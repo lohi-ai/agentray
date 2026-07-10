@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentray"
+version = "0.1.0"
+description = "AgentRay Python SDK — capture, identify, and flush product/agent events."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["analytics", "product-analytics", "agentray", "posthog-compatible"]
+dependencies = ["urllib3>=1.26"]
+
+[project.urls]
+Homepage = "https://agentray.lohi2.com"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentray"]

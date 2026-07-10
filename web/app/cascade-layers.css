@@ -1,0 +1,7 @@
+/* Canonical cascade-layer order, declared once before any layered rules load.
+   Astryx ships its component/reset/theme CSS inside named layers (reset,
+   astryx-base, astryx-theme) and Tailwind owns theme/base/utilities; first
+   appearance fixes their relative precedence. This file is imported FIRST in
+   app/layout.tsx so the order below wins no matter which sheet defines a layer
+   first. Keep in sync with the @layer line in globals.css. */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;

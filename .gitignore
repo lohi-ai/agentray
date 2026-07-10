@@ -1,0 +1,11 @@
+/server
+/agentray
+*.log
+.DS_Store
+web/node_modules
+web/.next
+
+# Local env files (real test/provider credentials — never commit)
+.env
+.env.*
+!.env.example

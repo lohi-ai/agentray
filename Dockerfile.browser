@@ -1,0 +1,114 @@
+# Browser image for the persistent `browser_use` tool.
+#
+# This is a sibling of Dockerfile.computeruse: the computer-use image is a
+# document/code toolchain; THIS image is a Chrome-driving browser. They are kept
+# separate on purpose — Chrome + its native deps add ~500 MB that a doc task
+# never needs, and the browser_use tool runs in its own session container
+# (browser-scoped session id) so the two never share a process space.
+#
+# The agent drives the browser via the `agent-browser` CLI (vercel-labs/
+# agent-browser): a Rust client-daemon over CDP that launches Chrome itself,
+# exposes LLM-optimized accessibility-tree snapshots, and — critically for a
+# server — SELF-REAPS on idle via AGENT_BROWSER_IDLE_TIMEOUT_MS, so a forgotten
+# session leaves no zombie Chrome pinning memory between conversations.
+#
+# Isolation is unchanged from the computer-use session: the DockerSandbox runs
+# this image with --cap-drop ALL, --security-opt no-new-privileges, no host env,
+# and mem/cpu/pids caps. Network egress is on (to load pages and fetch the
+# browser binary on first use); gate it at the host firewall for production.
+#
+# OPTIONAL STEALTH (cloakbrowser combo). Built lean by default with stock
+# Chrome-for-Testing. Set --build-arg ENABLE_CLOAK=1 to additionally bake in
+# CloakHQ/cloakbrowser — a stealth Chromium — and point agent-browser at it via
+# AGENT_BROWSER_EXECUTABLE_PATH + AGENT_BROWSER_ARGS. The whole combo stays
+# npm-only: cloakbrowser's npm package exports ensureBinary() (downloads the
+# ~200 MB stealth binary to ~/.cloakbrowser) and getDefaultStealthArgs(), both
+# invoked here with `node -e` one-liners — no pip/python. NOTE the cloakbrowser
+# binary's license: the latest major is Pro/paid; the previous major is free for
+# unlimited use. Pin a free major before enabling in production.
+#
+# Build + point config at it:
+#
+#   docker build -f Dockerfile.browser -t agentray-browser:latest .
+#   # with stealth:
+#   docker build -f Dockerfile.browser --build-arg ENABLE_CLOAK=1 -t agentray-browser:cloak .
+#   AGENTRAY_SANDBOX_ENABLED=true \
+#   AGENTRAY_SANDBOX_BROWSER_IMAGE=agentray-browser:latest \
+#   AGENTRAY_AGENT_WORKSPACE_ROOT=/var/agentray/workspace
+#
+# A missing image degrades safely: the session container fails to start and the
+# tool returns the error to the model rather than crashing the API.
+
+FROM node:22-bookworm-slim
+
+# Chromium + runtime libs. agent-browser can auto-download Chrome-for-Testing,
+# but CfT ships no Linux ARM64 build, so we install the distro `chromium`
+# package instead — it works on both amd64 and arm64 and pulls in the shared
+# libs Chromium links against. agent-browser is pointed at it via
+# AGENT_BROWSER_EXECUTABLE_PATH below.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+        chromium \
+        fonts-liberation fonts-dejavu; \
+    rm -rf /var/lib/apt/lists/*
+
+# Point agent-browser at the system Chromium (the cloak wrapper, when enabled,
+# overrides this with the stealth binary).
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# agent-browser CLI (npm). Pin a known-good version for reproducible builds.
+ARG AGENT_BROWSER_VERSION=0.27.0
+RUN set -eux; \
+    npm config set fetch-retries 5; \
+    npm config set fetch-retry-mintimeout 20000; \
+    npm install -g --no-fund --no-audit "agent-browser@${AGENT_BROWSER_VERSION}"; \
+    npm cache clean --force; \
+    agent-browser --version
+
+# Self-reap protection: the agent-browser daemon shuts down after this idle
+# window, so a session container that the host hasn't yet reaped never holds a
+# zombie Chrome. docker exec inherits this ENV from the container.
+ENV AGENT_BROWSER_IDLE_TIMEOUT_MS=60000
+
+# Optional: cloakbrowser stealth Chromium, npm-only. ensureBinary() downloads
+# the binary at build time so first browse is fast; getDefaultStealthArgs()
+# yields the launch flags agent-browser should pass through.
+#
+# `docker exec` runs `/bin/sh -c <cmd>` — a non-login shell that sources neither
+# /etc/profile.d nor /etc/environment — so we can't rely on those to inject the
+# stealth env. Instead we shadow `agent-browser` on PATH with a wrapper in
+# /usr/local/sbin (which precedes /usr/local/bin), and the wrapper exports the
+# computed env before exec'ing the real binary. Every `agent-browser …` call the
+# tool runs therefore launches the stealth Chromium, regardless of shell type.
+ARG ENABLE_CLOAK=0
+ARG CLOAK_VERSION=latest
+RUN set -eux; \
+    if [ "${ENABLE_CLOAK}" = "1" ]; then \
+        npm install -g --no-fund --no-audit "cloakbrowser@${CLOAK_VERSION}"; \
+        npm cache clean --force; \
+        NODE_PATH="$(npm root -g)"; export NODE_PATH; \
+        CLOAK_BIN="$(node -e 'require("cloakbrowser").ensureBinary().then(p=>process.stdout.write(p)).catch(e=>{console.error(e);process.exit(1)})')"; \
+        CLOAK_ARGS="$(node -e 'process.stdout.write(require("cloakbrowser").getDefaultStealthArgs().join(" "))')"; \
+        REAL="$(command -v agent-browser)"; \
+        mkdir -p /usr/local/sbin; \
+        { \
+          echo '#!/bin/sh'; \
+          printf 'export AGENT_BROWSER_EXECUTABLE_PATH=%s\n' "$CLOAK_BIN"; \
+          printf 'export AGENT_BROWSER_ARGS="%s"\n' "$CLOAK_ARGS"; \
+          printf 'exec "%s" "$@"\n' "$REAL"; \
+        } > /usr/local/sbin/agent-browser; \
+        chmod 0755 /usr/local/sbin/agent-browser; \
+        echo "cloakbrowser enabled: bin=$CLOAK_BIN args=$CLOAK_ARGS"; \
+    else \
+        echo "cloakbrowser disabled (stock Chrome-for-Testing)"; \
+    fi
+
+ENV NODE_PATH=/usr/local/lib/node_modules
+
+WORKDIR /workspace
+
+# No ENTRYPOINT/CMD: the sandbox supplies the keepalive (`sleep N`) and execs
+# each agent-browser command with `docker exec`.

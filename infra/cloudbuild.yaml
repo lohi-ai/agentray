@@ -1,0 +1,28 @@
+steps:
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    id: api
+    args:
+      - '--destination=${_API_IMAGE}:${_TAG}'
+      - '--cache=true'
+      - '--cache-ttl=168h'
+      - '--context=.'
+      - '--dockerfile=Dockerfile'
+    timeout: '600s'
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    id: web
+    waitFor: ['-']
+    args:
+      - '--destination=${_WEB_IMAGE}:${_TAG}'
+      - '--cache=true'
+      - '--cache-ttl=168h'
+      - '--context=dir:///workspace/web'
+      - '--dockerfile=/workspace/web/Dockerfile'
+      - '--build-arg=NEXT_PUBLIC_AGENTRAY_API_URL=${_WEB_API_URL}'
+    timeout: '600s'
+options:
+  machineType: 'E2_MEDIUM'
+substitutions:
+  _API_IMAGE: 'asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api'
+  _WEB_IMAGE: 'asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web'
+  _TAG: 'latest'
+  _WEB_API_URL: 'https://agentray-dev.lohi2.com'

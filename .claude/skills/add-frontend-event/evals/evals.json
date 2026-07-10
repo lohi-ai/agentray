@@ -1,0 +1,23 @@
+{
+  "skill_name": "add-frontend-event",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Track when a reader shares a chapter — there's a share button in web's reader toolbar that opens the native share sheet. I want to know which novels get shared the most.",
+      "expected_output": "Typed event (needs novel group attribution): share click handler calls a new trackChapterShared emitter in web/lib/analytics/events.ts with novelSlug + chapterNumber and novelGroup(), registered in .analytics-events.json in the same change, single call site.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Can you add an event so we know how many people visit the /bang-xep-hang ranking page in web?",
+      "expected_output": "No new event — Step 0 applies: user.pageview from autocapture already answers page-visit counts; filter the Web analytics tab by path. No code change, or at most an explanation.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "We need a purchase_completed event fired from the checkout success screen in web so we can chart revenue.",
+      "expected_output": "Pushback per Step 2: revenue events are server-authoritative and must come from the API after the payment settles, never the browser. Offer the intent/outcome pair instead (client purchase intent click + server-side completed event).",
+      "files": []
+    }
+  ]
+}

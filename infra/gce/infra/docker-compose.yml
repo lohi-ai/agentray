@@ -1,0 +1,69 @@
+# AgentRay shared infrastructure — ONE instance serves both dev and prod.
+# Env separation: ClickHouse database (agentray_dev / agentray_prod), Redis DB
+# index (0 / 1), NATS subject suffix (.dev / .prod). Postgres is NOT here — it
+# lives in the existing Cloud SQL instance.
+#
+# CLICKHOUSE_PASSWORD comes from secret.env (written by ../fetch-secrets.sh).
+# Note: the CLICKHOUSE_* env vars only take effect on first volume init;
+# deploy.sh ensures the per-env database exists on every roll.
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    container_name: agentray-clickhouse
+    restart: unless-stopped
+    env_file:
+      - secret.env
+    environment:
+      CLICKHOUSE_DB: agentray_dev
+      CLICKHOUSE_USER: agentray
+    # e2-standard-2 has 8 GB shared with the docai stack — cap ClickHouse.
+    # It reads the cgroup limit and sizes max_server_memory_usage from it.
+    mem_limit: 2g
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse-config.d/system-log-retention.xml:/etc/clickhouse-server/config.d/system-log-retention.xml:ro
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentray-redis
+    restart: unless-stopped
+    # Only holds rate-limit counters — small and safe to evict.
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 128m
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    container_name: agentray-nats
+    restart: unless-stopped
+    # -js enables JetStream; -sd persists the durable event stream across restarts
+    # so a broker bounce never drops queued events.
+    command: ["-js", "-sd", "/data"]
+    mem_limit: 256m
+    networks:
+      - edge
+    volumes:
+      - nats-data:/data
+
+volumes:
+  clickhouse-data:
+  nats-data:
+
+networks:
+  edge:
+    external: true

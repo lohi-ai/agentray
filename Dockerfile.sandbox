@@ -1,0 +1,46 @@
+# Hardened image for the agent sandbox (governance roadmap F6).
+#
+# This is the image the `run_shell` tool (and future file/browser tools) execute
+# inside. The DockerSandbox already locks the *runtime* down hard — --cap-drop
+# ALL, --security-opt no-new-privileges, non-root 65534, --read-only root,
+# --network none, resource caps. This image hardens the *contents*: it keeps the
+# one thing a shell tool needs (/bin/sh) and strips the egress/infra tooling an
+# injected payload would reach for, so the sandbox stays useful even if a
+# container-escape primitive is ever found (defense in depth).
+#
+# It is OPT-IN. The default backend image is alpine:3.19 (always pullable). To
+# use this one, build + tag it on the host and point config at it:
+#
+#   docker build -f Dockerfile.sandbox -t agentray-sandbox:latest .
+#   AGENTRAY_SANDBOX_ENABLED=true AGENTRAY_SANDBOX_IMAGE=agentray-sandbox:latest
+#
+# On GCE the Docker daemon the API talks to is the host daemon; build this image
+# once during deploy (or pull it from a registry) so it is present before the
+# first sandboxed run. A missing image degrades safely — buildSandbox logs and
+# disables sandboxed tools rather than crashing the API.
+
+FROM alpine:3.19
+
+# busybox provides /bin/sh plus its applets as symlinks. We keep sh + the file
+# utilities a shell tool legitimately uses, and remove the network/egress
+# applets and the package manager so nothing inside can fetch or exfiltrate even
+# if the --network none guard is someday bypassed.
+RUN set -eux; \
+    # drop the package manager entirely — no installs inside the sandbox
+    rm -rf /sbin/apk /etc/apk /lib/apk /usr/share/apk /var/cache/apk; \
+    # remove busybox network/egress applet symlinks (sh, cat, ls, etc. stay)
+    for applet in wget nc netcat telnet ftpget ftpput tftp \
+                  nslookup ping ping6 traceroute traceroute6 \
+                  arp ifconfig route ip udhcpc ssl_client; do \
+        rm -f "/usr/bin/$applet" "/bin/$applet" "/sbin/$applet" "/usr/sbin/$applet"; \
+    done; \
+    # belt-and-suspenders: no SUID/SGID binaries to escalate through
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true
+
+# Minimal PATH and a non-root default user (the sandbox also forces --user
+# 65534, but a hardened default keeps the image safe if reused elsewhere).
+ENV PATH=/usr/bin:/bin
+USER 65534:65534
+WORKDIR /work
+
+# No ENTRYPOINT/CMD: the sandbox always supplies the argv (e.g. /bin/sh -c …).

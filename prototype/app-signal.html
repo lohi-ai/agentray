@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentRay — Signal app prototype</title>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  :root{
+    color-scheme:dark;
+    /* Spring palette */
+    --background:#0A0E12; --surface-1:#11161F; --surface-2:#161C26; --surface-3:#1E2733; --surface-4:#28323F;
+    --foreground:#E9EEF4; --muted-foreground:#8C97A8; --faint:#5C6678; --border:#222C38; --input:#2C3645;
+    --primary:#22C786; --primary-hover:#3FE0A0; --primary-foreground:#04221A;
+    --agent:#8A7CFF; --agent-foreground:#0E0828; --data:#46B7E8;
+    --success:#3FCB7A; --warning:#E8A93B; --danger:#F0626B;
+    --ring:color-mix(in srgb,var(--primary) 60%,transparent);
+    --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-xl:14px;
+    --fast:120ms; --base:200ms; --ease:cubic-bezier(0.2,0.8,0.2,1);
+    --font-sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --font-mono:"Geist Mono","JetBrains Mono",ui-monospace,"SF Mono",monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{margin:0;background:var(--background);color:var(--foreground);font-family:var(--font-sans);letter-spacing:-0.01em;-webkit-font-smoothing:antialiased;}
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums;}
+  button{font:inherit;cursor:pointer;color:inherit;}
+  .ulabel{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted-foreground);}
+
+  /* lucide icon sizing (logical-property friendly) */
+  .lucide{width:16px;height:16px;stroke-width:2;flex:0 0 auto;}
+  .btn .lucide{width:15px;height:15px;}
+  .badge .lucide{width:18px;height:18px;}
+  .brand .mark .lucide{width:16px;height:16px;}
+
+  /* shell — logical properties so RTL is a dir flip */
+  .shell{display:grid;grid-template-columns:228px minmax(0,1fr);height:100dvh;}
+  .sidebar{background:var(--surface-1);border-inline-end:1px solid var(--border);display:flex;flex-direction:column;padding:14px 12px;gap:12px;overflow:auto;}
+  .brand{display:flex;align-items:center;gap:9px;padding:4px 8px;}
+  .brand .mark{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:color-mix(in srgb,var(--primary) 16%,transparent);color:var(--primary);}
+  .brand .b-name{font-weight:600;font-size:14px;letter-spacing:-0.02em;}
+  .brand .b-sub{font-size:11px;color:var(--muted-foreground);}
+  .nav{display:flex;flex-direction:column;gap:2px;}
+  .nav .ulabel{padding:8px 8px 4px;}
+  .nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-md);font-size:13px;color:var(--muted-foreground);text-decoration:none;cursor:pointer;transition:background var(--fast) var(--ease),color var(--fast) var(--ease);}
+  .nav a:hover{background:var(--surface-3);color:var(--foreground);}
+  .nav a.active{background:var(--surface-3);color:var(--foreground);box-shadow:inset 2px 0 0 0 var(--primary);}
+  .nav a .grow{margin-inline-start:auto;}
+
+  .langsel{display:flex;align-items:center;gap:6px;padding:6px 8px;color:var(--muted-foreground);font-size:12px;}
+  .langsel .lucide{width:15px;height:15px;}
+  .langsel button{height:24px;padding:0 8px;border:1px solid var(--border);background:transparent;border-radius:var(--radius-sm);font-size:11.5px;color:var(--muted-foreground);}
+  .langsel button.on{background:var(--surface-3);color:var(--foreground);border-color:transparent;}
+
+  .account{display:flex;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--surface-2);}
+  .account .av{width:26px;height:26px;border-radius:7px;background:var(--surface-4);display:grid;place-items:center;font-size:12px;font-weight:600;}
+  .account .a-name{font-size:12.5px;font-weight:500;}
+  .account .a-mail{font-size:11px;color:var(--muted-foreground);}
+
+  .main{overflow:auto;}
+  .content{max-width:1320px;margin:0 auto;padding:22px 26px 60px;}
+
+  .intro{display:flex;align-items:flex-start;gap:16px;margin-bottom:18px;}
+  .intro h1{font-size:19px;font-weight:600;letter-spacing:-0.02em;margin:0 0 3px;display:flex;align-items:center;gap:8px;}
+  .intro p{margin:0;font-size:13px;color:var(--muted-foreground);}
+  .intro .spacer{flex:1;}
+  .ctxchips{display:flex;gap:8px;margin:2px 0 16px;flex-wrap:wrap;}
+  .ctxchip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;background:var(--surface-2);border-radius:var(--radius-sm);font-size:12px;color:var(--muted-foreground);}
+  .ctxchip b{color:var(--foreground);font-weight:500;}
+
+  .btn{height:34px;padding:0 14px;border-radius:var(--radius-md);font-size:13px;font-weight:600;border:1px solid transparent;display:inline-flex;align-items:center;gap:7px;transition:background var(--fast) var(--ease),border-color var(--fast) var(--ease);}
+  .btn.primary{background:var(--primary);color:var(--primary-foreground);}
+  .btn.primary:hover{background:var(--primary-hover);}
+  .btn.agent{background:var(--agent);color:var(--agent-foreground);}
+  .btn.outline{background:transparent;border-color:var(--border);color:var(--foreground);}
+  .btn.outline:hover{background:var(--surface-3);}
+  .btn.ghost{background:transparent;color:var(--muted-foreground);}
+  .btn.ghost:hover{background:var(--surface-3);color:var(--foreground);}
+  .btn.sm{height:28px;padding:0 11px;font-size:12px;}
+
+  .stripwrap{background:var(--surface-1);border-radius:var(--radius-xl);padding:4px;margin-bottom:16px;}
+  .strip{display:grid;grid-template-columns:repeat(6,1fr);}
+  .stat{padding:13px 16px;position:relative;}
+  .stat + .stat::before{content:"";position:absolute;inset-inline-start:0;top:18%;height:64%;width:1px;background:var(--border);}
+  .stat .s-label{font-size:11px;color:var(--muted-foreground);margin-bottom:6px;}
+  .stat .s-val{font-size:21px;font-weight:600;letter-spacing:-0.02em;}
+  .stat .s-delta{font-size:11.5px;margin-top:3px;display:inline-flex;gap:3px;align-items:center;}
+  .s-delta .lucide{width:13px;height:13px;}
+  .up{color:var(--success);} .down{color:var(--danger);} .flat{color:var(--muted-foreground);}
+
+  .callout{background:var(--surface-1);border-radius:var(--radius-xl);padding:14px 16px;margin-bottom:16px;display:flex;gap:13px;align-items:flex-start;}
+  .callout .badge{flex:0 0 auto;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;}
+  .callout.growth .badge{background:color-mix(in srgb,var(--primary) 16%,transparent);color:var(--primary);}
+  .callout.agentic .badge{background:color-mix(in srgb,var(--agent) 16%,transparent);color:var(--agent);}
+  .callout.warn .badge{background:color-mix(in srgb,var(--warning) 16%,transparent);color:var(--warning);}
+  .callout .c-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground);margin-bottom:2px;}
+  .callout .c-title{font-size:14px;font-weight:600;margin-bottom:2px;}
+  .callout .c-detail{font-size:12.5px;color:var(--muted-foreground);line-height:1.5;}
+  .callout .c-action{margin-inline-start:auto;align-self:center;}
+
+  .panel{background:var(--surface-1);border-radius:var(--radius-xl);padding:16px;}
+  .panel-head{display:flex;align-items:center;margin-bottom:12px;}
+  .panel-head h3{font-size:13px;font-weight:600;margin:0;}
+  .panel-head .act{margin-inline-start:auto;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  .row-gap{display:flex;flex-direction:column;gap:14px;}
+
+  .livedot{position:relative;width:8px;height:8px;border-radius:50%;flex:0 0 8px;display:inline-block;}
+  .livedot::after{content:"";position:absolute;inset:0;border-radius:50%;animation:pulse 2s var(--ease) infinite;}
+  .livedot.working{background:var(--agent);color:var(--agent);}
+  .livedot.healthy{background:var(--success);color:var(--success);}
+  .livedot.attention{background:var(--warning);color:var(--warning);}
+  .livedot.paused,.livedot.idle{background:var(--faint);} .livedot.paused::after,.livedot.idle::after{display:none;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,currentColor 60%,transparent);}70%{box-shadow:0 0 0 6px transparent;}100%{box-shadow:0 0 0 0 transparent;}}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;padding:3px 9px;border-radius:20px;background:var(--surface-3);}
+  .pill.working{color:var(--agent);} .pill.healthy{color:var(--success);} .pill.attention{color:var(--warning);} .pill.paused{color:var(--muted-foreground);}
+
+  .agentgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  .acard{background:var(--surface-1);border-radius:var(--radius-xl);padding:15px;display:flex;flex-direction:column;gap:11px;position:relative;overflow:hidden;}
+  .acard.attention{box-shadow:inset 3px 0 0 0 var(--warning);}
+  .acard.paused{opacity:.62;}
+  .acard-head{display:flex;align-items:center;gap:10px;}
+  .av-agent{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:13px;background:color-mix(in srgb,var(--agent) 18%,transparent);color:var(--agent);}
+  .acard-head .name{font-size:13.5px;font-weight:600;}
+  .acard-head .grow{margin-inline-start:auto;}
+  .acard .desc{font-size:12.5px;color:var(--muted-foreground);line-height:1.5;min-height:36px;}
+  .acard .facts{display:flex;gap:14px;font-size:11.5px;color:var(--muted-foreground);padding-top:2px;}
+  .acard .facts b{color:var(--foreground);font-weight:500;}
+  .acard .acard-foot{display:flex;gap:8px;align-items:center;margin-top:2px;}
+  .acard .acard-foot .more{margin-inline-start:auto;color:var(--muted-foreground);background:transparent;border:none;display:grid;place-items:center;padding:4px;}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{text-align:start;font-weight:500;color:var(--muted-foreground);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:0 12px 9px;}
+  td{padding:10px 12px;border-top:1px solid var(--border);}
+  tbody tr{transition:background var(--fast) var(--ease);}
+  tbody tr:hover{background:var(--surface-2);}
+  td.num,th.num{text-align:end;font-family:var(--font-mono);font-variant-numeric:tabular-nums;}
+  .when{color:var(--faint);}
+  .barcell{display:flex;align-items:center;gap:8px;}
+  .bar{height:6px;border-radius:3px;background:color-mix(in srgb,var(--data) 55%,transparent);}
+
+  .chart{width:100%;height:180px;display:block;}
+  .legend{display:flex;gap:14px;margin-top:10px;font-size:11.5px;color:var(--muted-foreground);}
+  .legend i{width:9px;height:9px;border-radius:3px;display:inline-block;margin-inline-end:5px;vertical-align:-1px;}
+
+  .seg{display:inline-flex;background:var(--surface-2);border-radius:var(--radius-md);padding:3px;gap:2px;}
+  .seg button{height:28px;padding:0 13px;border:none;background:transparent;color:var(--muted-foreground);font-size:12.5px;border-radius:var(--radius-sm);}
+  .seg button.on{background:var(--surface-4);color:var(--foreground);}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;}
+  .chip{padding:8px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);font-size:12.5px;color:var(--foreground);}
+  .chip:hover{border-color:color-mix(in srgb,var(--primary) 45%,var(--border));background:var(--surface-3);}
+
+  .tabbar{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:18px;}
+  .tabbar button{height:36px;padding:0 12px;border:none;background:transparent;color:var(--muted-foreground);font-size:13px;position:relative;}
+  .tabbar button.on{color:var(--foreground);}
+  .tabbar button.on::after{content:"";position:absolute;inset-inline:8px;bottom:-1px;height:2px;background:var(--primary);border-radius:2px;}
+  .field{margin-bottom:16px;max-width:440px;}
+  .field label{display:block;font-size:12.5px;margin-bottom:6px;}
+  .field input{width:100%;height:36px;background:var(--surface-2);border:1px solid var(--input);border-radius:var(--radius-md);color:var(--foreground);padding:0 12px;font-size:13px;outline:none;}
+  .field input:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--ring);}
+  .keyrow{display:flex;align-items:center;gap:10px;background:var(--surface-2);border-radius:var(--radius-md);padding:10px 12px;font-size:12.5px;max-width:560px;}
+  .keyrow .grow{margin-inline-start:auto;}
+
+  .screen{display:none;} .screen.active{display:block;}
+  @media (max-width:980px){.shell{grid-template-columns:1fr;}.sidebar{display:none;}.strip{grid-template-columns:repeat(3,1fr);}.agentgrid,.grid3{grid-template-columns:1fr;}.grid2{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="brand"><span class="mark"><i data-lucide="waypoints"></i></span><div><div class="b-name">AgentRay</div><div class="b-sub" data-i18n="brand.sub">Growth · data · agents</div></div></div>
+    <nav class="nav" id="nav">
+      <span class="ulabel" data-i18n="group.main">Main</span>
+      <a href="chat-signal.html" target="_blank"><i data-lucide="message-square"></i><span data-i18n="nav.chat">Chat</span><span class="livedot working grow"></span></a>
+      <a data-screen="agents" class="active"><i data-lucide="bot"></i><span data-i18n="nav.agents">Agents</span></a>
+      <a data-screen="dashboards"><i data-lucide="layout-dashboard"></i><span data-i18n="nav.dashboards">Dashboards</span></a>
+      <a data-screen="traffic"><i data-lucide="globe"></i><span data-i18n="nav.traffic">Traffic</span></a>
+      <a data-screen="product"><i data-lucide="package"></i><span data-i18n="nav.product">Product</span></a>
+      <a data-screen="settings"><i data-lucide="settings"></i><span data-i18n="nav.settings">Settings</span></a>
+      <span class="ulabel" data-i18n="group.explore">Explore</span>
+      <a data-screen="monitor"><i data-lucide="activity"></i><span data-i18n="nav.monitor">Agent monitor</span></a>
+      <a data-screen="traffic"><i data-lucide="list"></i><span data-i18n="nav.events">Events</span></a>
+      <a data-screen="traffic"><i data-lucide="users"></i><span data-i18n="nav.people">People</span></a>
+      <a data-screen="dashboards"><i data-lucide="database"></i><span data-i18n="nav.sql">SQL</span></a>
+    </nav>
+    <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px;">
+      <div class="langsel"><i data-lucide="languages"></i><span data-i18n="lang.label">Language</span><span style="flex:1"></span><button data-lang="en" class="on">EN</button><button data-lang="vi">VI</button></div>
+      <div class="account"><span class="av">L</span><div><div class="a-name">Long Nguyen</div><div class="a-mail" data-i18n="account.ws">acme workspace</div></div></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+    <!-- AGENTS -->
+    <section class="screen active" id="s-agents">
+      <div class="intro">
+        <div><h1 data-i18n="agents.title">Your agents</h1><p data-i18n="agents.sub">Configure and trust the teammates doing the work.</p></div>
+        <div class="spacer"></div>
+        <button class="btn primary"><i data-lucide="plus"></i><span data-i18n="btn.newAgent">New agent</span></button>
+      </div>
+      <div class="ctxchips"><span class="ctxchip"><span data-i18n="ctx.project">Project</span> <b>Acme</b></span><span class="ctxchip"><span data-i18n="ctx.range">Range</span> <b data-i18n="range.24h">Last 24 hours</b></span></div>
+
+      <div class="stripwrap"><div class="strip">
+        <div class="stat"><div class="s-label" data-i18n="stat.active">Active</div><div class="s-val mono">6</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.workingNow">Working now</div><div class="s-val mono" style="color:var(--agent)">2</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.needsAttention">Needs attention</div><div class="s-val mono" style="color:var(--warning)">1</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.runsToday">Runs today</div><div class="s-val mono">148</div><div class="s-delta up"><i data-lucide="arrow-up"></i>12%</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.avgLatency">Avg latency</div><div class="s-val mono">6.4s</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.spend24">Spend (24h)</div><div class="s-val mono">$3.91</div></div>
+      </div></div>
+
+      <div class="agentgrid">
+        <div class="acard">
+          <div class="acard-head"><span class="av-agent">G</span><span class="name">Growth Agent</span><span class="pill working grow"><span class="livedot working"></span><span data-i18n="status.working">Working</span></span></div>
+          <div class="desc">Watches traffic & activation, explains what moved, and recommends the next growth action.</div>
+          <div class="facts"><span><span data-i18n="fact.lastRun">last run</span> <b class="mono">now</b></span><span><span data-i18n="fact.runs">runs</span> <b class="mono">61</b></span><span><span data-i18n="fact.cost">cost</span> <b class="mono">$1.40</b></span></div>
+          <div class="acard-foot"><button class="btn primary sm"><i data-lucide="messages-square"></i><span data-i18n="btn.talk">Talk to agent</span></button><button class="more"><i data-lucide="ellipsis"></i></button></div>
+        </div>
+        <div class="acard">
+          <div class="acard-head"><span class="av-agent">R</span><span class="name">Retention Agent</span><span class="pill healthy grow"><span class="livedot healthy"></span><span data-i18n="status.healthy">Healthy</span></span></div>
+          <div class="desc">Tracks cohort retention and flags features that move week-4 stickiness.</div>
+          <div class="facts"><span><span data-i18n="fact.lastRun">last run</span> <b class="mono">18m</b></span><span><span data-i18n="fact.runs">runs</span> <b class="mono">22</b></span><span><span data-i18n="fact.cost">cost</span> <b class="mono">$0.80</b></span></div>
+          <div class="acard-foot"><button class="btn primary sm"><i data-lucide="messages-square"></i><span data-i18n="btn.talk">Talk to agent</span></button><button class="more"><i data-lucide="ellipsis"></i></button></div>
+        </div>
+        <div class="acard attention">
+          <div class="acard-head"><span class="av-agent">N</span><span class="name">Nudge Agent</span><span class="pill attention grow"><span class="livedot attention"></span><span data-i18n="status.attention">Needs attention</span></span></div>
+          <div class="desc">Re-engages stalled trials over email. <span style="color:var(--warning)">Failed 3 runs — missing secret.</span></div>
+          <div class="facts"><span><span data-i18n="fact.lastRun">last run</span> <b class="mono">2h</b></span><span><span data-i18n="fact.runs">runs</span> <b class="mono">9</b></span><span><span data-i18n="fact.cost">cost</span> <b class="mono">$0.21</b></span></div>
+          <div class="acard-foot"><button class="btn agent sm"><i data-lucide="wrench"></i><span data-i18n="btn.fixSetup">Fix setup</span></button><button class="more"><i data-lucide="ellipsis"></i></button></div>
+        </div>
+        <div class="acard">
+          <div class="acard-head"><span class="av-agent">S</span><span class="name">SEO Agent</span><span class="pill working grow"><span class="livedot working"></span><span data-i18n="status.working">Working</span></span></div>
+          <div class="desc">Monitors AI crawler traffic and surfaces pages worth optimizing for answer engines.</div>
+          <div class="facts"><span><span data-i18n="fact.lastRun">last run</span> <b class="mono">now</b></span><span><span data-i18n="fact.runs">runs</span> <b class="mono">34</b></span><span><span data-i18n="fact.cost">cost</span> <b class="mono">$1.10</b></span></div>
+          <div class="acard-foot"><button class="btn primary sm"><i data-lucide="messages-square"></i><span data-i18n="btn.talk">Talk to agent</span></button><button class="more"><i data-lucide="ellipsis"></i></button></div>
+        </div>
+        <div class="acard paused">
+          <div class="acard-head"><span class="av-agent">Q</span><span class="name">QA Agent</span><span class="pill paused grow"><span class="livedot paused"></span><span data-i18n="status.paused">Paused</span></span></div>
+          <div class="desc">Reviews event tracking quality. Paused while the new schema rolls out.</div>
+          <div class="facts"><span><span data-i18n="fact.lastRun">last run</span> <b class="mono">3d</b></span><span><span data-i18n="fact.runs">runs</span> <b class="mono">0</b></span><span><span data-i18n="fact.cost">cost</span> <b class="mono">$0.00</b></span></div>
+          <div class="acard-foot"><button class="btn outline sm"><i data-lucide="play"></i><span data-i18n="btn.resume">Resume</span></button><button class="more"><i data-lucide="ellipsis"></i></button></div>
+        </div>
+        <div class="acard" style="border:1px dashed var(--border);background:transparent;">
+          <div class="acard-head"><span class="av-agent" style="background:var(--surface-3);color:var(--muted-foreground)"><i data-lucide="plus"></i></span><span class="name" data-i18n="btn.newAgent">New agent</span></div>
+          <div class="desc">Spin up a teammate from a template or a blank recipe. No backend code needed.</div>
+          <div class="acard-foot"><button class="btn outline sm" data-i18n="btn.createAgent">Create agent</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRAFFIC -->
+    <section class="screen" id="s-traffic">
+      <div class="intro">
+        <div><h1 data-i18n="traffic.title">Traffic</h1><p data-i18n="traffic.sub">Where visitors come from and which sources are worth more.</p></div>
+        <div class="spacer"></div>
+        <button class="btn agent"><i data-lucide="sparkles"></i><span data-i18n="btn.askTraffic">Ask about traffic</span></button>
+      </div>
+      <div class="ctxchips"><span class="ctxchip"><span data-i18n="ctx.project">Project</span> <b>Acme</b></span><span class="ctxchip"><span data-i18n="ctx.range">Range</span> <b data-i18n="range.7d">Last 7 days</b></span><span class="ctxchip"><span data-i18n="ctx.filters">Filters</span> <b data-i18n="filters.default">Default</b></span></div>
+
+      <div class="stripwrap"><div class="strip">
+        <div class="stat"><div class="s-label" data-i18n="stat.visitors">Visitors</div><div class="s-val mono">24,108</div><div class="s-delta up"><i data-lucide="arrow-up"></i>9%</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.pageviews">Pageviews</div><div class="s-val mono">82,440</div><div class="s-delta up"><i data-lucide="arrow-up"></i>6%</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.sessions">Sessions</div><div class="s-val mono">31,902</div><div class="s-delta up"><i data-lucide="arrow-up"></i>7%</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.conversions">Conversions</div><div class="s-val mono">1,204</div><div class="s-delta down"><i data-lucide="arrow-down"></i>3%</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.avgSession">Avg session</div><div class="s-val mono">2m 41s</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.aiTraffic">AI traffic</div><div class="s-val mono">11.2%</div><div class="s-delta up"><i data-lucide="arrow-up"></i>2.4×</div></div>
+      </div></div>
+
+      <div class="callout growth">
+        <span class="badge"><i data-lucide="trending-up"></i></span>
+        <div><div class="c-label" data-i18n="label.whatMoved">What moved</div><div class="c-title">Organic is your best source this week (+18%)</div><div class="c-detail">AI crawler traffic is up 2.4× — answer engines are citing your docs. Conversions dipped 3%, isolated to /pricing on mobile.</div></div>
+        <div class="c-action"><button class="btn outline sm"><i data-lucide="bookmark"></i><span data-i18n="btn.saveBoard">Save as board</span></button></div>
+      </div>
+
+      <div class="row-gap">
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="panel.sessionsTime">Sessions over time</h3><div class="act"><span class="seg"><button class="on">7d</button><button>30d</button></span></div></div>
+          <svg class="chart" viewBox="0 0 600 180" preserveAspectRatio="none">
+            <defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#46B7E8" stop-opacity="0.32"/><stop offset="100%" stop-color="#46B7E8" stop-opacity="0"/></linearGradient></defs>
+            <path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44 L600,180 L0,180 Z" fill="url(#g1)"/>
+            <path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44" fill="none" stroke="#46B7E8" stroke-width="2"/>
+          </svg>
+          <div class="legend"><span><i style="background:var(--data)"></i><span data-i18n="stat.sessions">Sessions</span></span></div>
+        </div>
+        <div class="grid2">
+          <div class="panel">
+            <div class="panel-head"><h3 data-i18n="panel.topSources">Top sources</h3></div>
+            <table>
+              <thead><tr><th data-i18n="th.source">Source</th><th class="num" data-i18n="stat.sessions">Sessions</th><th class="num" data-i18n="th.conv">Conv.</th></tr></thead>
+              <tbody>
+                <tr><td><span class="barcell"><span class="bar" style="width:88px"></span>Organic search</span></td><td class="num">12,940</td><td class="num">612</td></tr>
+                <tr><td><span class="barcell"><span class="bar" style="width:54px"></span>Direct</span></td><td class="num">7,810</td><td class="num">288</td></tr>
+                <tr><td><span class="barcell"><span class="bar" style="width:30px"></span>AI assistants</span></td><td class="num">3,572</td><td class="num">141</td></tr>
+                <tr><td><span class="barcell"><span class="bar" style="width:18px"></span>Referral</span></td><td class="num">2,140</td><td class="num">98</td></tr>
+                <tr><td><span class="barcell"><span class="bar" style="width:10px"></span>Social</span></td><td class="num">1,440</td><td class="num">65</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3 data-i18n="panel.topPages">Top pages</h3></div>
+            <table>
+              <thead><tr><th data-i18n="th.path">Path</th><th class="num" data-i18n="th.views">Views</th><th class="num" data-i18n="th.avg">Avg</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">/</td><td class="num">21,004</td><td class="num">1m12s</td></tr>
+                <tr><td class="mono">/pricing</td><td class="num">9,210</td><td class="num">0m48s</td></tr>
+                <tr><td class="mono">/docs/agents</td><td class="num">7,880</td><td class="num">3m20s</td></tr>
+                <tr><td class="mono">/blog/ai-seo</td><td class="num">5,402</td><td class="num">2m51s</td></tr>
+                <tr><td class="mono">/signup</td><td class="num">3,118</td><td class="num">0m39s</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRODUCT -->
+    <section class="screen" id="s-product">
+      <div class="intro">
+        <div><h1 data-i18n="product.title">Product</h1><p data-i18n="product.sub">Answer behavior questions without writing SQL first.</p></div>
+        <div class="spacer"></div>
+        <button class="btn primary"><i data-lucide="play"></i><span data-i18n="btn.runInsight">Run insight</span></button>
+      </div>
+      <div style="margin-bottom:16px;"><span class="seg"><button class="on" data-i18n="mode.trend">Trend</button><button data-i18n="mode.funnel">Funnel</button><button data-i18n="mode.retention">Retention</button><button data-i18n="mode.table">Table</button><button data-i18n="mode.agentAnalysis">Agent analysis</button></span></div>
+
+      <div class="panel" style="margin-bottom:16px;">
+        <div class="ulabel" style="margin-bottom:10px;" data-i18n="label.startQuestion">Start with a question</div>
+        <div class="chips">
+          <button class="chip">Which feature drives retention?</button>
+          <button class="chip">Where do new users drop off?</button>
+          <button class="chip">What do power users do in week 1?</button>
+          <button class="chip">Which events predict conversion?</button>
+        </div>
+      </div>
+
+      <div class="callout growth">
+        <span class="badge"><i data-lucide="lightbulb"></i></span>
+        <div><div class="c-label" data-i18n="label.result">Result</div><div class="c-title">Users who connect a data source in week 1 retain 2.3× better</div><div class="c-detail">Of 1,420 new users, those reaching <b class="mono">source_connected</b> within 7 days have 61% week-4 retention vs 27%.</div></div>
+        <div class="c-action"><button class="btn primary sm"><i data-lucide="line-chart"></i><span data-i18n="btn.saveChart">Save as chart</span></button></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3 data-i18n="panel.retention">Week-4 retention by week-1 activation</h3><div class="act"><button class="btn agent sm"><i data-lucide="sparkles"></i><span data-i18n="btn.askAgentAbout">Ask the agent about this</span></button></div></div>
+        <svg class="chart" viewBox="0 0 600 180" preserveAspectRatio="none">
+          <path d="M0,150 L60,140 L120,120 L180,118 L240,96 L300,90 L360,70 L420,66 L480,58 L540,52 L600,50" fill="none" stroke="#22C786" stroke-width="2.5"/>
+          <path d="M0,168 L60,166 L120,160 L180,158 L240,150 L300,148 L360,140 L420,138 L480,134 L540,130 L600,128" fill="none" stroke="#7E8AA0" stroke-width="2" stroke-dasharray="4 4"/>
+        </svg>
+        <div class="legend"><span><i style="background:var(--primary)"></i><span data-i18n="legend.activated">Activated in week 1</span></span><span><i style="background:#7E8AA0"></i><span data-i18n="legend.notActivated">Not activated</span></span></div>
+      </div>
+    </section>
+
+    <!-- MONITOR -->
+    <section class="screen" id="s-monitor">
+      <div class="intro">
+        <div><h1 data-i18n="monitor.title">Agent health</h1><p data-i18n="monitor.sub">Know what's safe, active, or needs review.</p></div>
+        <div class="spacer"></div>
+        <button class="btn primary"><i data-lucide="radio"></i><span data-i18n="btn.openMonitor">Open live monitor</span></button>
+      </div>
+      <div class="stripwrap"><div class="strip">
+        <div class="stat"><div class="s-label" data-i18n="status.healthy">Healthy</div><div class="s-val mono" style="color:var(--success)">4</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.workingNow">Working now</div><div class="s-val mono" style="color:var(--agent)">2</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.failures24">Failures (24h)</div><div class="s-val mono" style="color:var(--danger)">3</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.avgLatency">Avg latency</div><div class="s-val mono">6.4s</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.tokens24">Tokens (24h)</div><div class="s-val mono">1.84M</div></div>
+        <div class="stat"><div class="s-label" data-i18n="stat.spend24">Spend (24h)</div><div class="s-val mono">$3.91</div></div>
+      </div></div>
+
+      <div class="callout warn">
+        <span class="badge"><i data-lucide="triangle-alert"></i></span>
+        <div><div class="c-label" data-i18n="label.needsReview">Needs review</div><div class="c-title">Nudge Agent failed 3 runs on a missing secret</div><div class="c-detail">The <b class="mono">SENDGRID_KEY</b> secret was rotated and not updated. Re-add it to resume re-engagement runs.</div></div>
+        <div class="c-action"><button class="btn agent sm"><i data-lucide="wrench"></i><span data-i18n="btn.fixSecret">Fix secret</span></button></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3 data-i18n="panel.fleet">Fleet</h3><div class="act"><span class="ulabel" data-i18n="hint.failuresFirst">failures & active first</span></div></div>
+        <table>
+          <thead><tr><th data-i18n="th.agent">Agent</th><th data-i18n="th.status">Status</th><th data-i18n="th.currentWork">Current work</th><th class="num" data-i18n="fact.runs">Runs</th><th class="num">p95</th><th class="num" data-i18n="fact.cost">Cost</th></tr></thead>
+          <tbody>
+            <tr><td>Nudge Agent</td><td><span class="pill attention"><span class="livedot attention"></span><span data-i18n="status.attentionShort">Attention</span></span></td><td style="color:var(--danger)">3 failed · missing secret</td><td class="num">9</td><td class="num">—</td><td class="num">$0.21</td></tr>
+            <tr><td>Growth Agent</td><td><span class="pill working"><span class="livedot working"></span><span data-i18n="status.working">Working</span></span></td><td>Pricing drop analysis</td><td class="num">61</td><td class="num">8.2s</td><td class="num">$1.40</td></tr>
+            <tr><td>SEO Agent</td><td><span class="pill working"><span class="livedot working"></span><span data-i18n="status.working">Working</span></span></td><td>Crawler traffic scan</td><td class="num">34</td><td class="num">5.1s</td><td class="num">$1.10</td></tr>
+            <tr><td>Retention Agent</td><td><span class="pill healthy"><span class="livedot healthy"></span><span data-i18n="status.healthy">Healthy</span></span></td><td class="when" data-i18n="status.idle">idle</td><td class="num">22</td><td class="num">6.0s</td><td class="num">$0.80</td></tr>
+            <tr><td>QA Agent</td><td><span class="pill paused"><span class="livedot paused"></span><span data-i18n="status.paused">Paused</span></span></td><td class="when">—</td><td class="num">0</td><td class="num">—</td><td class="num">$0.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- DASHBOARDS -->
+    <section class="screen" id="s-dashboards">
+      <div class="intro">
+        <div><h1 data-i18n="dash.title">Growth overview <i data-lucide="chevron-down" style="width:15px;height:15px;color:var(--muted-foreground)"></i></h1><p data-i18n="dash.sub">The weekly check: acquisition, activation, and agent impact.</p></div>
+        <div class="spacer"></div>
+        <button class="btn primary"><i data-lucide="plus"></i><span data-i18n="btn.addChart">Add chart</span></button>
+      </div>
+      <div class="grid3">
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="kpi.newUsers">New users</h3><div class="act when mono">7d</div></div>
+          <div style="font-size:24px;font-weight:600" class="mono">1,420 <span class="s-delta up" style="font-size:12px"><i data-lucide="arrow-up"></i>14%</span></div>
+          <svg class="chart" style="height:90px" viewBox="0 0 300 90" preserveAspectRatio="none"><path d="M0,70 L40,60 L80,64 L120,44 L160,50 L200,30 L240,36 L300,20" fill="none" stroke="#22C786" stroke-width="2"/></svg>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="kpi.activation">Activation rate</h3><div class="act when mono">7d</div></div>
+          <div style="font-size:24px;font-weight:600" class="mono">42% <span class="s-delta up" style="font-size:12px"><i data-lucide="arrow-up"></i>5pt</span></div>
+          <svg class="chart" style="height:90px" viewBox="0 0 300 90" preserveAspectRatio="none"><path d="M0,60 L40,58 L80,50 L120,52 L160,40 L200,38 L240,30 L300,28" fill="none" stroke="#46B7E8" stroke-width="2"/></svg>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="kpi.agentActions">Agent actions</h3><div class="act when mono">7d</div></div>
+          <div style="font-size:24px;font-weight:600;color:var(--agent)" class="mono">312 <span class="s-delta up" style="font-size:12px"><i data-lucide="arrow-up"></i>28%</span></div>
+          <svg class="chart" style="height:90px" viewBox="0 0 300 90" preserveAspectRatio="none"><path d="M0,72 L40,66 L80,60 L120,50 L160,46 L200,34 L240,26 L300,16" fill="none" stroke="#8A7CFF" stroke-width="2"/></svg>
+        </div>
+        <div class="panel" style="grid-column:span 2;">
+          <div class="panel-head"><h3 data-i18n="kpi.convBySource">Conversions by source</h3></div>
+          <svg class="chart" viewBox="0 0 600 160" preserveAspectRatio="none">
+            <g fill="#46B7E8"><rect x="20" y="40" width="60" height="100" rx="4"/><rect x="120" y="70" width="60" height="70" rx="4"/><rect x="220" y="90" width="60" height="50" rx="4"/></g>
+            <g fill="#22C786"><rect x="320" y="60" width="60" height="80" rx="4"/><rect x="420" y="100" width="60" height="40" rx="4"/><rect x="520" y="110" width="60" height="30" rx="4"/></g>
+          </svg>
+          <div class="legend"><span><i style="background:var(--data)"></i><span data-i18n="legend.visits">Visits</span></span><span><i style="background:var(--primary)"></i><span data-i18n="stat.conversions">Conversions</span></span></div>
+        </div>
+        <div class="panel" style="display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px dashed var(--border);background:transparent;color:var(--muted-foreground);text-align:center;gap:8px;">
+          <i data-lucide="plus" style="width:22px;height:22px;"></i><div style="font-size:12.5px;" data-i18n="empty.addChart">Add a chart or start from a template</div><button class="btn outline sm" data-i18n="btn.browseTemplates">Browse templates</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="screen" id="s-settings">
+      <div class="intro"><div><h1 data-i18n="settings.title">Settings</h1><p data-i18n="settings.sub">Workspace, access, and API safety.</p></div></div>
+      <div class="tabbar"><button class="on" data-i18n="tab.workspace">Workspace</button><button data-i18n="tab.projects">Projects</button><button data-i18n="tab.members">Members</button><button data-i18n="tab.apikeys">API keys</button><button data-i18n="tab.activity">Activity</button></div>
+      <div class="grid2">
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="tab.workspace">Workspace</h3></div>
+          <div class="field"><label data-i18n="field.wsName">Workspace name</label><input value="Acme" /></div>
+          <div class="field"><label data-i18n="field.defaultProject">Default project</label><input value="Acme — Production" /></div>
+          <button class="btn primary sm" data-i18n="btn.save">Save changes</button>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3 data-i18n="tab.apikeys">API keys</h3><div class="act"><button class="btn outline sm"><i data-lucide="plus"></i><span data-i18n="btn.newKey">New key</span></button></div></div>
+          <div class="keyrow"><span class="livedot healthy"></span><span class="mono">ar_live_••••••••4f2a</span><span class="when grow" data-i18n="key.created">created 12 days ago</span><button class="btn ghost sm" data-i18n="btn.reveal">Reveal</button><button class="btn ghost sm" style="color:var(--danger)" data-i18n="btn.rotate">Rotate</button></div>
+          <p style="font-size:12px;color:var(--muted-foreground);margin-top:10px;max-width:480px;" data-i18n="key.warning">Rotating a key immediately revokes the old one. Update any running agents or integrations first.</p>
+        </div>
+      </div>
+    </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+  // ── i18n (next-intl-style key catalogs; demo: en + vi) ──────────────
+  const I18N = {
+    en: {},  // source locale — falls back to the inline default text
+    vi: {
+      "brand.sub":"Tăng trưởng · dữ liệu · trợ lý","group.main":"Chính","group.explore":"Khám phá",
+      "nav.chat":"Trò chuyện","nav.agents":"Trợ lý","nav.dashboards":"Bảng điều khiển","nav.traffic":"Lưu lượng",
+      "nav.product":"Sản phẩm","nav.settings":"Cài đặt","nav.monitor":"Giám sát trợ lý","nav.events":"Sự kiện",
+      "nav.people":"Người dùng","nav.sql":"SQL","lang.label":"Ngôn ngữ","account.ws":"không gian acme",
+      "ctx.project":"Dự án","ctx.range":"Khoảng","ctx.filters":"Bộ lọc","range.24h":"24 giờ qua","range.7d":"7 ngày qua","filters.default":"Mặc định",
+      "agents.title":"Trợ lý của bạn","agents.sub":"Cấu hình và tin tưởng các trợ lý đang làm việc.","btn.newAgent":"Trợ lý mới",
+      "stat.active":"Đang bật","stat.workingNow":"Đang làm việc","stat.needsAttention":"Cần chú ý","stat.runsToday":"Lượt chạy hôm nay","stat.avgLatency":"Độ trễ TB","stat.spend24":"Chi phí (24h)",
+      "status.working":"Đang chạy","status.healthy":"Ổn định","status.attention":"Cần chú ý","status.attentionShort":"Chú ý","status.paused":"Tạm dừng","status.idle":"rảnh",
+      "fact.lastRun":"chạy gần nhất","fact.runs":"lượt chạy","fact.cost":"chi phí",
+      "btn.talk":"Trò chuyện","btn.fixSetup":"Sửa cấu hình","btn.resume":"Tiếp tục","btn.createAgent":"Tạo trợ lý",
+      "traffic.title":"Lưu lượng","traffic.sub":"Khách đến từ đâu và nguồn nào giá trị hơn.","btn.askTraffic":"Hỏi về lưu lượng",
+      "stat.visitors":"Khách","stat.pageviews":"Lượt xem","stat.sessions":"Phiên","stat.conversions":"Chuyển đổi","stat.avgSession":"Phiên TB","stat.aiTraffic":"Lưu lượng AI",
+      "label.whatMoved":"Điều thay đổi","btn.saveBoard":"Lưu thành bảng","panel.sessionsTime":"Phiên theo thời gian",
+      "panel.topSources":"Nguồn hàng đầu","panel.topPages":"Trang hàng đầu","th.source":"Nguồn","th.conv":"Chuyển đổi","th.path":"Đường dẫn","th.views":"Lượt xem","th.avg":"TB",
+      "product.title":"Sản phẩm","product.sub":"Trả lời câu hỏi hành vi mà không cần viết SQL.","btn.runInsight":"Chạy phân tích",
+      "mode.trend":"Xu hướng","mode.funnel":"Phễu","mode.retention":"Giữ chân","mode.table":"Bảng","mode.agentAnalysis":"Phân tích trợ lý",
+      "label.startQuestion":"Bắt đầu bằng một câu hỏi","label.result":"Kết quả","btn.saveChart":"Lưu thành biểu đồ","btn.askAgentAbout":"Hỏi trợ lý về việc này","panel.retention":"Giữ chân tuần 4 theo kích hoạt tuần 1",
+      "legend.activated":"Kích hoạt trong tuần 1","legend.notActivated":"Chưa kích hoạt",
+      "monitor.title":"Sức khỏe trợ lý","monitor.sub":"Biết trợ lý nào an toàn, đang chạy hay cần xem lại.","btn.openMonitor":"Mở giám sát trực tiếp",
+      "stat.failures24":"Lỗi (24h)","stat.tokens24":"Token (24h)","label.needsReview":"Cần xem lại","btn.fixSecret":"Sửa secret",
+      "panel.fleet":"Đội trợ lý","hint.failuresFirst":"lỗi & đang chạy lên đầu","th.agent":"Trợ lý","th.status":"Trạng thái","th.currentWork":"Việc hiện tại",
+      "dash.title":"Tổng quan tăng trưởng","dash.sub":"Kiểm tra hằng tuần: thu hút, kích hoạt và tác động của trợ lý.","btn.addChart":"Thêm biểu đồ",
+      "kpi.newUsers":"Người dùng mới","kpi.activation":"Tỷ lệ kích hoạt","kpi.agentActions":"Hành động trợ lý","kpi.convBySource":"Chuyển đổi theo nguồn","legend.visits":"Lượt truy cập",
+      "empty.addChart":"Thêm biểu đồ hoặc bắt đầu từ mẫu","btn.browseTemplates":"Duyệt mẫu",
+      "settings.title":"Cài đặt","settings.sub":"Không gian, quyền truy cập và an toàn API.",
+      "tab.workspace":"Không gian","tab.projects":"Dự án","tab.members":"Thành viên","tab.apikeys":"Khóa API","tab.activity":"Hoạt động",
+      "field.wsName":"Tên không gian","field.defaultProject":"Dự án mặc định","btn.save":"Lưu thay đổi","btn.newKey":"Khóa mới",
+      "key.created":"tạo 12 ngày trước","btn.reveal":"Hiện","btn.rotate":"Xoay khóa","key.warning":"Xoay khóa sẽ thu hồi khóa cũ ngay lập tức. Hãy cập nhật các trợ lý hoặc tích hợp đang chạy trước."
+    }
+  };
+  // capture source strings once
+  document.querySelectorAll('[data-i18n]').forEach(el=>{ el.dataset.src = el.textContent; });
+  function setLocale(lang){
+    document.documentElement.lang = lang;
+    document.querySelectorAll('[data-i18n]').forEach(el=>{
+      const k = el.getAttribute('data-i18n');
+      el.textContent = (I18N[lang] && I18N[lang][k]) || el.dataset.src;
+    });
+    document.querySelectorAll('.langsel button').forEach(b=>b.classList.toggle('on', b.dataset.lang===lang));
+  }
+  document.querySelectorAll('.langsel button').forEach(b=>b.addEventListener('click',()=>setLocale(b.dataset.lang)));
+
+  // ── nav switching ──────────────────────────────────────────────────
+  const nav = document.getElementById('nav');
+  const links = [...nav.querySelectorAll('a[data-screen]')];
+  function show(name){
+    document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('active', s.id==='s-'+name));
+    links.forEach(a=>a.classList.toggle('active', a.dataset.screen===name));
+    document.querySelector('.main').scrollTop=0;
+  }
+  links.forEach(a=>a.addEventListener('click',e=>{e.preventDefault();show(a.dataset.screen);}));
+  document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{const b=e.target.closest('button');if(b){seg.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');}}));
+  document.querySelectorAll('.tabbar').forEach(tb=>tb.addEventListener('click',e=>{if(e.target.tagName==='BUTTON'){tb.querySelectorAll('button').forEach(x=>x.classList.remove('on'));e.target.classList.add('on');}}));
+
+  lucide.createIcons();
+</script>
+</body>
+</html>

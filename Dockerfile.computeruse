@@ -1,0 +1,107 @@
+# Computer-use toolchain image for the persistent `computer_use` tool.
+#
+# Unlike Dockerfile.sandbox (which STRIPS tooling so the locked, read-only,
+# no-network run_shell stays minimal), this image is the opposite end: a working
+# environment an agent can actually compute in — write and run code, install
+# more tools, and produce real documents. It is only ever used by the
+# `computer_use` tool, which the DockerSandbox runs in a persistent session
+# container that is still hard-isolated at the runtime layer:
+#
+#   --cap-drop ALL  --security-opt no-new-privileges  no host env  resource caps
+#
+# The session runs as container-root (so pip/apt/npm can install) but, with all
+# Linux capabilities dropped and no-new-privileges, root *inside* this throwaway
+# container cannot escalate to or see the host. Network egress is on so the agent
+# can install packages; gate it at the host firewall for production.
+#
+# LEAN DOC/PDF STACK. We deliberately do NOT ship LibreOffice, wkhtmltopdf,
+# weasyprint, or pandoc — they added ~1.2 GB and minutes of build time for
+# faithful any-format→PDF conversion we don't need. Instead:
+#
+#   parse  docx/xlsx/pptx/odt/pdf → text/md/html   officeparser (pure JS, npm)
+#   parse  pdf (programmatic / layout)             pypdf + pdfplumber (pure Python)
+#   create docx/xlsx/pptx                          python-docx / openpyxl / python-pptx
+#   create pdf (programmatic)                      reportlab (pure Python)
+#   create pdf (typeset markdown/templated)        typst (single static binary)
+#
+# This keeps the image small (~840 MB, vs the 1.64 GB LibreOffice stack) while still covering read+write of
+# every common office/PDF format. (For high-fidelity PDF→markdown with layout,
+# run-llama's `liteparse` can be added via npm/pip; note its *Office* path shells
+# out to LibreOffice, so it is a PDF-only add here.)
+#
+# Build + point config at it:
+#
+#   docker build -f Dockerfile.computeruse -t agentray-computeruse:latest .
+#   AGENTRAY_SANDBOX_ENABLED=true \
+#   AGENTRAY_SANDBOX_COMPUTER_USE_IMAGE=agentray-computeruse:latest
+#
+# A missing image degrades safely: the session container fails to start and the
+# tool returns the error to the model rather than crashing the API.
+
+# node:22 base gives a modern Node/npm (officeparser's deps require Node >=22 —
+# Debian's apt nodejs is 18 and fails); python3 is added via apt below.
+FROM node:22-bookworm-slim
+
+# TARGETARCH is provided by BuildKit (amd64 / arm64); used to fetch the matching
+# static typst binary.
+ARG TARGETARCH
+ARG TYPST_VERSION=0.15.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    HOME=/root
+
+# Python interpreter + fonts + extraction tools. No LibreOffice/wkhtmltopdf/pandoc;
+# Node/npm come from the base image.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl git unzip xz-utils \
+        python3 python3-pip python3-venv \
+        fonts-dejavu fonts-liberation; \
+    rm -rf /var/lib/apt/lists/*
+
+# typst: one ~30 MB static binary, fast markdown/templated → PDF. Replaces the
+# weasyprint + wkhtmltopdf + pandoc-via-LibreOffice trio.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) TYPST_ARCH=x86_64 ;; \
+        arm64) TYPST_ARCH=aarch64 ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    target="${TYPST_ARCH}-unknown-linux-musl"; \
+    url="https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${target}.tar.xz"; \
+    curl -fsSL "$url" -o /tmp/typst.tar.xz; \
+    tar -xJf /tmp/typst.tar.xz -C /tmp; \
+    install -m 0755 "/tmp/typst-${target}/typst" /usr/local/bin/typst; \
+    rm -rf /tmp/typst.tar.xz "/tmp/typst-${target}"; \
+    typst --version
+
+# Python document stack: parse + create PDF/DOCX/XLSX/PPTX. All pure-Python.
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        python-docx openpyxl python-pptx \
+        pypdf pdfplumber \
+        reportlab \
+        pandas tabulate \
+        markdown beautifulsoup4 lxml \
+        Pillow
+
+# officeparser: pure-JS parser for docx/pptx/xlsx/odt/odp/ods/pdf/rtf/csv/md/html
+# → text/markdown/html/csv. Removes the LibreOffice-for-reading dependency.
+RUN set -eux; \
+    npm config set fetch-retries 5; \
+    npm config set fetch-retry-mintimeout 20000; \
+    npm install -g --no-fund --no-audit officeparser; \
+    npm cache clean --force
+
+# officeparser is installed globally; NODE_PATH lets `node -e`/scripts resolve it
+# from any working directory (e.g. the mounted /workspace), not just the global
+# tree.
+ENV NODE_PATH=/usr/local/lib/node_modules
+
+WORKDIR /workspace
+
+# No ENTRYPOINT/CMD: the sandbox supplies the keepalive (`sleep N`) and execs
+# each command with `docker exec`.

@@ -1,0 +1,1 @@
+export { TrafficPage } from './page';

@@ -1,0 +1,290 @@
+/* Astryx ⇄ Tailwind coexistence (see `astryx docs migration`).
+   Explicit cascade-layer order so Astryx reset/theme load before Tailwind
+   utilities: migrated Astryx components keep their defaults while legacy
+   token-backed utility classes still win where intended. */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+/* NOTE: the Astryx vendored CSS (reset.css, astryx.css, theme-neutral/theme.css,
+   tailwind-theme.css) is imported as JS modules in app/layout.tsx, NOT here.
+   Turbopack (Next 16 dev + build default) silently drops bare-specifier
+   node_modules @imports from a Tailwind entry, shipping the page with zero
+   Astryx atomic CSS; the standalone Tailwind CLI and webpack inline them fine.
+   Importing them from layout.tsx makes Turbopack bundle them reliably. The
+   cascade-layer order is pinned in app/cascade-layers.css (loaded first). */
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--surface-1);
+  --color-card-foreground: var(--foreground);
+  --color-muted: var(--surface-3);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-accent: var(--surface-3);
+  --color-accent-foreground: var(--foreground);
+  --color-popover: var(--surface-2);
+  --color-popover-foreground: var(--foreground);
+  --color-secondary: var(--surface-2);
+  --color-secondary-foreground: var(--foreground);
+  --color-destructive: var(--danger);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+  --color-card-2: var(--surface-2);
+  --color-faint: var(--faint);
+  --color-agent: var(--agent);
+  --color-agent-foreground: var(--agent-foreground);
+  --color-data: var(--data);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --font-sans: var(--font-inter), Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+}
+
+:root {
+  color-scheme: dark;
+  /* Cool blue-slate cockpit ramp — the canonical AgentRay dark palette.
+     SOURCE OF TRUTH: prototype/app-signal.html (:root). These exact values
+     define color AND layout; keep them byte-identical to the prototype. The
+     real dark-mode defect was never the ramp but Astryx's warm-gray neutral
+     tokens overriding it — fixed by the Astryx dark bridge below, not by
+     changing these. Brand/semantic hues stay constant across modes. */
+  --background: #0A0E12;
+  --surface-1: #11161F;
+  --surface-2: #161C26;
+  --surface-3: #1E2733;
+  --surface-4: #28323F;
+  --foreground: #E9EEF4;
+  --muted-foreground: #8C97A8;
+  --faint: #5C6678;
+  --border: #222C38;
+  --input: #2C3645;
+  --primary: #22c786;
+  --primary-hover: #3fe0a0;
+  --primary-foreground: #04221a;
+  --agent: #8a7cff;
+  --agent-foreground: #0e0828;
+  --data: #46b7e8;
+  --success: #3fcb7a;
+  --warning: #e8a93b;
+  --danger: #f0626b;
+  --ring: color-mix(in srgb, var(--primary) 60%, transparent);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --fast: 120ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Astryx dark-mode bridge.
+   Astryx's neutral DARK tokens are a flat warm-gray ramp (body=card=muted=#1b1b1b,
+   surface=#262626, text=#fafafa) that clashes with AgentRay's cool blue-slate
+   identity — so every migrated Astryx component (AppShell, SideNav, Card, inputs,
+   chat pills) rendered warm-gray while legacy modules rendered cool blue. Here we
+   re-point Astryx's mode-aware neutral tokens at our bespoke ramp so the whole dark
+   UI shares ONE coherent palette. Astryx <Theme mode="dark"> sets data-theme="dark"
+   on <html>; this unlayered rule outranks the scoped @layer astryx-theme defaults.
+   Brand/semantic Astryx tokens (accent, success, danger, …) inherit unchanged. */
+[data-theme='dark'] {
+  --color-background-body: var(--background);
+  --color-background-card: var(--surface-1);
+  --color-background-popover: var(--surface-2);
+  --color-background-muted: var(--surface-2);
+  --color-background-surface: var(--surface-3);
+  --color-text-primary: var(--foreground);
+  --color-text-secondary: var(--muted-foreground);
+  --color-text-disabled: var(--faint);
+  --color-border: var(--border);
+  --color-border-emphasized: var(--input);
+  /* Astryx's neutral token is the inset-track fill for SegmentedControl / inputs;
+     its default dark value is a warm gray. Point it at our cool --surface-2 so the
+     segmented-control track matches the prototype's muted track. */
+  --color-neutral: var(--surface-2);
+  /* Astryx's accent token drives primary-button bg, selection borders, control
+     indicators, and the input caret. Default neutral accent is near-white; point
+     it at AgentRay green so every Astryx component's emphasis state is on-brand
+     and matches the prototype's green-as-primary language. */
+  --color-accent: var(--primary);
+}
+
+/* Astryx light-mode bridge (transitional).
+   Production/historical dark mode is a bespoke green-brand palette defined in
+   `:root` above and must stay byte-identical, so we do NOT touch it. Astryx's
+   <Theme> wrapper marks the app subtree `data-theme="light"` and exposes its
+   mode-aware tokens (`--color-*`) there. When that subtree is in light mode we
+   re-point the legacy *neutral* tokens (surfaces / text / borders) at the Astryx
+   light tokens, so every not-yet-migrated module flips to a correct light palette
+   with zero hardcoded light values. Brand/semantic tokens (`--primary`, `--agent`,
+   `--success`, …) intentionally inherit unchanged — saturated colors read in both
+   modes. This bridge is removed token-by-token as modules migrate to Astryx
+   components/tokens directly (see signal-primitives.tsx). */
+[data-theme='light'] {
+  color-scheme: light;
+  --background: var(--color-background-body);
+  --surface-1: var(--color-background-card);
+  --surface-2: var(--color-background-muted);
+  --surface-3: var(--color-background-surface);
+  --surface-4: var(--color-background-muted);
+  --foreground: var(--color-text-primary);
+  --muted-foreground: var(--color-text-secondary);
+  --faint: var(--color-text-disabled);
+  --border: var(--color-border);
+  --input: var(--color-border-emphasized);
+  /* Keep Astryx's accent on-brand green in light mode too (see dark bridge). */
+  --color-accent: var(--primary);
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+/* Per prototype/app-signal.html the sidebar is --surface-1 (one step above the
+   --background body), matching the cards/panels so the nav reads as a lifted
+   region with a border-inline-end seam. Astryx's SideNav defaults to
+   background-body, so re-point it; the unlayered single-class selector outranks
+   the scoped Astryx side-nav default. Works in both modes (surface-1 is bridged
+   to the Astryx card token in light). */
+.astryx-side-nav {
+  background: var(--surface-1);
+  border-inline-end: 1px solid var(--border);
+}
+
+/* Active/hover nav item: cool --surface-3 fill (no accent border, per design
+   direction). Astryx's default is a warm white-10%-overlay that reads gray,
+   not on-brand — override it to the cool ramp. */
+.astryx-side-nav-item:hover {
+  background: var(--surface-3);
+  color: var(--foreground);
+}
+.astryx-side-nav-item.selected,
+.astryx-side-nav-item[aria-current='page'] {
+  background: var(--surface-3);
+  color: var(--foreground);
+}
+
+/* Astryx buttons default to pill-ish 10–16px radii; the prototype's .btn uses
+   --radius-md (8px) square-ish corners. Restore the prototype shape on every
+   Astryx button (existing + the migrated shared Button) — unlayered single-class
+   selector, ordered after the Astryx import, so it wins without !important. */
+.astryx-button {
+  border-radius: var(--radius-md);
+}
+
+/* Astryx Selector's search popover gives its search field only --spacing-1 of
+   block padding while the panel itself has none, so the field hugs the rounded
+   top edge (visible on the Events event-name filter). Match the field's own
+   inline padding (--spacing-2) on the block axis so it clears the edge. Scoped
+   via :has to a popover that actually has a search field, so plain dialogs and
+   modals are untouched. */
+[role='dialog'] div:has(> [role='searchbox']) {
+  padding-block: var(--spacing-2);
+}
+
+html,
+body {
+  min-height: 100dvh;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Form controls inherit typography from their context, but this lives in
+   @layer base so explicit text-[…] utilities (in the utilities layer) win.
+   Unlayered, `font: inherit` overrode every text-size utility on buttons/
+   inputs — the cause of the post-Tailwind-v4 font-size inconsistency. */
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+/* Legacy buttons inherit their text color. Kept in @layer base so it sits below
+   the astryx-theme layer — otherwise this unlayered rule overrode migrated Astryx
+   buttons' own label color (made primary-button text near-invisible). Legacy
+   buttons have no Astryx color class, so they still inherit as before. */
+@layer base {
+  button {
+    color: inherit;
+  }
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 34%, transparent);
+}
+
+/* Base table styles — used globally via plain <table>/<th>/<td> elements */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+th {
+  padding: 0 12px 9px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  text-align: start;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+tbody tr:hover {
+  background: var(--color-background-muted);
+}
+
+td.num,
+th.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+/* Keyframes referenced via Tailwind arbitrary animate-[...] utilities */
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 60%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes sweep { to { width: 100%; } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: translateY(6px) scale(0.98); } }
+@keyframes stack-sheet-enter { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes stack-sheet-exit { from { transform: translateX(0); opacity: 1; } to { transform: translateX(24px); opacity: 0; } }

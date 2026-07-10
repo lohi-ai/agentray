@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentRay — /chat · Signal prototype</title>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  /* ────────────────────────────────────────────────────────────
+     Signal design tokens (from agentray/docs/DESIGN-SIGNAL.md)
+     ──────────────────────────────────────────────────────────── */
+  :root {
+    color-scheme: dark;
+    /* "Spring" palette — emerald growth + iris agent + sky data */
+    --background:#0A0E12;
+    --surface-1:#11161F;
+    --surface-2:#161C26;
+    --surface-3:#1E2733;
+    --surface-4:#28323F;
+    --foreground:#E9EEF4;
+    --muted-foreground:#8C97A8;
+    --faint:#5C6678;
+    --border:#222C38;
+    --input:#2C3645;
+
+    --primary:#22C786;          /* growth / action */
+    --primary-hover:#3FE0A0;
+    --primary-foreground:#04221A;
+    --agent:#8A7CFF;            /* agent / AI */
+    --agent-foreground:#0E0828;
+    --data:#46B7E8;            /* data / charts / links */
+    --success:#3FCB7A;
+    --warning:#E8A93B;
+    --danger:#F0626B;
+    --ring:color-mix(in srgb, var(--primary) 60%, transparent);
+
+    --chart-1:#22C786; --chart-2:#8A7CFF; --chart-3:#46B7E8; --chart-4:#E8A93B;
+
+    --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-xl:14px;
+    --fast:120ms; --base:200ms; --slow:320ms;
+    --ease:cubic-bezier(0.2,0.8,0.2,1);
+    --font-sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --font-mono:"Geist Mono","JetBrains Mono",ui-monospace,"SF Mono",monospace;
+  }
+
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    margin:0; background:var(--background); color:var(--foreground);
+    font-family:var(--font-sans); letter-spacing:-0.01em;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono { font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+  .uppercase-label {
+    font-size:11px; font-weight:500; text-transform:uppercase;
+    letter-spacing:0.08em; color:var(--muted-foreground);
+  }
+  button { font:inherit; cursor:pointer; color:inherit; }
+
+  /* lucide icon sizing */
+  .lucide { width:16px; height:16px; stroke-width:2; flex:0 0 auto; }
+  .brand .mark .lucide { width:15px; height:15px; }
+  .cmdk .lucide, .foot-btn .lucide, .tab .lucide { width:14px; height:14px; }
+  .send .lucide { width:17px; height:17px; }
+  .delta .lucide { width:14px; height:14px; }
+  .r-action .lucide { width:13px; height:13px; }
+
+  /* ── App shell ──────────────────────────────────────────────── */
+  .app { display:flex; flex-direction:column; height:100dvh; }
+
+  /* context bar */
+  .ctxbar {
+    height:44px; flex:0 0 44px; display:flex; align-items:center; gap:12px;
+    padding:0 16px; background:var(--background);
+    border-bottom:1px solid var(--border);
+  }
+  .brand { display:flex; align-items:center; gap:8px; font-weight:600; font-size:14px; letter-spacing:-0.02em; }
+  .brand .mark {
+    width:24px; height:24px; border-radius:7px; display:grid; place-items:center;
+    background:color-mix(in srgb, var(--primary) 16%, transparent); color:var(--primary);
+  }
+  .ctx-chip {
+    display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 10px;
+    background:var(--surface-2); border-radius:var(--radius-sm); font-size:12.5px;
+    color:var(--muted-foreground);
+  }
+  .ctx-chip b { color:var(--foreground); font-weight:500; }
+  .cmdk {
+    margin-left:auto; height:28px; padding:0 10px; display:inline-flex; align-items:center; gap:8px;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm);
+    font-size:12px; color:var(--muted-foreground);
+  }
+  .cmdk kbd {
+    font-family:var(--font-mono); font-size:11px; background:var(--surface-4);
+    padding:1px 5px; border-radius:4px; color:var(--foreground);
+  }
+  .toggle-btn {
+    height:28px; padding:0 10px; background:transparent; border:1px solid var(--border);
+    border-radius:var(--radius-sm); font-size:12.5px; color:var(--muted-foreground);
+    transition:background var(--fast) var(--ease), color var(--fast) var(--ease);
+  }
+  .toggle-btn[aria-pressed="true"] { background:var(--surface-3); color:var(--foreground); }
+  .toggle-btn:hover { background:var(--surface-3); }
+
+  /* body grid */
+  .stage { flex:1; display:grid; grid-template-columns:240px minmax(0,1fr) 320px; min-height:0; }
+  .stage[data-threads="off"] { grid-template-columns:0 minmax(0,1fr) 320px; }
+  .stage[data-panel="off"]   { grid-template-columns:240px minmax(0,1fr) 0; }
+  .stage[data-threads="off"][data-panel="off"] { grid-template-columns:0 minmax(0,1fr) 0; }
+
+  /* ── Threads rail ───────────────────────────────────────────── */
+  .rail {
+    background:var(--surface-1); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; min-height:0; overflow:hidden;
+    transition:width var(--base) var(--ease);
+  }
+  .rail-head { padding:12px; }
+  .btn-primary {
+    width:100%; height:36px; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    background:var(--primary); color:var(--primary-foreground); font-weight:600; font-size:13px;
+    border:none; border-radius:var(--radius-md);
+    transition:background var(--fast) var(--ease), transform var(--fast) var(--ease);
+  }
+  .btn-primary:hover { background:var(--primary-hover); }
+  .btn-primary:active { transform:translateY(1px); }
+  .rail-group { padding:6px 8px; }
+  .rail-list { padding:0 8px 12px; overflow:auto; flex:1; }
+  .thread {
+    width:100%; text-align:left; display:flex; align-items:center; gap:8px;
+    padding:8px 10px; border-radius:var(--radius-md); border:none; background:transparent;
+    color:var(--muted-foreground); font-size:13px; margin-bottom:2px;
+    transition:background var(--fast) var(--ease), color var(--fast) var(--ease);
+  }
+  .thread:hover { background:var(--surface-3); color:var(--foreground); }
+  .thread.active {
+    background:var(--surface-3); color:var(--foreground);
+    box-shadow:inset 2px 0 0 0 var(--primary);
+  }
+  .thread .t-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* ── Conversation ───────────────────────────────────────────── */
+  .convo { display:flex; flex-direction:column; min-height:0; background:var(--background); }
+  .stream { flex:1; overflow:auto; padding:28px 24px 12px; }
+  .stream-inner { max-width:760px; margin:0 auto; display:flex; flex-direction:column; gap:22px; }
+
+  /* front-door empty state */
+  .frontdoor { max-width:760px; margin:48px auto 0; }
+  .frontdoor h1 { font-size:22px; font-weight:600; letter-spacing:-0.02em; margin:0 0 4px; }
+  .frontdoor p.sub { color:var(--muted-foreground); font-size:13.5px; margin:0 0 24px; }
+  .starter-group { margin-bottom:18px; }
+  .starter-group .uppercase-label { margin-bottom:8px; display:block; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chip {
+    padding:9px 12px; background:var(--surface-2); border:1px solid var(--border);
+    border-radius:var(--radius-md); font-size:13px; color:var(--foreground);
+    transition:border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+  }
+  .chip:hover { border-color:color-mix(in srgb, var(--primary) 50%, var(--border)); background:var(--surface-3); }
+
+  /* messages */
+  .msg-user { align-self:flex-end; max-width:78%; }
+  .msg-user .bubble {
+    background:var(--surface-2); padding:10px 14px; border-radius:var(--radius-md);
+    font-size:13.5px; line-height:1.5;
+  }
+  .msg-agent { align-self:stretch; }
+  .agent-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .avatar {
+    width:22px; height:22px; border-radius:7px; display:grid; place-items:center; font-size:12px;
+    background:color-mix(in srgb, var(--agent) 18%, transparent); color:var(--agent); font-weight:700;
+  }
+  .agent-name { font-size:12.5px; font-weight:600; }
+  .msg-agent .body { font-size:13.5px; line-height:1.6; color:var(--foreground); }
+  .progress { display:flex; align-items:center; gap:8px; color:var(--muted-foreground); font-size:12.5px; }
+  .caret {
+    display:inline-block; width:8px; height:15px; background:var(--primary);
+    vertical-align:-2px; margin-left:1px; animation:blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity:0; } }
+
+  /* live dot */
+  .livedot { position:relative; width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
+  .livedot::after {
+    content:""; position:absolute; inset:0; border-radius:50%;
+    animation:pulse 2s var(--ease) infinite;
+  }
+  .livedot.working { background:var(--agent); } .livedot.working::after { box-shadow:0 0 0 0 var(--agent); }
+  .livedot.healthy { background:var(--success); } .livedot.healthy::after { box-shadow:0 0 0 0 var(--success); }
+  .livedot.attention { background:var(--warning); } .livedot.attention::after { box-shadow:0 0 0 0 var(--warning); }
+  .livedot.idle { background:var(--faint); } .livedot.idle::after { display:none; }
+  @keyframes pulse {
+    0% { box-shadow:0 0 0 0 color-mix(in srgb, currentColor 60%, transparent); }
+    70% { box-shadow:0 0 0 6px transparent; }
+    100% { box-shadow:0 0 0 0 transparent; }
+  }
+
+  /* result card */
+  .result {
+    margin-top:12px; background:var(--surface-1); border-radius:var(--radius-xl);
+    padding:14px 16px; position:relative; overflow:hidden;
+  }
+  .result::before {
+    content:""; position:absolute; left:0; top:0; height:2px; width:0; background:var(--primary);
+    animation:sweep var(--slow) var(--ease) forwards;
+  }
+  @keyframes sweep { to { width:100%; } }
+  .result .r-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }
+  .result .r-title { font-size:12.5px; color:var(--muted-foreground); }
+  .result .r-action {
+    font-size:12px; color:var(--primary); background:transparent; border:none; padding:0;
+  }
+  .result .r-action:hover { color:var(--primary-hover); text-decoration:underline; }
+  .metric-row { display:flex; align-items:flex-end; gap:14px; }
+  .metric { font-size:26px; font-weight:600; letter-spacing:-0.02em; }
+  .delta { font-size:13px; display:inline-flex; align-items:center; gap:3px; padding-bottom:4px; }
+  .delta.down { color:var(--danger); } .delta.up { color:var(--success); }
+  /* tiny sparkline bars */
+  .spark { display:flex; align-items:flex-end; gap:3px; height:34px; margin-left:auto; }
+  .spark span { width:6px; background:color-mix(in srgb, var(--data) 60%, transparent); border-radius:2px; }
+  .spark span.lo { background:color-mix(in srgb, var(--data) 30%, transparent); }
+
+  /* ── Composer ───────────────────────────────────────────────── */
+  .composer-wrap { padding:12px 24px 18px; }
+  .composer {
+    max-width:760px; margin:0 auto; background:var(--surface-2);
+    border:1px solid var(--input); border-radius:var(--radius-xl); padding:10px 12px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.03);
+    transition:border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+  }
+  .composer:focus-within { border-color:var(--primary); box-shadow:0 0 0 3px var(--ring); }
+  .composer-top { display:flex; align-items:flex-end; gap:10px; }
+  .agentchip {
+    display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 9px;
+    background:var(--surface-3); border-radius:var(--radius-sm); font-size:12.5px; flex:0 0 auto;
+    border:none; color:var(--foreground);
+  }
+  .composer textarea {
+    flex:1; background:transparent; border:none; resize:none; color:var(--foreground);
+    font-size:13.5px; line-height:1.5; max-height:140px; padding:6px 2px; outline:none;
+  }
+  .send {
+    width:34px; height:34px; flex:0 0 34px; border-radius:var(--radius-md); border:none;
+    background:var(--primary); color:var(--primary-foreground); display:grid; place-items:center;
+    transition:background var(--fast) var(--ease), opacity var(--fast) var(--ease);
+  }
+  .send:hover { background:var(--primary-hover); }
+  .send.stop { background:var(--danger); color:#fff; }
+  .send:disabled { opacity:.4; cursor:not-allowed; }
+  .composer-foot { display:flex; gap:14px; margin-top:8px; padding-left:2px; }
+  .foot-btn {
+    background:transparent; border:none; color:var(--muted-foreground); font-size:12px;
+    display:inline-flex; align-items:center; gap:5px; padding:0;
+  }
+  .foot-btn[aria-pressed="true"] { color:var(--primary); }
+  .foot-btn:hover { color:var(--foreground); }
+
+  /* ── Work panel ─────────────────────────────────────────────── */
+  .panel { background:var(--surface-1); border-left:1px solid var(--border); display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+  .tabs { display:flex; padding:10px 12px 0; gap:4px; }
+  .tab {
+    flex:1; height:30px; border:none; background:transparent; color:var(--muted-foreground);
+    font-size:12.5px; border-radius:var(--radius-sm); position:relative;
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  }
+  .tab[aria-selected="true"] { background:var(--surface-3); color:var(--foreground); }
+  .tab .count {
+    font-family:var(--font-mono); font-size:10.5px; background:var(--primary); color:var(--primary-foreground);
+    padding:0 5px; border-radius:8px; line-height:15px;
+  }
+  .panel-body { padding:12px; overflow:auto; flex:1; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+
+  .rec {
+    background:var(--surface-2); border-radius:var(--radius-lg); padding:11px 12px; margin-bottom:8px;
+  }
+  .rec .r-title { font-size:13px; font-weight:600; margin-bottom:3px; }
+  .rec .r-why { font-size:12px; color:var(--muted-foreground); line-height:1.45; margin-bottom:10px; }
+  .rec-actions { display:flex; gap:8px; }
+  .btn-sm { height:28px; padding:0 12px; border-radius:var(--radius-sm); font-size:12px; font-weight:600; border:none; }
+  .btn-sm.primary { background:var(--primary); color:var(--primary-foreground); }
+  .btn-sm.primary:hover { background:var(--primary-hover); }
+  .btn-sm.ghost { background:transparent; color:var(--muted-foreground); }
+  .btn-sm.ghost:hover { background:var(--surface-3); color:var(--foreground); }
+
+  .act-row { display:flex; gap:9px; padding:8px 2px; font-size:12.5px; align-items:flex-start; }
+  .act-row .when { color:var(--faint); font-size:11px; margin-left:auto; flex:0 0 auto; }
+  .act-dot { width:6px; height:6px; border-radius:50%; margin-top:5px; flex:0 0 6px; background:var(--faint); }
+  .act-dot.ok { background:var(--success); } .act-dot.warn { background:var(--warning); }
+
+  .run-row {
+    display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center;
+    padding:9px 10px; border-radius:var(--radius-lg); margin-bottom:6px; background:var(--surface-2);
+    cursor:pointer; transition:background var(--fast) var(--ease);
+  }
+  .run-row:hover { background:var(--surface-3); }
+  .run-meta { font-size:12px; color:var(--muted-foreground); }
+  .run-stats { display:flex; gap:12px; font-size:11.5px; color:var(--muted-foreground); }
+  .run-stats b { color:var(--foreground); font-weight:500; }
+
+  .panel-label { padding:12px 4px 6px; }
+
+  /* reduced motion */
+  @media (prefers-reduced-motion:reduce) {
+    *, *::before, *::after { animation:none !important; transition:none !important; }
+    .livedot::after { display:none; }
+    .result::before { width:100%; }
+  }
+
+  /* responsive note */
+  @media (max-width:1100px) {
+    .stage, .stage[data-threads="off"], .stage[data-panel="off"] { grid-template-columns:0 1fr 0; }
+    .rail, .panel { display:none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- context bar -->
+  <div class="ctxbar">
+    <div class="brand"><span class="mark"><i data-lucide="waypoints"></i></span> AgentRay</div>
+    <span class="ctx-chip">Project <b>Acme</b></span>
+    <div class="cmdk"><i data-lucide="search"></i><span>Search & jump</span><kbd>⌘K</kbd></div>
+    <button class="toggle-btn" id="t-threads" aria-pressed="true">Threads</button>
+    <button class="toggle-btn" id="t-panel" aria-pressed="true">Panel</button>
+  </div>
+
+  <div class="stage" id="stage" data-threads="on" data-panel="on">
+
+    <!-- threads rail -->
+    <aside class="rail">
+      <div class="rail-head">
+        <button class="btn-primary" id="new-chat"><i data-lucide="plus"></i> New chat</button>
+      </div>
+      <div class="rail-list">
+        <div class="rail-group"><span class="uppercase-label">Today</span></div>
+        <button class="thread active"><span class="livedot working"></span><span class="t-title">Why did pricing sessions fall?</span></button>
+        <button class="thread"><span class="livedot idle"></span><span class="t-title">Retention by signup source</span></button>
+        <div class="rail-group"><span class="uppercase-label">Earlier</span></div>
+        <button class="thread"><span class="livedot idle"></span><span class="t-title">Daily agent summary</span></button>
+        <button class="thread"><span class="livedot idle"></span><span class="t-title">AI crawler traffic spike</span></button>
+        <button class="thread"><span class="livedot idle"></span><span class="t-title">Onboarding funnel drop-off</span></button>
+      </div>
+    </aside>
+
+    <!-- conversation -->
+    <main class="convo">
+      <div class="stream" id="stream">
+        <!-- front door (empty state) -->
+        <div class="frontdoor" id="frontdoor">
+          <h1>What do you want to figure out?</h1>
+          <p class="sub">Ask in plain language. Growth Agent will pull the supporting signals and recommend a next step.</p>
+
+          <div class="starter-group">
+            <span class="uppercase-label">Traffic</span>
+            <div class="chips">
+              <button class="chip starter">Where is my best traffic coming from?</button>
+              <button class="chip starter">Is AI crawler traffic growing?</button>
+            </div>
+          </div>
+          <div class="starter-group">
+            <span class="uppercase-label">Product</span>
+            <div class="chips">
+              <button class="chip starter">Which feature drives retention?</button>
+              <button class="chip starter">Where do new users drop off?</button>
+            </div>
+          </div>
+          <div class="starter-group">
+            <span class="uppercase-label">Agents</span>
+            <div class="chips">
+              <button class="chip starter">What did my agents do today?</button>
+              <button class="chip starter">Any agents that need attention?</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- live conversation (hidden until first send) -->
+        <div class="stream-inner" id="convo-inner" style="display:none;"></div>
+      </div>
+
+      <!-- composer -->
+      <div class="composer-wrap">
+        <div class="composer">
+          <div class="composer-top">
+            <button class="agentchip"><span class="livedot healthy"></span> Growth Agent <i data-lucide="chevron-down"></i></button>
+            <textarea id="input" rows="1" placeholder="Ask anything…"></textarea>
+            <button class="send" id="send" disabled title="Send"><i data-lucide="arrow-up"></i></button>
+          </div>
+          <div class="composer-foot">
+            <button class="foot-btn" id="debug-toggle" aria-pressed="false"><i data-lucide="bug"></i> debug traces</button>
+            <button class="foot-btn"><i data-lucide="paperclip"></i> attach</button>
+            <span class="foot-btn" style="margin-left:auto;cursor:default;">Enter to send · Shift+Enter newline</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- work panel -->
+    <aside class="panel">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" data-pane="recs">Recommendations <span class="count">3</span></button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="activity">Activity</button>
+        <button class="tab" role="tab" aria-selected="false" data-pane="runs">Runs</button>
+      </div>
+      <div class="panel-body">
+
+        <div class="tabpane active" data-pane="recs">
+          <div class="rec">
+            <div class="r-title">Fix the /pricing entry path</div>
+            <div class="r-why">Sessions to /pricing fell 12% after the nav change on Jun 18. The CTA is below the fold on mobile.</div>
+            <div class="rec-actions"><button class="btn-sm primary">Act</button><button class="btn-sm ghost">Skip</button></div>
+          </div>
+          <div class="rec">
+            <div class="r-title">Re-engage trial drop-offs</div>
+            <div class="r-why">38 trials stalled at the "connect data" step this week. A nudge agent could recover them.</div>
+            <div class="rec-actions"><button class="btn-sm primary">Act</button><button class="btn-sm ghost">Skip</button></div>
+          </div>
+          <div class="rec">
+            <div class="r-title">Save "AI traffic" as a board</div>
+            <div class="r-why">You've asked about crawler traffic 3× this week. Pin it for one-glance checks.</div>
+            <div class="rec-actions"><button class="btn-sm primary">Act</button><button class="btn-sm ghost">Skip</button></div>
+          </div>
+        </div>
+
+        <div class="tabpane" data-pane="activity">
+          <div class="panel-label uppercase-label">Live activity</div>
+          <div class="act-row"><span class="act-dot warn"></span><div>Growth Agent is reading <b>events</b> & <b>web sessions</b>…</div><span class="when mono">now</span></div>
+          <div class="act-row"><span class="act-dot ok"></span><div>Run <span class="mono">#4f2a</span> completed — pricing analysis</div><span class="when mono">2m</span></div>
+          <div class="act-row"><span class="act-dot"></span><div>Imported <span class="mono">1,204</span> events from web</div><span class="when mono">14m</span></div>
+          <div class="act-row"><span class="act-dot ok"></span><div>Daily summary agent finished</div><span class="when mono">1h</span></div>
+        </div>
+
+        <div class="tabpane" data-pane="runs">
+          <div class="panel-label uppercase-label">Recent runs</div>
+          <div class="run-row">
+            <span class="livedot working"></span>
+            <div><div class="run-meta">Pricing analysis</div><div class="run-stats"><span><b class="mono">8.2s</b></span><span><b class="mono">12.4k</b> tok</span><span><b class="mono">$0.07</b></span></div></div>
+            <span class="mono" style="color:var(--agent);font-size:11px;">running</span>
+          </div>
+          <div class="run-row">
+            <span class="livedot idle"></span>
+            <div><div class="run-meta">Retention by source</div><div class="run-stats"><span><b class="mono">5.1s</b></span><span><b class="mono">9.1k</b> tok</span><span><b class="mono">$0.05</b></span></div></div>
+            <span class="mono" style="color:var(--success);font-size:11px;">ok</span>
+          </div>
+          <div class="run-row">
+            <span class="livedot idle"></span>
+            <div><div class="run-meta">AI crawler traffic</div><div class="run-stats"><span><b class="mono">3.7s</b></span><span><b class="mono">6.0k</b> tok</span><span><b class="mono">$0.03</b></span></div></div>
+            <span class="mono" style="color:var(--success);font-size:11px;">ok</span>
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script>
+  const stage = document.getElementById('stage');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
+  const stream = document.getElementById('stream');
+  const frontdoor = document.getElementById('frontdoor');
+  const convoInner = document.getElementById('convo-inner');
+  let streaming = false;
+
+  // swap the send/stop button's lucide glyph and re-render it
+  function setSendIcon(name) {
+    send.innerHTML = `<i data-lucide="${name}"></i>`;
+    lucide.createIcons({ nameAttr: 'data-lucide' });
+  }
+
+  // panel toggles
+  function bindToggle(btnId, attr) {
+    const btn = document.getElementById(btnId);
+    btn.addEventListener('click', () => {
+      const on = btn.getAttribute('aria-pressed') === 'true';
+      btn.setAttribute('aria-pressed', String(!on));
+      stage.setAttribute(attr, on ? 'off' : 'on');
+    });
+  }
+  bindToggle('t-threads', 'data-threads');
+  bindToggle('t-panel', 'data-panel');
+
+  // work panel tabs
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected','false'));
+      document.querySelectorAll('.tabpane').forEach(p => p.classList.remove('active'));
+      tab.setAttribute('aria-selected','true');
+      document.querySelector(`.tabpane[data-pane="${tab.dataset.pane}"]`).classList.add('active');
+    });
+  });
+
+  // debug toggle
+  const dbg = document.getElementById('debug-toggle');
+  dbg.addEventListener('click', () => dbg.setAttribute('aria-pressed', dbg.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'));
+
+  // composer autosize + enable
+  function refresh() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+    if (!streaming) send.disabled = input.value.trim().length === 0;
+  }
+  input.addEventListener('input', refresh);
+
+  // starters
+  document.querySelectorAll('.starter').forEach(c => c.addEventListener('click', () => {
+    input.value = c.textContent.trim(); refresh(); input.focus();
+  }));
+
+  // send / stream simulation
+  function escapeHtml(s){ return s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+
+  function userMsg(text) {
+    const el = document.createElement('div');
+    el.className = 'msg-user';
+    el.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+    convoInner.appendChild(el);
+  }
+
+  function agentMsg() {
+    const el = document.createElement('div');
+    el.className = 'msg-agent';
+    el.innerHTML = `
+      <div class="agent-head">
+        <span class="avatar">G</span>
+        <span class="agent-name">Growth Agent</span>
+        <span class="livedot working" aria-label="Agent working"></span>
+      </div>
+      <div class="progress" data-role="progress"><span class="livedot working"></span> Reading events & web sessions…</div>
+      <div class="body" data-role="body"></div>`;
+    convoInner.appendChild(el);
+    return el;
+  }
+
+  function doSend() {
+    const text = input.value.trim();
+    if (!text || streaming) return;
+    frontdoor.style.display = 'none';
+    convoInner.style.display = 'flex';
+
+    userMsg(text);
+    input.value = ''; refresh();
+
+    streaming = true;
+    send.disabled = false; send.classList.add('stop'); setSendIcon('square'); send.title = 'Stop';
+
+    const a = agentMsg();
+    const progress = a.querySelector('[data-role="progress"]');
+    const body = a.querySelector('[data-role="body"]');
+    stream.scrollTop = stream.scrollHeight;
+
+    const full = "Sessions to /pricing dropped 12% over the last 24 hours — most of the loss is on mobile, where the primary CTA fell below the fold after the Jun 18 nav change.";
+    let i = 0;
+    body.innerHTML = '<span class="caret"></span>';
+    const timer = setInterval(() => {
+      if (!streaming) { clearInterval(timer); return; }
+      i += 2;
+      body.innerHTML = escapeHtml(full.slice(0, i)) + '<span class="caret"></span>';
+      stream.scrollTop = stream.scrollHeight;
+      if (i >= full.length) {
+        clearInterval(timer);
+        finish(a, progress, body, full);
+      }
+    }, 22);
+  }
+
+  function finish(a, progress, body, full) {
+    streaming = false;
+    progress.remove();
+    a.querySelector('.livedot').className = 'livedot healthy';
+    body.innerHTML = escapeHtml(full);
+    // result card
+    const card = document.createElement('div');
+    card.className = 'result';
+    card.innerHTML = `
+      <div class="r-head"><span class="r-title">Sessions · /pricing · last 24h</span><button class="r-action">Open in Traffic <i data-lucide="arrow-right"></i></button></div>
+      <div class="metric-row">
+        <span class="metric mono">4,210</span>
+        <span class="delta down"><i data-lucide="trending-down"></i> 12%</span>
+        <div class="spark">
+          <span style="height:70%"></span><span style="height:85%"></span><span style="height:78%"></span>
+          <span style="height:90%"></span><span class="lo" style="height:55%"></span><span class="lo" style="height:48%"></span><span class="lo" style="height:40%"></span>
+        </div>
+      </div>`;
+    a.appendChild(card);
+    lucide.createIcons({ nameAttr: 'data-lucide' });
+    send.classList.remove('stop'); setSendIcon('arrow-up'); send.title = 'Send'; send.disabled = true;
+    stream.scrollTop = stream.scrollHeight;
+    input.focus();
+  }
+
+  function stopStream() {
+    streaming = false;
+    send.classList.remove('stop'); setSendIcon('arrow-up'); send.title = 'Send';
+    send.disabled = input.value.trim().length === 0;
+  }
+
+  send.addEventListener('click', () => streaming ? stopStream() : doSend());
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+
+  // new chat resets to front door
+  document.getElementById('new-chat').addEventListener('click', () => {
+    convoInner.innerHTML = ''; convoInner.style.display = 'none';
+    frontdoor.style.display = 'block';
+    stopStream(); input.value=''; refresh();
+  });
+
+  // initial icon render
+  lucide.createIcons({ nameAttr: 'data-lucide' });
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+export { WebAnalyticsPage } from './page';

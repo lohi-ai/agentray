@@ -1,0 +1,1 @@
+export { CohortsPage } from './page';

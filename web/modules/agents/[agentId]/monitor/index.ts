@@ -1,0 +1,1 @@
+export { AgentMonitorPage } from './page';

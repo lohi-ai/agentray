@@ -1,0 +1,1 @@
+export { AgentSetupPage } from './page';

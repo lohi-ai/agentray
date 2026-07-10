@@ -1,0 +1,16 @@
+root = "."
+tmp_dir = "air-tmp"
+
+[build]
+  cmd = "/usr/local/go/bin/go build -o ./air-tmp/server ./cmd/server"
+  bin = "./air-tmp/server"
+  full_bin = ""
+  include_ext = ["go"]
+  exclude_dir = ["web", "air-tmp", "prototype", "sdk", "docs", "infra"]
+  exclude_regex = ["_test.go"]
+  delay = 800
+  stop_on_error = true
+  log = "build-errors.log"
+
+[log]
+  time = true

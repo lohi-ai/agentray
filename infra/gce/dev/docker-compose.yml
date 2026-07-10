@@ -1,0 +1,31 @@
+name: agentray-dev
+
+services:
+  agentray-api:
+    image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api:${AGENTRAY_TAG:-latest-dev}
+    container_name: dev-agentray-api
+    restart: unless-stopped
+    env_file:
+      - app.env
+      - secret.env
+    mem_limit: 384m
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  agentray-web:
+    image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web:${AGENTRAY_TAG:-latest-dev}
+    container_name: dev-agentray-web
+    restart: unless-stopped
+    mem_limit: 384m
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true

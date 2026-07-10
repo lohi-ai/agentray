@@ -1,0 +1,101 @@
+services:
+  api:
+    build: .
+    environment:
+      HTTP_ADDR: ":8080"
+      POSTGRES_URL: "postgres://lohi:lohi@postgres:5432/lohi_analytics?sslmode=disable"
+      CLICKHOUSE_ADDR: "clickhouse:9000"
+      CLICKHOUSE_DATABASE: "lohi_analytics"
+      CLICKHOUSE_USER: "lohi"
+      CLICKHOUSE_PASSWORD: "lohi"
+      REDIS_URL: "redis://redis:6379/0"
+      NATS_URL: "nats://nats:4222"
+      INGEST_SUBJECT: "agentray.events.ingest"
+      RATE_LIMIT_PER_MINUTE: "600"
+      DEFAULT_PROJECT_NAME: "AgentRay local"
+      DEFAULT_PROJECT_API_KEY: "lohi_dev_project_token"
+      # Quickstart (#3b): seed ~2 days of synthetic events into the default project
+      # on first boot so a stranger lands on populated dashboards, not empty states.
+      # Idempotent and compose-only; unset it for a clean/self-host deployment.
+      AGENTRAY_SEED_DEMO: "${AGENTRAY_SEED_DEMO:-true}"
+      AGENT_KEY_ENC_SECRET: "dev-secret-32-bytes-local-docker!"
+      ALLOWED_ORIGINS: "http://localhost:3100,http://127.0.0.1:3100,http://localhost:3200,http://127.0.0.1:3200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    ports:
+      - "${AGENTRAY_API_PORT:-8088}:8080"
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_AGENTRAY_API_URL: "http://localhost:${AGENTRAY_API_PORT:-8088}"
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "${AGENTRAY_WEB_PORT:-3200}:3200"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lohi
+      POSTGRES_PASSWORD: lohi
+      POSTGRES_DB: lohi_analytics
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lohi -d lohi_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${AGENTRAY_POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_DB: lohi_analytics
+      CLICKHOUSE_USER: lohi
+      CLICKHOUSE_PASSWORD: lohi
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${AGENTRAY_CLICKHOUSE_HTTP_PORT:-18123}:8123"
+      - "${AGENTRAY_CLICKHOUSE_NATIVE_PORT:-19000}:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${AGENTRAY_REDIS_PORT:-6389}:6379"
+
+  nats:
+    image: nats:2-alpine
+    # -js enables JetStream; -sd is the on-disk store for the durable event stream.
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    ports:
+      - "${AGENTRAY_NATS_PORT:-4223}:4222"
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  nats-data:
