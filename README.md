@@ -33,6 +33,24 @@ The foundation architecture (detailed in `docs/PostHog-clone.md`):
 - PostHog-compatible `capture`, `batch`, and `identify` endpoints so existing
   browser and backend instrumentation can move over incrementally
 
+## Agent runtime as a library
+
+The agent runtime powering AgentRay's growth loop is exported as two reusable Go
+packages you can import on their own:
+
+- [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
+  OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
+  budget gating, and context compaction.
+- [`sandbox`](sandbox/) — read-only workspace tools (`read_file`, `grep`,
+  `glob`) for grounding an agent in a repository.
+
+```bash
+go get github.com/lohi-ai/agentray@latest
+```
+
+[Swatter](https://github.com/lohi-ai/swatter), the validated PR-review bugbot,
+is built entirely on these packages.
+
 ## Why AgentRay
 
 - Built for AI-first products: agent runs, tool usage, token cost, latency, and
