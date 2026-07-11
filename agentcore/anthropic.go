@@ -86,6 +86,10 @@ type antContentBlock struct {
 	// tool_result
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
+	// CacheControl marks this block as a prompt-cache breakpoint. encode stamps
+	// it on the final block of the final message (the "moving breakpoint"), so
+	// an agent loop's whole transcript-so-far is read from cache next turn.
+	CacheControl *antCacheControl `json:"cache_control,omitempty"`
 }
 
 type antMessage struct {
@@ -421,6 +425,19 @@ func (p *AnthropicProvider) encode(req ChatRequest) antRequest {
 			}}
 		} else {
 			out.System = systemText
+		}
+	}
+
+	// Moving breakpoint: also mark the final block of the final message, so the
+	// whole transcript-so-far becomes the cached prefix. Next turn re-sends the
+	// same transcript plus one exchange; Anthropic prefix-matches the previous
+	// breakpoint and bills everything before it as a cache read. Without this,
+	// only tools+system are cached and a large first user message (an agent's
+	// task + context payload) is re-billed in full every turn of the loop.
+	if req.CacheKey != "" && len(out.Messages) > 0 {
+		last := &out.Messages[len(out.Messages)-1]
+		if n := len(last.Content); n > 0 {
+			last.Content[n-1].CacheControl = &antCacheControl{Type: "ephemeral", TTL: antCacheTTL(req.CacheRetention)}
 		}
 	}
 
