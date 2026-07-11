@@ -184,14 +184,31 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		return decodeSSEResponse(p, resp, data)
 	}
 
+	// Classify by HTTP status BEFORE decoding the body. A 5xx/429 from a gateway
+	// often carries a non-JSON body (an HTML/text error page); decoding that first
+	// returns a plain decode error that isRetryable can't see as a ProviderError,
+	// which turns a transient, retryable outage into a permanent failure that
+	// drops the turn. The streaming path already checks status first — mirror it.
+	// When the error body happens to be JSON with a structured message, surface it;
+	// otherwise fall back to the raw body text.
+	if resp.StatusCode >= 400 {
+		message := strings.TrimSpace(string(data))
+		var errBody oaiResponse
+		if json.Unmarshal(data, &errBody) == nil && errBody.Error != nil && errBody.Error.Message != "" {
+			message = errBody.Error.Message
+		}
+		return ChatResponse{}, newProviderError(p.Name(), resp, message)
+	}
+
 	var decoded oaiResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return ChatResponse{}, fmt.Errorf("decode openai response (status %d): %w", resp.StatusCode, err)
 	}
+	// A 2xx body can still carry a structured error (some compat gateways do this).
 	if decoded.Error != nil {
 		return ChatResponse{}, newProviderError(p.Name(), resp, decoded.Error.Message)
 	}
-	if resp.StatusCode >= 400 || len(decoded.Choices) == 0 {
+	if len(decoded.Choices) == 0 {
 		return ChatResponse{}, newProviderError(p.Name(), resp, "unexpected response")
 	}
 
