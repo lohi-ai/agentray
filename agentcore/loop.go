@@ -427,6 +427,16 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			system = state.System
 		}
 
+		// Cheap context editing before compaction: past the soft threshold (half
+		// the compaction budget) clear superseded, stale, and bulky old tool
+		// results in place — deterministic, no LLM call. It runs independently of
+		// compaction below (both may fire on one turn; they share the single
+		// cache-prefix invalidation): editing keeps tool bulk down between
+		// compactions and makes the compaction summarization span cheaper, while
+		// compaction alone bounds growth the editor can't touch (user/assistant
+		// text).
+		res.Messages, _ = editContext(res.Messages, limits.MaxContextTokens, a.compaction)
+
 		// Stop guard: compact old turns when the estimated context approaches
 		// the model window so long autonomous runs stay bounded (§5.2). The older
 		// span is summarized by the active rung's model into a structured
@@ -470,6 +480,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if herr != nil {
 			return res, herr
 		}
+		// Cache-anchor placement is a loop decision, not a provider one: mark the
+		// stable prefix on the request view and let each provider translate the
+		// marks into its native caching (or ignore them).
+		reqMessages = markCacheAnchors(reqMessages, a.cacheKey)
 		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort}
 		if req, herr = a.hooks.runBeforeProviderRequest(ctx, req); herr != nil {
 			return res, herr

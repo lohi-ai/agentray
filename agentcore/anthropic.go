@@ -376,6 +376,7 @@ func (p *AnthropicProvider) encode(req ChatRequest) antRequest {
 	out := antRequest{Model: req.Model, MaxTokens: maxTokens}
 
 	var systemParts []string
+	var anchored []int // out.Messages indices whose source message carried CacheAnchor
 	for _, m := range req.Messages {
 		switch m.Role {
 		case RoleSystem:
@@ -411,6 +412,11 @@ func (p *AnthropicProvider) encode(req ChatRequest) antRequest {
 				Content: []antContentBlock{{Type: "text", Text: m.Content}},
 			})
 		}
+		// System messages don't reach out.Messages (hoisted into the system
+		// block below), so an anchor on one has nothing to attach to.
+		if m.CacheAnchor && m.Role != RoleSystem && len(out.Messages) > 0 {
+			anchored = append(anchored, len(out.Messages)-1)
+		}
 	}
 	// The system prompt is the largest stable prefix of a long run. When caching is
 	// requested, send it as a structured block carrying cache_control so Anthropic
@@ -428,16 +434,27 @@ func (p *AnthropicProvider) encode(req ChatRequest) antRequest {
 		}
 	}
 
-	// Moving breakpoint: also mark the final block of the final message, so the
-	// whole transcript-so-far becomes the cached prefix. Next turn re-sends the
-	// same transcript plus one exchange; Anthropic prefix-matches the previous
-	// breakpoint and bills everything before it as a cache read. Without this,
-	// only tools+system are cached and a large first user message (an agent's
-	// task + context payload) is re-billed in full every turn of the loop.
+	// Anchor-driven breakpoints: the loop decides placement (Message.CacheAnchor,
+	// see markCacheAnchors); this provider only translates each anchor into
+	// cache_control on that message's last block. With no anchors present (the
+	// provider used standalone, outside the loop) fall back to the classic moving
+	// breakpoint on the final message, so the whole transcript-so-far becomes the
+	// cached prefix: next turn re-sends the same transcript plus one exchange and
+	// Anthropic prefix-matches the previous breakpoint, billing everything before
+	// it as a cache read. Anthropic allows at most 4 breakpoints per request; one
+	// is spent on the system block, so only the last 3 anchors are honored.
 	if req.CacheKey != "" && len(out.Messages) > 0 {
-		last := &out.Messages[len(out.Messages)-1]
-		if n := len(last.Content); n > 0 {
-			last.Content[n-1].CacheControl = &antCacheControl{Type: "ephemeral", TTL: antCacheTTL(req.CacheRetention)}
+		if len(anchored) == 0 {
+			anchored = []int{len(out.Messages) - 1}
+		}
+		if len(anchored) > 3 {
+			anchored = anchored[len(anchored)-3:]
+		}
+		for _, idx := range anchored {
+			msg := &out.Messages[idx]
+			if n := len(msg.Content); n > 0 {
+				msg.Content[n-1].CacheControl = &antCacheControl{Type: "ephemeral", TTL: antCacheTTL(req.CacheRetention)}
+			}
 		}
 	}
 

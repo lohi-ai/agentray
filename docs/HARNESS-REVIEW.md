@@ -335,6 +335,43 @@ After the follow-up: **445 tests green across 14 packages**, and swatter
 (the downstream bug-catch agent consuming these tools) builds and passes its
 full suite (93 tests) against this tree.
 
+### Round-4 — token-usage pass (context editing + cache-anchor abstraction)
+
+A token-cost audit of the loop found the harness paid for bulk it no longer
+needed. Two mechanisms landed in `agentcore/`:
+
+- **Deterministic context editing (`contextedit.go`):** at a soft threshold
+  (half the compaction budget) a zero-LLM pass clears tool-result bulk from
+  the pre-keep-recent region, in confidence order: results superseded by a
+  newer *identical* call (same tool + args), `read_file` results staled by a
+  later `edit_file`/`write_file` to the same path, then any bulky (≥1KB)
+  older result. Each cleared message keeps its `ToolCallID`/`Name` linkage and
+  gets an actionable placeholder ("re-run it if you need the detail").
+  Copy-on-write and idempotent, so it can never wedge the compaction that
+  still bounds user/assistant text growth — both may fire in one turn for a
+  single shared cache-prefix invalidation. The long-run stress suite now
+  splits in two: the compaction stress dodges the editor (small unique-args
+  payloads), and `TestLongRunContextEditingBoundsWithoutCompaction` proves a
+  bulky redundant-call run stays bounded by clearing alone (≤3 summary calls
+  where the same shape previously drove dozens).
+- **Provider-neutral cache anchors (`cacheanchor.go`):** breakpoint *placement*
+  moved out of `anthropic.go` into the loop. `markCacheAnchors` stamps
+  `Message.CacheAnchor` (request-scoped, `json:"-"`, never persisted) on the
+  outgoing request view — currently one moving anchor on the final message —
+  and each provider only *translates*: Anthropic maps anchors to
+  `cache_control` on the message's last block (capped to the newest 3, staying
+  inside the 4-breakpoint limit with the system block), and keeps the classic
+  final-message fallback for standalone use without a loop; OpenAI/Gemini
+  ignore anchors (implicit prefix caching). New placement policies belong in
+  `cacheanchor.go`, never in a provider's encode.
+
+Audit findings that needed **no code**: `CompactionProvider`/`CompactionModel`
+overrides for cheap summarization already existed and are wired through the
+garden runner; and a "breakpoint after the compaction summary" idea is a no-op
+on Anthropic because `encode()` hoists all system-role messages into the
+top-level system block. After round-4: **456 tests green across 14 packages**;
+swatter re-verified (93 tests) against this tree.
+
 ## Not done (deferred, low value now)
 
 - Argument/command-pattern policy facets for `computer_use` (governance roadmap

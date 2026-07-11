@@ -41,6 +41,13 @@ type Message struct {
 	// createFailureMessage). It carries the failure reason; it is not produced by
 	// the model.
 	Error string `json:"error,omitempty"`
+	// CacheAnchor marks this message as a prompt-cache breakpoint candidate:
+	// "the prefix ending here is stable — cache it". Placement is decided by the
+	// loop (markCacheAnchors), never by a provider; each provider maps anchors
+	// onto its native mechanism (Anthropic: cache_control on the message's last
+	// block) or ignores them (OpenAI/Gemini cache implicitly by prefix). Request-
+	// scoped only — never persisted, so it is excluded from JSON.
+	CacheAnchor bool `json:"-"`
 }
 
 // ToolCall is a model request to invoke a tool with JSON arguments.
