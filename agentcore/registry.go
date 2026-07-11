@@ -27,11 +27,23 @@ func NewProvider(spec ProviderSpec) (LLMProvider, error) {
 		return NewOpenAIProvider(spec.APIKey, spec.BaseURL, compat), nil
 	case "anthropic":
 		return NewAnthropicProvider(spec.APIKey, spec.BaseURL), nil
+	case "google", "gemini":
+		// Gemini on Google's OpenAI-compatible surface. An explicit BaseURL
+		// overrides the default endpoint (e.g. a regional proxy).
+		p := NewGeminiProvider(spec.APIKey)
+		if b := strings.TrimSpace(spec.BaseURL); b != "" {
+			p.BaseURL = strings.TrimRight(b, "/")
+		}
+		return p, nil
 	default:
 		// OpenAI-compatible vendors are config, not code: route them through the
-		// OpenAI provider with a caller-supplied base_url + compat.
+		// OpenAI provider with a caller-supplied base_url + compat. The provider
+		// keeps the vendor's identity so traces and per-turn key refresh attribute
+		// to the vendor's tier, not "openai".
 		if spec.Compat.MaxTokensField != "" && strings.TrimSpace(spec.BaseURL) != "" {
-			return NewOpenAIProvider(spec.APIKey, spec.BaseURL, spec.Compat), nil
+			p := NewOpenAIProvider(spec.APIKey, spec.BaseURL, spec.Compat)
+			p.Vendor = strings.ToLower(strings.TrimSpace(spec.Name))
+			return p, nil
 		}
 		return nil, fmt.Errorf("agentcore: unknown provider %q", spec.Name)
 	}

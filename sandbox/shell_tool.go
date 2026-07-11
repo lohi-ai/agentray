@@ -2,8 +2,12 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -64,6 +68,17 @@ func ComputerUseLimits() agentcore.SandboxLimits {
 // one filesystem (a script written with write_file is runnable, and shell output
 // is readable back) — the coherent-workspace behaviour an agent expects.
 const shellWorkdir = "/workspace"
+
+const (
+	// spillShellOutputBytes mirrors agentcore's default per-tool-result cap: past
+	// it the loop middle-truncates what the model sees, so the full output is
+	// first persisted to the workspace and the model told where to find it
+	// (pi's full-output pattern) instead of the overflow being lost.
+	spillShellOutputBytes = 24 * 1024
+	// shellLogDir is the workspace-relative directory spilled outputs land in —
+	// readable via read_file/grep, and under shellWorkdir inside the shell.
+	shellLogDir = ".shell_logs"
+)
 
 // NewShellTool builds a run_shell tool over the given sandbox. limits is the
 // per-call isolation envelope (the zero value is fail-closed: no network,
@@ -170,7 +185,35 @@ func (t *ShellTool) Run(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("run_shell: %w", err)
 	}
-	return formatResult(res), nil
+	out := formatResult(res)
+	// Oversized output: persist the full text where the agent can read it before
+	// the loop truncates the visible result. The note rides the tail of the
+	// result, which middle-truncation preserves.
+	if len(out) > spillShellOutputBytes && t.workspace != nil {
+		if rel, serr := t.spillOutput(out); serr == nil {
+			out += fmt.Sprintf("\n[output is %d bytes and will be truncated above — full output saved to %s; read it with read_file/grep, or as %s/%s in the shell]",
+				len(out), rel, shellWorkdir, rel)
+		}
+	}
+	return out, nil
+}
+
+// spillOutput writes the full formatted result into shellLogDir in the
+// workspace and returns the workspace-relative path.
+func (t *ShellTool) spillOutput(out string) (string, error) {
+	var suffix [4]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", err
+	}
+	rel := filepath.ToSlash(filepath.Join(shellLogDir, fmt.Sprintf("shell-%s.log", hex.EncodeToString(suffix[:]))))
+	dir := filepath.Join(t.workspace.Root(), shellLogDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(t.workspace.Root(), filepath.FromSlash(rel)), []byte(out), 0o644); err != nil {
+		return "", err
+	}
+	return rel, nil
 }
 
 // formatResult renders a SandboxResult into a compact, model-readable block.

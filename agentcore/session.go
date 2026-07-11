@@ -37,12 +37,25 @@ const (
 	// of the run after repeated failures, so the disable is reconstructed on
 	// resume (and the broken tool isn't retried from scratch).
 	EntryToolDisabled SessionEntryKind = "tool_disabled"
+	// EntryLeafMove is a control entry (not a tree node): it moves the session's
+	// active leaf to Target, so the next appended entry chains from there. This
+	// is how a consumer rewinds a session to an earlier entry, or switches to
+	// another branch, without rewriting history (pi's branch()/leaf pointer).
+	EntryLeafMove SessionEntryKind = "leaf_move"
 )
 
-// SessionEntry is one immutable record in the append-only session log.
+// SessionEntry is one immutable record in the append-only session log. The log
+// is a tree, not just a line: ID/ParentID give each entry a stable address and
+// a tree parent, so a consumer can branch from any earlier entry in place (pi's
+// id/parentId session format). Both are optional — an entry without them chains
+// implicitly to the entry appended before it, so a flat log written by an older
+// writer is a single-branch tree and reduces exactly as before.
 type SessionEntry struct {
 	Seq       int              `json:"seq"` // append order, assigned by the store
 	Kind      SessionEntryKind `json:"kind"`
+	ID        string           `json:"id,omitempty"`        // stable entry id (writer-assigned)
+	ParentID  string           `json:"parent_id,omitempty"` // tree parent; "" chains to the previous entry
+	Target    string           `json:"target,omitempty"`    // EntryLeafMove: the new active leaf
 	Turn      int              `json:"turn,omitempty"`
 	Message   *Message         `json:"message,omitempty"` // EntryMessage
 	Model     string           `json:"model,omitempty"`   // EntryModelChange
@@ -77,10 +90,14 @@ type ReducedState struct {
 }
 
 // ReduceSession folds an append-only log into the current run state. It is a
-// pure function of the log — the heart of durable resume.
+// pure function of the log — the heart of durable resume. The fold walks only
+// the ACTIVE branch (leaf → root, reversed): a log that was rewound or branched
+// reduces to the history the next turn should actually see, while abandoned
+// branches stay in the log for inspection. A flat log's active branch is the
+// whole log, so pre-tree logs reduce exactly as before.
 func ReduceSession(log []SessionEntry) ReducedState {
 	var rs ReducedState
-	for _, e := range log {
+	for _, e := range ActivePath(log) {
 		if e.Turn > rs.LastTurn {
 			rs.LastTurn = e.Turn
 		}
@@ -88,6 +105,13 @@ func ReduceSession(log []SessionEntry) ReducedState {
 		case EntryMessage:
 			if e.Message != nil {
 				rs.Messages = append(rs.Messages, *e.Message)
+			}
+		case EntryBranchSummary:
+			// A branch switch distilled the abandoned branch into this summary;
+			// surface it to the resumed run as context, marker-prefixed like a
+			// compaction checkpoint so the model reads it as background.
+			if s := e.Summary; s != "" {
+				rs.Messages = append(rs.Messages, Message{Role: RoleSystem, Content: branchSummaryMarker + "\n" + s})
 			}
 		case EntryModelChange:
 			rs.Model = e.Model

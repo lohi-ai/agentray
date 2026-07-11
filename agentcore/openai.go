@@ -40,6 +40,10 @@ type OpenAIProvider struct {
 	BaseURL string
 	Compat  Compat
 	HTTP    *http.Client
+	// Vendor, when set, overrides Name() for OpenAI-compatible vendors served
+	// through this wire (the pi-ai pattern: most providers are this API at a
+	// different base URL). Empty keeps the stock "openai" identity.
+	Vendor string
 }
 
 // NewOpenAIProvider builds a provider. An empty baseURL falls back to the
@@ -59,8 +63,28 @@ func NewOpenAIProvider(apiKey, baseURL string, compat Compat) *OpenAIProvider {
 	}
 }
 
-func (p *OpenAIProvider) Name() string        { return "openai" }
+func (p *OpenAIProvider) Name() string {
+	if p.Vendor != "" {
+		return p.Vendor
+	}
+	return "openai"
+}
 func (p *OpenAIProvider) SupportsTools() bool { return p.Compat.SupportsTools }
+
+// defaultGeminiBaseURL is Google's OpenAI-compatible surface for the Gemini
+// API (chat completions + tools + streaming on the OpenAI wire).
+const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+// NewGeminiProvider builds a Google Gemini provider on the OpenAI-compatible
+// wire — provider breadth as config, not new code (Compat table pattern). Use
+// Gemini model ids ("gemini-2.5-pro", "gemini-2.5-flash"); tools, streaming,
+// and usage accounting ride the shared implementation, and Name() reports
+// "google" so traces, tiers, and RefreshKey attribute to the right vendor.
+func NewGeminiProvider(apiKey string) *OpenAIProvider {
+	p := NewOpenAIProvider(apiKey, defaultGeminiBaseURL, DefaultCompat())
+	p.Vendor = "google"
+	return p
+}
 
 // UpdateAPIKey swaps the key used for subsequent requests (KeyUpdater), letting
 // the loop refresh an expiring BYO token between turns.

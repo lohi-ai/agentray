@@ -147,7 +147,15 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 		return compact(messages, 6) // nothing old enough for a clean cut; elide
 	}
 	older := body[:cut]
-	tail := body[cut:]
+	// Tail-overflow guard (pi's split-turn case): findCutPoint snaps the cut back
+	// so tool results stay attached to the assistant turn that issued them, so a
+	// single turn with giant tool results can leave a "recent" tail far larger
+	// than the keep budget — and since the next compaction would then find
+	// nothing new to fold, the run would re-trigger compaction forever without
+	// ever shrinking. Instead of cutting mid-turn (which would orphan tool
+	// results from their call and break provider validation), bound the tail by
+	// eliding its bulkiest older tool results in place.
+	tail, tailShrunk := elideOversizedTail(body[cut:], settings.KeepRecentTokens)
 
 	// Iterative update-summary: if the older span begins with a prior summary
 	// (folded in by a previous compaction), lift it out and fold only the
@@ -157,7 +165,17 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 	// UPDATE_SUMMARIZATION_PROMPT / generateSummary(previousSummary).)
 	prevSummary, newOlder := splitPriorSummary(older)
 	if prevSummary != "" && len(newOlder) == 0 {
-		return messages // only the prior summary was old; nothing new to fold
+		// Only the prior summary was old; nothing new to fold. Still honor the
+		// tail guard, otherwise an oversized tail would wedge compaction (fire
+		// every turn, change nothing).
+		if !tailShrunk {
+			return messages
+		}
+		out := make([]Message, 0, len(head)+len(older)+len(tail))
+		out = append(out, head...)
+		out = append(out, older...) // just the prior summary message
+		out = append(out, tail...)
+		return out
 	}
 
 	summary, err := summarizeSpan(ctx, provider, model, newOlder, prevSummary)
@@ -179,6 +197,42 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 	out = append(out, summaryMsg)
 	out = append(out, tail...)
 	return out
+}
+
+// elideOversizedTail bounds the kept-verbatim tail of a compaction: while its
+// estimate exceeds the keep budget, bulky tool results are collapsed to a
+// placeholder, oldest first, never touching the final message (the newest
+// state the model is acting on). Call linkage (ToolCallID/Name) is preserved so
+// the transcript stays provider-valid. Returns the (possibly copied) tail and
+// whether anything was elided; a tail that cannot shrink further is returned
+// best-effort.
+func elideOversizedTail(tail []Message, keepRecentTokens int) ([]Message, bool) {
+	if keepRecentTokens <= 0 {
+		keepRecentTokens = defaultKeepRecentTokens
+	}
+	if estimateBytesTokens(tail) <= keepRecentTokens {
+		return tail, false
+	}
+	out := make([]Message, len(tail))
+	copy(out, tail)
+	shrunk := false
+	for i := 0; i < len(out)-1 && estimateBytesTokens(out) > keepRecentTokens; i++ {
+		m := out[i]
+		if m.Role != RoleTool || len(m.Content) <= 1024 {
+			continue
+		}
+		out[i] = Message{
+			Role:       RoleTool,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+			Content:    "[oversized tool result elided to fit context — re-run the tool if you need the detail]",
+		}
+		shrunk = true
+	}
+	if !shrunk {
+		return tail, false
+	}
+	return out, true
 }
 
 // firstUserText returns the content of the first non-empty user message in span.
@@ -248,8 +302,19 @@ func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span
 	return resp.Message.Content, nil
 }
 
+// Bounds applied when serializing a span for the summarizer, so one giant tool
+// result (a full query dump, pages of build output) cannot blow the compaction
+// call's own context window (pi truncates serialized tool results the same
+// way). Head+tail truncation keeps the end of the result, where the signal
+// usually is.
+const (
+	maxSerializedToolResult = 2000
+	maxSerializedToolArgs   = 600
+)
+
 // serializeConversation renders a span of messages into a plain-text transcript
-// the summarizer can read (roles labeled; tool calls and results inlined).
+// the summarizer can read (roles labeled; tool calls and results inlined, both
+// bounded so the summarization request itself stays small).
 func serializeConversation(span []Message) string {
 	var b strings.Builder
 	for _, m := range span {
@@ -263,10 +328,10 @@ func serializeConversation(span []Message) string {
 				fmt.Fprintf(&b, "ASSISTANT: %s\n", c)
 			}
 			for _, tc := range m.ToolCalls {
-				fmt.Fprintf(&b, "ASSISTANT called tool %s(%s)\n", tc.Name, tc.Arguments)
+				fmt.Fprintf(&b, "ASSISTANT called tool %s(%s)\n", tc.Name, truncateMiddle(tc.Arguments, maxSerializedToolArgs))
 			}
 		case RoleTool:
-			fmt.Fprintf(&b, "TOOL %s -> %s\n", m.Name, strings.TrimSpace(m.Content))
+			fmt.Fprintf(&b, "TOOL %s -> %s\n", m.Name, truncateMiddle(strings.TrimSpace(m.Content), maxSerializedToolResult))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")

@@ -115,6 +115,8 @@ Horizons: **Now** (next 4–6 weeks), **Next** (1–2 quarters), **Later**
   gate and the credential trust boundary.
 - **Harness parity is a bar, not a phase:** new capabilities ship with the
   faux + real test pattern from
-  [HARNESS-REVIEW.md](docs/HARNESS-REVIEW.md).
+  [HARNESS-REVIEW.md](docs/HARNESS-REVIEW.md). As of Round 3 the harness
+  meets or exceeds pi v0.80 (`earendil-works/pi`) on every audited axis;
+  regressions against that bar are release blockers.
 - **Dogfood first:** nothing graduates from Now/Next without running live on
   kiem-lai.

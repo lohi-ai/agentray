@@ -25,6 +25,7 @@ const (
 	maxGlobMatches    = 500
 	maxGrepFileBytes  = 2 * 1024 * 1024 // skip files larger than this when searching content
 	maxGrepLineLength = 400
+	maxGrepContext    = 10 // cap on before/after context lines per match
 )
 
 // skipDir lists directories never worth walking for search: VCS metadata and
@@ -55,16 +56,29 @@ func (t *GrepTool) Schema() agentcore.ToolSchema {
 		Name: ToolGrep,
 		Description: "Search file contents in the agent workspace by regular expression (Go/RE2 syntax). " +
 			"Returns matching lines as path:line:text, capped at " + fmt.Sprint(maxGrepMatches) + " matches. " +
-			"Use glob to narrow which files are searched and path to scope to a subdirectory.",
+			"Use glob to narrow which files are searched, path to scope to a subdirectory, and context " +
+			"to see surrounding lines without a follow-up read_file.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pattern": map[string]any{"type": "string", "description": "RE2 regular expression to match against each line."},
+				"pattern": map[string]any{"type": "string", "description": "RE2 regular expression to match against each line (or a plain string with literal)."},
 				"path":    map[string]any{"type": "string", "description": "Optional workspace-relative subdirectory to search. Defaults to the whole workspace."},
 				"glob":    map[string]any{"type": "string", "description": "Optional filename filter, e.g. *.go or **/*.ts. Matches the workspace-relative path."},
 				"case_insensitive": map[string]any{
 					"type":        "boolean",
 					"description": "Case-insensitive match. Defaults to false.",
+				},
+				"literal": map[string]any{
+					"type":        "boolean",
+					"description": "Treat pattern as a literal string instead of a regex. Defaults to false.",
+				},
+				"context": map[string]any{
+					"type":        "integer",
+					"description": "Lines of context to show before and after each match (like grep -C). Defaults to 0, max " + fmt.Sprint(maxGrepContext) + ".",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum matches to return. Defaults to " + fmt.Sprint(maxGrepMatches) + " (also the hard cap).",
 				},
 			},
 			"required": []string{"pattern"},
@@ -78,6 +92,9 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		Path            string `json:"path"`
 		Glob            string `json:"glob"`
 		CaseInsensitive bool   `json:"case_insensitive"`
+		Literal         bool   `json:"literal"`
+		Context         int    `json:"context"`
+		Limit           int    `json:"limit"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("grep: invalid arguments: %w", err)
@@ -86,8 +103,22 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		return "", fmt.Errorf("grep: pattern is empty")
 	}
 	expr := in.Pattern
+	if in.Literal {
+		expr = regexp.QuoteMeta(expr)
+	}
 	if in.CaseInsensitive {
 		expr = "(?i)" + expr
+	}
+	limit := in.Limit
+	if limit <= 0 || limit > maxGrepMatches {
+		limit = maxGrepMatches
+	}
+	ctxLines := in.Context
+	if ctxLines < 0 {
+		ctxLines = 0
+	}
+	if ctxLines > maxGrepContext {
+		ctxLines = maxGrepContext
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
@@ -106,7 +137,8 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		}
 	}
 
-	var matches []string
+	var out []string
+	count := 0
 	truncated := false
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -132,29 +164,77 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		if rerr != nil || !utf8.Valid(data) {
 			return nil // unreadable or binary
 		}
-		for i, line := range strings.Split(string(data), "\n") {
-			if !re.MatchString(line) {
-				continue
+		lines := strings.Split(string(data), "\n")
+		var hits []int
+		for i, line := range lines {
+			if re.MatchString(line) {
+				hits = append(hits, i)
 			}
-			if len(matches) >= maxGrepMatches {
-				truncated = true
-				return fs.SkipAll
-			}
-			matches = append(matches, fmt.Sprintf("%s:%d:%s", rel, i+1, clampLine(line)))
+		}
+		if len(hits) == 0 {
+			return nil
+		}
+		if count+len(hits) > limit {
+			hits = hits[:limit-count]
+			truncated = true
+		}
+		count += len(hits)
+		appendGrepHits(&out, rel, lines, hits, ctxLines)
+		if truncated {
+			return fs.SkipAll
 		}
 		return nil
 	})
 	if walkErr != nil {
 		return "", fmt.Errorf("grep: %w", walkErr)
 	}
-	if len(matches) == 0 {
+	if count == 0 {
 		return "no matches", nil
 	}
-	out := strings.Join(matches, "\n")
+	joined := strings.Join(out, "\n")
 	if truncated {
-		out += fmt.Sprintf("\n…[truncated at %d matches]", maxGrepMatches)
+		joined += fmt.Sprintf("\n…[truncated at %d matches — narrow with path/glob or raise limit]", limit)
 	}
-	return out, nil
+	return joined, nil
+}
+
+// appendGrepHits renders one file's accepted matches. Without context each hit
+// is a path:line:text row. With context, overlapping windows are merged into
+// groups (grep -C style): matched lines keep the ':' separators, context lines
+// use '-', and groups are divided by a "--" row.
+func appendGrepHits(out *[]string, rel string, lines []string, hits []int, ctxLines int) {
+	if ctxLines == 0 {
+		for _, h := range hits {
+			*out = append(*out, fmt.Sprintf("%s:%d:%s", rel, h+1, clampLine(lines[h])))
+		}
+		return
+	}
+	isHit := make(map[int]bool, len(hits))
+	for _, h := range hits {
+		isHit[h] = true
+	}
+	type span struct{ start, end int }
+	var spans []span
+	for _, h := range hits {
+		s, e := max(0, h-ctxLines), min(len(lines)-1, h+ctxLines)
+		if n := len(spans); n > 0 && s <= spans[n-1].end+1 {
+			spans[n-1].end = max(spans[n-1].end, e)
+			continue
+		}
+		spans = append(spans, span{s, e})
+	}
+	for _, sp := range spans {
+		if n := len(*out); n > 0 && (*out)[n-1] != "--" {
+			*out = append(*out, "--")
+		}
+		for i := sp.start; i <= sp.end; i++ {
+			sep := "-"
+			if isHit[i] {
+				sep = ":"
+			}
+			*out = append(*out, fmt.Sprintf("%s%s%d%s%s", rel, sep, i+1, sep, clampLine(lines[i])))
+		}
+	}
 }
 
 // GlobTool lists workspace files whose relative path matches a glob pattern

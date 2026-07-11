@@ -17,7 +17,15 @@ const (
 	ToolWriteFile = "write_file"
 )
 
-const maxReadFileBytes = 64 * 1024
+const (
+	// maxReadFileBytes is the byte budget for one read window. The window is
+	// selected first (offset/limit), then trimmed to this budget — so paging with
+	// offset can always reach every line of the file.
+	maxReadFileBytes = 64 * 1024
+	// maxReadWholeFileBytes bounds how large a file the tool will load at all;
+	// beyond this the caller is told to grep for the region instead.
+	maxReadWholeFileBytes = 16 * 1024 * 1024
+)
 
 type ReadFileTool struct {
 	workspace *Workspace
@@ -34,7 +42,8 @@ func (t *ReadFileTool) Schema() agentcore.ToolSchema {
 		Name: ToolReadFile,
 		Description: "Read a UTF-8 text file from the agent workspace. Content is returned with " +
 			"cat -n style line numbers so you can cite exact lines. Use offset and limit to read a " +
-			"window of a large file. The path must be relative and cannot escape the workspace.",
+			"window of a large file; a truncated read ends with the exact offset to continue from. " +
+			"The path must be relative and cannot escape the workspace.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -82,50 +91,79 @@ func (t *ReadFileTool) Run(_ context.Context, args string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("read_file: %s is a directory", rel)
 	}
+	if info.Size() > maxReadWholeFileBytes {
+		return "", fmt.Errorf("read_file: %s is %d bytes, over the %dMB read cap — use grep to locate the region you need",
+			rel, info.Size(), maxReadWholeFileBytes/(1024*1024))
+	}
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return "", fmt.Errorf("read_file: %w", err)
 	}
-	truncated := false
-	if len(data) > maxReadFileBytes {
-		data = data[:maxReadFileBytes]
-		for len(data) > 0 && !utf8.Valid(data) {
-			data = data[:len(data)-1]
-		}
-		truncated = true
-	}
 
-	// Window the requested line range (1-based offset, optional limit) and number
-	// each line cat -n style so the model can reference exact lines for edits.
+	// Window the requested line range FIRST (1-based offset, optional limit),
+	// then trim the selected window to the byte budget — never the file as a
+	// whole, so offset-paging can reach every line no matter the file size.
 	lines := strings.Split(string(data), "\n")
 	// A trailing newline yields a final empty element; drop it so the line count
 	// and numbering match cat -n rather than reporting a phantom blank line.
 	if len(lines) > 1 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
+	total := len(lines)
 	start := in.Offset
 	if start < 1 {
 		start = 1
 	}
-	if start > len(lines) {
-		start = len(lines) + 1
+	if start > total {
+		return "", fmt.Errorf("read_file: offset %d is beyond end of file (%d lines)", in.Offset, total)
 	}
-	end := len(lines)
+	end := total
 	if in.Limit > 0 && start+in.Limit-1 < end {
 		end = start + in.Limit - 1
-		truncated = true
+	}
+
+	// Emit numbered lines cat -n style until the byte budget runs out. Always
+	// emit at least one line so a single oversized line can't yield an empty
+	// window — it is clamped to the budget instead.
+	var content strings.Builder
+	last := start - 1
+	for i := start; i <= end; i++ {
+		line := lines[i-1]
+		if content.Len()+len(line) > maxReadFileBytes {
+			if i == start {
+				fmt.Fprintf(&content, "%6d\t%s\n", i, clampUTF8(line, maxReadFileBytes))
+				fmt.Fprintf(&content, "[line %d is %d bytes; showing its first %dKB]\n", i, len(line), maxReadFileBytes/1024)
+				last = i
+			}
+			break
+		}
+		fmt.Fprintf(&content, "%6d\t%s\n", i, line)
+		last = i
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "path: %s\nbytes: %d\nlines: %d", rel, info.Size(), len(lines))
-	if truncated {
-		fmt.Fprintf(&b, "\ntruncated: true")
+	fmt.Fprintf(&b, "path: %s\nbytes: %d\nlines: %d", rel, info.Size(), total)
+	if last < total {
+		b.WriteString("\ntruncated: true")
 	}
 	b.WriteString("\ncontent:\n")
-	for i := start; i <= end && i <= len(lines); i++ {
-		fmt.Fprintf(&b, "%6d\t%s\n", i, lines[i-1])
+	b.WriteString(content.String())
+	if last < total {
+		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d. Use offset=%d to continue.]", start, last, total, last+1)
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// clampUTF8 cuts s to at most max bytes without splitting a UTF-8 sequence.
+func clampUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 type WriteFileTool struct {

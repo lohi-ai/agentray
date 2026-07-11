@@ -17,10 +17,14 @@ func TestNewProviderResolvesVendors(t *testing.T) {
 		{"explicit openai", ProviderSpec{Name: "openai", APIKey: "k"}, "openai", false},
 		{"case-insensitive", ProviderSpec{Name: "OpenAI"}, "openai", false},
 		{"anthropic", ProviderSpec{Name: "anthropic", APIKey: "k"}, "anthropic", false},
+		{"google", ProviderSpec{Name: "google", APIKey: "k"}, "google", false},
+		{"gemini alias", ProviderSpec{Name: "Gemini", APIKey: "k"}, "google", false},
 		{
+			// Compat vendors keep their own identity so traces and per-turn key
+			// refresh attribute to the vendor's tier, not "openai".
 			"compatible vendor via base_url+compat",
 			ProviderSpec{Name: "groq", BaseURL: "https://api.groq.com/openai/v1", Compat: Compat{MaxTokensField: "max_tokens"}},
-			"openai", false,
+			"groq", false,
 		},
 		{"unknown vendor, no compat", ProviderSpec{Name: "mystery"}, "", true},
 		{"unknown vendor, compat but no base_url", ProviderSpec{Name: "mystery", Compat: Compat{MaxTokensField: "max_tokens"}}, "", true},

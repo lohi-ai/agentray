@@ -94,6 +94,53 @@ func TestComputerUseToolWithoutSessionDegrades(t *testing.T) {
 	}
 }
 
+// TestShellToolSpillsOversizedOutput: output past the visible cap is persisted
+// to the workspace with a tail note naming the path (which middle-truncation
+// preserves), so the overflow is recoverable instead of lost.
+func TestShellToolSpillsOversizedOutput(t *testing.T) {
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	huge := strings.Repeat("build log line\n", 4000) // ~60KB, over the 24KB spill threshold
+	stub := &stubSandbox{result: agentcore.SandboxResult{ExitCode: 1, Stdout: huge, Stderr: "final error: it broke"}}
+	tool := NewShellTool(stub, agentcore.SandboxLimits{}, ws)
+
+	out, err := tool.Run(context.Background(), `{"command":"make"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "full output saved to "+shellLogDir+"/") {
+		t.Fatalf("expected spill note in output tail: %q", out[len(out)-300:])
+	}
+	// The note names a real, readable file containing the complete output.
+	start := strings.Index(out, shellLogDir+"/")
+	rel := out[start:]
+	rel = rel[:strings.IndexAny(rel, "; ")]
+	logOut, rerr := NewReadFileTool(ws).Run(context.Background(), `{"path":"`+rel+`","offset":1,"limit":2}`)
+	if rerr != nil {
+		t.Fatalf("spilled log not readable via read_file: %v", rerr)
+	}
+	if !strings.Contains(logOut, "exit_code: 1") {
+		t.Fatalf("spilled log missing content: %q", logOut)
+	}
+}
+
+// TestShellToolSmallOutputDoesNotSpill: in-cap output must stay exactly as
+// before — no note, no log file.
+func TestShellToolSmallOutputDoesNotSpill(t *testing.T) {
+	ws, _ := NewWorkspace(t.TempDir())
+	stub := &stubSandbox{result: agentcore.SandboxResult{ExitCode: 0, Stdout: "ok\n"}}
+	tool := NewShellTool(stub, agentcore.SandboxLimits{}, ws)
+	out, err := tool.Run(context.Background(), `{"command":"echo ok"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "full output saved") {
+		t.Fatalf("small output must not spill: %q", out)
+	}
+}
+
 func TestShellToolRejectsEmptyAndBadArgs(t *testing.T) {
 	tool := NewShellTool(&stubSandbox{}, agentcore.SandboxLimits{}, nil)
 	if _, err := tool.Run(context.Background(), `{"command":"  "}`); err == nil {

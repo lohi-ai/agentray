@@ -205,11 +205,25 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// exactly the shape RecoverSession treats as cleanly interrupted. A nil store
 	// makes both buffer and flush no-ops.
 	var pending []SessionEntry
+	// lastEntryID chains this run's entries into the session tree: each buffered
+	// entry gets a stable id and points at the one before it, so any entry is a
+	// valid Rewind target later. An id-less entry (rand failure) degrades to the
+	// implicit chain — same shape, just not directly addressable.
+	var lastEntryID string
 	bufferEntry := func(e SessionEntry) {
 		if a.session == nil || a.sessionID == "" {
 			return
 		}
 		e.CreatedAt = time.Now()
+		if e.ID == "" {
+			e.ID = newEntryID()
+		}
+		if e.ParentID == "" {
+			e.ParentID = lastEntryID
+		}
+		if e.ID != "" {
+			lastEntryID = e.ID
+		}
 		pending = append(pending, e)
 	}
 	flush := func() {

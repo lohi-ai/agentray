@@ -33,8 +33,10 @@ func (t *EditFileTool) Schema() agentcore.ToolSchema {
 		Name: ToolEditFile,
 		Description: "Replace an exact string in a UTF-8 text file inside the agent workspace. " +
 			"old_string must appear exactly once unless replace_all is true; otherwise the edit is " +
-			"refused as ambiguous. Use this for surgical changes instead of rewriting the whole file " +
-			"with write_file. Paths must be relative and cannot escape the workspace.",
+			"refused as ambiguous. If no exact match exists, a fuzzy pass retries tolerating smart " +
+			"quotes, unicode dashes/spaces, trailing whitespace, and CRLF differences. Use this for " +
+			"surgical changes instead of rewriting the whole file with write_file. Paths must be " +
+			"relative and cannot escape the workspace.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -86,25 +88,42 @@ func (t *EditFileTool) Run(_ context.Context, args string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
 	}
-	content := string(data)
-
-	count := strings.Count(content, in.OldString)
-	if count == 0 {
-		return "", fmt.Errorf("edit_file: old_string not found in %s", rel)
-	}
-	if count > 1 && !in.ReplaceAll {
-		return "", fmt.Errorf("edit_file: old_string appears %d times in %s; add context to make it unique or set replace_all", count, rel)
-	}
+	// Match in a canonical view — BOM stripped, LF line endings — and restore
+	// both on write, so models never have to reproduce a BOM or CRLF exactly.
+	content, hadBOM := stripBOM(string(data))
+	crlf := detectCRLF(content)
+	content = normalizeToLF(content)
+	oldS := normalizeToLF(in.OldString)
+	newS := normalizeToLF(in.NewString)
 
 	var updated string
-	if in.ReplaceAll {
-		updated = strings.ReplaceAll(content, in.OldString, in.NewString)
-	} else {
-		updated = strings.Replace(content, in.OldString, in.NewString, 1)
+	matched := "exact"
+	count := strings.Count(content, oldS)
+	switch {
+	case count > 1 && !in.ReplaceAll:
+		return "", fmt.Errorf("edit_file: old_string appears %d times in %s; add context to make it unique or set replace_all", count, rel)
+	case count > 0 && in.ReplaceAll:
+		updated = strings.ReplaceAll(content, oldS, newS)
+	case count > 0:
+		updated = strings.Replace(content, oldS, newS, 1)
+	default:
+		// No exact match: retry in the fuzzy-normalized view (smart quotes,
+		// unicode dashes/spaces, trailing whitespace).
+		updated, count, err = fuzzyReplace(content, oldS, newS, rel, in.ReplaceAll)
+		if err != nil {
+			return "", err
+		}
+		matched = "fuzzy (normalized quotes/dashes/spaces/trailing whitespace)"
 	}
 
+	if crlf {
+		updated = strings.ReplaceAll(updated, "\n", "\r\n")
+	}
+	if hadBOM {
+		updated = "\uFEFF" + updated
+	}
 	if err := os.WriteFile(resolved, []byte(updated), 0o644); err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
 	}
-	return fmt.Sprintf("path: %s\nreplacements: %d\nbytes: %d", rel, count, len(updated)), nil
+	return fmt.Sprintf("path: %s\nreplacements: %d\nbytes: %d\nmatch: %s", rel, count, len(updated), matched), nil
 }

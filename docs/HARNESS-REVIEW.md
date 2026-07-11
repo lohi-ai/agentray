@@ -2,7 +2,11 @@
 
 Scope: review the agent harness against the Claude-Code / pi bar across four
 axes, then close the highest-value gap. Reference harness: pi
-(<https://pi.dev/>, `earendil-works/pi`).
+(<https://pi.dev/>, `earendil-works/pi`). Three rounds so far — Round 1
+(context/tools/permission/trace), Round 2 (delegation, truncation shape,
+reasoning effort, egress), Round 3 (full pi v0.80 benchmark: session tree,
+compaction guards, provider breadth). Round-3 verdict: **meets or exceeds pi
+on every audited axis.**
 
 ## Verdict per axis
 
@@ -226,6 +230,110 @@ dials a raw IP on the default bridge is the residual gap; closing it fully needs
 an internal docker network + sidecar (or netfilter rules), which requires added
 container capabilities — deferred as the netfilter follow-up. For hostile-tool
 threat models, additionally gate at the host firewall.
+
+## Round 3 — vs pi (earendil-works/pi v0.80): session tree, compaction guards, provider breadth
+
+A third pass benchmarked the harness against **pi**, the strongest open
+TypeScript agent toolkit (pi-ai / pi-agent-core / pi-coding-agent). Gap
+analysis first, then implementation of every axis where pi led.
+
+### Where we already exceeded pi (no work needed)
+
+| Axis | pi v0.80 | agentcore / Agent Garden |
+|---|---|---|
+| Permissions | **None built-in** (docs say to bring your own) | Default-deny `Policy`, allow-lists, per-tool gates, scope-gated marketplace tools |
+| Sandboxing | External patterns only (docs) | Built-in Docker sandbox, persistent sessions, `--network none` shell, egress allowlist proxy |
+| Budgets | None | Token/cost budget gate per run, priced tracing (`Usage.CostUSD`) |
+| Durability | Event-sourced session partly a **design proposal** | Shipped: append-only `SessionStore`, `ReduceSession`/`RecoverSession`, retry-safe tool replay, circuit breaker |
+| Subagents | Experimental orchestrator package | Built-in `spawn_subagent` with inherit-narrow-only, caps, cost folding |
+| Credentials | Caller-managed | Encrypted per-tier keys, per-turn `KeyRefresher` on auth failure |
+
+### Where pi led — all three closed this round
+
+**6. Session tree + rewind/branching** (pi's JSONL tree: `id`/`parentId`,
+leaf pointer, in-place branching, branch summaries). Implemented in
+`session_tree.go` + `session.go`:
+
+- Every appended entry gets a crypto-rand hex **ID** and a **ParentID**
+  (explicit, else the current leaf) — append-is-branch, exactly pi's model.
+  The loop stamps ids on all buffered entries (`loop.go`).
+- `EntryLeafMove` moves the active leaf; `ActivePath`/`ActiveLeaf`/
+  `SessionTree` expose the tree; `ReduceSession`/`RecoverSession` replay only
+  the **active branch**, so recovery after a rewind never leaks abandoned work.
+- `Rewind(ctx, store, sessionID, targetID, opts)` rewinds to any node,
+  optionally folding a summary of the abandoned span in as a marked
+  `EntryBranchSummary` (system message on reduce). Summarizer failure degrades
+  to a bare leaf move — rewind never fails on a flaky model.
+- **Fully backward compatible:** an id-less legacy log is a single-branch tree
+  (synthetic `#<index>` ids), and since `pgSessionStore` marshals whole entries
+  into JSONB `payload_json`, **no DB migration** was needed.
+
+Tests: `session_tree_test.go` (9 — flat-log compat, fork-by-parent, leaf-move
+rewind, synthetic ids, full rewind flow, degraded rewind, unknown target,
+recovery-follows-branch, loop id stamping).
+
+**7. Compaction robustness** (pi bounds summarizer input at 2,000 chars/tool
+result and split-turns oversized tails). Implemented in `compaction.go`:
+
+- `serializeConversation` now truncates tool args (600B) and results (2,000B)
+  middle-out before they reach the summarizer — one giant `run_sql` result can
+  no longer blow the summarizer's own request.
+- `elideOversizedTail` collapses bulky old tool results (oldest-first, final
+  message protected, call linkage preserved) when the kept tail alone exceeds
+  `KeepRecentTokens`. This **fixes a real wedge**: a transcript whose single
+  most-recent turn dwarfed the keep budget used to survive compaction
+  unchanged and re-trigger forever. Regression:
+  `TestCompactionUnwedgesOversizedSingleTurn`.
+
+**8. Provider breadth** (pi ships Google native). `NewGeminiProvider` rides
+the shared OpenAI-compatible wire against Google's compat endpoint
+(`generativelanguage.googleapis.com/v1beta/openai`) with vendor identity
+`"google"`; registry accepts `google`/`gemini` (BaseURL overridable). Bonus
+fix: OpenAI-compatible vendors now keep their **own** `Name()` (was always
+`"openai"`), so traces and the per-turn key refresh attribute to the vendor's
+tier — previously a compat vendor's key could never refresh.
+
+### Round-3 verdict
+
+With permissions, sandboxing, budgets, shipped durability, subagents, and
+egress control already ahead, and session tree/branching, compaction guards,
+and Google provider breadth now closed, agentcore + Agent Garden meets or
+exceeds pi v0.80 on every audited axis. pi's remaining distinctives (TUI
+widgets, TypeScript-native extension API) are out of scope for a Go
+analytics-agent runtime. Full suite: **427 tests green across 14 packages.**
+
+### Round-3 follow-up — tool ergonomics ported from pi's coding agent
+
+A close read of pi's coding-agent tools (read/bash/edit) against ours surfaced
+one real bug and three ergonomic gaps, all fixed in `sandbox/`:
+
+- **`read_file` paging bug (real defect):** the 64KB byte budget was applied to
+  the whole file *before* offset/limit windowing, so lines past 64KB were
+  unreachable at any offset — the tool silently returned empty content. The
+  budget now applies to the selected window; an oversized single line is
+  clamped with a note instead of vanishing, and offset-past-EOF is an
+  actionable error. Every truncated read now ends with the exact continuation
+  command: `[Showing lines X–Y of Z. Use offset=N to continue.]`
+- **`run_shell` output spill:** output past the 24KB visible cap (mirroring
+  agentcore's default `MaxToolResultLen`) is persisted to
+  `.shell_logs/shell-<id>.log` in the workspace before the loop truncates it;
+  a tail note (which head+tail truncation preserves) tells the model where the
+  full output lives, readable via `read_file`/`grep` or from the shell.
+- **`grep` gains `literal`, `context`, `limit`:** verbatim (regex-quoted)
+  matching, `grep -C`-style context with merged overlapping windows and `--`
+  group separators, and a caller-tunable match cap with an actionable
+  truncation notice.
+- **`edit_file` fuzzy fallback (`edit_match.go`, port of pi's edit-diff):**
+  exact match first; on miss, a normalized-view retry tolerating smart quotes,
+  unicode dashes/spaces, NFKC-foldable characters, trailing whitespace, BOM,
+  and CRLF differences. Untouched lines keep their original bytes; uniqueness
+  and `replace_all` semantics are unchanged; BOM and CRLF are restored on
+  write. Deliberately *not* ported: pi's system prompt (ours is stronger),
+  prompt templates, and TUI-specific machinery.
+
+After the follow-up: **445 tests green across 14 packages**, and swatter
+(the downstream bug-catch agent consuming these tools) builds and passes its
+full suite (93 tests) against this tree.
 
 ## Not done (deferred, low value now)
 
