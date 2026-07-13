@@ -594,6 +594,50 @@ export type ConnectorSyncDraft = {
   warnings?: string[];
 };
 
+// --- Agent teams ---
+
+export type Team = {
+  id: string;
+  project_id: string;
+  name: string;
+  slug: string;
+  lead_agent_id: string;
+  member_count: number;
+  card_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TeamMember = {
+  agent_id: string;
+  name: string;
+  slug: string;
+  role: string;
+  position: number;
+  enabled: boolean;
+  is_lead: boolean;
+};
+
+export type TeamCard = {
+  id: string;
+  team_id: string;
+  status: string;
+  title: string;
+  body: string;
+  assignee_agent_id: string;
+  assignee_name: string;
+  position: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TeamCardUpdate = {
+  status?: string;
+  title?: string;
+  body?: string;
+  assignee_agent_id?: string; // '' clears the assignee
+};
+
 // --- Per-agent budgets & quotas (#4) ---
 
 export type BudgetPeriod = 'day' | 'month';
@@ -1470,6 +1514,61 @@ export class AgentRayAPI {
 
   draftConnectorSyncs(connectorID: string, prompt: string) {
     return this.post<ConnectorSyncDraft>(`/api/connectors/${connectorID}/syncs/draft`, { prompt });
+  }
+
+  // --- Agent teams ---
+
+  teams() {
+    return this.get<{ teams: Team[]; statuses: string[] }>('/api/teams');
+  }
+
+  createTeam(name: string) {
+    return this.post<{ team: Team }>('/api/teams', { name });
+  }
+
+  team(teamID: string) {
+    return this.get<{ team: Team; members: TeamMember[] }>(`/api/teams/${teamID}`);
+  }
+
+  updateTeam(teamID: string, input: { name?: string; lead_agent_id?: string }) {
+    return this.request<{ team: Team }>(this.withProject(`/api/teams/${teamID}`), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteTeam(teamID: string) {
+    return this.request<void>(this.withProject(`/api/teams/${teamID}`), { method: 'DELETE' });
+  }
+
+  upsertTeamMember(teamID: string, agentID: string, input: { role?: string; position?: number } = {}) {
+    return this.request<void>(this.withProject(`/api/teams/${teamID}/members/${agentID}`), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  removeTeamMember(teamID: string, agentID: string) {
+    return this.request<void>(this.withProject(`/api/teams/${teamID}/members/${agentID}`), { method: 'DELETE' });
+  }
+
+  teamCards(teamID: string) {
+    return this.get<{ cards: TeamCard[]; statuses: string[] }>(`/api/teams/${teamID}/cards`);
+  }
+
+  createTeamCard(teamID: string, input: { title: string; body?: string }) {
+    return this.post<{ card: TeamCard }>(`/api/teams/${teamID}/cards`, input);
+  }
+
+  updateTeamCard(teamID: string, cardID: string, input: TeamCardUpdate) {
+    return this.request<{ card: TeamCard }>(this.withProject(`/api/teams/${teamID}/cards/${cardID}`), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteTeamCard(teamID: string, cardID: string) {
+    return this.request<void>(this.withProject(`/api/teams/${teamID}/cards/${cardID}`), { method: 'DELETE' });
   }
 
   // --- Per-agent budgets (#4) ---

@@ -349,6 +349,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
+	skillLoader := r.skillLoader(scopeID)
 
 	// Per-agent secrets (AgentGarden §5): decrypt this agent's stored secrets
 	// into a run-scoped credential.Vault that backs {{cred:NAME}} resolution. An
@@ -395,6 +396,26 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 				Description: target.Description,
 				Run:         r.delegateRunner(opts.ProjectID, target.AgentID),
 			})
+		}
+
+		// Team leadership (ARCHITECT-AGENT-TEAM P2/P3): when this agent is the
+		// selected lead of one or more teams, merge the member rosters into the
+		// delegate list (members run through the same guarded delegate path),
+		// inject the orchestrator skill, and grant the board tool — all derived
+		// per run, so demoting the lead revokes everything on its next run.
+		// Non-lead members resolve zero teams here and are untouched.
+		teams, err := r.Store.TeamsLedByAgentForRun(ctx, scopeID)
+		if err != nil {
+			return storage.AgentRun{}, agentcore.RunResult{}, err
+		}
+		if len(teams) > 0 {
+			delegates = mergeTeamDelegates(delegates, teams, func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error) {
+				return r.delegateRunner(opts.ProjectID, agentID)
+			})
+			header, body := orchestratorSkill(teams)
+			skills = append(skills, header)
+			skillLoader = withOrchestratorBody(skillLoader, body)
+			runTools = append(runTools, &teamBoardTool{store: r.Store, teams: teams})
 		}
 	}
 
@@ -530,7 +551,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Soul:               def.SoulMD,
 		Agents:             def.AgentsMD,
 		Skills:             skills,
-		SkillLoader:        r.skillLoader(scopeID),
+		SkillLoader:        skillLoader,
 		Data:               r.Store,
 		Memory:             mem,
 		Notifier:           r.Notifier,

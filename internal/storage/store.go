@@ -1070,6 +1070,9 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 	if err := s.migrateAgentLab(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateTeams(ctx); err != nil {
+		return err
+	}
 	// external_rows is the landing table for data-connector syncs: one wide
 	// JSON row per source row, deduplicated on merge by the replacing key so
 	// snapshot re-syncs and retried batches are idempotent. `cursor` versions

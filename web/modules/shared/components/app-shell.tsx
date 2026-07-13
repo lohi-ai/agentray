@@ -18,6 +18,7 @@ import {
   Settings,
   Store,
   Users,
+  UsersRound,
   Waypoints,
 } from 'lucide-react';
 import type { ComponentType, ReactNode, SVGProps } from 'react';
@@ -48,6 +49,7 @@ const navGroups: Array<{ label: string; items: NavItem[] }> = [
       { href: '/dashboard', section: 'dashboards', icon: LayoutDashboard, label: 'Dashboards' },
       { href: '/chat', section: 'chat', icon: MessageSquare, label: 'Chat', live: true },
       { href: '/agents', section: 'agents', icon: Bot, label: 'Agents' },
+      { href: '/teams', section: 'agents', icon: UsersRound, label: 'Teams' },
       { href: '/marketplace', section: 'agents', icon: Store, label: 'Marketplace' },
       { href: '/web-analytics', section: 'traffic', icon: Globe, label: 'Traffic' },
       { href: '/product', section: 'product', icon: Package, label: 'Product' },
