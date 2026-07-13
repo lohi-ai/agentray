@@ -33,11 +33,17 @@ type PullRequest struct {
 	// KeyColumn uniquely identifies a row (used as the idempotency key in the
 	// landing table).
 	KeyColumn string
-	// CursorColumn orders the incremental pull (updated_at, id, …). Rows with
-	// CursorColumn > Cursor are returned in ascending cursor order.
+	// CursorColumn orders the incremental pull (updated_at, id, …). Pagination
+	// is keyset on (CursorColumn, KeyColumn) so rows tied on one cursor value
+	// are never skipped across a batch boundary; NULL cursors sort first and
+	// are paged by key alone.
 	CursorColumn string
-	// Cursor is the last synced cursor value ("" = from the beginning).
+	// Cursor is the last synced cursor value ("" = NULL region or from the
+	// beginning, disambiguated by CursorKey).
 	Cursor string
+	// CursorKey is the key of the last synced row, the tie-breaking half of
+	// the keyset cursor ("" = from the beginning).
+	CursorKey string
 	// Limit caps the batch size; the Engine loops until HasMore is false.
 	Limit int
 }
@@ -55,9 +61,12 @@ type Row struct {
 // PullResult is one incremental batch.
 type PullResult struct {
 	Rows []Row
-	// NextCursor is the cursor to persist after this batch lands (the max
-	// cursor seen). Empty means "unchanged".
+	// NextCursor is the cursor of the batch's last row ("" while still inside
+	// the NULL-cursor region).
 	NextCursor string
+	// NextCursorKey is the key of the batch's last row — together with
+	// NextCursor it is the keyset position the next pull resumes from.
+	NextCursorKey string
 	// HasMore hints that another batch is immediately available.
 	HasMore bool
 }

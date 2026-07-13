@@ -4274,6 +4274,13 @@ var (
 	// JOIN — its project scope is a plain filter with no identity-stitching
 	// args, so joining it against events is safe to rewrite.
 	externalSourcePattern = regexp.MustCompile(`(?i)\b(from|join)\s+external_rows\b`)
+	// After rewriting, no bare reference to either tenant table may remain:
+	// comma joins (`FROM external_rows x, events e`), quoted identifiers
+	// (`FROM "events"`), or any other unrecognized form would read the raw
+	// multi-tenant table on a role with database-wide SELECT. String literals
+	// are stripped before this check so `WHERE name = 'events'` stays legal.
+	residualSourcePattern = regexp.MustCompile(`(?i)\b(events|external_rows)\b`)
+	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
 )
 
 func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver) (string, []any, error) {
@@ -4306,6 +4313,11 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 	}
 	if hasExternal {
 		query = externalSourcePattern.ReplaceAllString(query, "${1} scoped_external_rows")
+	}
+	// Fail closed: any reference the rewrite did not catch (comma join, quoted
+	// identifier, second occurrence) would hit the raw multi-tenant table.
+	if residualSourcePattern.MatchString(sqlStringLiteral.ReplaceAllString(query, "''")) {
+		return "", nil, fmt.Errorf("the events and external_rows tables may only be referenced directly after FROM or JOIN (comma joins and quoted table names are not supported)")
 	}
 	projectPlaceholders := strings.Count(query, "{project_id}")
 	query = strings.ReplaceAll(query, "{project_id}", "?")

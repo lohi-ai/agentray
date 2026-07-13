@@ -71,12 +71,14 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if err != nil {
 			return err
 		}
-		source, err := openConnectorSource(c.Request().Context(), store, ctx.User.ID, project.ID, c.Param("connector_id"), 15*time.Second)
+		probeCtx, cancel := context.WithTimeout(c.Request().Context(), probeTimeout)
+		defer cancel()
+		source, err := openConnectorSource(probeCtx, store, ctx.User.ID, project.ID, c.Param("connector_id"))
 		if err != nil {
 			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		}
 		defer source.Close()
-		if err := source.TestConnection(c.Request().Context()); err != nil {
+		if err := source.TestConnection(probeCtx); err != nil {
 			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]any{"ok": true})
@@ -87,12 +89,14 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if err != nil {
 			return err
 		}
-		source, err := openConnectorSource(c.Request().Context(), store, ctx.User.ID, project.ID, c.Param("connector_id"), 15*time.Second)
+		probeCtx, cancel := context.WithTimeout(c.Request().Context(), probeTimeout)
+		defer cancel()
+		source, err := openConnectorSource(probeCtx, store, ctx.User.ID, project.ID, c.Param("connector_id"))
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 		defer source.Close()
-		tables, err := source.DiscoverSchema(c.Request().Context())
+		tables, err := source.DiscoverSchema(probeCtx)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -197,12 +201,14 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		source, err := openConnectorSource(c.Request().Context(), store, ctx.User.ID, project.ID, c.Param("connector_id"), 15*time.Second)
+		probeCtx, cancel := context.WithTimeout(c.Request().Context(), probeTimeout)
+		defer cancel()
+		source, err := openConnectorSource(probeCtx, store, ctx.User.ID, project.ID, c.Param("connector_id"))
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 		defer source.Close()
-		tables, err := source.DiscoverSchema(c.Request().Context())
+		tables, err := source.DiscoverSchema(probeCtx)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -221,17 +227,22 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 	})
 }
 
+// probeTimeout bounds a whole probe request (authorize + dial + the
+// test/discover query itself) so a source that connects but then hangs cannot
+// pin the handler; each handler derives one probe context from it.
+const probeTimeout = 15 * time.Second
+
 // openConnectorSource authorizes (owner/admin, enforced by the store), decrypts
-// the DSN, and opens the source with a bounded timeout. The DSN is a local
-// variable only — it is never serialized or logged.
-func openConnectorSource(ctx context.Context, store *storage.Store, userID, projectID, connectorID string, timeout time.Duration) (connector.Source, error) {
+// the DSN, and opens the source. The caller's ctx must already carry the probe
+// deadline — the same ctx then bounds the probe query, so the timeout covers
+// the whole operation, not just the dial. The DSN is a local variable only —
+// it is never serialized or logged.
+func openConnectorSource(ctx context.Context, store *storage.Store, userID, projectID, connectorID string) (connector.Source, error) {
 	kind, dsn, err := store.ConnectorDSNForUser(ctx, userID, projectID, connectorID)
 	if err != nil {
 		return nil, fmt.Errorf("connector not found or permission denied")
 	}
-	openCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return connector.Open(openCtx, kind, dsn)
+	return connector.Open(ctx, kind, dsn)
 }
 
 // authoringProvider resolves the workspace's authoring model tier (same

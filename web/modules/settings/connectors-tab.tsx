@@ -304,7 +304,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       {draft ? (
         <DraftReviewDialog
           draft={draft}
-          onApprove={(input) => void create.mutate(input)}
+          onApprove={(input) => create.mutateAsync(input)}
           onClose={() => setDraft(null)}
         />
       ) : null}
@@ -402,10 +402,11 @@ function AddSyncDialog({ connectorID, onSubmit, onClose }: {
 
 function DraftReviewDialog({ draft, onApprove, onClose }: {
   draft: ConnectorSyncDraft;
-  onApprove: (input: ConnectorSyncInput) => void;
+  onApprove: (input: ConnectorSyncInput) => Promise<unknown>;
   onClose: () => void;
 }) {
   const [approved, setApproved] = useState<Set<number>>(new Set());
+  const [saving, setSaving] = useState<number | null>(null);
 
   return (
     <Modal title="AI-drafted syncs — review before saving" onClose={onClose} wide footer={<Button variant="ghost" size="sm" onClick={onClose}>Done</Button>}>
@@ -423,12 +424,17 @@ function DraftReviewDialog({ draft, onApprove, onClose }: {
               variant={approved.has(i) ? 'ghost' : 'primary'}
               size="sm"
               onClick={() => {
-                if (approved.has(i)) return;
-                onApprove({ source_table: s.source_table, key_column: s.key_column, cursor_column: s.cursor_column, schedule_cron: s.schedule_cron, enabled: true });
-                setApproved((prev) => new Set(prev).add(i));
+                if (approved.has(i) || saving === i) return;
+                setSaving(i);
+                // The mutation hook surfaces failures via setError; here a
+                // failed row just stays approvable instead of reading "Added".
+                onApprove({ source_table: s.source_table, key_column: s.key_column, cursor_column: s.cursor_column, schedule_cron: s.schedule_cron, enabled: true })
+                  .then(() => setApproved((prev) => new Set(prev).add(i)))
+                  .catch(() => undefined)
+                  .finally(() => setSaving((cur) => (cur === i ? null : cur)));
               }}
             >
-              {approved.has(i) ? 'Added' : 'Add'}
+              {approved.has(i) ? 'Added' : saving === i ? 'Adding…' : 'Add'}
             </Button>
           </div>
         ))}

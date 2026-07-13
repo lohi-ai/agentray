@@ -151,8 +151,10 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"JSONExtractString(data, 'column') (JSONExtractInt/Float for numbers); row_key is the source row's " +
-			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key); " +
-			"external_rows may be joined with events.",
+			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key). " +
+			"To combine the two tables, put events on the FROM side and join external_rows onto it " +
+			"(FROM events e JOIN external_rows x ON ...): events may appear exactly once and only after FROM, " +
+			"external_rows only after FROM or JOIN — comma joins, quoted table names, and JOIN events are rejected.",
 		Scope: "data_quality",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runSQLInput) (runSQLOutput, error) {
 			d, err := depsFrom(cc)

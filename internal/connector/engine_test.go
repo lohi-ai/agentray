@@ -35,8 +35,10 @@ func useFakeSource(s Source, openErr error) {
 	fakePlugin.mu.Unlock()
 }
 
-// fakeSource pops scripted batches; it records the cursors the engine asked for.
+// fakeSource pops scripted batches; it records the cursors the engine asked
+// for. Mutex-guarded because Tick dispatches runs to their own goroutines.
 type fakeSource struct {
+	mu      sync.Mutex
 	batches []PullResult
 	pullErr error
 	cursors []string
@@ -53,6 +55,8 @@ func (f *fakeSource) PullRows(ctx context.Context, req PullRequest) (PullResult,
 	if f.blockCh != nil {
 		<-f.blockCh
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.cursors = append(f.cursors, req.Cursor)
 	if f.pullErr != nil {
 		return PullResult{}, f.pullErr
@@ -63,6 +67,12 @@ func (f *fakeSource) PullRows(ctx context.Context, req PullRequest) (PullResult,
 	next := f.batches[0]
 	f.batches = f.batches[1:]
 	return next, nil
+}
+
+func (f *fakeSource) pulledCursors() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cursors...)
 }
 
 type fakeStore struct {
@@ -108,6 +118,9 @@ func rowsBatch(cursor string, keys ...string) PullResult {
 	for _, k := range keys {
 		out.Rows = append(out.Rows, Row{Key: k, Cursor: cursor, Data: map[string]any{"id": k}})
 	}
+	if len(keys) > 0 {
+		out.NextCursorKey = keys[len(keys)-1]
+	}
 	return out
 }
 
@@ -128,8 +141,8 @@ func TestRunSyncAdvancesCursorAcrossBatches(t *testing.T) {
 		t.Fatalf("finished = %+v", store.finished)
 	}
 	got := store.finished[0]
-	if got.Cursor != "9" || got.Rows != 3 || got.Err != "" {
-		t.Fatalf("result = %+v, want cursor 9, rows 3, no error", got)
+	if !got.AdvanceCursor || got.Cursor != "9" || got.CursorKey != "k3" || got.Rows != 3 || got.Err != "" {
+		t.Fatalf("result = %+v, want advanced cursor (9, k3), rows 3, no error", got)
 	}
 }
 
@@ -183,11 +196,11 @@ func TestRunSyncSnapshotModePersistsNoCursor(t *testing.T) {
 	if err := NewEngine(store).RunSync(context.Background(), "s1"); err != nil {
 		t.Fatalf("RunSync: %v", err)
 	}
-	if got := store.finished[0]; got.Cursor != "" || got.Rows != 2 {
+	if got := store.finished[0]; got.AdvanceCursor || got.Cursor != "" || got.CursorKey != "" || got.Rows != 2 {
 		t.Fatalf("result = %+v, want no persisted cursor and 2 rows", got)
 	}
-	if len(src.cursors) == 0 || src.cursors[0] != "" {
-		t.Fatalf("pull cursors = %v, want snapshot pull from the beginning", src.cursors)
+	if cursors := src.pulledCursors(); len(cursors) == 0 || cursors[0] != "" {
+		t.Fatalf("pull cursors = %v, want snapshot pull from the beginning", cursors)
 	}
 }
 
@@ -266,8 +279,65 @@ func TestTickRunsOnlyDueSyncs(t *testing.T) {
 			{ID: "unscheduled", Cron: ""},
 		},
 	}
-	NewEngine(store).Tick(context.Background(), time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC))
+	engine := NewEngine(store)
+	engine.Tick(context.Background(), time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC))
+	engine.Wait() // Tick dispatches runs to goroutines; wait before asserting
 	if len(store.finished) != 1 {
 		t.Fatalf("finished %d runs, want exactly the due one", len(store.finished))
+	}
+}
+
+// Rows whose cursor column is NULL sort first and are paged by key alone: the
+// pair position ("", key) must count as forward progress — not a stall — and
+// must be persisted so the next run resumes inside the NULL region.
+func TestRunSyncNullCursorRegionAdvancesByKey(t *testing.T) {
+	b1 := PullResult{
+		Rows:          []Row{{Key: "k1", Cursor: "", Data: map[string]any{"id": "k1"}}},
+		NextCursor:    "",
+		NextCursorKey: "k1",
+		HasMore:       true,
+	}
+	b2 := PullResult{
+		Rows:          []Row{{Key: "k2", Cursor: "", Data: map[string]any{"id": "k2"}}},
+		NextCursor:    "",
+		NextCursorKey: "k2",
+	}
+	useFakeSource(&fakeSource{batches: []PullResult{b1, b2}}, nil)
+	store := &fakeStore{job: incrementalJob()}
+
+	if err := NewEngine(store).RunSync(context.Background(), "s1"); err != nil {
+		t.Fatalf("RunSync: %v", err)
+	}
+	if len(store.inserted) != 2 {
+		t.Fatalf("inserted %d batches, want 2 (key-only progress must not stall)", len(store.inserted))
+	}
+	got := store.finished[0]
+	if !got.AdvanceCursor || got.Cursor != "" || got.CursorKey != "k2" || got.Rows != 2 {
+		t.Fatalf("result = %+v, want persisted position (\"\", k2) and 2 rows", got)
+	}
+}
+
+// A snapshot sync (no cursor column) that still has rows left after the batch
+// cap must fail loudly: it restarts from scratch every run, so the tail would
+// otherwise silently never land.
+func TestRunSyncSnapshotCapReportsTruncation(t *testing.T) {
+	batches := make([]PullResult, maxBatchesPerRun)
+	for i := range batches {
+		b := rowsBatch(fmt.Sprintf("c%03d", i), fmt.Sprintf("k%03d", i))
+		b.HasMore = true
+		batches[i] = b
+	}
+	useFakeSource(&fakeSource{batches: batches}, nil)
+	job := incrementalJob()
+	job.CursorColumn = ""
+	store := &fakeStore{job: job}
+
+	err := NewEngine(store).RunSync(context.Background(), "s1")
+	if err == nil || !strings.Contains(err.Error(), "snapshot limit") {
+		t.Fatalf("err = %v, want snapshot-limit truncation error", err)
+	}
+	got := store.finished[0]
+	if got.AdvanceCursor || got.Err == "" || got.Rows != maxBatchesPerRun {
+		t.Fatalf("result = %+v, want no cursor, an error, and %d landed rows", got, maxBatchesPerRun)
 	}
 }

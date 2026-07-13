@@ -141,6 +141,44 @@ func TestScopedReadonlySQLStillRejectsUnknownSources(t *testing.T) {
 	}
 }
 
+// Comma joins, quoted identifiers, and any other reference form the rewrite
+// does not recognize must be rejected outright — a residual bare `events` or
+// `external_rows` token reads the raw multi-tenant table on a role with
+// database-wide SELECT, so the guard fails closed on anything left over.
+func TestScopedReadonlySQLRejectsResidualTenantTableReferences(t *testing.T) {
+	bypasses := []string{
+		// Comma cross-joins: the second table is not preceded by FROM/JOIN.
+		"SELECT count() FROM external_rows x, events e",
+		"SELECT count() FROM events e, external_rows x",
+		"SELECT a.data, b.data FROM external_rows a, external_rows b WHERE a.row_key = b.row_key",
+		"SELECT count() FROM events e, events f",
+		// Quoted identifier beside a recognized source.
+		`SELECT count() FROM external_rows x, "events" e`,
+		// Alias shadowing the table name would survive rewriting as a bare token.
+		"SELECT events.name FROM external_rows AS events",
+	}
+	for _, q := range bypasses {
+		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}); err == nil {
+			t.Errorf("expected residual tenant-table reference to be rejected: %s", q)
+		}
+	}
+}
+
+// String literals that merely contain a table name must not trip the residual
+// check — only identifier positions are dangerous.
+func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
+	oks := []string{
+		"SELECT count() FROM events WHERE event_name = 'events'",
+		"SELECT count() FROM external_rows WHERE table_name = 'external_rows'",
+		"SELECT count() FROM events WHERE event_name = 'it''s external_rows'",
+	}
+	for _, q := range oks {
+		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}); err != nil {
+			t.Errorf("literal-only mention wrongly rejected (%v): %s", err, q)
+		}
+	}
+}
+
 // Only FROM events is rewritten, so `… JOIN events` would read the bare table
 // cross-tenant — it must stay rejected even when external_rows is present.
 func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {

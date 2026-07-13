@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -19,8 +20,12 @@ func init() {
 
 // postgresSource reads an external PostgreSQL database. One short-lived
 // connection per Source; the Engine opens and closes it around each sync run.
+// A Source is used from one goroutine at a time, so the type cache is unlocked.
 type postgresSource struct {
 	conn *pgx.Conn
+	// columnTypes caches format_type lookups per "table\x00column" — the type
+	// cannot change within a Source's lifetime, and PullRows runs per batch.
+	columnTypes map[string]string
 }
 
 // openPostgres validates and dials the DSN. Every returned error is sanitized:
@@ -39,7 +44,7 @@ func openPostgres(ctx context.Context, dsn string) (Source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect to %s:%d/%s failed: %s", cfg.Host, cfg.Port, cfg.Database, sanitizePGError(err, cfg.Password))
 	}
-	return &postgresSource{conn: conn}, nil
+	return &postgresSource{conn: conn, columnTypes: map[string]string{}}, nil
 }
 
 // sanitizePGError renders a connection/query error without ever leaking the
@@ -133,11 +138,12 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position`)
 	return tables, rows.Err()
 }
 
-// PullRows fetches the next incremental batch: rows whose cursor column is
-// strictly greater than the last cursor, in (cursor, key) order. Identifiers
-// are quote-sanitized; the cursor value is cast server-side to the cursor
-// column's own type so text cursors compare correctly against ints,
-// timestamps, and uuids.
+// PullRows fetches the next incremental batch, keyset-paginated on
+// (cursor, key) so rows tied on one cursor value are never skipped across a
+// batch boundary. NULL cursors sort first and are paged by key alone, then the
+// scan flows into the non-NULL region. Identifiers are quote-sanitized; cursor
+// and key values are cast server-side to their columns' own types so text
+// cursors compare correctly against ints, timestamps, and uuids.
 func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullResult, error) {
 	if req.Table == "" || req.KeyColumn == "" || req.CursorColumn == "" {
 		return PullResult{}, fmt.Errorf("postgres: table, key column, and cursor column are required")
@@ -154,15 +160,39 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 
 	query := fmt.Sprintf(`SELECT * FROM %s`, tableIdent)
 	var args []any
-	if req.Cursor != "" {
+	switch {
+	case req.Cursor != "" && req.CursorKey != "":
+		cursorType, err := p.columnType(ctx, req.Table, req.CursorColumn)
+		if err != nil {
+			return PullResult{}, err
+		}
+		keyType, err := p.columnType(ctx, req.Table, req.KeyColumn)
+		if err != nil {
+			return PullResult{}, err
+		}
+		query += fmt.Sprintf(` WHERE %s > CAST($1 AS %s) OR (%s = CAST($1 AS %s) AND %s > CAST($2 AS %s))`,
+			cursorIdent, cursorType, cursorIdent, cursorType, keyIdent, keyType)
+		args = append(args, req.Cursor, req.CursorKey)
+	case req.Cursor != "":
+		// Legacy position without a key half: strict cursor comparison.
 		cursorType, err := p.columnType(ctx, req.Table, req.CursorColumn)
 		if err != nil {
 			return PullResult{}, err
 		}
 		query += fmt.Sprintf(` WHERE %s > CAST($1 AS %s)`, cursorIdent, cursorType)
 		args = append(args, req.Cursor)
+	case req.CursorKey != "":
+		// Still inside the NULL-cursor region (sorted first): page by key,
+		// then flow into the non-NULL region.
+		keyType, err := p.columnType(ctx, req.Table, req.KeyColumn)
+		if err != nil {
+			return PullResult{}, err
+		}
+		query += fmt.Sprintf(` WHERE (%s IS NULL AND %s > CAST($1 AS %s)) OR %s IS NOT NULL`,
+			cursorIdent, keyIdent, keyType, cursorIdent)
+		args = append(args, req.CursorKey)
 	}
-	query += fmt.Sprintf(` ORDER BY %s ASC, %s ASC LIMIT %d`, cursorIdent, keyIdent, req.Limit)
+	query += fmt.Sprintf(` ORDER BY %s ASC NULLS FIRST, %s ASC LIMIT %d`, cursorIdent, keyIdent, req.Limit)
 
 	rows, err := p.conn.Query(ctx, query, args...)
 	if err != nil {
@@ -193,9 +223,11 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 			return PullResult{}, fmt.Errorf("postgres: row in %s has empty key column %s", req.Table, req.KeyColumn)
 		}
 		out.Rows = append(out.Rows, Row{Key: key, Cursor: cursor, Data: data})
-		// Rows arrive in ascending cursor order, so the last row carries the
-		// batch's max cursor.
+		// Rows arrive in (cursor NULLS FIRST, key) order, so the last row is
+		// the keyset position the next pull resumes from. Cursor stays "" while
+		// still inside the NULL region; the key carries the progress there.
 		out.NextCursor = cursor
+		out.NextCursorKey = key
 	}
 	if err := rows.Err(); err != nil {
 		return PullResult{}, fmt.Errorf("postgres: pull %s: %s", req.Table, sanitizePGError(err, p.conn.Config().Password))
@@ -205,9 +237,14 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 }
 
 // columnType returns the server-rendered type (format_type) of one column, for
-// the cursor CAST. The lookup itself is parameterized, so untrusted config can
-// only ever name a column, never inject SQL.
+// the cursor/key CASTs, cached for the Source's lifetime. The lookup itself is
+// parameterized, so untrusted config can only ever name a column, never inject
+// SQL.
 func (p *postgresSource) columnType(ctx context.Context, table, column string) (string, error) {
+	cacheKey := table + "\x00" + column
+	if typ, ok := p.columnTypes[cacheKey]; ok {
+		return typ, nil
+	}
 	schema, bare := splitQualified(table)
 	var typ string
 	err := p.conn.QueryRow(ctx, `
@@ -225,6 +262,7 @@ WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 AND NOT a.attisdroppe
 	if strings.ContainsAny(typ, `"'`+";") {
 		return "", fmt.Errorf("postgres: unsupported cursor column type %q", typ)
 	}
+	p.columnTypes[cacheKey] = typ
 	return typ, nil
 }
 
@@ -256,7 +294,7 @@ func normalizePGValue(v any) any {
 	case time.Time:
 		return t.UTC().Format(time.RFC3339Nano)
 	case [16]byte: // uuid
-		return formatUUID(t)
+		return uuid.UUID(t).String()
 	case []byte:
 		return "\\x" + hex.EncodeToString(t)
 	case string, bool, int, int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64:
@@ -267,10 +305,6 @@ func normalizePGValue(v any) any {
 		}
 		return fmt.Sprint(t)
 	}
-}
-
-func formatUUID(b [16]byte) string {
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // stringifyPGValue renders a normalized value as the string key/cursor form.

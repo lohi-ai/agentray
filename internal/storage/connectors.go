@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ type ConnectorSync struct {
 	ScheduleCron string     `json:"schedule_cron"`
 	Enabled      bool       `json:"enabled"`
 	Cursor       string     `json:"cursor"`
+	CursorKey    string     `json:"cursor_key"`
 	LastRunAt    *time.Time `json:"last_run_at"`
 	LastStatus   string     `json:"last_status"`
 	LastError    string     `json:"last_error"`
@@ -50,7 +52,7 @@ type ConnectorSync struct {
 }
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
-	cursor_column, schedule_cron, enabled, cursor, last_run_at, last_status, last_error, last_rows, total_rows,
+	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
 	created_at, updated_at`
 
 func (s *Store) migrateConnectors(ctx context.Context) error {
@@ -85,6 +87,10 @@ func (s *Store) migrateConnectors(ctx context.Context) error {
 	UNIQUE (connector_id, source_table)
 )`,
 		`CREATE INDEX IF NOT EXISTS connector_syncs_project_idx ON connector_syncs (project_id, created_at DESC)`,
+		// cursor_key is the tie-breaking half of the keyset cursor: the key of
+		// the last synced row, so rows sharing one cursor value are never
+		// skipped across a batch boundary.
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS cursor_key TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -267,7 +273,7 @@ RETURNING `+connectorSyncColumns,
 }
 
 // UpdateConnectorSync overwrites a sync's editable fields (owner/admin only).
-// Changing the source table or cursor column resets the cursor — the old
+// Changing the source table or cursor column resets the cursor pair — the old
 // position is meaningless against a new shape.
 func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, syncID string, in ConnectorSyncInput) (ConnectorSync, error) {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
@@ -289,6 +295,7 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 UPDATE connector_syncs SET
 	source_table = $3, key_column = $4, cursor_column = $5, schedule_cron = $6, enabled = $7,
 	cursor = CASE WHEN source_table = $3 AND cursor_column = $5 THEN cursor ELSE '' END,
+	cursor_key = CASE WHEN source_table = $3 AND cursor_column = $5 AND key_column = $4 THEN cursor_key ELSE '' END,
 	updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
@@ -368,17 +375,12 @@ func validateSyncInput(in ConnectorSyncInput) error {
 }
 
 func connectorKindKnown(kind string) bool {
-	for _, k := range connector.Kinds() {
-		if k == kind {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(connector.Kinds(), kind)
 }
 
 func syncScanDest(cs *ConnectorSync) []any {
 	return []any{&cs.ID, &cs.ConnectorID, &cs.ProjectID, &cs.SourceTable, &cs.KeyColumn,
-		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.LastRunAt, &cs.LastStatus,
+		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
 		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.CreatedAt, &cs.UpdatedAt}
 }
 
@@ -411,12 +413,12 @@ func (s *Store) ConnectorSyncJob(ctx context.Context, syncID string) (connector.
 	var ciphertext string
 	err := s.pg.QueryRow(ctx, `
 SELECT cs.id::text, cs.project_id::text, cs.connector_id::text, dc.kind, dc.dsn_ciphertext,
-	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor
+	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor, cs.cursor_key
 FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id = cs.connector_id
 WHERE cs.id = $1`, syncID).
 		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext,
-			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor)
+			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor, &job.CursorKey)
 	if err != nil {
 		return connector.SyncJob{}, err
 	}
@@ -440,10 +442,11 @@ func (s *Store) FinishConnectorSync(ctx context.Context, syncID string, result c
 	}
 	_, err := s.pg.Exec(ctx, `
 UPDATE connector_syncs SET
-	cursor = CASE WHEN $2 != '' THEN $2 ELSE cursor END,
-	last_run_at = now(), last_status = $3, last_error = $4, last_rows = $5,
-	total_rows = total_rows + $5, updated_at = now()
-WHERE id = $1`, syncID, result.Cursor, status, errText, result.Rows)
+	cursor = CASE WHEN $2 THEN $3 ELSE cursor END,
+	cursor_key = CASE WHEN $2 THEN $4 ELSE cursor_key END,
+	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7,
+	total_rows = total_rows + $7, updated_at = now()
+WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, status, errText, result.Rows)
 	return err
 }
 
