@@ -147,7 +147,12 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"user they later logged in as) — uniqExact(distinct_id) double-counts anyone who logged in. " +
 			"Use raw `distinct_id` only for exact-match filters on a specific id. " +
 			"For any user/acquisition/retention metric, exclude crawlers with " +
-			"WHERE ifNull(visitor_class, 'human') = 'human' — search-bot and ai-platform rows are not people.",
+			"WHERE ifNull(visitor_class, 'human') = 'human' — search-bot and ai-platform rows are not people. " +
+			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
+			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
+			"JSONExtractString(data, 'column') (JSONExtractInt/Float for numbers); row_key is the source row's " +
+			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key); " +
+			"external_rows may be joined with events.",
 		Scope: "data_quality",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runSQLInput) (runSQLOutput, error) {
 			d, err := depsFrom(cc)

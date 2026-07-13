@@ -919,6 +919,10 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateConnectors(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1064,6 +1068,26 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 		return err
 	}
 	if err := s.migrateAgentLab(ctx); err != nil {
+		return err
+	}
+	// external_rows is the landing table for data-connector syncs: one wide
+	// JSON row per source row, deduplicated on merge by the replacing key so
+	// snapshot re-syncs and retried batches are idempotent. `cursor` versions
+	// the replacement so the newest pull of a row wins; run_sql reaches this
+	// table through the scoped_external_rows rewrite (scopedReadonlySQL) and
+	// the readonly role's database-wide SELECT grant already covers it.
+	if err := s.ch.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS external_rows (
+	project_id UUID,
+	connector_id UUID,
+	table_name LowCardinality(String),
+	row_key String,
+	cursor String,
+	data String,
+	synced_at DateTime64(3, 'UTC') DEFAULT now64()
+)
+ENGINE = ReplacingMergeTree(synced_at)
+ORDER BY (project_id, connector_id, table_name, row_key)`); err != nil {
 		return err
 	}
 	if err := s.provisionReadonlyRole(ctx, cfg); err != nil {
@@ -4246,6 +4270,10 @@ func eventToMap(event Event) map[string]any {
 var (
 	eventsSourcePattern = regexp.MustCompile(`(?i)\bfrom\s+events\b`)
 	eventsJoinPattern   = regexp.MustCompile(`(?i)\bjoin\s+events\b`)
+	// external_rows (data-connector landing table) may be read via FROM or
+	// JOIN — its project scope is a plain filter with no identity-stitching
+	// args, so joining it against events is safe to rewrite.
+	externalSourcePattern = regexp.MustCompile(`(?i)\b(from|join)\s+external_rows\b`)
 )
 
 func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver) (string, []any, error) {
@@ -4257,29 +4285,56 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 	if strings.Contains(sqlText, "?") {
 		return "", nil, fmt.Errorf("SQL parameters are not supported; use {project_id}")
 	}
+	// JOIN events is always rejected — only the FROM position is rewritten to
+	// the scoped CTE, so a joined bare `events` would read cross-tenant.
 	if eventsJoinPattern.MatchString(sqlText) {
 		return "", nil, fmt.Errorf("SQL-lite does not support joining the events table")
 	}
-	matches := eventsSourcePattern.FindAllStringIndex(sqlText, -1)
-	if len(matches) != 1 {
+	hasExternal := externalSourcePattern.MatchString(sqlText)
+	eventsMatches := eventsSourcePattern.FindAllStringIndex(sqlText, -1)
+	hasEvents := len(eventsMatches) > 0
+	if hasEvents && len(eventsMatches) != 1 {
 		return "", nil, fmt.Errorf("SQL must read from the events table exactly once")
 	}
-	query := eventsSourcePattern.ReplaceAllString(sqlText, "FROM scoped_events")
+	if !hasEvents && !hasExternal {
+		return "", nil, fmt.Errorf("SQL must read from the events table exactly once (or from external_rows)")
+	}
+
+	query := sqlText
+	if hasEvents {
+		query = eventsSourcePattern.ReplaceAllString(query, "FROM scoped_events")
+	}
+	if hasExternal {
+		query = externalSourcePattern.ReplaceAllString(query, "${1} scoped_external_rows")
+	}
 	projectPlaceholders := strings.Count(query, "{project_id}")
 	query = strings.ReplaceAll(query, "{project_id}", "?")
 
-	// scoped_events exposes a stitched `canonical_id` column: anonymous events are
-	// folded onto the identified user they later aliased to. Raw `distinct_id` is
-	// left untouched for exact-match filters; counts of unique users / retention
-	// should read `canonical_id` so a visitor who later logs in is one person, not
-	// two. The args for the alias map are prepended because the CTE comes first.
-	canonicalExpr, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	args := append([]any{}, canonicalArgs...)
-	args = append(args, projectID)
+	// CTE args come first (the CTEs precede the user query), in CTE order;
+	// {project_id} placeholder args follow.
+	var ctes []string
+	args := []any{}
+	if hasEvents {
+		// scoped_events exposes a stitched `canonical_id` column: anonymous events are
+		// folded onto the identified user they later aliased to. Raw `distinct_id` is
+		// left untouched for exact-match filters; counts of unique users / retention
+		// should read `canonical_id` so a visitor who later logs in is one person, not
+		// two.
+		canonicalExpr, canonicalArgs := resolver.canonicalExpr("distinct_id")
+		args = append(args, canonicalArgs...)
+		args = append(args, projectID)
+		ctes = append(ctes, "scoped_events AS (SELECT *, "+canonicalExpr+" AS canonical_id FROM events WHERE project_id = ?)")
+	}
+	if hasExternal {
+		// FINAL collapses the ReplacingMergeTree versions at query time, so a
+		// re-synced row reads as one row even before background merges run.
+		args = append(args, projectID)
+		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?)")
+	}
 	for i := 0; i < projectPlaceholders; i++ {
 		args = append(args, projectID)
 	}
-	query = "WITH scoped_events AS (SELECT *, " + canonicalExpr + " AS canonical_id FROM events WHERE project_id = ?) " + query
+	query = "WITH " + strings.Join(ctes, ", ") + " " + query
 	return query, args, nil
 }
 

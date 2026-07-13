@@ -5,8 +5,9 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { Intro } from '@/modules/shared/components/signal-primitives';
 import { ActivityTab, ApiKeysTab, MembersTab, ProjectsTab, WorkspaceTab } from './settings-tabs';
 import { ModelsTab } from './models-tab';
+import { ConnectorsTab } from './connectors-tab';
 
-const TABS = ['Workspace', 'Projects', 'Members', 'AI Provider', 'API keys', 'Activity'] as const;
+const TABS = ['Workspace', 'Projects', 'Members', 'AI Provider', 'Data connectors', 'API keys', 'Activity'] as const;
 type Tab = (typeof TABS)[number];
 
 export function SettingsPage() {
@@ -30,6 +31,7 @@ export function SettingsPage() {
       {tab === 'Projects' ? <ProjectsTab /> : null}
       {tab === 'Members' ? <MembersTab /> : null}
       {tab === 'AI Provider' ? <ModelsTab /> : null}
+      {tab === 'Data connectors' ? <ConnectorsTab /> : null}
       {tab === 'API keys' ? <ApiKeysTab /> : null}
       {tab === 'Activity' ? <ActivityTab /> : null}
     </AppShell>

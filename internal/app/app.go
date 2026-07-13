@@ -13,6 +13,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/agentruntime"
 	"github.com/lohi-ai/agentray/internal/alerting"
 	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/connector"
 	"github.com/lohi-ai/agentray/internal/credential"
 	"github.com/lohi-ai/agentray/internal/httptool"
 	"github.com/lohi-ai/agentray/internal/ingestion"
@@ -182,11 +183,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	runnerOpts = append(runnerOpts, agentruntime.WithNotifier(alertDeliverer))
 
 	scheduler := agentruntime.NewScheduler(nc, store, runnerOpts...)
-	// The evaluator rides the scheduler's minute tick, sharing one clock with
-	// scheduled runs instead of standing up a second timer.
+	// The evaluator and the connector sync engine ride the scheduler's minute
+	// tick, sharing one clock with scheduled runs instead of standing up more
+	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
+	connectorEngine := connector.NewEngine(store)
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
+		connectorEngine.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
 		store.Close()
@@ -199,6 +203,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, ws, liveReg, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
+	registerConnectorRoutes(e, store, connectorEngine)
 
 	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler}, nil
 }

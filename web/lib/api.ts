@@ -537,6 +537,63 @@ export type AlertEvent = {
   value: number;
 };
 
+// --- Data connectors ---
+
+export type DataConnector = {
+  id: string;
+  project_id: string;
+  name: string;
+  kind: string;
+  has_dsn: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConnectorSync = {
+  id: string;
+  connector_id: string;
+  project_id: string;
+  source_table: string;
+  key_column: string;
+  cursor_column: string;
+  schedule_cron: string;
+  enabled: boolean;
+  cursor: string;
+  last_run_at: string | null;
+  last_status: string;
+  last_error: string;
+  last_rows: number;
+  total_rows: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConnectorSyncInput = {
+  source_table: string;
+  key_column: string;
+  cursor_column: string;
+  schedule_cron: string;
+  enabled: boolean;
+};
+
+export type ConnectorColumn = {
+  name: string;
+  type: string;
+  is_primary_key: boolean;
+};
+
+export type ConnectorTable = {
+  name: string;
+  columns: ConnectorColumn[];
+};
+
+export type ConnectorSyncDraftItem = ConnectorSyncInput & { reason?: string };
+
+export type ConnectorSyncDraft = {
+  syncs: (Omit<ConnectorSyncDraftItem, 'enabled'> & { enabled?: boolean })[];
+  warnings?: string[];
+};
+
 // --- Per-agent budgets & quotas (#4) ---
 
 export type BudgetPeriod = 'day' | 'month';
@@ -1364,6 +1421,55 @@ export class AgentRayAPI {
 
   deleteAlertChannel(id: string) {
     return this.request<void>(this.withProject(`/api/alerts/channels/${id}`), { method: 'DELETE' });
+  }
+
+  // --- Data connectors ---
+
+  connectors() {
+    return this.get<{ connectors: DataConnector[]; kinds: string[] }>('/api/connectors');
+  }
+
+  createConnector(input: { name: string; kind: string; dsn: string }) {
+    return this.post<{ connector: DataConnector }>('/api/connectors', input);
+  }
+
+  deleteConnector(id: string) {
+    return this.request<void>(this.withProject(`/api/connectors/${id}`), { method: 'DELETE' });
+  }
+
+  testConnector(id: string) {
+    return this.post<{ ok: boolean; error?: string }>(`/api/connectors/${id}/test`, {});
+  }
+
+  connectorSchema(id: string) {
+    return this.get<{ tables: ConnectorTable[] }>(`/api/connectors/${id}/schema`);
+  }
+
+  connectorSyncs(connectorID: string) {
+    return this.get<{ syncs: ConnectorSync[] }>(`/api/connectors/${connectorID}/syncs`);
+  }
+
+  createConnectorSync(connectorID: string, input: ConnectorSyncInput) {
+    return this.post<{ sync: ConnectorSync }>(`/api/connectors/${connectorID}/syncs`, input);
+  }
+
+  updateConnectorSync(syncID: string, input: ConnectorSyncInput) {
+    return this.request<{ sync: ConnectorSync }>(this.withProject(`/api/connector-syncs/${syncID}`), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteConnectorSync(syncID: string) {
+    return this.request<void>(this.withProject(`/api/connector-syncs/${syncID}`), { method: 'DELETE' });
+  }
+
+  runConnectorSync(syncID: string) {
+    return this.post<{ ok: boolean; error?: string }>(`/api/connector-syncs/${syncID}/run`, {});
+  }
+
+  draftConnectorSyncs(connectorID: string, prompt: string) {
+    return this.post<ConnectorSyncDraft>(`/api/connectors/${connectorID}/syncs/draft`, { prompt });
   }
 
   // --- Per-agent budgets (#4) ---

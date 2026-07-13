@@ -91,6 +91,69 @@ func TestValidateReadonlySQLAllowsInnocuousNames(t *testing.T) {
 	}
 }
 
+// external_rows (the data-connector landing table) is the second readable
+// source: it must be rewritten to a project-scoped FINAL CTE, alone or next to
+// events, with CTE args in CTE order.
+func TestScopedReadonlySQLScopesExternalRows(t *testing.T) {
+	query, args, err := scopedReadonlySQL(
+		"SELECT JSONExtractString(data, 'email') FROM external_rows WHERE table_name = 'users'",
+		"project-1",
+		identityResolver{},
+	)
+	if err != nil {
+		t.Fatalf("scopedReadonlySQL returned error: %v", err)
+	}
+	if !strings.Contains(query, "WITH scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?)") {
+		t.Fatalf("query did not scope external_rows: %s", query)
+	}
+	if !strings.Contains(query, "FROM scoped_external_rows") {
+		t.Fatalf("query did not read from scoped alias: %s", query)
+	}
+	if strings.Contains(query, "scoped_events") {
+		t.Fatalf("events CTE must not appear for an external_rows-only query: %s", query)
+	}
+	if len(args) != 1 || args[0] != "project-1" {
+		t.Fatalf("args=%v want only the external_rows project arg", args)
+	}
+}
+
+func TestScopedReadonlySQLJoinsEventsWithExternalRows(t *testing.T) {
+	query, args, err := scopedReadonlySQL(
+		"SELECT count() FROM events e JOIN external_rows x ON x.row_key = e.distinct_id WHERE x.project_id != {project_id}",
+		"project-1",
+		identityResolver{},
+	)
+	if err != nil {
+		t.Fatalf("scopedReadonlySQL returned error: %v", err)
+	}
+	if !strings.Contains(query, "FROM scoped_events") || !strings.Contains(query, "JOIN scoped_external_rows") {
+		t.Fatalf("query did not scope both sources: %s", query)
+	}
+	// CTE order is events then external_rows, then the in-query placeholder.
+	if len(args) != 3 || args[0] != "project-1" || args[1] != "project-1" || args[2] != "project-1" {
+		t.Fatalf("args=%v want three project args (events CTE, external CTE, placeholder)", args)
+	}
+}
+
+func TestScopedReadonlySQLStillRejectsUnknownSources(t *testing.T) {
+	if _, _, err := scopedReadonlySQL("SELECT * FROM secrets", "project-1", identityResolver{}); err == nil {
+		t.Fatal("expected query with no scoped source to be rejected")
+	}
+}
+
+// Only FROM events is rewritten, so `… JOIN events` would read the bare table
+// cross-tenant — it must stay rejected even when external_rows is present.
+func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {
+	_, _, err := scopedReadonlySQL(
+		"SELECT count() FROM external_rows x JOIN events e ON e.distinct_id = x.row_key",
+		"project-1",
+		identityResolver{},
+	)
+	if err == nil {
+		t.Fatal("expected JOIN events beside external_rows to be rejected")
+	}
+}
+
 func TestScopedReadonlySQLRejectsEventsJoin(t *testing.T) {
 	_, _, err := scopedReadonlySQL(
 		"SELECT count() FROM events JOIN events AS other ON other.distinct_id = events.distinct_id",
