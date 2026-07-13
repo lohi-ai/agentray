@@ -293,9 +293,9 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
 UPDATE connector_syncs SET
-	source_table = $3, key_column = $4, cursor_column = $5, schedule_cron = $6, enabled = $7,
-	cursor = CASE WHEN source_table = $3 AND cursor_column = $5 THEN cursor ELSE '' END,
-	cursor_key = CASE WHEN source_table = $3 AND cursor_column = $5 AND key_column = $4 THEN cursor_key ELSE '' END,
+	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, schedule_cron = $6, enabled = $7,
+	cursor = CASE WHEN source_table = $3::text AND cursor_column = $5::text THEN cursor ELSE '' END,
+	cursor_key = CASE WHEN source_table = $3::text AND cursor_column = $5::text AND key_column = $4::text THEN cursor_key ELSE '' END,
 	updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
@@ -444,8 +444,8 @@ func (s *Store) FinishConnectorSync(ctx context.Context, syncID string, result c
 UPDATE connector_syncs SET
 	cursor = CASE WHEN $2 THEN $3 ELSE cursor END,
 	cursor_key = CASE WHEN $2 THEN $4 ELSE cursor_key END,
-	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7,
-	total_rows = total_rows + $7, updated_at = now()
+	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7::int,
+	total_rows = total_rows + $7::bigint, updated_at = now()
 WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, status, errText, result.Rows)
 	return err
 }
