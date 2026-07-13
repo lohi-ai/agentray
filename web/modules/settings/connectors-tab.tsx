@@ -71,6 +71,7 @@ export function ConnectorsTab() {
       hideable: false,
       sortable: false,
       align: 'end',
+      width: { type: 'pixel', value: 150 },
       renderCell: (c) => (
         <span className="flex justify-end gap-1">
           <Button variant="ghost" size="sm" onClick={() => void testConnector(c.id)}>
@@ -211,21 +212,24 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
   }
 
   const columns = useMemo<DataColumn<ConnectorSync>[]>(() => [
-    { key: 'source_table', header: 'Table' },
+    { key: 'source_table', header: 'Table', width: { type: 'proportional', value: 1, minWidth: 90 } },
     {
       key: 'key_column',
       header: 'Key / cursor',
       sortable: false,
+      width: { type: 'proportional', value: 1, minWidth: 120 },
       renderCell: (s) => <span className="font-mono text-[var(--color-text-secondary)]">{s.key_column}{s.cursor_column ? ` / ${s.cursor_column}` : ' / full re-sync'}</span>,
     },
     {
       key: 'schedule_cron',
       header: 'Schedule',
+      width: { type: 'proportional', value: 1, minWidth: 90 },
       renderCell: (s) => <span className="font-mono text-[var(--color-text-secondary)]">{s.schedule_cron || 'manual'}</span>,
     },
     {
       key: 'last_status',
       header: 'Last run',
+      width: { type: 'proportional', value: 2, minWidth: 140 },
       renderCell: (s) => {
         if (!s.last_run_at) return <span className="text-[var(--color-text-disabled)]">never</span>;
         if (s.last_status === 'error') {
@@ -237,12 +241,14 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
     {
       key: 'total_rows',
       header: 'Total rows',
+      width: { type: 'proportional', value: 1, minWidth: 80 },
       sortValue: (s) => s.total_rows,
       renderCell: (s) => <span className="tabular-nums">{formatCompact(s.total_rows)}</span>,
     },
     {
       key: 'enabled',
       header: 'Enabled',
+      width: { type: 'pixel', value: 72 },
       renderCell: (s) => (
         <Button variant="ghost" size="sm" onClick={() => void update.mutate({ id: s.id, input: { source_table: s.source_table, key_column: s.key_column, cursor_column: s.cursor_column, schedule_cron: s.schedule_cron, enabled: !s.enabled } })}>
           {s.enabled ? 'On' : 'Off'}
@@ -255,6 +261,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       hideable: false,
       sortable: false,
       align: 'end',
+      width: { type: 'pixel', value: 180 },
       renderCell: (s) => (
         <span className="flex justify-end gap-1">
           <Button
