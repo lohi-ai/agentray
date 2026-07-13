@@ -373,7 +373,7 @@ func sendNotification() opcore.Operation[sendNotificationInput, sendNotification
 // --- Growth operations (growth_suggest) ---
 
 type submitRecInput struct {
-	Category    string         `json:"category" desc:"marketing | sales | growth"`
+	Category    string         `json:"category" desc:"marketing | sales | growth | product | data"`
 	Title       string         `json:"title" desc:"short recommendation title" required:"true"`
 	Rationale   string         `json:"rationale" desc:"why, grounded in the data you saw"`
 	Evidence    map[string]any `json:"evidence" desc:"references to charts/queries/numbers"`

@@ -154,7 +154,7 @@ func TestDataAnalystPreset(t *testing.T) {
 }
 
 // TestMarketingLeadPreset pins the config-only marketing team agent: the full
-// PLAN→CREATE→REVIEW→PUBLISH→LEARN loop must be expressible as persona + scopes
+// ORIENT→PLAN→CREATE→REVIEW→PUBLISH→LEARN loop must be expressible as persona + scopes
 // + skills over the generic runtime (no bespoke Go), the human review gate must
 // be explicit in the persona, and everything channel-specific (hosts, creds,
 // call shapes) must live in the publish-manifest skill so a new channel is a
