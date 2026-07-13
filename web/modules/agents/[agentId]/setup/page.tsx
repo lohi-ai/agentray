@@ -7,7 +7,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { Selector } from '@astryxdesign/core/Selector';
 import { AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
-import { useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgentTaskTiers } from '@/modules/agent/hooks';
+import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgentTaskTiers } from '@/modules/agent/hooks';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -224,7 +224,73 @@ function PermissionsTab({ agentID }: { agentID: string }) {
         </Panel>
       ))}
       <div><Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving}>{saving ? 'Saving…' : 'Save permissions'}</Button></div>
+      <AutonomySection />
     </div>
+  );
+}
+
+// --- Autonomy: how much this project's agents may do with no human watching.
+// Project-level (agent_configs.autonomy) and enforced by the runner, not by
+// persona text: below "Auto", tools marked external-write in the catalog
+// (Fetch / HTTP) are stripped from every unattended run — schedules, webhooks,
+// and delegated hand-offs — so an agent can draft but never publish.
+const AUTONOMY_RUNGS = [
+  {
+    value: 'suggest',
+    label: 'Suggest',
+    detail: 'The default. Agents analyze, draft, and file recommendations. Runs that start without a human (schedules, webhooks, delegated tasks) never carry publishing tools like Fetch / HTTP.',
+  },
+  {
+    value: 'scheduled',
+    label: 'Scheduled',
+    detail: 'Agents work unattended on their triggers, but publishing tools are still removed from those runs — unattended work always stops at a draft for human review.',
+  },
+  {
+    value: 'auto',
+    label: 'Auto — can publish unattended',
+    detail: 'Unattended runs keep their publishing tools (Fetch / HTTP to the hosts you allow). An agent can post to external services with no human reviewing the exact content first.',
+  },
+];
+
+function AutonomySection() {
+  const { config, configLoading, saveConfig } = useAgent();
+  const [value, setValue] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  if (configLoading && !config) return <Panel title="Autonomy"><Loading label="Loading autonomy…" /></Panel>;
+  const current = config?.autonomy || 'suggest';
+  const selected = value ?? current;
+  const rung = AUTONOMY_RUNGS.find((r) => r.value === selected) ?? AUTONOMY_RUNGS[0];
+
+  const onSave = async () => {
+    if (!config) return;
+    setSaving(true);
+    try {
+      await saveConfig({ enabled: config.enabled, redact_pii: config.redact_pii, autonomy: selected, schedule_cron: config.schedule_cron });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Panel title="Autonomy">
+      <p className="mb-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+        How much agents in this project may do when no one is watching. This applies to every agent in the
+        project and is enforced by the platform — below “Auto”, publishing tools are removed from every
+        unattended run, whatever the agent&apos;s instructions say.
+      </p>
+      <Segment options={AUTONOMY_RUNGS.map((r) => ({ value: r.value, label: r.label }))} value={selected} onChange={setValue} />
+      <p className="mt-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{rung.detail}</p>
+      {selected === 'auto' ? (
+        <p className="mt-2 max-w-[600px] text-[12px] font-medium" style={{ color: 'var(--color-warning)' }}>
+          Only turn this on when you trust the agents, their allowed hosts, and the audit trail more than a
+          per-post review. Everything an agent publishes is recorded, but nobody approves it beforehand.
+        </p>
+      ) : null}
+      <div className="mt-3">
+        <Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving || selected === current}>
+          {saving ? 'Saving…' : 'Save autonomy'}
+        </Button>
+      </div>
+    </Panel>
   );
 }
 

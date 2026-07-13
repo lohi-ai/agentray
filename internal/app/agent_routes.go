@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,9 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			Enabled: payload.Enabled, RedactPII: payload.RedactPII, Scopes: payload.Scopes,
 			Autonomy: payload.Autonomy, ScheduleCron: payload.ScheduleCron,
 		})
+		if errors.Is(err, storage.ErrInvalidAutonomy) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 		if err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}

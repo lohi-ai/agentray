@@ -44,8 +44,14 @@ type ToolSpec struct {
 	Title        string
 	Description  string
 	Configurable bool
-	available    func(ToolBuildContext) bool
-	build        func(ToolBuildContext, string) (agentcore.Tool, error)
+	// ExternalWrite marks a tool whose calls can publish outside the platform
+	// (post to an API, send content to a third party). The runner strips such
+	// tools from unattended (scheduled/webhook/delegate) runs unless the
+	// agent's autonomy is 'auto' — the hard publish rail. Read-only fetchers
+	// and workspace/sandbox tools are not marked.
+	ExternalWrite bool
+	available     func(ToolBuildContext) bool
+	build         func(ToolBuildContext, string) (agentcore.Tool, error)
 }
 
 // ToolCatalogEntry is the JSON-serializable view of a ToolSpec for the
@@ -59,11 +65,12 @@ type ToolCatalogEntry struct {
 
 var toolRegistry = map[string]ToolSpec{
 	httptool.ToolHTTPRequest: {
-		Name:         httptool.ToolHTTPRequest,
-		Title:        "Fetch / HTTP",
-		Description:  "Make guarded outbound HTTP(S) requests to an allowlisted set of hosts. Use a {{cred:NAME}} placeholder for any secret; it is resolved at the trust boundary and never seen by the model.",
-		Configurable: true,
-		build:        buildHTTPRequestTool,
+		Name:          httptool.ToolHTTPRequest,
+		Title:         "Fetch / HTTP",
+		Description:   "Make guarded outbound HTTP(S) requests to an allowlisted set of hosts. Use a {{cred:NAME}} placeholder for any secret; it is resolved at the trust boundary and never seen by the model.",
+		Configurable:  true,
+		ExternalWrite: true,
+		build:         buildHTTPRequestTool,
 	},
 	httptool.ToolWebFetch: {
 		Name:         httptool.ToolWebFetch,
@@ -169,6 +176,15 @@ func ToolCatalog(ctxs ...ToolBuildContext) []ToolCatalogEntry {
 func IsRegisteredTool(name string) bool {
 	_, ok := toolRegistry[name]
 	return ok
+}
+
+// ToolExternalWrite reports whether a registered tool is marked external-write
+// in the catalog (it can publish outside the platform). An unregistered name
+// returns false — the rail only governs catalog tools; run-derived tools
+// (analytics ops, team_board) are internal by construction.
+func ToolExternalWrite(name string) bool {
+	spec, ok := toolRegistry[name]
+	return ok && spec.ExternalWrite
 }
 
 // ToolAvailable reports whether a registered tool's host dependencies are

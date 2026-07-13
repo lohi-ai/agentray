@@ -425,6 +425,13 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		trigger = "manual"
 	}
 
+	// Hard unattended-publish rail: a background run keeps external-write tools
+	// (http_request) only when this agent's autonomy is 'auto'. Applied after
+	// the team-lead merge so it governs the final tool set; evaluated here —
+	// inside execute — so a delegated child, which re-enters execute under the
+	// TARGET agent's own cfg, is gated by that agent's own autonomy per run.
+	runTools = applyAutonomyRail(runTools, trigger, cfg.Autonomy)
+
 	// Budget resolution (#4). Resolve the agent's effective ceiling + already-spent
 	// baseline for the current day once, so the per-turn gate is a cheap in-memory
 	// comparison rather than a query each turn. Two enforcement points:
@@ -943,6 +950,28 @@ func resolveRunTools(toolCtx ToolBuildContext, globalHTTP agentcore.Tool, select
 		tools = append(tools, globalHTTP)
 	}
 	return tools, nil
+}
+
+// applyAutonomyRail enforces the hard unattended-publish gate: tools whose
+// catalog spec is external-write are stripped from background-trigger runs
+// (scheduled/webhook/delegate — no human watching the output) unless the
+// agent's autonomy is 'auto', the explicit opt-in rung. Interactive chat and
+// manual runs pass through untouched at every autonomy, as does every
+// non-external-write tool. This is enforcement in code, not persona prose: at
+// suggest/scheduled an unattended run cannot publish even if the model tries.
+// Pure (no Store/ctx) so the trigger×autonomy matrix is unit-testable.
+func applyAutonomyRail(tools []agentcore.Tool, trigger, autonomy string) []agentcore.Tool {
+	if !isBackgroundTrigger(trigger) || autonomy == storage.AutonomyAuto {
+		return tools
+	}
+	kept := make([]agentcore.Tool, 0, len(tools))
+	for _, t := range tools {
+		if ToolExternalWrite(t.Name()) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
 }
 
 // persistTrace writes each tool-call projection to agent_tool_calls (§5.2, §9).

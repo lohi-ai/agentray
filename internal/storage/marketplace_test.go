@@ -178,11 +178,25 @@ func TestMarketingLeadPreset(t *testing.T) {
 	}
 
 	// The scheduled loop must be self-contained, parallelize channel drafts, and
-	// hard-stop at the review gate — an unattended run may never publish.
-	for _, marker := range []string{"Orient", "Plan", "Create", "Review gate", "Learn", "spawn_subagent", "send_notification", "Never publish from an unattended run"} {
+	// carry the conditional review gate: at suggest/scheduled an unattended run
+	// hard-stops at drafts; at the opt-in `auto` rung it may publish but owes
+	// the audit trail (submit_recommendation of what shipped). The gate is read
+	// off the toolset — the runner strips http_request below `auto` — so the
+	// persona must reference both branches.
+	for _, marker := range []string{
+		"Orient", "Plan", "Create", "Review gate", "Learn", "spawn_subagent", "send_notification",
+		"publish from an unattended run",
+		"explicitly opted in",
+		"audit trail",
+	} {
 		if !strings.Contains(p.AgentsMD, marker) {
 			t.Errorf("marketing-lead loop persona is missing %q", marker)
 		}
+	}
+	// The audit-trail duty for auto-mode publishes must be explicit in the
+	// never-list too: no unattended publish without a submit_recommendation.
+	if !strings.Contains(p.AgentsMD, "Never publish unattended without filing the audit-trail") {
+		t.Error("marketing-lead never-list is missing the auto-mode audit-trail duty")
 	}
 
 	// The loop's stages ship as skills (config), not bespoke Go.

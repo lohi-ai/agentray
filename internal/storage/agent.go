@@ -71,6 +71,30 @@ var errAgentForbidden = errors.New("agent config permission denied")
 var errInvalidSecretName = errors.New("invalid secret name (must match [A-Za-z0-9_.-]{1,128})")
 var errEmptySecretValue = errors.New("secret value must not be empty")
 
+// ErrInvalidAutonomy rejects an autonomy value outside the ladder, so the API
+// layer can answer 400 instead of the generic permission 403.
+var ErrInvalidAutonomy = errors.New("invalid autonomy: must be one of suggest, scheduled, auto")
+
+// The autonomy ladder, lowest → highest trust. `suggest` files recommendations
+// only; `scheduled` may run unattended (cron/webhook) but the runner strips
+// external-write tools from those runs; `auto` is the explicit opt-in that
+// keeps external-write tools in unattended runs (the hard publish rail opens).
+const (
+	AutonomySuggest   = "suggest"
+	AutonomyScheduled = "scheduled"
+	AutonomyAuto      = "auto"
+)
+
+// ValidAutonomy reports whether a is a rung of the autonomy ladder.
+func ValidAutonomy(a string) bool {
+	switch a {
+	case AutonomySuggest, AutonomyScheduled, AutonomyAuto:
+		return true
+	default:
+		return false
+	}
+}
+
 // migrateAgent bootstraps the agent_* Postgres tables (§9, §14.10). Idempotent
 // CREATE TABLE IF NOT EXISTS, matching the repo's inline-migrate convention.
 // Config is the only table written in P0; the run/trace/recommendation/
@@ -495,7 +519,10 @@ func (s *Store) UpsertAgentConfig(ctx context.Context, userID, projectID string,
 	}
 	autonomy := strings.TrimSpace(in.Autonomy)
 	if autonomy == "" {
-		autonomy = "suggest"
+		autonomy = AutonomySuggest
+	}
+	if !ValidAutonomy(autonomy) {
+		return AgentConfig{}, ErrInvalidAutonomy
 	}
 
 	// Only the project-level run-eligibility fields are written; the model_*

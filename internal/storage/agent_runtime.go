@@ -725,13 +725,13 @@ func scanSkillRows(rows pgx.Rows) ([]AgentSkill, error) {
 	return out, rows.Err()
 }
 
-// ScheduledAgentProjects returns project ids whose config has autonomy =
-// 'scheduled' and the agent enabled, with their cron expression — the candidate
-// set the scheduler evaluates each tick.
+// ScheduledAgentProjects returns project ids whose config is scheduled-capable
+// (autonomy 'scheduled' or the higher 'auto' rung) and the agent enabled, with
+// their cron expression — the candidate set the scheduler evaluates each tick.
 func (s *Store) ScheduledAgentProjects(ctx context.Context) (map[string]string, error) {
 	rows, err := s.pg.Query(ctx, `
 SELECT project_id::text, schedule_cron FROM agent_configs
-WHERE enabled = true AND autonomy = 'scheduled' AND schedule_cron <> ''`)
+WHERE enabled = true AND autonomy IN ('scheduled', 'auto') AND schedule_cron <> ''`)
 	if err != nil {
 		return nil, err
 	}
