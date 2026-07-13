@@ -349,7 +349,6 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
-	skillLoader := r.skillLoader(scopeID)
 
 	// Per-agent secrets (AgentGarden §5): decrypt this agent's stored secrets
 	// into a run-scoped credential.Vault that backs {{cred:NAME}} resolution. An
@@ -409,12 +408,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 			return storage.AgentRun{}, agentcore.RunResult{}, err
 		}
 		if len(teams) > 0 {
+			// A member whose name collides with an explicit grant for a different
+			// agent is advertised by its slug everywhere (delegate list, skill
+			// roster, board) so spawn_subagent always reaches the shown agent.
+			teams = applyDelegateNameCollisions(teams, targets)
 			delegates = mergeTeamDelegates(delegates, teams, func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error) {
 				return r.delegateRunner(opts.ProjectID, agentID)
 			})
-			header, body := orchestratorSkill(teams)
-			skills = append(skills, header)
-			skillLoader = withOrchestratorBody(skillLoader, body)
+			skills = append(skills, orchestratorSkill(teams))
 			runTools = append(runTools, &teamBoardTool{store: r.Store, teams: teams})
 		}
 	}
@@ -551,7 +552,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Soul:               def.SoulMD,
 		Agents:             def.AgentsMD,
 		Skills:             skills,
-		SkillLoader:        skillLoader,
+		SkillLoader:        r.skillLoader(scopeID),
 		Data:               r.Store,
 		Memory:             mem,
 		Notifier:           r.Notifier,

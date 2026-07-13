@@ -1,11 +1,26 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/internal/storage"
 )
+
+// teamHTTPError maps a store error from the team surface to the right status:
+// permission denials are 403, missing rows 404, everything else (validation)
+// 400 — the same split on every verb.
+func teamHTTPError(err error) *echo.HTTPError {
+	switch {
+	case errors.Is(err, storage.ErrTeamForbidden):
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
+	case errors.Is(err, storage.ErrTeamNotFound), errors.Is(err, storage.ErrTeamCardNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	default:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+}
 
 // registerTeamRoutes mounts the agent-team surface: team CRUD, roster
 // membership, lead selection, and the kanban board. Reads and card writes are
@@ -21,7 +36,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		teams, err := store.ListTeams(c.Request().Context(), ctx.User.ID, project.ID)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"teams": teams, "statuses": storage.TeamCardStatuses()})
 	})
@@ -39,7 +54,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		created, err := store.CreateTeam(c.Request().Context(), ctx.User.ID, project.ID, payload.Name)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusCreated, map[string]any{"team": created})
 	})
@@ -51,7 +66,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		team, members, err := store.GetTeam(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"))
 		if err != nil {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"team": team, "members": members})
 	})
@@ -61,16 +76,18 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		if err != nil {
 			return err
 		}
+		// lead_agent_id is a pointer so a rename-only PUT (field omitted) keeps
+		// the current lead; an explicit "" demotes it.
 		var payload struct {
-			Name        string `json:"name"`
-			LeadAgentID string `json:"lead_agent_id"`
+			Name        string  `json:"name"`
+			LeadAgentID *string `json:"lead_agent_id"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
 		updated, err := store.UpdateTeam(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), payload.Name, payload.LeadAgentID)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"team": updated})
 	})
@@ -81,7 +98,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 			return err
 		}
 		if err := store.DeleteTeam(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
@@ -92,15 +109,17 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		if err != nil {
 			return err
 		}
+		// Pointers so an omitted field keeps the row's current value — a
+		// role-only edit must not reset the member's board position.
 		var payload struct {
-			Role     string `json:"role"`
-			Position int    `json:"position"`
+			Role     *string `json:"role"`
+			Position *int    `json:"position"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
 		if err := store.UpsertTeamMember(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), c.Param("agent_id"), payload.Role, payload.Position); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
@@ -111,7 +130,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 			return err
 		}
 		if err := store.RemoveTeamMember(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), c.Param("agent_id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
@@ -124,7 +143,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		cards, err := store.ListTeamCards(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"))
 		if err != nil {
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"cards": cards, "statuses": storage.TeamCardStatuses()})
 	})
@@ -143,7 +162,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		created, err := store.CreateTeamCard(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), payload.Title, payload.Body)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusCreated, map[string]any{"card": created})
 	})
@@ -159,7 +178,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		updated, err := store.UpdateTeamCard(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), c.Param("card_id"), payload)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"card": updated})
 	})
@@ -170,7 +189,7 @@ func registerTeamRoutes(e *echo.Echo, store *storage.Store) {
 			return err
 		}
 		if err := store.DeleteTeamCard(c.Request().Context(), ctx.User.ID, project.ID, c.Param("team_id"), c.Param("card_id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return teamHTTPError(err)
 		}
 		return c.NoContent(http.StatusNoContent)
 	})

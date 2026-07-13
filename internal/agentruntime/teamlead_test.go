@@ -69,46 +69,57 @@ func TestMergeTeamDelegatesMemberOnTwoTeamsAppearsOnce(t *testing.T) {
 }
 
 func TestOrchestratorSkillHeaderAndBody(t *testing.T) {
-	header, body := orchestratorSkill(teamFixture())
-	if header.ID != orchestratorSkillID || !header.Enabled {
-		t.Fatalf("bad header: %+v", header)
+	skill := orchestratorSkill(teamFixture())
+	if skill.ID != orchestratorSkillID || !skill.Enabled {
+		t.Fatalf("bad skill header: %+v", skill)
 	}
 	for _, want := range []string{"Growth", "Writer", "Analyst", "team_board", "spawn_subagent"} {
-		if !strings.Contains(body, want) {
+		if !strings.Contains(skill.Body, want) {
 			t.Fatalf("body missing %q", want)
 		}
 	}
 }
 
-func TestWithOrchestratorBodyServesSyntheticAndDelegatesRest(t *testing.T) {
-	inner := func(_ context.Context, ids []string) (map[string]string, error) {
-		out := map[string]string{}
-		for _, id := range ids {
-			if id == orchestratorSkillID {
-				return nil, context.Canceled // the synthetic id must never reach the inner loader
-			}
-			out[id] = "stored:" + id
-		}
-		return out, nil
+func TestApplyDelegateNameCollisionsRenamesShadowedMember(t *testing.T) {
+	// Two distinct agents share the display name "Writer"; slugs stay unique
+	// per project, so the member's slug is the collision-free handle.
+	teams := []storage.TeamLeadership{{
+		TeamID: "t1", Name: "Growth", Slug: "growth",
+		Members: []storage.AgentDelegateTarget{
+			{AgentID: "a1", Name: "Writer", Slug: "writer-2", Description: "Writes copy"},
+			{AgentID: "a2", Name: "Analyst", Slug: "analyst"},
+		},
+	}}
+	explicit := []storage.AgentDelegateTarget{{AgentID: "x9", Name: "Writer", Slug: "writer"}}
+	out := applyDelegateNameCollisions(teams, explicit)
+	if got := out[0].Members[0].Name; got != "writer-2" {
+		t.Fatalf("shadowed member must be advertised by slug, got %q", got)
 	}
-	loader := withOrchestratorBody(inner, "THE BODY")
-	got, err := loader(context.Background(), []string{"uuid-1", orchestratorSkillID})
-	if err != nil {
-		t.Fatal(err)
+	if out[0].Members[1].Name != "Analyst" {
+		t.Fatalf("non-colliding member must keep its name: %+v", out[0].Members[1])
 	}
-	if got[orchestratorSkillID] != "THE BODY" {
-		t.Fatalf("synthetic body not served: %v", got)
+	if teams[0].Members[0].Name != "Writer" {
+		t.Fatal("input roster must not be mutated")
 	}
-	if got["uuid-1"] != "stored:uuid-1" {
-		t.Fatalf("stored skill not loaded through inner loader: %v", got)
+	// End to end: the merged delegate list carries the slug, so
+	// spawn_subagent("writer-2") reaches a1 while "Writer" stays the explicit
+	// grant to x9.
+	existing := []agentcore.Delegate{{Name: "Writer", Description: "explicit grant"}}
+	merged := mergeTeamDelegates(existing, out, noopRunFor)
+	names := make([]string, 0, len(merged))
+	for _, d := range merged {
+		names = append(names, d.Name)
+	}
+	if len(merged) != 3 || merged[1].Name != "writer-2" {
+		t.Fatalf("merge must expose the renamed member: %v", names)
 	}
 }
 
-func TestWithOrchestratorBodyNilInner(t *testing.T) {
-	loader := withOrchestratorBody(nil, "B")
-	got, err := loader(context.Background(), []string{orchestratorSkillID})
-	if err != nil || got[orchestratorSkillID] != "B" {
-		t.Fatalf("got %v, %v", got, err)
+func TestApplyDelegateNameCollisionsSameAgentKeepsName(t *testing.T) {
+	explicit := []storage.AgentDelegateTarget{{AgentID: "a1", Name: "Writer", Slug: "writer"}}
+	out := applyDelegateNameCollisions(teamFixture(), explicit)
+	if out[0].Members[0].Name != "Writer" {
+		t.Fatalf("same-agent overlap must keep the name (merge dedupes it): %+v", out[0].Members[0])
 	}
 }
 

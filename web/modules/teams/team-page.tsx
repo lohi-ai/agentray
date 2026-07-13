@@ -11,7 +11,7 @@ import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { Button, EmptyState, Intro, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { useTeam } from './hooks';
 
-const columnLabels: Record<string, string> = { backlog: 'Backlog', doing: 'Doing', review: 'Review', done: 'Done' };
+const columnLabel = (status: string) => status.charAt(0).toUpperCase() + status.slice(1);
 
 // TeamPage is one team's home: the roster (add/remove members, pick the lead)
 // and the kanban board the lead orchestrates. Moving a card here is the same
@@ -136,7 +136,7 @@ export function TeamPage() {
           return (
             <div key={status} className="flex min-h-[180px] flex-col gap-2.5 rounded-xl bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-3">
               <div className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
-                {columnLabels[status] ?? status}
+                {columnLabel(status)}
                 <span className="font-mono text-[11px] tabular-nums">{column.length}</span>
                 <span className="flex-1" />
                 {status === 'backlog' ? (

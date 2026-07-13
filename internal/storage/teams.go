@@ -22,11 +22,17 @@ import (
 
 var errTeamLeadNotMember = errors.New("lead must be a team member")
 var errTeamMemberNotInProject = errors.New("agent does not operate in this project")
-var errInvalidCardStatus = errors.New("invalid card status (backlog|doing|review|done)")
-var errTeamForbidden = errors.New("team permission denied")
+
+// Exported sentinels so the HTTP layer can map permission denials to 403 and
+// missing rows to 404 instead of collapsing everything into 400.
+var ErrTeamForbidden = errors.New("team permission denied")
+var ErrTeamNotFound = errors.New("team not found")
+var ErrTeamCardNotFound = errors.New("card not found")
 
 // teamCardStatuses is the kanban column set, in board order.
 var teamCardStatuses = []string{"backlog", "doing", "review", "done"}
+
+var errInvalidCardStatus = errors.New("invalid card status (" + strings.Join(teamCardStatuses, "|") + ")")
 
 // validTeamCardStatus reports whether status is a legal kanban column. Pure and
 // unit-testable; every write path (control plane and the lead's team_board
@@ -152,7 +158,7 @@ SELECT id::text, project_id::text, name, slug, lead_agent_id::text, created_at, 
 FROM teams WHERE id = $1 AND project_id = $2`, teamID, project.ID).
 		Scan(&t.ID, &t.ProjectID, &t.Name, &t.Slug, &lead, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
-		return Project{}, Team{}, errors.New("team not found")
+		return Project{}, Team{}, ErrTeamNotFound
 	}
 	if lead != nil {
 		t.LeadAgentID = *lead
@@ -169,7 +175,7 @@ func (s *Store) canManageTeam(ctx context.Context, userID string, project Projec
 		return err
 	}
 	if !canManage {
-		return errTeamForbidden
+		return ErrTeamForbidden
 	}
 	return nil
 }
@@ -236,11 +242,12 @@ RETURNING id::text, project_id::text, name, slug, created_at, updated_at`,
 	return t, nil
 }
 
-// UpdateTeam renames a team and/or picks its lead (owner/admin only). A
-// non-empty lead must be a current member — the lead is what receives the
-// orchestrator skill and board tool at run time, so it cannot point outside
-// the roster. An empty leadAgentID clears the lead.
-func (s *Store) UpdateTeam(ctx context.Context, userID, projectID, teamID, name, leadAgentID string) (Team, error) {
+// UpdateTeam renames a team and/or picks its lead (owner/admin only). A nil
+// leadAgentID keeps the current lead (partial update, same semantics as an
+// empty name); an explicit empty string clears it; a non-empty lead must be a
+// current member — the lead is what receives the orchestrator skill and board
+// tool at run time, so it cannot point outside the roster.
+func (s *Store) UpdateTeam(ctx context.Context, userID, projectID, teamID, name string, leadAgentID *string) (Team, error) {
 	project, team, err := s.teamProject(ctx, userID, projectID, teamID)
 	if err != nil {
 		return Team{}, err
@@ -252,16 +259,21 @@ func (s *Store) UpdateTeam(ctx context.Context, userID, projectID, teamID, name,
 		name = team.Name
 	}
 	var lead *string
-	if leadAgentID = strings.TrimSpace(leadAgentID); leadAgentID != "" {
+	if leadAgentID == nil {
+		if team.LeadAgentID != "" {
+			keep := team.LeadAgentID
+			lead = &keep
+		}
+	} else if next := strings.TrimSpace(*leadAgentID); next != "" {
 		var isMember bool
 		if err := s.pg.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM team_members WHERE team_id = $1 AND agent_id = $2)`,
-			team.ID, leadAgentID).Scan(&isMember); err != nil {
+			team.ID, next).Scan(&isMember); err != nil {
 			return Team{}, err
 		}
 		if !isMember {
 			return Team{}, errTeamLeadNotMember
 		}
-		lead = &leadAgentID
+		lead = &next
 	}
 	var t Team
 	var outLead *string
@@ -328,7 +340,9 @@ ORDER BY m.position ASC, a.name ASC`, team.ID)
 
 // UpsertTeamMember adds or updates one roster row (owner/admin only). The
 // agent must operate in the team's project — same rule as a delegation grant.
-func (s *Store) UpsertTeamMember(ctx context.Context, userID, projectID, teamID, agentID, role string, position int) error {
+// Nil role/position mean "keep the current value" on an existing row (partial
+// update); a new row defaults to no role and the end of the roster.
+func (s *Store) UpsertTeamMember(ctx context.Context, userID, projectID, teamID, agentID string, role *string, position *int) error {
 	project, team, err := s.teamProject(ctx, userID, projectID, teamID)
 	if err != nil {
 		return err
@@ -343,11 +357,18 @@ func (s *Store) UpsertTeamMember(ctx context.Context, userID, projectID, teamID,
 	if !ok && !isDefaultAgent(project.ID, agentID) {
 		return errTeamMemberNotInProject
 	}
+	if role != nil {
+		trimmed := strings.TrimSpace(*role)
+		role = &trimmed
+	}
 	_, err = s.pg.Exec(ctx, `
 INSERT INTO team_members (team_id, agent_id, role, position)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (team_id, agent_id) DO UPDATE SET role = EXCLUDED.role, position = EXCLUDED.position`,
-		team.ID, agentID, strings.TrimSpace(role), position)
+VALUES ($1, $2, COALESCE($3::text, ''),
+	COALESCE($4::int, (SELECT COALESCE(MAX(position), 0) + 1 FROM team_members m WHERE m.team_id = $1)))
+ON CONFLICT (team_id, agent_id) DO UPDATE SET
+	role = COALESCE($3::text, team_members.role),
+	position = COALESCE($4::int, team_members.position)`,
+		team.ID, agentID, role, position)
 	if err != nil {
 		return err
 	}
@@ -358,7 +379,8 @@ ON CONFLICT (team_id, agent_id) DO UPDATE SET role = EXCLUDED.role, position = E
 // RemoveTeamMember drops one roster row (owner/admin only). Removing the
 // current lead also clears the team's lead — a team never points at a lead
 // outside its roster, and the ex-lead's orchestrator injection stops on its
-// next run.
+// next run. The ex-member's cards go back to unassigned for the same reason:
+// the board never references an agent outside the roster.
 func (s *Store) RemoveTeamMember(ctx context.Context, userID, projectID, teamID, agentID string) error {
 	project, team, err := s.teamProject(ctx, userID, projectID, teamID)
 	if err != nil {
@@ -371,6 +393,9 @@ func (s *Store) RemoveTeamMember(ctx context.Context, userID, projectID, teamID,
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `UPDATE teams SET lead_agent_id = NULL, updated_at = now() WHERE id = $1 AND lead_agent_id = $2`, team.ID, agentID); err != nil {
+		return err
+	}
+	if _, err := s.pg.Exec(ctx, `UPDATE team_cards SET assignee_agent_id = NULL, updated_at = now() WHERE team_id = $1 AND assignee_agent_id = $2`, team.ID, agentID); err != nil {
 		return err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "team.member.delete", "project", project.ID, project.Name, "{}")
@@ -501,7 +526,7 @@ RETURNING id::text, team_id::text, status, title, body, assignee_agent_id::text,
 		teamID, cardID, in.Status, in.Title, in.Body, in.AssigneeAgentID != nil, assignee).
 		Scan(&c.ID, &c.TeamID, &c.Status, &c.Title, &c.Body, &outAssignee, &c.Position, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
-		return TeamCard{}, errors.New("card not found")
+		return TeamCard{}, ErrTeamCardNotFound
 	}
 	if outAssignee != nil {
 		c.AssigneeAgentID = *outAssignee
@@ -582,19 +607,7 @@ ORDER BY m.position ASC, a.name ASC`, teamID, leadAgentID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := make([]AgentDelegateTarget, 0)
-	for rows.Next() {
-		var t AgentDelegateTarget
-		if err := rows.Scan(&t.AgentID, &t.Name, &t.Slug, &t.Description); err != nil {
-			return nil, err
-		}
-		if r := []rune(t.Description); len(r) > 160 {
-			t.Description = string(r[:160])
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return scanDelegateTargets(rows)
 }
 
 // TeamCardsForRun returns a led team's board for the lead's team_board tool

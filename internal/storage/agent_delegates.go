@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"errors"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Cross-agent delegation grants (ARCHITECT-AGENT-TEAM delegate, pulled forward
@@ -138,6 +140,13 @@ ORDER BY a.name ASC`, scopeID)
 	if err != nil {
 		return nil, err
 	}
+	return scanDelegateTargets(rows)
+}
+
+// scanDelegateTargets hydrates rows shaped (agent id, name, slug, persona
+// hint) and clamps the hint to one roster-sized line. Shared by the delegate
+// and team-roster run-path queries so the two rosters can never diverge.
+func scanDelegateTargets(rows pgx.Rows) ([]AgentDelegateTarget, error) {
 	defer rows.Close()
 	out := make([]AgentDelegateTarget, 0)
 	for rows.Next() {

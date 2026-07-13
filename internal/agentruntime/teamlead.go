@@ -44,8 +44,8 @@ You are the lead of the team(s) listed below. Work the shared kanban board with 
 
 ## Workflow
 1. **See the board**: team_board {"action":"list"} shows every card by column (backlog / doing / review / done) with ids and assignees.
-2. **Pick a card**: choose the highest-value backlog card (or the one the user named). Move it to doing and assign it: team_board {"action":"move","card_id":"…","status":"doing","assignee":"<member name>"}.
-3. **Delegate**: hand the work to the assigned member with spawn_subagent {"agent":"<member name>","task":"…"}. State the task fully and self-contained — the member sees nothing of this conversation. Pick the member whose specialty matches; use "self" only for work squarely in your own lane.
+2. **Pick a card**: choose the highest-value backlog card (or the one the user named). Move it to doing and assign it: team_board {"action":"move","card_id":"…","status":"doing","assignee":"<member name>"}. You are the orchestrator, not a member — a card you work yourself stays unassigned (assignees are members only).
+3. **Delegate**: hand the work to the assigned member with spawn_subagent {"agent":"<member name>","task":"…"}. State the task fully and self-contained — the member sees nothing of this conversation. Pick the member whose specialty matches; finish a card yourself only when the work is squarely in your own lane.
 4. **Review**: read the member's answer. If acceptable, move the card to review (when the user should sign off) or done; if not, re-delegate with concrete corrections or finish it yourself.
 5. **Synthesize**: report per card what was done, by whom, and the outcome. Create follow-up cards with team_board {"action":"add","title":"…","body":"…"} when work uncovers new work.
 
@@ -57,11 +57,20 @@ You are the lead of the team(s) listed below. Work the shared kanban board with 
 ## Your teams
 `
 
+// teamBoardStore is the narrow slice of storage the board tool may touch —
+// a tool handler never holds a full store/DB handle (AGENT-GOVERNANCE.md);
+// the runner injects the concrete store at construction.
+type teamBoardStore interface {
+	TeamCardsForRun(ctx context.Context, teamID string) ([]storage.TeamCard, error)
+	CreateTeamCardForRun(ctx context.Context, teamID, title, body string) (storage.TeamCard, error)
+	UpdateTeamCardForRun(ctx context.Context, teamID, cardID string, in storage.TeamCardUpdate) (storage.TeamCard, error)
+}
+
 // teamBoardTool is the lead's kanban surface, bound to the teams the running
 // agent leads. It deliberately supports only list/add/move — structural
 // changes (roster, lead, deleting cards) stay human-only in the UI.
 type teamBoardTool struct {
-	store *storage.Store
+	store teamBoardStore
 	teams []storage.TeamLeadership
 }
 
@@ -255,11 +264,41 @@ func renderBoard(team storage.TeamLeadership, cards []storage.TeamCard) string {
 	return b.String()
 }
 
+// applyDelegateNameCollisions returns a copy of teams in which any member
+// whose name is already taken by an explicit delegate grant for a DIFFERENT
+// agent is advertised by its slug instead (slugs are unique per project).
+// spawn_subagent matches delegates by name, so without the rename the
+// explicit grant would intercept calls the roster attributes to the member —
+// the lead must always reach exactly the agent the board shows. Runs before
+// mergeTeamDelegates/orchestratorSkill/teamBoardTool so the delegate list,
+// the skill roster, and assignee resolution all use the same name. Pure.
+func applyDelegateNameCollisions(teams []storage.TeamLeadership, explicit []storage.AgentDelegateTarget) []storage.TeamLeadership {
+	taken := make(map[string]string, len(explicit)) // folded name -> agent id
+	for _, e := range explicit {
+		taken[strings.ToLower(e.Name)] = e.AgentID
+	}
+	out := make([]storage.TeamLeadership, len(teams))
+	for i, team := range teams {
+		members := make([]storage.AgentDelegateTarget, len(team.Members))
+		copy(members, team.Members)
+		for j, m := range members {
+			if id, clash := taken[strings.ToLower(m.Name)]; clash && id != m.AgentID && m.Slug != "" {
+				members[j].Name = m.Slug
+			}
+		}
+		team.Members = members
+		out[i] = team
+	}
+	return out
+}
+
 // mergeTeamDelegates folds the led teams' member rosters into the delegate
 // list. spawn_subagent matches delegates by name (case-insensitive), so
 // dedupe is by folded name: an explicit agent_delegates grant wins over a
 // team-derived entry of the same name, and a member on two led teams appears
-// once. Pure, so the precedence is unit-testable without a DB.
+// once. Cross-agent name collisions are resolved beforehand by
+// applyDelegateNameCollisions. Pure, so the precedence is unit-testable
+// without a DB.
 func mergeTeamDelegates(existing []agentcore.Delegate, teams []storage.TeamLeadership, runFor func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error)) []agentcore.Delegate {
 	seen := make(map[string]bool, len(existing))
 	for _, d := range existing {
@@ -283,9 +322,11 @@ func mergeTeamDelegates(existing []agentcore.Delegate, teams []storage.TeamLeade
 	return out
 }
 
-// orchestratorSkill builds the synthetic lead-only skill: a header for the
-// definition plus the full body (workflow + the concrete team rosters). Pure.
-func orchestratorSkill(teams []storage.TeamLeadership) (agentcore.Skill, string) {
+// orchestratorSkill builds the synthetic lead-only skill. The preloaded Body
+// (workflow + the concrete team rosters) is served straight from the skill
+// definition by agentcore's read_skill — only the header lands in the system
+// prompt, the body loads on demand like any stored skill. Pure.
+func orchestratorSkill(teams []storage.TeamLeadership) agentcore.Skill {
 	var b strings.Builder
 	b.WriteString(orchestratorSkillBody)
 	for _, team := range teams {
@@ -296,36 +337,6 @@ func orchestratorSkill(teams []storage.TeamLeadership) (agentcore.Skill, string)
 		Name:        "Team orchestrator",
 		Description: orchestratorSkillDescription,
 		Enabled:     true,
-	}, b.String()
-}
-
-// withOrchestratorBody wraps a SkillLoader so the synthetic skill's body is
-// served from memory while every stored skill still loads through the inner
-// loader. Pure.
-func withOrchestratorBody(inner agentcore.SkillLoader, body string) agentcore.SkillLoader {
-	return func(ctx context.Context, ids []string) (map[string]string, error) {
-		rest := make([]string, 0, len(ids))
-		wantOrchestrator := false
-		for _, id := range ids {
-			if id == orchestratorSkillID {
-				wantOrchestrator = true
-				continue
-			}
-			rest = append(rest, id)
-		}
-		out := map[string]string{}
-		if len(rest) > 0 && inner != nil {
-			loaded, err := inner(ctx, rest)
-			if err != nil {
-				return nil, err
-			}
-			for k, v := range loaded {
-				out[k] = v
-			}
-		}
-		if wantOrchestrator {
-			out[orchestratorSkillID] = body
-		}
-		return out, nil
+		Body:        b.String(),
 	}
 }
