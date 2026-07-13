@@ -152,3 +152,77 @@ func TestDataAnalystPreset(t *testing.T) {
 		}
 	}
 }
+
+// TestMarketingLeadPreset pins the config-only marketing team agent: the full
+// PLAN→CREATE→REVIEW→PUBLISH→LEARN loop must be expressible as persona + scopes
+// + skills over the generic runtime (no bespoke Go), the human review gate must
+// be explicit in the persona, and everything channel-specific (hosts, creds,
+// call shapes) must live in the publish-manifest skill so a new channel is a
+// skill edit, not a backend change.
+func TestMarketingLeadPreset(t *testing.T) {
+	p, ok := AgentPresetBySlug("marketing-lead")
+	if !ok {
+		t.Fatal("marketing-lead preset does not resolve by slug")
+	}
+	if p.Category != "marketing" {
+		t.Errorf("marketing-lead category = %q, want marketing", p.Category)
+	}
+	// growth_suggest projects submit_recommendation (dev tickets + publish audit),
+	// remember (calendar state), and send_notification (draft delivery).
+	if !p.Scopes["growth_suggest"] {
+		t.Error("marketing-lead must grant growth_suggest (submit_recommendation, remember, send_notification)")
+	}
+	// data_quality + analyze_build ground the plan in real product data.
+	if !p.Scopes["data_quality"] || !p.Scopes["analyze_build"] {
+		t.Error("marketing-lead must grant data_quality and analyze_build (plan from data)")
+	}
+
+	// The scheduled loop must be self-contained, parallelize channel drafts, and
+	// hard-stop at the review gate — an unattended run may never publish.
+	for _, marker := range []string{"Orient", "Plan", "Create", "Review gate", "Learn", "spawn_subagent", "send_notification", "Never publish from an unattended run"} {
+		if !strings.Contains(p.AgentsMD, marker) {
+			t.Errorf("marketing-lead loop persona is missing %q", marker)
+		}
+	}
+
+	// The loop's stages ship as skills (config), not bespoke Go.
+	want := map[string]bool{
+		"content-calendar": false,
+		"channel-port":     false,
+		"publish-manifest": false,
+		"image-gen":        false,
+		"video-script":     false,
+		"trend-scout":      false,
+		"dev-ticket":       false,
+	}
+	var publish, video AgentPresetSkill
+	for _, sk := range p.Skills {
+		if _, tracked := want[sk.Name]; tracked {
+			want[sk.Name] = true
+		}
+		switch sk.Name {
+		case "publish-manifest":
+			publish = sk
+		case "video-script":
+			video = sk
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("marketing-lead is missing the %q skill", name)
+		}
+	}
+
+	// The publish contract must route through the governed http_request tool with
+	// write-only cred placeholders — never a bespoke publish tool.
+	for _, marker := range []string{"http_request", "allow_hosts", "{{cred:", "graph.facebook.com", "api.x.com", "oauth.reddit.com"} {
+		if !strings.Contains(publish.Body, marker) {
+			t.Errorf("publish-manifest skill is missing %q", marker)
+		}
+	}
+	// Video is human-produced by design (user decision): script only, no claim of
+	// generation or publishing.
+	if !strings.Contains(video.Body, "asking the human to record") {
+		t.Error("video-script skill must hand production to a human")
+	}
+}

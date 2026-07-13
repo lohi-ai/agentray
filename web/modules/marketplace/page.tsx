@@ -1,6 +1,6 @@
 'use client';
 
-import { BarChart3, Database, LayoutTemplate, Megaphone, PieChart, Rocket, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
+import { BarChart3, Database, LayoutTemplate, Megaphone, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
 import type { AgentPreset, TemplateChart } from '@/lib/api';
 import { useMarketplace, useTemplates } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -13,6 +13,7 @@ const PRESET_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
   megaphone: Megaphone,
   database: Database,
   rocket: Rocket,
+  send: Send,
   'shield-check': ShieldCheck,
 };
 
