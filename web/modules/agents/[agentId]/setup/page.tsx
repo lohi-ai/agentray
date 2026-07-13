@@ -231,26 +231,28 @@ function PermissionsTab({ agentID }: { agentID: string }) {
 
 // --- Autonomy: how much this project's agents may do with no human watching.
 // Project-level (agent_configs.autonomy) and enforced by the runner, not by
-// persona text: below "Auto", tools marked external-write in the catalog
-// (Fetch / HTTP) are stripped from every unattended run — schedules, webhooks,
-// and delegated hand-offs — so an agent can draft but never publish.
+// persona text: below "Auto", catalog tools flagged external-write (currently
+// Fetch / HTTP) are stripped from every unattended run — schedules, webhooks,
+// and delegated hand-offs. Sandbox browsing tools are not flagged; for agents
+// granted those, instructions and host allowlists are the guard.
 const AUTONOMY_RUNGS = [
   {
     value: 'suggest',
     label: 'Suggest',
-    detail: 'The default. Agents analyze, draft, and file recommendations. Runs that start without a human (schedules, webhooks, delegated tasks) never carry publishing tools like Fetch / HTTP.',
+    detail: 'The default. Agents analyze, draft, and file recommendations. Runs that start without a human (schedules, webhooks, delegated tasks) never carry the Fetch / HTTP publishing tools.',
   },
   {
     value: 'scheduled',
     label: 'Scheduled',
-    detail: 'Agents work unattended on their triggers, but publishing tools are still removed from those runs — unattended work always stops at a draft for human review.',
+    detail: 'Agents work unattended on their triggers, but the Fetch / HTTP publishing tools are still removed from those runs — unattended work stops at a draft for human review.',
   },
   {
     value: 'auto',
     label: 'Auto — can publish unattended',
-    detail: 'Unattended runs keep their publishing tools (Fetch / HTTP to the hosts you allow). An agent can post to external services with no human reviewing the exact content first.',
+    detail: 'Unattended runs keep Fetch / HTTP (to the hosts you allow). An agent can post to external services with no human reviewing the exact content first.',
   },
 ];
+const AUTONOMY_OPTIONS = AUTONOMY_RUNGS.map((r) => ({ value: r.value, label: r.label }));
 
 function AutonomySection() {
   const { config, configLoading, saveConfig } = useAgent();
@@ -258,7 +260,12 @@ function AutonomySection() {
   const [saving, setSaving] = useState(false);
 
   if (configLoading && !config) return <Panel title="Autonomy"><Loading label="Loading autonomy…" /></Panel>;
-  const current = config?.autonomy || 'suggest';
+  // A stored value outside the ladder (legacy row, manual DB edit) is treated
+  // as Suggest — which is exactly how the runner's fail-closed rail treats it —
+  // and surfaced so saving normalizes it instead of silently masking it.
+  const stored = config?.autonomy || 'suggest';
+  const known = AUTONOMY_RUNGS.some((r) => r.value === stored);
+  const current = known ? stored : 'suggest';
   const selected = value ?? current;
   const rung = AUTONOMY_RUNGS.find((r) => r.value === selected) ?? AUTONOMY_RUNGS[0];
 
@@ -274,19 +281,26 @@ function AutonomySection() {
     <Panel title="Autonomy">
       <p className="mb-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
         How much agents in this project may do when no one is watching. This applies to every agent in the
-        project and is enforced by the platform — below “Auto”, publishing tools are removed from every
-        unattended run, whatever the agent&apos;s instructions say.
+        project and is enforced by the platform — below “Auto”, the Fetch / HTTP publishing tools are removed
+        from every unattended run, whatever the agent&apos;s instructions say.
       </p>
-      <Segment options={AUTONOMY_RUNGS.map((r) => ({ value: r.value, label: r.label }))} value={selected} onChange={setValue} />
+      {!known ? (
+        <p className="mb-2 max-w-[600px] text-[12px] font-medium" style={{ color: 'var(--color-warning)' }}>
+          The stored autonomy value “{stored}” is not recognized, so agents run at Suggest (the strictest
+          rung). Save to normalize it.
+        </p>
+      ) : null}
+      <Segment options={AUTONOMY_OPTIONS} value={selected} onChange={setValue} />
       <p className="mt-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{rung.detail}</p>
       {selected === 'auto' ? (
         <p className="mt-2 max-w-[600px] text-[12px] font-medium" style={{ color: 'var(--color-warning)' }}>
-          Only turn this on when you trust the agents, their allowed hosts, and the audit trail more than a
-          per-post review. Everything an agent publishes is recorded, but nobody approves it beforehand.
+          Only turn this on when you trust the agents and their allowed hosts more than a per-post review.
+          Nobody approves a post beforehand, and the audit trail is filed by the agent itself — it is a duty
+          in its instructions, not something the platform can guarantee.
         </p>
       ) : null}
       <div className="mt-3">
-        <Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving || selected === current}>
+        <Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving || (known && selected === stored)}>
           {saving ? 'Saving…' : 'Save autonomy'}
         </Button>
       </div>

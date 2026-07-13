@@ -993,8 +993,11 @@ channel with the brief + these rules, then assemble the returned packages into
 one review bundle: per channel, the final text, the media (image prompt/file or
 video script), and the intended publish target. Tell each child explicitly:
 **draft and return the package only — never call ` + "`http_request`" + ` or
-publish anything.** Children inherit your full toolset; publishing is only
-ever done by you, after the review gate — never by a child.`,
+publish anything.** That instruction is your standing order to the child, not
+a platform rail — children inherit your toolset, so below ` + "`auto`" + `
+autonomy the platform has already stripped ` + "`http_request`" + ` from them,
+but at ` + "`auto`" + ` only this order keeps a child from publishing.
+Publishing is done by you, after the review gate — never delegate it.`,
 			},
 			{
 				Name:        "publish-manifest",

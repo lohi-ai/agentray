@@ -426,10 +426,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	}
 
 	// Hard unattended-publish rail: a background run keeps external-write tools
-	// (http_request) only when this agent's autonomy is 'auto'. Applied after
-	// the team-lead merge so it governs the final tool set; evaluated here —
-	// inside execute — so a delegated child, which re-enters execute under the
-	// TARGET agent's own cfg, is gated by that agent's own autonomy per run.
+	// (http_request) only when autonomy is 'auto'. Autonomy is project-level —
+	// agent_configs is keyed by project_id, so every agent in the project shares
+	// one rung (only scopes/tools are per-agent). Applied after the team-lead
+	// merge so it governs the final selectable tool set; evaluated here — inside
+	// execute — so a delegated child, which re-enters execute for its own run,
+	// passes through the rail again on its own trigger.
 	runTools = applyAutonomyRail(runTools, trigger, cfg.Autonomy)
 
 	// Budget resolution (#4). Resolve the agent's effective ceiling + already-spent
@@ -775,10 +777,17 @@ func (r *Runner) ResumeRun(ctx context.Context, userID, projectID, runID string)
 	if agentID == projectID {
 		agentID = ""
 	}
+	// Preserve the original trigger so the autonomy rail re-applies: a resumed
+	// scheduled/webhook run is still unattended and must not regain
+	// external-write tools by being relabeled "manual".
+	trigger := run.Trigger
+	if trigger == "" {
+		trigger = "manual"
+	}
 	return r.Run(ctx, RunOptions{
 		ProjectID:         projectID,
 		AgentID:           agentID,
-		Trigger:           "manual",
+		Trigger:           trigger,
 		Prompt:            lastUserPrompt(seed),
 		SeedMessages:      seed,
 		SeedDisabledTools: plan.DisabledTools,
@@ -955,10 +964,14 @@ func resolveRunTools(toolCtx ToolBuildContext, globalHTTP agentcore.Tool, select
 // applyAutonomyRail enforces the hard unattended-publish gate: tools whose
 // catalog spec is external-write are stripped from background-trigger runs
 // (scheduled/webhook/delegate — no human watching the output) unless the
-// agent's autonomy is 'auto', the explicit opt-in rung. Interactive chat and
+// project's autonomy is 'auto', the explicit opt-in rung. Interactive chat and
 // manual runs pass through untouched at every autonomy, as does every
-// non-external-write tool. This is enforcement in code, not persona prose: at
-// suggest/scheduled an unattended run cannot publish even if the model tries.
+// non-external-write tool. This is enforcement in code, not persona prose —
+// but it governs only catalog tools marked ExternalWrite (currently
+// http_request). Network-capable sandbox tools (computer_use, browser_use)
+// are deliberately unmarked so existing scheduled agents keep working; for
+// agents granted those, unattended-publish restraint remains persona-governed
+// plus whatever egress allowlist the host configures.
 // Pure (no Store/ctx) so the trigger×autonomy matrix is unit-testable.
 func applyAutonomyRail(tools []agentcore.Tool, trigger, autonomy string) []agentcore.Tool {
 	if !isBackgroundTrigger(trigger) || autonomy == storage.AutonomyAuto {

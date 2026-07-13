@@ -185,13 +185,19 @@ func TestMarketingLeadPreset(t *testing.T) {
 	// persona must reference both branches.
 	for _, marker := range []string{
 		"Orient", "Plan", "Create", "Review gate", "Learn", "spawn_subagent", "send_notification",
-		"publish from an unattended run",
 		"explicitly opted in",
 		"audit trail",
 	} {
 		if !strings.Contains(p.AgentsMD, marker) {
 			t.Errorf("marketing-lead loop persona is missing %q", marker)
 		}
+	}
+	// The hard-stop instruction hard-wraps across lines in the persona source,
+	// so assert it on a whitespace-normalized view — the imperative "Never"
+	// must be part of the pinned phrase, not dropped to dodge the wrap.
+	flat := strings.Join(strings.Fields(p.AgentsMD), " ")
+	if !strings.Contains(flat, "Never publish from an unattended run") {
+		t.Error("marketing-lead persona is missing the imperative unattended-publish hard stop")
 	}
 	// The audit-trail duty for auto-mode publishes must be explicit in the
 	// never-list too: no unattended publish without a submit_recommendation.

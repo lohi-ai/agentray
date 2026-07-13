@@ -122,9 +122,13 @@ func (s *Store) ListAgents(ctx context.Context, userID, projectID string) ([]Age
 		return nil, err
 	}
 	// Agents operating in the project: its home agents plus any workspace agent
-	// granted into it (the "assigned to this product" set).
+	// granted into it (the "assigned to this product" set). Autonomy is read
+	// from agent_configs — the project-level rung the runner actually gates on —
+	// not the per-row agents.autonomy column, which the config UI never writes.
 	rows, err := s.pg.Query(ctx, `
-SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled, a.autonomy, a.created_at, a.updated_at
+SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
+       coalesce((SELECT autonomy FROM agent_configs WHERE project_id = $1), 'suggest') AS autonomy,
+       a.created_at, a.updated_at
 FROM agents a
 WHERE a.project_id = $1
    OR a.id IN (SELECT agent_id FROM agent_project_grants WHERE project_id = $1)

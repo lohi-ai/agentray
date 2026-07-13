@@ -31,8 +31,12 @@ type AgentMonitorRow struct {
 
 // monitorSelect is the shared projection: every agent column the Agent struct
 // scans, plus the run aggregates. LEFT JOIN keeps agents with zero runs.
+// Autonomy comes from agent_configs (the project-level rung the runner gates
+// on), not agents.autonomy, which the config UI never writes.
 const monitorSelect = `
-SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled, a.autonomy, a.created_at, a.updated_at,
+SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
+       coalesce((SELECT autonomy FROM agent_configs c WHERE c.project_id = a.project_id), 'suggest') AS autonomy,
+       a.created_at, a.updated_at,
        count(r.id) AS run_count,
        count(r.id) FILTER (WHERE r.status = 'running') AS running_count,
        count(r.id) FILTER (WHERE r.status = 'error') AS error_count,
@@ -44,7 +48,7 @@ FROM agents a
 LEFT JOIN agent_runs r ON coalesce(r.agent_id, r.project_id) = a.id`
 
 const monitorGroupBy = `
-GROUP BY a.id, a.project_id, a.name, a.slug, a.is_default, a.enabled, a.autonomy, a.created_at, a.updated_at`
+GROUP BY a.id, a.project_id, a.name, a.slug, a.is_default, a.enabled, a.created_at, a.updated_at`
 
 func scanMonitorRow(row pgx.Row) (AgentMonitorRow, error) {
 	var m AgentMonitorRow

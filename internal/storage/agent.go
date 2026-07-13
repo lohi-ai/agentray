@@ -462,7 +462,7 @@ func (s *Store) GetAgentConfig(ctx context.Context, userID, projectID string) (A
 // readAgentConfig loads the row (or a default-deny config when absent) without
 // the ciphertext.
 func (s *Store) readAgentConfig(ctx context.Context, projectID string) (AgentConfig, error) {
-	cfg := AgentConfig{ProjectID: projectID, Provider: "openai", RedactPII: true, Autonomy: "suggest", Scopes: defaultScopes(), ModelFallback: true}
+	cfg := AgentConfig{ProjectID: projectID, Provider: "openai", RedactPII: true, Autonomy: AutonomySuggest, Scopes: defaultScopes(), ModelFallback: true}
 	var (
 		cipher, liteCipher, proCipher           *string
 		scopeMonitor, scopeDQ, scopeAB, scopeGS bool
