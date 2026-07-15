@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentcore từ 0 đến 1 — AgentRay</title>
+<style>
+  /* ==== AgentRay tokens — mirrored 1:1 from web/app/globals.css :root ==== */
+  :root {
+    color-scheme: dark;
+    --background: #0A0E12;
+    --surface-1: #11161F;
+    --surface-2: #161C26;
+    --surface-3: #1E2733;
+    --surface-4: #28323F;
+    --foreground: #E9EEF4;
+    --muted-foreground: #8C97A8;
+    --faint: #5C6678;
+    --border: #222C38;
+    --input: #2C3645;
+    --primary: #22c786;
+    --primary-hover: #3fe0a0;
+    --primary-foreground: #04221a;
+    --agent: #8a7cff;
+    --agent-foreground: #0e0828;
+    --data: #46b7e8;
+    --success: #3fcb7a;
+    --warning: #e8a93b;
+    --danger: #f0626b;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 14px;
+    --fast: 120ms;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; border-color: var(--border); }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
+  }
+  ::selection { background: color-mix(in srgb, var(--primary) 34%, transparent); }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px 64px; }
+
+  header { padding: 40px 0 8px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .brand .logo {
+    display: grid; place-items: center; width: 34px; height: 34px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+    color: var(--primary);
+  }
+  .brand b { font-size: 15px; letter-spacing: -0.02em; }
+  .brand span { color: var(--muted-foreground); font-size: 12.5px; }
+  h1 { font-size: 26px; line-height: 1.25; letter-spacing: -0.03em; margin: 0 0 10px; }
+  .sub { color: var(--muted-foreground); font-size: 14.5px; max-width: 660px; margin: 0; }
+  .sub + .sub { margin-top: 8px; }
+
+  /* Level sections — the 0→1 staircase */
+  .level { margin-top: 44px; }
+  .level-head { display: flex; align-items: center; gap: 11px; margin-bottom: 6px; }
+  .level-n {
+    display: grid; place-items: center; width: 30px; height: 30px; flex: none;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 20%, transparent);
+    color: var(--primary);
+    font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+  }
+  .level h2 { font-size: 17px; letter-spacing: -0.02em; margin: 0; }
+  .level .kicker { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); display: block; }
+  .lede { color: var(--muted-foreground); font-size: 13.5px; margin: 0 0 14px; max-width: 680px; }
+
+  /* Problem → solution strip */
+  .pv { display: flex; flex-direction: column; gap: 8px; margin: 0 0 14px; }
+  .pv .row { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+  .pv .tag {
+    flex: none; display: inline-flex; padding: 1px 8px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    transform: translateY(-1px);
+  }
+  .pv .tag.p { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+  .pv .tag.s { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary-hover); }
+  .pv .row div { color: var(--muted-foreground); }
+  .pv .row div b, .pv .row div strong { color: var(--foreground); font-weight: 600; }
+
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 16px;
+  }
+  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); margin: 0 0 10px; }
+
+  /* Flow diagram — styled boxes + svg arrows */
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .flow .node {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 8px 12px;
+    font-size: 12.5px; font-weight: 500; line-height: 1.35;
+  }
+  .flow .node small { display: block; color: var(--muted-foreground); font-size: 11px; font-weight: 400; }
+  .flow .node.hl { border-color: color-mix(in srgb, var(--primary) 45%, transparent); background: color-mix(in srgb, var(--primary) 10%, transparent); }
+  .flow .node.tool { border-color: color-mix(in srgb, var(--agent) 45%, transparent); background: color-mix(in srgb, var(--agent) 10%, transparent); }
+  .flow .arr { color: var(--faint); flex: none; display: grid; place-items: center; }
+  .flow-note { margin: 10px 0 0; font-size: 12px; color: var(--muted-foreground); }
+  .flow-note .ui { font-size: 11px; }
+
+  /* Facts grid */
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .facts.three { grid-template-columns: 1fr 1fr 1fr; }
+  .fact { display: flex; gap: 11px; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 14px 15px; }
+  .fact .ic { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border-radius: var(--radius-md); }
+  .fact .ic.g { background: color-mix(in srgb, var(--primary) 18%, transparent); color: var(--primary); }
+  .fact .ic.p { background: color-mix(in srgb, var(--agent) 18%, transparent); color: var(--agent); }
+  .fact .ic.b { background: color-mix(in srgb, var(--data) 18%, transparent); color: var(--data); }
+  .fact .ic.w { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .fact h3 { font-size: 13.5px; margin: 0 0 3px; }
+  .fact p { font-size: 12.5px; color: var(--muted-foreground); margin: 0; }
+
+  /* Prompt-anatomy stack */
+  .stack { display: flex; flex-direction: column; gap: 6px; }
+  .stack .layer {
+    display: flex; align-items: baseline; gap: 10px;
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    background: var(--surface-2); padding: 8px 12px; font-size: 12.5px;
+  }
+  .stack .layer .name { font-family: var(--font-mono); font-size: 11.5px; color: var(--foreground); flex: none; min-width: 132px; }
+  .stack .layer span:last-child { color: var(--muted-foreground); }
+  .stack .layer.dim { border-style: dashed; background: transparent; }
+
+  /* Mono chip */
+  .ui, code.chip {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--surface-3); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap;
+  }
+
+  /* Limits table */
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; color: var(--muted-foreground); text-align: left; padding: 4px 12px 8px 0; }
+  td { font-size: 12.5px; padding: 8px 12px 8px 0; border-top: 1px solid var(--border); vertical-align: top; }
+  td:first-child { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
+  td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  td .why { color: var(--muted-foreground); }
+
+  /* Callout */
+  .callout {
+    display: flex; gap: 12px;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    border-radius: var(--radius-xl);
+    padding: 15px 16px;
+    margin-top: 14px;
+  }
+  .callout.info { border-color: color-mix(in srgb, var(--data) 35%, transparent); background: color-mix(in srgb, var(--data) 8%, transparent); }
+  .callout.info .ic { color: var(--data); }
+  .callout .ic { color: var(--warning); flex: none; margin-top: 2px; }
+  .callout p { margin: 0; font-size: 13px; }
+  .callout p + p { margin-top: 6px; }
+  .callout b { color: var(--warning); }
+  .callout.info b { color: var(--data); }
+
+  footer { margin-top: 48px; color: var(--muted-foreground); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+
+  a { color: var(--data); }
+  a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+  @media (max-width: 900px) {
+    .facts.three { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .facts { grid-template-columns: 1fr; }
+    h1 { font-size: 22px; }
+    .stack .layer { flex-direction: column; gap: 2px; }
+    .stack .layer .name { min-width: 0; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="6" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M7.2 11l9.4-4.2M7.2 13l9.4 4.2"/></svg>
+      </span>
+      <b>AgentRay</b>
+      <span>· agentcore</span>
+    </div>
+    <h1>agentcore: từ 0 đến 1</h1>
+    <p class="sub"><strong>agentcore</strong> là bộ máy chạy agent của AgentRay — một package Go (<span class="ui">agentray/agentcore</span>) hoàn toàn <strong>trung lập với sản phẩm</strong>: nó không biết gì về analytics hay bất kỳ nghiệp vụ nào. Mọi thứ riêng của sản phẩm đi vào qua interface: <span class="ui">Tool</span>, <span class="ui">Policy</span>, <span class="ui">MemoryStore</span>, <span class="ui">SessionStore</span>, <span class="ui">LLMProvider</span>.</p>
+    <p class="sub">Tài liệu này xây agentcore lại từ con số 0: mỗi mức lắp thêm đúng một mảnh, và nói rõ mảnh đó sinh ra để giải quyết cái gì.</p>
+  </header>
+
+  <!-- ============ MỨC 0 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">0</span><div><span class="kicker">Mức 0</span><h2>Một lần gọi mô hình</h2></div></div>
+    <p class="lede">Điểm xuất phát là thứ đơn giản nhất có thể: nhét tin nhắn vào một con LLM, nhận chữ ra. Không state, không hành động.</p>
+    <div class="panel">
+      <div class="flow">
+        <span class="node">Prompt<small>tin nhắn của bạn</small></span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node hl">LLM<small>suy luận</small></span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node">Chữ trả về</span>
+      </div>
+      <p class="flow-note">Model chỉ biết <em>nói</em>. Không sờ được database, không gọi được API — và quên sạch sau mỗi cú gọi.</p>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 1 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">1</span><div><span class="kicker">Mức 1</span><h2>Vòng lặp tool — trái tim của agent</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Model cần <b>làm</b> chứ không chỉ nói: chạy SQL, đọc file, gọi HTTP.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div>Chìa cho model một danh sách <b>tool</b> (tên + schema tham số). Thay vì trả lời, nó được quyền <b>đòi gọi tool</b>; vòng lặp chạy tool rồi đút kết quả ngược lại — cứ thế đến khi ra câu trả lời cuối.</div></div>
+    </div>
+    <div class="panel">
+      <div class="flow">
+        <span class="node">Prompt</span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node hl">LLM suy luận</span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node tool">Gọi tool?<small>run_sql, http_request…</small></span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node">Chạy tool + đút kết quả lại</span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><polyline points="3 7 3 12 8 12"/></svg></span>
+        <span class="node hl">…quay lại LLM</span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node">Trả lời cuối</span>
+      </div>
+      <p class="flow-note">Một vòng như vậy là một <b>turn</b>. Tool là code do host cắm vào — người dùng chỉ <em>chọn</em> được tool, không bao giờ <em>bịa</em> ra được tool mới, nên bề mặt năng lực luôn nằm trong tay code. Tool read-only được chạy song song trong cùng turn; tool chạy lâu thì stream tiến độ ra cho người xem khỏi đợi mù.</p>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 2 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">2</span><div><span class="kicker">Mức 2</span><h2>Rào chắn: giới hạn, quyền, bí mật</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Vòng lặp tự chạy mà không ai trông thì lặp vô hạn, gọi tool bừa bãi, lộ API key lúc nào không hay.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div>Ba lớp rào độc lập: <b>Limits</b> chặn vòng lặp, <b>Policy</b> chặn từng cú gọi tool, <b>credential vault</b> giữ secret ngoài tầm mắt model.</div></div>
+    </div>
+    <div class="panel" style="margin-bottom:14px;">
+      <p class="panel-title">Limits — mặc định v1</p>
+      <table>
+        <thead><tr><th scope="col">Giới hạn</th><th scope="col">Mặc định</th><th scope="col">Chặn gì</th></tr></thead>
+        <tbody>
+          <tr><td>MaxTurns</td><td class="num">12</td><td class="why">số lần gọi LLM trong một run</td></tr>
+          <tr><td>MaxToolCalls</td><td class="num">24</td><td class="why">tổng số lần thực thi tool</td></tr>
+          <tr><td>MaxToolResultLen</td><td class="num">~bytes</td><td class="why">một kết quả tool quá to bị cắt trước khi tới LLM</td></tr>
+          <tr><td>MaxContextTokens</td><td class="num">budget mềm</td><td class="why">vượt là kích hoạt dọn dẹp context (mức 6)</td></tr>
+        </tbody>
+      </table>
+      <p class="flow-note">Thêm nữa: con tool nào lỗi mấy lần liên tiếp là bị <em>tắt luôn cho hết run</em> — để model khỏi đâm đầu mãi vào một bức tường.</p>
+    </div>
+    <div class="facts">
+      <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div><h3>Policy: mặc định từ chối</h3><p>Mỗi cú gọi tool phải qua kiểm tra schema rồi hỏi <span class="ui">Policy.Allow</span> mới được chạy. Project mở màn với <em>zero tool</em> — bật con nào là người dùng tự bật. Và chặn không phải chặn câm: model nhận lại lý do dễ đọc để tự đổi hướng.</p></div></div>
+      <div class="fact"><span class="ic w" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><div><h3>Secret kiểu <span class="ui">{{cred:NAME}}</span></h3><p>Model và trace chỉ thấy placeholder. Giá trị thật chỉ được giải mã <em>ở biên tin cậy</em> — sau tracing và policy, ngay trước lúc tool chạy — nên không đời nào lọt vào context, log hay câu trả lời.</p></div></div>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 3 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">3</span><div><span class="kicker">Mức 3</span><h2>Persona: SOUL.md, AGENTS.md và skill</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Vòng lặp chạy được rồi, nhưng con agent nào cũng giống con nào — mà nhét hết hướng dẫn vào một prompt khổng lồ thì vừa đốt tiền vừa loãng.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div><b>AgentDefinition</b>: danh tính do người dùng soạn, tách rõ phần <em>luôn nạp</em> và phần <em>nạp khi cần</em>.</div></div>
+    </div>
+    <div class="panel">
+      <p class="panel-title">Giải phẫu system prompt — đúng thứ tự lắp ráp</p>
+      <div class="stack">
+        <div class="layer"><span class="name">SOUL.md</span><span>agent <em>là ai</em> — danh tính ổn định, luôn được nạp</span></div>
+        <div class="layer"><span class="name">AGENTS.md</span><span>nhiệm vụ &amp; bối cảnh hiện tại — phần hay thay đổi</span></div>
+        <div class="layer"><span class="name">memory đã recall</span><span>mấy fact chưng cất từ những run trước (mức 4)</span></div>
+        <div class="layer dim"><span class="name">tiêu đề skill</span><span>chỉ tên + mô tả của mỗi skill — <em>không</em> nhét nguyên văn</span></div>
+      </div>
+      <p class="flow-note">Skill là playbook dạng SKILL.md. Vòng lặp chỉ chìa <em>tiêu đề</em>; thấy liên quan thì model tự kéo toàn văn qua tool <span class="ui">read_skill</span> — <b>progressive disclosure</b> (tiết lộ dần): kiến thức nào cần mới trả token cho kiến thức đó.</p>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 4 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">4</span><div><span class="kicker">Mức 4</span><h2>Memory: trí nhớ dài hạn</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Hết run là quên sạch — tuần nào con agent cũng “khám phá lại” đúng một sự thật về sản phẩm.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div><b>MemoryStore</b>: sau mỗi run, điều gì đáng nhớ thì chưng cất thành entry gọn (<span class="ui">fact</span> / <span class="ui">learning</span> / <span class="ui">outcome</span>), đầu run sau recall lại theo tag/từ khóa.</div></div>
+    </div>
+    <div class="facts">
+      <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.1-2.6 5.4-.8.8-1.4 1.9-1.4 3.1V19a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-1.5c0-1.2-.6-2.3-1.4-3.1C5.2 13.1 4 11.4 4 9a7 7 0 0 1 8-7z"/></svg></span><div><h3>Chưng cất, không bê nguyên transcript</h3><p>Memory là mấy câu ngắn đã cô đặc, PII che sạch trước khi lưu. Nó nằm trong system prompt ngay <em>sau</em> AGENTS.md — model đọc như kiến thức nền.</p></div></div>
+      <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h12"/></svg></span><div><h3>Khử trùng lặp trước khi trả tiền</h3><p>Con agent sống lâu tích cả chục cách nói của cùng một bài học. Trước khi tiêm, bản nào chỉ là diễn đạt lại thì bị loại theo độ trùng từ vựng — giữ bản trúng nhất, đỡ tiền token cho <em>mọi</em> run về sau.</p></div></div>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 5 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">5</span><div><span class="kicker">Mức 5</span><h2>Session bền vững: log append-only</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Run dài mà tiến trình chỉ nằm trong RAM: crash một cái là mất sạch; muốn “thử lại từ bước 3” cũng chịu.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div><b>SessionStore</b>: mọi diễn biến ghi thành entry <em>bất biến</em> vào một log append-only (chỉ ghi thêm). Muốn biết state của run thì <em>reduce log ra</em> — không đời nào sửa bản ghi tại chỗ.</div></div>
+    </div>
+    <div class="panel">
+      <p class="flow-note" style="margin-top:0;">Log còn là <b>cây</b> chứ không phải một dòng thẳng: entry nào cũng có <span class="ui">ID</span>/<span class="ui">ParentID</span>, nên <em>rẽ nhánh được từ bất kỳ điểm nào trong quá khứ</em> — nền của trò “thử lại từ đây” trong Lab. Run crash hay vừa bị compaction đều resume được từ log. Không cắm session thì run chạy thuần trong RAM như cũ — độ bền là thứ chọn dùng, không ai ép.</p>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 6 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">6</span><div><span class="kicker">Mức 6</span><h2>Context window: dọn, nén, và cache</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Run tự hành càng dài, transcript càng phình — tràn context window của model là run chết, mà token nào cũng là tiền.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div>Ba cơ chế xếp tầng, từ rẻ đến đắt.</div></div>
+    </div>
+    <div class="facts three">
+      <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></span><div><h3>1 · Context editing — 0 cú gọi LLM</h3><p>Chạm nửa budget compaction là có một lượt dọn <em>deterministic</em>, xóa phần xác của kết quả tool cũ: cái bị một cú gọi y hệt mới hơn đè, <span class="ui">read_file</span> đã ôi vì file bị ghi sau đó, rồi mới tới đám cồng kềnh (≥1KB). Placeholder giữ nguyên liên kết và ghi rõ cách lấy lại dữ liệu.</p></div></div>
+      <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg></span><div><h3>2 · Compaction (nén)</h3><p>Vẫn tràn? Model tóm đoạn cũ của transcript thành một <em>checkpoint có cấu trúc</em>; ~<span class="ui">KeepRecentTokens</span> gần nhất giữ nguyên văn. Cú tóm tắt ghim được vào một model rẻ riêng, khỏi mượn model đang chạy.</p></div></div>
+      <div class="fact"><span class="ic p" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></span><div><h3>3 · Cache anchor trung lập</h3><p>Vòng lặp tự đóng dấu anchor lên message — provider chỉ việc <em>dịch</em>: Anthropic map sang <span class="ui">cache_control</span> (3 anchor mới nhất, nằm trong trần 4 breakpoint), OpenAI/Gemini lơ đi vì đã cache prefix ngầm sẵn. Prefix ổn định = mỗi turn rẻ hơn hẳn.</p></div></div>
+    </div>
+  </section>
+
+  <!-- ============ MỨC 7 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">7</span><div><span class="kicker">Mức 7</span><h2>Nhiều provider, model ladder, budget</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Một model duy nhất là một điểm chết duy nhất: quá tải, hết hạn key, hoặc đơn giản là quá đắt cho việc vặt.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div>Provider là interface (Anthropic, OpenAI/tương thích — bring-your-own-key), phía trên là ba van điều tiết.</div></div>
+    </div>
+    <div class="facts three">
+      <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg></span><div><h3>Model ladder (thang model)</h3><p>Một thang <span class="ui">provider+model</span> có thứ tự: bậc chính lỗi kiểu tạm thời thì leo bậc kế. agentcore chỉ thấy danh sách bậc — hệ tier của sản phẩm tự map vào từ ngoài.</p></div></div>
+      <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><polyline points="21 3 21 9 15 9"/></svg></span><div><h3>Key tươi mỗi turn</h3><p>Trước mỗi turn có thể re-resolve API key, nên token BYO sắp hết hạn không giết được một run dài.</p></div></div>
+      <div class="fact"><span class="ic w" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><div><h3>Budget gate</h3><p>Đầu mỗi turn, chi phí tích lũy phải đi qua <span class="ui">budgetGate</span>. Hết tiền không có nghĩa là chết giữa câu: vòng lặp tước hết tool, chen vào một lượt “tóm tắt rồi dừng”, rồi trả về <span class="ui">budget_exhausted</span> đàng hoàng.</p></div></div>
+    </div>
+    <p class="flow-note" style="margin-top:12px;">Cùng tầng này còn hai hàng đợi nhỏ mà lợi hại: <b>steering</b> — bạn chen ngang chỉnh hướng giữa run, turn kế tiếp là nó nghe theo; <b>follow-up</b> — còn tin nhắn nối thì vòng lặp chạy tiếp thay vì thoát, nên cả cuộc hội thoại nằm gọn trong một run có kiểm soát.</p>
+  </section>
+
+  <!-- ============ MỨC 8 ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true">8</span><div><span class="kicker">Mức 8</span><h2>Ủy quyền: subagent và delegate</h2></div></div>
+    <div class="pv">
+      <div class="row"><span class="tag p">Vấn đề</span><div>Việc to kéo theo cả đống mò mẫm — tool churn, ngõ cụt, kết quả trung gian — làm ngập context của con agent chính.</div></div>
+      <div class="row"><span class="tag s">Giải pháp</span><div>Tống phần mò mẫm sang một context khác, chỉ lấy về câu trả lời cuối.</div></div>
+    </div>
+    <div class="facts">
+      <div class="fact"><span class="ic p" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6"/><circle cx="12" cy="12" r="3"/><path d="M12 15v6"/><path d="M5 6l4.5 4.5"/><path d="M19 6l-4.5 4.5"/></svg></span><div><h3><span class="ui">spawn_subagent</span> — con phù du</h3><p>Fork một con agent con cho một việc khép kín. Con thừa kế nhưng <em>không bao giờ được nới quyền của cha</em> (tool, policy, model), chạy với lịch sử cô lập riêng; chỉ câu trả lời cuối (trần 48KB) quay về cha. Mặc định: sâu 1 cấp, tối đa 8 con/run.</p></div></div>
+      <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><div><h3>Delegate — giao cho agent khác</h3><p>Khác subagent: việc được giao hẳn cho một con agent <em>có danh tính riêng</em> — nó chạy bằng persona, tool, policy và secret <b>của chính nó</b>, không phải của bên gọi. Agent Teams đứng trên nền này: lead giao thẻ cho thành viên qua delegate run.</p></div></div>
+    </div>
+  </section>
+
+  <!-- ============ LẮP RÁP ============ -->
+  <section class="level">
+    <div class="level-head"><span class="level-n" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><span class="kicker">Lắp ráp</span><h2>AgentRay dùng agentcore thế nào</h2></div></div>
+    <p class="lede">Không có “engine riêng” cho agent do người dùng tạo. Con agent nào cũng chỉ là <strong>dữ liệu cấu hình</strong>, lắp vào đúng một bộ máy:</p>
+    <div class="panel">
+      <div class="flow">
+        <span class="node">Agent row + SOUL.md/AGENTS.md<small>+ skills, tools, secrets, tiers</small></span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node hl">agentcore.New(…)</span>
+        <span class="arr" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>
+        <span class="node">Run<small>chat · manual · schedule · webhook</small></span>
+      </div>
+      <p class="flow-note">Cùng một policy gate, cùng một cách giải secret, cùng SSRF guard, sandbox và trace cho <em>mọi</em> agent — từ Data Analyst trong Marketplace đến con agent bạn tự tạo. Lab của AgentGarden dùng chính <span class="ui">stepGate</span> của vòng lặp để dừng run trước từng bước, mọi hành vi khác giữ nguyên.</p>
+    </div>
+    <div class="callout info">
+      <span class="ic" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>
+      <div>
+        <p><b>Quy tắc biên</b> — agentcore không import gì từ các package dùng nó (agentruntime, storage). Thứ gì riêng của sản phẩm đều đi vào qua interface. Chiều ngược lại cũng là luật của repo: <b>thêm agent mới = thêm cấu hình</b> (preset trong marketplace, skill, scope) — không bao giờ là code backend mới.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>Tài liệu giải thích agentcore của AgentRay, dựng theo lối 0→1 · Nguồn sự thật: <span class="ui">agentray/agentcore/*.go</span> (agent.go, loop.go, tool.go, permission.go, definition.go, memory.go, session.go, compaction.go, contextedit.go, cacheanchor.go, subagent.go) và ARCHITECT-AGENTGARDEN.md.</footer>
+</main>
+</body>
+</html>

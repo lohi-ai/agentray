@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Teams hoạt động thế nào — AgentRay</title>
+<style>
+  /* ==== AgentRay tokens — mirrored 1:1 from web/app/globals.css :root ==== */
+  :root {
+    color-scheme: dark;
+    --background: #0A0E12;
+    --surface-1: #11161F;
+    --surface-2: #161C26;
+    --surface-3: #1E2733;
+    --surface-4: #28323F;
+    --foreground: #E9EEF4;
+    --muted-foreground: #8C97A8;
+    --faint: #5C6678;
+    --border: #222C38;
+    --input: #2C3645;
+    --primary: #22c786;
+    --primary-hover: #3fe0a0;
+    --primary-foreground: #04221a;
+    --agent: #8a7cff;
+    --agent-foreground: #0e0828;
+    --data: #46b7e8;
+    --success: #3fcb7a;
+    --warning: #e8a93b;
+    --danger: #f0626b;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 14px;
+    --fast: 120ms;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; border-color: var(--border); }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
+  }
+  ::selection { background: color-mix(in srgb, var(--primary) 34%, transparent); }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px 64px; }
+
+  /* Header — imitates the app's Intro block */
+  header { padding: 40px 0 8px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .brand .logo {
+    display: grid; place-items: center; width: 34px; height: 34px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+    color: var(--primary);
+  }
+  .brand b { font-size: 15px; letter-spacing: -0.02em; }
+  .brand span { color: var(--muted-foreground); font-size: 12.5px; }
+  h1 { font-size: 26px; line-height: 1.25; letter-spacing: -0.03em; margin: 0 0 10px; }
+  .sub { color: var(--muted-foreground); font-size: 14.5px; max-width: 640px; margin: 0; }
+
+  h2 {
+    font-size: 17px; letter-spacing: -0.02em;
+    margin: 44px 0 6px;
+    display: flex; align-items: center; gap: 9px;
+  }
+  h2 .ic {
+    display: grid; place-items: center; width: 26px; height: 26px;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--agent) 18%, transparent);
+    color: var(--agent); flex: none;
+  }
+  .lede { color: var(--muted-foreground); font-size: 13.5px; margin: 0 0 16px; max-width: 660px; }
+
+  /* Panel — imitates signal-primitives Panel */
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 16px;
+  }
+
+  /* Step cards */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .step { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 16px; }
+  .step .n {
+    display: grid; place-items: center; width: 26px; height: 26px;
+    border-radius: 999px; margin-bottom: 10px;
+    background: color-mix(in srgb, var(--primary) 20%, transparent);
+    color: var(--primary);
+    font-family: var(--font-mono); font-size: 12.5px; font-weight: 700;
+  }
+  .step h3 { font-size: 13.5px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .step p { font-size: 12.5px; color: var(--muted-foreground); margin: 0; }
+
+  /* Roster mock — imitates TeamPage roster rows */
+  .roster-row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    font-size: 13px; font-weight: 500;
+  }
+  .roster-row:last-child { border-bottom: 0; }
+  .avatar {
+    display: grid; place-items: center; width: 26px; height: 26px; flex: none;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--agent) 18%, transparent);
+    color: var(--agent); font-size: 12px; font-weight: 700;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  }
+  .pill.lead { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary-hover); }
+  .pill.member { background: var(--surface-3); color: var(--muted-foreground); }
+  .roster-role { color: var(--muted-foreground); font-size: 11.5px; font-weight: 400; }
+  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); margin: 0 0 8px; }
+
+  /* Kanban mock — imitates TeamPage board */
+  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .col {
+    display: flex; flex-direction: column; gap: 10px;
+    min-height: 150px; padding: 12px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  }
+  .col-head {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted-foreground);
+  }
+  .col-head .count { font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .col-head .vi { margin-inline-start: auto; font-size: 10.5px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted-foreground); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 11px 12px; }
+  .card .t { font-size: 13px; font-weight: 500; line-height: 1.4; margin: 0 0 6px; }
+  .card .who { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted-foreground); }
+  .card .who .avatar { width: 18px; height: 18px; font-size: 9.5px; border-radius: 5px; }
+  .col-empty { padding: 10px 0; text-align: center; font-size: 11.5px; color: var(--muted-foreground); }
+
+  /* Chat exchange mock */
+  .chat { display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 620px; padding: 10px 14px; border-radius: var(--radius-lg); font-size: 13px; }
+  .msg.you { align-self: flex-end; background: color-mix(in srgb, var(--primary) 16%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent); }
+  .msg.lead-msg { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
+  .msg .from { display: block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); margin-bottom: 4px; }
+  .msg.you .from { color: var(--primary-hover); }
+  .msg code { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-3); border-radius: var(--radius-sm); padding: 1px 5px; }
+
+  /* Fact list */
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .fact { display: flex; gap: 11px; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 14px 15px; }
+  .fact .ic { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border-radius: var(--radius-md); }
+  .fact .ic.g { background: color-mix(in srgb, var(--primary) 18%, transparent); color: var(--primary); }
+  .fact .ic.p { background: color-mix(in srgb, var(--agent) 18%, transparent); color: var(--agent); }
+  .fact .ic.b { background: color-mix(in srgb, var(--data) 18%, transparent); color: var(--data); }
+  .fact .ic.w { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .fact h3 { font-size: 13.5px; margin: 0 0 3px; }
+  .fact p { font-size: 12.5px; color: var(--muted-foreground); margin: 0; }
+
+  /* Safety callout */
+  .callout {
+    display: flex; gap: 12px;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    border-radius: var(--radius-xl);
+    padding: 15px 16px;
+  }
+  .callout .ic { color: var(--warning); flex: none; margin-top: 2px; }
+  .callout p { margin: 0; font-size: 13px; }
+  .callout p + p { margin-top: 6px; }
+  .callout b { color: var(--warning); }
+
+  /* Start checklist */
+  ol.start { margin: 0; padding: 0 0 0 2px; list-style: none; counter-reset: s; }
+  ol.start li {
+    counter-increment: s;
+    display: flex; gap: 12px; align-items: baseline;
+    padding: 10px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    font-size: 13.5px;
+  }
+  ol.start li:last-child { border-bottom: 0; }
+  ol.start li::before {
+    content: counter(s);
+    display: grid; place-items: center;
+    width: 22px; height: 22px; flex: none;
+    border-radius: 999px;
+    background: var(--surface-3); color: var(--foreground);
+    font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+    transform: translateY(4px);
+  }
+  ol.start .hint { color: var(--muted-foreground); font-size: 12.5px; }
+  kbd, .ui { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap; }
+
+  footer { margin-top: 48px; color: var(--muted-foreground); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+
+  a { color: var(--data); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--ring, var(--primary)); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+  @media (max-width: 900px) {
+    .steps { grid-template-columns: 1fr 1fr; }
+    .board { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 560px) {
+    .steps { grid-template-columns: 1fr; }
+    .board { grid-template-columns: 1fr; }
+    .facts { grid-template-columns: 1fr; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="6" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M7.2 11l9.4-4.2M7.2 13l9.4 4.2"/></svg>
+      </span>
+      <b>AgentRay</b>
+      <span>· Agent Teams</span>
+    </div>
+    <h1>Agent Teams hoạt động thế nào?</h1>
+    <p class="sub">Ghép mấy con agent có sẵn thành một <strong>team</strong>, chọn một <strong>lead (trưởng nhóm)</strong>, giao việc bằng thẻ trên bảng kanban — rồi chỉ việc chat với lead. Lead tự điều thành viên làm và tự cập nhật bảng.</p>
+  </header>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>Bốn bước, một vòng làm việc</h2>
+  <p class="lede">Không cần viết code hay cấu hình gì đặc biệt — team chỉ là cách xếp đội cho mấy con agent bạn đã có.</p>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><h3>Lập team</h3><p>Vào <span class="ui">Teams</span>, tạo team và thêm ít nhất 2 con agent trong project vào roster (danh sách thành viên).</p></div>
+    <div class="step"><span class="n">2</span><h3>Chọn lead</h3><p>Bấm <span class="ui">Make lead</span> ở một thành viên. Chỉ lead mới được cấp skill điều phối và tool thao tác bảng.</p></div>
+    <div class="step"><span class="n">3</span><h3>Thêm thẻ việc</h3><p>Mỗi việc là một thẻ (card) trên bảng kanban, có thể gán cho một thành viên cụ thể.</p></div>
+    <div class="step"><span class="n">4</span><h3>Chat với lead</h3><p>Bảo lead “xử lý bảng”. Lead chia việc cho từng thành viên, gom kết quả về rồi kéo thẻ sang cột kế.</p></div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7z"/><path d="M5 20h14"/></svg></span>Lead là gì — và vì sao chỉ có một?</h2>
+  <p class="lede">Mỗi team có đúng một lead. Nền tảng chỉ tiêm <em>skill điều phối</em> (orchestrator) và tool <span class="ui">team_board</span> cho lead — thành viên còn lại không thấy bảng, cũng không tự giao việc được.</p>
+  <div class="panel" style="margin-bottom:14px;">
+    <p class="panel-title">Roster — ví dụ</p>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">M</span> Marketing Lead <span class="pill lead">Lead</span> <span class="roster-role">điều phối, tổng hợp, báo cáo</span></div>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">D</span> Data Analyst <span class="pill member">Thành viên</span> <span class="roster-role">truy vấn số liệu, dựng biểu đồ</span></div>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">G</span> Growth Lead <span class="pill member">Thành viên</span> <span class="roster-role">đề xuất thử nghiệm tăng trưởng</span></div>
+  </div>
+  <div class="facts">
+    <div class="fact"><span class="ic p" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7z"/><path d="M5 20h14"/></svg></span><div><h3>Lead điều phối</h3><p>Đọc bảng, nhặt thẻ, giao đúng người, gom kết quả về rồi cập nhật trạng thái thẻ.</p></div></div>
+    <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2"/></svg></span><div><h3>Thành viên chỉ làm việc được giao</h3><p>Mỗi việc được giao chạy thành một delegate run riêng, bằng đúng quyền, tool và persona của chính con agent đó.</p></div></div>
+    <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></span><div><h3>Một bảng, hai bàn tay</h3><p>Bạn và lead làm chung một bảng: lead kéo thẻ qua tool <span class="ui">team_board</span>, bạn kéo thẻ thẳng trên giao diện — chung một dữ liệu.</p></div></div>
+    <div class="fact"><span class="ic w" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div><h3>Run nào cũng có vết</h3><p>Từng delegate run đều hiện trong <span class="ui">Agent monitor</span> với token, chi phí và log đầy đủ — ai làm gì, lúc nào, xem được hết.</p></div></div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></span>Bảng kanban: 4 cột cố định</h2>
+  <p class="lede">Thẻ đi một chiều từ trái sang phải. Tên cột giữ nguyên tiếng Anh như trên giao diện.</p>
+  <div class="board">
+    <div class="col">
+      <div class="col-head">Backlog <span class="count">2</span><span class="vi">chờ làm</span></div>
+      <div class="card"><p class="t">Viết bài giới thiệu tính năng đọc offline</p><span class="who"><span class="avatar" aria-hidden="true">?</span> Chưa gán</span></div>
+      <div class="card"><p class="t">Rà soát sự kiện analytics tuần này</p><span class="who"><span class="avatar" aria-hidden="true">D</span> Data Analyst</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Doing <span class="count">1</span><span class="vi">đang làm</span></div>
+      <div class="card"><p class="t">Phân tích phễu đăng ký tháng 7</p><span class="who"><span class="avatar" aria-hidden="true">D</span> Data Analyst</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Review <span class="count">1</span><span class="vi">chờ duyệt</span></div>
+      <div class="card"><p class="t">Bản nháp lịch nội dung tuần 29</p><span class="who"><span class="avatar" aria-hidden="true">M</span> Marketing Lead</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Done <span class="count">0</span><span class="vi">xong</span></div>
+      <div class="col-empty">Trống</div>
+    </div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Một phiên làm việc trông ra sao</h2>
+  <p class="lede">Bạn chat với lead như chat với một PM. Phía sau, lead tự gọi thành viên và tự cập nhật bảng.</p>
+  <div class="panel chat">
+    <div class="msg you"><span class="from">Bạn</span>Bảng đang có gì? Xử lý giúp mình các thẻ Backlog nhé.</div>
+    <div class="msg lead-msg"><span class="from">Marketing Lead — trưởng nhóm</span>Bảng có 2 thẻ Backlog. Mình giao <em>“Rà soát sự kiện analytics”</em> cho Data Analyst và tự nhận <em>“Viết bài giới thiệu”</em>. Đã chuyển cả hai sang <code>doing</code>.</div>
+    <div class="msg lead-msg"><span class="from">Marketing Lead — trưởng nhóm</span>Data Analyst xong rồi: 3 event thiếu thuộc tính <code>novel_id</code>, chi tiết nằm trong kết quả run. Bản nháp bài viết cũng xong — mình chuyển cả hai sang <code>review</code> để bạn duyệt.</div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>Rào an toàn: giao việc ≠ được đăng</h2>
+  <div class="callout">
+    <span class="ic" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+    <div>
+      <p>Run do lead giao (delegate run) được tính là <b>run không ai trông</b> — giống run theo lịch. Ở autonomy (mức tự chủ) <b>Suggest</b> hoặc <b>Scheduled</b> (mặc định), nền tảng <b>tự gỡ tool đăng tải Fetch / HTTP</b> khỏi mấy run này: thành viên chỉ làm tới bản nháp, không tự đăng ra ngoài được.</p>
+      <p>Chỉ khi workspace chủ động bật mức <b>Auto</b> (trong <span class="ui">Set up → Permissions → Autonomy</span>) thì run không ai trông mới được giữ tool đăng tải — và khi đó con agent phải tự ghi log những gì nó đã đăng.</p>
+    </div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>Bắt đầu trong 2 phút</h2>
+  <div class="panel">
+    <ol class="start">
+      <li><div>Mở <span class="ui">Teams</span> trên thanh điều hướng, bấm <span class="ui">New team</span>. <span class="hint">Team thuộc về project hiện tại.</span></div></li>
+      <li><div>Thêm ít nhất 2 con agent vào roster. <span class="hint">Dùng agent có sẵn hoặc cài nhanh từ Marketplace (Data Analyst, Marketing Lead…).</span></div></li>
+      <li><div>Bấm <span class="ui">Make lead</span> ở con agent bạn muốn làm lead.</div></li>
+      <li><div>Thêm vài thẻ việc bằng <span class="ui">New card</span> — mỗi thẻ một việc cụ thể, gán người nếu muốn.</div></li>
+      <li><div>Mở <span class="ui">Chat</span>, chọn lead và nhắn: <em>“Xử lý bảng của team X giúp mình.”</em> <span class="hint">Theo dõi các run trong Agent monitor.</span></div></li>
+    </ol>
+  </div>
+
+  <footer>Tài liệu giải thích tính năng Agent Teams của AgentRay · Cột bảng: Backlog → Doing → Review → Done · Autonomy mặc định: Suggest (run không ai trông thì không được đăng tải).</footer>
+</main>
+</body>
+</html>

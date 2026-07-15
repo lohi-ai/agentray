@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Agent Teams work — AgentRay</title>
+<style>
+  /* ==== AgentRay tokens — mirrored 1:1 from web/app/globals.css :root ==== */
+  :root {
+    color-scheme: dark;
+    --background: #0A0E12;
+    --surface-1: #11161F;
+    --surface-2: #161C26;
+    --surface-3: #1E2733;
+    --surface-4: #28323F;
+    --foreground: #E9EEF4;
+    --muted-foreground: #8C97A8;
+    --faint: #5C6678;
+    --border: #222C38;
+    --input: #2C3645;
+    --primary: #22c786;
+    --primary-hover: #3fe0a0;
+    --primary-foreground: #04221a;
+    --agent: #8a7cff;
+    --agent-foreground: #0e0828;
+    --data: #46b7e8;
+    --success: #3fcb7a;
+    --warning: #e8a93b;
+    --danger: #f0626b;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 14px;
+    --fast: 120ms;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; border-color: var(--border); }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
+  }
+  ::selection { background: color-mix(in srgb, var(--primary) 34%, transparent); }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px 64px; }
+
+  /* Header — imitates the app's Intro block */
+  header { padding: 40px 0 8px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+  .brand .logo {
+    display: grid; place-items: center; width: 34px; height: 34px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--primary) 22%, transparent);
+    color: var(--primary);
+  }
+  .brand b { font-size: 15px; letter-spacing: -0.02em; }
+  .brand span { color: var(--muted-foreground); font-size: 12.5px; }
+  h1 { font-size: 26px; line-height: 1.25; letter-spacing: -0.03em; margin: 0 0 10px; }
+  .sub { color: var(--muted-foreground); font-size: 14.5px; max-width: 640px; margin: 0; }
+
+  h2 {
+    font-size: 17px; letter-spacing: -0.02em;
+    margin: 44px 0 6px;
+    display: flex; align-items: center; gap: 9px;
+  }
+  h2 .ic {
+    display: grid; place-items: center; width: 26px; height: 26px;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--agent) 18%, transparent);
+    color: var(--agent); flex: none;
+  }
+  .lede { color: var(--muted-foreground); font-size: 13.5px; margin: 0 0 16px; max-width: 660px; }
+
+  /* Panel — imitates signal-primitives Panel */
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 16px;
+  }
+
+  /* Step cards */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .step { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 16px; }
+  .step .n {
+    display: grid; place-items: center; width: 26px; height: 26px;
+    border-radius: 999px; margin-bottom: 10px;
+    background: color-mix(in srgb, var(--primary) 20%, transparent);
+    color: var(--primary);
+    font-family: var(--font-mono); font-size: 12.5px; font-weight: 700;
+  }
+  .step h3 { font-size: 13.5px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .step p { font-size: 12.5px; color: var(--muted-foreground); margin: 0; }
+
+  /* Roster mock — imitates TeamPage roster rows */
+  .roster-row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    font-size: 13px; font-weight: 500;
+  }
+  .roster-row:last-child { border-bottom: 0; }
+  .avatar {
+    display: grid; place-items: center; width: 26px; height: 26px; flex: none;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--agent) 18%, transparent);
+    color: var(--agent); font-size: 12px; font-weight: 700;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  }
+  .pill.lead { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary-hover); }
+  .pill.member { background: var(--surface-3); color: var(--muted-foreground); }
+  .roster-role { color: var(--muted-foreground); font-size: 11.5px; font-weight: 400; }
+  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); margin: 0 0 8px; }
+
+  /* Kanban mock — imitates TeamPage board */
+  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .col {
+    display: flex; flex-direction: column; gap: 10px;
+    min-height: 150px; padding: 12px;
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  }
+  .col-head {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted-foreground);
+  }
+  .col-head .count { font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 11px 12px; }
+  .card .t { font-size: 13px; font-weight: 500; line-height: 1.4; margin: 0 0 6px; }
+  .card .who { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted-foreground); }
+  .card .who .avatar { width: 18px; height: 18px; font-size: 9.5px; border-radius: 5px; }
+  .col-empty { padding: 10px 0; text-align: center; font-size: 11.5px; color: var(--muted-foreground); }
+
+  /* Chat exchange mock */
+  .chat { display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 620px; padding: 10px 14px; border-radius: var(--radius-lg); font-size: 13px; }
+  .msg.you { align-self: flex-end; background: color-mix(in srgb, var(--primary) 16%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent); }
+  .msg.lead-msg { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
+  .msg .from { display: block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); margin-bottom: 4px; }
+  .msg.you .from { color: var(--primary-hover); }
+  .msg code { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-3); border-radius: var(--radius-sm); padding: 1px 5px; }
+
+  /* Fact list */
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .fact { display: flex; gap: 11px; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 14px 15px; }
+  .fact .ic { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border-radius: var(--radius-md); }
+  .fact .ic.g { background: color-mix(in srgb, var(--primary) 18%, transparent); color: var(--primary); }
+  .fact .ic.p { background: color-mix(in srgb, var(--agent) 18%, transparent); color: var(--agent); }
+  .fact .ic.b { background: color-mix(in srgb, var(--data) 18%, transparent); color: var(--data); }
+  .fact .ic.w { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+  .fact h3 { font-size: 13.5px; margin: 0 0 3px; }
+  .fact p { font-size: 12.5px; color: var(--muted-foreground); margin: 0; }
+
+  /* Safety callout */
+  .callout {
+    display: flex; gap: 12px;
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    border-radius: var(--radius-xl);
+    padding: 15px 16px;
+  }
+  .callout .ic { color: var(--warning); flex: none; margin-top: 2px; }
+  .callout p { margin: 0; font-size: 13px; }
+  .callout p + p { margin-top: 6px; }
+  .callout b { color: var(--warning); }
+
+  /* Start checklist */
+  ol.start { margin: 0; padding: 0 0 0 2px; list-style: none; counter-reset: s; }
+  ol.start li {
+    counter-increment: s;
+    display: flex; gap: 12px; align-items: baseline;
+    padding: 10px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    font-size: 13.5px;
+  }
+  ol.start li:last-child { border-bottom: 0; }
+  ol.start li::before {
+    content: counter(s);
+    display: grid; place-items: center;
+    width: 22px; height: 22px; flex: none;
+    border-radius: 999px;
+    background: var(--surface-3); color: var(--foreground);
+    font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+    transform: translateY(4px);
+  }
+  ol.start .hint { color: var(--muted-foreground); font-size: 12.5px; }
+  kbd, .ui { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 6px; white-space: nowrap; }
+
+  footer { margin-top: 48px; color: var(--muted-foreground); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+
+  a { color: var(--data); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--ring, var(--primary)); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+  @media (max-width: 900px) {
+    .steps { grid-template-columns: 1fr 1fr; }
+    .board { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 560px) {
+    .steps { grid-template-columns: 1fr; }
+    .board { grid-template-columns: 1fr; }
+    .facts { grid-template-columns: 1fr; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="6" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M7.2 11l9.4-4.2M7.2 13l9.4 4.2"/></svg>
+      </span>
+      <b>AgentRay</b>
+      <span>· Agent Teams</span>
+    </div>
+    <h1>How do Agent Teams work?</h1>
+    <p class="sub">Group your existing agents into a <strong>team</strong>, pick one <strong>lead</strong>, hand out work as cards on a kanban board — then just talk to the lead. The lead orchestrates the members and keeps the board up to date.</p>
+  </header>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>Four steps, one working loop</h2>
+  <p class="lede">No code and no special configuration — a team is just a way to organize the agents you already have.</p>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><h3>Form the team</h3><p>Go to <span class="ui">Teams</span>, create a team, and add at least 2 project agents to the roster.</p></div>
+    <div class="step"><span class="n">2</span><h3>Pick a lead</h3><p>Click <span class="ui">Make lead</span> on one member. Only the lead is granted the orchestration skill and the board tool.</p></div>
+    <div class="step"><span class="n">3</span><h3>Add work cards</h3><p>Each piece of work is a card on the kanban board, optionally assigned to a specific member.</p></div>
+    <div class="step"><span class="n">4</span><h3>Chat with the lead</h3><p>Ask the lead to “work the board”. The lead delegates to each member, collects results, and moves cards to the next column.</p></div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7z"/><path d="M5 20h14"/></svg></span>What is the lead — and why only one?</h2>
+  <p class="lede">In every team, exactly one agent holds the lead role. The platform injects the <em>orchestrator skill</em> and the <span class="ui">team_board</span> tool into the lead only — the other members can't see the board and can't delegate work on their own.</p>
+  <div class="panel" style="margin-bottom:14px;">
+    <p class="panel-title">Roster — example</p>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">M</span> Marketing Lead <span class="pill lead">Lead</span> <span class="roster-role">orchestrates, aggregates, reports</span></div>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">D</span> Data Analyst <span class="pill member">Member</span> <span class="roster-role">queries data, builds charts</span></div>
+    <div class="roster-row"><span class="avatar" aria-hidden="true">G</span> Growth Lead <span class="pill member">Member</span> <span class="roster-role">proposes growth experiments</span></div>
+  </div>
+  <div class="facts">
+    <div class="fact"><span class="ic p" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7z"/><path d="M5 20h14"/></svg></span><div><h3>The lead orchestrates</h3><p>It reads the board, picks cards, delegates each one to the best-suited member, collects results, and updates card status.</p></div></div>
+    <div class="fact"><span class="ic b" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2"/></svg></span><div><h3>Members only do assigned work</h3><p>Each assignment runs as its own delegate run under that agent's own permissions, tools, and persona.</p></div></div>
+    <div class="fact"><span class="ic g" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></span><div><h3>One board, two hands</h3><p>You and the lead work the same board: the lead moves cards through the <span class="ui">team_board</span> tool, you drag cards directly in the UI — same underlying data.</p></div></div>
+    <div class="fact"><span class="ic w" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div><h3>Every run is recorded</h3><p>Each delegate run shows up in the <span class="ui">Agent monitor</span> with tokens, cost, and a full log — you can see who did what, and when.</p></div></div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></span>The kanban board: 4 fixed columns</h2>
+  <p class="lede">Cards travel one way, left to right.</p>
+  <div class="board">
+    <div class="col">
+      <div class="col-head">Backlog <span class="count">2</span></div>
+      <div class="card"><p class="t">Write the launch post for offline reading</p><span class="who"><span class="avatar" aria-hidden="true">?</span> Unassigned</span></div>
+      <div class="card"><p class="t">Audit this week's analytics events</p><span class="who"><span class="avatar" aria-hidden="true">D</span> Data Analyst</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Doing <span class="count">1</span></div>
+      <div class="card"><p class="t">Analyze the July signup funnel</p><span class="who"><span class="avatar" aria-hidden="true">D</span> Data Analyst</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Review <span class="count">1</span></div>
+      <div class="card"><p class="t">Draft content calendar for week 29</p><span class="who"><span class="avatar" aria-hidden="true">M</span> Marketing Lead</span></div>
+    </div>
+    <div class="col">
+      <div class="col-head">Done <span class="count">0</span></div>
+      <div class="col-empty">Empty</div>
+    </div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>What a working session looks like</h2>
+  <p class="lede">You talk to the lead like a project manager. Behind the scenes, it calls the members and updates the board itself.</p>
+  <div class="panel chat">
+    <div class="msg you"><span class="from">You</span>What's on the board? Please work through the Backlog cards.</div>
+    <div class="msg lead-msg"><span class="from">Marketing Lead — team lead</span>The board has 2 Backlog cards. I'm delegating <em>“Audit analytics events”</em> to Data Analyst and taking <em>“Write the launch post”</em> myself. Both moved to <code>doing</code>.</div>
+    <div class="msg lead-msg"><span class="from">Marketing Lead — team lead</span>Data Analyst is done: 3 events are missing the <code>novel_id</code> property, details in the run output. The launch-post draft is ready too — I've moved both to <code>review</code> for you.</div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>The safety rail: delegated ≠ allowed to publish</h2>
+  <div class="callout">
+    <span class="ic" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+    <div>
+      <p>Runs the lead delegates (delegate runs) count as <b>unattended runs</b> — same as scheduled runs. At the <b>Suggest</b> or <b>Scheduled</b> autonomy rungs (the default), the platform <b>automatically strips the Fetch / HTTP publishing tools</b> from these runs: members stop at drafts and can never publish externally on their own.</p>
+      <p>Only when the workspace deliberately opts into the <b>Auto</b> rung (under <span class="ui">Set up → Permissions → Autonomy</span>) do unattended runs keep their publishing tools — and the agent then owes an audit trail of everything it published.</p>
+    </div>
+  </div>
+
+  <h2><span class="ic" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>Get started in 2 minutes</h2>
+  <div class="panel">
+    <ol class="start">
+      <li><div>Open <span class="ui">Teams</span> in the navigation and click <span class="ui">New team</span>. <span class="hint">Teams belong to the current project.</span></div></li>
+      <li><div>Add at least 2 agents to the roster. <span class="hint">Use existing agents or install from the Marketplace (Data Analyst, Marketing Lead…).</span></div></li>
+      <li><div>Click <span class="ui">Make lead</span> on the agent you want in charge.</div></li>
+      <li><div>Add a few work cards with <span class="ui">New card</span> — one concrete task per card, assign if you like.</div></li>
+      <li><div>Open <span class="ui">Chat</span>, pick the lead, and ask: <em>“Work the board for team X, please.”</em> <span class="hint">Watch the runs in Agent monitor.</span></div></li>
+    </ol>
+  </div>
+
+  <footer>Explainer for AgentRay's Agent Teams feature · Board columns: Backlog → Doing → Review → Done · Default autonomy rung: Suggest (no unattended publishing).</footer>
+</main>
+</body>
+</html>
