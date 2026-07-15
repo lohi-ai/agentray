@@ -502,7 +502,22 @@ type TemplateChart struct {
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Store, error) {
-	pg, err := pgxpool.New(ctx, cfg.PostgresURL)
+	pgCfg, err := pgxpool.ParseConfig(cfg.PostgresURL)
+	if err != nil {
+		return nil, err
+	}
+	// Bound the pool against the shared docai-db instance (100-connection budget
+	// split across api, tts-api, translate-api, and the cli). pgxpool otherwise
+	// defaults to max(4, numCPU) with no lifetime recycling, and no per-statement
+	// cap — so a stuck query would pin a connection indefinitely.
+	pgCfg.MaxConns = 6
+	pgCfg.MaxConnIdleTime = 30 * time.Second
+	pgCfg.MaxConnLifetime = 30 * time.Minute
+	if pgCfg.ConnConfig.RuntimeParams == nil {
+		pgCfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	pgCfg.ConnConfig.RuntimeParams["statement_timeout"] = "15000"
+	pg, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
 		return nil, err
 	}
