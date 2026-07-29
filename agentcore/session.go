@@ -42,6 +42,12 @@ const (
 	// is how a consumer rewinds a session to an earlier entry, or switches to
 	// another branch, without rewriting history (pi's branch()/leaf pointer).
 	EntryLeafMove SessionEntryKind = "leaf_move"
+	// EntryGoal records the run's goal-gate condition (Config.Goal), written at
+	// the start of a goal-gated run so a resume re-arms the gate — without it a
+	// crashed /goal run would resume ungated while its replayed transcript still
+	// carries the gate's nudge messages. A leaf closes the goal along with the
+	// run, so later runs chained onto the same log are not gated by it.
+	EntryGoal SessionEntryKind = "goal"
 )
 
 // SessionEntry is one immutable record in the append-only session log. The log
@@ -51,23 +57,24 @@ const (
 // implicitly to the entry appended before it, so a flat log written by an older
 // writer is a single-branch tree and reduces exactly as before.
 type SessionEntry struct {
-	Seq       int              `json:"seq"` // append order, assigned by the store
-	Kind      SessionEntryKind `json:"kind"`
-	ID        string           `json:"id,omitempty"`        // stable entry id (writer-assigned)
-	ParentID  string           `json:"parent_id,omitempty"` // tree parent; "" chains to the previous entry
-	Target    string           `json:"target,omitempty"`    // EntryLeafMove: the new active leaf
-	Turn      int              `json:"turn,omitempty"`
-	Message   *Message         `json:"message,omitempty"` // EntryMessage
-	Model     string           `json:"model,omitempty"`   // EntryModelChange
-	Tools     []string         `json:"tools,omitempty"`   // EntryActiveToolsChange
-	Tool      string           `json:"tool,omitempty"`    // EntryToolDisabled
-	Summary   string           `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
-	Final     bool             `json:"final,omitempty"`   // EntryCompaction completion marker
+	Seq      int              `json:"seq"` // append order, assigned by the store
+	Kind     SessionEntryKind `json:"kind"`
+	ID       string           `json:"id,omitempty"`        // stable entry id (writer-assigned)
+	ParentID string           `json:"parent_id,omitempty"` // tree parent; "" chains to the previous entry
+	Target   string           `json:"target,omitempty"`    // EntryLeafMove: the new active leaf
+	Turn     int              `json:"turn,omitempty"`
+	Message  *Message         `json:"message,omitempty"` // EntryMessage
+	Model    string           `json:"model,omitempty"`   // EntryModelChange
+	Tools    []string         `json:"tools,omitempty"`   // EntryActiveToolsChange
+	Tool     string           `json:"tool,omitempty"`    // EntryToolDisabled
+	Goal     string           `json:"goal,omitempty"`    // EntryGoal: the run's completion condition
+	Summary  string           `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
+	Final    bool             `json:"final,omitempty"`   // EntryCompaction completion marker
 	// Usage records what the summarization call itself cost (EntryCompaction
 	// completion / EntryBranchSummary). Compaction and branch summaries are real
 	// billable provider calls; without this they are invisible spend (pi #6671).
-	Usage *Usage `json:"usage,omitempty"`
-	CreatedAt time.Time        `json:"created_at"`
+	Usage     *Usage    `json:"usage,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // SessionStore is the append-only durability seam (extends the working-memory
@@ -90,6 +97,7 @@ type ReducedState struct {
 	DisabledTools     []string // tools the circuit breaker disabled (EntryToolDisabled)
 	Completed         bool     // an EntryLeaf was seen
 	PendingCompaction bool     // a compaction start with no completion
+	Goal              string   // goal-gate condition of the unfinished tail run (EntryGoal)
 	LastTurn          int
 }
 
@@ -135,8 +143,13 @@ func ReduceSession(log []SessionEntry) ReducedState {
 			} else {
 				rs.PendingCompaction = true
 			}
+		case EntryGoal:
+			rs.Goal = e.Goal
 		case EntryLeaf:
 			rs.Completed = true
+			// The goal belongs to the run that just finished; a later run chained
+			// onto this log (a chat continuation) must not inherit its gate.
+			rs.Goal = ""
 		}
 	}
 	return rs
@@ -195,6 +208,7 @@ type ResumePlan struct {
 	ActiveTools     []string
 	DisabledTools   []string   // tools the circuit breaker disabled; re-applied on resume
 	Completed       bool       // run already reached a leaf; nothing to resume
+	Goal            string     // goal-gate condition of the interrupted run, re-armed on resume
 	Interrupted     bool       // the last turn did not complete
 	RerunCompaction bool       // an unfinished compaction must be re-run first
 	RetryCalls      []ToolCall // dangling calls whose tools are retry-safe
@@ -214,6 +228,7 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 		ActiveTools:     rs.ActiveTools,
 		DisabledTools:   rs.DisabledTools,
 		Completed:       rs.Completed,
+		Goal:            rs.Goal,
 		RerunCompaction: rs.PendingCompaction,
 	}
 	if rs.Completed {

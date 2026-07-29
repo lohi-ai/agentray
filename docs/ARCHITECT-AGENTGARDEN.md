@@ -54,6 +54,22 @@ No separate engine exists for user-created agents. The same policy gate,
 credential resolution, HTTP SSRF guard, sandbox, traces, and usecase boundary apply
 to every agent.
 
+### Goal gate (`/goal`)
+
+A chat message starting with `/goal <condition>` (task on the following lines,
+optional) runs that turn goal-gated: the completion contract lands in the system
+prompt, and the run may only stop by ending its answer with `STATUS: DONE` (goal
+met) or `STATUS: BLOCKED` (+ reason). The sentinel is matched on the answer's
+closing line only (mentioning it mid-prose does not count), and the goal is
+recorded in the durable log so a crash-resumed run stays gated. A finish
+without either sentinel is
+re-opened with a keep-going nudge. The gate is uncapped but never wedges a run —
+turn/tool/budget limits still bound the loop, a budget wrap-up bypasses it, and a
+verbatim-repeated answer stops as `goal_stalled`. Mechanism:
+`agentcore.Config.Goal` (`agentcore/goal.go`), threaded per run via
+`RunOptions.Goal`; the chat directive parser is `parseGoalDirective`
+(`internal/agentruntime/chat.go`).
+
 ## Tools and secrets
 
 - Tool kinds are code-defined and audited once.

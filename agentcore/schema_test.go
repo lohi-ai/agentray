@@ -60,6 +60,42 @@ func TestValidateArgs_RequiredAndTypes(t *testing.T) {
 	}
 }
 
+// TestValidateArgs_UnionTypes verifies list-valued type constraints — the
+// nullable form ["string","null"] — accept any member and reject the rest,
+// instead of silently passing everything (pi #7243's nullable-schema gap).
+func TestValidateArgs_UnionTypes(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"tag":   map[string]any{"type": []any{"string", "null"}},
+			"items": map[string]any{"type": []any{"array", "null"}},
+			// A malformed member (7) must be skipped, not disable the union.
+			"mixed": map[string]any{"type": []any{"string", 7, "null"}},
+		},
+	}
+	cases := []struct {
+		name    string
+		args    string
+		wantErr bool
+	}{
+		{"string member ok", `{"tag":"a"}`, false},
+		{"null member ok", `{"tag":null}`, false},
+		{"non-member rejected", `{"tag":7}`, true},
+		{"array member ok", `{"items":[1,2]}`, false},
+		{"object not in union", `{"items":{"a":1}}`, true},
+		{"malformed member skipped, valid member ok", `{"mixed":"a"}`, false},
+		{"malformed member skipped, non-member rejected", `{"mixed":true}`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateArgs(c.args, schema)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("validateArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
+			}
+		})
+	}
+}
+
 // TestLoopRejectsBadArgs verifies a schema-invalid tool call is blocked before
 // execution, the precise reason reaches the model, and the tool never runs.
 func TestLoopRejectsBadArgs(t *testing.T) {

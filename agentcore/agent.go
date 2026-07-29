@@ -49,6 +49,14 @@ type Agent struct {
 	// returning, so a conversation continues within one bounded run (pi's
 	// follow-up queue).
 	getFollowUp func(ctx context.Context) []Message
+	// finishGuard, when set, is consulted on a normal finish before the
+	// follow-up drain: a non-empty nudge re-opens the run for a bounded verify/
+	// repair pass (hermes-agent's verify-on-stop; see finishguard.go).
+	finishGuard FinishGuard
+	// goal, when non-empty, activates the run-level goal gate (goal.go): the
+	// completion contract is added to the system prompt and a normal finish
+	// without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens the run.
+	goal string
 	// prepareNextTurn, when set, is called after each completed turn with the
 	// current TurnState; the returned state (model / tools / system) drives the
 	// next turn without mutating the in-flight one. nil keeps the run static.
@@ -243,6 +251,23 @@ type Config struct {
 	// GetFollowUpMessages is an optional callback drained when the agent would
 	// stop; returned messages restart the loop instead of ending the run.
 	GetFollowUpMessages func(ctx context.Context) []Message
+	// FinishGuard, when set, is consulted when the model produces a final
+	// answer and the run would end normally: a non-empty return is injected as
+	// a synthetic user message and the loop continues, bounded at
+	// maxFinishNudges per run (verify-on-stop). It runs before the follow-up
+	// drain and never fires on a budget wrap-up, tool-budget stop, MaxTurns
+	// stop, abort, or terminal tool. nil accepts every finish.
+	FinishGuard FinishGuard
+	// Goal, when non-empty, declares the condition under which this run may
+	// stop (Claude Code /goal analog; see goal.go). The completion contract is
+	// appended to the system prompt, and a normal finish whose answer lacks a
+	// STATUS: DONE or STATUS: BLOCKED sentinel is re-opened with a keep-going
+	// nudge. Uncapped, but still bounded by MaxTurns / MaxToolCalls / the
+	// budget gate, and a repeated identical answer breaks the loop with
+	// StopReason "goal_stalled". The goal is recorded in the durable log
+	// (EntryGoal), so a resumed run stays gated even when the resuming caller
+	// cannot re-supply it. Empty — the default — disables the gate.
+	Goal string
 	// PrepareNextTurn is an optional save-point hook called after each turn; the
 	// returned TurnState (model / tools / system) drives the next turn. nil keeps
 	// the model, tools, and prompt fixed for the whole run.
@@ -373,6 +398,8 @@ func New(cfg Config) (*Agent, error) {
 		escalation:         cfg.Escalation,
 		getSteering:        cfg.GetSteeringMessages,
 		getFollowUp:        cfg.GetFollowUpMessages,
+		finishGuard:        cfg.FinishGuard,
+		goal:               cfg.Goal,
 		prepareNextTurn:    cfg.PrepareNextTurn,
 		budgetGate:         cfg.BudgetGate,
 		session:            cfg.Session,

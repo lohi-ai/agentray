@@ -385,6 +385,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// needs no special step — the reduced history still carries the full span,
 	// so the in-loop compaction guard simply fires again.
 	resumed := false
+	// goal is the run's effective goal-gate condition: the configured one, or —
+	// on a resume that didn't re-supply it — the one recovered from the durable
+	// log below, so a crashed /goal run never resumes ungated.
+	goal := a.goal
 	if a.resumeSession && a.session != nil && a.sessionID != "" {
 		slog, lerr := a.session.Log(ctx, a.sessionID)
 		if lerr != nil {
@@ -409,6 +413,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// fresh run; its entries chain onto the existing log.
 			case len(plan.Messages) > 0:
 				resumed = true
+				if goal == "" {
+					goal = plan.Goal
+				}
 				for _, name := range plan.DisabledTools {
 					disabledTools[name] = true
 				}
@@ -500,6 +507,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// existing log above, in which case the history is already durable and new
 	// entries chain onto it instead.
 	if !resumed {
+		// Record the goal first so RecoverSession re-arms the gate on a resumed
+		// run even when the caller cannot re-supply Config.Goal.
+		if goal != "" {
+			appendEntry(SessionEntry{Kind: EntryGoal, Goal: goal})
+		}
 		for i := range messages {
 			m := messages[i]
 			appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
@@ -517,6 +529,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 	}
 	system := buildSystemPrompt(a.def, recalled, skills)
+	// A goal-gated run learns the completion protocol up front: the contract
+	// rides in the system prompt (fresh and resumed runs alike — the system
+	// message is rebuilt every run; on a resume the goal itself comes back via
+	// the log's EntryGoal when the caller didn't re-supply it).
+	if goal != "" {
+		system += goalContract(goal)
+	}
 	if system != "" {
 		res.Messages = append([]Message{{Role: RoleSystem, Content: system}}, res.Messages...)
 	}
@@ -566,6 +585,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// budgetFinalizing latches once the budget gate trips: the loop injects one
 	// tool-free wrap-up turn and then stops with StopReason "budget_exhausted".
 	budgetFinalizing := false
+	// finishNudges counts verify-on-stop injections so an unsatisfiable
+	// FinishGuard cannot loop the run against MaxTurns (cap: maxFinishNudges).
+	finishNudges := 0
+	// goalNudges / lastGoalFinal drive the goal gate's stall breaker: after a
+	// nudge, a finish repeating the previous answer verbatim is accepted as
+	// "goal_stalled" instead of burning turns until MaxTurns.
+	goalNudges := 0
+	lastGoalFinal := ""
 	// freeTurns refunds turns spent only on plan bookkeeping (update_plan) so the
 	// built-in todo list can't starve the MaxTurns budget on a long task. The
 	// MaxToolCalls budget still backstops a runaway planning loop.
@@ -755,6 +782,55 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 				flush()
 				return res, nil
+			}
+			// Goal gate (/goal): a goal-gated run may only stop when the answer
+			// declares STATUS: DONE or STATUS: BLOCKED (contract in the system
+			// prompt). Otherwise inject a keep-going nudge — persisted like a
+			// steer — and continue. Runs before the finish guard: an unmet goal
+			// makes any verify pass on this answer moot. A budget wrap-up never
+			// reaches here (returned above), and MaxTurns / MaxToolCalls still
+			// bound the extended loop. The stall breaker accepts a verbatim
+			// repeat of the previous nudged answer so a model with nothing new
+			// to say stops as "goal_stalled" instead of spinning.
+			if goal != "" && !goalSatisfied(res.Final) {
+				if goalNudges > 0 && res.Final == lastGoalFinal {
+					res.StopReason = "goal_stalled"
+					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+					appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
+					flush()
+					return res, nil
+				}
+				goalNudges++
+				lastGoalFinal = res.Final
+				m := Message{Role: RoleUser, Content: goalNudge(goal)}
+				res.Messages = append(res.Messages, m)
+				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+				emit(StreamEvent{Type: StreamProgress, Note: "Goal not met — continuing.", Turn: res.Turns})
+				emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+				flush()
+				continue
+			}
+			// Finish guard (verify-on-stop): before accepting the finish, let a
+			// configured guard inspect the answer + tool trace and demand one
+			// bounded verify/repair pass. The nudge is persisted like a steer so a
+			// resume replays the same conversation. Runs before the follow-up drain
+			// — the guard is about the answer just produced, while follow-ups are
+			// new input for after an accepted finish.
+			if a.finishGuard != nil && finishNudges < maxFinishNudges {
+				state := FinishState{Final: res.Final, Turns: res.Turns, Tools: res.Tools, Nudges: finishNudges}
+				if nudge := consultFinishGuard(ctx, a.finishGuard, state); nudge != "" {
+					finishNudges++
+					m := Message{Role: RoleUser, Content: nudge}
+					res.Messages = append(res.Messages, m)
+					appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+					// Curated note, not the raw nudge: progress notes reach the end
+					// user's chat feed (same pattern as the goal gate above), while
+					// the nudge text itself is internal rail scaffolding.
+					emit(StreamEvent{Type: StreamProgress, Note: "Verifying the answer before finishing.", Turn: res.Turns})
+					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+					flush()
+					continue
+				}
 			}
 			// Follow-up: after the agent would stop, drain any queued follow-up
 			// messages and restart the loop instead of returning, so a conversation

@@ -89,6 +89,32 @@ type chatWork struct {
 	// work timeline (design §7.3). Empty disables mirroring (legacy /chat).
 	ConversationID string
 	OnRunID        func(string)
+	// Goal, when non-empty, activates the run-level goal gate for this turn
+	// (parsed from a leading "/goal <condition>" line; see parseGoalDirective).
+	Goal string
+}
+
+// parseGoalDirective splits a leading "/goal <condition>" line off a chat
+// message (Claude Code /goal analog). The first line after "/goal" is the
+// completion condition (surrounding quotes tolerated); the remaining lines are
+// the task. A directive with no task keeps the condition as the prompt, so
+// `/goal all 172 tests pass` alone still starts a gated run. Messages not
+// starting with the directive pass through unchanged (goal == "").
+func parseGoalDirective(message string) (goal, rest string) {
+	trimmed := strings.TrimSpace(message)
+	body, ok := strings.CutPrefix(trimmed, "/goal")
+	if !ok || (body != "" && !strings.ContainsAny(body[:1], " \t\n")) {
+		return "", message // absent, or a different word like "/goals"
+	}
+	line, task, _ := strings.Cut(strings.TrimSpace(body), "\n")
+	goal = strings.Trim(strings.TrimSpace(line), `"'`)
+	if goal == "" {
+		return "", message // bare "/goal" with no condition — treat as plain text
+	}
+	if rest = strings.TrimSpace(task); rest == "" {
+		rest = "Work toward this goal until it is satisfied: " + goal
+	}
+	return goal, rest
 }
 
 // ChatService owns one conversational turn of the general agent. It holds a
@@ -124,9 +150,16 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	}
 	emit(agentcore.StreamEvent{Type: agentcore.StreamProgress, Note: "Reading your message…"})
 
-	dec, err := s.classify(ctx, opts.ProjectID, opts.History, opts.Message)
-	if err != nil {
-		return ChatResult{}, err
+	// A "/goal …" directive is always work — skip the small-talk classifier and
+	// hand the stripped task plus the goal condition straight to the agent run.
+	goal, message := parseGoalDirective(opts.Message)
+
+	dec := chatDecision{Route: routeData}
+	if goal == "" {
+		var err error
+		if dec, err = s.classify(ctx, opts.ProjectID, opts.History, opts.Message); err != nil {
+			return ChatResult{}, err
+		}
 	}
 
 	// Direct reply (small talk / persona): stream it word-by-word, no run.
@@ -142,9 +175,9 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		return ChatResult{Route: dec.Route}, fmt.Errorf("agentruntime: no handler for route %q", dec.Route)
 	}
 	res, err := s.handle(ctx, chatWork{
-		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: opts.Message,
+		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
 		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
-		OnRunID: opts.OnRunID,
+		OnRunID: opts.OnRunID, Goal: goal,
 	}, sink)
 	res.Route = dec.Route
 	if err != nil {
@@ -316,7 +349,7 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 
 	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
-		History: req.History, SessionID: req.SessionID, OnRunID: onRunID,
+		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
 	}, wrapped)
 	if runErr != nil {
 		return ChatResult{RunID: run.ID, Tools: res.Tools, Turns: res.Turns}, runErr

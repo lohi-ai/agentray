@@ -57,18 +57,39 @@ func validateObject(obj, schema map[string]any) error {
 }
 
 // validateValue checks one field value against its property schema (type + enum).
-// Unknown or absent type constraints pass.
+// Unknown or absent type constraints pass. A union type list — the common
+// nullable form `"type": ["string", "null"]` — accepts a value matching ANY
+// member; before this, a list-valued type skipped checking entirely, so a
+// nullable field silently accepted every shape (pi #7243's nullable-schema
+// validation gap).
 func validateValue(name string, value any, propSchema map[string]any) error {
 	if enum, ok := propSchema["enum"].([]any); ok && len(enum) > 0 {
 		if !enumContains(enum, value) {
 			return fmt.Errorf("field %q must be one of %s", name, formatEnum(enum))
 		}
 	}
-	typ, _ := propSchema["type"].(string)
-	if typ == "" || matchesJSONType(value, typ) {
-		return nil
+	switch typ := propSchema["type"].(type) {
+	case string:
+		if !matchesJSONType(value, typ) {
+			return fmt.Errorf("field %q must be a %s", name, typ)
+		}
+	case []any:
+		names := make([]string, 0, len(typ))
+		for _, t := range typ {
+			tn, ok := t.(string)
+			if !ok {
+				continue // malformed member — skip it, still honor the valid ones
+			}
+			if matchesJSONType(value, tn) {
+				return nil
+			}
+			names = append(names, tn)
+		}
+		if len(names) > 0 {
+			return fmt.Errorf("field %q must be a %s", name, strings.Join(names, " or "))
+		}
 	}
-	return fmt.Errorf("field %q must be a %s", name, typ)
+	return nil
 }
 
 // missingRequired returns the names listed in schema.required that are absent

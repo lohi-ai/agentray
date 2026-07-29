@@ -7,9 +7,9 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/credential"
-	"github.com/lohi-ai/agentray/sandbox"
 	"github.com/lohi-ai/agentray/internal/storage"
 	"github.com/lohi-ai/agentray/internal/usecase"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // defaultRunMaxTokens caps a run's per-turn model output when the caller doesn't
@@ -284,6 +284,12 @@ type RunOptions struct {
 	// the provider's own cap. Set a generous value for runs that emit large
 	// artifacts so output isn't truncated with stop_reason:"length".
 	MaxTokens int
+	// Goal, when non-empty, is this run's completion condition (Claude Code
+	// /goal analog). The model is told to end with STATUS: DONE once the goal
+	// holds (or STATUS: BLOCKED with the reason), and a finish without either
+	// sentinel re-opens the run. Still bounded by turn/tool/budget limits.
+	// Empty — the default — leaves the run ungated.
+	Goal string
 }
 
 // Run executes one agent run and returns the persisted run row plus the loop
@@ -575,19 +581,24 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		CompactionProvider: compactProvider,
 		CompactionModel:    compactTC.Model,
 		Scopes:             ScopesFromMap(cfg.Scopes),
-		Soul:               def.SoulMD,
-		Agents:             def.AgentsMD,
-		Skills:             skills,
-		SkillLoader:        r.skillLoader(scopeID),
-		Data:               r.Store,
-		Memory:             mem,
-		Notifier:           r.Notifier,
-		RunID:              runID,
-		Sandbox:            r.Sandbox,
-		Credentials:        creds,
-		Tools:              runTools,
-		Tracer:             r.Tracer,
-		StepGate:           opts.StepGate,
+		// Verify-on-stop rail: a figure-shaped answer produced with zero evidence
+		// tool executions re-opens the run once (verify or disclaim). nil when the
+		// agent's scopes grant no read tools, so persona-only agents are untouched.
+		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes)),
+		Goal:        opts.Goal,
+		Soul:        def.SoulMD,
+		Agents:      def.AgentsMD,
+		Skills:      skills,
+		SkillLoader: r.skillLoader(scopeID),
+		Data:        r.Store,
+		Memory:      mem,
+		Notifier:    r.Notifier,
+		RunID:       runID,
+		Sandbox:     r.Sandbox,
+		Credentials: creds,
+		Tools:       runTools,
+		Tracer:      r.Tracer,
+		StepGate:    opts.StepGate,
 		// Durable resume: key the append-only log on the run id (the FK that the
 		// resume endpoint and the trace both use) — unless this run continues an
 		// earlier run's session, in which case the ORIGINAL log keeps growing

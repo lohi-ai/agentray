@@ -21,6 +21,22 @@ var scopeTools = map[string][]string{
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolRemember, ToolSendNotification},
 }
 
+// readTools classifies which scope-granted tools READ project data, versus the
+// authoring/side-effect tools (create_chart, create_dashboard,
+// submit_recommendation, remember, send_notification). Kept beside scopeTools
+// so a scope gaining a new tool is classified in the same file — the evidence
+// guard (evidence_guard.go) derives its evidence set from this, and a read
+// tool missing here would silently be treated as non-evidence.
+var readTools = map[string]bool{
+	ToolActivitySummary: true,
+	ToolRecentEvents:    true,
+	ToolExploreEvents:   true,
+	ToolPersons:         true,
+	ToolRunSQL:          true,
+	ToolRunInsight:      true,
+	ToolListDashboards:  true,
+}
+
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.
 func ScopesFromMap(m map[string]bool) Scopes {
 	return Scopes{

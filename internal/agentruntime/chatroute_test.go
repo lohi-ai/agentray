@@ -137,6 +137,57 @@ func TestChatRoutesToData(t *testing.T) {
 	}
 }
 
+func TestParseGoalDirective(t *testing.T) {
+	cases := []struct {
+		name     string
+		message  string
+		wantGoal string
+		wantRest string
+	}{
+		{"condition and task", "/goal all tests pass\nfix the flaky suite", "all tests pass", "fix the flaky suite"},
+		{"quoted condition", `/goal "STATUS report published"` + "\ndo it", "STATUS report published", "do it"},
+		{"condition only", "/goal churn dashboard exists", "churn dashboard exists", "Work toward this goal until it is satisfied: churn dashboard exists"},
+		{"bare directive", "/goal", "", "/goal"},
+		{"different word", "/goals for this quarter?", "", "/goals for this quarter?"},
+		{"plain message", "how many signups?", "", "how many signups?"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			goal, rest := parseGoalDirective(tc.message)
+			if goal != tc.wantGoal || rest != tc.wantRest {
+				t.Fatalf("parseGoalDirective(%q) = (%q,%q), want (%q,%q)", tc.message, goal, rest, tc.wantGoal, tc.wantRest)
+			}
+		})
+	}
+}
+
+func TestChatGoalDirectiveBypassesClassifier(t *testing.T) {
+	var got chatWork
+	svc := &ChatService{
+		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
+			t.Fatal("classifier must not run for a /goal directive")
+			return chatDecision{}, nil
+		},
+		handle: func(_ context.Context, req chatWork, _ agentcore.StreamSink) (ChatResult, error) {
+			got = req
+			return ChatResult{RunID: "run1", Final: "done.\nSTATUS: DONE"}, nil
+		},
+	}
+	res, err := svc.Chat(context.Background(), ChatOptions{ProjectID: "p", Message: "/goal weekly report saved\nwrite the weekly report"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got.Goal != "weekly report saved" {
+		t.Fatalf("goal not threaded to the handler: %+v", got)
+	}
+	if got.Message != "write the weekly report" {
+		t.Fatalf("directive not stripped from the prompt: %q", got.Message)
+	}
+	if res.Route != routeData {
+		t.Fatalf("route = %q, want data", res.Route)
+	}
+}
+
 func TestChatUnknownRoute(t *testing.T) {
 	svc := &ChatService{
 		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {

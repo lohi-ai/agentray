@@ -8,8 +8,8 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/opcore"
-	"github.com/lohi-ai/agentray/sandbox"
 	"github.com/lohi-ai/agentray/internal/usecase"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // BuildParams is everything needed to construct a Growth Analyst agent for one
@@ -157,6 +157,16 @@ type BuildParams struct {
 	// JSON Schema at the provider (structured outputs). For verdict-shaped
 	// agents (moderation / classification presets); nil leaves output free.
 	OutputSchema *agentcore.OutputSchema
+	// FinishGuard, when set, is consulted when the model produces a final
+	// answer (agentcore's verify-on-stop): a non-empty return re-opens the run
+	// with a bounded synthetic follow-up. The runner wires the evidence guard
+	// here (see evidence_guard.go); nil accepts every finish.
+	FinishGuard agentcore.FinishGuard
+	// Goal, when non-empty, activates agentcore's run-level goal gate (Claude
+	// Code /goal analog): the completion contract lands in the system prompt
+	// and a finish without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens
+	// the run. Empty — the default — leaves runs ungated.
+	Goal string
 }
 
 // resolveBaseURL applies the §13.1 precedence: per-config base_url ->
@@ -336,6 +346,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	}
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.OutputSchema = p.OutputSchema
+	cfg.FinishGuard = p.FinishGuard
+	cfg.Goal = p.Goal
 	cfg.Policy = agentcore.NewAllowList(names...)
 	if p.MaxContextTokens > 0 {
 		limits := agentcore.DefaultLimits()
