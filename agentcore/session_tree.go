@@ -179,15 +179,17 @@ type BranchOptions struct {
 	// EntryBranchSummary appended to the new branch, so context from the
 	// abandoned work survives the switch (pi's branch summarization on /tree).
 	// A summarizer error or empty summary degrades to a bare leaf move — a
-	// rewind never fails on a flaky summarizer.
-	Summarize func(ctx context.Context, abandoned []Message) (string, error)
+	// rewind never fails on a flaky summarizer. The returned Usage is the
+	// summarization call's own spend; Rewind stamps it onto the branch-summary
+	// entry so this real provider call is never invisible spend.
+	Summarize func(ctx context.Context, abandoned []Message) (string, Usage, error)
 }
 
 // NewBranchSummarizer adapts a provider+model into BranchOptions.Summarize
 // using the same structured-checkpoint prompt as compaction, so branch
 // summaries and compaction checkpoints read identically to the model.
-func NewBranchSummarizer(provider LLMProvider, model string) func(ctx context.Context, abandoned []Message) (string, error) {
-	return func(ctx context.Context, abandoned []Message) (string, error) {
+func NewBranchSummarizer(provider LLMProvider, model string) func(ctx context.Context, abandoned []Message) (string, Usage, error) {
+	return func(ctx context.Context, abandoned []Message) (string, Usage, error) {
 		return summarizeSpan(ctx, provider, model, abandoned, "")
 	}
 }
@@ -211,13 +213,16 @@ func Rewind(ctx context.Context, store SessionStore, sessionID, targetID string,
 	if opts.Summarize != nil && leaf != "" && leaf != targetID {
 		anc := commonAncestor(nodes, byID, leaf, targetID)
 		if abandoned := spanMessages(nodes, byID, leaf, anc); len(abandoned) > 0 {
-			if summary, serr := opts.Summarize(ctx, abandoned); serr == nil && strings.TrimSpace(summary) != "" {
+			if summary, su, serr := opts.Summarize(ctx, abandoned); serr == nil && strings.TrimSpace(summary) != "" {
 				bs := SessionEntry{
 					Kind:      EntryBranchSummary,
 					ID:        newEntryID(),
 					ParentID:  targetID,
 					Summary:   strings.TrimSpace(summary),
 					CreatedAt: time.Now(),
+				}
+				if su != (Usage{}) {
+					bs.Usage = &su
 				}
 				if bs.ID != "" {
 					if err := store.Append(ctx, sessionID, bs); err != nil {

@@ -19,7 +19,23 @@ const (
 	// anthropicExtendedCacheBeta is the beta opt-in required for the 1-hour cache
 	// window; the default 5-minute window needs no beta header.
 	anthropicExtendedCacheBeta = "extended-cache-ttl-2025-04-11"
+	// anthropicStructuredOutputBeta is the beta opt-in for output_format
+	// (grammar-constrained JSON answers).
+	anthropicStructuredOutputBeta = "structured-outputs-2025-11-13"
 )
+
+// antBetaHeader assembles the anthropic-beta header for a request: the
+// comma-joined set of betas it actually uses, or "" when none apply.
+func antBetaHeader(req ChatRequest) string {
+	var betas []string
+	if usesExtendedCache(req) {
+		betas = append(betas, anthropicExtendedCacheBeta)
+	}
+	if req.OutputSchema != nil {
+		betas = append(betas, anthropicStructuredOutputBeta)
+	}
+	return strings.Join(betas, ",")
+}
 
 // antCacheTTL maps the neutral CacheRetention hint onto an Anthropic cache TTL:
 // a long/24h hint asks for the extended 1-hour window, anything else uses the
@@ -129,6 +145,15 @@ type antRequest struct {
 	Messages []antMessage `json:"messages"`
 	Tools    []antTool    `json:"tools,omitempty"`
 	Stream   bool         `json:"stream,omitempty"`
+	// OutputFormat constrains the text answer to a JSON Schema (structured
+	// outputs beta). Sent only when the neutral request carries an OutputSchema.
+	OutputFormat *antOutputFormat `json:"output_format,omitempty"`
+}
+
+// antOutputFormat is Anthropic's structured-output selector (json_schema form).
+type antOutputFormat struct {
+	Type   string         `json:"type"`
+	Schema map[string]any `json:"schema"`
 }
 
 // antUsage mirrors Anthropic's usage block. input_tokens already *excludes* the
@@ -174,8 +199,8 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (ChatResp
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", p.APIKey)
 	httpReq.Header.Set("anthropic-version", anthropicVersion)
-	if usesExtendedCache(req) {
-		httpReq.Header.Set("anthropic-beta", anthropicExtendedCacheBeta)
+	if betas := antBetaHeader(req); betas != "" {
+		httpReq.Header.Set("anthropic-beta", betas)
 	}
 
 	resp, err := p.HTTP.Do(httpReq)
@@ -263,8 +288,8 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req ChatRequest) (<-chan
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("x-api-key", p.APIKey)
 	httpReq.Header.Set("anthropic-version", anthropicVersion)
-	if usesExtendedCache(req) {
-		httpReq.Header.Set("anthropic-beta", anthropicExtendedCacheBeta)
+	if betas := antBetaHeader(req); betas != "" {
+		httpReq.Header.Set("anthropic-beta", betas)
 	}
 
 	resp, err := p.HTTP.Do(httpReq)
@@ -374,6 +399,9 @@ func (p *AnthropicProvider) encode(req ChatRequest) antRequest {
 		maxTokens = anthropicDefaultTokens
 	}
 	out := antRequest{Model: req.Model, MaxTokens: maxTokens}
+	if req.OutputSchema != nil {
+		out.OutputFormat = &antOutputFormat{Type: "json_schema", Schema: req.OutputSchema.Schema}
+	}
 
 	var systemParts []string
 	var anchored []int // out.Messages indices whose source message carried CacheAnchor

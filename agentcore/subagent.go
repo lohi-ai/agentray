@@ -156,6 +156,24 @@ func (t *subagentTool) Name() string { return ToolSpawnSubagent }
 // ("spawn three children, then synthesize") runs them concurrently.
 func (t *subagentTool) Parallel() bool { return true }
 
+// RetrySafeCall marks a spawn call safe to re-issue after a crash only when it
+// self-forks: the child session ID is deterministic in (parent session, tool
+// call ID), so a replayed self-fork reattaches — returning a completed child's
+// recorded answer, or resuming an interrupted child from its own durable log —
+// instead of running a duplicate child. A delegate-routed spawn has no such
+// wiring (Delegate.Run is an opaque closure under the target agent's identity),
+// so replaying it would re-run the teammate's entire task; those calls are left
+// dangling for the model to decide. (On a storeless run recovery never happens,
+// so the declaration is moot.)
+func (t *subagentTool) RetrySafeCall(call ToolCall) bool {
+	var in subagentArgs
+	if err := json.Unmarshal([]byte(call.Arguments), &in); err != nil {
+		return false
+	}
+	who := strings.TrimSpace(in.Agent)
+	return who == "" || strings.EqualFold(who, "self")
+}
+
 func (t *subagentTool) Schema() ToolSchema {
 	props := map[string]any{
 		"task": map[string]any{
@@ -267,6 +285,11 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 			if ev.Type == StreamToolExecStart && ev.Tool != nil {
 				emit(fmt.Sprintf("[%s] running %s", label, ev.Tool.Tool))
 			}
+			// Surface the child's own progress notes (reattach / resume / budget)
+			// so the parent's viewer sees why a spawn returned instantly.
+			if ev.Type == StreamProgress && ev.Note != "" {
+				emit(fmt.Sprintf("[%s] %s", label, ev.Note))
+			}
 		}
 	}
 
@@ -283,8 +306,27 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 		}
 	} else {
 		child := t.parent.fork()
+		seed := []Message{{Role: RoleUser, Content: prompt}}
+		// A durable parent gives the child a durable session of its own, with an
+		// ID derived deterministically from (parent session, tool call): the same
+		// logical spawn always maps to the same child session (pi's deterministic
+		// child-session IDs). A replayed spawn call therefore REATTACHES instead
+		// of duplicating: a child that already completed returns its recorded
+		// answer without re-running (no duplicate spend or side effects), and a
+		// child that crashed mid-run resumes from its own log. This is what makes
+		// spawn_subagent safe to declare RetrySafe.
+		if callID, ok := ToolCallID(ctx); ok && t.parent.session != nil && t.parent.sessionID != "" {
+			child.session = t.parent.session
+			child.sessionID = t.parent.sessionID + "/" + callID
+			// Drive-level resume does the rest: a completed child log reattaches
+			// (recorded answer, zero provider calls), an interrupted one resumes
+			// from its own history — its own dangling retry-safe calls replayed
+			// with their original IDs, the breaker's verdicts re-applied — and an
+			// empty one runs fresh from the seed.
+			child.resumeSession = true
+		}
 		var res RunResult
-		res, err = child.runLoop(ctx, []Message{{Role: RoleUser, Content: prompt}}, task, sink)
+		res, err = child.runLoop(ctx, seed, task, sink)
 		// Fold the child's spend before handling the error (a child's own
 		// children are already folded into res.Usage by its runLoop, recursively).
 		t.parent.addChildUsage(res.Usage)

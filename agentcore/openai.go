@@ -136,6 +136,23 @@ type oaiRequest struct {
 	// ReasoningEffort asks a reasoning model for that much thinking per turn
 	// ("low" | "medium" | "high"). Sent only when the neutral request sets it.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ResponseFormat constrains the answer to a JSON Schema (structured
+	// outputs). Sent only when the neutral request carries an OutputSchema, so
+	// strict compat servers are otherwise unaffected.
+	ResponseFormat *oaiResponseFormat `json:"response_format,omitempty"`
+}
+
+// oaiResponseFormat is OpenAI's structured-output selector; the json_schema
+// form is emitted, strict only when the caller opted in (see OutputSchema.Strict).
+type oaiResponseFormat struct {
+	Type       string        `json:"type"`
+	JSONSchema oaiJSONSchema `json:"json_schema"`
+}
+
+type oaiJSONSchema struct {
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
 }
 
 type oaiStreamOptions struct {
@@ -539,6 +556,20 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 // compat table.
 func (p *OpenAIProvider) encode(req ChatRequest) oaiRequest {
 	out := oaiRequest{Model: req.Model, MaxTokens: req.MaxTokens, PromptCacheKey: req.CacheKey, ReasoningEffort: req.ReasoningEffort}
+	if req.OutputSchema != nil {
+		name := req.OutputSchema.Name
+		if name == "" {
+			name = "output"
+		}
+		// Strict is caller-opt-in: OpenAI's strict mode 400s on any schema
+		// outside its subset (draft-07 features like oneOf/format, optional
+		// properties), so hardcoding it would turn a valid schema into a fatal
+		// error every turn instead of the documented soft-degrade.
+		out.ResponseFormat = &oaiResponseFormat{
+			Type:       "json_schema",
+			JSONSchema: oaiJSONSchema{Name: name, Strict: req.OutputSchema.Strict, Schema: req.OutputSchema.Schema},
+		}
+	}
 	for _, m := range req.Messages {
 		om := oaiMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID, Name: m.Name}
 		for _, tc := range m.ToolCalls {

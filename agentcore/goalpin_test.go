@@ -43,7 +43,7 @@ func TestGoalPinnedOnFirstCompaction(t *testing.T) {
 	prov := &scriptedSummaryProvider{summary: "## Goal\nsomething the model paraphrased\n## Next Steps\n1. go"}
 	msgs := goalTranscript(goal)
 
-	out := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
+	out, _ := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
 
 	got, ok := findGoalPin(out)
 	if !ok {
@@ -78,7 +78,7 @@ func TestGoalSurvivesRepeatedCompaction(t *testing.T) {
 	msgs := goalTranscript(goal)
 
 	for round := 0; round < 5; round++ {
-		msgs = compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
+		msgs, _ = compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
 		// Simulate the run growing again between compactions so there is always an
 		// older span to fold on the next round.
 		for i := 0; i < 8; i++ {

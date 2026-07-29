@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/storage"
@@ -19,7 +20,9 @@ import (
 // without storage needing to understand any of them; kind/turn are also lifted
 // into columns for cheap ordering and filtering. The sessionID the loop passes is
 // the run id (the same id the trace sink keys on), so the durable log and the
-// per-LLM-call trace attribute to the same run.
+// per-LLM-call trace attribute to the same run — or, for a spawned sub-agent, the
+// derived "<runID>/<toolCallID>" child key, which still attributes (and cascades)
+// to the root run via its UUID prefix.
 type pgSessionStore struct {
 	store *storage.Store
 }
@@ -29,8 +32,19 @@ func NewSessionStore(store *storage.Store) agentcore.SessionStore {
 	return &pgSessionStore{store: store}
 }
 
-// Append persists one entry. The store assigns the per-run sequence number; the
-// returned seq is discarded here because the loop never reads it back mid-run
+// rootRunID extracts the agent_runs UUID a session key hangs off. A run's own
+// log is keyed by its run id verbatim; a sub-agent child session is keyed
+// "<runID>/<toolCallID>" (agentcore's deterministic child-session ids), so the
+// prefix before the first "/" is the root run for the FK/cascade.
+func rootRunID(sessionID string) string {
+	if i := strings.IndexByte(sessionID, '/'); i >= 0 {
+		return sessionID[:i]
+	}
+	return sessionID
+}
+
+// Append persists one entry. The store assigns the per-session sequence number;
+// the returned seq is discarded here because the loop never reads it back mid-run
 // (resume reads the whole ordered log). Best-effort is the loop's contract — a
 // durability write must never break a run — but we surface the error so a failing
 // store is visible to the (best-effort) caller.
@@ -40,7 +54,8 @@ func (s *pgSessionStore) Append(ctx context.Context, sessionID string, entry age
 		return err
 	}
 	_, err = s.store.AppendAgentSessionEntry(ctx, storage.AgentSessionEntry{
-		RunID:       sessionID,
+		RunID:       rootRunID(sessionID),
+		SessionKey:  sessionID,
 		Kind:        string(entry.Kind),
 		Turn:        entry.Turn,
 		PayloadJSON: string(payload),

@@ -516,7 +516,12 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	if pgCfg.ConnConfig.RuntimeParams == nil {
 		pgCfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	pgCfg.ConnConfig.RuntimeParams["statement_timeout"] = "15000"
+	// Default the per-statement cap only when the DSN didn't set one
+	// (`?options=-c statement_timeout=...` / `statement_timeout=` in the URL),
+	// so an operator can override it without a code change.
+	if _, ok := pgCfg.ConnConfig.RuntimeParams["statement_timeout"]; !ok {
+		pgCfg.ConnConfig.RuntimeParams["statement_timeout"] = "15000"
+	}
 	pg, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
 		return nil, err
@@ -540,7 +545,23 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		chDatabase: cfg.ClickHouseDatabase,
 		resolvers:  newResolverCache(30 * time.Second),
 	}
-	if err := store.migrate(ctx, cfg); err != nil {
+	// Migrations run on their own single-connection pool with the per-statement
+	// cap lifted: DDL and one-time backfills on grown production tables can
+	// legitimately exceed the 15s runtime cap, and aborting boot mid-migration
+	// is strictly worse than a slow one. The runtime pool above keeps its cap.
+	migCfg := pgCfg.Copy()
+	migCfg.MaxConns = 1
+	migCfg.ConnConfig.RuntimeParams["statement_timeout"] = "0"
+	migPG, err := pgxpool.NewWithConfig(ctx, migCfg)
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	store.pg = migPG
+	err = store.migrate(ctx, cfg)
+	migPG.Close()
+	store.pg = pg
+	if err != nil {
 		store.Close()
 		return nil, err
 	}

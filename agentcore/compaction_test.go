@@ -48,7 +48,7 @@ func longTranscript() []Message {
 func TestCompactWithSummary_ReplacesOlderSpan(t *testing.T) {
 	prov := &scriptedSummaryProvider{summary: "## Goal\nfinish the task\n## Next Steps\n1. continue"}
 	msgs := longTranscript()
-	out := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
+	out, _ := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
 
 	if prov.calls != 1 {
 		t.Fatalf("expected 1 summarization call, got %d", prov.calls)
@@ -119,7 +119,7 @@ func TestCompactWithSummary_IterativeUpdate(t *testing.T) {
 		)
 	}
 
-	out := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
+	out, _ := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
 
 	if prov.calls != 1 {
 		t.Fatalf("expected 1 summarization call, got %d", prov.calls)
@@ -164,7 +164,7 @@ func TestSplitPriorSummary(t *testing.T) {
 func TestCompactWithSummary_FallsBackOnError(t *testing.T) {
 	prov := &scriptedSummaryProvider{err: errors.New("boom")}
 	msgs := longTranscript()
-	out := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
+	out, _ := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3000})
 	// Falls back to deterministic elide: no summary marker, still shrinks/holds.
 	for _, m := range out {
 		if strings.HasPrefix(m.Content, summaryMarker) {

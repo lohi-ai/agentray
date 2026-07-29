@@ -102,6 +102,43 @@ The acceptance test for AgentGarden is the novel request moderator. It moderates
 The target Novel API exposes audited operations under `/novel/agent/*` plus a
 capability manifest. AgentGarden does not hardcode novel moderation behavior.
 
+### Second surface: reader edit-suggestion pre-review
+
+The same `agent_mod` principal also pre-reviews reader-submitted paragraph
+edits, and it needed **zero** AgentGarden code — only three new operations and a
+playbook section in the Novel API's manifest (`list_edit_queue`,
+`get_edit_context`, `submit_edit_verdict`). Nothing about the agent changes:
+same key, same `http_request` allowlist, same trigger.
+
+Note what carried the second and largest improvement: `get_edit_context`, which
+hands the reviewer the paragraphs around the edit and how comparable edits were
+judged before. That is **input**, not capability — the agent gained no new
+power, it simply stopped being asked to judge a two-line diff blind. When an
+agent's answers are weak, widening what it can *read* is almost always the
+cheaper fix than widening what it can *do*.
+
+The split of responsibility is the point, and it is worth copying for any future
+surface:
+
+| Layer | Owns | Artifact |
+|---|---|---|
+| Agent skill | The judging rubric: what counts as a real fix, what is vandalism, when to answer "unsure", why confidence must be honest. | `kiem-lai/docs/agent-skills/novel-edit-review.md`, pasted into the skill editor |
+| Agent credential | The API key. | `NOVEL_API_KEY` secret, referenced as `{{cred:NOVEL_API_KEY}}` in the `http_request` header config |
+| Novel API manifest | Which operations exist, their paths and payloads. | `GET /novel/agent/skills` |
+| Novel API policy | Turning verdict × confidence × submitter trust into `auto_accept` / `auto_reject` / `human`, and performing the write. | `api/src/modules/edit-suggestions/ai-review.ts` |
+
+That split is the reusable part. **Rubric in a skill, key in a credential,
+operation list in the API manifest, decision in the API.** Each moves for a
+different reason and at a different cadence: the rubric is tuned without a
+deploy, the key rotates without touching the rubric, and the thresholds that
+decide whether a machine may write to a published chapter stay in reviewed,
+tested server code where an agent cannot reach them.
+
+The agent cannot accept a suggestion, cannot write chapter text, and cannot
+raise its own thresholds — it has no such operation. A verdict the policy
+declines to act on is still persisted and shown to the human mod, so the
+low-confidence path is useful work rather than a wasted call.
+
 ## Current shipped state
 
 - Per-agent secrets, tools, triggers, definitions, skills, and task-tier settings

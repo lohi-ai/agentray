@@ -95,6 +95,12 @@ type Agent struct {
 	// resumed (the disable survives via the durable log → RecoverSession). Empty —
 	// the default — starts every tool enabled.
 	seedDisabledTools []string
+	// resumeSession makes the run continue the existing durable log at sessionID
+	// instead of opening a fresh one: drive rebuilds history from the log,
+	// replays dangling retry-safe calls with their original call IDs, and skips
+	// re-persisting the seeds (doing so would double every message in the
+	// reduced history). A completed log short-circuits to its recorded answer.
+	resumeSession bool
 	// maxTokens caps the model's output tokens per turn. 0 — the default — lets
 	// the provider apply its own default (the gateway's cap), which can truncate
 	// large outputs with stop_reason:"length". Set a generous value for agents
@@ -105,6 +111,9 @@ type Agent struct {
 	// reasoning_effort). Providers without the knob ignore it. Empty — the
 	// default — sends nothing, so strict compat servers are unaffected.
 	reasoningEffort string
+	// outputSchema, when set, constrains every text answer to a JSON Schema at
+	// the provider (structured outputs). Verdict-shaped agents only.
+	outputSchema *OutputSchema
 	// subagents, when non-nil, enables the built-in spawn_subagent delegation
 	// tool (still policy-gated): the loop advertises it while the run's
 	// delegation depth (carried on ctx, see DelegationDepth) is below MaxDepth,
@@ -248,6 +257,16 @@ type Config struct {
 	// either unset keeps the run in-memory only.
 	Session   SessionStore
 	SessionID string
+	// ResumeSession, when true (with Session + SessionID set), continues the
+	// existing durable log at SessionID instead of starting a fresh run: the
+	// loop rebuilds history from the log (the seed messages are used only if
+	// the log turns out empty), re-issues dangling retry-safe tool calls with
+	// their ORIGINAL call IDs — reproducing their idempotency keys and child
+	// session IDs, so a replayed spawn_subagent reattaches instead of
+	// re-running — and closes the remaining dangling calls with interrupted
+	// notes. A log that already reached its leaf returns its recorded final
+	// answer without any provider call.
+	ResumeSession bool
 	// StepGate is an optional pause-before-each-turn hook. When set, the loop calls
 	// it at the top of every turn and blocks until it returns; a non-nil error
 	// halts the run. The Lab's explain mode uses it to step a live run; leaving it
@@ -275,6 +294,15 @@ type Config struct {
 	// reasoning_effort). Providers without the knob ignore it; empty sends
 	// nothing.
 	ReasoningEffort string
+	// OutputSchema, when non-nil, constrains every text answer this agent
+	// produces to the given JSON Schema (grammar-constrained decoding at the
+	// provider: OpenAI response_format json_schema strict, Anthropic
+	// structured-outputs output_format). Meant for verdict-shaped agents —
+	// moderation / classification presets that must return machine-parseable
+	// verdict×confidence JSON — not general chat: any plain-text turn must fit
+	// the schema. Providers without the capability ignore it, so callers still
+	// validate the answer. nil — the default — leaves output free-form.
+	OutputSchema *OutputSchema
 	// Subagents, when non-nil, enables the built-in spawn_subagent tool (the
 	// tool must additionally be permitted by Policy): the model may delegate a
 	// self-contained task to an ephemeral child agent that inherits this agent's
@@ -349,6 +377,7 @@ func New(cfg Config) (*Agent, error) {
 		budgetGate:         cfg.BudgetGate,
 		session:            cfg.Session,
 		sessionID:          cfg.SessionID,
+		resumeSession:      cfg.ResumeSession,
 		stepGate:           cfg.StepGate,
 		retry:              retry,
 		cacheKey:           cfg.PromptCacheKey,
@@ -356,6 +385,7 @@ func New(cfg Config) (*Agent, error) {
 		seedDisabledTools:  cfg.SeedDisabledTools,
 		maxTokens:          cfg.MaxTokens,
 		reasoningEffort:    cfg.ReasoningEffort,
+		outputSchema:       cfg.OutputSchema,
 		subagents:          cfg.Subagents,
 		delegates:          cfg.Delegates,
 	}, nil

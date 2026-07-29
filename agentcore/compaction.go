@@ -82,6 +82,27 @@ func estimateBytesTokens(messages []Message) int {
 	return bytes / 4
 }
 
+// effectiveCompaction clamps the keep-recent window to half the compaction
+// budget. Without the clamp, a consumer who sets Limits.MaxContextTokens below
+// KeepRecentTokens (default 20k) wedges the loop: shouldCompact fires every
+// turn, but findCutPoint sees the entire transcript inside the "recent" window
+// (cut 0) and falls back to the deterministic elide — which only collapses
+// bulky tool results, so a transcript whose bulk lives in assistant tool-call
+// arguments or prose passes through untouched, and compaction runs forever
+// without ever shrinking anything.
+func effectiveCompaction(settings CompactionSettings, budget int) CompactionSettings {
+	if budget <= 0 {
+		budget = defaultContextTokenBudget
+	}
+	if settings.KeepRecentTokens <= 0 {
+		settings.KeepRecentTokens = defaultKeepRecentTokens
+	}
+	if settings.KeepRecentTokens > budget/2 {
+		settings.KeepRecentTokens = budget / 2
+	}
+	return settings
+}
+
 // shouldCompact reports whether the estimated context exceeds the budget.
 func shouldCompact(messages []Message, budget int) bool {
 	if budget <= 0 {
@@ -136,15 +157,17 @@ func findCutPoint(body []Message, keepRecentTokens int) int {
 // the recent tail verbatim. The summary call uses the supplied provider/model
 // (the active rung — typically the cheapest). On any failure (provider error,
 // empty summary, nothing old enough) it falls back to the deterministic elide so
-// a run is never broken by compaction.
-func compactWithSummary(ctx context.Context, provider LLMProvider, model string, messages []Message, settings CompactionSettings) []Message {
+// a run is never broken by compaction. The returned Usage is what the
+// summarization call itself spent (zero on the no-LLM paths) so the caller can
+// fold it into run accounting.
+func compactWithSummary(ctx context.Context, provider LLMProvider, model string, messages []Message, settings CompactionSettings) ([]Message, Usage) {
 	sysN := leadingSystemCount(messages)
 	head := messages[:sysN]
 	body := messages[sysN:] // may begin with a prior summary (folded in below)
 
 	cut := findCutPoint(body, settings.KeepRecentTokens)
 	if cut <= 0 {
-		return compact(messages, 6) // nothing old enough for a clean cut; elide
+		return compact(messages, 6), Usage{} // nothing old enough for a clean cut; elide
 	}
 	older := body[:cut]
 	// Tail-overflow guard (pi's split-turn case): findCutPoint snaps the cut back
@@ -169,18 +192,20 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 		// tail guard, otherwise an oversized tail would wedge compaction (fire
 		// every turn, change nothing).
 		if !tailShrunk {
-			return messages
+			return messages, Usage{}
 		}
 		out := make([]Message, 0, len(head)+len(older)+len(tail))
 		out = append(out, head...)
 		out = append(out, older...) // just the prior summary message
 		out = append(out, tail...)
-		return out
+		return out, Usage{}
 	}
 
-	summary, err := summarizeSpan(ctx, provider, model, newOlder, prevSummary)
+	summary, su, err := summarizeSpan(ctx, provider, model, newOlder, prevSummary)
 	if err != nil || strings.TrimSpace(summary) == "" {
-		return compact(messages, 6) // summarization failed — degrade, don't break
+		// Degrade, don't break — but still report su: an empty summary from a
+		// successful call was billed even though its output was unusable.
+		return compact(messages, 6), su
 	}
 
 	summaryMsg := Message{Role: RoleSystem, Content: summaryMarker + "\n" + strings.TrimSpace(summary)}
@@ -196,7 +221,7 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 	}
 	out = append(out, summaryMsg)
 	out = append(out, tail...)
-	return out
+	return out, su
 }
 
 // elideOversizedTail bounds the kept-verbatim tail of a compaction: while its
@@ -274,10 +299,11 @@ func splitPriorSummary(older []Message) (string, []Message) {
 // (roles preserved) and handed to a one-shot, non-streaming Chat call with no
 // tools. When previousSummary is non-empty the model is asked to UPDATE it in
 // place — preserving everything already captured and folding in only the new
-// messages — instead of summarizing from scratch.
-func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span []Message, previousSummary string) (string, error) {
+// messages — instead of summarizing from scratch. The returned Usage is the
+// summarization call's own spend, so it can be billed against the run.
+func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span []Message, previousSummary string) (string, Usage, error) {
 	if len(span) == 0 {
-		return "", fmt.Errorf("empty span")
+		return "", Usage{}, fmt.Errorf("empty span")
 	}
 	var userContent string
 	if strings.TrimSpace(previousSummary) != "" {
@@ -297,9 +323,9 @@ func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span
 	}
 	resp, err := provider.Chat(ctx, req)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
-	return resp.Message.Content, nil
+	return resp.Message.Content, resp.Usage, nil
 }
 
 // Bounds applied when serializing a span for the summarizer, so one giant tool

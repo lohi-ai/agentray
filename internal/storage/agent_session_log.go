@@ -18,8 +18,13 @@ import (
 // AgentSessionEntry is one immutable record in a run's append-only log. Payload
 // is the consumer-marshalled entry body; storage never interprets it.
 type AgentSessionEntry struct {
-	ID          string    `json:"id"`
-	RunID       string    `json:"run_id"`
+	ID    string `json:"id"`
+	RunID string `json:"run_id"`
+	// SessionKey identifies the log this entry belongs to. For a run's own log it
+	// equals RunID; a sub-agent child session appends under a derived key
+	// ("<runID>/<toolCallID>") while RunID stays the root run, so the FK and its
+	// cascade-delete still hang off agent_runs. Empty defaults to RunID.
+	SessionKey  string    `json:"session_key"`
 	Seq         int       `json:"seq"`
 	Kind        string    `json:"kind"`
 	Turn        int       `json:"turn"`
@@ -33,16 +38,28 @@ type AgentSessionEntry struct {
 // repo convention; called from Store.migrate after migrateAgentTrace.
 func (s *Store) migrateAgentSessionLog(ctx context.Context) error {
 	stmts := []string{
+		// session_key is the log identity; run_id is the ROOT run the log hangs
+		// off (FK + cascade). They differ for sub-agent child sessions, whose key
+		// is "<runID>/<toolCallID>" — a derived key, not a run row — so the seq
+		// uniqueness lives on session_key, not run_id.
 		`CREATE TABLE IF NOT EXISTS agent_session_log (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+	session_key TEXT NOT NULL DEFAULT '',
 	seq INT NOT NULL,
 	kind VARCHAR(32) NOT NULL DEFAULT '',
 	turn INT NOT NULL DEFAULT 0,
 	payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-	UNIQUE (run_id, seq)
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`,
+		// Upgrade an existing table in place: add the key, backfill it from
+		// run_id (pre-existing logs are all run-keyed), then move the seq
+		// uniqueness from (run_id, seq) to (session_key, seq) so a child session
+		// sharing the parent's run_id can hold its own seq sequence.
+		`ALTER TABLE agent_session_log ADD COLUMN IF NOT EXISTS session_key TEXT NOT NULL DEFAULT ''`,
+		`UPDATE agent_session_log SET session_key = run_id::text WHERE session_key = ''`,
+		`ALTER TABLE agent_session_log DROP CONSTRAINT IF EXISTS agent_session_log_run_id_seq_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS agent_session_log_session_seq_key ON agent_session_log (session_key, seq)`,
 		`CREATE INDEX IF NOT EXISTS agent_session_log_run_idx ON agent_session_log (run_id, seq ASC)`,
 	}
 	for _, stmt := range stmts {
@@ -63,27 +80,32 @@ func (s *Store) AppendAgentSessionEntry(ctx context.Context, e AgentSessionEntry
 	if payload == "" {
 		payload = "{}"
 	}
+	key := e.SessionKey
+	if key == "" {
+		key = e.RunID
+	}
 	var seq int
 	err := s.pg.QueryRow(ctx, `
-INSERT INTO agent_session_log (run_id, seq, kind, turn, payload_json)
+INSERT INTO agent_session_log (run_id, session_key, seq, kind, turn, payload_json)
 VALUES (
-	$1,
-	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_session_log WHERE run_id = $1),
-	$2, $3, $4::jsonb
+	$1, $2,
+	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_session_log WHERE session_key = $2),
+	$3, $4, $5::jsonb
 )
-RETURNING seq`, e.RunID, e.Kind, e.Turn, payload).Scan(&seq)
+RETURNING seq`, e.RunID, key, e.Kind, e.Turn, payload).Scan(&seq)
 	return seq, err
 }
 
-// AgentSessionLog returns a run's full ordered entry log (oldest first). No RBAC:
-// the caller (runner resume path) has already authorized the run. The fold that
+// AgentSessionLog returns one session's full ordered entry log (oldest first),
+// keyed on session_key (a run id, or a derived child-session key). No RBAC: the
+// caller (runner resume path) has already authorized the run. The fold that
 // rebuilds run state lives in the consumer; storage just returns the rows.
-func (s *Store) AgentSessionLog(ctx context.Context, runID string) ([]AgentSessionEntry, error) {
+func (s *Store) AgentSessionLog(ctx context.Context, sessionKey string) ([]AgentSessionEntry, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, run_id::text, seq, kind, turn, payload_json::text, created_at
+SELECT id::text, run_id::text, session_key, seq, kind, turn, payload_json::text, created_at
 FROM agent_session_log
-WHERE run_id = $1
-ORDER BY seq ASC`, runID)
+WHERE session_key = $1
+ORDER BY seq ASC`, sessionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +113,7 @@ ORDER BY seq ASC`, runID)
 	out := []AgentSessionEntry{}
 	for rows.Next() {
 		var e AgentSessionEntry
-		if err := rows.Scan(&e.ID, &e.RunID, &e.Seq, &e.Kind, &e.Turn, &e.PayloadJSON, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.RunID, &e.SessionKey, &e.Seq, &e.Kind, &e.Turn, &e.PayloadJSON, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

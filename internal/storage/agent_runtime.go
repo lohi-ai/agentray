@@ -26,6 +26,10 @@ type AgentRun struct {
 	AgentID     string     `json:"agent_id"`
 	Trigger     string     `json:"trigger"` // chat | scheduled | manual | webhook
 	Status      string     `json:"status"`  // running | done | error
+	// SessionID is the session this run belongs to: the client conversation id
+	// for a chat run, or — for a resume attempt — the durable session (original
+	// run id) it continued, so ResumeRun can follow the chain back to the log.
+	SessionID string `json:"session_id,omitempty"`
 	TokenInput  int        `json:"token_input"`
 	TokenOutput int        `json:"token_output"`
 	CostUSD     float64    `json:"cost_usd"` // summed model cost for the run (§ tracing)
@@ -155,9 +159,9 @@ func (s *Store) GetAgentRun(ctx context.Context, userID, projectID, runID string
 	}
 	var r AgentRun
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, summary, started_at, finished_at
 FROM agent_runs WHERE id = $1 AND project_id = $2`, runID, project.ID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt)
 	if err != nil {
 		return AgentRun{}, nil, err
 	}

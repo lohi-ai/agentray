@@ -91,7 +91,7 @@ func TestCompactionUnwedgesOversizedSingleTurn(t *testing.T) {
 		{Role: RoleAssistant, Content: "still going"},
 	}
 	before := estimateContextTokens(msgs)
-	out := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3_000})
+	out, _ := compactWithSummary(context.Background(), prov, "m", msgs, CompactionSettings{KeepRecentTokens: 3_000})
 	after := estimateContextTokens(out)
 	if after >= before {
 		t.Fatalf("compaction did not shrink an oversized single turn: before=%d after=%d", before, after)

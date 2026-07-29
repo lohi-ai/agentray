@@ -118,9 +118,9 @@ func TestRewindWritesBranchSummaryAndMovesLeaf(t *testing.T) {
 
 	var summarized []Message
 	newLeaf, err := Rewind(ctx, store, sid, "a", BranchOptions{
-		Summarize: func(_ context.Context, abandoned []Message) (string, error) {
+		Summarize: func(_ context.Context, abandoned []Message) (string, Usage, error) {
 			summarized = abandoned
-			return "tried events_raw; it lacks signup rows", nil
+			return "tried events_raw; it lacks signup rows", Usage{InputTokens: 40, OutputTokens: 10, CostUSD: 0.002}, nil
 		},
 	})
 	if err != nil {
@@ -159,6 +159,17 @@ func TestRewindWritesBranchSummaryAndMovesLeaf(t *testing.T) {
 	if len(log) != 6 { // a, b, c, branch_summary, leaf_move, d
 		t.Fatalf("log length = %d, want 6", len(log))
 	}
+	// The summarization call's spend is stamped on the branch-summary entry so
+	// tree navigation is never invisible spend.
+	var su *Usage
+	for _, e := range log {
+		if e.Kind == EntryBranchSummary {
+			su = e.Usage
+		}
+	}
+	if su == nil || su.InputTokens != 40 || su.OutputTokens != 10 {
+		t.Fatalf("branch summary entry missing usage stamp: %+v", su)
+	}
 }
 
 // TestRewindDegradesToBareLeafMove verifies a failing summarizer never fails
@@ -176,7 +187,7 @@ func TestRewindDegradesToBareLeafMove(t *testing.T) {
 		}
 	}
 	newLeaf, err := Rewind(ctx, store, sid, "a", BranchOptions{
-		Summarize: func(context.Context, []Message) (string, error) { return "", errors.New("summarizer down") },
+		Summarize: func(context.Context, []Message) (string, Usage, error) { return "", Usage{}, errors.New("summarizer down") },
 	})
 	if err != nil {
 		t.Fatal(err)

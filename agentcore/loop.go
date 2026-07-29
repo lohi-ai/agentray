@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,6 +53,10 @@ type ToolTrace struct {
 	Error      string `json:"error,omitempty"`
 	ResultMeta string `json:"result_meta,omitempty"`
 	LatencyMS  int64  `json:"latency_ms,omitempty"` // wall-clock of the tool execution (0 when not executed)
+	// IdempotencyKey is the framework-derived dedupe key handed to the tool
+	// (empty on runs without a durable session). Persisting it lets an external
+	// side effect be correlated back to the exact logical call that caused it.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // budgetExhaustedSteer is injected as a final user turn when the budget gate
@@ -68,6 +73,14 @@ type RunResult struct {
 	Usage      Usage       `json:"usage"`
 	Turns      int         `json:"turns"`
 	StopReason string      `json:"stop_reason"`
+	// UnpersistedEntries counts durable session entries the run buffered but
+	// could not commit because the session store kept failing through the final
+	// flush. Zero on a healthy (or storeless) run. Non-zero means the durable
+	// log holds a valid prefix of the run — recovery stays safe (the
+	// conservative resume never re-runs non-idempotent work) but the tail of
+	// this run cannot be reconstructed (pi's Faulted state, degraded to a
+	// flagged result instead of a halt).
+	UnpersistedEntries int `json:"unpersisted_entries,omitempty"`
 }
 
 // StreamEventType classifies an incremental event emitted during a streamed run.
@@ -195,9 +208,9 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 // turn streams its tokens to sink as they arrive; tool execution is identical to
 // the non-streaming path. runLoop owns the busy guard and the agent_start/end
 // brackets; drive owns everything between.
-func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink StreamSink, emit func(StreamEvent)) (RunResult, error) {
+func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink StreamSink, emit func(StreamEvent)) (res RunResult, err error) {
 	limits := a.limits
-	res := RunResult{Messages: messages}
+	res = RunResult{Messages: messages}
 
 	// Durable writes are buffered per turn and flushed atomically at the turn
 	// boundary (pi's pendingSessionWrites + save_point), so a crash mid-turn loses
@@ -226,26 +239,42 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 		pending = append(pending, e)
 	}
+	// flushCtx survives run cancellation: an aborted run must still commit its
+	// buffered entries, or the durable log loses exactly the turns recovery
+	// needs to see. WithoutCancel keeps the ctx values (tracing) minus the kill.
+	flushCtx := context.WithoutCancel(ctx)
 	flush := func() {
 		if a.session == nil || a.sessionID == "" || len(pending) == 0 {
 			return
 		}
+		// Append in order and stop at the first failure, so the durable log is
+		// always a valid *prefix* of the run — a child entry never lands without
+		// its parent (holes would break tree chaining and recovery). The
+		// unflushed suffix stays pending and is retried at the next save point,
+		// so a transient store blip self-heals; entries still pending when the
+		// run returns are surfaced as res.UnpersistedEntries.
+		n := 0
 		for _, e := range pending {
-			_ = a.session.Append(ctx, a.sessionID, e)
+			if aerr := a.session.Append(flushCtx, a.sessionID, e); aerr != nil {
+				emit(StreamEvent{Type: StreamProgress, Note: "durable session write failed; retrying at next save point", Turn: res.Turns})
+				break
+			}
+			n++
 		}
-		pending = pending[:0]
+		if n == 0 {
+			return
+		}
+		pending = pending[n:]
 		emit(StreamEvent{Type: StreamSavePoint, Turn: res.Turns})
 	}
 	// A trailing flush guarantees the last turn's buffered entries (leaf included)
-	// are committed on every return path.
-	defer flush()
+	// are committed on every return path; whatever still couldn't be written is
+	// reported on the result instead of being dropped silently.
+	defer func() {
+		flush()
+		res.UnpersistedEntries = len(pending)
+	}()
 	appendEntry := bufferEntry
-	// Persist the seed messages (the user prompt / prior thread) so the log is a
-	// complete, reducible record from the first turn.
-	for i := range messages {
-		m := messages[i]
-		appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
-	}
 
 	// recordTool appends a trace and, when streaming, forwards it to the sink as a
 	// tool_execution_end event (and the back-compat StreamTool) so the UI sees
@@ -275,21 +304,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		sink(StreamEvent{Type: StreamToolExecUpdate, Tool: &tr, Note: partial, Turn: res.Turns})
 	}
 
-	// Perceive: assemble the system prompt once from the definition + recalled
-	// memory + the available-skill headers. Skill bodies are NOT inlined; the
-	// model pulls one on demand via the read_skill tool (progressive disclosure),
-	// so only the skills the task actually needs ever enter context.
-	var recalled []MemoryEntry
-	if a.memory != nil {
-		if got, err := a.memory.Recall(ctx, a.def.ScopeID, task, 8); err == nil {
-			recalled = got
-		}
-	}
 	skills := a.def.enabledSkills()
-	system := buildSystemPrompt(a.def, recalled, skills)
-	if system != "" {
-		res.Messages = append([]Message{{Role: RoleSystem, Content: system}}, res.Messages...)
-	}
 
 	// Effective tool registry for this run = the host tools, plus the built-in
 	// read_skill tool when the definition carries skills, plus the built-in
@@ -316,6 +331,194 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	disabledTools := map[string]bool{}
 	for _, name := range a.seedDisabledTools {
 		disabledTools[name] = true
+	}
+
+	// A tool the circuit breaker disabled this run is refused without executing.
+	// It is also dropped from the advertised schemas, so a well-behaved model
+	// won't call it — this catches a model retrying it from memory.
+	disabledOutcome := func(call ToolCall) toolOutcome {
+		return toolOutcome{
+			trace:   ToolTrace{Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "disabled after repeated failures"},
+			message: toolResult(call, "blocked: "+call.Name+" was disabled for this run after repeated failures — do not call it again; finish another way"),
+		}
+	}
+
+	// toolCallCount counts real executions against MaxToolCalls across the whole
+	// run — resume replays included, so a resumed run can't spend more than a
+	// live one.
+	toolCallCount := 0
+	// applyBreaker is the circuit-breaker accounting shared by live dispatch and
+	// resume replay: a real execution that errored increments its tool's
+	// consecutive-failure counter — crossing maxToolFailures disables the tool
+	// for the rest of the run (durably, via EntryToolDisabled) and appends a
+	// routing note to the result message — while a success resets the counter.
+	applyBreaker := func(o toolOutcome, msg *Message) {
+		if !o.executed {
+			return
+		}
+		name := o.trace.Tool
+		if o.trace.Error == "" {
+			delete(toolFailures, name)
+			return
+		}
+		toolFailures[name]++
+		if toolFailures[name] >= maxToolFailures && !disabledTools[name] {
+			disabledTools[name] = true
+			// Log the disable so it is reconstructed on resume (RecoverSession),
+			// keeping a broken tool disabled across a crash rather than retried.
+			appendEntry(SessionEntry{Kind: EntryToolDisabled, Turn: res.Turns, Tool: name})
+			msg.Content += fmt.Sprintf("\n\n[%s has failed %d times in a row and is now disabled for the rest of this run. Do not call it again — complete the task another way.]", name, toolFailures[name])
+			emit(StreamEvent{Type: StreamProgress, Note: fmt.Sprintf("Disabled %q after %d consecutive failures; continuing without it.", name, toolFailures[name]), Turn: res.Turns})
+		}
+	}
+
+	// Durable resume (P9, pi's harness resume): when this run continues an
+	// existing session log (Config.ResumeSession), history is rebuilt from the
+	// log instead of the seeds. Recovery is conservative but not inert: a
+	// dangling call whose tool declares RetrySafe is re-issued NOW with its
+	// ORIGINAL call id — reproducing its idempotency key and, for
+	// spawn_subagent, its deterministic child-session id, so the replay
+	// reattaches to completed work instead of redoing it — while every other
+	// dangling call is closed with an interrupted note for the model to act on.
+	// A log that already reached its leaf short-circuits: the recorded answer
+	// is returned with no provider call (reattach). An unfinished compaction
+	// needs no special step — the reduced history still carries the full span,
+	// so the in-loop compaction guard simply fires again.
+	resumed := false
+	if a.resumeSession && a.session != nil && a.sessionID != "" {
+		slog, lerr := a.session.Log(ctx, a.sessionID)
+		if lerr != nil {
+			// An unreadable log fails the resume rather than silently degrading to
+			// a from-scratch run: a fresh run would splice new seed messages onto
+			// the crashed run's existing log and could redo non-idempotent work
+			// that log already records.
+			return res, fmt.Errorf("resume: reading durable session log: %w", lerr)
+		}
+		if len(slog) > 0 {
+			plan := RecoverSession(slog, tools, RecoveryMarkInterrupted)
+			switch {
+			case plan.Completed:
+				if final := strings.TrimSpace(lastAssistantText(plan.Messages)); final != "" {
+					res.Messages = plan.Messages
+					res.Final = final
+					res.StopReason = "reattached"
+					emit(StreamEvent{Type: StreamProgress, Note: "reattached to completed session; returning its recorded answer"})
+					return res, nil
+				}
+				// Completed but answerless (degenerate log): fall through to a
+				// fresh run; its entries chain onto the existing log.
+			case len(plan.Messages) > 0:
+				resumed = true
+				for _, name := range plan.DisabledTools {
+					disabledTools[name] = true
+				}
+				emit(StreamEvent{Type: StreamProgress, Note: "resuming interrupted session from its durable log"})
+				// Replays are real executions, so they run under the same rails as
+				// live dispatch: the step and budget gates are consulted first (a
+				// gated run replays nothing — its dangling calls close with
+				// interrupted notes below and the loop's own gates take over from
+				// turn 1), and each call honors cancellation, the tool-call
+				// budget, and circuit-breaker accounting.
+				replay := plan.RetryCalls
+				if a.stepGate != nil && len(replay) > 0 {
+					if gerr := a.stepGate(ctx, 0); gerr != nil {
+						replay = nil
+					}
+				}
+				if a.budgetGate != nil && len(replay) > 0 && a.budgetGate(ctx, addUsage(res.Usage, a.peekChildUsage())) {
+					replay = nil
+				}
+				terminated := false
+				retried := map[string]Message{}
+				for _, call := range replay {
+					if ctx.Err() != nil || toolCallCount >= limits.MaxToolCalls {
+						break // the rest close with interrupted notes below
+					}
+					var out toolOutcome
+					if disabledTools[call.Name] {
+						out = disabledOutcome(call)
+					} else {
+						out = a.runToolCall(ctx, tools, call, limits, emitUpdate)
+					}
+					applyBreaker(out, &out.message)
+					if out.executed {
+						toolCallCount++
+					}
+					recordTool(out.trace)
+					retried[call.ID] = out.message
+					terminated = terminated || out.terminate
+				}
+				// Stitch each dangling call's closure — the replayed result or an
+				// interrupted note — directly after the assistant message that
+				// issued it, and persist only these NEW messages (the recovered
+				// history is already in the log).
+				satisfied := map[string]bool{}
+				for _, m := range plan.Messages {
+					if m.Role == RoleTool && m.ToolCallID != "" {
+						satisfied[m.ToolCallID] = true
+					}
+				}
+				stitched := make([]Message, 0, len(plan.Messages)+len(plan.RetryCalls)+len(plan.DroppedCalls))
+				for _, m := range plan.Messages {
+					stitched = append(stitched, m)
+					if m.Role != RoleAssistant {
+						continue
+					}
+					for _, c := range m.ToolCalls {
+						if satisfied[c.ID] {
+							continue
+						}
+						closing, ok := retried[c.ID]
+						if !ok {
+							closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: interruptedCallNote}
+						}
+						stitched = append(stitched, closing)
+						appendEntry(SessionEntry{Kind: EntryMessage, Message: &closing})
+						satisfied[c.ID] = true
+					}
+				}
+				messages = stitched
+				res.Messages = stitched
+				if terminated {
+					// A replayed terminal tool ends the run exactly as a live one
+					// would: record the leaf so the log reduces to Completed=true
+					// (a later resume reattaches instead of replaying the child's
+					// terminal operation). The stitched transcript is already
+					// valid; the new closures and the leaf flush via the deferred
+					// trailing flush.
+					res.Final = lastAssistantText(res.Messages)
+					appendEntry(SessionEntry{Kind: EntryLeaf})
+					return res, nil
+				}
+			}
+			// len(plan.Messages) == 0 falls through: nothing recoverable, run fresh.
+		}
+	}
+
+	// Persist the seed messages (the user prompt / prior thread) so the log is a
+	// complete, reducible record from the first turn — unless this run resumed an
+	// existing log above, in which case the history is already durable and new
+	// entries chain onto it instead.
+	if !resumed {
+		for i := range messages {
+			m := messages[i]
+			appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
+		}
+	}
+
+	// Perceive: assemble the system prompt once from the definition + recalled
+	// memory + the available-skill headers. Skill bodies are NOT inlined; the
+	// model pulls one on demand via the read_skill tool (progressive disclosure),
+	// so only the skills the task actually needs ever enter context.
+	var recalled []MemoryEntry
+	if a.memory != nil {
+		if got, err := a.memory.Recall(ctx, a.def.ScopeID, task, 8); err == nil {
+			recalled = got
+		}
+	}
+	system := buildSystemPrompt(a.def, recalled, skills)
+	if system != "" {
+		res.Messages = append([]Message{{Role: RoleSystem, Content: system}}, res.Messages...)
 	}
 
 	// buildSchemas advertises a tool set to the model: policy-permitted tools plus
@@ -360,7 +563,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// changes apply to the next request without touching the in-flight one.
 	state := TurnState{Model: a.model, Tools: tools, System: system}
 
-	toolCallCount := 0
 	// budgetFinalizing latches once the budget gate trips: the loop injects one
 	// tool-free wrap-up turn and then stops with StopReason "budget_exhausted".
 	budgetFinalizing := false
@@ -401,7 +603,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// mid-run correction; stripping tools below forces a text-only wrap-up.
 		if a.budgetGate != nil && !budgetFinalizing && a.budgetGate(ctx, addUsage(res.Usage, a.peekChildUsage())) {
 			budgetFinalizing = true
-			res.Messages = append(res.Messages, Message{Role: RoleUser, Content: budgetExhaustedSteer})
+			wrap := Message{Role: RoleUser, Content: budgetExhaustedSteer}
+			res.Messages = append(res.Messages, wrap)
+			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &wrap})
 			if sink != nil {
 				sink(StreamEvent{Type: StreamProgress, Note: "Budget reached — summarizing and stopping.", Turn: res.Turns})
 			}
@@ -435,7 +639,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// compactions and makes the compaction summarization span cheaper, while
 		// compaction alone bounds growth the editor can't touch (user/assistant
 		// text).
-		res.Messages, _ = editContext(res.Messages, limits.MaxContextTokens, a.compaction)
+		// The keep-recent window is clamped to the actual budget so a small
+		// MaxContextTokens cannot leave compaction with "nothing old enough".
+		compaction := effectiveCompaction(a.compaction, limits.MaxContextTokens)
+		res.Messages, _ = editContext(res.Messages, limits.MaxContextTokens, compaction)
 
 		// Stop guard: compact old turns when the estimated context approaches
 		// the model window so long autonomous runs stay bounded (§5.2). The older
@@ -452,8 +659,17 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// completion. A start with no completion (crash mid-compaction) tells
 			// recovery to re-run it.
 			appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
-			res.Messages = compactWithSummary(ctx, compactProvider, compactModel, res.Messages, a.compaction)
-			appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true})
+			var cu Usage
+			res.Messages, cu = compactWithSummary(ctx, compactProvider, compactModel, res.Messages, compaction)
+			// The summarization call is real billable spend: fold it into the
+			// run's accounting and stamp it on the completion entry so the audit
+			// trail shows what compaction itself cost (pi #6671).
+			res.Usage = addUsage(res.Usage, cu)
+			fin := SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true}
+			if cu != (Usage{}) {
+				fin.Usage = &cu
+			}
+			appendEntry(fin)
 		}
 
 		// Steering: drain any user-injected corrections queued since the last turn
@@ -461,7 +677,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// honored on the very next turn (pi's steering queue).
 		if a.getSteering != nil {
 			for _, m := range a.getSteering(ctx) {
+				m := m
 				res.Messages = append(res.Messages, m)
+				// Persist the drained steer: the model acts on it this turn, so a
+				// resume that rebuilt history without it would replay a different
+				// conversation than the one that ran.
+				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 				if sink != nil {
 					sink(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
 				}
@@ -484,7 +705,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// stable prefix on the request view and let each provider translate the
 		// marks into its native caching (or ignore them).
 		reqMessages = markCacheAnchors(reqMessages, a.cacheKey)
-		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort}
+		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
 		if req, herr = a.hooks.runBeforeProviderRequest(ctx, req); herr != nil {
 			return res, herr
 		}
@@ -542,7 +763,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if a.getFollowUp != nil {
 				if follow := a.getFollowUp(ctx); len(follow) > 0 {
 					for _, m := range follow {
+						m := m
 						res.Messages = append(res.Messages, m)
+						// Persist the drained follow-up for the same reason as a
+						// steer: it is part of the conversation the model saw.
+						appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 						emit(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
 					}
 					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
@@ -584,50 +809,58 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			emit(StreamEvent{Type: StreamToolExecStart, Tool: &start, Turn: res.Turns})
 		}
 
-		// A tool the circuit breaker disabled this run is refused without executing.
-		// It is also dropped from the advertised schemas, so a well-behaved model
-		// won't call it — this catches a model retrying it from memory.
-		disabledOutcome := func(call ToolCall) toolOutcome {
-			return toolOutcome{
-				trace:   ToolTrace{Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "disabled after repeated failures"},
-				message: toolResult(call, "blocked: "+call.Name+" was disabled for this run after repeated failures — do not call it again; finish another way"),
-			}
-		}
-
+		// Chunked dispatch (Claude Code / pi executionMode parity): consecutive
+		// parallel-eligible calls run concurrently as one group; a non-eligible
+		// call is a barrier that runs alone at its position. A mixed batch like
+		// [read, read, write, read] therefore runs the two reads concurrently,
+		// then the write, then the last read — instead of the old all-or-nothing
+		// rule where one sequential tool serialized the whole batch. Results are
+		// always applied in the model's order (outcomes is index-addressed), and
+		// a sequential tool still observes every earlier call completed.
 		outcomes := make([]toolOutcome, len(calls))
-		if len(calls) > 1 && a.allParallel(tools, calls) {
-			var wg sync.WaitGroup
-			for i := range calls {
-				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					// disabledTools is only written in the (single-threaded) accounting
-					// loop after wg.Wait, so reading it here during dispatch is safe.
-					if disabledTools[calls[i].Name] {
-						outcomes[i] = disabledOutcome(calls[i])
-						return
-					}
-					outcomes[i] = a.runToolCall(ctx, tools, calls[i], limits, emitUpdate)
-				}(i)
-			}
-			wg.Wait()
-		} else {
-			for i := range calls {
-				if disabledTools[calls[i].Name] {
-					outcomes[i] = disabledOutcome(calls[i])
-					continue
+		for lo := 0; lo < len(calls); {
+			hi := lo + 1
+			if isParallelTool(tools, calls[lo]) {
+				for hi < len(calls) && isParallelTool(tools, calls[hi]) {
+					hi++
 				}
-				// Honor cancellation between tool calls; remaining calls short-
-				// circuit to an aborted result rather than draining the batch.
-				if err := ctx.Err(); err != nil {
+			}
+			// Honor cancellation between groups; remaining calls short-circuit to
+			// an aborted result rather than draining the batch.
+			if err := ctx.Err(); err != nil {
+				for i := lo; i < len(calls); i++ {
 					outcomes[i] = toolOutcome{
 						trace:   ToolTrace{Tool: calls[i].Name, Args: calls[i].Arguments, Allowed: false, Reason: "aborted"},
 						message: toolResult(calls[i], "stopped: run aborted"),
 					}
-					continue
 				}
-				outcomes[i] = a.runToolCall(ctx, tools, calls[i], limits, emitUpdate)
+				break
 			}
+			if hi-lo == 1 {
+				if disabledTools[calls[lo].Name] {
+					outcomes[lo] = disabledOutcome(calls[lo])
+				} else {
+					outcomes[lo] = a.runToolCall(ctx, tools, calls[lo], limits, emitUpdate)
+				}
+			} else {
+				var wg sync.WaitGroup
+				for i := lo; i < hi; i++ {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						// disabledTools is only written in the (single-threaded)
+						// accounting loop after all groups finish, so reading it
+						// here during dispatch is safe.
+						if disabledTools[calls[i].Name] {
+							outcomes[i] = disabledOutcome(calls[i])
+							return
+						}
+						outcomes[i] = a.runToolCall(ctx, tools, calls[i], limits, emitUpdate)
+					}(i)
+				}
+				wg.Wait()
+			}
+			lo = hi
 		}
 
 		// Apply outcomes in the model's original order: record (and stream) each
@@ -636,28 +869,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		terminate := false
 		for i := range outcomes {
 			msg := outcomes[i].message
-			// Circuit-breaker accounting: count consecutive failures per tool within
-			// this run. A real execution that errored increments the tool's counter; a
-			// success resets it. Once a tool crosses maxToolFailures it is disabled for
-			// the rest of the run — dropped from the advertised schemas next turn — and
-			// a note is appended to its result so the model stops retrying it and routes
-			// around it instead of stalling.
-			if outcomes[i].executed {
-				name := outcomes[i].trace.Tool
-				if outcomes[i].trace.Error != "" {
-					toolFailures[name]++
-					if toolFailures[name] >= maxToolFailures && !disabledTools[name] {
-						disabledTools[name] = true
-						// Log the disable so it is reconstructed on resume (RecoverSession),
-						// keeping a broken tool disabled across a crash rather than retried.
-						appendEntry(SessionEntry{Kind: EntryToolDisabled, Turn: res.Turns, Tool: name})
-						msg.Content += fmt.Sprintf("\n\n[%s has failed %d times in a row and is now disabled for the rest of this run. Do not call it again — complete the task another way.]", name, toolFailures[name])
-						emit(StreamEvent{Type: StreamProgress, Note: fmt.Sprintf("Disabled %q after %d consecutive failures; continuing without it.", name, toolFailures[name]), Turn: res.Turns})
-					}
-				} else {
-					delete(toolFailures, name)
-				}
-			}
+			applyBreaker(outcomes[i], &msg)
 			recordTool(outcomes[i].trace)
 			res.Messages = append(res.Messages, msg)
 			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
@@ -670,6 +882,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if terminate {
 			res.Final = lastAssistantText(res.Messages)
 			emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+			// A terminal tool completes the run: record the leaf so the durable
+			// log reduces to Completed=true and a resume reattaches to the
+			// recorded outcome instead of replaying the terminal call.
+			appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 			flush()
 			return res, nil
 		}
@@ -801,8 +1017,13 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 	if emitUpdate != nil {
 		emit = func(partial string) { emitUpdate(gated, partial) }
 	}
+	// Hand the tool its crash-stable idempotency key: (sessionID, call ID) is
+	// replayed verbatim by RecoverSession, so a re-run after a crash presents
+	// the same key and the external system can dedupe the effect.
+	ikey := toolIdempotencyKey(a.sessionID, call.ID)
+	trace.IdempotencyKey = ikey
 	execStart := time.Now()
-	out, runErr := callTool(ctx, tool, runArgs, emit)
+	out, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
 	// Head+tail truncation: an oversized result keeps its beginning AND end,
 	// because the end often carries the signal (a shell error after pages of
@@ -819,21 +1040,16 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 	return toolOutcome{trace: trace, message: toolResult(call, out), terminate: term, executed: true}
 }
 
-// allParallel reports whether every call in the batch targets a registered tool
-// that opts into concurrent execution (ParallelTool). A single non-eligible call
-// forces the whole batch to run sequentially — the safe default.
-func (a *Agent) allParallel(tools *ToolSet, calls []ToolCall) bool {
-	for _, call := range calls {
-		tool, ok := tools.Get(call.Name)
-		if !ok {
-			return false
-		}
-		p, ok := tool.(ParallelTool)
-		if !ok || !p.Parallel() {
-			return false
-		}
+// isParallelTool reports whether one call targets a registered tool that opts
+// into concurrent execution (ParallelTool). Unknown tools and tools that don't
+// opt in run sequentially — the safe default.
+func isParallelTool(tools *ToolSet, call ToolCall) bool {
+	tool, ok := tools.Get(call.Name)
+	if !ok {
+		return false
 	}
-	return true
+	p, ok := tool.(ParallelTool)
+	return ok && p.Parallel()
 }
 
 // reason issues one turn against the rung currently in use. Two distinct

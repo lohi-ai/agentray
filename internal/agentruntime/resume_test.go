@@ -15,7 +15,7 @@ func TestCloseDanglingCallsSynthesizesResults(t *testing.T) {
 		{Role: agentcore.RoleAssistant, ToolCalls: []agentcore.ToolCall{{ID: "c1", Name: "query"}}},
 		// no tool result for c1 — the run crashed mid-flight
 	}
-	out := closeDanglingCalls(in)
+	out := agentcore.CloseDanglingCalls(in)
 	if len(out) != 3 {
 		t.Fatalf("want 3 messages (orig 2 + 1 synthesized), got %d: %+v", len(out), out)
 	}
@@ -35,7 +35,7 @@ func TestCloseDanglingCallsLeavesSatisfiedCalls(t *testing.T) {
 		{Role: agentcore.RoleAssistant, ToolCalls: []agentcore.ToolCall{{ID: "c1", Name: "query"}}},
 		{Role: agentcore.RoleTool, ToolCallID: "c1", Name: "query", Content: "42"},
 	}
-	out := closeDanglingCalls(in)
+	out := agentcore.CloseDanglingCalls(in)
 	if len(out) != 2 {
 		t.Fatalf("a satisfied call must not be re-closed, got %d messages: %+v", len(out), out)
 	}

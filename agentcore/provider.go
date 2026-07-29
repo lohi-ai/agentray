@@ -106,6 +106,32 @@ type ChatRequest struct {
 	// reasoning_effort; providers without the knob ignore it. Empty sends
 	// nothing, so strict compat servers are unaffected.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// OutputSchema, when non-nil, constrains the model's text answer to the
+	// given JSON Schema (grammar-constrained decoding). OpenAI maps it to
+	// response_format json_schema with strict:true; Anthropic to the
+	// structured-outputs output_format (plus its beta header). Providers
+	// without the capability ignore it, so the loop still validates the answer.
+	// Intended for verdict-shaped agents (classification / moderation) — tool
+	// calls are unaffected, but any plain-text turn must fit the schema, so
+	// leave it nil for general chat agents.
+	OutputSchema *OutputSchema `json:"output_schema,omitempty"`
+}
+
+// OutputSchema names a JSON Schema that constrains the assistant's text
+// output. Name is required by the OpenAI wire (defaulted to "output" when
+// empty); Schema is a draft-07-style JSON Schema object.
+type OutputSchema struct {
+	Name   string         `json:"name,omitempty"`
+	Schema map[string]any `json:"schema"`
+	// Strict opts into OpenAI's strict structured outputs (grammar-constrained
+	// decoding). Set it ONLY when Schema fits OpenAI's strict subset (every
+	// object needs additionalProperties:false and all properties required, no
+	// unsupported keywords) — a non-conforming schema is rejected with a 400 on
+	// every turn. The default (false) sends the schema in best-effort mode,
+	// which accepts any valid JSON Schema and soft-degrades, matching the
+	// ChatRequest.OutputSchema contract that the loop still validates the
+	// answer itself.
+	Strict bool `json:"strict,omitempty"`
 }
 
 // ChatResponse is one assistant turn. StopReason is the model's explicit reason

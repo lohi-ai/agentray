@@ -63,6 +63,10 @@ type SessionEntry struct {
 	Tool      string           `json:"tool,omitempty"`    // EntryToolDisabled
 	Summary   string           `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
 	Final     bool             `json:"final,omitempty"`   // EntryCompaction completion marker
+	// Usage records what the summarization call itself cost (EntryCompaction
+	// completion / EntryBranchSummary). Compaction and branch summaries are real
+	// billable provider calls; without this they are invisible spend (pi #6671).
+	Usage *Usage `json:"usage,omitempty"`
 	CreatedAt time.Time        `json:"created_at"`
 }
 
@@ -157,14 +161,27 @@ type RetrySafeTool interface {
 	RetrySafe() bool
 }
 
-// isRetrySafe reports whether a registered tool opts into post-crash retry.
-func isRetrySafe(tools *ToolSet, name string) bool {
+// CallRetrySafeTool refines RetrySafeTool per invocation: a tool whose
+// retry-safety depends on the specific call's arguments (spawn_subagent is
+// crash-safe only when it self-forks, not when it routes to a delegate agent)
+// implements this and receives the original dangling call. When both interfaces
+// are implemented, this one wins.
+type CallRetrySafeTool interface {
+	RetrySafeCall(call ToolCall) bool
+}
+
+// isRetrySafe reports whether a registered tool opts into post-crash retry for
+// this specific dangling call.
+func isRetrySafe(tools *ToolSet, call ToolCall) bool {
 	if tools == nil {
 		return false
 	}
-	t, ok := tools.Get(name)
+	t, ok := tools.Get(call.Name)
 	if !ok {
 		return false
+	}
+	if cs, ok := t.(CallRetrySafeTool); ok {
+		return cs.RetrySafeCall(call)
 	}
 	rs, ok := t.(RetrySafeTool)
 	return ok && rs.RetrySafe()
@@ -220,7 +237,7 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 				continue
 			}
 			plan.Interrupted = true
-			if isRetrySafe(tools, c.Name) {
+			if isRetrySafe(tools, c) {
 				plan.RetryCalls = append(plan.RetryCalls, c)
 			} else {
 				plan.DroppedCalls = append(plan.DroppedCalls, c)
@@ -233,4 +250,43 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 		plan.Interrupted = true
 	}
 	return plan
+}
+
+// interruptedCallNote is the synthesized tool result that closes a dangling
+// call in a recovered transcript, shared by CloseDanglingCalls and the drive-
+// level resume path so the model always sees the same wording.
+const interruptedCallNote = "[interrupted: this tool call did not complete before the run was suspended and was not re-run automatically]"
+
+// CloseDanglingCalls returns a transcript in which every assistant tool call
+// that never received a result is satisfied by a synthesized interrupted-note
+// tool message. Providers reject a history with an unanswered tool call, so
+// this is what makes a recovered transcript replayable. Already-satisfied calls
+// and non-assistant messages pass through untouched, in order.
+func CloseDanglingCalls(messages []Message) []Message {
+	satisfied := map[string]bool{}
+	for _, m := range messages {
+		if m.Role == RoleTool && m.ToolCallID != "" {
+			satisfied[m.ToolCallID] = true
+		}
+	}
+	out := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, m)
+		if m.Role != RoleAssistant {
+			continue
+		}
+		for _, c := range m.ToolCalls {
+			if satisfied[c.ID] {
+				continue
+			}
+			out = append(out, Message{
+				Role:       RoleTool,
+				ToolCallID: c.ID,
+				Name:       c.Name,
+				Content:    interruptedCallNote,
+			})
+			satisfied[c.ID] = true
+		}
+	}
+	return out
 }

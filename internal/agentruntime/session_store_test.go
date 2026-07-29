@@ -28,6 +28,21 @@ func TestSessionEntryFromRowRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRootRunID verifies the child-session key convention: the root run UUID is
+// everything before the first "/", so child appends ("<runID>/<callID>") keep a
+// valid run_id FK while the full key stays the log identity.
+func TestRootRunID(t *testing.T) {
+	for in, want := range map[string]string{
+		"a1b2":              "a1b2",
+		"a1b2/call_9":       "a1b2",
+		"a1b2/call_9/inner": "a1b2",
+	} {
+		if got := rootRunID(in); got != want {
+			t.Errorf("rootRunID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestSessionEntryFromRowMalformedDegrades verifies a bad payload yields an entry
 // carrying only the row's kind/turn/seq rather than failing.
 func TestSessionEntryFromRowMalformedDegrades(t *testing.T) {

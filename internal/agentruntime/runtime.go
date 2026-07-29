@@ -86,9 +86,15 @@ type BuildParams struct {
 	// and resumed. nil store — the default — keeps the run in-memory only.
 	Session   agentcore.SessionStore
 	SessionID string
-	// SeedDisabledTools pre-disables tools in the run's circuit breaker. A resume
-	// passes the tools that were disabled in the crashed run so a broken tool stays
-	// disabled across the restart. Empty — the default — starts every tool enabled.
+	// ResumeSession makes the run continue the existing log at SessionID instead
+	// of opening a fresh one: history is rebuilt from the log, dangling
+	// retry-safe calls are replayed with their original ids, the crashed run's
+	// disabled tools are re-applied, and a completed log returns its recorded
+	// answer without a provider call. See agentcore.Config.ResumeSession.
+	ResumeSession bool
+	// SeedDisabledTools pre-disables tools in the run's circuit breaker. Empty —
+	// the default — starts every tool enabled. (A resume no longer needs this:
+	// ResumeSession recovers the disabled set from the log itself.)
 	SeedDisabledTools []string
 	// MaxTokens caps the model's output tokens per turn. 0 — the default — uses
 	// the provider's own default. Set a generous value for agents that emit large
@@ -147,6 +153,10 @@ type BuildParams struct {
 	// ReasoningEffort, when set ("low" | "medium" | "high"), is passed through
 	// to reasoning models on every turn (OpenAI-wire reasoning_effort).
 	ReasoningEffort string
+	// OutputSchema, when non-nil, constrains every text answer to the given
+	// JSON Schema at the provider (structured outputs). For verdict-shaped
+	// agents (moderation / classification presets); nil leaves output free.
+	OutputSchema *agentcore.OutputSchema
 }
 
 // resolveBaseURL applies the §13.1 precedence: per-config base_url ->
@@ -287,6 +297,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		// the analytics-only run is unchanged unless the runner wires these.
 		Session:              p.Session,
 		SessionID:            p.SessionID,
+		ResumeSession:        p.ResumeSession,
 		SeedDisabledTools:    p.SeedDisabledTools,
 		MaxTokens:            p.MaxTokens,
 		PromptCacheKey:       p.PromptCacheKey,
@@ -324,6 +335,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		names = append(names, agentcore.ToolSpawnSubagent)
 	}
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.OutputSchema = p.OutputSchema
 	cfg.Policy = agentcore.NewAllowList(names...)
 	if p.MaxContextTokens > 0 {
 		limits := agentcore.DefaultLimits()

@@ -88,7 +88,7 @@ func TestTodoSurvivesCompaction(t *testing.T) {
 	hook := TodoContextHook(store)
 
 	prov := &scriptedSummaryProvider{summary: "## Goal\nx\n## Next Steps\n1. y"}
-	compacted := compactWithSummary(context.Background(), prov, "m", longTranscript(), CompactionSettings{KeepRecentTokens: 3000})
+	compacted, _ := compactWithSummary(context.Background(), prov, "m", longTranscript(), CompactionSettings{KeepRecentTokens: 3000})
 
 	out := hook(context.Background(), compacted)
 	last := out[len(out)-1]
