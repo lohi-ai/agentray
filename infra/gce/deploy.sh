@@ -5,10 +5,14 @@ set -euo pipefail
 # Run from: agentray/
 #
 # Usage: ./infra/gce/deploy.sh --env <dev|prod> [--tag TAG] [--skip-build]
+#                                        [--no-gate] [--gate-timeout SECONDS]
 #
-#   --env         Required. "dev" or "prod".
-#   --tag         Image tag (default: <git-sha>-<unix-ts>).
-#   --skip-build  Don't run Cloud Build; deploy an existing tag.
+#   --env           Required. "dev" or "prod".
+#   --tag           Image tag (default: <git-sha>-<unix-ts>).
+#   --skip-build    Don't run Cloud Build; deploy an existing tag.
+#   --no-gate       Switch traffic the moment the new colour is created,
+#                   without waiting for its healthcheck.
+#   --gate-timeout  Seconds to wait for the new colour to go healthy (default 240).
 #
 # Schema migrations are automatic: the API creates/updates Postgres and
 # ClickHouse tables at startup. ClickHouse/Redis/NATS are shared single
@@ -24,13 +28,17 @@ WEB_IMAGE="asia-southeast1-docker.pkg.dev/${PROJECT_ID}/docker/agentray-web"
 ENV=""
 TAG=""
 SKIP_BUILD=false
+GATE=true
+GATE_TIMEOUT=240
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env)        ENV="$2"; shift 2 ;;
     --tag)        TAG="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=true; shift ;;
-    -h|--help)    sed -n '3,15p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
+    --no-gate)      GATE=false; shift ;;
+    --gate-timeout) GATE_TIMEOUT="$2"; shift 2 ;;
+    -h|--help)    sed -n '3,17p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -48,7 +56,28 @@ SERVICE_ROOT="$(cd "${GCE_DIR}/../.." && pwd)"  # agentray/
 REPO_ROOT="$(cd "${SERVICE_ROOT}/.." && pwd)"   # repo root
 CADDY_DIR="${REPO_ROOT}/infra/gce/caddy"
 
-: "${TAG:=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)}"
+# shellcheck source=../../../infra/gce/lib/blue-green.sh
+source "${REPO_ROOT}/infra/gce/lib/blue-green.sh"
+# AgentRay is two containers behind one hostname, so it owns two upstream
+# snippets. Both move together: the colour is read off the api snippet, both
+# containers are started on it, and both snippets flip only after BOTH report
+# healthy — a half-switched hostname would serve a new dashboard against an old
+# API. (agentray-web declares no healthcheck; bg_wait accepts "running" for it.)
+UPSTREAM="${ENV}-agentray-api"
+UPSTREAM_WEB="${ENV}-agentray-web"
+# --no-gate is not "the old behaviour": traffic still moves in one atomic Caddy
+# reload, it just moves before anything has vouched for the new colour.
+if [ "$GATE" = false ]; then bg_wait() { :; }; fi
+
+if [ -z "$TAG" ]; then
+  if [ "$SKIP_BUILD" = true ]; then
+    # No build this run, so a fresh <sha>-<ts> tag wouldn't exist in the registry;
+    # reuse the last image published for this env.
+    TAG="latest-${ENV}"
+  else
+    TAG="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date +%s)"
+  fi
+fi
 
 echo "==> agentray (${ENV}) → api:${TAG} web:${TAG} (web API URL: ${WEB_API_URL})"
 
@@ -80,6 +109,8 @@ gcloud compute ssh "$VM_NAME" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-th
 set -euo pipefail
 sudo docker network inspect edge >/dev/null 2>&1 || sudo docker network create edge
 sudo bash ~/gce/caddy/fetch-origin-cert.sh
+$(bg_seed)
+$(bg_validate)
 sudo docker compose -f ~/gce/caddy/docker-compose.yml up -d
 sudo docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true
 sudo bash ~/gce/agentray/fetch-secrets.sh '${ENV}'
@@ -93,9 +124,20 @@ CH_PW=\$(sudo grep '^CLICKHOUSE_PASSWORD=' ~/gce/agentray/infra/secret.env | cut
 sudo docker exec agentray-clickhouse clickhouse-client \
   --user agentray --password \"\$CH_PW\" \
   --query 'CREATE DATABASE IF NOT EXISTS agentray_${ENV}'
+$(bg_pick "$UPSTREAM")
+BG_NEW_API=${ENV}-agentray-api-\$BG_COLOR
+BG_NEW_WEB=${ENV}-agentray-web-\$BG_COLOR
+BG_OLD=\${BG_OLD_COLOR:+${ENV}-agentray-api-\$BG_OLD_COLOR ${ENV}-agentray-web-\$BG_OLD_COLOR}
+BG_LEGACY=\${BG_LEGACY:+${ENV}-agentray-api ${ENV}-agentray-web}
 sudo env AGENTRAY_TAG='${TAG}' DOCKER_CONFIG=/root/.docker \
-  docker compose -f ~/gce/agentray/${ENV}/docker-compose.yml up -d --pull always
+  docker compose -f ~/gce/agentray/${ENV}/docker-compose.yml up -d --pull always \
+  agentray-api-\$BG_COLOR agentray-web-\$BG_COLOR
+$(bg_wait "$GATE_TIMEOUT" "\$BG_NEW_API \$BG_NEW_WEB")
+$(bg_switch "$UPSTREAM" "\$BG_NEW_API" 8080)
+$(bg_switch "$UPSTREAM_WEB" "\$BG_NEW_WEB" 3200)
+$(bg_park "\$BG_OLD \$BG_LEGACY")
 sudo docker image prune -f >/dev/null 2>&1 || true
 "
 
-echo "==> Deployed. Rollback: ./infra/gce/deploy.sh --env ${ENV} --tag <prev> --skip-build"
+echo "==> Deployed. Rollback (seconds, exact same image): ../infra/gce/rollback.sh --service agentray --env ${ENV}"
+echo "    The previous colour is parked, not deleted. Add --dry-run to see what it returns to."

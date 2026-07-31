@@ -1,30 +1,50 @@
 name: agentray-dev
 
-services:
-  agentray-api:
-    image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api:${AGENTRAY_TAG:-latest-dev}
-    container_name: dev-agentray-api
-    restart: unless-stopped
-    env_file:
-      - app.env
-      - secret.env
-    mem_limit: 384m
-    networks:
-      - edge
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+# Blue-green: the service body lives in an anchor and is instantiated twice,
+# once per colour. A deploy starts the colour that is NOT serving, waits for it
+# to report healthy, then flips the Caddy upstream snippet — so a broken build
+# never sees a request and "rollback" is just not flipping. Only one colour
+# exists at a time; infra/gce/lib/blue-green.sh removes the old one after the
+# switch. Never `up -d` without naming a service, or you start both.
+x-agentray-api: &agentray-api-svc
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api:${AGENTRAY_TAG:-latest-dev}
+  restart: unless-stopped
+  env_file:
+    - app.env
+    - secret.env
+  mem_limit: 384m
+  networks:
+    - edge
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
 
-  agentray-web:
-    image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web:${AGENTRAY_TAG:-latest-dev}
-    container_name: dev-agentray-web
-    restart: unless-stopped
-    mem_limit: 384m
-    networks:
-      - edge
+x-agentray-web: &agentray-web-svc
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web:${AGENTRAY_TAG:-latest-dev}
+  restart: unless-stopped
+  mem_limit: 384m
+  networks:
+    - edge
+
+services:
+  agentray-api-blue:
+    <<: *agentray-api-svc
+    container_name: dev-agentray-api-blue
+
+  agentray-api-green:
+    <<: *agentray-api-svc
+    container_name: dev-agentray-api-green
+
+  agentray-web-blue:
+    <<: *agentray-web-svc
+    container_name: dev-agentray-web-blue
+
+  agentray-web-green:
+    <<: *agentray-web-svc
+    container_name: dev-agentray-web-green
 
 networks:
   edge:
