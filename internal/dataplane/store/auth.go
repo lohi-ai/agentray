@@ -448,12 +448,18 @@ func (s *Store) RemoveWorkspaceMember(ctx context.Context, actorID string, works
 }
 
 func (s *Store) ListWorkspaceProjects(ctx context.Context, userID string, workspaceID string) ([]Project, error) {
+	// projects[0] of this list is the project /api/auth/me hands the app as the
+	// active one, so the tie between Demo and the caller's own project — both
+	// inserted in one transaction, both carrying the identical now() — decides
+	// whether a new account opens on the seeded funnel or on an empty project.
+	// Demo wins it explicitly; p.id keeps the rest stable. Same reasoning as
+	// DefaultProjectForUser.
 	rows, err := s.pg.Query(ctx, `
 SELECT p.id::text, p.workspace_id::text, p.name, p.api_key, p.created_at
 FROM projects p
 JOIN workspace_members wm ON wm.workspace_id = p.workspace_id
 WHERE wm.user_id = $1 AND p.workspace_id = $2
-ORDER BY p.created_at ASC`, userID, workspaceID)
+ORDER BY p.created_at ASC, (p.name = $3) DESC, p.id ASC`, userID, workspaceID, DemoProjectName)
 	if err != nil {
 		return nil, err
 	}
