@@ -41,7 +41,12 @@ type OpenAIProvider struct {
 	APIKey  string
 	BaseURL string
 	Compat  Compat
-	HTTP    *http.Client
+	// HTTP serves the non-streamed Chat path (absolute cap, no header deadline —
+	// a buffered completion's headers arrive only once generation is done).
+	HTTP *http.Client
+	// StreamHTTP serves the SSE path, where a header deadline is meaningful. Nil
+	// falls back to HTTP, so a caller that overrides only HTTP still works.
+	StreamHTTP *http.Client
 	// Vendor, when set, overrides Name() for OpenAI-compatible vendors served
 	// through this wire (the pi-ai pattern: most providers are this API at a
 	// different base URL). Empty keeps the stock "openai" identity.
@@ -58,11 +63,21 @@ func NewOpenAIProvider(apiKey, baseURL string, compat Compat) *OpenAIProvider {
 		compat = DefaultCompat()
 	}
 	return &OpenAIProvider{
-		APIKey:  apiKey,
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Compat:  compat,
-		HTTP:    NewChatHTTPClient(0),
+		APIKey:     apiKey,
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		Compat:     compat,
+		HTTP:       NewChatHTTPClient(0),
+		StreamHTTP: NewStreamHTTPClient(0),
 	}
+}
+
+// streamHTTP is the client the SSE path uses: StreamHTTP when set, otherwise
+// whatever the caller put on HTTP.
+func (p *OpenAIProvider) streamHTTP() *http.Client {
+	if p.StreamHTTP != nil {
+		return p.StreamHTTP
+	}
+	return p.HTTP
 }
 
 func (p *OpenAIProvider) Name() string {
@@ -412,7 +427,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
 
-	resp, err := p.HTTP.Do(httpReq)
+	resp, err := p.streamHTTP().Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

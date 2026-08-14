@@ -64,7 +64,20 @@ func usesExtendedCache(req agentcore.ChatRequest) bool {
 type AnthropicProvider struct {
 	APIKey  string
 	BaseURL string
-	HTTP    *http.Client
+	// HTTP serves the non-streamed Chat path (absolute cap, no header deadline).
+	HTTP *http.Client
+	// StreamHTTP serves the SSE path, where a header deadline is meaningful. Nil
+	// falls back to HTTP, so a caller that overrides only HTTP still works.
+	StreamHTTP *http.Client
+}
+
+// streamHTTP is the client the SSE path uses: StreamHTTP when set, otherwise
+// whatever the caller put on HTTP.
+func (p *AnthropicProvider) streamHTTP() *http.Client {
+	if p.StreamHTTP != nil {
+		return p.StreamHTTP
+	}
+	return p.HTTP
 }
 
 // NewAnthropicProvider builds a provider; an empty baseURL uses the vendor
@@ -74,9 +87,10 @@ func NewAnthropicProvider(apiKey, baseURL string) *AnthropicProvider {
 		baseURL = defaultAnthropicBaseURL
 	}
 	return &AnthropicProvider{
-		APIKey:  apiKey,
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTP:    NewChatHTTPClient(0),
+		APIKey:     apiKey,
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		HTTP:       NewChatHTTPClient(0),
+		StreamHTTP: NewStreamHTTPClient(0),
 	}
 }
 
@@ -300,7 +314,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 		httpReq.Header.Set("anthropic-beta", betas)
 	}
 
-	resp, err := p.HTTP.Do(httpReq)
+	resp, err := p.streamHTTP().Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

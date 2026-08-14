@@ -8,14 +8,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"time"
 )
 
 // ProviderError is the typed error a provider returns for an HTTP-level failure,
-// so the loop can classify it (retryable status? honor Retry-After?) instead of
-// string-matching a message (pi's isRetryableError, made structural). A nil/zero
-// Status marks a transport-level failure with no HTTP response.
+// so the loop can classify it (retryable status? honor Retry-After?) rather than
+// string-matching a bare error (pi's isRetryableError, made structural where a
+// status exists). A nil/zero Status marks a transport-level failure with no HTTP
+// response.
 type ProviderError struct {
 	Provider   string        // provider name ("openai", "anthropic")
 	Status     int           // HTTP status; 0 for a transport failure
@@ -40,10 +42,11 @@ func (e *ProviderError) Error() string {
 // Retry-After so the loop can pace a 429/503 backoff to the server's hint.
 //
 // It is exported because it is the contract between a provider and the loop's
-// retry/escalation logic: IsRetryable classifies structurally (status code,
-// Retry-After) rather than by string-matching a message, so a provider that
-// returns a plain error is silently un-retryable. Any provider — in this repo
-// or out of it — builds its transport failures with this.
+// retry/escalation logic: IsRetryable classifies structurally first (status
+// code, Retry-After), falling back to the message only where the status carries
+// no signal. A provider that returns a plain error is silently un-retryable, so
+// any provider — in this repo or out of it — builds its transport failures with
+// this.
 func NewProviderError(provider string, resp *http.Response, message string) *ProviderError {
 	pe := &ProviderError{Provider: provider, Message: message}
 	if resp != nil {
@@ -73,11 +76,57 @@ func parseRetryAfter(v string) time.Duration {
 	return 0
 }
 
+// exhaustedLimitPattern marks an account-level limit that no amount of retrying
+// will clear: a spent quota, an empty balance, a billing problem. These arrive
+// wearing the SAME 429 as an ordinary throttle, so status alone cannot tell them
+// apart and a status-only classifier burns the whole ladder on a failure that is
+// permanent until a human tops the account up. Checked before anything else, so
+// it also overrides a retryable status. (pi's
+// NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.)
+var exhaustedLimitPattern = regexp.MustCompile(
+	`(?i)insufficient_quota|quota exceeded|out of budget|billing|` +
+		`monthly usage limit reached|available balance|usage limit`)
+
+// retryableMessagePattern catches transient failures whose status code is
+// useless — a gateway that wraps an upstream blip in a 200, or a transport error
+// with no HTTP response at all. Deliberately narrower than pi's list: it covers
+// the wordings actually observed against this stack rather than every provider
+// pi supports, because a false positive here retries something permanent.
+var retryableMessagePattern = regexp.MustCompile(
+	`(?i)overloaded|rate.?limit|too many requests|service.?unavailable|` +
+		`server.?error|internal.?error|provider.?returned.?error|` +
+		`connection reset|connection refused|other side closed|fetch failed|` +
+		`socket hang up|stream ended before|ended without|truncated`)
+
+// retryableStatus reports whether an HTTP status is worth another attempt.
+//
+// Beyond the standard transient set this includes two ranges that a status-only
+// switch misses. 520-524 are Cloudflare's origin-side codes (520 unknown error,
+// 521 origin down, 522 timeout, 523 unreachable, 524 origin timeout): the edge
+// is healthy and answering, so the failure is upstream of it and typically
+// brief. 529 is Anthropic's "overloaded". Omitting these is not academic — the
+// idle-game benchmark took a 521 and gave up without a single retry.
+func retryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+		529: // Anthropic overloaded_error
+		return true
+	}
+	// Cloudflare origin-side range.
+	return status >= 520 && status <= 524
+}
+
 // IsRetryable reports whether err is a transient failure worth retrying the same
-// model: a rate limit (429), a server-side 5xx (500/502/503/504), a request
-// timeout (408), or a transport-level network blip. A cancellation is never
-// retryable — the caller guards on ctx.Err() — and a client error (4xx other than
-// 408/429) won't be fixed by retrying, so it falls through to escalation.
+// model: a rate limit (429), a server-side 5xx (500/502/503/504), a Cloudflare
+// origin error (520-524), an Anthropic overload (529), a request timeout (408),
+// or a transport-level network blip. A cancellation is never retryable — the
+// caller guards on ctx.Err() — and a client error (4xx other than 408/429) won't
+// be fixed by retrying, so it falls through to escalation.
+//
+// An exhausted quota or a billing failure is never retryable even when it wears
+// a retryable status, because the account, not the network, is what is broken.
 //
 // Exported alongside NewProviderError as the other half of the provider↔loop
 // retry contract: a provider builds the error, the loop classifies it, and an
@@ -89,16 +138,20 @@ func IsRetryable(err error) bool {
 	}
 	var pe *ProviderError
 	if errors.As(err, &pe) {
+		// An account limit is permanent until a human acts on it; it outranks
+		// both the status and the transient-wording check below.
+		if exhaustedLimitPattern.MatchString(pe.Message) {
+			return false
+		}
 		if pe.Status == 0 {
 			return true // transport failure captured as a ProviderError
 		}
-		switch pe.Status {
-		case http.StatusRequestTimeout, http.StatusTooManyRequests,
-			http.StatusInternalServerError, http.StatusBadGateway,
-			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		if retryableStatus(pe.Status) {
 			return true
 		}
-		return false
+		// The status was unhelpful (a gateway 200 wrapping an upstream failure,
+		// say); fall back to what the provider actually said.
+		return retryableMessagePattern.MatchString(pe.Message)
 	}
 	// Transport-level failures (connection reset, DNS, timeouts) arrive as
 	// *url.Error / net.Error from the HTTP client; these are worth a retry.

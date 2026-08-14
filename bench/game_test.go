@@ -29,7 +29,6 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
-	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -76,7 +75,8 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 	limits.MaxTurns = 60
 	limits.MaxToolCalls = 150
 
-	agent, err := preset.New(agentcore.Config{
+	obs := newRunObserver()
+	agent, err := obs.build(agentcore.Config{
 		Provider:             rec,
 		Model:                model,
 		Limits:               &limits,
@@ -230,6 +230,10 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 			t.Logf("artifact copy %s: %v", f, cerr)
 		}
 	}
+	if derr := obs.dump(outDir); derr != nil {
+		t.Logf("observer dump: %v", derr)
+	}
+	t.Logf("observed: %+v", obs.summarize())
 	if slData, jerr := json.MarshalIndent(shellLog, "", "  "); jerr == nil {
 		if err := os.MkdirAll(outDir, 0o755); err == nil {
 			_ = os.WriteFile(filepath.Join(outDir, "shell-log.json"), slData, 0o644)

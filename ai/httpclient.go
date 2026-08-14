@@ -9,33 +9,41 @@ import (
 	"time"
 )
 
-// Timeouts for the chat providers. These two knobs do different jobs, and
-// collapsing them into one is what broke the collision/idle-game benchmarks.
+// Timeouts for the chat providers. There are two knobs, they do different jobs,
+// and which of them applies depends on whether the request is STREAMED.
 //
-// Go's http.Client.Timeout is absolute: it covers dialing, the response
-// headers, AND the full body read. For a chat provider the body IS the model
-// generating — a turn that streams a complete HTML page can legitimately spend
-// minutes there. Sizing that cap like a handshake (the old 120s) does not
-// protect against a dead gateway; it kills the slowest *healthy* turns, and
-// because the kill is deterministic the retry ladder then reproduces it on
-// every attempt (3x120s of dead wall clock before the turn finally fails).
+// Go's http.Client.Timeout is absolute: it covers dialing, the response headers,
+// AND the full body read. For a chat provider the body IS the model generating —
+// a turn that produces a complete HTML page can legitimately spend minutes
+// there. Sizing that cap like a handshake (the old 120s) does not protect
+// against a dead gateway; it kills the slowest *healthy* turns, and because the
+// kill is deterministic the retry ladder then reproduces it on every attempt.
 //
-// So the absolute cap is sized for the slowest legitimate turn, and the
-// liveness check moves to ResponseHeaderTimeout — time to first response
-// header, which is genuinely a handshake and completes before generation
-// starts. A dead endpoint still fails in a minute; a slow one is left alone.
+// ResponseHeaderTimeout looks like the safe replacement — time to first response
+// header is a real liveness signal — but only on an SSE request. There the
+// gateway writes its 200 immediately and the tokens follow, so headers precede
+// generation. On a NON-streamed completion the response is a single buffered
+// JSON document: headers do not leave the gateway until generation has finished,
+// so a "header" deadline is a generation deadline wearing a disguise. Bench #4
+// proved it — the first turn generated 9.5k tokens, the header deadline fired at
+// exactly 60.3s, and the (successful) retry then spent 135s regenerating the
+// same answer: 60s of dead wall clock and a doubled bill for a healthy call.
+//
+// So: the absolute cap applies to both paths and is sized for the slowest
+// legitimate turn; the header deadline applies to the streamed path ONLY.
 const (
 	// DefaultChatTimeout bounds one chat exchange end to end, body included.
 	DefaultChatTimeout = 10 * time.Minute
-	// DefaultResponseHeaderTimeout bounds the wait for response headers — the
-	// "is this gateway alive" check the absolute cap was mistakenly doing.
+	// DefaultResponseHeaderTimeout bounds the wait for response headers on a
+	// STREAMED request — the "is this gateway alive" check the absolute cap was
+	// mistakenly doing. It is meaningless on a buffered completion.
 	DefaultResponseHeaderTimeout = 60 * time.Second
 )
 
-// NewChatHTTPClient builds the HTTP client the chat providers use: a generous
-// absolute deadline for long generations plus a short header deadline so an
-// unresponsive endpoint still fails fast. A zero timeout uses
-// DefaultChatTimeout.
+// NewChatHTTPClient builds the HTTP client for NON-streamed chat completions: a
+// generous absolute deadline and no header deadline, because the headers of a
+// buffered completion arrive only once the model has finished. A zero timeout
+// uses DefaultChatTimeout.
 //
 // Exported so a caller that knows its own latency envelope can size the cap
 // itself and assign it to the provider's HTTP field, rather than inheriting a
@@ -45,10 +53,18 @@ func NewChatHTTPClient(timeout time.Duration) *http.Client {
 		timeout = DefaultChatTimeout
 	}
 	// Clone the stock transport so connection pooling, proxy support and HTTP/2
-	// stay at their defaults; only the header deadline is ours.
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = DefaultResponseHeaderTimeout
-	return &http.Client{Timeout: timeout, Transport: tr}
+	// stay at their defaults.
+	return &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
+}
+
+// NewStreamHTTPClient builds the HTTP client for SSE chat requests: the same
+// absolute cap plus the header deadline, which is honest here — an SSE gateway
+// flushes its headers before the first token, so a silent wait past
+// DefaultResponseHeaderTimeout means the endpoint is not answering at all.
+func NewStreamHTTPClient(timeout time.Duration) *http.Client {
+	c := NewChatHTTPClient(timeout)
+	c.Transport.(*http.Transport).ResponseHeaderTimeout = DefaultResponseHeaderTimeout
+	return c
 }
 
 // describeReadErr names which deadline actually killed a body read. Go reports
