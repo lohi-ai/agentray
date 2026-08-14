@@ -135,6 +135,29 @@ type Agent struct {
 	// the consumer — agentcore never loads or builds another agent itself, so it
 	// stays product-agnostic. Empty leaves only self-delegation.
 	delegates []Delegate
+	// onLogInvariantViolation, when set, turns on the "model-visible means
+	// logged" runtime check (loginvariant.go) and receives every divergence
+	// between the live history and the durable log.
+	onLogInvariantViolation func(LogInvariantViolation)
+	// sessionQuery, when non-nil, enables the session_query retrieval tool
+	// (sessionquery.go) so the model can recover detail compaction summarized
+	// away instead of re-running the tool that produced it.
+	sessionQuery *SessionQuerySettings
+	// jobs, when non-nil, enables the background-job seam (jobs.go): tools may
+	// start work that outlives their call, the job_* tools observe and stop it,
+	// and completed jobs are announced at the top of the next turn. The policy
+	// is resolved per run because the owner token is run-scoped.
+	jobs *JobSettings
+	// repeatGuard, when non-nil, are the validated settings for the repeated-
+	// tool-call reminder. The guard's counters are per-RUN state, so the loop
+	// builds a fresh one from these settings at the top of every run rather than
+	// carrying a chain across runs of the same Agent.
+	repeatGuard *RepeatGuardSettings
+	// spill, when non-nil, replaces plain truncation of an oversized tool result
+	// with save-to-artifact + preview + locator, and enables the read_spill
+	// retrieval tool (spill.go). nil keeps truncation, which discards the
+	// omitted bytes irrecoverably.
+	spill *spillPolicy
 	// childUsage accumulates the usage of sub-agent runs spawned during the
 	// current run (written by spawn_subagent, possibly from parallel tool
 	// goroutines); runLoop folds and resets it into the RunResult so a parent
@@ -335,6 +358,45 @@ type Config struct {
 	// answer. Zero-value settings apply the defaults (depth 1, 8 per run, 48 KB
 	// answer cap). nil — the default — leaves the agent solo.
 	Subagents *SubagentSettings
+	// OnLogInvariantViolation, when set, enables the "model-visible means
+	// logged" check on durable runs: before every provider request the loop
+	// verifies that each message in the live history has a durable counterpart,
+	// and reports any that does not. It never alters the run — it is a detector
+	// for the silent class of bug where an injected message reaches the model
+	// but not the log, so a resumed run replays a different conversation than
+	// the one that actually happened.
+	//
+	// Cheap enough to leave on in production (a hash per message per turn);
+	// wire it to your error sink. nil — the default — skips the check.
+	OnLogInvariantViolation func(LogInvariantViolation)
+	// SessionQuery, when non-nil, enables the built-in session_query tool: the
+	// model can search this session's own durable log — including spans
+	// compaction has already summarized away — instead of re-running the tool
+	// that produced a fact it can no longer see. With no Provider it searches
+	// the run's own SessionStore, so it needs Session + SessionID; supply a
+	// Provider to search wider (an index-backed one — see SessionQuery).
+	// nil — the default — leaves the agent with no retrieval tool.
+	SessionQuery *SessionQuerySettings
+	// Jobs, when non-nil, enables background jobs for this run: a long-running
+	// tool can call JobsFrom(ctx).Start(...) to return immediately with a job id
+	// instead of blocking the run, the built-in job_list / job_status / job_wait
+	// / job_cancel tools observe and control the work, and finished jobs are
+	// announced to the model at the top of the next turn. Every job is fenced to
+	// this run and cancelled when it ends. nil — the default — keeps every tool
+	// synchronous.
+	Jobs *JobSettings
+	// RepeatGuard, when non-nil, enables the repeated-tool-call reminder: an
+	// advisory nudge injected when the model calls the same tool with identical
+	// arguments N times in a row (repeatguard.go). It never blocks a call. The
+	// zero value applies the defaults (thresholds 3/5/8, update_plan excluded).
+	// nil — the default — leaves the guard off.
+	RepeatGuard *RepeatGuardSettings
+	// Spill, when non-nil with a Store, keeps an oversized tool result out of the
+	// context WITHOUT destroying it: the full text is saved to the store and the
+	// model-facing result becomes a bounded head/tail preview plus a locator it
+	// can read back through the built-in read_spill tool. nil — the default —
+	// keeps plain head+tail truncation, which drops the omitted bytes for good.
+	Spill *SpillSettings
 	// Delegates names the other agents this one may invoke through
 	// spawn_subagent's agent parameter. Each Delegate.Run closure executes the
 	// target agent under its own identity (persona, tools, policy) — the
@@ -373,6 +435,11 @@ func New(cfg Config) (*Agent, error) {
 	retry := DefaultRetryPolicy()
 	if cfg.Retry != nil {
 		retry = cfg.Retry.normalized()
+	}
+	// Validate the repeat-guard configuration here so a bad threshold list is a
+	// construction error, not a guard that silently never fires.
+	if _, err := newRepeatGuard(cfg.RepeatGuard); err != nil {
+		return nil, err
 	}
 
 	// The permission gate is itself a beforeToolCall hook, run first.
@@ -415,6 +482,12 @@ func New(cfg Config) (*Agent, error) {
 		outputSchema:       cfg.OutputSchema,
 		subagents:          cfg.Subagents,
 		delegates:          cfg.Delegates,
+		spill:              newSpillPolicy(cfg.Spill, cfg.SessionID, limits),
+		repeatGuard:        cfg.RepeatGuard,
+		jobs:               cfg.Jobs,
+		sessionQuery:       cfg.SessionQuery,
+
+		onLogInvariantViolation: cfg.OnLogInvariantViolation,
 	}, nil
 }
 

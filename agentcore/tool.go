@@ -70,6 +70,26 @@ func (ts *ToolSet) Add(t Tool) {
 	ts.byKey[t.Name()] = t
 }
 
+// With returns a COPY of the set with the given tools added, leaving the
+// receiver untouched. The loop assembles a run's effective registry this way —
+// host tools plus whichever built-ins the run enables (read_skill,
+// spawn_subagent, read_spill, job_*, session_query) — so the shared Agent
+// toolset is never mutated per run and two concurrent runs of the same
+// definition cannot see each other's built-ins.
+func (ts *ToolSet) With(tools ...Tool) *ToolSet {
+	clone := &ToolSet{
+		order: append([]string{}, ts.order...),
+		byKey: make(map[string]Tool, len(ts.byKey)+len(tools)),
+	}
+	for k, v := range ts.byKey {
+		clone.byKey[k] = v
+	}
+	for _, t := range tools {
+		clone.Add(t)
+	}
+	return clone
+}
+
 // Get returns the tool of the given name, if registered.
 func (ts *ToolSet) Get(name string) (Tool, bool) {
 	t, ok := ts.byKey[name]
@@ -91,6 +111,37 @@ func (ts *ToolSet) Names() []string {
 	copy(out, ts.order)
 	return out
 }
+
+// gateExemptTools are the framework's own built-in tools, which run without
+// consulting the (default-deny) permission Policy.
+//
+// The exemption is narrow and follows one rule: a tool is exempt only if it
+// cannot reach anything the agent does not already have. Each of these reads
+// back something THIS run produced or was authored into its own definition, and
+// each is fenced to the run's session:
+//
+//   - read_skill   — definition-authored skill bodies, nothing else
+//   - read_spill   — output of a tool call this run already made, which the
+//     framework itself truncated away
+//   - job_*        — observation and cancellation of work this run launched
+//   - session_query — this run's own durable log
+//
+// The alternative — making every marketplace preset enumerate them — would be
+// pure friction: a preset that forgot one would silently lose the ability to
+// read its own truncated output, with no security benefit, since none of these
+// tools can be pointed at another agent's data. Anything that CAN reach outside
+// the run (a filesystem read, an HTTP fetch, a SQL query) stays gated.
+var gateExemptTools = func() map[string]bool {
+	m := map[string]bool{
+		readSkillToolName:    true,
+		readSpillToolName:    true,
+		sessionQueryToolName: true,
+	}
+	for _, n := range jobToolNames {
+		m[n] = true
+	}
+	return m
+}()
 
 // defaultMaxToolResultBytes bounds a tool result before it reaches the LLM —
 // token + safety guard (pi harness truncate.ts, rebuilt UTF-8-safe).

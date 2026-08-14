@@ -57,6 +57,11 @@ type ToolTrace struct {
 	// (empty on runs without a durable session). Persisting it lets an external
 	// side effect be correlated back to the exact logical call that caused it.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// SpillLocator is set when the result was too large for the context and its
+	// full text was saved to a spill artifact (spill.go). It makes the complete
+	// output recoverable from the trace long after the run, not just by the model
+	// mid-run — an oversized result is no longer lost to observability either.
+	SpillLocator string `json:"spill_locator,omitempty"`
 }
 
 // budgetExhaustedSteer is injected as a final user turn when the budget gate
@@ -221,11 +226,34 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	limits := a.limits
 	res = RunResult{Messages: messages}
 
+	// Background jobs (jobs.go). The owner is the durable session when there is
+	// one, else a token unique to this run — either way every job is fenced to
+	// the run that started it. The launcher rides the run context so a tool can
+	// start work that outlives its own call, and CancelAll on return means no
+	// goroutine survives the run that spawned it.
+	jobOwner := a.sessionID
+	if jobOwner == "" {
+		jobOwner = "run_" + newEntryID()
+	}
+	jobs := newJobsPolicy(a.jobs, jobOwner, limits)
+	if jobs != nil {
+		ctx = withJobs(ctx, JobLauncher{store: jobs.store, owner: jobs.owner, base: ctx, maxBytes: jobs.maxBytes})
+		defer jobs.store.CancelAll(jobs.owner)
+	}
+
 	// Durable writes are buffered per turn and flushed atomically at the turn
 	// boundary (pi's pendingSessionWrites + save_point), so a crash mid-turn loses
 	// the whole in-flight turn rather than leaving a half-written one — which is
 	// exactly the shape RecoverSession treats as cleanly interrupted. A nil store
 	// makes both buffer and flush no-ops.
+	// "Model-visible means logged" tracker (loginvariant.go). Only meaningful on
+	// a durable run — without a log there is nothing for the history to diverge
+	// from.
+	var invariant *logInvariant
+	if a.session != nil && a.sessionID != "" {
+		invariant = newLogInvariant(a.onLogInvariantViolation != nil, a.onLogInvariantViolation)
+	}
+
 	var pending []SessionEntry
 	// lastEntryID chains this run's entries into the session tree: each buffered
 	// entry gets a stable id and points at the one before it, so any entry is a
@@ -245,6 +273,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 		if e.ID != "" {
 			lastEntryID = e.ID
+		}
+		// Every persisted message is one the live history is allowed to show.
+		// Tracking it HERE — at the single choke point every durable write goes
+		// through — is what makes the invariant impossible to forget: a future
+		// feature that injects a message without calling appendEntry trips the
+		// check instead of silently corrupting resume.
+		if e.Kind == EntryMessage && e.Message != nil {
+			invariant.note(*e.Message)
 		}
 		pending = append(pending, e)
 	}
@@ -329,6 +365,19 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	if a.subagents != nil && DelegationDepth(ctx) < a.subagents.normalized().MaxDepth {
 		tools = withSubagent(tools, a)
 	}
+	if a.spill != nil {
+		tools = tools.With(&readSpillTool{policy: a.spill})
+	}
+	if jobs != nil {
+		tools = withJobTools(tools, jobs)
+	}
+	if sq := newSessionQueryPolicy(a.sessionQuery, a.session, a.sessionID); sq != nil {
+		tools = tools.With(&sessionQueryTool{policy: sq})
+	}
+
+	// Repeated-tool-call chain (per run, so a new run never inherits a chain).
+	// The settings were validated in New, so the error here cannot fire.
+	repeatChain, _ := newRepeatGuard(a.repeatGuard)
 
 	// Circuit-breaker state (per run): consecutive failures per tool, and the set
 	// of tools disabled after crossing maxToolFailures. A disabled tool is dropped
@@ -422,6 +471,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// fresh run; its entries chain onto the existing log.
 			case len(plan.Messages) > 0:
 				resumed = true
+				// A recovered history came OUT of the log, so it satisfies the
+				// invariant by definition; seed the tracker with it or every
+				// resumed run would report its whole history as unlogged.
+				invariant.noteAll(plan.Messages)
 				if goal == "" {
 					goal = plan.Goal
 				}
@@ -729,6 +782,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// MaxContextTokens cannot leave compaction with "nothing old enough".
 		compaction := effectiveCompaction(a.compaction, limits.MaxContextTokens)
 		res.Messages, _ = editContext(res.Messages, limits.MaxContextTokens, compaction)
+		// The context editor rewrites superseded tool results in place. That is
+		// a deterministic function of the logged history — a resume replays the
+		// same log and derives the same edit — so it rebases the invariant
+		// rather than tripping it.
+		invariant.rebase(res.Messages)
 
 		// Stop guard: compact old turns when the estimated context approaches
 		// the model window so long autonomous runs stay bounded (§5.2). The older
@@ -780,6 +838,25 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				}
 				appendEntry(fin)
 			}
+			// Compaction replaces the transcript wholesale, but the log carries
+			// the bracket that says so and recovery re-derives the same shape, so
+			// the rewritten history is the new baseline for the invariant.
+			invariant.rebase(res.Messages)
+		}
+
+		// Background-job completion notices: announce work that finished since the
+		// last turn as a synthetic user message, persisted like a steer. Without
+		// this the model has to poll job_status — burning a turn per check, and
+		// never learning the outcome at all if it forgets to look. Drained before
+		// steering so the model reads the results it was waiting on first.
+		if jobs != nil && jobs.notify {
+			if done := jobs.store.DrainCompleted(jobs.owner); len(done) > 0 {
+				if notice := completionNotice(done, jobNoticeInlineLimit); notice != "" {
+					m := Message{Role: RoleUser, Content: notice}
+					res.Messages = append(res.Messages, m)
+					appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+				}
+			}
 		}
 
 		// Steering: drain any user-injected corrections queued since the last turn
@@ -788,6 +865,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if a.getSteering != nil {
 			for _, m := range a.getSteering(ctx) {
 				m := m
+				// New human input breaks the repeat chain: the model has been
+				// given information it did not have, so a call it now repeats is
+				// a fresh decision, not a continuation of the old loop.
+				repeatChain.reset()
 				res.Messages = append(res.Messages, m)
 				// Persist the drained steer: the model acts on it this turn, so a
 				// resume that rebuilt history without it would replay a different
@@ -807,6 +888,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// trimming, reminders — without mutating the persisted history; the result
 		// drives only this request. before_provider_request hooks then inspect or
 		// rewrite the assembled request. Both honor the hook error policy.
+		// "Model-visible means logged": check the history the loop maintains,
+		// NOT the post-hook request view. Context hooks are documented to shape
+		// the outgoing request without mutating persisted history, so checking
+		// after them would flag every redaction as a violation.
+		invariant.check(res.Turns, res.Messages)
+
 		reqMessages, herr := a.hooks.runContext(ctx, res.Messages)
 		if herr != nil {
 			return failTurn(herr)
@@ -921,6 +1008,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// still bounds the extended loop.
 			if a.getFollowUp != nil {
 				if follow := a.getFollowUp(ctx); len(follow) > 0 {
+					// A follow-up is new human input; break the repeat chain for
+					// the same reason a steer does.
+					repeatChain.reset()
 					for _, m := range follow {
 						m := m
 						res.Messages = append(res.Messages, m)
@@ -1049,6 +1139,21 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			return res, nil
 		}
 
+		// Repeated-tool-call reminder: if this batch pushed a run of identical
+		// calls to a configured threshold, inject the advisory as a synthetic
+		// user message AFTER the tool results, so the model reads its own
+		// repeated output and the reminder together. Persisted like a steer, so
+		// a resumed run sees the same conversation it was actually given —
+		// "model-visible means logged" (see assertLogged below). Never fires on
+		// a terminating turn: that run is already over.
+		if nudge := repeatChain.observe(calls); nudge != "" {
+			m := Message{Role: RoleUser, Content: nudge}
+			res.Messages = append(res.Messages, m)
+			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+			// Deliberately not emitted as a StreamProgress note: progress notes
+			// reach the end user, and the reminder is internal rail scaffolding.
+		}
+
 		// Refund a turn that did nothing but update the run plan: plan bookkeeping
 		// is not productive progress, so it must not consume the MaxTurns budget on
 		// a long multi-step task (the MaxToolCalls budget still backstops a runaway
@@ -1140,10 +1245,14 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 		return toolOutcome{trace: trace, message: toolResult(call, "invalid arguments: "+err.Error())}
 	}
 
-	// beforeToolCall preflight (permission gate + consumer hooks). The built-in
-	// read_skill tool bypasses it: it only returns definition-authored skill
-	// bodies, so it is always allowed regardless of the (default-deny) policy.
-	if call.Name != readSkillToolName {
+	// beforeToolCall preflight (permission gate + consumer hooks). Two built-ins
+	// bypass it because neither can reach anything the agent does not already
+	// have: read_skill only returns definition-authored skill bodies, and
+	// read_spill only returns output THIS session produced and had truncated
+	// away (the store is fenced to the run's session id). Requiring every
+	// marketplace preset to enumerate them would be friction with no security
+	// value.
+	if !gateExemptTools[call.Name] {
 		if d := a.hooks.runBefore(ctx, gated); !d.Allow {
 			trace.Allowed = false
 			trace.Reason = d.Reason
@@ -1184,10 +1293,14 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 	execStart := time.Now()
 	out, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
-	// Head+tail truncation: an oversized result keeps its beginning AND end,
-	// because the end often carries the signal (a shell error after pages of
-	// build output, the final rows of a query, a stack trace's cause).
-	out = truncateMiddle(out, limits.MaxToolResultLen)
+	// Bound the result for the model. With a spill store configured the overflow
+	// is SAVED and reachable via read_spill; without one it is head+tail
+	// truncated, keeping the beginning AND end because the end often carries the
+	// signal (a shell error after pages of build output, the final rows of a
+	// query, a stack trace's cause) — but losing the middle for good.
+	var spillLoc string
+	out, spillLoc = a.applySpill(ctx, gated, out, limits)
+	trace.SpillLocator = spillLoc
 	out, term := a.hooks.runAfter(ctx, gated, out, runErr)
 
 	trace.Allowed = true
