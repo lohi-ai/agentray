@@ -548,7 +548,11 @@ function ResultCard({ card }: { card: AgentResultCard }) {
       ) : (
         <div className="flex flex-wrap items-end gap-4">
           {(card.stats ?? []).map((s) => (
-            <div key={s.label}><Text type="supporting" className="!text-[var(--color-text-disabled)]">{s.label}</Text><span className="font-mono text-[26px] font-semibold tracking-[-0.02em]">{s.value}{card.unit ? <span className="text-[var(--color-text-disabled)]"> {card.unit}</span> : null}</span></div>
+            // A stat's label and unit are body text the reader has to parse to
+            // know what the number means, so they sit on --color-text-secondary
+            // (6.6:1) rather than --color-text-disabled (--faint, 3.35:1 — below
+            // AA, and reserved for genuinely inert text).
+            <div key={s.label}><Text type="supporting">{s.label}</Text><span className="font-mono text-[26px] font-semibold tracking-[-0.02em]">{s.value}{card.unit ? <span className="text-[var(--color-text-secondary)]"> {card.unit}</span> : null}</span></div>
           ))}
         </div>
       )}

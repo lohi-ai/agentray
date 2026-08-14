@@ -136,8 +136,17 @@ export function AppShell({ children, bleed = false }: { active?: AppSection; chi
   );
 
   return (
-    <AstryxAppShell height="fill" contentPadding={bleed ? 0 : 6} sideNav={sideNav}>
-      {bleed ? children : <div className="max-w-[1320px] mx-auto">{children}</div>}
-    </AstryxAppShell>
+    <>
+      {/* First tab stop on every page. Without it a keyboard user walks all
+          eleven nav items before reaching the content, on every navigation. */}
+      <a href="#main-content" className="skip-to-content">Skip to content</a>
+      <AstryxAppShell height="fill" contentPadding={bleed ? 0 : 6} sideNav={sideNav}>
+        {bleed ? (
+          <div id="main-content" className="h-full">{children}</div>
+        ) : (
+          <div id="main-content" className="max-w-[1320px] mx-auto">{children}</div>
+        )}
+      </AstryxAppShell>
+    </>
   );
 }

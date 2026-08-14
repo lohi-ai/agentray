@@ -3,6 +3,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pencil, Sparkles, Trash2 } from 'lucide-react';
+import { Card } from '@astryxdesign/core/Card';
+import { Heading } from '@astryxdesign/core/Heading';
+import { HStack } from '@astryxdesign/core/HStack';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { Text } from '@astryxdesign/core/Text';
 import { AgentRayAPI, type ActivitySummary, type Chart, type Filters } from '@/lib/api';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
@@ -53,14 +58,16 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
 // hover tooltip rather than crowding the card with always-on labels.
 function SeriesChart({ values, labels, type }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type'] }) {
   if (values.length === 0) {
-    return <div className="block w-full grid place-items-center text-[var(--color-text-secondary)] text-xs" style={{ height: 168 }}>No data in range</div>;
+    return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
   const latest = values[values.length - 1];
   return (
     <div>
       <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168 }} />
-      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] tracking-normal mt-1.5">
-        latest <span className="font-mono tabular-nums text-primary font-semibold">{formatCompact(latest)}</span>
+      <div className="mt-1.5">
+        <Text type="supporting">
+          latest <span className="font-mono tabular-nums font-semibold text-primary">{formatCompact(latest)}</span>
+        </Text>
       </div>
     </div>
   );
@@ -91,7 +98,7 @@ function SqlGraph({ chart, projectID }: { chart: Chart; projectID: string }) {
     return () => { active = false; };
   }, [api, sql, chart.y_field, chart.x_field]);
 
-  if (data === null) return <div className="block w-full grid place-items-center text-[var(--color-text-secondary)] text-xs" style={{ height: 140 }}>Running query…</div>;
+  if (data === null) return <div className="grid w-full place-items-center" style={{ height: 140 }}><Text type="supporting">Running query…</Text></div>;
   return <SeriesChart values={data.values} labels={data.labels} type={specType(chart.kind)} />;
 }
 
@@ -109,25 +116,31 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
     router.push(`/chat?q=${encodeURIComponent(q)}`);
   }
 
+  // Astryx migration: the hand-rolled card div is now an Astryx <Card>, the
+  // title a <Heading level={5}>, and the three action buttons Astryx
+  // <IconButton>s. That last swap is not cosmetic — the raw buttons carried
+  // only `title`, which is not an accessible name, and sat at 26px against a
+  // 44px touch target. IconButton's `label` is the accessible name and its
+  // tooltip keeps the hover affordance.
   return (
-    <div className="rounded-xl bg-[var(--color-background-card)] p-4">
-      <div className="flex items-center mb-3">
+    <Card padding={4}>
+      <HStack align="center" gap={0} className="mb-3">
         {handle}
-        <h3 className="m-0 text-[13px] font-semibold">{chart.name || 'Untitled chart'}</h3>
+        <Heading level={5}>{chart.name || 'Untitled chart'}</Heading>
         {preview ? null : (
-          <div className="ms-auto flex items-center gap-0.5">
+          <HStack align="center" gap={0.5} className="ms-auto">
             {chart.sql ? (
-              <button className="grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-agent" title="Ask the agent to explain this chart" onClick={explain}><Sparkles size={14} /></button>
+              <IconButton label="Explain this chart" tooltip="Ask the agent to explain this chart" variant="ghost" size="sm" icon={<Sparkles size={14} />} onClick={explain} />
             ) : null}
             {onEdit ? (
-              <button className="grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" title="Edit chart" onClick={onEdit}><Pencil size={14} /></button>
+              <IconButton label="Edit chart" tooltip="Edit chart" variant="ghost" size="sm" icon={<Pencil size={14} />} onClick={onEdit} />
             ) : null}
             {onDelete ? (
-              <button className="grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" title="Delete chart" onClick={onDelete}><Trash2 size={14} /></button>
+              <IconButton label="Delete chart" tooltip="Delete chart" variant="ghost" size="sm" icon={<Trash2 size={14} />} onClick={onDelete} />
             ) : null}
-          </div>
+          </HStack>
         )}
-      </div>
+      </HStack>
       {chart.kind === 'stat' ? (
         <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
       ) : chart.sql ? (
@@ -139,6 +152,6 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
           type={specType(chart.kind)}
         />
       )}
-    </div>
+    </Card>
   );
 }

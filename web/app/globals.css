@@ -165,6 +165,36 @@
   border-inline-end: 1px solid var(--border);
 }
 
+/* Nav items ship at 36px, below the 44px minimum touch target. The sidebar is
+   the primary navigation on a surface that is used on tablets, so raise the hit
+   area without changing the type scale or the visual rhythm — padding grows, the
+   label does not move. */
+.astryx-side-nav-item {
+  min-height: 44px;
+}
+
+/* Skip link: a nav-heavy shell means a keyboard user otherwise tabs through
+   every nav item on every page before reaching the content. Off-screen until
+   focused, then pinned to the top-start corner above everything. */
+.skip-to-content {
+  position: absolute;
+  inset-inline-start: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--spacing-2, 8px) var(--spacing-3, 12px);
+  border-radius: var(--radius-md);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+.skip-to-content:focus-visible {
+  inset-inline-start: var(--spacing-2, 8px);
+  top: var(--spacing-2, 8px);
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 /* Active/hover nav item: cool --surface-3 fill (no accent border, per design
    direction). Astryx's default is a warm white-10%-overlay that reads gray,
    not on-brand — override it to the cool ramp. */

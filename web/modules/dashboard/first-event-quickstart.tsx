@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
+import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import { apiBase } from '@/lib/api';
 import { isSampleProject, settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
 import { useAuthStore } from '@/lib/app-state';
@@ -98,7 +99,7 @@ export function FirstEventQuickstart() {
 
   const [source, setSource] = useState<Source>('website');
   const [lang, setLang] = useState<Lang>('js');
-  const [copied, setCopied] = useState<'key' | 'code' | null>(null);
+  const [copied, setCopied] = useState<'key' | null>(null);
 
   const key = project?.api_key ?? '';
   const base = apiBase();
@@ -106,6 +107,9 @@ export function FirstEventQuickstart() {
     () => (source === 'website' ? websiteSnippet(base, key) : appSnippet(lang, base, key)),
     [source, lang, base, key],
   );
+  // The website snippet is a <script> tag, so it highlights as HTML; the app
+  // snippets follow the picked language.
+  const codeLang = source === 'website' ? 'html' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
 
   if (!shouldShowFirstEventGuide({
     eventNames: names,
@@ -113,9 +117,9 @@ export function FirstEventQuickstart() {
     sample,
   })) return null;
 
-  function copy(text: string, what: 'key' | 'code') {
+  function copy(text: string) {
     void navigator.clipboard?.writeText(text);
-    setCopied(what);
+    setCopied('key');
     setTimeout(() => setCopied(null), 1500);
   }
 
@@ -150,7 +154,7 @@ export function FirstEventQuickstart() {
             <span className="min-w-0 flex-1 truncate font-mono tabular-nums">{key || '—'}</span>
             <button
               className="inline-flex flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-[11.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
-              onClick={() => copy(key, 'key')}
+              onClick={() => copy(key)}
               disabled={!key}
             >
               {copied === 'key' ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
@@ -183,15 +187,10 @@ export function FirstEventQuickstart() {
                   <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">pageview</code>.
                 </p>
               )}
-              <div className="relative">
-                <pre className="m-0 overflow-x-auto rounded-md bg-[var(--color-background-muted)] p-3.5 font-mono text-[12px] leading-[1.55] text-[var(--color-text-primary)]"><code>{code}</code></pre>
-                <button
-                  className="absolute end-2.5 top-2.5 inline-flex items-center gap-1 rounded-sm border border-[var(--color-border)] bg-[var(--color-background-card)] px-2 py-1 text-[11.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
-                  onClick={() => copy(code, 'code')}
-                >
-                  {copied === 'code' ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
-                </button>
-              </div>
+              {/* Astryx migration: native <CodeBlock> — syntax highlighting,
+                  horizontal scroll inside its own box, and its own copy button,
+                  which retires the hand-rolled one that had no accessible name. */}
+              <CodeBlock code={code} language={codeLang} size="sm" width="100%" container="section" />
             </>
           )}
         </div>
