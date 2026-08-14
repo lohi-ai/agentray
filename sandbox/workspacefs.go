@@ -357,6 +357,12 @@ find . -type d \( ` + findPruneExpr() + ` \) -prune -o -type f -print`
 }
 
 func (s sandboxFS) ReadEach(ctx context.Context, rels []string, maxBytes int64, fn func(string, []byte) error) error {
+	return s.readEachWithBudget(ctx, rels, maxBytes, fsSnapshotMaxBytes, fn)
+}
+
+// readEachWithBudget is ReadEach with the snapshot budget as a parameter, so a
+// test can drive the overflow path without materializing 32MB.
+func (s sandboxFS) readEachWithBudget(ctx context.Context, rels []string, maxBytes, totalBudget int64, fn func(string, []byte) error) error {
 	if len(rels) == 0 {
 		return nil
 	}
@@ -364,13 +370,16 @@ func (s sandboxFS) ReadEach(ctx context.Context, rels []string, maxBytes int64, 
 	// reply is a length-framed stream: "F <bytes> <path>\n" then exactly that many
 	// raw bytes. Framing by byte count rather than a delimiter keeps binary and
 	// newline-bearing content intact; a path containing a newline simply fails the
-	// -f test and is skipped rather than desyncing the stream.
+	// -f test and is skipped rather than desyncing the stream. The `tr -d ' '`
+	// matters: BSD wc pads its count with leading spaces, busybox wc does not, and
+	// the frame header has to be identical either way.
 	script := `max_file=$1
 max_total=$2
 total=0
 while IFS= read -r p; do
   [ -f "$p" ] || continue
-  n=$(wc -c < "$p" 2>/dev/null) || continue
+  n=$(wc -c < "$p" 2>/dev/null | tr -d ' ') || continue
+  [ -n "$n" ] || continue
   [ "$n" -gt "$max_file" ] && continue
   total=$((total + n))
   if [ "$total" -gt "$max_total" ]; then exit 3; fi
@@ -379,7 +388,7 @@ while IFS= read -r p; do
 done`
 	res, err := s.exec(ctx, agentcore.SandboxExec{
 		Argv: []string{"/bin/sh", "-c", script, "sh",
-			strconv.FormatInt(maxBytes, 10), strconv.Itoa(fsSnapshotMaxBytes)},
+			strconv.FormatInt(maxBytes, 10), strconv.FormatInt(totalBudget, 10)},
 		Stdin: strings.Join(rels, "\n") + "\n",
 	})
 	if err != nil {
@@ -387,7 +396,7 @@ done`
 	}
 	if res.ExitCode == fsExitOverflow {
 		return fmt.Errorf("more than %dMB of file content — narrow the search with path or glob",
-			fsSnapshotMaxBytes/(1024*1024))
+			totalBudget/(1024*1024))
 	}
 	if res.ExitCode != 0 {
 		return sandboxCmdErr("read", res)
@@ -405,8 +414,11 @@ func parseFramedFiles(stream string, fn func(string, []byte) error) error {
 			return nil
 		}
 		header, rest := stream[:nl], stream[nl+1:]
-		sizeStr, path, ok := strings.Cut(strings.TrimPrefix(header, "F "), " ")
-		if !ok || !strings.HasPrefix(header, "F ") {
+		if !strings.HasPrefix(header, "F ") {
+			return nil
+		}
+		sizeStr, path, ok := strings.Cut(strings.TrimLeft(header[2:], " "), " ")
+		if !ok {
 			return nil
 		}
 		size, err := strconv.Atoi(sizeStr)
