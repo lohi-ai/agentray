@@ -1,93 +1,89 @@
 'use client';
 
 import { useState } from 'react';
-import { Grid } from '@astryxdesign/core/Grid';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
-import type { WorkspaceModelTiers, WorkspaceModelTiersInput } from '@/lib/api';
+import type { WorkspaceModelTiers, WorkspaceModelTiersInput, WorkspaceProvider, WorkspaceProviderInput } from '@/lib/api';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { Button, Loading, Panel } from '@/modules/shared/components/signal-primitives';
+import {
+  decodeTierValue,
+  encodeTierValue,
+  listedModelsToPickerOptions,
+  type ListedModel,
+} from './model-picker';
 
-// The three workspace tiers. flash is the always-present default every project
-// and agent inherits; lite/pro are additive overrides — a blank field falls back
-// to flash, so the common "one key, different model per tier" setup needs the key
-// entered only once (on flash).
 const TIERS = [
   { key: 'flash', label: 'Default', hint: 'Balanced model every agent draws from. Required.' },
-  { key: 'lite', label: 'Lite', hint: 'Cheaper model for mechanical steps. Blank fields inherit the default.' },
-  { key: 'pro', label: 'Pro', hint: 'Stronger model for deep reasoning. Blank fields inherit the default.' },
+  { key: 'lite', label: 'Lite', hint: 'Cheaper model for mechanical steps. Blank inherits the default, including its provider.' },
+  { key: 'pro', label: 'Pro', hint: 'Stronger model for deep reasoning. Blank inherits the default, including its provider.' },
 ] as const;
 
 type TierKey = (typeof TIERS)[number]['key'];
 
-// Providers AgentRay constructs by name (internal/agentcore/registry.go). Any
-// OpenAI-compatible vendor is reached by picking "openai" + a custom Base URL.
-const PROVIDERS = ['openai', 'anthropic'];
+// Vendor kinds the user can configure — not a model catalog. Model IDs come
+// from each active provider's list-models API.
+const VENDOR_KINDS = [
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'google', label: 'Google Gemini' },
+  { value: 'openai-compat', label: 'OpenAI-compatible' },
+] as const;
 
-type TierDraft = { provider: string; model: string; base_url: string };
+type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
+const emptyProviderDraft = (): ProviderDraft => ({ vendor: 'openai', name: '', base_url: '', api_key: '' });
+
+type TierDraft = { providerId: string; model: string };
 type Draft = {
   flash: TierDraft;
   lite: TierDraft;
   pro: TierDraft;
-  keys: Record<TierKey, string>; // '' = keep stored key; any value = replace
-  clear: Record<TierKey, boolean>; // true = clear the stored key ('-')
   model_fallback: boolean;
 };
 
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
-    flash: { provider: c.provider || 'openai', model: c.model, base_url: c.base_url },
-    lite: { provider: c.lite_provider, model: c.lite_model, base_url: c.lite_base_url },
-    pro: { provider: c.pro_provider, model: c.pro_model, base_url: c.pro_base_url },
-    keys: { flash: '', lite: '', pro: '' },
-    clear: { flash: false, lite: false, pro: false },
+    flash: { providerId: c.flash_provider_id || '', model: c.model || '' },
+    lite: { providerId: c.lite_provider_id || '', model: c.lite_model || '' },
+    pro: { providerId: c.pro_provider_id || '', model: c.pro_model || '' },
     model_fallback: c.model_fallback,
   };
 }
 
-function apiKeyField(key: string, clear: boolean): string {
-  if (clear) return '-';
-  return key; // '' leaves the stored key untouched server-side
-}
-
 function draftToInput(d: Draft): WorkspaceModelTiersInput {
   return {
-    provider: d.flash.provider,
+    flash_provider_id: d.flash.providerId,
     model: d.flash.model,
-    base_url: d.flash.base_url,
-    api_key: apiKeyField(d.keys.flash, d.clear.flash),
-    lite_provider: d.lite.provider,
+    lite_provider_id: d.lite.providerId,
     lite_model: d.lite.model,
-    lite_base_url: d.lite.base_url,
-    lite_api_key: apiKeyField(d.keys.lite, d.clear.lite),
-    pro_provider: d.pro.provider,
+    pro_provider_id: d.pro.providerId,
     pro_model: d.pro.model,
-    pro_base_url: d.pro.base_url,
-    pro_api_key: apiKeyField(d.keys.pro, d.clear.pro),
     model_fallback: d.model_fallback,
   };
 }
 
 const labelCls = 'mb-1.5 block text-[12.5px] text-[var(--color-text-secondary)]';
 
-function hasKeyFor(config: WorkspaceModelTiers, tier: TierKey): boolean {
-  if (tier === 'flash') return config.has_key;
-  if (tier === 'lite') return config.lite_has_key;
-  return config.pro_has_key;
+function vendorNeedsBaseURL(vendor: string): boolean {
+  return vendor === 'openai-compat' || (vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google');
 }
 
 export function ModelsTab() {
-  const { models, modelsLoading, saveModels, testModels } = useWorkspaceModels();
+  const {
+    models, modelsLoading, providers, listedModels, listedErrors, listedLoading,
+    saveModels, testModels, createProvider, updateProvider, deleteProvider,
+  } = useWorkspaceModels();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [seededFrom, setSeededFrom] = useState<WorkspaceModelTiers | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [addDraft, setAddDraft] = useState<ProviderDraft>(emptyProviderDraft());
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<ProviderDraft>(emptyProviderDraft());
+  const [busyProvider, setBusyProvider] = useState<string | null>(null);
 
-  // Reseed the form whenever the loaded config object changes (initial load +
-  // post-save invalidation), discarding unsaved local edits in favour of server
-  // truth. Adjusting state during render off a changed source is React's
-  // recommended pattern — no effect needed.
   if (models && models !== seededFrom) {
     setSeededFrom(models);
     setDraft(draftFromConfig(models));
@@ -96,12 +92,8 @@ export function ModelsTab() {
   if (modelsLoading && !draft) return <Panel title="AI Provider"><Loading label="Loading model pool…" /></Panel>;
   if (!models || !draft) return <Panel title="AI Provider"><Loading label="Loading model pool…" /></Panel>;
 
-  const patch = (tier: TierKey, field: keyof TierDraft, value: string) =>
-    setDraft((d) => (d ? { ...d, [tier]: { ...d[tier], [field]: value } } : d));
-  const setKey = (tier: TierKey, value: string) =>
-    setDraft((d) => (d ? { ...d, keys: { ...d.keys, [tier]: value }, clear: { ...d.clear, [tier]: false } } : d));
-  const toggleClear = (tier: TierKey) =>
-    setDraft((d) => (d ? { ...d, clear: { ...d.clear, [tier]: !d.clear[tier] }, keys: { ...d.keys, [tier]: '' } } : d));
+  const pickerOptions = listedModelsToPickerOptions(listedModels as ListedModel[]);
+  const inheritOption = { value: '', label: 'Inherit default' };
 
   const onSave = async () => {
     setSaving(true);
@@ -120,96 +112,177 @@ export function ModelsTab() {
     }
   };
 
+  const onAdd = async () => {
+    const input: WorkspaceProviderInput = {
+      vendor: addDraft.vendor,
+      name: addDraft.name,
+      base_url: addDraft.base_url,
+      api_key: addDraft.api_key,
+    };
+    setBusyProvider('new');
+    try {
+      await createProvider(input);
+      setAddDraft(emptyProviderDraft());
+      setAdding(false);
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const onUpdate = async (id: string) => {
+    setBusyProvider(id);
+    try {
+      await updateProvider(id, {
+        vendor: editDraft.vendor,
+        name: editDraft.name,
+        base_url: editDraft.base_url,
+        api_key: editDraft.api_key,
+      });
+      setEditing(null);
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const onDelete = async (id: string) => {
+    setBusyProvider(id);
+    try {
+      await deleteProvider(id);
+      setDraft((d) => {
+        if (!d) return d;
+        const clear = (t: TierDraft): TierDraft => (t.providerId === id ? { providerId: '', model: '' } : t);
+        return { ...d, flash: clear(d.flash), lite: clear(d.lite), pro: clear(d.pro) };
+      });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const setTierValue = (tier: TierKey, value: string) => {
+    if (!value) {
+      setDraft((d) => (d ? { ...d, [tier]: { providerId: '', model: '' } } : d));
+      return;
+    }
+    const { providerId, modelId } = decodeTierValue(value);
+    setDraft((d) => (d ? { ...d, [tier]: { providerId, model: modelId } } : d));
+  };
+
+  const configured = providers as WorkspaceProvider[];
+  const hasAnyKey = configured.some((p) => p.has_key) || models.has_key;
+
   return (
     <div className="flex flex-col gap-[14px]">
       <p className="max-w-[640px] text-[13px] text-[var(--color-text-primary)]">
-        {models.hosted_default
-          ? 'Using the hosted model. Paste your own key to override — encrypted at rest, never shown again.'
-          : 'Paste one API key so Growth Lead can answer. Encrypted at rest, never shown again.'}
+        {models.hosted_default && !configured.length
+          ? 'Using the hosted model. Add a provider with your own key to override — encrypted at rest, never shown again.'
+          : hasAnyKey
+            ? 'Configured providers are encrypted at rest. Pick a listed model for each tier.'
+            : 'Add a provider and paste its API key so Growth Lead can answer. Encrypted at rest, never shown again.'}
       </p>
       <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">
-        Optional Lite/Pro tiers share this key unless you override them. OpenAI-compatible providers work via a custom base URL.
-        Only workspace owners and admins can change these.
+        Configure one or many providers, then pick each tier from the models those providers list. Lite and Pro inherit the default when left blank. Only workspace owners and admins can change these.
       </p>
+
+      <Panel title="Providers">
+        {configured.length === 0 && !adding ? (
+          <p className="mb-3 text-[12.5px] text-[var(--color-text-secondary)]">No providers configured yet.</p>
+        ) : null}
+        <div className="flex flex-col gap-3">
+          {configured.map((p) => (
+            <div key={p.id} className="rounded-md border border-[var(--color-border)] p-3">
+              {editing === p.id ? (
+                <ProviderFields
+                  draft={editDraft}
+                  onChange={setEditDraft}
+                  onSubmit={() => void onUpdate(p.id)}
+                  onCancel={() => setEditing(null)}
+                  submitLabel={busyProvider === p.id ? 'Saving…' : 'Save provider'}
+                  disabled={busyProvider === p.id}
+                  keyHint={p.has_key ? 'key set' : 'not set'}
+                />
+              ) : (
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[13px] text-[var(--color-text-primary)]">{p.name || p.vendor}</div>
+                    <div className="text-[12px] text-[var(--color-text-secondary)]">
+                      {p.vendor}
+                      {p.base_url ? ` · ${p.base_url}` : ''}
+                      {' · '}
+                      {p.has_key ? 'key set' : 'no key'}
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setEditing(p.id);
+                        setEditDraft({ vendor: p.vendor, name: p.name, base_url: p.base_url, api_key: '' });
+                      }}
+                    >
+                      Edit
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => void onDelete(p.id)} disabled={busyProvider === p.id}>
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        {adding ? (
+          <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
+            <ProviderFields
+              draft={addDraft}
+              onChange={setAddDraft}
+              onSubmit={() => void onAdd()}
+              onCancel={() => { setAdding(false); setAddDraft(emptyProviderDraft()); }}
+              submitLabel={busyProvider === 'new' ? 'Adding…' : 'Add provider'}
+              disabled={busyProvider === 'new'}
+              keyHint="paste key"
+            />
+          </div>
+        ) : (
+          <div className="mt-3">
+            <Button variant="outline" size="sm" onClick={() => setAdding(true)}>Add provider</Button>
+          </div>
+        )}
+      </Panel>
 
       {TIERS.map(({ key, label, hint }) => {
         const tier = draft[key];
-        const keySet = hasKeyFor(models, key);
-        const cleared = draft.clear[key];
+        const currentValue = tier.providerId && tier.model ? encodeTierValue(tier.providerId, tier.model) : '';
+        const currentMissing = currentValue && !pickerOptions.some((o) => o.value === currentValue);
+        const options = [
+          ...(key !== 'flash' ? [inheritOption] : []),
+          ...pickerOptions.map((o) => ({ value: o.value, label: o.label })),
+          ...(currentMissing ? [{ value: currentValue, label: `${tier.model} · saved` }] : []),
+        ];
         return (
           <Panel key={key} title={`${label} tier`}>
             <p className="mb-3 max-w-[560px] text-[12px] text-[var(--color-text-secondary)]">{hint}</p>
-            <Grid columns={{ minWidth: 340, max: 2 }} gap={3}>
-              <div>
-                <label className={labelCls}>Provider</label>
-                <Selector
-                  label="Provider"
-                  isLabelHidden
-                  options={[
-                    ...(key !== 'flash' ? [{ value: '', label: 'Inherit default' }] : []),
-                    ...PROVIDERS.map((p) => ({ value: p, label: p })),
-                    // Surface an already-stored OpenAI-compatible vendor name so the
-                    // controlled selector always has a matching option.
-                    ...(tier.provider && !PROVIDERS.includes(tier.provider) ? [{ value: tier.provider, label: tier.provider }] : []),
-                  ]}
-                  value={tier.provider}
-                  onChange={(v) => patch(key, 'provider', v)}
-                  width="100%"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Model</label>
-                <TextInput
-                  label="Model"
-                  isLabelHidden
-                  value={tier.model}
-                  placeholder={key === 'flash' ? 'e.g. gpt-4o' : 'Inherit default'}
-                  onChange={(v) => patch(key, 'model', v)}
-                  width="100%"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Base URL <span className="text-[var(--color-text-disabled)]">(optional)</span></label>
-                <TextInput
-                  label="Base URL"
-                  isLabelHidden
-                  value={tier.base_url}
-                  placeholder="OpenAI-compatible endpoint"
-                  onChange={(v) => patch(key, 'base_url', v)}
-                  width="100%"
-                />
-              </div>
-              <div>
-                <label className={labelCls}>
-                  API key
-                  <span className="ms-2 text-[var(--color-text-disabled)]">
-                    {cleared ? 'will be cleared' : keySet ? 'key set' : key === 'flash' ? 'not set' : 'inherits default'}
-                  </span>
-                </label>
-                <TextInput
-                  label="API key"
-                  isLabelHidden
-                  type="password"
-                  value={draft.keys[key]}
-                  isDisabled={cleared}
-                  placeholder={keySet ? '•••••••• (unchanged)' : 'Paste provider key'}
-                  onChange={(v) => setKey(key, v)}
-                  width="100%"
-                />
-                {keySet ? (
-                  <button
-                    type="button"
-                    className="mt-1.5 text-[11.5px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
-                    onClick={() => toggleClear(key)}
-                  >
-                    {cleared ? 'Keep stored key' : 'Clear stored key'}
-                  </button>
-                ) : null}
-              </div>
-            </Grid>
+            <div>
+              <label className={labelCls}>Model</label>
+              <Selector
+                label="Model"
+                isLabelHidden
+                options={options.length ? options : [{ value: '', label: listedLoading ? 'Loading models…' : 'Add a provider to list models' }]}
+                value={currentValue}
+                onChange={(v) => setTierValue(key, v)}
+                width="100%"
+              />
+            </div>
           </Panel>
         );
       })}
+
+      {listedErrors.length ? (
+        <p className="max-w-[640px] text-[12.5px] text-[var(--color-danger,var(--color-text-secondary))]">
+          Some providers could not list models:{' '}
+          {listedErrors.map((e) => `${e.provider_id}: ${e.error}`).join('; ')}
+        </p>
+      ) : null}
 
       <Panel title="Escalation">
         <div className="max-w-[560px]">
@@ -229,6 +302,77 @@ export function ModelsTab() {
         <Button variant="outline" size="sm" onClick={() => void onTest()} disabled={testing}>
           {testing ? 'Testing…' : 'Test connection'}
         </Button>
+      </div>
+    </div>
+  );
+}
+
+function ProviderFields({
+  draft,
+  onChange,
+  onSubmit,
+  onCancel,
+  submitLabel,
+  disabled,
+  keyHint,
+}: {
+  draft: ProviderDraft;
+  onChange: (d: ProviderDraft) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  submitLabel: string;
+  disabled: boolean;
+  keyHint: string;
+}) {
+  const patch = (field: keyof ProviderDraft, value: string) => onChange({ ...draft, [field]: value });
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <label className={labelCls}>Vendor</label>
+        <Selector
+          label="Vendor"
+          isLabelHidden
+          options={VENDOR_KINDS.map((v) => ({ value: v.value, label: v.label }))}
+          value={draft.vendor}
+          onChange={(v) => patch('vendor', v)}
+          width="100%"
+        />
+      </div>
+      <div>
+        <label className={labelCls}>Name <span className="text-[var(--color-text-disabled)]">(optional)</span></label>
+        <TextInput label="Name" isLabelHidden value={draft.name} placeholder="Shown in the model picker" onChange={(v) => patch('name', v)} width="100%" />
+      </div>
+      {vendorNeedsBaseURL(draft.vendor) || draft.base_url || draft.vendor === 'google' ? (
+        <div>
+          <label className={labelCls}>
+            Base URL
+            {vendorNeedsBaseURL(draft.vendor) ? '' : <span className="text-[var(--color-text-disabled)]"> (optional)</span>}
+          </label>
+          <TextInput
+            label="Base URL"
+            isLabelHidden
+            value={draft.base_url}
+            placeholder={draft.vendor === 'openai-compat' ? 'https://api.example.com/v1' : 'Vendor default'}
+            onChange={(v) => patch('base_url', v)}
+            width="100%"
+          />
+        </div>
+      ) : null}
+      <div>
+        <label className={labelCls}>API key <span className="ms-2 text-[var(--color-text-disabled)]">{keyHint}</span></label>
+        <TextInput
+          label="API key"
+          isLabelHidden
+          type="password"
+          value={draft.api_key}
+          placeholder={keyHint === 'key set' ? '•••••••• (unchanged)' : 'Paste provider key'}
+          onChange={(v) => patch('api_key', v)}
+          width="100%"
+        />
+      </div>
+      <div className="flex gap-2">
+        <Button variant="primary" size="sm" onClick={onSubmit} disabled={disabled}>{submitLabel}</Button>
+        <Button variant="outline" size="sm" onClick={onCancel} disabled={disabled}>Cancel</Button>
       </div>
     </div>
   );

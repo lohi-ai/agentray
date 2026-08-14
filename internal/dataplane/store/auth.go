@@ -518,13 +518,19 @@ WHERE wm.user_id = $1 AND p.id = $2`, userID, projectID).
 
 func (s *Store) DefaultProjectForUser(ctx context.Context, userID string) (Project, error) {
 	var project Project
+	// created_at ASC alone is a coin flip for a fresh account: CreateAccount
+	// inserts Demo and the caller's own project inside one transaction, so both
+	// rows carry the identical now(). Landing the first session on the empty
+	// project instead of the seeded one is the difference between "there is
+	// nothing here" and the funnel the whole first run reads — so Demo wins the
+	// tie explicitly, and p.id keeps the order stable after that.
 	err := s.pg.QueryRow(ctx, `
 SELECT p.id::text, p.workspace_id::text, p.name, p.api_key, p.created_at
 FROM projects p
 JOIN workspace_members wm ON wm.workspace_id = p.workspace_id
 WHERE wm.user_id = $1
-ORDER BY p.created_at ASC
-LIMIT 1`, userID).
+ORDER BY p.created_at ASC, (p.name = $2) DESC, p.id ASC
+LIMIT 1`, userID, DemoProjectName).
 		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.APIKey, &project.CreatedAt)
 	return project, err
 }

@@ -423,13 +423,32 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	PRIMARY KEY (scope_id, period)
 )`,
+		// Multi-provider workspace config: each row is one configured vendor
+		// (encrypted key + optional base URL). The 3 tiers then point at a
+		// provider id + model id of an active provider. Legacy per-tier key
+		// columns on workspace_model_tiers stay readable via dual-read until
+		// this table is backfilled (see backfillWorkspaceProviders).
+		`CREATE TABLE IF NOT EXISTS workspace_providers (
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	vendor VARCHAR(32) NOT NULL,
+	name VARCHAR(128) NOT NULL DEFAULT '',
+	base_url TEXT NOT NULL DEFAULT '',
+	api_key_ciphertext TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`,
+		`CREATE INDEX IF NOT EXISTS workspace_providers_ws_idx ON workspace_providers (workspace_id)`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS flash_provider_id UUID`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_provider_id UUID`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_provider_id UUID`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.backfillWorkspaceProviders(ctx)
 }
 
 // defaultScopes is the default-deny scope set for a new project.

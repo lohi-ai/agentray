@@ -566,8 +566,17 @@ export function ChatPage() {
                 />
               }
             >
-              {messages.length ? <Conversation messages={messages} agentName={agentName} agentNameByID={agentNameByID} debug={debug} /> : null}
-              {handoff ? <FirstRunHandoff handoff={handoff} /> : null}
+              {/* One child or none, never a list of nulls: ChatLayout decides
+                  whether to show `emptyState` with `Array.isArray(children) &&
+                  children.length === 0`, so two conditional expressions here
+                  make `children` a truthy two-null array and the empty state
+                  never renders — which silently blanks the whole front door. */}
+              {messages.length ? (
+                <>
+                  <Conversation messages={messages} agentName={agentName} agentNameByID={agentNameByID} debug={debug} />
+                  {handoff ? <FirstRunHandoff handoff={handoff} /> : null}
+                </>
+              ) : null}
             </ChatLayout>
           </main>
           {!narrow && panelOn ? <WorkPanel tab={tab} onTab={setTab} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} /> : null}

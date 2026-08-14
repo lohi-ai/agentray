@@ -458,6 +458,34 @@ export type AgentGrant = {
 // the bare provider/model/base_url/has_key; lite/pro are additive and fall back
 // to flash) every project and agent in the workspace draws from. Configured once
 // per workspace; keys never returned — only the *_has_key presence flags.
+export type WorkspaceProvider = {
+  id: string;
+  workspace_id: string;
+  vendor: string;
+  name: string;
+  base_url: string;
+  has_key: boolean;
+};
+
+export type WorkspaceProviderInput = {
+  vendor: string;
+  name?: string;
+  base_url?: string;
+  api_key?: string; // '' keeps the stored key on update, '-' clears it
+};
+
+export type ListedWorkspaceModel = {
+  provider_id: string;
+  provider_name: string;
+  provider_vendor: string;
+  id: string;
+};
+
+export type ListedWorkspaceModels = {
+  models: ListedWorkspaceModel[];
+  errors?: { provider_id: string; error: string }[];
+};
+
 export type WorkspaceModelTiers = {
   workspace_id: string;
   provider: string;
@@ -474,12 +502,16 @@ export type WorkspaceModelTiers = {
   pro_has_key: boolean;
   model_fallback: boolean;
   hosted_default?: boolean;
+  providers?: WorkspaceProvider[];
+  flash_provider_id?: string;
+  lite_provider_id?: string;
+  pro_provider_id?: string;
 };
 
 export type WorkspaceModelTiersInput = {
-  provider: string;
-  model: string;
-  base_url: string;
+  provider?: string;
+  model?: string;
+  base_url?: string;
   api_key?: string; // '' keeps the stored key, '-' clears it
   lite_provider?: string;
   lite_model?: string;
@@ -490,6 +522,9 @@ export type WorkspaceModelTiersInput = {
   pro_base_url?: string;
   pro_api_key?: string;
   model_fallback?: boolean;
+  flash_provider_id?: string;
+  lite_provider_id?: string;
+  pro_provider_id?: string;
 };
 
 // --- Alerting (#1) ---
@@ -1653,6 +1688,34 @@ export class AgentRayAPI {
 
   testWorkspaceModels() {
     return this.post<AgentConfigTestResult>('/api/workspace/models/test', {});
+  }
+
+  workspaceProviders() {
+    return this.get<{ providers: WorkspaceProvider[] }>('/api/workspace/providers');
+  }
+
+  createWorkspaceProvider(input: WorkspaceProviderInput) {
+    return this.request<{ provider: WorkspaceProvider }>(this.withProject('/api/workspace/providers'), {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateWorkspaceProvider(id: string, input: WorkspaceProviderInput) {
+    return this.request<{ provider: WorkspaceProvider }>(this.withProject(`/api/workspace/providers/${id}`), {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  deleteWorkspaceProvider(id: string) {
+    return this.request<{ ok: boolean }>(this.withProject(`/api/workspace/providers/${id}`), {
+      method: 'DELETE',
+    });
+  }
+
+  listedWorkspaceModels() {
+    return this.get<ListedWorkspaceModels>('/api/workspace/models/listed');
   }
 
   // Per-agent capabilities: which backend usecase/analytics tool groups this

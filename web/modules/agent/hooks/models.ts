@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, type AgentScopes, type AgentTaskTiers, type WorkspaceModelTiersInput } from '@/lib/api';
+import { AgentRayAPI, type AgentScopes, type AgentTaskTiers, type WorkspaceModelTiersInput, type WorkspaceProviderInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 export function useWorkspaceModels() {
@@ -25,6 +25,7 @@ export function useWorkspaceModels() {
     onSuccess: () => {
       setMessage('Workspace models saved');
       queryClient.invalidateQueries({ queryKey: ['workspace-models', projectID] });
+      queryClient.invalidateQueries({ queryKey: ['workspace-listed-models', projectID] });
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -41,11 +42,60 @@ export function useWorkspaceModels() {
     onError: (e: Error) => setError(e.message),
   });
 
+  const providersQuery = useQuery({
+    queryKey: ['workspace-providers', projectID],
+    queryFn: () => client().workspaceProviders(),
+    enabled,
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const listedQuery = useQuery({
+    queryKey: ['workspace-listed-models', projectID],
+    queryFn: () => client().listedWorkspaceModels(),
+    enabled,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['workspace-models', projectID] });
+    queryClient.invalidateQueries({ queryKey: ['workspace-providers', projectID] });
+    queryClient.invalidateQueries({ queryKey: ['workspace-listed-models', projectID] });
+  };
+
+  const createProvider = useMutation({
+    mutationFn: (input: WorkspaceProviderInput) => client().createWorkspaceProvider(input),
+    onSuccess: () => { setMessage('Provider added'); invalidate(); },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const updateProvider = useMutation({
+    mutationFn: ({ id, input }: { id: string; input: WorkspaceProviderInput }) =>
+      client().updateWorkspaceProvider(id, input),
+    onSuccess: () => { setMessage('Provider updated'); invalidate(); },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const deleteProvider = useMutation({
+    mutationFn: (id: string) => client().deleteWorkspaceProvider(id),
+    onSuccess: () => { setMessage('Provider removed'); invalidate(); },
+    onError: (e: Error) => setError(e.message),
+  });
+
   return {
     models: modelsQuery.data?.config,
     modelsLoading: modelsQuery.isLoading,
+    providers: providersQuery.data?.providers ?? modelsQuery.data?.config?.providers ?? [],
+    listedModels: listedQuery.data?.models ?? [],
+    listedErrors: listedQuery.data?.errors ?? [],
+    listedLoading: listedQuery.isLoading,
     saveModels: (input: WorkspaceModelTiersInput) => saveModels.mutateAsync(input),
     testModels: () => testModels.mutateAsync(),
+    createProvider: (input: WorkspaceProviderInput) => createProvider.mutateAsync(input),
+    updateProvider: (id: string, input: WorkspaceProviderInput) => updateProvider.mutateAsync({ id, input }),
+    deleteProvider: (id: string) => deleteProvider.mutateAsync(id),
+    refreshListed: () => queryClient.invalidateQueries({ queryKey: ['workspace-listed-models', projectID] }),
   };
 }
 

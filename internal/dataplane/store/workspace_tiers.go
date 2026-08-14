@@ -2,10 +2,8 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
@@ -36,6 +34,13 @@ type WorkspaceModelTiers struct {
 	// default model (no BYOK key). Settings can say "using the hosted model"
 	// instead of pretending the tenant pasted a key.
 	HostedDefault bool `json:"hosted_default"`
+
+	// Multi-provider config: the 3 tiers select a model of an active
+	// configured provider. Providers is the redacted list (no keys).
+	Providers       []WorkspaceProvider `json:"providers,omitempty"`
+	FlashProviderID string              `json:"flash_provider_id,omitempty"`
+	LiteProviderID  string              `json:"lite_provider_id,omitempty"`
+	ProProviderID   string              `json:"pro_provider_id,omitempty"`
 }
 
 // HostModelDefaults is the optional process-level model pool a workspace
@@ -143,6 +148,12 @@ type WorkspaceModelTiersInput struct {
 	ProAPIKey    string
 
 	ModelFallback bool
+
+	// Provider-id form (preferred). When set, these win over the legacy
+	// per-tier vendor/key columns.
+	FlashProviderID string
+	LiteProviderID  string
+	ProProviderID   string
 }
 
 // GetWorkspaceModelTiers returns the workspace tier pool (keys redacted) for any
@@ -159,30 +170,41 @@ func (s *Store) GetWorkspaceModelTiers(ctx context.Context, userID, workspaceID 
 }
 
 // readWorkspaceModelTiers loads the row (or a default pool when absent) without
-// any ciphertext.
+// any ciphertext. Prefer configured workspace_providers; fall back to the
+// pre-upgrade one-row-per-workspace columns so existing keys still resolve.
 func (s *Store) readWorkspaceModelTiers(ctx context.Context, workspaceID string) (WorkspaceModelTiers, error) {
-	cfg := WorkspaceModelTiers{WorkspaceID: workspaceID, Provider: "openai", ModelFallback: true}
-	var cipher, liteCipher, proCipher *string
-	err := s.pg.QueryRow(ctx, `
-SELECT provider, model, base_url, api_key_ciphertext,
-       lite_provider, lite_model, lite_base_url, lite_api_key_ciphertext,
-       pro_provider, pro_model, pro_base_url, pro_api_key_ciphertext, model_fallback
-FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
-		&cfg.Provider, &cfg.Model, &cfg.BaseURL, &cipher,
-		&cfg.LiteProvider, &cfg.LiteModel, &cfg.LiteBaseURL, &liteCipher,
-		&cfg.ProProvider, &cfg.ProModel, &cfg.ProBaseURL, &proCipher, &cfg.ModelFallback)
+	book, err := s.loadBook(ctx, workspaceID, false)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			cfg, _ = applyHostModelFallback(cfg, nil, s.hostModel)
-			return cfg, nil // no row yet → hosted default, or empty pool
-		}
 		return WorkspaceModelTiers{}, err
 	}
-	cfg.HasKey = cipher != nil && *cipher != ""
-	cfg.LiteHasKey = liteCipher != nil && *liteCipher != ""
-	cfg.ProHasKey = proCipher != nil && *proCipher != ""
+	cfg, _ := book.Resolve()
+	cfg.WorkspaceID = workspaceID
+	if cfg.Provider == "" {
+		cfg.Provider = "openai"
+	}
+	// A workspace that already has a BYOK provider must not pick up the
+	// hosted lite/pro model IDs. GET is redacted (no decrypted keys), so
+	// host fallback used to see an empty pool and inject those IDs — Save
+	// then persisted them as overrides and broke blank-lite/pro inherit.
+	if providerBookHasKey(book) {
+		return cfg, nil
+	}
 	cfg, _ = applyHostModelFallback(cfg, nil, s.hostModel)
 	return cfg, nil
+}
+
+// providerBookHasKey reports whether any configured provider already has a
+// key (ciphertext present, or a decrypted key on the run path).
+func providerBookHasKey(book *WorkspaceProviderBook) bool {
+	if book == nil {
+		return false
+	}
+	for _, p := range book.Providers {
+		if p.HasKey || p.APIKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // UpsertWorkspaceModelTiers writes the workspace tier pool; workspace owner/admin
@@ -196,6 +218,35 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 		return WorkspaceModelTiers{}, errAgentForbidden
 	}
 
+	// Preferred path: tiers point at configured providers. An already-migrated
+	// workspace (provider rows exist) always saves the selection, even when
+	// lite/pro (or flash) are blank — blank means inherit.
+	if in.FlashProviderID != "" || in.LiteProviderID != "" || in.ProProviderID != "" {
+		return s.SaveWorkspaceTierSelection(ctx, userID, workspaceID, WorkspaceTierSelection{
+			FlashProviderID: strings.TrimSpace(in.FlashProviderID),
+			FlashModel:      strings.TrimSpace(in.Model),
+			LiteProviderID:  strings.TrimSpace(in.LiteProviderID),
+			LiteModel:       strings.TrimSpace(in.LiteModel),
+			ProProviderID:   strings.TrimSpace(in.ProProviderID),
+			ProModel:        strings.TrimSpace(in.ProModel),
+			ModelFallback:   in.ModelFallback,
+		})
+	}
+	if existing, lerr := s.loadBook(ctx, workspaceID, false); lerr == nil && len(existing.Providers) > 0 {
+		return s.SaveWorkspaceTierSelection(ctx, userID, workspaceID, WorkspaceTierSelection{
+			FlashProviderID: strings.TrimSpace(in.FlashProviderID),
+			FlashModel:      strings.TrimSpace(in.Model),
+			LiteProviderID:  strings.TrimSpace(in.LiteProviderID),
+			LiteModel:       strings.TrimSpace(in.LiteModel),
+			ProProviderID:   strings.TrimSpace(in.ProProviderID),
+			ProModel:        strings.TrimSpace(in.ProModel),
+			ModelFallback:   in.ModelFallback,
+		})
+	}
+
+	// Legacy write: one-row-per-workspace vendor+key columns. Still accepted so
+	// existing clients keep working; we persist the columns AND upsert matching
+	// provider rows so the next read goes through the multi-provider path.
 	provider := strings.TrimSpace(in.Provider)
 	if provider == "" {
 		provider = "openai"
@@ -241,9 +292,29 @@ ON CONFLICT (workspace_id) DO UPDATE SET
 	if err != nil {
 		return WorkspaceModelTiers{}, err
 	}
+	if err := s.syncLegacyProviders(ctx, workspaceID); err != nil {
+		return WorkspaceModelTiers{}, err
+	}
 
 	_ = s.recordWorkspaceAudit(ctx, workspaceID, userID, "agent.workspace_tiers.update", "workspace", workspaceID, "", "{}")
 	return s.readWorkspaceModelTiers(ctx, workspaceID)
+}
+
+// syncLegacyProviders creates/updates provider rows from the denormalized
+// workspace_model_tiers columns after a legacy-shaped write, so a subsequent
+// read goes through the multi-provider book.
+func (s *Store) syncLegacyProviders(ctx context.Context, workspaceID string) error {
+	var n int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM workspace_providers WHERE workspace_id = $1`, workspaceID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		// Providers already exist — leave them; the denormalized columns are
+		// just the tier display. A later SaveWorkspaceTierSelection owns the
+		// pointers.
+		return nil
+	}
+	return s.backfillWorkspaceProviders(ctx)
 }
 
 // WorkspaceTiersForRun loads the workspace tier pool for a system-initiated run
@@ -251,33 +322,18 @@ ON CONFLICT (workspace_id) DO UPDATE SET
 // per-tier keys ("lite"/"flash"/"pro"). For in-memory call-time use only — never
 // expose the keys over an API.
 func (s *Store) WorkspaceTiersForRun(ctx context.Context, workspaceID string) (WorkspaceModelTiers, map[string]string, error) {
-	cfg := WorkspaceModelTiers{WorkspaceID: workspaceID, Provider: "openai", ModelFallback: true}
-	var flashC, liteC, proC *string
-	err := s.pg.QueryRow(ctx, `
-SELECT provider, model, base_url, api_key_ciphertext,
-       lite_provider, lite_model, lite_base_url, lite_api_key_ciphertext,
-       pro_provider, pro_model, pro_base_url, pro_api_key_ciphertext, model_fallback
-FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
-		&cfg.Provider, &cfg.Model, &cfg.BaseURL, &flashC,
-		&cfg.LiteProvider, &cfg.LiteModel, &cfg.LiteBaseURL, &liteC,
-		&cfg.ProProvider, &cfg.ProModel, &cfg.ProBaseURL, &proC, &cfg.ModelFallback)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	book, err := s.loadBook(ctx, workspaceID, true)
+	if err != nil {
 		return WorkspaceModelTiers{}, nil, err
 	}
-	keys := make(map[string]string, 3)
-	for tier, c := range map[string]*string{"flash": flashC, "lite": liteC, "pro": proC} {
-		if c == nil || *c == "" {
-			continue
-		}
-		plain, decErr := decryptAgentKey(*c)
-		if decErr != nil {
-			return WorkspaceModelTiers{}, nil, decErr
-		}
-		keys[tier] = plain
+	cfg, keys := book.Resolve()
+	cfg.WorkspaceID = workspaceID
+	if cfg.Provider == "" {
+		cfg.Provider = "openai"
 	}
-	cfg.HasKey = keys["flash"] != ""
-	cfg.LiteHasKey = keys["lite"] != ""
-	cfg.ProHasKey = keys["pro"] != ""
+	if providerBookHasKey(book) {
+		return cfg, keys, nil
+	}
 	cfg, keys = applyHostModelFallback(cfg, keys, s.hostModel)
 	return cfg, keys, nil
 }

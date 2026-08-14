@@ -15,8 +15,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/channels"
-	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -30,6 +30,7 @@ const detachedRunCeiling = 10 * time.Minute
 // definition + skills + memory CRUD, a key test, interactive chat, run history,
 // recommendations, and a manual run trigger.
 func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
+	registerWorkspaceProviderRoutes(e, store)
 	// --- config ---
 	e.GET("/api/agent/config", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
@@ -104,6 +105,10 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProBaseURL    string `json:"pro_base_url"`
 			ProAPIKey     string `json:"pro_api_key"`
 			ModelFallback bool   `json:"model_fallback"`
+
+			FlashProviderID string `json:"flash_provider_id"`
+			LiteProviderID  string `json:"lite_provider_id"`
+			ProProviderID   string `json:"pro_provider_id"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
@@ -114,7 +119,10 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			LiteBaseURL: payload.LiteBaseURL, LiteAPIKey: payload.LiteAPIKey,
 			ProProvider: payload.ProProvider, ProModel: payload.ProModel,
 			ProBaseURL: payload.ProBaseURL, ProAPIKey: payload.ProAPIKey,
-			ModelFallback: payload.ModelFallback,
+			ModelFallback:   payload.ModelFallback,
+			FlashProviderID: payload.FlashProviderID,
+			LiteProviderID:  payload.LiteProviderID,
+			ProProviderID:   payload.ProProviderID,
 		})
 		if err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
@@ -130,33 +138,13 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if _, err := store.GetWorkspaceModelTiers(c.Request().Context(), ctx.User.ID, project.WorkspaceID); err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
-		cfg, keys, err := store.WorkspaceTiersForRun(c.Request().Context(), project.WorkspaceID)
+		book, err := store.LoadWorkspaceBook(c.Request().Context(), project.WorkspaceID, true)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		// Test flash plus any lite/pro tier with its own override, applying the same
-		// merge a run uses (blank fields inherit flash, including the key). Each entry
-		// reports {ok, error} so the UI can flag the exact failing tier.
-		results := make(map[string]any, 3)
-		allOK := true
-		test := func(name, provider, model, baseURL, key string) {
-			provider = firstNonEmpty(provider, cfg.Provider)
-			model = firstNonEmpty(model, cfg.Model)
-			baseURL = firstNonEmpty(baseURL, cfg.BaseURL)
-			key = firstNonEmpty(key, keys["flash"])
-			res := testTierProvider(c, provider, baseURL, model, key)
-			results[name] = res
-			if ok, _ := res["ok"].(bool); !ok {
-				allOK = false
-			}
-		}
-		test("flash", cfg.Provider, cfg.Model, cfg.BaseURL, keys["flash"])
-		if cfg.LiteProvider != "" || cfg.LiteModel != "" || cfg.LiteBaseURL != "" || keys["lite"] != "" {
-			test("lite", cfg.LiteProvider, cfg.LiteModel, cfg.LiteBaseURL, keys["lite"])
-		}
-		if cfg.ProProvider != "" || cfg.ProModel != "" || cfg.ProBaseURL != "" || keys["pro"] != "" {
-			test("pro", cfg.ProProvider, cfg.ProModel, cfg.ProBaseURL, keys["pro"])
-		}
+		// Test each configured tier through the selected model's owning provider
+		// (same credentials a run would use).
+		allOK, results := testBookConnections(c.Request().Context(), book)
 		return c.JSON(http.StatusOK, map[string]any{"ok": allOK, "tiers": results})
 	})
 
