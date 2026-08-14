@@ -340,8 +340,10 @@ describe('firstRunHandoff', () => {
   it('belongs to the seeded exchange, not to every later turn', () => {
     // `started` is session-sticky, so without the turn bound the handoff would
     // render again under the answer to every follow-up question.
-    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 2 })).not.toBeNull();
-    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 4 })).toBeNull();
+    // One ChatMsg is one exchange (it carries both the ask and the answer), so
+    // the seeded run is turnCount 1 and the first follow-up is 2.
+    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 1 })).not.toBeNull();
+    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 2 })).toBeNull();
   });
 
   it('leads with the payoff, then the next commitment', () => {

@@ -30,7 +30,7 @@ export function PlanTab() {
   // against a number it cannot buy past would be a lie about its own limits.
   if (!hosted) {
     return (
-      <Grid columns={{ minWidth: 440, max: 2 }} gap={4}>
+      <Grid columns={{ minWidth: 300, max: 2 }} gap={4}>
         <Panel title="Plan">
           <VStack gap={3} align="start">
             <Badge variant="green" label="Self-hosted · unlimited" />
@@ -70,7 +70,7 @@ export function PlanTab() {
         />
       ) : null}
 
-      <Grid columns={{ minWidth: 440, max: 2 }} gap={4}>
+      <Grid columns={{ minWidth: 300, max: 2 }} gap={4}>
         <Panel
           title="Plan"
           action={<Button variant="outline" size="sm" onClick={() => router.push('/pricing')}>Compare plans</Button>}

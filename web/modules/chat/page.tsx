@@ -194,8 +194,8 @@ export function ChatPage() {
     started: firstRunFired,
     settled: !streaming && !!lastMessage?.done,
     failed: !lastMessage?.text || needsKeyRecovery(lastMessage.text),
-    // The seeded exchange is one ask and one answer. Past that the user has
-    // moved on, and the handoff must not reappear under every later turn.
+    // One ChatMsg is one exchange, so the seeded run is a length of 1. Past
+    // that the user has moved on and the handoff must not reappear.
     turnCount: messages.length,
   });
 
