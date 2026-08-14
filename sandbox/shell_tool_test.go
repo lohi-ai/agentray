@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -265,5 +266,24 @@ func TestShellToolMountsWorkspace(t *testing.T) {
 	m := stub.last.Mounts[0]
 	if m.Source != ws.Root() || m.Target != shellWorkdir || m.ReadOnly {
 		t.Fatalf("mount = %+v, want rw %s->%s", m, ws.Root(), shellWorkdir)
+	}
+}
+
+// The timeout must reap the whole process group, not just the direct child. A
+// shell that backgrounded a job would otherwise keep the inherited stdout pipe
+// open, so the "killed" run blocks until the orphan finishes.
+func TestShellToolHostModeKillsBackgroundedChildren(t *testing.T) {
+	tool := NewShellTool(nil, agentcore.SandboxLimits{TimeoutSeconds: 0.5}, nil)
+	start := time.Now()
+	out, err := tool.Run(context.Background(), `{"command":"sleep 30 & sleep 30"}`)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "killed:") {
+		t.Fatalf("expected the command to be killed, got:\n%s", out)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("run took %s — the backgrounded child outlived the timeout", elapsed)
 	}
 }

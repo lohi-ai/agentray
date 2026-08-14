@@ -28,7 +28,8 @@ import (
 //     and the one a bare exec.CommandContext would have thrown away.
 //   - Workdir is resolved through Mounts, so a command runs in the agent
 //     workspace rather than the server's working directory.
-//   - TimeoutSeconds is enforced with a hard kill of the child process group.
+//   - TimeoutSeconds is enforced with a hard kill of the whole process group, so
+//     a command that backgrounded work does not outlive its own timeout.
 //
 // What it cannot keep, and what a caller must weigh before choosing it:
 //
@@ -82,6 +83,11 @@ func (h *HostSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (agen
 	defer cleanup()
 
 	cmd := exec.CommandContext(runCtx, req.Argv[0], req.Argv[1:]...)
+	// Put the command in its own process group and kill the group on timeout.
+	// os/exec's default cancel kills only the direct child, which would leave a
+	// `sleep 300 &` the shell spawned running past the deadline.
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	cmd.Dir = dir
 	// A non-nil Env is what stops os/exec from handing the child the host
 	// process environment. hostEnv always returns non-nil, including for an empty

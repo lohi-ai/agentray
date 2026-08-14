@@ -115,11 +115,24 @@ func curlConfig(req sandboxHTTPRequest, timeout int) string {
 	if m := strings.TrimSpace(req.Method); m != "" {
 		b.WriteString("request = " + curlQuote(strings.ToUpper(m)) + "\n")
 	}
+	hasContentType := false
 	for k, v := range req.Headers {
+		if strings.EqualFold(strings.TrimSpace(k), "Content-Type") {
+			hasContentType = true
+		}
 		b.WriteString("header = " + curlQuote(k+": "+v) + "\n")
 	}
 	if req.Body != "" {
-		b.WriteString("data-binary = " + curlQuote(req.Body) + "\n")
+		// data-raw, never data/data-binary: those treat a leading '@' as "read
+		// this file", so a model-authored body of "@/etc/passwd" would post the
+		// container's file instead of the string it wrote.
+		b.WriteString("data-raw = " + curlQuote(req.Body) + "\n")
+		if !hasContentType {
+			// curl adds application/x-www-form-urlencoded to any request with a
+			// body; net/http adds nothing. An empty value tells curl to send no
+			// such header, so both substrates put the same request on the wire.
+			b.WriteString(`header = "Content-Type:"` + "\n")
+		}
 	}
 	if req.FollowRedirects {
 		b.WriteString("location\n")
@@ -183,9 +196,12 @@ func parseCurlResponse(out string, maxBodyBytes int64) (*http.Response, []byte, 
 		}
 		resp = parsed
 		rest = body
-		// A 1xx or a redirect curl followed is succeeded by another header block;
-		// anything else means `rest` is the body.
-		if !startsWithStatusLine(rest) {
+		// Only an informational (1xx) or a redirect curl followed is succeeded by
+		// another header block. Anything else means `rest` is the body — and the
+		// body is not allowed to be re-parsed as headers just because it happens to
+		// start with "HTTP/", which a fetched log or spec file easily does.
+		interim := parsed.StatusCode < 200 || (parsed.StatusCode >= 300 && parsed.StatusCode < 400)
+		if !interim || !startsWithStatusLine(rest) {
 			break
 		}
 	}

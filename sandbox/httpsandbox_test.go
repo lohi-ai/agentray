@@ -166,3 +166,50 @@ func TestSandboxHTTPRefusesEmptyAllowlist(t *testing.T) {
 		t.Fatalf("error = %v, want a refusal to run without an allowlist", err)
 	}
 }
+
+// curl's --data / --data-binary read a FILE when the value starts with '@'. The
+// body is model-authored, so using either would turn `{"body":"@/etc/passwd"}`
+// into a file read. data-raw never does that.
+func TestCurlConfigNeverReadsBodyAsFile(t *testing.T) {
+	cfg := curlConfig(sandboxHTTPRequest{URL: "https://a.example/", Body: "@/etc/passwd"}, 15)
+	if strings.Contains(cfg, "data-binary") || strings.Contains(cfg, "\ndata =") {
+		t.Fatalf("body must be sent with data-raw:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `data-raw = "@/etc/passwd"`) {
+		t.Fatalf("body not sent verbatim as data-raw:\n%s", cfg)
+	}
+}
+
+// curl adds application/x-www-form-urlencoded to any request carrying a body;
+// net/http adds nothing. The substrates must put the same request on the wire.
+func TestCurlConfigSuppressesDefaultContentType(t *testing.T) {
+	cfg := curlConfig(sandboxHTTPRequest{URL: "https://a.example/", Body: "x"}, 15)
+	if !strings.Contains(cfg, `header = "Content-Type:"`) {
+		t.Fatalf("expected curl's default Content-Type to be suppressed:\n%s", cfg)
+	}
+	withCT := curlConfig(sandboxHTTPRequest{
+		URL:     "https://a.example/",
+		Body:    "x",
+		Headers: map[string]string{"content-type": "application/json"},
+	}, 15)
+	if strings.Contains(withCT, `header = "Content-Type:"`) {
+		t.Fatalf("a caller-set Content-Type must not be stripped:\n%s", withCT)
+	}
+}
+
+// A fetched document whose first line happens to look like a status line must
+// not be re-parsed as another header block and swallowed.
+func TestParseCurlResponseKeepsBodyThatLooksLikeHeaders(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n" +
+		"HTTP/1.1 404 Not Found\r\nX-Doc: an example in the page text\r\n\r\nrest of the doc"
+	resp, body, err := parseCurlResponse(raw, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want the real 200", resp.StatusCode)
+	}
+	if !strings.HasPrefix(string(body), "HTTP/1.1 404 Not Found") {
+		t.Fatalf("body was eaten as headers: %q", body)
+	}
+}
