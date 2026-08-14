@@ -14,6 +14,7 @@ import type {
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { ConfirmDialog } from '@/modules/shared/components/modal';
 import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { useStackSheet } from '@/modules/shared/components/stack-sheet';
 import {
   decodeTierValue,
   encodeTierValue,
@@ -24,7 +25,7 @@ import {
   type ListedModel,
   type ModelPickerItem,
 } from './model-picker';
-import { ProviderDialog, vendorLabel } from './provider-dialog';
+import { ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
 import { TIERS, TierBlock, type TierKey } from './tier-block';
 
 type TierDraft = { providerId: string; model: string };
@@ -41,11 +42,20 @@ type Draft = {
 // for it; nothing new goes over the wire.
 const isInherited = (t: TierDraft) => !t.providerId && !t.model;
 
+// A tier is only selectable when it names both a configured provider and a
+// model. The hosted default fills lite/pro model IDs with no provider behind
+// them, and the legacy per-workspace columns can do the same — rendered
+// literally that is a tier which is neither inherited nor showing a choice.
+// Treat a half-set tier as unset, which is what the runtime already does with
+// it and what "Same as Default" means.
+const tierDraft = (providerId: string, model: string): TierDraft =>
+  providerId && model ? { providerId, model } : { providerId: '', model: '' };
+
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
-    flash: { providerId: c.flash_provider_id || '', model: c.model || '' },
-    lite: { providerId: c.lite_provider_id || '', model: c.lite_model || '' },
-    pro: { providerId: c.pro_provider_id || '', model: c.pro_model || '' },
+    flash: tierDraft(c.flash_provider_id || '', c.model || ''),
+    lite: tierDraft(c.lite_provider_id || '', c.lite_model || ''),
+    pro: tierDraft(c.pro_provider_id || '', c.pro_model || ''),
     model_fallback: c.model_fallback,
   };
 }
@@ -71,6 +81,10 @@ type TestState = {
   models: Record<string, string>;
 };
 
+// One id for both add and replace: re-pushing it swaps the open panel's content
+// in place instead of stacking a second copy of the same form.
+const PROVIDER_SHEET = 'ai-provider-form';
+
 export function ModelsTab() {
   const {
     models, modelsLoading, providers, listedModels, listedErrors, listedLoading,
@@ -82,9 +96,9 @@ export function ModelsTab() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testState, setTestState] = useState<TestState | null>(null);
-  const [dialog, setDialog] = useState<{ provider: WorkspaceProvider | null } | null>(null);
   const [deleting, setDeleting] = useState<WorkspaceProvider | null>(null);
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
+  const { push, closeById } = useStackSheet();
 
   const configured = providers as WorkspaceProvider[];
   const listed = listedModels as ListedModel[];
@@ -177,16 +191,24 @@ export function ModelsTab() {
     }
   };
 
-  const onSubmitProvider = async (input: WorkspaceProviderInput) => {
-    const target = dialog?.provider;
-    setBusyProvider(target?.id ?? 'new');
-    try {
-      if (target) await updateProvider(target.id, input);
-      else await createProvider(input);
-      setDialog(null);
-    } finally {
-      setBusyProvider(null);
-    }
+  // The form opens as a StackSheet panel, not a centred modal — same right-edge
+  // stack every other agentray drill-down uses.
+  const openProviderSheet = (provider: WorkspaceProvider | null) => {
+    push({
+      id: PROVIDER_SHEET,
+      title: providerFormTitle(provider),
+      content: (
+        <ProviderForm
+          provider={provider}
+          onSubmit={async (input) => {
+            if (provider) await updateProvider(provider.id, input);
+            else await createProvider(input);
+            closeById(PROVIDER_SHEET);
+          }}
+          onCancel={() => closeById(PROVIDER_SHEET)}
+        />
+      ),
+    });
   };
 
   const onDelete = async (id: string) => {
@@ -220,7 +242,7 @@ export function ModelsTab() {
         title="1 · Your AI provider"
         action={
           hasProviders ? (
-            <Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setDialog({ provider: null })}>
+            <Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => openProviderSheet(null)}>
               Add provider
             </Button>
           ) : undefined
@@ -232,7 +254,7 @@ export function ModelsTab() {
             title="No provider yet"
             detail="Paste an API key from OpenAI, Anthropic, or Google and your agents can start answering. The key is encrypted and never shown again."
             action={
-              <Button variant="primary" size="sm" icon={<Plus size={15} />} onClick={() => setDialog({ provider: null })}>
+              <Button variant="primary" size="sm" icon={<Plus size={15} />} onClick={() => openProviderSheet(null)}>
                 Add provider
               </Button>
             }
@@ -241,6 +263,15 @@ export function ModelsTab() {
           <div className="flex flex-col gap-2">
             {configured.map((p) => {
               const failure = errorByProvider.get(p.id);
+              // Three states, not two: a row can exist with no key at all —
+              // the legacy per-workspace columns still surface as a keyless
+              // provider once the real rows are removed. "Connected" there
+              // would be a lie the owner has no way to check.
+              const badge = failure
+                ? { status: 'attention', label: 'Key rejected' }
+                : p.has_key
+                  ? { status: 'healthy', label: 'Connected' }
+                  : { status: 'paused', label: 'Needs a key' };
               return (
                 <div key={p.id} className="rounded-md border border-[var(--color-border)] p-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -249,11 +280,7 @@ export function ModelsTab() {
                         <span className="text-[13px] text-[var(--color-text-primary)]">
                           {p.name || vendorLabel(p.vendor)}
                         </span>
-                        <StatusPill
-                          grow={false}
-                          status={failure ? 'attention' : 'healthy'}
-                          label={failure ? 'Key rejected' : 'Connected'}
-                        />
+                        <StatusPill grow={false} status={badge.status} label={badge.label} />
                       </div>
                       <div className="mt-0.5 text-[12px] text-[var(--color-text-secondary)]">
                         {vendorLabel(p.vendor)}
@@ -272,7 +299,7 @@ export function ModelsTab() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => setDialog({ provider: p })}
+                        onClick={() => openProviderSheet(p)}
                         disabled={busyProvider === p.id}
                       >
                         Replace key
@@ -393,16 +420,6 @@ export function ModelsTab() {
       <p className="max-w-[640px] text-[12px] text-[var(--color-text-secondary)]">
         Only workspace owners and admins can change these.
       </p>
-
-      {dialog ? (
-        <ProviderDialog
-          key={dialog.provider?.id ?? 'new'}
-          provider={dialog.provider}
-          busy={busyProvider !== null}
-          onSubmit={(input) => void onSubmitProvider(input)}
-          onClose={() => setDialog(null)}
-        />
-      ) : null}
 
       {deleting ? (
         <ConfirmDialog

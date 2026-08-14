@@ -75,10 +75,14 @@ export function useStackSheet() {
 
 /** @param n total panels in the stack — used by ultra mode to subtract sibling strips. */
 function resolveWidth(entry: StackSheetEntry, n = 1): number {
-  const base = entry.width ?? 460;
-  if (entry.widthStep === 1) return Math.min(base + 280, 1000);
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
+  // The portal is pinned `right-4`, so anything wider than the viewport minus
+  // its insets hangs off the *left* edge and clips its own content — the
+  // default 460 does exactly that on a 390 px phone. Cap every width step.
+  const fit = Math.max(vw - EDGE_PAD, 260);
+  const base = Math.min(entry.width ?? 460, fit);
+  if (entry.widthStep === 1) return Math.min(base + 280, 1000, fit);
   if (entry.widthStep === 2) {
-    const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
     const stripsWidth = (n - 1) * (STRIP_W + PANEL_GAP);
     return Math.max(vw - EDGE_PAD - stripsWidth, base);
   }
