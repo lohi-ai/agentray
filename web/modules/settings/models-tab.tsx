@@ -1,38 +1,31 @@
 'use client';
 
-import { useState } from 'react';
-import { TextInput } from '@astryxdesign/core/TextInput';
-import { Selector } from '@astryxdesign/core/Selector';
+import { useMemo, useState } from 'react';
+import { AlertTriangle, Check, KeyRound, Plus, X } from 'lucide-react';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
-import type { WorkspaceModelTiers, WorkspaceModelTiersInput, WorkspaceProvider, WorkspaceProviderInput } from '@/lib/api';
+import { Text } from '@astryxdesign/core/Text';
+import type {
+  AgentConfigTestResult,
+  WorkspaceModelTiers,
+  WorkspaceModelTiersInput,
+  WorkspaceProvider,
+  WorkspaceProviderInput,
+} from '@/lib/api';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
-import { Button, Loading, Panel } from '@/modules/shared/components/signal-primitives';
+import { ConfirmDialog } from '@/modules/shared/components/modal';
+import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import {
   decodeTierValue,
   encodeTierValue,
-  listedModelsToPickerOptions,
+  friendlyProviderError,
+  listedModelsToItems,
+  savedModelItem,
+  searchModelItems,
   type ListedModel,
+  type ModelPickerItem,
 } from './model-picker';
-
-const TIERS = [
-  { key: 'flash', label: 'Default', hint: 'Balanced model every agent draws from. Required.' },
-  { key: 'lite', label: 'Lite', hint: 'Cheaper model for mechanical steps. Blank inherits the default, including its provider.' },
-  { key: 'pro', label: 'Pro', hint: 'Stronger model for deep reasoning. Blank inherits the default, including its provider.' },
-] as const;
-
-type TierKey = (typeof TIERS)[number]['key'];
-
-// Vendor kinds the user can configure — not a model catalog. Model IDs come
-// from each active provider's list-models API.
-const VENDOR_KINDS = [
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'google', label: 'Google Gemini' },
-  { value: 'openai-compat', label: 'OpenAI-compatible' },
-] as const;
-
-type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
-const emptyProviderDraft = (): ProviderDraft => ({ vendor: 'openai', name: '', base_url: '', api_key: '' });
+import { ProviderDialog, vendorLabel } from './provider-dialog';
+import { TIERS, TierBlock, type TierKey } from './tier-block';
 
 type TierDraft = { providerId: string; model: string };
 type Draft = {
@@ -41,6 +34,12 @@ type Draft = {
   pro: TierDraft;
   model_fallback: boolean;
 };
+
+// Blank means "inherit from Default" everywhere in this file — that is exactly
+// what runtime.resolve() already does with an unset tier, and what
+// SaveWorkspaceTierSelection persists. The checkbox is the plain-language name
+// for it; nothing new goes over the wire.
+const isInherited = (t: TierDraft) => !t.providerId && !t.model;
 
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
@@ -63,11 +62,7 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
   };
 }
 
-const labelCls = 'mb-1.5 block text-[12.5px] text-[var(--color-text-secondary)]';
-
-function vendorNeedsBaseURL(vendor: string): boolean {
-  return vendor === 'openai-compat' || (vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google');
-}
+type TestState = { at: number; ok: boolean; tiers: Record<string, { ok: boolean; error?: string }> };
 
 export function ModelsTab() {
   const {
@@ -76,24 +71,75 @@ export function ModelsTab() {
   } = useWorkspaceModels();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [seededFrom, setSeededFrom] = useState<WorkspaceModelTiers | null>(null);
+  const [inherit, setInherit] = useState<Record<'lite' | 'pro', boolean>>({ lite: true, pro: true });
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [addDraft, setAddDraft] = useState<ProviderDraft>(emptyProviderDraft());
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState<ProviderDraft>(emptyProviderDraft());
+  const [testState, setTestState] = useState<TestState | null>(null);
+  const [dialog, setDialog] = useState<{ provider: WorkspaceProvider | null } | null>(null);
+  const [deleting, setDeleting] = useState<WorkspaceProvider | null>(null);
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
+
+  const configured = providers as WorkspaceProvider[];
+  const listed = listedModels as ListedModel[];
+
+  // The Typeahead's whole catalog is already in memory (one listed-models
+  // fetch), so search is a synchronous filter — hence debounceMs={0} below.
+  const items = useMemo(() => listedModelsToItems(listed), [listed]);
+  const searchSource = useMemo(
+    () => ({ search: (q: string) => searchModelItems(items, q), bootstrap: () => items.slice(0, 8) }),
+    [items],
+  );
 
   if (models && models !== seededFrom) {
     setSeededFrom(models);
-    setDraft(draftFromConfig(models));
+    const next = draftFromConfig(models);
+    setDraft(next);
+    setInherit({ lite: isInherited(next.lite), pro: isInherited(next.pro) });
   }
 
-  if (modelsLoading && !draft) return <Panel title="AI Provider"><Loading label="Loading model pool…" /></Panel>;
-  if (!models || !draft) return <Panel title="AI Provider"><Loading label="Loading model pool…" /></Panel>;
+  if (!models || !draft) {
+    return (
+      <Panel title="AI Provider">
+        <Loading label={modelsLoading ? 'Loading your AI setup…' : 'Loading model pool…'} />
+      </Panel>
+    );
+  }
 
-  const pickerOptions = listedModelsToPickerOptions(listedModels as ListedModel[]);
-  const inheritOption = { value: '', label: 'Inherit default' };
+  const providerName = (id: string) => {
+    const p = configured.find((x) => x.id === id);
+    return p ? p.name || vendorLabel(p.vendor) : '';
+  };
+
+  // ai.ListError only carries a provider UUID, so the readable name is joined
+  // here — a failure has to say which key broke, not print an id.
+  const errorByProvider = new Map<string, string>();
+  const orphanErrors: string[] = [];
+  for (const e of listedErrors) {
+    const message = friendlyProviderError(e.error);
+    if (configured.some((p) => p.id === e.provider_id)) errorByProvider.set(e.provider_id, message);
+    else orphanErrors.push(message);
+  }
+
+  const tierItem = (key: TierKey): ModelPickerItem | null => {
+    const t = draft[key];
+    if (!t.providerId || !t.model) return null;
+    const value = encodeTierValue(t.providerId, t.model);
+    return items.find((i) => i.id === value) ?? savedModelItem(t.providerId, t.model, providerName(t.providerId));
+  };
+
+  const setTierItem = (key: TierKey, item: ModelPickerItem | null) => {
+    if (!item) {
+      setDraft((d) => (d ? { ...d, [key]: { providerId: '', model: '' } } : d));
+      return;
+    }
+    const { providerId, modelId } = decodeTierValue(item.id);
+    setDraft((d) => (d ? { ...d, [key]: { providerId, model: modelId } } : d));
+  };
+
+  const setInheritTier = (key: 'lite' | 'pro', checked: boolean) => {
+    setInherit((s) => ({ ...s, [key]: checked }));
+    if (checked) setDraft((d) => (d ? { ...d, [key]: { providerId: '', model: '' } } : d));
+  };
 
   const onSave = async () => {
     setSaving(true);
@@ -103,42 +149,28 @@ export function ModelsTab() {
       setSaving(false);
     }
   };
+
   const onTest = async () => {
     setTesting(true);
+    setTestState(null);
     try {
-      await testModels();
+      const res: AgentConfigTestResult = await testModels();
+      setTestState({ at: Date.now(), ok: res.ok, tiers: res.tiers ?? {} });
+    } catch {
+      // useWorkspaceModels already surfaced the failure as a toast; leaving
+      // testState null keeps the last good result from being misread as new.
     } finally {
       setTesting(false);
     }
   };
 
-  const onAdd = async () => {
-    const input: WorkspaceProviderInput = {
-      vendor: addDraft.vendor,
-      name: addDraft.name,
-      base_url: addDraft.base_url,
-      api_key: addDraft.api_key,
-    };
-    setBusyProvider('new');
+  const onSubmitProvider = async (input: WorkspaceProviderInput) => {
+    const target = dialog?.provider;
+    setBusyProvider(target?.id ?? 'new');
     try {
-      await createProvider(input);
-      setAddDraft(emptyProviderDraft());
-      setAdding(false);
-    } finally {
-      setBusyProvider(null);
-    }
-  };
-
-  const onUpdate = async (id: string) => {
-    setBusyProvider(id);
-    try {
-      await updateProvider(id, {
-        vendor: editDraft.vendor,
-        name: editDraft.name,
-        base_url: editDraft.base_url,
-        api_key: editDraft.api_key,
-      });
-      setEditing(null);
+      if (target) await updateProvider(target.id, input);
+      else await createProvider(input);
+      setDialog(null);
     } finally {
       setBusyProvider(null);
     }
@@ -158,222 +190,214 @@ export function ModelsTab() {
     }
   };
 
-  const setTierValue = (tier: TierKey, value: string) => {
-    if (!value) {
-      setDraft((d) => (d ? { ...d, [tier]: { providerId: '', model: '' } } : d));
-      return;
-    }
-    const { providerId, modelId } = decodeTierValue(value);
-    setDraft((d) => (d ? { ...d, [tier]: { providerId, model: modelId } } : d));
-  };
-
-  const configured = providers as WorkspaceProvider[];
-  const hasAnyKey = configured.some((p) => p.has_key) || models.has_key;
+  const hasProviders = configured.length > 0;
 
   return (
     <div className="flex flex-col gap-[14px]">
       <p className="max-w-[640px] text-[13px] text-[var(--color-text-primary)]">
-        {models.hosted_default && !configured.length
-          ? 'Using the hosted model. Add a provider with your own key to override — encrypted at rest, never shown again.'
-          : hasAnyKey
-            ? 'Configured providers are encrypted at rest. Pick a listed model for each tier.'
-            : 'Add a provider and paste its API key so Growth Lead can answer. Encrypted at rest, never shown again.'}
-      </p>
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">
-        Configure one or many providers, then pick each tier from the models those providers list. Lite and Pro inherit the default when left blank. Only workspace owners and admins can change these.
+        {hasProviders
+          ? 'Your agents think with the keys below. Choose which model handles which kind of work.'
+          : models.hosted_default
+            ? 'Your agents are running on the included hosted model. Add your own key to use a different provider — it is encrypted and never shown again.'
+            : 'Your agents need an AI provider to think. Add a key once, then choose which model handles which kind of work.'}
       </p>
 
-      <Panel title="Providers">
-        {configured.length === 0 && !adding ? (
-          <p className="mb-3 text-[12.5px] text-[var(--color-text-secondary)]">No providers configured yet.</p>
-        ) : null}
-        <div className="flex flex-col gap-3">
-          {configured.map((p) => (
-            <div key={p.id} className="rounded-md border border-[var(--color-border)] p-3">
-              {editing === p.id ? (
-                <ProviderFields
-                  draft={editDraft}
-                  onChange={setEditDraft}
-                  onSubmit={() => void onUpdate(p.id)}
-                  onCancel={() => setEditing(null)}
-                  submitLabel={busyProvider === p.id ? 'Saving…' : 'Save provider'}
-                  disabled={busyProvider === p.id}
-                  keyHint={p.has_key ? 'key set' : 'not set'}
-                />
-              ) : (
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="text-[13px] text-[var(--color-text-primary)]">{p.name || p.vendor}</div>
-                    <div className="text-[12px] text-[var(--color-text-secondary)]">
-                      {p.vendor}
-                      {p.base_url ? ` · ${p.base_url}` : ''}
-                      {' · '}
-                      {p.has_key ? 'key set' : 'no key'}
+      {/* ---- Step 1 ---- */}
+      <Panel
+        title="1 · Your AI provider"
+        action={
+          hasProviders ? (
+            <Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setDialog({ provider: null })}>
+              Add provider
+            </Button>
+          ) : undefined
+        }
+      >
+        {!hasProviders ? (
+          <EmptyState
+            icon={<KeyRound size={20} />}
+            title="No provider yet"
+            detail="Paste an API key from OpenAI, Anthropic, or Google and your agents can start answering. The key is encrypted and never shown again."
+            action={
+              <Button variant="primary" size="sm" icon={<Plus size={15} />} onClick={() => setDialog({ provider: null })}>
+                Add provider
+              </Button>
+            }
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {configured.map((p) => {
+              const failure = errorByProvider.get(p.id);
+              return (
+                <div key={p.id} className="rounded-md border border-[var(--color-border)] p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[13px] text-[var(--color-text-primary)]">
+                          {p.name || vendorLabel(p.vendor)}
+                        </span>
+                        <StatusPill
+                          grow={false}
+                          status={failure ? 'attention' : 'healthy'}
+                          label={failure ? 'Key rejected' : 'Connected'}
+                        />
+                      </div>
+                      <div className="mt-0.5 text-[12px] text-[var(--color-text-secondary)]">
+                        {vendorLabel(p.vendor)}
+                        {p.base_url ? ` · ${p.base_url}` : ''}
+                        {' · '}
+                        {p.has_key ? 'key saved' : 'no key yet'}
+                      </div>
+                      {failure ? (
+                        <div role="alert" className="mt-2 flex items-start gap-1.5 text-[12px] text-danger">
+                          <AlertTriangle size={13} className="mt-0.5 flex-none" />
+                          <span>{failure}</span>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-none gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDialog({ provider: p })}
+                        disabled={busyProvider === p.id}
+                      >
+                        Replace key
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setDeleting(p)} disabled={busyProvider === p.id}>
+                        Remove
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex gap-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setEditing(p.id);
-                        setEditDraft({ vendor: p.vendor, name: p.name, base_url: p.base_url, api_key: '' });
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => void onDelete(p.id)} disabled={busyProvider === p.id}>
-                      Remove
-                    </Button>
-                  </div>
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
-        {adding ? (
-          <div className="mt-3 rounded-md border border-[var(--color-border)] p-3">
-            <ProviderFields
-              draft={addDraft}
-              onChange={setAddDraft}
-              onSubmit={() => void onAdd()}
-              onCancel={() => { setAdding(false); setAddDraft(emptyProviderDraft()); }}
-              submitLabel={busyProvider === 'new' ? 'Adding…' : 'Add provider'}
-              disabled={busyProvider === 'new'}
-              keyHint="paste key"
-            />
-          </div>
-        ) : (
-          <div className="mt-3">
-            <Button variant="outline" size="sm" onClick={() => setAdding(true)}>Add provider</Button>
+              );
+            })}
+            {orphanErrors.length ? (
+              <div role="alert" className="flex items-start gap-1.5 text-[12px] text-danger">
+                <AlertTriangle size={13} className="mt-0.5 flex-none" />
+                <span>{orphanErrors.join(' · ')}</span>
+              </div>
+            ) : null}
           </div>
         )}
       </Panel>
 
-      {TIERS.map(({ key, label, hint }) => {
-        const tier = draft[key];
-        const currentValue = tier.providerId && tier.model ? encodeTierValue(tier.providerId, tier.model) : '';
-        const currentMissing = currentValue && !pickerOptions.some((o) => o.value === currentValue);
-        const options = [
-          ...(key !== 'flash' ? [inheritOption] : []),
-          ...pickerOptions.map((o) => ({ value: o.value, label: o.label })),
-          ...(currentMissing ? [{ value: currentValue, label: `${tier.model} · saved` }] : []),
-        ];
-        return (
-          <Panel key={key} title={`${label} tier`}>
-            <p className="mb-3 max-w-[560px] text-[12px] text-[var(--color-text-secondary)]">{hint}</p>
-            <div>
-              <label className={labelCls}>Model</label>
-              <Selector
-                label="Model"
-                isLabelHidden
-                options={options.length ? options : [{ value: '', label: listedLoading ? 'Loading models…' : 'Add a provider to list models' }]}
-                value={currentValue}
-                onChange={(v) => setTierValue(key, v)}
-                width="100%"
+      {/* ---- Step 2 ---- */}
+      <Panel title="2 · Which model does what">
+        <p className="mb-4 max-w-[600px] text-[12.5px] text-[var(--color-text-secondary)]">
+          Match the brainpower to the job. A lighter model is fine for quick steps — save the strongest one for where
+          depth matters. This is the simplest way to control cost.
+        </p>
+
+        {!hasProviders ? (
+          <EmptyState title="Add a provider first" detail="Once a key is saved, its models show up here." />
+        ) : (
+          <div className="flex flex-col gap-4">
+            {TIERS.map((tier) => {
+              // Only Lite and Pro can inherit; Default is the tier they inherit from.
+              const optional = tier.key === 'lite' || tier.key === 'pro' ? tier.key : null;
+              return (
+                <TierBlock
+                  key={tier.key}
+                  tier={tier}
+                  value={tierItem(tier.key)}
+                  inherit={optional ? inherit[optional] : false}
+                  onInheritChange={optional ? (checked) => setInheritTier(optional, checked) : null}
+                  onChange={(item) => setTierItem(tier.key, item)}
+                  searchSource={searchSource}
+                  isLoading={listedLoading}
+                />
+              );
+            })}
+
+            <div className="border-t border-[var(--color-border)] pt-4">
+              <CheckboxInput
+                label="If a run fails, retry it on a stronger model"
+                description="Costs more on the runs that fail, but they finish instead of erroring out."
+                value={draft.model_fallback}
+                onChange={(checked) => setDraft((d) => (d ? { ...d, model_fallback: checked } : d))}
               />
             </div>
-          </Panel>
-        );
-      })}
-
-      {listedErrors.length ? (
-        <p className="max-w-[640px] text-[12.5px] text-[var(--color-danger,var(--color-text-secondary))]">
-          Some providers could not list models:{' '}
-          {listedErrors.map((e) => `${e.provider_id}: ${e.error}`).join('; ')}
-        </p>
-      ) : null}
-
-      <Panel title="Escalation">
-        <div className="max-w-[560px]">
-          <CheckboxInput
-            label="Escalate on failure"
-            description="When a run fails at its starting tier, retry it on each higher tier before giving up."
-            value={draft.model_fallback}
-            onChange={(checked) => setDraft((d) => (d ? { ...d, model_fallback: checked } : d))}
-          />
-        </div>
+          </div>
+        )}
       </Panel>
 
-      <div className="flex items-center gap-2">
-        <Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving}>
-          {saving ? 'Saving…' : 'Save changes'}
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => void onTest()} disabled={testing}>
-          {testing ? 'Testing…' : 'Test connection'}
-        </Button>
-      </div>
-    </div>
-  );
-}
+      {hasProviders ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving}>
+              {saving ? 'Saving…' : 'Save changes'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void onTest()} disabled={testing}>
+              {testing ? 'Checking…' : 'Check it works'}
+            </Button>
+            <Text type="supporting">Checking sends one real message per model — it can take up to a minute.</Text>
+          </div>
 
-function ProviderFields({
-  draft,
-  onChange,
-  onSubmit,
-  onCancel,
-  submitLabel,
-  disabled,
-  keyHint,
-}: {
-  draft: ProviderDraft;
-  onChange: (d: ProviderDraft) => void;
-  onSubmit: () => void;
-  onCancel: () => void;
-  submitLabel: string;
-  disabled: boolean;
-  keyHint: string;
-}) {
-  const patch = (field: keyof ProviderDraft, value: string) => onChange({ ...draft, [field]: value });
-  return (
-    <div className="flex flex-col gap-3">
-      <div>
-        <label className={labelCls}>Vendor</label>
-        <Selector
-          label="Vendor"
-          isLabelHidden
-          options={VENDOR_KINDS.map((v) => ({ value: v.value, label: v.label }))}
-          value={draft.vendor}
-          onChange={(v) => patch('vendor', v)}
-          width="100%"
-        />
-      </div>
-      <div>
-        <label className={labelCls}>Name <span className="text-[var(--color-text-disabled)]">(optional)</span></label>
-        <TextInput label="Name" isLabelHidden value={draft.name} placeholder="Shown in the model picker" onChange={(v) => patch('name', v)} width="100%" />
-      </div>
-      {vendorNeedsBaseURL(draft.vendor) || draft.base_url || draft.vendor === 'google' ? (
-        <div>
-          <label className={labelCls}>
-            Base URL
-            {vendorNeedsBaseURL(draft.vendor) ? '' : <span className="text-[var(--color-text-disabled)]"> (optional)</span>}
-          </label>
-          <TextInput
-            label="Base URL"
-            isLabelHidden
-            value={draft.base_url}
-            placeholder={draft.vendor === 'openai-compat' ? 'https://api.example.com/v1' : 'Vendor default'}
-            onChange={(v) => patch('base_url', v)}
-            width="100%"
-          />
+          {/* The check runs for up to a minute and the toast is gone in four
+              seconds, so the outcome lives here until the next check. */}
+          {testing ? (
+            <div className="rounded-md border border-[var(--color-border)] p-3 text-[12.5px] text-[var(--color-text-secondary)]">
+              Checking your models… you can stay on this page.
+            </div>
+          ) : testState ? (
+            <div className="rounded-md border border-[var(--color-border)] p-3">
+              <div className="mb-2 text-[12px] text-[var(--color-text-secondary)]">
+                {testState.ok ? 'Everything answered.' : 'Some models did not answer.'}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {TIERS.map((tier) => {
+                  const result = testState.tiers[tier.key];
+                  const model = draft[tier.key].model;
+                  return (
+                    <div key={tier.key} className="flex flex-wrap items-baseline gap-2 text-[12.5px]">
+                      {!result ? (
+                        <Check size={14} className="flex-none text-[var(--color-text-disabled)]" />
+                      ) : result.ok ? (
+                        <Check size={14} className="flex-none text-success" />
+                      ) : (
+                        <X size={14} className="flex-none text-danger" />
+                      )}
+                      <span className="text-[var(--color-text-primary)]">{tier.title}</span>
+                      <span className="text-[var(--color-text-secondary)]">
+                        {result ? model || 'default model' : 'same as Default'}
+                      </span>
+                      {result?.error ? (
+                        <span className="text-danger">— {friendlyProviderError(result.error)}</span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
-      <div>
-        <label className={labelCls}>API key <span className="ms-2 text-[var(--color-text-disabled)]">{keyHint}</span></label>
-        <TextInput
-          label="API key"
-          isLabelHidden
-          type="password"
-          value={draft.api_key}
-          placeholder={keyHint === 'key set' ? '•••••••• (unchanged)' : 'Paste provider key'}
-          onChange={(v) => patch('api_key', v)}
-          width="100%"
+
+      <p className="max-w-[640px] text-[12px] text-[var(--color-text-secondary)]">
+        Only workspace owners and admins can change these.
+      </p>
+
+      {dialog ? (
+        <ProviderDialog
+          key={dialog.provider?.id ?? 'new'}
+          provider={dialog.provider}
+          busy={busyProvider !== null}
+          onSubmit={(input) => void onSubmitProvider(input)}
+          onClose={() => setDialog(null)}
         />
-      </div>
-      <div className="flex gap-2">
-        <Button variant="primary" size="sm" onClick={onSubmit} disabled={disabled}>{submitLabel}</Button>
-        <Button variant="outline" size="sm" onClick={onCancel} disabled={disabled}>Cancel</Button>
-      </div>
+      ) : null}
+
+      {deleting ? (
+        <ConfirmDialog
+          title={`Remove ${deleting.name || vendorLabel(deleting.vendor)}?`}
+          detail="Its key is deleted and any tier using one of its models falls back to the Default. You can add it again later."
+          confirmLabel="Remove"
+          danger
+          onConfirm={() => void onDelete(deleting.id)}
+          onClose={() => setDeleting(null)}
+        />
+      ) : null}
     </div>
   );
 }
