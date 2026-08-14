@@ -18,8 +18,22 @@ export type Workspace = {
   id: string;
   name: string;
   role: string;
+  // Display-only plan id (free | solo | team). Nothing in the backend enforces
+  // it — it drives the plan badge, the meter's ceiling, and the upgrade moment.
+  plan?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type UpgradeRequest = {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  plan: string;
+  email: string;
+  volume: string;
+  note: string;
+  created_at: string;
 };
 
 export type WorkspaceUsage = {
@@ -60,6 +74,9 @@ export type AuthState = {
   workspaces: Workspace[];
   projects: Project[];
   project: Project;
+  // true only on the managed cloud (AGENTRAY_HOSTED). A `docker compose up`
+  // instance sends false/undefined and every plan + pricing surface stays hidden.
+  hosted?: boolean;
 };
 
 export type Event = {
@@ -1191,6 +1208,24 @@ export class AgentRayAPI {
 
   workspaceUsage(workspaceID: string, filters: Filters) {
     return this.get<{ usage: WorkspaceUsage }>(`/api/workspaces/${workspaceID}/usage?${new URLSearchParams(filterParams(filters)).toString()}`);
+  }
+
+  // The usage meter's window is the calendar month, not the shared Filters range
+  // — a plan ceiling is monthly, so it must not move when the user changes the
+  // dashboard's date picker. Reuses the same endpoint/aggregate (from/to are
+  // already accepted), so the meter adds no new query.
+  workspaceMonthUsage(workspaceID: string, now = new Date()) {
+    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const params = new URLSearchParams({ from: from.toISOString(), to: now.toISOString(), limit: '1' });
+    return this.get<{ usage: WorkspaceUsage }>(`/api/workspaces/${workspaceID}/usage?${params.toString()}`);
+  }
+
+  latestUpgradeRequest(workspaceID: string) {
+    return this.get<{ request: UpgradeRequest | null }>(`/api/workspaces/${workspaceID}/upgrade-request`);
+  }
+
+  requestUpgrade(workspaceID: string, input: { plan: string; email?: string; volume?: string; note?: string }) {
+    return this.post<{ request: UpgradeRequest }>(`/api/workspaces/${workspaceID}/upgrade-request`, input);
   }
 
   workspaceMembers(workspaceID: string) {

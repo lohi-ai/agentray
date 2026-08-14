@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { Check, MessageSquare, Paperclip, Plus, Trash2 } from 'lucide-react';
+import { Check, LayoutDashboard, MessageSquare, Paperclip, Plug, Plus, Trash2 } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
@@ -29,7 +29,7 @@ import { Text } from '@astryxdesign/core/Text';
 import type { Agent, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useRouter } from 'next/navigation';
-import { startersByKind, type FirstSessionNotice } from '@/lib/ia';
+import { FIRST_RUN_PROMPT, settingsPath, startersByKind, type FirstRunHandoff as FirstRunHandoffCopy, type FirstSessionNotice } from '@/lib/ia';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
 import type { ChatThread } from './use-chat-threads';
@@ -197,6 +197,114 @@ export function FrontDoor({
           <HStack gap={2} wrap="wrap">{group.prompts.map((chip) => <Token key={chip} size="lg" label={chip} onClick={() => go(chip)} />)}</HStack>
         </VStack>
       ))}
+    </VStack>
+  );
+}
+
+// FirstRunPanel is the first thing a hosted stranger sees. It replaces the
+// FrontDoor chip wall for a workspace that has never run an agent.
+//
+// The thing it fixes: signup already creates a populated Demo project, a hired
+// agent, a cloned dashboard and ~2 days of events — and nothing in the UI says
+// so. This panel states that the teammate already exists, names the sample data
+// honestly *before* the run (so the payoff is never a bait-and-switch), and
+// offers exactly one primary move: watch it work.
+//
+// The starter chips are kept but demoted below — this is the opening move, not
+// a menu, and "connect my own product" is never buried for the user who wants
+// their own data first.
+export function FirstRunPanel({
+  agentName,
+  sampleProjectName,
+  onRun,
+  onPick,
+  hasModelKey,
+}: {
+  agentName: string;
+  // The seeded project the run reads. Named in the copy so the user is told
+  // what they are looking at before they see a number from it.
+  sampleProjectName: string;
+  onRun: (prompt: string) => void;
+  onPick: (value: string) => void;
+  // false = we know there is no workspace model key. undefined = still loading,
+  // so the panel stays optimistic rather than flashing a blocker.
+  hasModelKey?: boolean;
+}) {
+  const router = useRouter();
+  const groups = startersByKind();
+  const blocked = hasModelKey === false;
+  return (
+    <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1 pt-4">
+      <VStack gap={3} align="start">
+        <Badge variant="purple" label={`${agentName} · hired & ready`} />
+        <VStack gap={1}>
+          <Heading level={2}>Your data is already here. Want me to read it?</Heading>
+          <Text type="supporting">
+            {`Your workspace ships with ${sampleProjectName} — a couple of days of sample product events, so I have something to read on day one. I’ll find the weakest step in it, pin what I find to a dashboard, and then you can point me at your own product.`}
+          </Text>
+        </VStack>
+      </VStack>
+
+      {blocked ? (
+        // The one blocker that stops the run. Events are unaffected — say so, or
+        // a new user reads "add a key" as "nothing works until you pay someone".
+        <Callout
+          tone="warn"
+          icon={<MessageSquare size={16} />}
+          label="One thing first"
+          title={`${agentName} needs an AI key to answer`}
+          detail="Bring your own key — you pay your model provider directly, and we never mark it up. Your events keep arriving either way."
+          action={<Button variant="primary" size="sm" label="Add AI key" onClick={() => router.push(settingsPath('ai'))} />}
+        />
+      ) : null}
+
+      <HStack gap={2} wrap="wrap">
+        <Button
+          variant="primary"
+          label="Find my weakest funnel step"
+          isDisabled={blocked}
+          onClick={() => onRun(FIRST_RUN_PROMPT)}
+          className="![background:var(--agent)] !text-[var(--agent-foreground)]"
+        />
+        <Button variant="secondary" label="Connect my own product instead" onClick={() => router.push(settingsPath('keys'))} />
+      </HStack>
+
+      <VStack gap={2}>
+        <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">Or ask me something else</Text>
+        <HStack gap={2} wrap="wrap">
+          {groups.flatMap((group) => group.prompts).map((chip) => (
+            <Token key={chip} size="lg" label={chip} onClick={() => onPick(chip)} />
+          ))}
+        </HStack>
+      </VStack>
+    </VStack>
+  );
+}
+
+// FirstRunHandoff closes the first run with the two callouts the design calls
+// for: the payoff (the dashboard the user just watched get built) and the next
+// commitment (bring your own product). Order matters — the payoff is never
+// withheld behind the upsell.
+export function FirstRunHandoff({ handoff }: { handoff: FirstRunHandoffCopy }) {
+  const router = useRouter();
+  return (
+    <VStack gap={0} align="stretch" className="mx-auto w-full max-w-[760px] px-1 pb-2">
+      <Callout
+        tone="growth"
+        icon={<LayoutDashboard size={16} />}
+        label={handoff.dashboard.label}
+        title={handoff.dashboard.title}
+        detail={handoff.dashboard.detail}
+        action={<Button variant="primary" size="sm" label={handoff.dashboard.action} onClick={() => router.push(handoff.dashboard.href)} />}
+      />
+      <Callout
+        tone="agentic"
+        icon={<Plug size={16} />}
+        label={handoff.connect.label}
+        title={handoff.connect.title}
+        detail={handoff.connect.detail}
+        action={<Button variant="secondary" size="sm" label={handoff.connect.action} onClick={() => router.push(handoff.connect.href)} />}
+      />
     </VStack>
   );
 }

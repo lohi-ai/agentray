@@ -32,6 +32,7 @@ const QUESTIONS: Array<{ mode: Mode; label: string; blurb: string; icon: ReactNo
 ];
 
 export function ProductPage() {
+  const router = useRouter();
   const { insight, runInsight } = useInsight();
   const { summary } = useActivity();
   const [active, setActive] = useState<Mode | null>(null);

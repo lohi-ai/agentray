@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Bot,
+  CreditCard,
   Database,
   Globe,
   Languages,
@@ -25,7 +26,7 @@ import { NavIcon } from '@astryxdesign/core/NavIcon';
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
-import { matchActiveHref, navGroups, signedInLandingTarget } from '@/lib/ia';
+import { matchActiveHref, navGroups, navItemsFor, signedInLandingTarget } from '@/lib/ia';
 import { useAuth, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 
@@ -43,6 +44,7 @@ const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/replay': PlayCircle,
   '/sql': Database,
   '/templates': LayoutTemplate,
+  '/pricing': CreditCard,
 };
 
 // Small pulsing "live" indicator shown on the Chat item. Uses the --agent token
@@ -93,8 +95,12 @@ function SidebarFooter() {
 
 export function AppShell({ children, bleed = false }: { active?: AppSection; children: ReactNode; bleed?: boolean }) {
   const pathname = usePathname() ?? '';
-  const current = matchActiveHref(pathname);
-  const groups = navGroups();
+  // Self-host never renders Plans: a `docker compose up` operator has no plan
+  // to be on and nothing to buy, so the item is dropped rather than disabled.
+  const hosted = useAuthStore((s) => s.auth?.hosted ?? false);
+  const items = navItemsFor({ hosted });
+  const current = matchActiveHref(pathname, items);
+  const groups = navGroups(items);
 
   const sideNav = (
     <SideNav

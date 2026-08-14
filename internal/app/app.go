@@ -202,7 +202,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, ws, liveReg, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, ws, liveReg, cfg.Hosted, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)

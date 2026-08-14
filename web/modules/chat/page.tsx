@@ -16,12 +16,12 @@ import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
 import { useAgentSkills } from '@/modules/agent/hooks';
 import { useMediaQuery } from '@/modules/app/hooks/media';
-import { firstSessionNotice, firstValuePath, formatAgentError, instantReply, isSampleProject, needsKeyRecovery, recoveryAction, threadNeedsRecovery } from '@/lib/ia';
+import { firstRunHandoff, firstSessionNotice, firstValuePath, formatAgentError, instantReply, isFirstRun, isSampleProject, needsKeyRecovery, recoveryAction, threadNeedsRecovery } from '@/lib/ia';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { useEventNames } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
-import { ThreadsRail, FrontDoor, Conversation, AgentMenu, type ChatMsg, type ChatStep } from './chat-parts';
+import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, AgentMenu, type ChatMsg, type ChatStep } from './chat-parts';
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
 
@@ -61,7 +61,7 @@ export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
   const router = useRouter();
-  const { chatStream, conversationSend, sessionRun, runs, recommendations, ackRecommendation } = useAgent();
+  const { chatStream, conversationSend, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation } = useChatThreads(projectID);
 
@@ -176,6 +176,24 @@ export function ChatPage() {
     catalogReady,
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
     sample,
+  });
+
+  // First session: a workspace that has never run an agent gets the FirstRunPanel
+  // instead of the chip wall. The gate keys off *runs*, not events — signup seeds
+  // a populated Demo project, so an events-based check would never turn off.
+  const firstRun = isFirstRun({ runs, runsReady, turnCount: messages.length });
+  // Whether the seeded first-run prompt was fired from this session. Local state,
+  // not derived: once the user has watched the run, the handoff belongs to that
+  // turn, and a reload legitimately drops back to the ordinary thread view.
+  const [firstRunFired, setFirstRunFired] = useState(false);
+  const lastMessage = messages[messages.length - 1];
+  // A turn that settled with no prose is the failure shape the stream leaves
+  // behind (abort, network, agent error) — that gets the error surface, not a
+  // "your dashboard is ready" pointing at a board nothing was pinned to.
+  const handoff = firstRunHandoff({
+    started: firstRunFired,
+    settled: !streaming && !!lastMessage?.done,
+    failed: !lastMessage?.text || needsKeyRecovery(lastMessage.text),
   });
 
   // Read dropped/picked/pasted files into text attachments, dropping unreadable
@@ -506,7 +524,17 @@ export function ChatPage() {
             })() : null}
             <ChatLayout
               density="balanced"
-              emptyState={<FrontDoor onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />}
+              emptyState={firstRun ? (
+                <FirstRunPanel
+                  agentName={agentName}
+                  sampleProjectName={projectName || 'Demo'}
+                  hasModelKey={modelsLoading ? undefined : !!models?.has_key}
+                  onPick={setInput}
+                  onRun={(q) => { setFirstRunFired(true); void send(q); }}
+                />
+              ) : (
+                <FrontDoor onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />
+              )}
               composer={
                 <Composer
                   value={input}
@@ -532,6 +560,7 @@ export function ChatPage() {
               }
             >
               {messages.length ? <Conversation messages={messages} agentName={agentName} agentNameByID={agentNameByID} debug={debug} /> : null}
+              {handoff ? <FirstRunHandoff handoff={handoff} /> : null}
             </ChatLayout>
           </main>
           {!narrow && panelOn ? <WorkPanel tab={tab} onTab={setTab} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} /> : null}

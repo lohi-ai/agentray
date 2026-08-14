@@ -23,9 +23,12 @@ type User struct {
 }
 
 type Workspace struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Role      string    `json:"role"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+	// Plan is display-only (see workspace_plan.go): it drives the plan badge,
+	// the usage meter's ceiling, and the upgrade moment. Nothing enforces it.
+	Plan      string    `json:"plan"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -121,8 +124,8 @@ RETURNING id::text, email, name, created_at, updated_at`, email, name, string(ha
 	if err := tx.QueryRow(ctx, `
 INSERT INTO workspaces (name, created_by)
 VALUES ($1, $2)
-RETURNING id::text, name, 'owner', created_at, updated_at`, workspaceName, out.User.ID).
-		Scan(&out.Workspace.ID, &out.Workspace.Name, &out.Workspace.Role, &out.Workspace.CreatedAt, &out.Workspace.UpdatedAt); err != nil {
+RETURNING id::text, name, 'owner', COALESCE(plan, 'free'), created_at, updated_at`, workspaceName, out.User.ID).
+		Scan(&out.Workspace.ID, &out.Workspace.Name, &out.Workspace.Role, &out.Workspace.Plan, &out.Workspace.CreatedAt, &out.Workspace.UpdatedAt); err != nil {
 		return AccountBootstrap{}, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -259,7 +262,7 @@ RETURNING id::text, email, name, created_at, updated_at`, userID, name).
 
 func (s *Store) ListUserWorkspaces(ctx context.Context, userID string) ([]Workspace, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT w.id::text, w.name, wm.role, w.created_at, w.updated_at
+SELECT w.id::text, w.name, wm.role, COALESCE(w.plan, 'free'), w.created_at, w.updated_at
 FROM workspaces w
 JOIN workspace_members wm ON wm.workspace_id = w.id
 WHERE wm.user_id = $1
@@ -271,9 +274,10 @@ ORDER BY w.created_at ASC`, userID)
 	workspaces := []Workspace{}
 	for rows.Next() {
 		var workspace Workspace
-		if err := rows.Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
+		if err := rows.Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.Plan, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
 			return nil, err
 		}
+		workspace.Plan = NormalizePlan(workspace.Plan)
 		workspaces = append(workspaces, workspace)
 	}
 	return workspaces, rows.Err()
@@ -323,8 +327,8 @@ func (s *Store) CreateWorkspace(ctx context.Context, userID string, name string)
 	if err := tx.QueryRow(ctx, `
 INSERT INTO workspaces (name, created_by)
 VALUES ($1, $2)
-RETURNING id::text, name, 'owner', created_at, updated_at`, name, userID).
-		Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
+RETURNING id::text, name, 'owner', COALESCE(plan, 'free'), created_at, updated_at`, name, userID).
+		Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.Plan, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
 		return Workspace{}, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -384,8 +388,9 @@ SET name = $3, updated_at = now()
 FROM workspace_members wm
 WHERE w.id = $2 AND wm.workspace_id = w.id AND wm.user_id = $1
 	AND wm.role IN ('owner', 'admin')
-RETURNING w.id::text, w.name, wm.role, w.created_at, w.updated_at`, userID, workspaceID, name).
-		Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.CreatedAt, &workspace.UpdatedAt)
+RETURNING w.id::text, w.name, wm.role, COALESCE(w.plan, 'free'), w.created_at, w.updated_at`, userID, workspaceID, name).
+		Scan(&workspace.ID, &workspace.Name, &workspace.Role, &workspace.Plan, &workspace.CreatedAt, &workspace.UpdatedAt)
+	workspace.Plan = NormalizePlan(workspace.Plan)
 	if err == nil {
 		_ = s.recordWorkspaceAudit(ctx, workspaceID, userID, "workspace.renamed", "workspace", workspaceID, workspace.Name, "{}")
 	}

@@ -60,6 +60,11 @@ type Config struct {
 	SandboxDockerBin    string   // optional docker CLI path; empty = "docker"
 	AgentWorkspaceRoot  string   // optional root for read_file/write_file; empty disables file tools
 	SeedDemo            bool     // AGENTRAY_SEED_DEMO: seed ~2 days of synthetic events into the default project on first boot (compose quickstart only, #3b)
+	// Hosted marks this as the managed cloud (agentray.lohi2.com) rather than a
+	// `docker compose up` instance. Off by default so a self-host operator never
+	// sees a pricing page or a usage ceiling for a plan they cannot buy — the web
+	// app reads it off the auth payload and hides every plan surface when false.
+	Hosted bool
 	// CredentialsEnabled turns on the {{cred:NAME}} secret vault (governance F7).
 	// Off by default. When on, the host loads every AGENTRAY_CRED_* env var into
 	// an in-memory vault and threads it into every run, so an agent can use a
@@ -125,6 +130,7 @@ func FromEnv() Config {
 		SandboxDockerBin:             os.Getenv("AGENTRAY_SANDBOX_DOCKER_BIN"),
 		AgentWorkspaceRoot:           os.Getenv("AGENTRAY_AGENT_WORKSPACE_ROOT"),
 		SeedDemo:                     envBool("AGENTRAY_SEED_DEMO", false),
+		Hosted:                       envBool("AGENTRAY_HOSTED", false),
 		CredentialsEnabled:           envBool("AGENTRAY_CREDENTIALS_ENABLED", false),
 		HTTPToolEnabled:              envBool("AGENTRAY_HTTP_TOOL_ENABLED", false),
 		HTTPToolAllowHosts:           os.Getenv("AGENTRAY_HTTP_TOOL_ALLOW_HOSTS"),

@@ -117,6 +117,10 @@ export function useAgent() {
     config: configQuery.data?.config,
     configLoading: configQuery.isLoading,
     runs: runsQuery.data?.runs ?? [],
+    // The first-run gate needs "we asked and the answer was zero", not "we
+    // have nothing yet" — an empty array while the query is in flight would
+    // flash the first-session panel at a workspace with a hundred runs.
+    runsReady: !!projectID && !runsQuery.isPending,
     recommendations: recsQuery.data?.recommendations ?? [],
     saveConfig: (input: AgentConfigInput) => saveConfig.mutateAsync(input),
     chat: (message: string) => chat.mutateAsync(message),

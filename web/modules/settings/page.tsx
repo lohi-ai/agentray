@@ -9,8 +9,9 @@ import { Intro } from '@/modules/shared/components/signal-primitives';
 import { ActivityTab, ApiKeysTab, MembersTab, ProjectsTab, WorkspaceTab } from './settings-tabs';
 import { ModelsTab } from './models-tab';
 import { ConnectorsTab } from './connectors-tab';
+import { PlanTab } from './plan-tab';
 
-const TABS = ['Workspace', 'Projects', 'Members', 'AI Provider', 'Data connectors', 'API keys', 'Activity'] as const;
+const TABS = ['Workspace', 'Plan & usage', 'Projects', 'Members', 'AI Provider', 'Data connectors', 'API keys', 'Activity'] as const;
 type Tab = (typeof TABS)[number];
 
 export function SettingsPage() {
@@ -44,6 +45,7 @@ export function SettingsPage() {
         ))}
       </div>
       {tab === 'Workspace' ? <WorkspaceTab /> : null}
+      {tab === 'Plan & usage' ? <PlanTab /> : null}
       {tab === 'Projects' ? <ProjectsTab /> : null}
       {tab === 'Members' ? <MembersTab /> : null}
       {tab === 'AI Provider' ? <ModelsTab /> : null}

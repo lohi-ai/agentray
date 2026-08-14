@@ -14,7 +14,10 @@ import (
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
+// hosted marks the managed cloud (config.Hosted). It travels no further than the
+// auth payload: the web app hides every plan/pricing surface when it is false, so
+// a `docker compose up` operator is never shown a ceiling they cannot buy past.
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store)
 
 	e.GET("/healthz", func(c echo.Context) error {
@@ -69,7 +72,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if len(projects) == 0 {
 			projects = []storage.Project{bootstrap.Project}
 		}
-		return c.JSON(http.StatusCreated, authPayload(ctx, []storage.Workspace{bootstrap.Workspace}, projects, bootstrap.Project))
+		return c.JSON(http.StatusCreated, authPayload(ctx, []storage.Workspace{bootstrap.Workspace}, projects, bootstrap.Project, hosted))
 	}, authRateLimit)
 
 	e.POST("/api/auth/login", func(c echo.Context) error {
@@ -94,7 +97,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project))
+		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project, hosted))
 	}, authRateLimit)
 
 	e.POST("/api/auth/logout", func(c echo.Context) error {
@@ -116,7 +119,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project))
+		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project, hosted))
 	})
 
 	e.PUT("/api/users/me", func(c echo.Context) error {
@@ -139,7 +142,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project))
+		return c.JSON(http.StatusOK, authPayload(ctx, workspaces, projects, project, hosted))
 	})
 
 	e.GET("/api/workspaces", func(c echo.Context) error {
@@ -212,6 +215,48 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 			return echo.NewHTTPError(http.StatusForbidden, "workspace not available")
 		}
 		return c.JSON(http.StatusOK, map[string]any{"usage": usage})
+	})
+
+	// The upgrade CTA while there is no payment processor: a recorded interest
+	// row, so the button is never dead and the demand signal outlives the page
+	// view. GET reports the workspace's most recent request so the sheet can say
+	// "you already asked" instead of inviting a duplicate.
+	e.GET("/api/workspaces/:workspace_id/upgrade-request", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		req, err := store.LatestUpgradeRequest(c.Request().Context(), ctx.User.ID, c.Param("workspace_id"))
+		if err != nil {
+			// No request yet is the common case, not a failure.
+			return c.JSON(http.StatusOK, map[string]any{"request": nil})
+		}
+		return c.JSON(http.StatusOK, map[string]any{"request": req})
+	})
+
+	e.POST("/api/workspaces/:workspace_id/upgrade-request", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			Plan   string `json:"plan"`
+			Email  string `json:"email"`
+			Volume string `json:"volume"`
+			Note   string `json:"note"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		email := strings.TrimSpace(payload.Email)
+		if email == "" {
+			email = ctx.User.Email
+		}
+		req, err := store.CreateUpgradeRequest(c.Request().Context(), ctx.User.ID, c.Param("workspace_id"), payload.Plan, email, payload.Volume, payload.Note)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, "workspace not available")
+		}
+		return c.JSON(http.StatusCreated, map[string]any{"request": req})
 	})
 
 	e.GET("/api/workspaces/:workspace_id/members", func(c echo.Context) error {

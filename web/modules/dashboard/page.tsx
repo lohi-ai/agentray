@@ -2,17 +2,18 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, ChevronUp, LayoutGrid, Plus, Sparkles } from 'lucide-react';
+import { ChevronDown, ChevronUp, FlaskConical, LayoutGrid, Plus, Sparkles } from 'lucide-react';
 import { useAuthStore } from '@/lib/app-state';
 import type { Chart } from '@/lib/api';
-import { firstSessionNotice, firstValuePath, isSampleProject } from '@/lib/ia';
+import { formatCompact } from '@/lib/format';
+import { firstSessionNotice, firstValuePath, isSampleProject, settingsPath } from '@/lib/ia';
 import { useActivity, useDashboards, useEventNames } from '@/modules/app/hooks';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { PromptDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Intro, Loading } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Intro, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { Selector } from '@astryxdesign/core/Selector';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { ChartCard } from './chart-card';
@@ -45,6 +46,25 @@ export function DashboardPage() {
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
     sample,
   });
+  // Provenance, not decoration: a stranger arrives here straight from watching
+  // the agent build this board, and the subtitle has to say that's what they're
+  // looking at. Falls back to the ordinary weekly-check line once it isn't news.
+  const boardSubtitle = sample
+    ? 'Built by your agent from sample data — the same charts fill with your numbers once you connect your product.'
+    : 'The weekly check: what moved, and whether the last test worked.';
+
+  // Only stats we actually have. A tile that renders "—" because the summary is
+  // still loading is worse than one fewer tile, so the strip is built from what
+  // resolved and hidden entirely when nothing did.
+  const headlineStats = summary
+    ? [
+        { label: 'Events', value: formatCompact(summary.event_count) },
+        { label: 'People', value: formatCompact(summary.distinct_users) },
+        { label: 'Sessions', value: formatCompact(summary.sessions) },
+        { label: 'Agent events', value: formatCompact(summary.agent_events) },
+      ]
+    : [];
+
   const [dialog, setDialog] = useState<'view' | null>(null);
   // null = closed; 'new' = create; a Chart = edit that chart.
   const [editing, setEditing] = useState<Chart | 'new' | null>(null);
@@ -121,10 +141,29 @@ export function DashboardPage() {
       ) : null}
       <Intro
         title="Dashboards"
-        sub="The weekly check: what moved, and whether the last test worked."
+        sub={boardSubtitle}
         action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask AI</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
       />
       <FilterBar extra={selector} />
+
+      {/* Sample data being mistaken for real data is a trust failure, not a
+          polish issue — so this banner is permanent while the sample project is
+          active. It is the one callout in the product that never collapses and
+          carries no dismiss control. */}
+      {sample ? (
+        <Callout
+          tone="warn"
+          icon={<FlaskConical size={16} />}
+          label="Sample data"
+          title={`These numbers are from ${projectName}, not your product`}
+          detail="Every account ships with this so there is something to read on day one. Connect your own product and the same charts fill with your numbers."
+          action={<Button variant="outline" size="sm" onClick={() => router.push(settingsPath('keys'))}>Connect my product</Button>}
+        />
+      ) : null}
+
+      {/* Headline numbers in one strip above the board, never scattered across
+          the chart cards (DESIGN.md §Data Trust). */}
+      {headlineStats.length ? <StatsStrip stats={headlineStats} /> : null}
 
       <FirstEventQuickstart />
 

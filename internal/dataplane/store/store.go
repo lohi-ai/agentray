@@ -964,6 +964,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// Agent schema (including workspace_providers) lives in Postgres. Run it
+	// here so a PG-only boot still creates the tables; migrateClickHouse
+	// also calls migrateAgent and is idempotent.
+	if err := s.migrateAgent(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1112,6 +1119,9 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 		return err
 	}
 	if err := s.migrateTeams(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateWorkspacePlan(ctx); err != nil {
 		return err
 	}
 	// external_rows is the landing table for data-connector syncs: one wide

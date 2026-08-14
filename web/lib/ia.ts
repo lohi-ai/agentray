@@ -11,6 +11,8 @@ export type NavItemDef = {
   group: NavGroupId;
   // Extra path prefixes that light this item (nested or leftover routes).
   aliases?: readonly string[];
+  // Rendered only on the managed cloud. Self-host never sees it.
+  hostedOnly?: boolean;
 };
 
 export const NAV_ITEMS: readonly NavItemDef[] = [
@@ -25,7 +27,15 @@ export const NAV_ITEMS: readonly NavItemDef[] = [
   { href: '/sql', label: 'SQL', group: 'Signals' },
   { href: '/templates', label: 'Templates', group: 'Signals' },
   { href: '/settings', label: 'Settings', group: 'Workspace', aliases: ['/alerts'] },
+  { href: '/pricing', label: 'Plans', group: 'Workspace', hostedOnly: true },
 ];
+
+// navItemsFor drops hosted-only surfaces on a self-hosted instance. A
+// `docker compose up` operator must never be shown a pricing page or a plan
+// ceiling they cannot buy past — see AGENTRAY_HOSTED / config.Hosted.
+export function navItemsFor(opts: { hosted?: boolean }, items: readonly NavItemDef[] = NAV_ITEMS): NavItemDef[] {
+  return items.filter((item) => !item.hostedOnly || !!opts.hosted);
+}
 
 // Web mirror of internal/channels. Shipped kinds are reachable; reserved
 // kinds are listed so the UI can say “not yet” instead of inventing a surface.
@@ -172,6 +182,62 @@ export type FirstValuePath = {
   showFirstAsk: boolean;
 };
 
+// FIRST_RUN_PROMPT is the one seeded question the first-run panel fires at the
+// already-hired agent. It is phrased as the job the product exists to do, not as
+// a demo script, so the answer the stranger watches arrive is a real one.
+export const FIRST_RUN_PROMPT = 'What is the single weakest step in my activation funnel?';
+
+export type FirstRunGate = {
+  // Agent runs for the active project. Only the count matters — a run that
+  // errored still means the user has pressed the button and seen the runtime.
+  runs: { readonly length: number } | null | undefined;
+  // false while the runs query is in flight. The panel must never flash for a
+  // workspace that has already run, so an unresolved gate reads as "not first".
+  runsReady: boolean;
+  // Turns already in the open thread. A thread mid-conversation is not a first
+  // session even when the workspace has no persisted run yet.
+  turnCount?: number;
+};
+
+// isFirstRun gates the first-session panel. It keys off *agent runs*, never off
+// event emptiness: signup seeds a populated Demo project, so an events-based
+// check would leave the panel showing forever (own project) or never (Demo).
+export function isFirstRun(gate: FirstRunGate): boolean {
+  if (!gate.runsReady) return false;
+  if ((gate.turnCount ?? 0) > 0) return false;
+  return (gate.runs?.length ?? 0) === 0;
+}
+
+export type FirstRunHandoff = {
+  dashboard: { label: string; title: string; detail: string; action: string; href: string };
+  connect: { label: string; title: string; detail: string; action: string; href: string };
+};
+
+// firstRunHandoff is the end of the first run: the payoff (the dashboard the
+// agent just read) and the next commitment (point it at your own product). Two
+// callouts, in that order — the payoff is never withheld behind the upsell.
+// Returns null until the seeded turn has actually settled, and stays null when
+// it failed: a failed run gets the error surface, not a handover.
+export function firstRunHandoff(input: { started: boolean; settled: boolean; failed: boolean }): FirstRunHandoff | null {
+  if (!input.started || !input.settled || input.failed) return null;
+  return {
+    dashboard: {
+      label: 'Your dashboard',
+      title: 'Product Overview is ready',
+      detail: 'I read the funnel and pinned what moved. Open it — you watched it get built.',
+      action: 'Open your dashboard',
+      href: '/dashboard',
+    },
+    connect: {
+      label: 'Next',
+      title: 'That was sample data. Point me at your product.',
+      detail: 'Send one event from your own app and I will do that again on numbers you care about.',
+      action: 'Connect my product',
+      href: '/settings?tab=keys',
+    },
+  };
+}
+
 // Empty catalog (zero event names, catalog has loaded) turns on the guided
 // first-event + first-ask path. A published Demo workspace keeps the connect
 // guide on so sample data never hides "bring your product."
@@ -312,10 +378,11 @@ export type FirstSessionNotice = {
   href?: string;
 };
 
-export function settingsPath(tab?: 'ai' | 'keys' | 'connectors'): string {
+export function settingsPath(tab?: 'ai' | 'keys' | 'connectors' | 'plan'): string {
   if (tab === 'ai') return '/settings?tab=ai';
   if (tab === 'keys') return '/settings?tab=keys';
   if (tab === 'connectors') return '/settings?tab=connectors';
+  if (tab === 'plan') return '/settings?tab=plan';
   return '/settings';
 }
 
@@ -328,6 +395,7 @@ export function settingsTabFromQuery(search: string): string {
   if (tab === 'members') return 'Members';
   if (tab === 'projects') return 'Projects';
   if (tab === 'activity') return 'Activity';
+  if (tab === 'plan') return 'Plan & usage';
   return 'Workspace';
 }
 

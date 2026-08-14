@@ -20,6 +20,74 @@ export function useWorkspaceUsage() {
   return { usage: query.data?.usage ?? null, loading: query.isFetching };
 }
 
+// useWorkspacePlan is everything the three plan surfaces read: which plan the
+// workspace is on, this calendar month's event count, and whether the deployment
+// is the managed cloud at all. The month window is deliberately NOT the shared
+// Filters range — a plan ceiling is monthly, so the meter must not move when the
+// user changes a dashboard's date picker.
+export function useWorkspacePlan() {
+  const selectedWorkspaceID = useAuthStore((s) => s.selectedWorkspaceID);
+  const projectID = useAuthStore((s) => s.project?.id);
+  const workspaces = useAuthStore((s) => s.workspaces);
+  const hosted = useAuthStore((s) => s.auth?.hosted ?? false);
+  const workspace = workspaces.find((w) => w.id === selectedWorkspaceID) ?? workspaces[0] ?? null;
+
+  const query = useQuery({
+    queryKey: ['workspace-month-usage', selectedWorkspaceID],
+    queryFn: () => new AgentRayAPI(projectID || '').workspaceMonthUsage(selectedWorkspaceID),
+    enabled: !!selectedWorkspaceID,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  return {
+    hosted,
+    workspace,
+    plan: workspace?.plan ?? 'free',
+    usage: query.data?.usage ?? null,
+    loading: query.isPending,
+    // A meter that cannot load degrades to the text "Usage unavailable"; it
+    // never blocks the shell and never shows a spinner where a number belongs.
+    failed: query.isError,
+  };
+}
+
+// useUpgradeRequest backs the interest form that stands in for a checkout while
+// there is no payment processor. The POST writes a real row, so the button is
+// never dead, and the latest request is read back so the sheet can say "you
+// already asked" instead of inviting a duplicate.
+export function useUpgradeRequest() {
+  const queryClient = useQueryClient();
+  const selectedWorkspaceID = useAuthStore((s) => s.selectedWorkspaceID);
+  const projectID = useAuthStore((s) => s.project?.id);
+  const setMessage = useUIStore((s) => s.setMessage);
+  const setError = useUIStore((s) => s.setError);
+
+  const query = useQuery({
+    queryKey: ['upgrade-request', selectedWorkspaceID],
+    queryFn: () => new AgentRayAPI(projectID || '').latestUpgradeRequest(selectedWorkspaceID),
+    enabled: !!selectedWorkspaceID,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const mutation = useMutation({
+    mutationFn: (input: { plan: string; email?: string; volume?: string; note?: string }) =>
+      new AgentRayAPI(projectID || '').requestUpgrade(selectedWorkspaceID, input),
+    onSuccess: async () => {
+      setMessage('Thanks — we have your name.');
+      await queryClient.invalidateQueries({ queryKey: ['upgrade-request', selectedWorkspaceID] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Could not send that. Try again.'),
+  });
+
+  return {
+    request: query.data?.request ?? null,
+    submit: (input: { plan: string; email?: string; volume?: string; note?: string }) => mutation.mutateAsync(input),
+    submitting: mutation.isPending,
+  };
+}
+
 export function useWorkspaceMembers() {
   const queryClient = useQueryClient();
   const selectedWorkspaceID = useAuthStore((s) => s.selectedWorkspaceID);

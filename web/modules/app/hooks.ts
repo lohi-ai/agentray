@@ -3,4 +3,4 @@ export { useFilters, useActivity, useWebAnalytics, usePersons, useCohorts, useCo
 export { useAlertRules, useAlertChannels } from './hooks/alerts';
 export { useDashboards } from './hooks/dashboards';
 export { useSavedQueries, useSQL } from './hooks/sql';
-export { useWorkspaceUsage, useWorkspaceMembers, useWorkspaceAuditLogs, useCurrentProject } from './hooks/workspace';
+export { useWorkspaceUsage, useWorkspacePlan, useUpgradeRequest, useWorkspaceMembers, useWorkspaceAuditLogs, useCurrentProject } from './hooks/workspace';

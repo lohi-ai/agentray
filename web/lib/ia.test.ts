@@ -7,6 +7,7 @@ import {
   STARTER_TASKS,
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
+  firstRunHandoff,
   firstSessionNotice,
   firstValuePath,
   isSampleProject,
@@ -19,7 +20,9 @@ import {
   threadNeedsRecovery,
   weakestLink,
   settingsTabFromQuery,
+  isFirstRun,
   matchActiveHref,
+  navItemsFor,
   shouldStartDocksOpen,
   navGroupForPath,
   navGroups,
@@ -37,6 +40,11 @@ describe('nav grouping', () => {
     expect(groups[2].items.map((i) => i.label)).toEqual([
       'Dashboards', 'Traffic', 'Product', 'People', 'Events', 'Replay', 'SQL', 'Templates',
     ]);
+    expect(groups[3].items.map((i) => i.label)).toEqual(['Settings', 'Plans']);
+  });
+
+  it('drops the Plans item from the Workspace group on self-host', () => {
+    const groups = navGroups(navItemsFor({ hosted: false }));
     expect(groups[3].items.map((i) => i.label)).toEqual(['Settings']);
   });
 
@@ -288,5 +296,65 @@ describe('shouldStartDocksOpen', () => {
   it('keeps the first session full-width until there is work to show', () => {
     expect(shouldStartDocksOpen({ threadCount: 0, recommendationCount: 0 })).toBe(false);
     expect(shouldStartDocksOpen({ threadCount: 1, recommendationCount: 0 })).toBe(true);
+  });
+});
+
+describe('isFirstRun', () => {
+  it('never shows the panel while the runs query is still in flight', () => {
+    // A flash of "your data is already here" on a workspace with 200 runs is
+    // worse than a beat of nothing, so an unresolved gate reads as not-first.
+    expect(isFirstRun({ runs: [], runsReady: false })).toBe(false);
+    expect(isFirstRun({ runs: undefined, runsReady: false })).toBe(false);
+  });
+
+  it('shows the panel only when the workspace has never run an agent', () => {
+    expect(isFirstRun({ runs: [], runsReady: true })).toBe(true);
+    expect(isFirstRun({ runs: [{}], runsReady: true })).toBe(false);
+  });
+
+  it('does not key off event emptiness — the seeded Demo project always has events', () => {
+    // The gate takes runs, not eventNames. A populated Demo workspace with no
+    // run is still a first run; an empty own-project with a run is not.
+    expect(isFirstRun({ runs: [], runsReady: true })).toBe(true);
+    expect(isFirstRun({ runs: [{}, {}], runsReady: true })).toBe(false);
+  });
+
+  it('stands down inside a thread that already has turns', () => {
+    expect(isFirstRun({ runs: [], runsReady: true, turnCount: 1 })).toBe(false);
+    expect(isFirstRun({ runs: [], runsReady: true, turnCount: 0 })).toBe(true);
+  });
+});
+
+describe('firstRunHandoff', () => {
+  it('stays quiet until the seeded turn settles', () => {
+    expect(firstRunHandoff({ started: false, settled: false, failed: false })).toBeNull();
+    expect(firstRunHandoff({ started: true, settled: false, failed: false })).toBeNull();
+  });
+
+  it('withholds the handover when the run failed', () => {
+    // A failed run gets the error surface (retry + simplify), never a
+    // "your dashboard is ready" that points at nothing.
+    expect(firstRunHandoff({ started: true, settled: true, failed: true })).toBeNull();
+  });
+
+  it('leads with the payoff, then the next commitment', () => {
+    const handoff = firstRunHandoff({ started: true, settled: true, failed: false });
+    expect(handoff?.dashboard.href).toBe('/dashboard');
+    expect(handoff?.connect.detail).toMatch(/your own app/i);
+    // The sample-data admission is in the connect callout, never omitted.
+    expect(handoff?.connect.title).toMatch(/sample data/i);
+  });
+});
+
+describe('navItemsFor', () => {
+  it('hides pricing on a self-hosted instance', () => {
+    const selfHost = navItemsFor({ hosted: false }).map((item) => item.href);
+    expect(selfHost).not.toContain('/pricing');
+    expect(selfHost).toContain('/settings');
+    expect(navItemsFor({}).map((item) => item.href)).not.toContain('/pricing');
+  });
+
+  it('shows pricing on the managed cloud', () => {
+    expect(navItemsFor({ hosted: true }).map((item) => item.href)).toContain('/pricing');
   });
 });

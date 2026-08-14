@@ -53,12 +53,16 @@ func clearSessionCookie(c echo.Context) {
 	})
 }
 
-func authPayload(ctx authContext, workspaces []storage.Workspace, projects []storage.Project, project storage.Project) map[string]any {
+// hosted tells the web app which deployment it is talking to. false (the default,
+// and every `docker compose up`) means: no pricing page, no usage ceiling, no
+// upgrade prompt — the plan surfaces collapse to a single "self-hosted" card.
+func authPayload(ctx authContext, workspaces []storage.Workspace, projects []storage.Project, project storage.Project, hosted bool) map[string]any {
 	return map[string]any{
 		"user":               ctx.User,
 		"session_expires_at": ctx.Session.ExpiresAt,
 		"workspaces":         workspaces,
 		"projects":           projects,
 		"project":            project,
+		"hosted":             hosted,
 	}
 }
