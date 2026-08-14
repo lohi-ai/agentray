@@ -55,3 +55,19 @@ export function MeterUnavailable({ label }: { label: string }) {
     </VStack>
   );
 }
+
+// MeterPending is the in-flight state, and it is deliberately NOT the failure
+// copy: a healthy first load must never tell the user their usage is
+// unavailable. Same box, same height as the real meter, so nothing jumps when
+// the number lands — a dashed track and an em dash where the count will be.
+export function MeterPending({ label }: { label: string }) {
+  return (
+    <VStack gap={1.5} align="stretch">
+      <HStack justify="between" align="center" gap={3}>
+        <Text type="supporting">{label}</Text>
+        <Text type="supporting" hasTabularNumbers aria-live="polite">— / —</Text>
+      </HStack>
+      <div className="h-1.5 w-full rounded-full bg-[var(--color-background-muted)]" aria-hidden />
+    </VStack>
+  );
+}

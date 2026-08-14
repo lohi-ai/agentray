@@ -9,7 +9,7 @@ import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import { useUpgradeRequest, useWorkspacePlan } from '@/modules/app/hooks';
-import { MeterUnavailable, PlanMeter } from '@/modules/shared/components/plan-meter';
+import { MeterPending, MeterUnavailable, PlanMeter } from '@/modules/shared/components/plan-meter';
 import { Button, Callout, Panel } from '@/modules/shared/components/signal-primitives';
 import { nextPlan, planByID, usageMeter } from '@/lib/plans';
 import { UpgradeSheet } from './upgrade-sheet';
@@ -103,9 +103,10 @@ export function PlanTab() {
           {failed ? (
             <MeterUnavailable label="Events ingested" />
           ) : loading ? (
-            // A skeleton dash, not a spinner: the layout must not jump when the
-            // number lands, and a spinner where a number belongs reads as broken.
-            <MeterUnavailable label="Events ingested" />
+            // A skeleton dash, not a spinner and not the failure copy: an
+            // ordinary in-flight fetch must not read as an outage, and the
+            // layout must not jump when the number lands.
+            <MeterPending label="Events ingested" />
           ) : (
             <VStack gap={4} align="stretch">
               <PlanMeter meter={meter} label="Events ingested" />

@@ -194,6 +194,9 @@ export function ChatPage() {
     started: firstRunFired,
     settled: !streaming && !!lastMessage?.done,
     failed: !lastMessage?.text || needsKeyRecovery(lastMessage.text),
+    // The seeded exchange is one ask and one answer. Past that the user has
+    // moved on, and the handoff must not reappear under every later turn.
+    turnCount: messages.length,
   });
 
   // Read dropped/picked/pasted files into text attachments, dropping unreadable
@@ -415,6 +418,9 @@ export function ChatPage() {
     cancelled.current = true;
     setStreaming(false);
     setInput('');
+    // The handoff belongs to the thread the first run happened in. Leaving it
+    // armed would re-show it on any other two-message thread the user opens.
+    setFirstRunFired(false);
     newChat();
   }
 
@@ -423,6 +429,7 @@ export function ChatPage() {
   function onSelect(id: string) {
     cancelled.current = true;
     setStreaming(false);
+    setFirstRunFired(false);
     selectThread(id);
   }
 

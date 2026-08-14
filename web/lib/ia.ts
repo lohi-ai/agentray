@@ -218,8 +218,14 @@ export type FirstRunHandoff = {
 // callouts, in that order — the payoff is never withheld behind the upsell.
 // Returns null until the seeded turn has actually settled, and stays null when
 // it failed: a failed run gets the error surface, not a handover.
-export function firstRunHandoff(input: { started: boolean; settled: boolean; failed: boolean }): FirstRunHandoff | null {
+//
+// turnCount scopes it to the seeded exchange (the ask + the answer, so 2). The
+// "started" flag is session-sticky, so without this the handoff would re-render
+// under every later answer in the session, and under any older thread the user
+// clicks into — a "your dashboard is ready" attached to a turn that built nothing.
+export function firstRunHandoff(input: { started: boolean; settled: boolean; failed: boolean; turnCount?: number }): FirstRunHandoff | null {
   if (!input.started || !input.settled || input.failed) return null;
+  if ((input.turnCount ?? 2) > 2) return null;
   return {
     dashboard: {
       label: 'Your dashboard',

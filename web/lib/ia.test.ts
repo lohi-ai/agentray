@@ -337,6 +337,13 @@ describe('firstRunHandoff', () => {
     expect(firstRunHandoff({ started: true, settled: true, failed: true })).toBeNull();
   });
 
+  it('belongs to the seeded exchange, not to every later turn', () => {
+    // `started` is session-sticky, so without the turn bound the handoff would
+    // render again under the answer to every follow-up question.
+    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 2 })).not.toBeNull();
+    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 4 })).toBeNull();
+  });
+
   it('leads with the payoff, then the next commitment', () => {
     const handoff = firstRunHandoff({ started: true, settled: true, failed: false });
     expect(handoff?.dashboard.href).toBe('/dashboard');

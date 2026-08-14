@@ -971,6 +971,14 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The plan column and upgrade_requests are Postgres DDL, and the auth path
+	// now selects w.plan on every login — so it must not sit behind the
+	// ClickHouse migration. A CH outage or schema conflict there returns early,
+	// and this column missing turns "analytics are down" into "nobody can log in".
+	if err := s.migrateWorkspacePlan(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1119,9 +1127,6 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 		return err
 	}
 	if err := s.migrateTeams(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateWorkspacePlan(ctx); err != nil {
 		return err
 	}
 	// external_rows is the landing table for data-connector syncs: one wide

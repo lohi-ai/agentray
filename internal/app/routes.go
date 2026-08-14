@@ -1,6 +1,8 @@
 package app
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -228,8 +230,15 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		req, err := store.LatestUpgradeRequest(c.Request().Context(), ctx.User.ID, c.Param("workspace_id"))
 		if err != nil {
-			// No request yet is the common case, not a failure.
-			return c.JSON(http.StatusOK, map[string]any{"request": nil})
+			// No request yet — and a workspace this user cannot see — are both
+			// "nothing on file", the common case rather than a failure. A real
+			// database error is not: answering null there tells the caller their
+			// request was never recorded and invites a duplicate.
+			// pgx.ErrNoRows wraps sql.ErrNoRows, so one check covers both.
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusOK, map[string]any{"request": nil})
+			}
+			return err
 		}
 		return c.JSON(http.StatusOK, map[string]any{"request": req})
 	})
@@ -254,7 +263,12 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		req, err := store.CreateUpgradeRequest(c.Request().Context(), ctx.User.ID, c.Param("workspace_id"), payload.Plan, email, payload.Volume, payload.Note)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, "workspace not available")
+			// Only the access check answers ErrNoRows; anything else is a real
+			// failure and must not be reported to the user as "not allowed".
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusForbidden, "workspace not available")
+			}
+			return err
 		}
 		return c.JSON(http.StatusCreated, map[string]any{"request": req})
 	})
