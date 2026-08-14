@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AgentRayAPI, type AgentConversationEntry } from '@/lib/api';
+import { formatAgentError } from '@/lib/ia';
 import type { ChatMsg } from './chat-parts';
 
 // A chat thread. Since the conversation store landed (DESIGN-CONVERSATION-STORE.md
@@ -62,6 +63,7 @@ export function entriesToMessages(entries: AgentConversationEntry[]): ChatMsg[] 
     let text = '';
     try { text = String((JSON.parse(e.payload_json || '{}') as { text?: string }).text ?? ''); } catch { text = ''; }
     if (!text) continue;
+    if (e.role === 'assistant') text = formatAgentError(text);
     if (e.role === 'user') {
       cur = { id: e.seq, prompt: text, text: '', progress: '', card: null, done: true, tools: [] };
       out.push(cur);

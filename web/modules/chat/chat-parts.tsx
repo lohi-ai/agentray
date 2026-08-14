@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { Check, Paperclip, Plus, Trash2 } from 'lucide-react';
+import { Check, MessageSquare, Paperclip, Plus, Trash2 } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
@@ -28,6 +28,10 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import type { Agent, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
+import { useRouter } from 'next/navigation';
+import { startersByKind, type FirstSessionNotice } from '@/lib/ia';
+import { Callout } from '@/modules/shared/components/signal-primitives';
+import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
 import type { ChatThread } from './use-chat-threads';
 import { Chart, type ChartSpec } from '@/modules/shared/components/charts';
 import type { MarkdownComponents } from '@astryxdesign/core/Markdown';
@@ -65,11 +69,7 @@ export type ChatMsg = {
   agentName?: string;
 };
 
-const STARTERS: Record<string, string[]> = {
-  Traffic: ['Where is my best traffic coming from?', 'Is AI crawler traffic growing?'],
-  Product: ['Which feature drives retention?', 'Where do new users drop off?'],
-  Agents: ['What did my agents do today?', 'Any agents that need attention?'],
-};
+
 
 export function ThreadsRail({
   threads, activeID, onNew, onSelect, onDelete, bare,
@@ -144,17 +144,57 @@ export function AgentMenu({ agents, currentID, currentName, onPick }: { agents: 
   );
 }
 
-export function FrontDoor({ onPick }: { onPick: (value: string) => void }) {
+export function FrontDoor({
+  onPick,
+  onAsk,
+  showFirstEvent = false,
+  notice = null,
+}: {
+  onPick: (value: string) => void;
+  onAsk?: (value: string) => void;
+  showFirstEvent?: boolean;
+  notice?: FirstSessionNotice | null;
+}) {
+  const router = useRouter();
+  const groups = startersByKind();
+  const ask = notice?.ask ?? groups[0]?.prompts[0] ?? 'What changed in the last 7 days?';
+  const go = onAsk ?? onPick;
+  const action = notice?.href && (notice.kind === 'setup' || /AI key/i.test(notice.detail ?? ''))
+    ? <Button variant="secondary" size="sm" label="Add AI key" onClick={() => router.push(notice.href!)} />
+    : <Button variant="secondary" size="sm" label={notice?.kind === 'noticed' ? 'Write that down' : 'Ask that'} onClick={() => go(ask)} />;
+  const noticed = notice?.kind === 'noticed';
   return (
-    <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1">
+    <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1 pt-4">
       <VStack gap={1}>
-        <Heading level={2}>What do you want to figure out?</Heading>
-        <Text type="supporting">Ask in plain language. The agent will pull the supporting signals and recommend a next step.</Text>
+        <Heading level={2}>{noticed ? notice.title : 'Ask Growth Lead what to do next'}</Heading>
+        <Text type="supporting">
+          {noticed ? notice.detail : 'One question. I’ll look at your events and recommend a single next move.'}
+        </Text>
       </VStack>
-      {Object.entries(STARTERS).map(([group, chips]) => (
-        <VStack gap={2} key={group}>
-          <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">{group}</Text>
-          <HStack gap={2} wrap="wrap">{chips.map((chip) => <Token key={chip} size="lg" label={chip} onClick={() => onPick(chip)} />)}</HStack>
+      {showFirstEvent ? <FirstEventQuickstart /> : null}
+      {notice && !noticed ? (
+        <Callout
+          tone="agentic"
+          icon={<MessageSquare size={16} />}
+          label={notice.kind === 'setup' ? 'Almost ready' : 'Best next step'}
+          title={notice.title}
+          detail={notice.detail}
+          action={action}
+        />
+      ) : noticed ? (
+        <Callout
+          tone="growth"
+          icon={<MessageSquare size={16} />}
+          label="What to do this week"
+          title="I’ll write the next move from your events — not a guess."
+          detail={notice.ask}
+          action={action}
+        />
+      ) : null}
+      {groups.map((group) => (
+        <VStack gap={2} key={group.kind}>
+          <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">{group.label}</Text>
+          <HStack gap={2} wrap="wrap">{group.prompts.map((chip) => <Token key={chip} size="lg" label={chip} onClick={() => go(chip)} />)}</HStack>
         </VStack>
       ))}
     </VStack>

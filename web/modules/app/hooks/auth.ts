@@ -11,7 +11,6 @@ export function useAuth() {
   const setAuthChecked = useAuthStore((s) => s.setAuthChecked);
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const setMessage = useUIStore((s) => s.setMessage);
-  const setError = useUIStore((s) => s.setError);
 
   const meQuery = useQuery({
     queryKey: ['me'],
@@ -41,9 +40,10 @@ export function useAuth() {
       setAuthChecked(true);
       setMessage(input.mode === 'signup' ? 'Workspace created. Welcome to AgentRay.' : 'Logged in.');
     },
-    onError: (err) => {
+    onError: () => {
       setAuthChecked(true);
-      setError(err instanceof Error ? err.message : 'Authentication failed');
+      // AuthGate formats the thrown error onto the form banner. Do not toast
+      // here — a toast + banner on first touch reads as two failures.
     },
   });
 

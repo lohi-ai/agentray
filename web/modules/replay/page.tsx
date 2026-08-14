@@ -49,7 +49,7 @@ export function ReplayPage() {
 
   return (
     <AppShell active="monitor">
-      <Intro title="Session replay" sub="Step through every event in a session to see what the agent saw." action={<>{input}<Button variant="primary" icon={<Play size={15} />} onClick={() => void load()}>Replay</Button></>} />
+      <Intro title="Session replay" sub="What happened in one session, in order." action={<>{input}<Button variant="primary" icon={<Play size={15} />} onClick={() => void load()}>Replay</Button></>} />
       {loading ? <Panel title="Loading…"><span /></Panel> : !replay ? (
         <EmptyState title="No session loaded" detail="Paste a session ID, or open a session from People or Events." />
       ) : (

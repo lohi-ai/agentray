@@ -3,22 +3,19 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  Activity,
-  Bell,
   Bot,
   Database,
   Globe,
   Languages,
-  Layers,
   LayoutDashboard,
+  LayoutTemplate,
   List,
   LogOut,
   MessageSquare,
   Package,
+  PlayCircle,
   Settings,
-  Store,
   Users,
-  UsersRound,
   Waypoints,
 } from 'lucide-react';
 import type { ComponentType, ReactNode, SVGProps } from 'react';
@@ -28,57 +25,25 @@ import { NavIcon } from '@astryxdesign/core/NavIcon';
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
+import { matchActiveHref, navGroups, signedInLandingTarget } from '@/lib/ia';
 import { useAuth, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 
 export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings';
 
-type NavItem = {
-  href: string;
-  section: AppSection;
-  // Matches Astryx's IconType so the component can be handed straight to SideNavItem.
-  icon: ComponentType<SVGProps<SVGSVGElement>>;
-  label: string;
-  live?: boolean;
+const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
+  '/chat': MessageSquare,
+  '/agents': Bot,
+  '/dashboard': LayoutDashboard,
+  '/web-analytics': Globe,
+  '/product': Package,
+  '/settings': Settings,
+  '/persons': Users,
+  '/events': List,
+  '/replay': PlayCircle,
+  '/sql': Database,
+  '/templates': LayoutTemplate,
 };
-
-const navGroups: Array<{ label: string; items: NavItem[] }> = [
-  {
-    label: 'Main',
-    items: [
-      { href: '/dashboard', section: 'dashboards', icon: LayoutDashboard, label: 'Dashboards' },
-      { href: '/chat', section: 'chat', icon: MessageSquare, label: 'Chat', live: true },
-      { href: '/agents', section: 'agents', icon: Bot, label: 'Agents' },
-      { href: '/teams', section: 'agents', icon: UsersRound, label: 'Teams' },
-      { href: '/marketplace', section: 'agents', icon: Store, label: 'Marketplace' },
-      { href: '/web-analytics', section: 'traffic', icon: Globe, label: 'Traffic' },
-      { href: '/product', section: 'product', icon: Package, label: 'Product' },
-      { href: '/settings', section: 'settings', icon: Settings, label: 'Settings' },
-    ],
-  },
-  {
-    label: 'Explore',
-    items: [
-      { href: '/agents/monitor', section: 'monitor', icon: Activity, label: 'Agent monitor' },
-      { href: '/events', section: 'traffic', icon: List, label: 'Events' },
-      { href: '/persons', section: 'traffic', icon: Users, label: 'People' },
-      { href: '/cohorts', section: 'traffic', icon: Layers, label: 'Cohorts' },
-      { href: '/alerts', section: 'monitor', icon: Bell, label: 'Alerts' },
-      { href: '/sql', section: 'dashboards', icon: Database, label: 'SQL' },
-    ],
-  },
-];
-
-// The active nav item is the one whose href is the longest prefix of the current
-// path. Matching on the shared `section` lit several links at once (Agents +
-// Marketplace, Dashboards + SQL); longest-prefix keeps exactly one lit and still
-// highlights the parent on nested routes (/agents/123 → Agents, but
-// /agents/monitor → Agent monitor since its href is more specific).
-function activeHref(pathname: string): string {
-  const all = navGroups.flatMap((g) => g.items.map((i) => i.href));
-  const matches = all.filter((href) => pathname === href || pathname.startsWith(href + '/'));
-  return matches.sort((a, b) => b.length - a.length)[0] ?? '';
-}
 
 // Small pulsing "live" indicator shown on the Chat item. Uses the --agent token
 // (via the bg-agent/text-agent utilities) and the shared `pulse` keyframes; no
@@ -128,7 +93,8 @@ function SidebarFooter() {
 
 export function AppShell({ children, bleed = false }: { active?: AppSection; children: ReactNode; bleed?: boolean }) {
   const pathname = usePathname() ?? '';
-  const current = activeHref(pathname);
+  const current = matchActiveHref(pathname);
+  const groups = navGroups();
 
   const sideNav = (
     <SideNav
@@ -136,25 +102,28 @@ export function AppShell({ children, bleed = false }: { active?: AppSection; chi
         <SideNavHeading
           heading="AgentRay"
           subheading="Growth · data · agents"
-          headingHref="/dashboard"
+          headingHref={signedInLandingTarget()}
           icon={<NavIcon icon={<Waypoints size={16} />} />}
         />
       }
       footer={<SidebarFooter />}
     >
-      {navGroups.map((group) => (
-        <SideNavSection key={group.label} title={group.label}>
-          {group.items.map((item) => (
-            <SideNavItem
-              key={item.href}
-              as={Link}
-              href={item.href}
-              label={item.label}
-              icon={item.icon}
-              isSelected={item.href === current}
-              endContent={item.live ? <LiveDot /> : undefined}
-            />
-          ))}
+      {groups.map((group) => (
+        <SideNavSection key={group.id} title={group.label}>
+          {group.items.map((item) => {
+            const Icon = NAV_ICONS[item.href];
+            return (
+              <SideNavItem
+                key={item.href}
+                as={Link}
+                href={item.href}
+                label={item.label}
+                icon={Icon}
+                isSelected={item.href === current}
+                endContent={item.href === '/chat' ? <LiveDot /> : undefined}
+              />
+            );
+          })}
         </SideNavSection>
       ))}
     </SideNav>

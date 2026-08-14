@@ -8,6 +8,7 @@ import { Chart } from '@/modules/shared/components/charts';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 // personLabel is the display identity used in the table and for global search:
@@ -95,6 +96,7 @@ export function PersonsPage() {
     return (
       <AppShell active="traffic">
         <Intro title="People" sub="Who is behind the events — identified and anonymous." />
+        <div className="mb-3"><RelatedSurfacesLabel parentHref="/persons" /></div>
         <Loading label="Loading people…" />
       </AppShell>
     );
@@ -105,6 +107,7 @@ export function PersonsPage() {
   return (
     <AppShell active="traffic">
       <Intro title="People" sub="Who is behind the events — identified and anonymous." />
+      <div className="mb-3"><RelatedSurfacesLabel parentHref="/persons" /></div>
       <FilterBar showEventType={false} showErrors={false} />
       <StatsStrip stats={[
         { label: 'People', value: formatNumber(persons.total) },

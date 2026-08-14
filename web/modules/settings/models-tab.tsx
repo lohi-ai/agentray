@@ -122,9 +122,13 @@ export function ModelsTab() {
 
   return (
     <div className="flex flex-col gap-[14px]">
+      <p className="max-w-[640px] text-[13px] text-[var(--color-text-primary)]">
+        {models.hosted_default
+          ? 'Using the hosted model. Paste your own key to override — encrypted at rest, never shown again.'
+          : 'Paste one API key so Growth Lead can answer. Encrypted at rest, never shown again.'}
+      </p>
       <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">
-        The model pool is shared by every project and agent in this workspace. Configure it once: bring your own
-        provider key per tier, and pick which model serves each tier. Keys are encrypted at rest and never returned.
+        Optional Lite/Pro tiers share this key unless you override them. OpenAI-compatible providers work via a custom base URL.
         Only workspace owners and admins can change these.
       </p>
 

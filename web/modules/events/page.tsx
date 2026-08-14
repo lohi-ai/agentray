@@ -154,7 +154,7 @@ export function EventsPage() {
   if (loading && !explorer) {
     return (
       <AppShell active="traffic">
-        <Intro title="Events" sub="Raw event stream across people, sessions, and agents." action={header} />
+        <Intro title="Events" sub="Every signal you sent — people, sessions, and agent work." action={header} />
         <FilterBar extra={liveStatus} />
         <Loading label="Loading events…" />
       </AppShell>
@@ -178,7 +178,7 @@ export function EventsPage() {
 
   return (
     <AppShell active="traffic">
-      <Intro title="Events" sub="Raw event stream across people, sessions, and agents." action={header} />
+      <Intro title="Events" sub="Every signal you sent — people, sessions, and agent work." action={header} />
       <FilterBar extra={filterExtra} />
       <StatsStrip stats={[
         { label: 'Events', value: formatCompact(events.length) },

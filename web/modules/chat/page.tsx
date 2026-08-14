@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Bug, PanelLeft, PanelRight } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Bug, PanelLeft, PanelRight, Plus } from 'lucide-react';
 import { ChatLayout } from '@astryxdesign/core/Chat';
+import { Button } from '@astryxdesign/core/Button';
 import { ToggleButton } from '@astryxdesign/core/ToggleButton';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Badge } from '@astryxdesign/core/Badge';
@@ -14,6 +16,9 @@ import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
 import { useAgentSkills } from '@/modules/agent/hooks';
 import { useMediaQuery } from '@/modules/app/hooks/media';
+import { firstSessionNotice, firstValuePath, formatAgentError, instantReply, isSampleProject, needsKeyRecovery, recoveryAction, threadNeedsRecovery } from '@/lib/ia';
+import { useWorkspaceModels } from '@/modules/agent/hooks';
+import { useEventNames } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
 import { ThreadsRail, FrontDoor, Conversation, AgentMenu, type ChatMsg, type ChatStep } from './chat-parts';
@@ -55,6 +60,7 @@ const PANEL_SHEET = 'chat-panel';
 export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
+  const router = useRouter();
   const { chatStream, conversationSend, sessionRun, runs, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation } = useChatThreads(projectID);
@@ -66,8 +72,8 @@ export function ChatPage() {
   // panels when narrow; their open state is read back from the live stack so the
   // toggle un-presses when the user dismisses a panel from its own close button.
   const narrow = useMediaQuery('(max-width: 1100px)');
-  const [threadsOn, setThreadsOn] = useState(true);
-  const [panelOn, setPanelOn] = useState(true);
+  const [threadsOn, setThreadsOn] = useState(false);
+  const [panelOn, setPanelOn] = useState(false);
   const { push, closeById, panels } = useStackSheet();
   const [debug, setDebug] = useState(false);
   const [tab, setTab] = useState<PanelTab>('recs');
@@ -116,7 +122,7 @@ export function ChatPage() {
   if (activeID !== loadedID) {
     setLoadedID(activeID);
     const t = threads.find((x) => x.id === activeID);
-    setMessages(t ? t.messages : []);
+    setMessages(t ? t.messages.map((m) => (m.text ? { ...m, text: formatAgentError(m.text) } : m)) : []);
     setPickedAgentID(t?.agentID || initialAgentID || '');
   }
 
@@ -139,7 +145,15 @@ export function ChatPage() {
       setMessages((cur) => {
         const last = cur[cur.length - 1];
         if (last && !last.done) return cur; // don't clobber an in-flight turn
-        return msgs;
+        const formatted = msgs.map((m) => (m.text ? { ...m, text: formatAgentError(m.text) } : m));
+        // Old failed turns stored the raw error (or only the user line). Keep a
+        // local recovery bubble so the bar survives reload until the server
+        // starts persisting the formatted sentence.
+        if (threadNeedsRecovery(cur) && !threadNeedsRecovery(formatted)) {
+          const extra = cur.filter((m) => needsKeyRecovery(m.text ?? '') && !formatted.some((s) => s.text === m.text));
+          return extra.length ? [...formatted, ...extra] : formatted;
+        }
+        return formatted;
       });
     })();
     return () => { cancel = true; };
@@ -152,6 +166,17 @@ export function ChatPage() {
   const agentName = agent?.name || 'Agent';
   // The current agent's skills back the composer's `/` command menu.
   const { skills } = useAgentSkills(agent?.id);
+  const { names: eventNames, loading: catalogLoading } = useEventNames();
+  const { models, modelsLoading } = useWorkspaceModels();
+  const catalogReady = !catalogLoading && !!projectID;
+  const sample = isSampleProject({ name: projectName });
+  const firstValue = firstValuePath({ eventNames, catalogReady, sample });
+  const sessionNotice = firstSessionNotice({
+    eventNames,
+    catalogReady,
+    hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+    sample,
+  });
 
   // Read dropped/picked/pasted files into text attachments, dropping unreadable
   // ones and anything past the per-turn cap, and surfacing what was skipped.
@@ -281,13 +306,34 @@ export function ChatPage() {
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
   }
 
-  async function send() {
+  async function send(override?: string) {
     // Fold the typed /skill commands and any attachments into the single message
     // string the conversation store carries (FE-only — there's no separate channel).
     // The same composed string is both displayed and sent, so a reloaded turn
     // re-renders identically from the server projection.
-    const prompt = composeMessage(input, attachments, skills);
+    const prompt = composeMessage(override ?? input, attachments, skills);
     if (!prompt || streaming) return;
+    const instant = instantReply({
+      eventNames,
+      catalogReady,
+      hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+    }, prompt);
+    if (instant) {
+      const id = Date.now();
+      const seeded: ChatMsg[] = [...messages, {
+        id, prompt, text: instant, progress: '', card: null, done: true, tools: [],
+        agentID: agent?.id, agentName,
+      }];
+      setMessages(seeded);
+      setInput('');
+      setAttachments([]);
+      setNotice('');
+      dirty.current = true;
+      // Keep this turn local: a server conversation with no entries would wipe
+      // the written opinion on reload. The next live ask opens the store.
+      if (activeID) saveMessages(activeID, seeded, agent?.id);
+      return;
+    }
     const id = Date.now();
     const seeded: ChatMsg[] = [...messages, { id, prompt, text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName }];
     setMessages(seeded);
@@ -304,7 +350,7 @@ export function ChatPage() {
       onToolStart: (tool: string) => patch(id, (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, tool, status: 'running' as const }] })),
       onCard: (c: AgentResultCard) => patch(id, (m) => ({ ...m, card: c })),
       onTool: (t: AgentToolTrace) => patch(id, (m) => ({ ...m, tools: [...m.tools, t], steps: applyToolTrace(m.steps, t) })),
-      onError: (msg: string) => patch(id, (m) => ({ ...m, text: m.text || msg })),
+      onError: (msg: string) => patch(id, (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
     };
     // Open (or reuse) the server conversation, so the thread is durable and shared.
     // If that fails (offline / no project), fall back to the legacy client-history
@@ -328,7 +374,7 @@ export function ChatPage() {
             { role: 'assistant' as const, content: m.text },
           ]), { sessionID: activeID, agentID: agent?.id, signal: ac.signal });
       if (!isSteered(result)) {
-        patch(id, (m) => ({ ...m, text: m.text || result.final, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools.length ? m.tools : result.tool_calls, progress: '', done: true }));
+        patch(id, (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools.length ? m.tools : result.tool_calls, progress: '', done: true }));
       } else {
         patch(id, (m) => ({ ...m, progress: '', done: true }));
       }
@@ -424,6 +470,7 @@ export function ChatPage() {
             <Badge variant="neutral" label={<>Project <b className="font-medium text-[var(--color-text-primary)]">{projectName || '—'}</b></>} />
           </HStack>
           <HStack align="center" gap={2}>
+            <Button label="New chat" size="sm" variant="secondary" icon={<Plus size={14} />} onClick={onNew} />
             <ToggleButton
               label="Threads"
               size="sm"
@@ -447,9 +494,19 @@ export function ChatPage() {
         >
           {!narrow && threadsOn ? <ThreadsRail threads={threads} activeID={activeID} onNew={onNew} onSelect={onSelect} onDelete={removeThread} /> : null}
           <main className="col-start-2 flex min-h-0 flex-col bg-background">
+            {threadNeedsRecovery(messages, { hasModelKey: !!models?.has_key }) ? (() => {
+              const hit = [...messages].reverse().find((m) => needsKeyRecovery(m.text ?? ''));
+              const action = recoveryAction(hit?.text ?? '');
+              return (
+                <div className="flex flex-none items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-background-card)] px-4 py-2">
+                  <Text type="supporting">{action.detail}</Text>
+                  <Button label={action.label} size="sm" variant="primary" onClick={() => router.push(action.href)} />
+                </div>
+              );
+            })() : null}
             <ChatLayout
               density="balanced"
-              emptyState={<FrontDoor onPick={setInput} />}
+              emptyState={<FrontDoor onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />}
               composer={
                 <Composer
                   value={input}
@@ -466,7 +523,9 @@ export function ChatPage() {
                   footerActions={
                     <>
                       <AgentMenu agents={agents} currentID={agent?.id} currentName={agentName} onPick={setPickedAgentID} />
-                      <ToggleButton label="debug traces" size="sm" icon={<Bug size={14} />} isPressed={debug} onPressedChange={setDebug} />
+                      {debug || messages.length > 2 ? (
+                        <ToggleButton label="debug traces" size="sm" icon={<Bug size={14} />} isPressed={debug} onPressedChange={setDebug} />
+                      ) : null}
                     </>
                   }
                 />

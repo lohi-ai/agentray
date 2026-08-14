@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation';
+import { signedInLandingTarget } from '@/lib/ia';
 
-// The daily home is the dashboard, not the agent list. A dashboard rewards a
-// user for just showing up (it shows what happened overnight on load); the
-// agent list is a configuration surface that lives at /agents.
+// Conversation is the front door. Saved views stay at /dashboard; a signed-in
+// session should land in chat so the first action is asking, not scanning a board.
 export default function Home() {
-  redirect('/dashboard');
+  redirect(signedInLandingTarget());
 }

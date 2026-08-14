@@ -456,6 +456,7 @@ export type WorkspaceModelTiers = {
   pro_base_url: string;
   pro_has_key: boolean;
   model_fallback: boolean;
+  hosted_default?: boolean;
 };
 
 export type WorkspaceModelTiersInput = {

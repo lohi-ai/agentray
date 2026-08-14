@@ -185,9 +185,9 @@ export function MarketplacePage() {
             'radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--agent) 18%, transparent), transparent 60%), radial-gradient(120% 140% at 100% 0%, color-mix(in srgb, var(--primary) 16%, transparent), transparent 58%)',
         }}
       >
-        <span className="mb-3 inline-flex items-center gap-[7px] rounded-[20px] px-[10px] py-1 text-[11.5px] font-semibold bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Store size={13} /> Marketplace</span>
-        <h1 className="m-0 text-[22px] font-[650] tracking-[-0.02em]">Productive in one click</h1>
-        <p className="mt-[6px] mb-0 max-w-[560px] text-[13px] leading-[1.55] text-[var(--color-text-secondary)]">Hire a ready-made agent or start a dashboard from a template — preview the graphs, then drop it straight into your workspace.</p>
+        <span className="mb-3 inline-flex items-center gap-[7px] rounded-[20px] px-[10px] py-1 text-[11.5px] font-semibold bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Store size={13} /> Hire a teammate</span>
+        <h1 className="m-0 text-[22px] font-[650] tracking-[-0.02em]">Add a specialist in one click</h1>
+        <p className="mt-[6px] mb-0 max-w-[560px] text-[13px] leading-[1.55] text-[var(--color-text-secondary)]">Growth, marketing, and data teammates you can talk to — plus dashboard starters you can pin this week.</p>
       </div>
 
       <div className="mt-[26px] mb-3 flex items-baseline gap-[9px]">

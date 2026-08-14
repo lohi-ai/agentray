@@ -52,7 +52,7 @@ export function ProductPage() {
 
   return (
     <AppShell active="product">
-      <Intro title="Product" sub="Answer behavior questions without writing SQL first." />
+      <Intro title="Product" sub="Answer behavior questions without writing SQL first." action={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>} />
 
       {/* Astryx migration: the question picker is now an Astryx <Card> wrapping a
           responsive <Grid> of <SelectableCard>s — native controlled selection

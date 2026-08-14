@@ -1,8 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import { Waypoints } from 'lucide-react';
 import { NavIcon } from '@astryxdesign/core/NavIcon';
 import { Text } from '@astryxdesign/core/Text';
+import { apiBase } from '@/lib/api';
+import { formatAuthError } from '@/lib/auth-form';
 import { useAuth } from '@/modules/app/hooks';
 import { AuthScreen } from '@/modules/shared/auth-screen';
 
@@ -12,6 +15,7 @@ import { AuthScreen } from '@/modules/shared/auth-screen';
 // it, so pages can assume an authenticated project is available.
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { auth, authChecked, loading, submitAuth } = useAuth();
+  const [error, setError] = useState('');
 
   if (!authChecked) {
     return (
@@ -25,7 +29,20 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   if (!auth) {
-    return <AuthScreen loading={loading} error="" onSubmit={submitAuth} />;
+    return (
+      <AuthScreen
+        loading={loading}
+        error={error}
+        onSubmit={async (input) => {
+          setError('');
+          try {
+            await submitAuth(input);
+          } catch (err) {
+            setError(formatAuthError(err, apiBase()));
+          }
+        }}
+      />
+    );
   }
 
   return <>{children}</>;

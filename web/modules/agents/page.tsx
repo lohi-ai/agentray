@@ -2,28 +2,33 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { MessagesSquare, Play, Plus, Settings2, Share2, Wrench } from 'lucide-react';
+import { FlaskConical, MessagesSquare, Play, Plus, Settings2, Share2, Wrench } from 'lucide-react';
 import type { AgentMonitorRow } from '@/lib/api';
 import { formatCompact, formatCost, formatRelative } from '@/lib/format';
-import { useAgents } from '@/modules/agent/hooks';
+import { useAgents, useWorkspaceModels } from '@/modules/agent/hooks';
+import { settingsPath } from '@/lib/ia';
 import { useAgentMonitor } from '@/modules/agent-monitor/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PromptDialog } from '@/modules/shared/components/modal';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { Button, ContextChips, EmptyState, Intro, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { AssignProductsDialog } from './assign-products-dialog';
 
 // agentStatus derives the prototype's four health states from the run rollup.
-function agentStatus(row: AgentMonitorRow): { status: string; label: string } {
+function agentStatus(row: AgentMonitorRow, needsKey: boolean): { status: string; label: string } {
+  if (needsKey) return { status: 'attention', label: 'Needs AI key' };
   if (!row.enabled) return { status: 'paused', label: 'Paused' };
   if (row.error_count > 0) return { status: 'attention', label: 'Needs attention' };
   if (row.running_count > 0) return { status: 'working', label: 'Working' };
-  return { status: 'healthy', label: 'Healthy' };
+  return { status: 'healthy', label: 'Ready' };
 }
 
 export function AgentsPage() {
   const router = useRouter();
   const { agents, isLoading } = useAgentMonitor();
   const { createAgent, updateAgent } = useAgents();
+  const { models, modelsLoading } = useWorkspaceModels();
+  const needsKey = !modelsLoading && !models?.has_key;
   const [creating, setCreating] = useState(false);
   const [assigning, setAssigning] = useState<{ id: string; name: string } | null>(null);
 
@@ -51,7 +56,8 @@ export function AgentsPage() {
       {assigning ? (
         <AssignProductsDialog agentID={assigning.id} agentName={assigning.name} onClose={() => setAssigning(null)} />
       ) : null}
-      <Intro title="Your agents" sub="Configure and trust the teammates doing the work." action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New agent</Button>} />
+      <Intro title="Your team" sub="Teammates who watch the product and recommend the next move." action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New agent</Button>} />
+      <div className="mb-3"><RelatedSurfacesLabel parentHref="/agents" /></div>
       <ContextChips range="Last 24 hours" />
       <StatsStrip
         stats={[
@@ -68,7 +74,7 @@ export function AgentsPage() {
       ) : (
         <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
           {agents.map((row) => {
-            const { status, label } = agentStatus(row);
+            const { status, label } = agentStatus(row, needsKey);
             return (
               <div
                 className={`relative flex flex-col gap-[11px] overflow-hidden rounded-xl bg-[var(--color-background-card)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.7)] hover:[&_.av-agent]:shadow-[0_0_0_4px_color-mix(in_srgb,var(--agent)_12%,transparent)] ${status === 'paused' ? 'opacity-[0.62]' : ''}`}
@@ -86,7 +92,9 @@ export function AgentsPage() {
                   <span>cost <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatCost(row.cost_usd)}</b></span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-2">
-                  {status === 'attention' ? (
+                  {needsKey ? (
+                    <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(settingsPath('ai'))}>Add AI key</Button>
+                  ) : status === 'attention' ? (
                     <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(`/agents/${row.id}/monitor`)}>Fix setup</Button>
                   ) : status === 'paused' ? (
                     <Button variant="outline" size="sm" icon={<Play size={15} />} onClick={() => void updateAgent(row.id, row.name, true)}>Resume</Button>
@@ -94,6 +102,7 @@ export function AgentsPage() {
                     <Button variant="primary" size="sm" icon={<MessagesSquare size={15} />} onClick={() => router.push(`/chat?agent=${row.id}`)}>Talk to agent</Button>
                   )}
                   <Button variant="ghost" size="sm" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${row.id}/setup`)}>Set up</Button>
+                  <Button variant="ghost" size="sm" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${row.id}/lab`)}>Lab</Button>
                   <Button variant="ghost" size="sm" icon={<Share2 size={15} />} onClick={() => setAssigning({ id: row.id, name: row.name })}>Assign</Button>
                 </div>
               </div>

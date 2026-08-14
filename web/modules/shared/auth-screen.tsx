@@ -10,6 +10,7 @@ import { Card } from '@astryxdesign/core/Card';
 import { VStack } from '@astryxdesign/core/Stack';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
+import { validateAuthForm, type AuthField, type AuthMode } from '@/lib/auth-form';
 
 type Feature = { icon: ComponentType<SVGProps<SVGSVGElement>>; label: string; detail: string };
 
@@ -34,22 +35,33 @@ export function AuthScreen({
 }: {
   loading: boolean;
   error: string;
-  onSubmit: (input: { mode: 'login' | 'signup'; email: string; name: string; password: string; workspaceName: string; projectName: string }) => Promise<void>;
+  onSubmit: (input: { mode: AuthMode; email: string; name: string; password: string; workspaceName: string; projectName: string }) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<'login' | 'signup'>('login');
+  // Sign up first: a stranger's job is to create a workspace, not guess they already have one.
+  const [mode, setMode] = useState<AuthMode>('signup');
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
-  const [workspaceName, setWorkspaceName] = useState('');
-  const [projectName, setProjectName] = useState('');
+  const [workspaceName, setWorkspaceName] = useState('My workspace');
+  const [projectName, setProjectName] = useState('Production');
+  const [issue, setIssue] = useState<{ field: AuthField; message: string } | null>(null);
   const isSignup = mode === 'signup';
+
+  function fieldStatus(field: AuthField) {
+    return issue?.field === field ? { type: 'error' as const, message: issue.message } : undefined;
+  }
+
+  function switchMode(next: AuthMode) {
+    setMode(next);
+    setIssue(null);
+  }
 
   return (
     <main
-      className="relative min-h-screen overflow-hidden px-5 py-8 sm:px-8"
+      className="relative flex min-h-dvh items-center px-5 py-8 sm:px-8"
       style={{ background: PAGE_BACKGROUND, color: 'var(--color-text-primary)' }}
     >
-      <div className="mx-auto grid min-h-[calc(100dvh-4rem)] w-full max-w-[1080px] items-center gap-10 lg:grid-cols-[minmax(0,1fr)_420px] lg:gap-16">
+      <div className="mx-auto grid w-full max-w-[1080px] items-center gap-10 lg:grid-cols-[minmax(0,1fr)_420px] lg:gap-16">
         {/* Brand / value proposition */}
         <section className="order-2 lg:order-1">
           <VStack gap={6} align="start">
@@ -58,8 +70,8 @@ export function AuthScreen({
               <Badge variant="green" label="Growth operating system with agents" />
               <Heading level={1}>Turn product signals into agent-assisted growth moves.</Heading>
               <Text type="body" color="secondary">
-                Ask what changed in plain language, see what moved across traffic and product, and let
-                AI agents investigate and recommend the next step — all from one workspace.
+                Sign up and land in a live Demo workspace — a real funnel, a written weakest step —
+                then connect your website, app, or warehouse to replace the sample with your data.
               </Text>
             </VStack>
             <div className="grid w-full gap-1">
@@ -79,7 +91,7 @@ export function AuthScreen({
                 </div>
               ))}
             </div>
-            <Text type="supporting">Open-source · Self-hostable · MCP-ready</Text>
+            <Text type="supporting">Ask · Notice · Act · Open-source · Self-hostable</Text>
           </VStack>
         </section>
 
@@ -90,14 +102,14 @@ export function AuthScreen({
             className="shadow-[0_30px_80px_-28px_rgba(0,0,0,0.6)] backdrop-blur-sm"
           >
             <VStack gap={4} align="stretch">
-              <ModeToggle mode={mode} onChange={setMode} />
+              <ModeToggle mode={mode} onChange={switchMode} />
 
               <VStack gap={1} align="start">
-                <Heading level={3}>{isSignup ? 'Create your workspace' : 'Welcome back'}</Heading>
+                <Heading level={3}>{isSignup ? 'Start asking in a minute' : 'Welcome back'}</Heading>
                 <Text type="supporting">
                   {isSignup
-                    ? 'A workspace holds your projects and event streams. Set it up in seconds.'
-                    : 'Sign in to your AgentRay dashboard.'}
+                    ? 'Create a workspace, then ask what changed. No SQL setup first.'
+                    : 'Sign in to start asking what changed.'}
                 </Text>
               </VStack>
 
@@ -106,19 +118,22 @@ export function AuthScreen({
               <form
                 onSubmit={(event) => {
                   event.preventDefault();
+                  const next = validateAuthForm({ mode, email, name, password, workspaceName, projectName });
+                  setIssue(next);
+                  if (next) return;
                   void onSubmit({ mode, email, name, password, workspaceName, projectName });
                 }}
               >
                 <VStack gap={3} align="stretch">
-                  <TextInput label="Email" type="email" value={email} onChange={setEmail} htmlName="email" placeholder="you@company.com" />
+                  <TextInput label="Email" type="email" value={email} onChange={(v) => { setEmail(v); setIssue(null); }} htmlName="email" placeholder="you@company.com" isRequired status={fieldStatus('email')} hasAutoFocus />
                   {isSignup ? (
-                    <TextInput label="Full name" value={name} onChange={setName} htmlName="name" placeholder="Ada Lovelace" />
+                    <TextInput label="Full name" value={name} onChange={(v) => { setName(v); setIssue(null); }} htmlName="name" placeholder="Ada Lovelace" isRequired status={fieldStatus('name')} />
                   ) : null}
-                  <TextInput label="Password" type="password" value={password} onChange={setPassword} htmlName="password" placeholder={isSignup ? 'At least 8 characters' : '••••••••'} />
+                  <TextInput label="Password" type="password" value={password} onChange={(v) => { setPassword(v); setIssue(null); }} htmlName="password" placeholder={isSignup ? 'At least 8 characters' : 'Your password'} isRequired status={fieldStatus('password')} />
                   {isSignup ? (
                     <>
-                      <TextInput label="Workspace name" value={workspaceName} onChange={setWorkspaceName} htmlName="workspaceName" placeholder="Acme Inc." />
-                      <TextInput label="Project name" value={projectName} onChange={setProjectName} htmlName="projectName" placeholder="Production" />
+                      <TextInput label="Workspace name" value={workspaceName} onChange={(v) => { setWorkspaceName(v); setIssue(null); }} htmlName="workspaceName" placeholder="Acme Inc." isRequired status={fieldStatus('workspaceName')} />
+                      <TextInput label="Project name" value={projectName} onChange={(v) => { setProjectName(v); setIssue(null); }} htmlName="projectName" placeholder="Production" isRequired status={fieldStatus('projectName')} />
                     </>
                   ) : null}
                   <Button
@@ -154,10 +169,10 @@ export function AuthScreen({
 // Here the active pill uses --color-background-surface (the one neutral token
 // that's lighter than the track in dark) plus elevation, so the selected tab
 // reads as raised in BOTH light and dark.
-function ModeToggle({ mode, onChange }: { mode: 'login' | 'signup'; onChange: (m: 'login' | 'signup') => void }) {
-  const tabs: { value: 'login' | 'signup'; label: string }[] = [
-    { value: 'login', label: 'Log in' },
+function ModeToggle({ mode, onChange }: { mode: AuthMode; onChange: (m: AuthMode) => void }) {
+  const tabs: { value: AuthMode; label: string }[] = [
     { value: 'signup', label: 'Sign up' },
+    { value: 'login', label: 'Log in' },
   ];
   return (
     <div
@@ -174,7 +189,7 @@ function ModeToggle({ mode, onChange }: { mode: 'login' | 'signup'; onChange: (m
             role="tab"
             aria-selected={active}
             onClick={() => onChange(t.value)}
-            className={`h-9 rounded-[var(--radius-md)] text-[13.5px] font-medium transition-colors ${
+            className={`h-11 min-h-11 rounded-[var(--radius-md)] text-[13.5px] font-medium transition-colors ${
               active
                 ? 'border border-[var(--color-border-emphasized)] bg-[var(--color-background-surface)] text-[var(--color-text-primary)] shadow-[var(--shadow-low)]'
                 : 'border border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'

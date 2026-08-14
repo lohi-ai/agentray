@@ -5,7 +5,10 @@ import { useRouter } from 'next/navigation';
 import { ChevronDown, ChevronUp, LayoutGrid, Plus, Sparkles } from 'lucide-react';
 import { useAuthStore } from '@/lib/app-state';
 import type { Chart } from '@/lib/api';
-import { useActivity, useDashboards } from '@/modules/app/hooks';
+import { firstSessionNotice, firstValuePath, isSampleProject } from '@/lib/ia';
+import { useActivity, useDashboards, useEventNames } from '@/modules/app/hooks';
+import { useWorkspaceModels } from '@/modules/agent/hooks';
+import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { PromptDialog } from '@/modules/shared/components/modal';
@@ -27,9 +30,21 @@ function spanClass(span: number): string {
 
 export function DashboardPage() {
   const projectID = useAuthStore((s) => s.project?.id);
+  const projectName = useAuthStore((s) => s.project?.name);
   const router = useRouter();
   const { dashboards, selectedDashboard, charts, loading, setSelectedDashboardID, createDashboard, saveChart, deleteChart, reorderCharts } = useDashboards();
   const { summary } = useActivity();
+  const { names: eventNames, loading: catalogLoading } = useEventNames();
+  const { models, modelsLoading } = useWorkspaceModels();
+  const catalogReady = !catalogLoading && !!projectID;
+  const sample = isSampleProject({ name: projectName });
+  const firstValue = firstValuePath({ eventNames, catalogReady, sample });
+  const sessionNotice = firstSessionNotice({
+    eventNames,
+    catalogReady,
+    hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+    sample,
+  });
   const [dialog, setDialog] = useState<'view' | null>(null);
   // null = closed; 'new' = create; a Chart = edit that chart.
   const [editing, setEditing] = useState<Chart | 'new' | null>(null);
@@ -106,12 +121,25 @@ export function DashboardPage() {
       ) : null}
       <Intro
         title="Dashboards"
-        sub="The weekly check: acquisition, activation, and agent impact."
+        sub="The weekly check: what moved, and whether the last test worked."
         action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask AI</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
       />
       <FilterBar extra={selector} />
 
       <FirstEventQuickstart />
+
+      {sessionNotice?.kind === 'noticed' ? (
+        <div className="mb-4">
+          <Callout
+            tone="growth"
+            icon={<Sparkles size={16} />}
+            label="What I noticed"
+            title={sessionNotice.title}
+            detail={sessionNotice.detail}
+            action={<Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={() => router.push(`/chat?q=${encodeURIComponent(sessionNotice.ask)}`)}>Write that down</Button>}
+          />
+        </div>
+      ) : null}
 
       <DailyReadout />
 
@@ -123,12 +151,18 @@ export function DashboardPage() {
         <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-background-card)] py-14">
           <EmptyState
             icon={<LayoutGrid size={26} />}
-            title="No charts yet"
-            detail="Add a metric or SQL-backed chart, or ask the agent to build one for you."
+            title={firstValue.showFirstEvent ? 'Nothing to chart yet' : 'No saved views yet'}
+            detail={firstValue.showFirstEvent
+              ? 'Send a first event, then ask Growth Lead what to look at.'
+              : 'Ask Growth Lead to pin a chart, or add one yourself.'}
             action={(
               <div className="flex items-center justify-center gap-2">
-                <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={onAddChart}>Add chart</Button>
-                <Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={onAskAI}>Ask AI</Button>
+                {firstValue.showFirstAsk
+                  ? <Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={() => router.push('/chat')}>Ask a first question</Button>
+                  : <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={onAddChart}>Add chart</Button>}
+                {firstValue.showFirstAsk
+                  ? <Button variant="outline" size="sm" icon={<Plus size={14} />} onClick={onAddChart}>Add chart</Button>
+                  : <Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={onAskAI}>Ask AI</Button>}
               </div>
             )}
           />

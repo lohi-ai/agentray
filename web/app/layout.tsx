@@ -20,8 +20,8 @@ const inter = Inter({ subsets: ['latin', 'vietnamese'], variable: '--font-inter'
 const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono', display: 'swap' });
 
 export const metadata: Metadata = {
-  title: 'AgentRay Dashboard',
-  description: 'Open-source analytics dashboard for AI-first products.',
+  title: 'AgentRay',
+  description: 'Ask what changed, see what moved, and let agents recommend the next step.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

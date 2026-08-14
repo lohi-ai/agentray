@@ -1,14 +1,23 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, KeyRound, Plug, RefreshCw } from 'lucide-react';
+import { Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
 import { apiBase } from '@/lib/api';
+import { isSampleProject, settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
 import { useAuthStore } from '@/lib/app-state';
 import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
 import { Button, Segment } from '@/modules/shared/components/signal-primitives';
 
+type Source = 'website' | 'app' | 'warehouse';
 type Lang = 'curl' | 'js' | 'python';
+
+const SOURCES: Array<{ value: Source; label: string }> = [
+  { value: 'website', label: 'Website' },
+  { value: 'app', label: 'App / API' },
+  { value: 'warehouse', label: 'Warehouse' },
+];
 
 const LANGS: Array<{ value: Lang; label: string }> = [
   { value: 'curl', label: 'cURL' },
@@ -16,10 +25,28 @@ const LANGS: Array<{ value: Lang; label: string }> = [
   { value: 'python', label: 'Python' },
 ];
 
-// snippet builds a copy-paste integration that POSTs one event to the ingest
-// endpoint. The shape mirrors the /capture contract exactly:
-//   { api_key, event, distinct_id, properties }
-function snippet(lang: Lang, base: string, key: string): string {
+function websiteSnippet(base: string, key: string): string {
+  return [
+    `<script>`,
+    `(function () {`,
+    `  var id = localStorage.getItem("ar_id") || (crypto.randomUUID && crypto.randomUUID());`,
+    `  if (id) localStorage.setItem("ar_id", id);`,
+    `  fetch("${base}/capture", {`,
+    `    method: "POST",`,
+    `    headers: { "Content-Type": "application/json" },`,
+    `    body: JSON.stringify({`,
+    `      api_key: "${key}",`,
+    `      event: "pageview",`,
+    `      distinct_id: id || "anon",`,
+    `      properties: { path: location.pathname }`,
+    `    })`,
+    `  });`,
+    `})();`,
+    `</script>`,
+  ].join('\n');
+}
+
+function appSnippet(lang: Lang, base: string, key: string): string {
   const url = `${base}/capture`;
   if (lang === 'curl') {
     return [
@@ -59,26 +86,32 @@ function snippet(lang: Lang, base: string, key: string): string {
   ].join('\n');
 }
 
-// FirstEventQuickstart is the activation surface: a brand-new project has an API
-// key but no obvious path to its first data point, so the dashboard would just
-// look empty forever. This card turns that dead end into the analytics "aha" —
-// copy a working snippet, send one event, watch the dashboard come alive. It is
-// self-gating: it renders nothing once the project has ever emitted an event
-// (the event-name catalog spans all history, not the active range).
+// FirstEventQuickstart is the activation surface: empty projects and the
+// published Demo workspace both need a path to the caller's own data.
 export function FirstEventQuickstart() {
+  const router = useRouter();
   const { names, loading } = useEventNames();
   const { project } = useCurrentProject();
   const projectID = useAuthStore((s) => s.project?.id);
   const queryClient = useQueryClient();
+  const sample = isSampleProject(project);
 
-  const [lang, setLang] = useState<Lang>('curl');
+  const [source, setSource] = useState<Source>('website');
+  const [lang, setLang] = useState<Lang>('js');
   const [copied, setCopied] = useState<'key' | 'code' | null>(null);
 
   const key = project?.api_key ?? '';
   const base = apiBase();
-  const code = useMemo(() => snippet(lang, base, key), [lang, base, key]);
+  const code = useMemo(
+    () => (source === 'website' ? websiteSnippet(base, key) : appSnippet(lang, base, key)),
+    [source, lang, base, key],
+  );
 
-  if (loading || names.length > 0 || !project) return null;
+  if (!shouldShowFirstEventGuide({
+    eventNames: names,
+    catalogReady: !loading && !!project,
+    sample,
+  })) return null;
 
   function copy(text: string, what: 'key' | 'code') {
     void navigator.clipboard?.writeText(text);
@@ -96,20 +129,23 @@ export function FirstEventQuickstart() {
       <div className="flex items-start gap-[13px] border-b border-[var(--color-border)] px-4 py-3.5">
         <span className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary"><Plug size={16} /></span>
         <div className="min-w-0">
-          <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Get started · ~2 min</div>
-          <div className="text-sm font-semibold">Send your first event</div>
-          <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">No data yet. Drop one of these snippets into your app and your dashboard, agents, and people views all light up.</div>
+          <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+            {sample ? 'Connect your product · ~2 min' : 'Get started · ~2 min'}
+          </div>
+          <div className="text-sm font-semibold">
+            {sample ? 'This funnel is a sample. Bring yours.' : 'Send your first event'}
+          </div>
+          <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">
+            {sample
+              ? 'You are looking at published demo data so you can see the product work. Connect a website, app, or warehouse to replace it with your drop.'
+              : 'No data yet. Drop a snippet on your site, in your app, or open a warehouse connector.'}
+          </div>
         </div>
-        <span className="ms-auto hidden items-center gap-1.5 self-center rounded-[20px] bg-[var(--color-background-surface)] px-[9px] py-[3px] text-[11.5px] text-agent [@media(min-width:520px)]:inline-flex">
-          <span className="relative inline-block h-2 w-2 flex-none rounded-full bg-agent after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" />
-          Waiting for events
-        </span>
       </div>
 
       <div className="flex flex-col gap-3.5 p-4">
-        {/* Step 1 — API key */}
         <div>
-          <div className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium"><KeyRound size={14} className="text-[var(--color-text-secondary)]" /> Step 1 · Your project API key</div>
+          <div className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium"><KeyRound size={14} className="text-[var(--color-text-secondary)]" /> Your project API key</div>
           <div className="flex max-w-[560px] items-center gap-[10px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-[12.5px]">
             <span className="min-w-0 flex-1 truncate font-mono tabular-nums">{key || '—'}</span>
             <button
@@ -122,27 +158,49 @@ export function FirstEventQuickstart() {
           </div>
         </div>
 
-        {/* Step 2 — snippet */}
         <div>
           <div className="mb-1.5 flex flex-wrap items-center gap-2">
-            <span className="text-[12.5px] font-medium">Step 2 · Send an event</span>
-            <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
+            <span className="text-[12.5px] font-medium">Source</span>
+            <span className="ms-auto"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} /></span>
           </div>
-          <div className="relative">
-            <pre className="m-0 overflow-x-auto rounded-md bg-[var(--color-background-muted)] p-3.5 font-mono text-[12px] leading-[1.55] text-[var(--color-text-primary)]"><code>{code}</code></pre>
-            <button
-              className="absolute end-2.5 top-2.5 inline-flex items-center gap-1 rounded-sm border border-[var(--color-border)] bg-[var(--color-background-card)] px-2 py-1 text-[11.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
-              onClick={() => copy(code, 'code')}
-            >
-              {copied === 'code' ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
-            </button>
-          </div>
-          <p className="mt-1.5 text-[11.5px] text-[var(--color-text-secondary)]">Swap <code className="font-mono">event</code>, <code className="font-mono">distinct_id</code>, and <code className="font-mono">properties</code> for your own. Events appear within a few seconds.</p>
+
+          {source === 'warehouse' ? (
+            <div className="rounded-md bg-[var(--color-background-muted)] px-3.5 py-3 text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+              <p className="mb-2 flex items-center gap-1.5 text-[var(--color-text-primary)]">
+                <Warehouse size={14} /> Pull events from Postgres or an existing warehouse.
+              </p>
+              <Button variant="primary" size="sm" onClick={() => router.push(settingsPath('connectors'))}>Open data connectors</Button>
+            </div>
+          ) : (
+            <>
+              {source === 'app' ? (
+                <div className="mb-2 flex items-center gap-2">
+                  <Smartphone size={14} className="text-[var(--color-text-secondary)]" />
+                  <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
+                </div>
+              ) : (
+                <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
+                  <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">pageview</code>.
+                </p>
+              )}
+              <div className="relative">
+                <pre className="m-0 overflow-x-auto rounded-md bg-[var(--color-background-muted)] p-3.5 font-mono text-[12px] leading-[1.55] text-[var(--color-text-primary)]"><code>{code}</code></pre>
+                <button
+                  className="absolute end-2.5 top-2.5 inline-flex items-center gap-1 rounded-sm border border-[var(--color-border)] bg-[var(--color-background-card)] px-2 py-1 text-[11.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
+                  onClick={() => copy(code, 'code')}
+                >
+                  {copied === 'code' ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
-          <span className="text-[11.5px] text-[var(--color-text-disabled)]">This card disappears once your first event lands.</span>
+          <span className="text-[11.5px] text-[var(--color-text-disabled)]">
+            {sample ? 'Your Production project stays empty until a real event lands.' : 'This card disappears once your first event lands.'}
+          </span>
         </div>
       </div>
     </div>
