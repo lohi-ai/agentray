@@ -99,7 +99,18 @@ Important properties:
 - sandbox has no host env, no network by default, non-root, read-only root, resource
   caps, and timeout kill;
 - `http_request` is per-agent allowlisted and re-checks resolved IPs to block
-  metadata, loopback, private, and DNS-rebinding paths.
+  metadata, loopback, private, and DNS-rebinding paths — including when the
+  request is made from inside a container, because the egress proxy applies the
+  same IP guard the host dialer does;
+- every constructor in the `sandbox` package takes an `agentcore.Sandbox` and
+  tolerates `nil`, which runs the tool on the host machine instead. That is a
+  capability for embedded and local consumers of the package, **not** something
+  this control plane exposes: `internal/runtime` still refuses to build
+  `run_shell`, `computer_use` and `browser_use` without a sandbox, so a hosted
+  deployment never gains a host shell by omission. `HostSandbox` keeps what a
+  plain process can keep of the contract — only the declared env is visible, the
+  workspace is the working directory, the timeout hard-kills — and enforces
+  none of the filesystem, network or resource caps.
 
 ## AgentGarden and teams
 
