@@ -54,7 +54,14 @@ wrong.
 
 ## Extending capabilities
 
-Add a capability once as an operation:
+Which path applies is decided by *who* is extending — see
+[ARCHITECT-EXTENSIONS.md](ARCHITECT-EXTENSIONS.md) for the full contract. A
+tenant adds capabilities through MCP servers, tool config, and skills; a
+maintainer adds them as operations (below) or as `agentcore.Hooks`. AgentRay
+never loads tenant-authored code in this process — the tenant extension boundary
+is a network boundary, not a plugin loader.
+
+Add a first-party capability once as an operation:
 
 1. Add the narrow method to `usecase.Repo` and implement it on `storage.Store`.
 2. Declare an `opcore.Operation[I,O]` in `internal/dataplane/usecase/*`.
@@ -81,6 +88,7 @@ These compose independently and default closed where possible:
 | Computer-use isolation | `computer_use` is a deliberate higher-privilege tool (persistent session, network, writable, container-root) distinct from the locked `run_shell` (ephemeral, no-net, read-only, nobody). Still `--cap-drop ALL`, no-new-privileges, no host env, resource caps; granted only when explicitly selected. | `sandbox.NewComputerUseTool`, `Dockerfile.computeruse` |
 | Browser-use isolation | `browser_use` drives a real browser via the `agent-browser` CLI in its **own** persistent session (browser-scoped `::browser` session id, dedicated Chromium image) — same hard isolation as computer-use (`--cap-drop ALL`, no-new-privileges, no host env, caps). The agent-browser daemon self-reaps on idle (`AGENT_BROWSER_IDLE_TIMEOUT_MS`) and `CloseSession` removes the container, so no zombie Chrome survives a conversation. Granted only when explicitly selected; optional cloakbrowser stealth is opt-in at build time. | `sandbox.NewBrowserTool`, `Dockerfile.browser` |
 | HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `internal/shared/httptool` |
+| MCP client boundary | Remote tools come from servers the tenant operates, reached over Streamable HTTP only (no stdio — nothing tenant-named is ever spawned on the host). Connections use the same SSRF-guarded client; server auth headers resolve `{{cred:NAME}}` host-side at build time, never through the tool loop; every `mcp__` tool counts as external-write for the unattended-publish rail. | `internal/shared/mcpclient`, `agentruntime.ToolMCP` |
 | Evidence guard (verify-on-stop) | A figure-shaped final answer produced with zero executed read tools re-opens the run once: verify with a granted data tool, cite earlier-turn tool results as the figures' provenance, or restate the figures as not read from project data. Delegation counts (`spawn_subagent` is evidence — the child ran the read tools); list numbering and dates don't count as figures. Policy-only, capped at one nudge, skipped for agents with no read tools. | `agentcore.FinishGuard`, `agentruntime/evidence_guard.go` |
 
 Important properties:
@@ -113,7 +121,12 @@ Deferred fleet controls, in likely build order:
 4. signed per-agent identity;
 5. ring/resource tiers;
 6. trust scoring;
-7. external MCP/tool-definition scanner when third-party tools arrive.
+7. external MCP/tool-definition scanner. Third-party tools have now arrived (the
+   `mcp` catalog entry), and a remote server's advertised names, descriptions,
+   and schemas enter the model's context unreviewed — a tool description is a
+   prompt-injection surface. The transport is already fenced (SSRF guard, no
+   stdio, external-write rail); what is missing is inspecting what a server
+   *says*.
 
 Already shipped: hardened sandbox image and credential vault.
 
@@ -127,6 +140,8 @@ Already shipped: hardened sandbox image and credential vault.
 | Docker sandbox + injection guard | `sandbox/` |
 | Credential vault | `internal/shared/credential/` |
 | HTTP tool + SSRF guard | `internal/shared/httptool/` |
+| MCP client (remote tools) | `internal/shared/mcpclient/` |
+| Lifecycle hooks (first-party extension seam) | `agentcore/hooks.go` |
 | Operation adapters | `internal/shared/opcore/` |
 | Usecase repo + analytics operations | `internal/dataplane/usecase/` |
 | Runtime tool/policy wiring | `internal/runtime/` |

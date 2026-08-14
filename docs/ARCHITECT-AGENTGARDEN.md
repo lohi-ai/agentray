@@ -6,6 +6,7 @@ A new agent should be a data/config change, not an AgentRay backend PR.
 Read with:
 
 - [AGENT-GOVERNANCE.md](AGENT-GOVERNANCE.md) — boundary, secrets, tools, sandbox.
+- [ARCHITECT-EXTENSIONS.md](ARCHITECT-EXTENSIONS.md) — the two extension paths (MCP for tenants, hooks for maintainers).
 - [ARCHITECT-AGENT-TEAM.md](ARCHITECT-AGENT-TEAM.md) — deferred sub-agent/team model.
 
 ## What users do here
@@ -75,6 +76,11 @@ verbatim-repeated answer stops as `goal_stalled`. Mechanism:
 - Tool kinds are code-defined and audited once.
 - Agent authors choose which existing tools an agent may use.
 - `http_request` uses a per-agent host allowlist.
+- `mcp` is the one selection that expands to many tools: its config lists remote
+  Model Context Protocol servers the project operates, and each contributes its
+  advertised tools as `mcp__<server>__<tool>`. This is how a tenant adds a
+  capability without an AgentRay PR — see
+  [ARCHITECT-EXTENSIONS.md](ARCHITECT-EXTENSIONS.md).
 - Secrets are write-only, encrypted at rest, and referenced by name:
   `{{cred:NOVEL_API_KEY}}`.
 - Secret values are resolved only at the trust boundary, after tracing and policy

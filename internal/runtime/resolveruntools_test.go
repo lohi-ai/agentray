@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/sandbox"
-	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // fakeTool is a minimal agentcore.Tool used to stand in for a host-global
@@ -28,7 +28,7 @@ func toolNames(tools []agentcore.Tool) map[string]bool {
 
 func TestResolveRunToolsNoSelectionsUsesGlobal(t *testing.T) {
 	global := fakeTool{name: httptool.ToolHTTPRequest}
-	tools, err := resolveRunTools(ToolBuildContext{}, global, nil)
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, nil)
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestResolveRunToolsNoSelectionsUsesGlobal(t *testing.T) {
 }
 
 func TestResolveRunToolsNoGlobalNoSelections(t *testing.T) {
-	tools, err := resolveRunTools(ToolBuildContext{}, nil, nil)
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, nil)
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestResolveRunToolsNoGlobalNoSelections(t *testing.T) {
 
 func TestResolveRunToolsEnabledSelectionOverridesGlobal(t *testing.T) {
 	global := fakeTool{name: httptool.ToolHTTPRequest}
-	tools, err := resolveRunTools(ToolBuildContext{}, global, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, []storage.AgentToolSelection{
 		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
 	})
 	if err != nil {
@@ -66,7 +66,7 @@ func TestResolveRunToolsEnabledSelectionOverridesGlobal(t *testing.T) {
 
 func TestResolveRunToolsDisabledSelectionSuppressesGlobal(t *testing.T) {
 	global := fakeTool{name: httptool.ToolHTTPRequest}
-	tools, err := resolveRunTools(ToolBuildContext{}, global, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, []storage.AgentToolSelection{
 		{Name: httptool.ToolHTTPRequest, Enabled: false},
 	})
 	if err != nil {
@@ -78,7 +78,7 @@ func TestResolveRunToolsDisabledSelectionSuppressesGlobal(t *testing.T) {
 }
 
 func TestResolveRunToolsFailsClosedOnBadConfig(t *testing.T) {
-	_, err := resolveRunTools(ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	_, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":[]}`},
 	})
 	if err == nil {
@@ -87,7 +87,7 @@ func TestResolveRunToolsFailsClosedOnBadConfig(t *testing.T) {
 }
 
 func TestResolveRunToolsBuildsRunShellFromSandboxContext(t *testing.T) {
-	tools, err := resolveRunTools(ToolBuildContext{Sandbox: stubSandbox{}}, nil, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{Sandbox: stubSandbox{}}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 	})
 	if err != nil {
@@ -101,7 +101,7 @@ func TestResolveRunToolsBuildsRunShellFromSandboxContext(t *testing.T) {
 func TestResolveRunToolsSkipsRunShellWhenNoSandbox(t *testing.T) {
 	// A stale run_shell selection on a deployment with no sandbox must be skipped,
 	// not abort the run — the agent still runs with its remaining tools.
-	tools, err := resolveRunTools(ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 	})
 	if err != nil {
@@ -115,7 +115,7 @@ func TestResolveRunToolsSkipsRunShellWhenNoSandbox(t *testing.T) {
 func TestResolveRunToolsSkipsUnavailableButKeepsAvailable(t *testing.T) {
 	// run_shell is unavailable (no sandbox) but http_request is fine: the run
 	// proceeds with http_request rather than dying on the stale shell selection.
-	tools, err := resolveRunTools(ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
 	})
@@ -130,7 +130,7 @@ func TestResolveRunToolsSkipsUnavailableButKeepsAvailable(t *testing.T) {
 func TestResolveRunToolsFailsClosedOnUnknownTool(t *testing.T) {
 	// An unregistered tool is not "unavailable" — it is a real misconfiguration,
 	// so it must still fail closed rather than being silently dropped.
-	_, err := resolveRunTools(ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	_, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: "definitely_not_a_tool", Enabled: true, ConfigJSON: `{}`},
 	})
 	if err == nil {
@@ -143,7 +143,7 @@ func TestResolveRunToolsBuildsWorkspaceTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	tools, err := resolveRunTools(ToolBuildContext{Sandbox: stubSandbox{}, Workspace: ws}, nil, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{Sandbox: stubSandbox{}, Workspace: ws}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolReadFile, Enabled: true, ConfigJSON: `{}`},
 		{Name: sandbox.ToolWriteFile, Enabled: true, ConfigJSON: `{}`},
 		{Name: sandbox.ToolBrowserUse, Enabled: true, ConfigJSON: `{}`},
@@ -162,7 +162,7 @@ func TestResolveRunToolsBuildsWorkspaceTools(t *testing.T) {
 func TestResolveRunToolsSkipsWorkspaceToolsWhenWorkspaceMissing(t *testing.T) {
 	// A workspace-dependent selection on a deployment with no workspace is stale
 	// and must be skipped, not abort the run.
-	tools, err := resolveRunTools(ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolReadFile, Enabled: true, ConfigJSON: `{}`},
 	})
 	if err != nil {

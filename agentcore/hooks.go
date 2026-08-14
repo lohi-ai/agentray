@@ -44,6 +44,90 @@ type MessageEndHook func(ctx context.Context, msg Message)
 // rewriting the outgoing request is what BeforeProviderRequest is for.
 type ProviderResponseHook func(ctx context.Context, resp ChatResponse)
 
+// RunStart is the assembled starting state of a run, handed to the
+// BeforeAgentStart hooks after the system prompt is built (definition + recalled
+// memory + skill headers + any goal contract) and before the first turn. It is
+// the only seam that can shape the *first* request; PrepareNextTurn shapes every
+// turn after one has completed.
+type RunStart struct {
+	// System is the assembled system prompt. It has not yet been prepended to
+	// Messages — the loop does that after the hooks run.
+	System string
+	// Messages are the seed messages (the user prompt, or a continued thread).
+	// They never include the system message.
+	Messages []Message
+	// Task is the recall/skill-selection task string for this run. Read-only:
+	// changing it here has no effect (memory recall already happened).
+	Task string
+}
+
+// BeforeAgentStartHook shapes a run before its first provider request (pi's
+// before_agent_start). Return the input with your edits: an empty System keeps
+// the assembled prompt, and nil Messages keep the seeds, so a hook that only
+// wants to append a reminder can return RunStart{Messages: append(...)} without
+// restating the prompt. Runs before the seed messages are persisted to the
+// durable log, so an injected message is part of the recorded conversation and
+// survives resume.
+type BeforeAgentStartHook func(ctx context.Context, start RunStart) RunStart
+
+// TurnInfo describes one reasoning turn at its boundary (pi's turn_start /
+// turn_end). Usage is the run total accumulated so far, not this turn's slice.
+type TurnInfo struct {
+	Turn int
+	// Model is the rung actually in use for this turn.
+	Model string
+	// Usage is the run-to-date total at the boundary.
+	Usage Usage
+	// StopReason is set at turn end only (empty at turn start) and carries the
+	// provider's reason for the turn that just completed.
+	StopReason string
+}
+
+// TurnHook observes a turn boundary. Unlike the StreamTurnStart / StreamTurnEnd
+// stream events — which only reach a viewer on a *streamed* run — turn hooks
+// fire on every run, so metering and audit do not depend on someone watching.
+// Read-only: a return value is not threaded back.
+type TurnHook func(ctx context.Context, info TurnInfo)
+
+// CompactRequest describes an imminent compaction: the loop has decided the
+// transcript is over budget and is about to summarize its older span.
+type CompactRequest struct {
+	Turn int
+	// Messages is the live history that would be compacted.
+	Messages []Message
+	// Budget is the run's MaxContextTokens (the soft ceiling that tripped).
+	Budget int
+	// Settings are the effective compaction settings for this run (already
+	// clamped to the budget).
+	Settings CompactionSettings
+}
+
+// CompactDecision is a BeforeCompact hook's answer. The zero value means "no
+// opinion" — the built-in summarize-and-elide compaction runs as usual.
+type CompactDecision struct {
+	// Skip abandons compaction for this turn. The transcript is left as-is, so a
+	// hook that skips forever will run the context past its budget; use it to
+	// defer (e.g. mid-tool-sequence), not to disable compaction.
+	Skip bool
+	// Messages, when non-nil, replaces the transcript with a consumer-supplied
+	// compaction and suppresses the built-in one. The loop persists the same
+	// compaction bracket either way, but no summarization call is billed.
+	Messages []Message
+}
+
+// BeforeCompactHook is consulted immediately before the loop compacts an
+// over-budget transcript (pi's session_before_compact). The first hook that
+// returns Skip, or a non-nil Messages, decides; later hooks are not consulted.
+// Use it to pin content the default cut point would drop, or to swap in a
+// domain-specific summarizer.
+type BeforeCompactHook func(ctx context.Context, req CompactRequest) CompactDecision
+
+// AgentEndHook observes a finished run (pi's agent_end), after sub-agent usage is
+// folded in and any synthesized failure turn is appended — so res is exactly what
+// the caller receives. Read-only, fires on every exit path including error and
+// abort.
+type AgentEndHook func(ctx context.Context, res RunResult)
+
 // HookErrorPolicy governs what happens when a hook handler panics or returns an
 // error. The default (continue) keeps a single bad hook from taking down a run.
 type HookErrorPolicy string
@@ -64,6 +148,21 @@ const (
 type Hooks struct {
 	Before []BeforeToolCall
 	After  []AfterToolCall
+
+	// BeforeAgentStart runs in order once per run, on the assembled system
+	// prompt + seed messages, each seeing the previous one's output.
+	BeforeAgentStart []BeforeAgentStartHook
+	// TurnStart observers run in order at the top of every turn, before any of
+	// the turn's work (compaction, steering, the provider call).
+	TurnStart []TurnHook
+	// TurnEnd observers run in order once a turn is complete, on every path out
+	// of that turn (final answer, tool round, guard stop, abort).
+	TurnEnd []TurnHook
+	// BeforeCompact runs in order when the transcript trips its context budget;
+	// the first decisive answer (Skip, or replacement Messages) wins.
+	BeforeCompact []BeforeCompactHook
+	// AgentEnd observers run in order as the run returns, on every exit path.
+	AgentEnd []AgentEndHook
 
 	// Context runs in order before every provider request, each transforming the
 	// message view the next one sees (a reducer over the message list).
@@ -205,6 +304,77 @@ func (h Hooks) runMessageEnd(ctx context.Context, msg Message) error {
 		}
 	}
 	return nil
+}
+
+// runBeforeAgentStart folds the run-start hooks over the assembled prompt and
+// seeds. Per-field "empty means unchanged": a hook that returns an empty System
+// keeps the prompt it was given, and nil Messages keep the seeds, so a hook may
+// edit one without restating the other. A panicking hook is attributed and
+// skipped (its input passes through); under HookThrow it aborts the run.
+func (h Hooks) runBeforeAgentStart(ctx context.Context, start RunStart) (RunStart, error) {
+	for i, hook := range h.BeforeAgentStart {
+		var out RunStart
+		source := fmt.Sprintf("before_agent_start[%d]", i)
+		if perr := safe(func() { out = hook(ctx, start) }); perr != nil {
+			if e := h.emitErr(source, perr); e != nil {
+				return start, e
+			}
+			continue
+		}
+		if out.System != "" {
+			start.System = out.System
+		}
+		if out.Messages != nil {
+			start.Messages = out.Messages
+		}
+	}
+	return start, nil
+}
+
+// runTurnHooks dispatches one read-only turn-boundary observer list in order.
+// source names the list ("turn_start"/"turn_end") for attribution.
+func (h Hooks) runTurnHooks(ctx context.Context, list []TurnHook, source string, info TurnInfo) error {
+	for i, hook := range list {
+		if perr := safe(func() { hook(ctx, info) }); perr != nil {
+			if e := h.emitErr(fmt.Sprintf("%s[%d]", source, i), perr); e != nil {
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+// runBeforeCompact asks the compaction hooks in order, stopping at the first
+// decisive answer (a Skip, or a non-nil replacement transcript). A panicking hook
+// is attributed and skipped so a broken hook cannot suppress compaction — the
+// loop falls through to the built-in path, which is the safe direction. Under
+// HookThrow the failure aborts the run.
+func (h Hooks) runBeforeCompact(ctx context.Context, req CompactRequest) (CompactDecision, error) {
+	for i, hook := range h.BeforeCompact {
+		var d CompactDecision
+		source := fmt.Sprintf("before_compact[%d]", i)
+		if perr := safe(func() { d = hook(ctx, req) }); perr != nil {
+			if e := h.emitErr(source, perr); e != nil {
+				return CompactDecision{}, e
+			}
+			continue
+		}
+		if d.Skip || d.Messages != nil {
+			return d, nil
+		}
+	}
+	return CompactDecision{}, nil
+}
+
+// runAgentEnd dispatches the read-only agent_end observers in order. It is called
+// from a deferred close on the run, so it never returns an error to abort with:
+// the run is already over. Failures are still attributed via OnError.
+func (h Hooks) runAgentEnd(ctx context.Context, res RunResult) {
+	for i, hook := range h.AgentEnd {
+		if perr := safe(func() { hook(ctx, res) }); perr != nil {
+			_ = h.emitErr(fmt.Sprintf("agent_end[%d]", i), perr)
+		}
+	}
 }
 
 // runAfterProviderResponse dispatches the read-only after_provider_response

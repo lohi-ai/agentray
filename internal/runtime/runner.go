@@ -3,12 +3,13 @@ package agentruntime
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/shared/credential"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
+	"github.com/lohi-ai/agentray/internal/shared/credential"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -379,9 +380,22 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
-	runTools, err := resolveRunTools(ToolBuildContext{Sandbox: r.Sandbox, Workspace: r.Workspace, BrowserImage: r.BrowserImage, NetworkAllow: r.NetworkAllow}, r.HTTPTool, toolSelections)
+	runTools, toolNotes, err := resolveRunTools(ctx, ToolBuildContext{
+		Sandbox:      r.Sandbox,
+		Workspace:    r.Workspace,
+		BrowserImage: r.BrowserImage,
+		NetworkAllow: r.NetworkAllow,
+		// The vault backs {{cred:NAME}} in a tool's *config* (an MCP server's
+		// Authorization header), resolved here rather than in the tool loop.
+		Credentials: creds,
+	}, r.HTTPTool, toolSelections)
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
+	}
+	// A capability the operator granted but that could not be built (an optional
+	// MCP server that would not answer) is a degraded run, not a silent one.
+	for _, note := range toolNotes {
+		log.Printf("agentruntime: scope=%s %s", scopeID, note)
 	}
 
 	// Cross-agent delegation roster: the other agents this one has been granted
@@ -943,10 +957,18 @@ func runCredentials(global agentcore.CredentialResolver, secrets map[string]stri
 // (overriding a host-global default of the same name); a disabled selection
 // suppresses that tool entirely; a tool the agent has not selected falls back to
 // the host-global default. Building validates each selection's config, so a
-// malformed one returns an error and the caller fails the run closed. Pure (no
-// Store/ctx) so the precedence + fail-closed behavior is unit-testable.
-func resolveRunTools(toolCtx ToolBuildContext, globalHTTP agentcore.Tool, selections []storage.AgentToolSelection) ([]agentcore.Tool, error) {
+// malformed one returns an error and the caller fails the run closed.
+//
+// One selection may expand to several tools (mcp: one config, N remote servers,
+// each with its own tool list), which is why building takes a context — the
+// expansion talks to those servers. The returned notes describe capabilities
+// that were skipped without failing the run (an optional MCP server that would
+// not answer); the caller reports them rather than losing them silently.
+//
+// Takes no Store, so the precedence + fail-closed behavior stays unit-testable.
+func resolveRunTools(ctx context.Context, toolCtx ToolBuildContext, globalHTTP agentcore.Tool, selections []storage.AgentToolSelection) ([]agentcore.Tool, []string, error) {
 	var tools []agentcore.Tool
+	var notes []string
 	decided := make(map[string]bool, len(selections))
 	for _, sel := range selections {
 		decided[sel.Name] = true
@@ -963,17 +985,18 @@ func resolveRunTools(toolCtx ToolBuildContext, globalHTTP agentcore.Tool, select
 		if IsRegisteredTool(sel.Name) && !ToolAvailable(toolCtx, sel.Name) {
 			continue
 		}
-		tool, err := BuildToolWithContext(toolCtx, sel.Name, sel.ConfigJSON)
+		built, buildNotes, err := BuildToolsWithContext(ctx, toolCtx, sel.Name, sel.ConfigJSON)
 		if err != nil {
-			return nil, fmt.Errorf("tool %q: %w", sel.Name, err)
+			return nil, nil, fmt.Errorf("tool %q: %w", sel.Name, err)
 		}
-		tools = append(tools, tool)
+		tools = append(tools, built...)
+		notes = append(notes, buildNotes...)
 	}
 	// The host-global default fills in only for a tool the agent hasn't decided.
 	if globalHTTP != nil && !decided[globalHTTP.Name()] {
 		tools = append(tools, globalHTTP)
 	}
-	return tools, nil
+	return tools, notes, nil
 }
 
 // applyAutonomyRail enforces the hard unattended-publish gate: tools whose

@@ -174,7 +174,13 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 	// close, which reads the final res.Turns by closure.
 	emit(StreamEvent{Type: StreamAgentStart})
 	var res RunResult
-	defer func() { emit(StreamEvent{Type: StreamAgentEnd, Turn: res.Turns}) }()
+	// agent_end observers see the finished RunResult — child usage folded in and,
+	// on a failed run, the synthesized failure turn appended — so the deferred
+	// close runs them just before the stream event that ends the run.
+	defer func() {
+		a.hooks.runAgentEnd(ctx, res)
+		emit(StreamEvent{Type: StreamAgentEnd, Turn: res.Turns})
+	}()
 
 	res, err := a.drive(ctx, messages, task, sink, emit)
 	// Fold in what spawned sub-agents spent (spawn_subagent accumulates child
@@ -199,6 +205,9 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 		_ = a.hooks.runMessageEnd(ctx, fail)
 		emit(StreamEvent{Type: StreamMessageEnd, Turn: res.Turns})
 		emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+		// The turn that failed was already closed inside drive (endTurn runs on
+		// every path out of a turn), so this synthesized turn boundary is a stream
+		// courtesy only — re-running the turn_end hooks here would double-count it.
 	}
 	return res, err
 }
@@ -502,22 +511,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 	}
 
-	// Persist the seed messages (the user prompt / prior thread) so the log is a
-	// complete, reducible record from the first turn — unless this run resumed an
-	// existing log above, in which case the history is already durable and new
-	// entries chain onto it instead.
-	if !resumed {
-		// Record the goal first so RecoverSession re-arms the gate on a resumed
-		// run even when the caller cannot re-supply Config.Goal.
-		if goal != "" {
-			appendEntry(SessionEntry{Kind: EntryGoal, Goal: goal})
-		}
-		for i := range messages {
-			m := messages[i]
-			appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
-		}
-	}
-
 	// Perceive: assemble the system prompt once from the definition + recalled
 	// memory + the available-skill headers. Skill bodies are NOT inlined; the
 	// model pulls one on demand via the read_skill tool (progressive disclosure),
@@ -536,6 +529,37 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	if goal != "" {
 		system += goalContract(goal)
 	}
+
+	// before_agent_start (P10): the last seam that can shape the FIRST request.
+	// It runs on the assembled prompt and the seed messages, before either is
+	// persisted, so an injected message becomes part of the recorded conversation
+	// on a fresh run. On a resumed run the durable log is authoritative and the
+	// history below is already persisted, so a hook's message edits apply to this
+	// attempt only — persist a mid-run injection through the steering queue.
+	start, herr := a.hooks.runBeforeAgentStart(ctx, RunStart{System: system, Messages: messages, Task: task})
+	if herr != nil {
+		return res, herr
+	}
+	system = start.System
+	messages = start.Messages
+	res.Messages = messages
+
+	// Persist the seed messages (the user prompt / prior thread) so the log is a
+	// complete, reducible record from the first turn — unless this run resumed an
+	// existing log above, in which case the history is already durable and new
+	// entries chain onto it instead.
+	if !resumed {
+		// Record the goal first so RecoverSession re-arms the gate on a resumed
+		// run even when the caller cannot re-supply Config.Goal.
+		if goal != "" {
+			appendEntry(SessionEntry{Kind: EntryGoal, Goal: goal})
+		}
+		for i := range messages {
+			m := messages[i]
+			appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
+		}
+	}
+
 	if system != "" {
 		res.Messages = append([]Message{{Role: RoleSystem, Content: system}}, res.Messages...)
 	}
@@ -607,6 +631,40 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 		res.Turns++
 		emit(StreamEvent{Type: StreamTurnStart, Turn: res.Turns})
+		// turn_start / turn_end hooks (P10) fire on every run, streamed or not, so
+		// metering and audit do not depend on a viewer being attached. endTurn is
+		// idempotent per turn and closes the turn on every path out of it — normal
+		// completion, a guard stop, or an aborted turn — so the stream event and the
+		// hook always agree on how many turns happened.
+		turnClosed := false
+		// endTurn closes the turn exactly once. emitStream is false only on the
+		// error path, where runLoop emits the turn_end event itself to bracket the
+		// synthesized failure message — the hooks still fire here so a turn_end
+		// observer sees exactly one close per started turn.
+		endTurn := func(emitStream bool) {
+			if turnClosed {
+				return
+			}
+			turnClosed = true
+			if emitStream {
+				emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+			}
+			// A turn-end observer cannot abort: the turn's work is already done and
+			// several call sites are on a return path. Failures are still attributed
+			// through Hooks.OnError.
+			_ = a.hooks.runTurnHooks(ctx, a.hooks.TurnEnd, "turn_end",
+				TurnInfo{Turn: res.Turns, Model: state.Model, Usage: res.Usage, StopReason: res.StopReason})
+		}
+		// failTurn closes the turn before surfacing an error that aborts the run, so
+		// a turn_end observer never sees a turn that started and never ended.
+		failTurn := func(e error) (RunResult, error) {
+			endTurn(false)
+			return res, e
+		}
+		if herr := a.hooks.runTurnHooks(ctx, a.hooks.TurnStart, "turn_start",
+			TurnInfo{Turn: res.Turns, Model: state.Model, Usage: res.Usage}); herr != nil {
+			return failTurn(herr)
+		}
 
 		// Explain-mode pause point (Lab): block before this turn does any work until
 		// the consumer permits it. Everything below — compaction, steering, the
@@ -617,6 +675,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if err := a.stepGate(ctx, res.Turns); err != nil {
 				res.StopReason = "halted"
 				res.Final = lastAssistantText(res.Messages)
+				endTurn(true)
 				return res, nil
 			}
 		}
@@ -676,27 +735,51 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// span is summarized by the active rung's model into a structured
 		// checkpoint; on any failure it degrades to a deterministic elide.
 		if shouldCompact(res.Messages, limits.MaxContextTokens) {
-			// Compaction runs on its own tier when the consumer pinned one
-			// (compactionProvider/Model); otherwise it borrows the active rung.
-			compactProvider, compactModel := ladder[rung].Provider, ladder[rung].Model
-			if a.compactionProvider != nil && a.compactionModel != "" {
-				compactProvider, compactModel = a.compactionProvider, a.compactionModel
+			// before_compact (P10): the consumer may defer this compaction or supply
+			// its own — a domain summarizer, or a cut that pins content the default
+			// would drop. Asked before any durable bracket is written, so a skipped
+			// compaction leaves no trace to recover.
+			decision, herr := a.hooks.runBeforeCompact(ctx, CompactRequest{
+				Turn:     res.Turns,
+				Messages: res.Messages,
+				Budget:   limits.MaxContextTokens,
+				Settings: compaction,
+			})
+			if herr != nil {
+				return failTurn(herr)
 			}
-			// Bracket the compaction in the durable log: a start entry, then the
-			// completion. A start with no completion (crash mid-compaction) tells
-			// recovery to re-run it.
-			appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
-			var cu Usage
-			res.Messages, cu = compactWithSummary(ctx, compactProvider, compactModel, res.Messages, compaction)
-			// The summarization call is real billable spend: fold it into the
-			// run's accounting and stamp it on the completion entry so the audit
-			// trail shows what compaction itself cost (pi #6671).
-			res.Usage = addUsage(res.Usage, cu)
-			fin := SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true}
-			if cu != (Usage{}) {
-				fin.Usage = &cu
+			switch {
+			case decision.Skip:
+				// Nothing to bracket: the transcript is untouched this turn.
+			case decision.Messages != nil:
+				// A consumer-supplied compaction still gets the durable bracket (the
+				// transcript really did change shape) but costs no summarization call.
+				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
+				res.Messages = decision.Messages
+				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true})
+			default:
+				// Compaction runs on its own tier when the consumer pinned one
+				// (compactionProvider/Model); otherwise it borrows the active rung.
+				compactProvider, compactModel := ladder[rung].Provider, ladder[rung].Model
+				if a.compactionProvider != nil && a.compactionModel != "" {
+					compactProvider, compactModel = a.compactionProvider, a.compactionModel
+				}
+				// Bracket the compaction in the durable log: a start entry, then the
+				// completion. A start with no completion (crash mid-compaction) tells
+				// recovery to re-run it.
+				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
+				var cu Usage
+				res.Messages, cu = compactWithSummary(ctx, compactProvider, compactModel, res.Messages, compaction)
+				// The summarization call is real billable spend: fold it into the
+				// run's accounting and stamp it on the completion entry so the audit
+				// trail shows what compaction itself cost (pi #6671).
+				res.Usage = addUsage(res.Usage, cu)
+				fin := SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true}
+				if cu != (Usage{}) {
+					fin.Usage = &cu
+				}
+				appendEntry(fin)
 			}
-			appendEntry(fin)
 		}
 
 		// Steering: drain any user-injected corrections queued since the last turn
@@ -726,7 +809,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// rewrite the assembled request. Both honor the hook error policy.
 		reqMessages, herr := a.hooks.runContext(ctx, res.Messages)
 		if herr != nil {
-			return res, herr
+			return failTurn(herr)
 		}
 		// Cache-anchor placement is a loop decision, not a provider one: mark the
 		// stable prefix on the request view and let each provider translate the
@@ -734,12 +817,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		reqMessages = markCacheAnchors(reqMessages, a.cacheKey)
 		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
 		if req, herr = a.hooks.runBeforeProviderRequest(ctx, req); herr != nil {
-			return res, herr
+			return failTurn(herr)
 		}
 		emit(StreamEvent{Type: StreamMessageStart, Turn: res.Turns})
 		resp, err := a.reason(ctx, req, sink, ladder, &rung)
 		if err != nil {
-			return res, fmt.Errorf("provider chat (turn %d): %w", res.Turns, err)
+			return failTurn(fmt.Errorf("provider chat (turn %d): %w", res.Turns, err))
 		}
 		emit(StreamEvent{Type: StreamMessageEnd, Turn: res.Turns})
 		res.Usage.InputTokens += resp.Usage.InputTokens
@@ -761,7 +844,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// message_end observers (P10): the assistant message is now final. Read-only;
 		// a failure is attributed and (under HookThrow) aborts the run.
 		if err := a.hooks.runMessageEnd(ctx, turnMsg); err != nil {
-			return res, err
+			return failTurn(err)
 		}
 		// Reflect any escalation into the snapshot so the next turn's prompt/budget
 		// (and a PrepareNextTurn hook) see the model actually in use. Record a
@@ -778,7 +861,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// queued follow-ups: the ceiling is hit, so we do not restart the loop.
 			if budgetFinalizing {
 				res.StopReason = "budget_exhausted"
-				emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+				endTurn(true)
 				appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 				flush()
 				return res, nil
@@ -795,7 +878,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if goal != "" && !goalSatisfied(res.Final) {
 				if goalNudges > 0 && res.Final == lastGoalFinal {
 					res.StopReason = "goal_stalled"
-					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+					endTurn(true)
 					appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 					flush()
 					return res, nil
@@ -806,7 +889,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				res.Messages = append(res.Messages, m)
 				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 				emit(StreamEvent{Type: StreamProgress, Note: "Goal not met — continuing.", Turn: res.Turns})
-				emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+				endTurn(true)
 				flush()
 				continue
 			}
@@ -827,7 +910,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 					// user's chat feed (same pattern as the goal gate above), while
 					// the nudge text itself is internal rail scaffolding.
 					emit(StreamEvent{Type: StreamProgress, Note: "Verifying the answer before finishing.", Turn: res.Turns})
-					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+					endTurn(true)
 					flush()
 					continue
 				}
@@ -846,12 +929,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 						emit(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
 					}
-					emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+					endTurn(true)
 					flush()
 					continue
 				}
 			}
-			emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+			endTurn(true)
 			appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 			flush()
 			return res, nil
@@ -873,7 +956,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			}
 			res.StopReason = "max_tool_calls"
 			res.Final = lastAssistantText(res.Messages)
-			emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+			endTurn(true)
 			flush()
 			return res, nil
 		}
@@ -957,7 +1040,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 
 		if terminate {
 			res.Final = lastAssistantText(res.Messages)
-			emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+			endTurn(true)
 			// A terminal tool completes the run: record the leaf so the durable
 			// log reduces to Completed=true and a resume reattaches to the
 			// recorded outcome instead of replaying the terminal call.
@@ -992,7 +1075,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 
 		// Turn complete (reason + act); flush the turn's buffered durable writes as
 		// one save-point, then continue to the next turn.
-		emit(StreamEvent{Type: StreamTurnEnd, Turn: res.Turns})
+		endTurn(true)
 		flush()
 	}
 

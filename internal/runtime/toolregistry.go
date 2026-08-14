@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -8,8 +9,14 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/shared/httptool"
+	"github.com/lohi-ai/agentray/internal/shared/mcpclient"
 	"github.com/lohi-ai/agentray/sandbox"
 )
+
+// ToolMCP is the catalog entry that connects an agent to remote Model Context
+// Protocol servers. It is the one selection that expands into many tools: the
+// config lists servers, and each server contributes whatever it advertises.
+const ToolMCP = "mcp"
 
 // The selectable-tool registry (AgentGarden §6). It is the single catalog of
 // tools a project can turn on per-agent and the only place that knows how to
@@ -34,6 +41,14 @@ type ToolBuildContext struct {
 	// AGENTRAY_SANDBOX_NETWORK_ALLOW, comma-separated). Empty keeps the current
 	// open-network behavior. run_shell is unaffected (it never gets network).
 	NetworkAllow []string
+	// Credentials is the run-scoped secret vault, supplied for tools whose
+	// *config* (not the model's arguments) carries a {{cred:NAME}} placeholder.
+	// Only `mcp` needs it today: an MCP server's Authorization header is operator
+	// configuration resolved here, on the host side at build time, so it never
+	// passes through the tool loop where a model-visible argument would. nil is
+	// normal — a config with no placeholder needs no vault, and one with a
+	// placeholder fails closed.
+	Credentials agentcore.CredentialResolver
 }
 
 // ToolSpec describes one selectable tool: its stable name, human-facing catalog
@@ -51,7 +66,19 @@ type ToolSpec struct {
 	// and workspace/sandbox tools are not marked.
 	ExternalWrite bool
 	available     func(ToolBuildContext) bool
-	build         func(ToolBuildContext, string) (agentcore.Tool, error)
+	// build constructs the one tool this entry provides. Exactly one of build or
+	// buildMany is set.
+	build func(ToolBuildContext, string) (agentcore.Tool, error)
+	// buildMany constructs the several tools one selection expands into: `mcp` is
+	// a single catalog entry whose config names N remote servers, each
+	// advertising its own tool list. It takes a context because expansion talks
+	// to the network, and returns notes describing any capability it had to skip
+	// so the caller can report a degraded — rather than silent — tool set.
+	buildMany func(context.Context, ToolBuildContext, string) ([]agentcore.Tool, []string, error)
+	// validate checks a stored config without building anything. The control
+	// plane uses it at write time; a buildMany entry MUST set it, so accepting a
+	// selection never depends on a remote server answering right now.
+	validate func(ToolBuildContext, string) error
 }
 
 // ToolCatalogEntry is the JSON-serializable view of a ToolSpec for the
@@ -71,6 +98,19 @@ var toolRegistry = map[string]ToolSpec{
 		Configurable:  true,
 		ExternalWrite: true,
 		build:         buildHTTPRequestTool,
+	},
+	ToolMCP: {
+		Name:         ToolMCP,
+		Title:        "MCP servers",
+		Description:  "Connect the agent to remote Model Context Protocol servers you operate. Each server's tools are advertised to the model as mcp__<server>__<tool>. Configure servers with a name and an https URL; put any token in a {{cred:NAME}} placeholder, which is resolved on the server and never seen by the model.",
+		Configurable: true,
+		// A third-party server can do anything behind its own API, so every tool
+		// it contributes is treated as capable of publishing outside the platform:
+		// the unattended-publish rail strips them from background runs unless the
+		// project's autonomy is 'auto'.
+		ExternalWrite: true,
+		validate:      validateMCPConfig,
+		buildMany:     buildMCPTools,
 	},
 	httptool.ToolWebFetch: {
 		Name:         httptool.ToolWebFetch,
@@ -178,11 +218,17 @@ func IsRegisteredTool(name string) bool {
 	return ok
 }
 
-// ToolExternalWrite reports whether a registered tool is marked external-write
-// in the catalog (it can publish outside the platform). An unregistered name
-// returns false — the rail only governs catalog tools; run-derived tools
-// (analytics ops, team_board) are internal by construction.
+// ToolExternalWrite reports whether a tool is external-write (it can publish
+// outside the platform). Catalog tools answer from their spec. An unregistered
+// name returns false — the rail only governs catalog tools; run-derived tools
+// (analytics ops, team_board) are internal by construction — with one exception:
+// a tool contributed by a remote MCP server carries the mcp__ prefix and no
+// catalog entry of its own, and we cannot see what it does behind the server's
+// API, so it is external-write by construction.
 func ToolExternalWrite(name string) bool {
+	if strings.HasPrefix(name, mcpclient.ToolPrefix) {
+		return true
+	}
 	spec, ok := toolRegistry[name]
 	return ok && spec.ExternalWrite
 }
@@ -213,13 +259,96 @@ func BuildTool(name, configJSON string) (agentcore.Tool, error) {
 // BuildToolWithContext constructs a live tool from a registered name, the host
 // runtime context, and its config JSON. An unknown name, missing dependency, or
 // invalid config returns an error so a run fails closed rather than silently
-// dropping a capability the operator selected.
+// dropping a capability the operator selected. A selection that expands to
+// several tools (mcp) has no single tool to return — use BuildToolsWithContext.
 func BuildToolWithContext(ctx ToolBuildContext, name, configJSON string) (agentcore.Tool, error) {
 	spec, ok := toolRegistry[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
+	if spec.build == nil {
+		return nil, fmt.Errorf("tool %q expands to several tools; use BuildToolsWithContext", name)
+	}
 	return spec.build(ctx, configJSON)
+}
+
+// BuildToolsWithContext is the run path's builder: it returns every tool one
+// selection provides — one for an ordinary entry, N for an expanding one — plus
+// notes describing any capability that had to be skipped (an optional MCP server
+// that would not answer). Notes are for reporting, not control flow: anything
+// the operator must know about but that should not take the run down.
+func BuildToolsWithContext(ctx context.Context, tctx ToolBuildContext, name, configJSON string) ([]agentcore.Tool, []string, error) {
+	spec, ok := toolRegistry[name]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown tool %q", name)
+	}
+	if spec.buildMany != nil {
+		return spec.buildMany(ctx, tctx, configJSON)
+	}
+	tool, err := spec.build(tctx, configJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []agentcore.Tool{tool}, nil, nil
+}
+
+// ValidateToolConfig checks a stored selection's config without building it or
+// touching the network. The control plane calls it at write time so an unusable
+// selection (an empty http_request allowlist, a malformed MCP server list) is
+// rejected there rather than failing the next run closed — while a remote MCP
+// server that happens to be down right now does not block saving a valid config.
+func ValidateToolConfig(tctx ToolBuildContext, name, configJSON string) error {
+	spec, ok := toolRegistry[name]
+	if !ok {
+		return fmt.Errorf("unknown tool %q", name)
+	}
+	if spec.validate != nil {
+		return spec.validate(tctx, configJSON)
+	}
+	_, err := spec.build(tctx, configJSON)
+	return err
+}
+
+// validateMCPConfig checks the server list is well formed and that each URL is
+// one we would be willing to dial. It performs no I/O and resolves no secrets:
+// a config is savable before the agent's vault is loaded and while a remote
+// server is down. An unresolvable {{cred:NAME}} therefore surfaces at run time,
+// where it fails the run closed.
+func validateMCPConfig(_ ToolBuildContext, configJSON string) error {
+	_, err := mcpclient.ParseConfig(configJSON)
+	return err
+}
+
+// buildMCPTools connects to each configured server and adapts its advertised
+// tools. A malformed config fails the run closed — the operator asked for a
+// capability we cannot honor. An unreachable server is skipped with a note
+// instead, because a third-party outage should not take down an agent's
+// unrelated work; a server marked "required" opts back into failing closed.
+func buildMCPTools(ctx context.Context, tctx ToolBuildContext, configJSON string) ([]agentcore.Tool, []string, error) {
+	cfg, err := mcpclient.ParseConfig(configJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	var tools []agentcore.Tool
+	var notes []string
+	for _, spec := range cfg.Servers {
+		client, err := spec.Connect(ctx, tctx.Credentials)
+		if err != nil {
+			// A bad URL or an unresolvable secret is configuration, not weather:
+			// fail closed regardless of "required".
+			return nil, nil, err
+		}
+		got, err := mcpclient.Tools(ctx, client)
+		if err != nil {
+			if spec.Required {
+				return nil, nil, fmt.Errorf("required mcp server %q is unavailable: %w", spec.Name, err)
+			}
+			notes = append(notes, fmt.Sprintf("mcp server %q was unavailable and its tools were skipped: %v", spec.Name, err))
+			continue
+		}
+		tools = append(tools, got...)
+	}
+	return tools, notes, nil
 }
 
 // httpToolConfig is the per-agent config for http_request.

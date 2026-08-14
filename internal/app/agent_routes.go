@@ -594,9 +594,13 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		// Validate the config eagerly when enabling, so an unusable selection (e.g.
 		// an empty http_request allowlist or unavailable sandbox) is rejected at write
-		// time instead of failing the next run closed.
+		// time instead of failing the next run closed. Validation is offline: an mcp
+		// selection is checked for a well-formed server list, not by dialing the
+		// servers, so a remote outage never blocks saving a correct config — and no
+		// vault is passed, so a {{cred:NAME}} header is accepted here and resolved
+		// (or failed closed) at run time when the agent's secrets are loaded.
 		if payload.Enabled {
-			if _, err := agentruntime.BuildToolWithContext(agentruntime.ToolBuildContext{Sandbox: sb, Workspace: ws}, name, config); err != nil {
+			if err := agentruntime.ValidateToolConfig(agentruntime.ToolBuildContext{Sandbox: sb, Workspace: ws}, name, config); err != nil {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 		}
