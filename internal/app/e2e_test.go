@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -411,8 +411,21 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		t.Fatalf("unexpected auth/me response: %+v", me)
 	}
 
+	if signup.Project.Name != "Demo" {
+		t.Fatalf("first session should land on the published Demo workspace, got %q", signup.Project.Name)
+	}
+	emptyID := ""
+	for _, p := range signup.Projects {
+		if p.Name == "AgentRay bootstrap e2e" {
+			emptyID = p.ID
+			break
+		}
+	}
+	if emptyID == "" {
+		t.Fatalf("signup did not also create the caller's empty project: %+v", signup.Projects)
+	}
 	var emptyWeb webAnalyticsResponse
-	getJSONMust(t, client, ts.URL+"/api/web-analytics?project_id="+signup.Project.ID, &emptyWeb)
+	getJSONMust(t, client, ts.URL+"/api/web-analytics?project_id="+emptyID, &emptyWeb)
 	if emptyWeb.WebAnalytics.Visitors != 0 || emptyWeb.WebAnalytics.Pageviews != 0 {
 		t.Fatalf("empty project web analytics should be zeroed: %+v", emptyWeb.WebAnalytics)
 	}

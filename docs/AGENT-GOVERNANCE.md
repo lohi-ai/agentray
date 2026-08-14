@@ -9,7 +9,7 @@ Read this before adding, wiring, or exposing any agent capability.
 ## Non-negotiable boundary
 
 **Agents never touch infrastructure.** No agent, tool handler, prompt, skill, or
-sub-agent may import `internal/storage`, hold a DB/NATS/Redis/ClickHouse handle,
+sub-agent may import `internal/dataplane/store`, hold a DB/NATS/Redis/ClickHouse handle,
 or open its own connection to agentray data.
 
 All product data access goes through one path:
@@ -57,7 +57,7 @@ wrong.
 Add a capability once as an operation:
 
 1. Add the narrow method to `usecase.Repo` and implement it on `storage.Store`.
-2. Declare an `opcore.Operation[I,O]` in `internal/usecase/*`.
+2. Declare an `opcore.Operation[I,O]` in `internal/dataplane/usecase/*`.
 3. In the handler, use only `depsFrom(cc).Repo` (and approved memory deps).
 4. Register the operation in the usecase registry.
 5. Permit the tool name through the runtime policy/tool registry.
@@ -76,11 +76,11 @@ These compose independently and default closed where possible:
 |---|---|---|
 | Policy gate | Agent sees/calls only allowed tools. | `agentcore.Policy`, `agentruntime/policy.go` |
 | Injection guard | Blocks obvious prompt-injection payloads in tool args. | `sandbox.InjectionGuard` hook |
-| Credential vault | Resolves `{{cred:NAME}}` after trace + policy, before tool execution. Secrets stay out of model context and traces. | `agentcore.CredentialResolver`, `internal/credential` |
+| Credential vault | Resolves `{{cred:NAME}}` after trace + policy, before tool execution. Secrets stay out of model context and traces. | `agentcore.CredentialResolver`, `internal/shared/credential` |
 | Sandbox | Runs untrusted shell/file/browser-like work in an isolated container. | `agentcore.Sandbox`, `sandbox` |
 | Computer-use isolation | `computer_use` is a deliberate higher-privilege tool (persistent session, network, writable, container-root) distinct from the locked `run_shell` (ephemeral, no-net, read-only, nobody). Still `--cap-drop ALL`, no-new-privileges, no host env, resource caps; granted only when explicitly selected. | `sandbox.NewComputerUseTool`, `Dockerfile.computeruse` |
 | Browser-use isolation | `browser_use` drives a real browser via the `agent-browser` CLI in its **own** persistent session (browser-scoped `::browser` session id, dedicated Chromium image) — same hard isolation as computer-use (`--cap-drop ALL`, no-new-privileges, no host env, caps). The agent-browser daemon self-reaps on idle (`AGENT_BROWSER_IDLE_TIMEOUT_MS`) and `CloseSession` removes the container, so no zombie Chrome survives a conversation. Granted only when explicitly selected; optional cloakbrowser stealth is opt-in at build time. | `sandbox.NewBrowserTool`, `Dockerfile.browser` |
-| HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `internal/httptool` |
+| HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `internal/shared/httptool` |
 | Evidence guard (verify-on-stop) | A figure-shaped final answer produced with zero executed read tools re-opens the run once: verify with a granted data tool, cite earlier-turn tool results as the figures' provenance, or restate the figures as not read from project data. Delegation counts (`spawn_subagent` is evidence — the child ran the read tools); list numbering and dates don't count as figures. Policy-only, capped at one nudge, skipped for agents with no read tools. | `agentcore.FinishGuard`, `agentruntime/evidence_guard.go` |
 
 Important properties:
@@ -125,9 +125,9 @@ Already shipped: hardened sandbox image and credential vault.
 | Policy contract | `agentcore/policy.go` |
 | Sandbox contract | `agentcore/sandbox.go` |
 | Docker sandbox + injection guard | `sandbox/` |
-| Credential vault | `internal/credential/` |
-| HTTP tool + SSRF guard | `internal/httptool/` |
-| Operation adapters | `internal/opcore/` |
-| Usecase repo + analytics operations | `internal/usecase/` |
-| Runtime tool/policy wiring | `internal/agentruntime/` |
-| App config/wiring | `internal/app/`, `internal/config/` |
+| Credential vault | `internal/shared/credential/` |
+| HTTP tool + SSRF guard | `internal/shared/httptool/` |
+| Operation adapters | `internal/shared/opcore/` |
+| Usecase repo + analytics operations | `internal/dataplane/usecase/` |
+| Runtime tool/policy wiring | `internal/runtime/` |
+| App config/wiring | `internal/app/`, `internal/shared/config/` |

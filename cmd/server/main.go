@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/app"
-	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 func main() {

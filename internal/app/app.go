@@ -10,15 +10,15 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/agentruntime"
-	"github.com/lohi-ai/agentray/internal/alerting"
-	"github.com/lohi-ai/agentray/internal/config"
-	"github.com/lohi-ai/agentray/internal/connector"
-	"github.com/lohi-ai/agentray/internal/credential"
-	"github.com/lohi-ai/agentray/internal/httptool"
-	"github.com/lohi-ai/agentray/internal/ingestion"
+	"github.com/lohi-ai/agentray/internal/dataplane/alerting"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
+	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/shared/config"
+	"github.com/lohi-ai/agentray/internal/shared/credential"
+	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/sandbox"
-	"github.com/lohi-ai/agentray/internal/storage"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
@@ -37,6 +37,8 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Dataplane store must not import workloads; inject the pack catalog here.
+	storage.SetPackCatalog(marketplacePresets, marketplacePresetBySlug)
 	redisOptions, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		store.Close()

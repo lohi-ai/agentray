@@ -14,9 +14,10 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/agentruntime"
+	"github.com/lohi-ai/agentray/internal/channels"
+	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/sandbox"
-	"github.com/lohi-ai/agentray/internal/storage"
 )
 
 // detachedRunCeiling bounds a chat run that has outlived its SSE connection (the
@@ -1329,7 +1330,18 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			// signature alike, so the endpoint leaks nothing about why it refused.
 			return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
 		}
-		if err := scheduler.PublishWebhook(run.ProjectID, run.AgentID, run.Prompt); err != nil {
+		env, err := channels.NewEnvelope(channels.KindWebhook, run.ProjectID, run.AgentID, run.Prompt)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+		}
+		if err := scheduler.Dispatch(c.Request().Context(), agentruntime.DispatchRequest{
+			Channel:   string(env.Kind),
+			ProjectID: env.ProjectID,
+			AgentID:   env.AgentID,
+			PersonID:  env.PersonID,
+			Body:      env.Body,
+			Meta:      env.Meta,
+		}); err != nil {
 			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
 		}
 		return c.JSON(http.StatusAccepted, map[string]any{"queued": true})

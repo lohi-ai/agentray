@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/httptool"
+	"github.com/lohi-ai/agentray/internal/shared/httptool"
 )
 
 // realProvider builds the operator's OpenAI-compatible provider, or skips.

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/storage"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // registerAgentMonitorRoutes mounts the read-only observability surface for the

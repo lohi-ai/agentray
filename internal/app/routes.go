@@ -8,10 +8,10 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/agentruntime"
-	"github.com/lohi-ai/agentray/internal/ingestion"
+	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/sandbox"
-	"github.com/lohi-ai/agentray/internal/storage"
 )
 
 func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
@@ -65,7 +65,11 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		setSessionCookie(c, token, session.ExpiresAt)
 		ctx := authContext{User: bootstrap.User, Session: session}
-		return c.JSON(http.StatusCreated, authPayload(ctx, []storage.Workspace{bootstrap.Workspace}, []storage.Project{bootstrap.Project}, bootstrap.Project))
+		projects := bootstrap.Projects
+		if len(projects) == 0 {
+			projects = []storage.Project{bootstrap.Project}
+		}
+		return c.JSON(http.StatusCreated, authPayload(ctx, []storage.Workspace{bootstrap.Workspace}, projects, bootstrap.Project))
 	}, authRateLimit)
 
 	e.POST("/api/auth/login", func(c echo.Context) error {

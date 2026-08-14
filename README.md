@@ -19,6 +19,10 @@ scheduled, unattended growth loop.
 
 ## What's inside
 
+The backend is four layers — **channels → workloads → runtime → dataplane** —
+mapped in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). `agentcore/` and
+`sandbox/` stay at the module root as the public runtime libraries.
+
 The foundation architecture (detailed in `docs/PostHog-clone.md`):
 
 - Go ingestion API built with Echo

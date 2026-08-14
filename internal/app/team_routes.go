@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/storage"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // teamHTTPError maps a store error from the team surface to the right status:

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 // llmStub is a scripted OpenAI-wire /chat/completions server. It answers by

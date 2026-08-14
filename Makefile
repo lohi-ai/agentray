@@ -1,6 +1,6 @@
 # AgentRay developer tasks.
 #
-# Agent tests come in two layers (see internal/agentcore/agent_realprovider_test.go):
+# Agent tests come in two layers (see agentcore/agent_realprovider_test.go):
 #   * deterministic faux-provider unit tests — always run, no credentials.
 #   * env-gated real-provider tests (TestReal_*) — exercise a live model; they
 #     SKIP (not fail) when AGENTRAY_TEST_OPENAI_* is unset, so `make test` stays
@@ -78,12 +78,12 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 	$(GO) test ./internal/... -run 'TestReal_|RealProvider' -v -count=1
 
 test-stress: ## Run the long-run stability / compaction stress test
-	$(GO) test ./internal/agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
+	$(GO) test ./agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
 
 check: vet test ## Vet + unit tests — the pre-commit gate
 
 agent-funcs: ## List the agent test functions this Makefile targets
-	@grep -rhn '^func TestReal_\|^func TestLongRun' internal/agentcore/*_test.go
+	@grep -rhn '^func TestReal_\|^func TestLongRun' agentcore/*_test.go
 
 # --- Sandbox setup (run on the Docker-equipped host the API uses) ---------
 

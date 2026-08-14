@@ -15,24 +15,22 @@ Go service that handles event ingestion, analytics queries, auth, and dashboard 
 
 ## Directory Layout
 
+Layer map (source of truth): [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ```
 agentray/
   cmd/server/main.go            — entry point, wires config + graceful shutdown
+  agentcore/ · sandbox/         — public runtime libraries
   internal/
-    config/config.go            — Config struct, FromEnv()
-    app/
-      app.go                    — Server struct, New(), Start(), Shutdown()
-      routes.go                 — all route handlers inline (no controller layer)
-      auth.go                   — session helpers, authFromRequest, setSessionCookie
-    ingestion/
-      handler.go                — Capture, Batch, Identify HTTP handlers
-      queue.go                  — EventQueue (NATS publish) + EventWorker (NATS subscribe → CH write)
-      ratelimit.go              — Redis sliding-window rate limiter middleware
-      properties.go             — event property extraction (agent fields, tokens, cost)
-    storage/
-      store.go                  — Store struct + all DB methods
-      auth.go                   — user/session/workspace/project CRUD (Postgres)
-      store_test.go
+    channels/                   — ingress catalog (chat, mcp, schedule, webhook, lab)
+    workloads/                  — Garden packs (growth, marketing, data)
+    runtime/                    — AgentGarden + scheduler + runner (package agentruntime)
+    dataplane/
+      ingest/                   — Capture, Batch, Identify, NATS → ClickHouse
+      connector/                — source plugin registry (postgres shipped)
+    app/                        — composition root (HTTP)
+    shared/                     — config, cronx, credential, opcore, httptool
+    dataplane/store · usecase · alerting
   sdk/browser/autocapture.ts   — browser SDK
 ```
 
@@ -68,7 +66,7 @@ The NATS queue is the only async component. HTTP returns before ClickHouse write
 
 Sessions are stored in PostgreSQL. On login/signup the server sets an `HttpOnly` cookie (`agentray_session`). All dashboard API calls carry this cookie. The `authFromRequest` helper reads and validates the cookie, returning an `authContext{User, Session}`.
 
-## Storage Layer (`internal/storage/store.go`)
+## Storage Layer (`internal/dataplane/store/store.go`)
 
 `Store` holds a `*pgxpool.Pool` (Postgres) and a `clickhouse.Conn`.
 
@@ -77,7 +75,7 @@ Sessions are stored in PostgreSQL. On login/signup the server sets an `HttpOnly`
 
 `EventFilter` is the shared query parameter struct populated by `filterFromRequest()` from query string params (`hours`, `from`, `to`, `event_type`, `event_name`, `distinct_id`, `session_id`, `agent_id`, `model_name`, `search`, `error_only`, `limit`).
 
-## Configuration (`internal/config/config.go`)
+## Configuration (`internal/shared/config/config.go`)
 
 ## Shutdown
 

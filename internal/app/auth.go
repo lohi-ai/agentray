@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/storage"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 const sessionCookieName = "agentray_session"

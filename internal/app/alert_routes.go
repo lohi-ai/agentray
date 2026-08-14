@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/storage"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // registerAlertRoutes mounts the Alerting (#1) CRUD surface: rules are

@@ -68,7 +68,7 @@ turn/tool/budget limits still bound the loop, a budget wrap-up bypasses it, and 
 verbatim-repeated answer stops as `goal_stalled`. Mechanism:
 `agentcore.Config.Goal` (`agentcore/goal.go`), threaded per run via
 `RunOptions.Goal`; the chat directive parser is `parseGoalDirective`
-(`internal/agentruntime/chat.go`).
+(`internal/runtime/chat.go`).
 
 ## Tools and secrets
 

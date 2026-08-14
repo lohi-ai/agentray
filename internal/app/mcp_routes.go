@@ -2,10 +2,10 @@ package app
 
 import (
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/agentruntime"
-	"github.com/lohi-ai/agentray/internal/opcore"
-	"github.com/lohi-ai/agentray/internal/storage"
-	"github.com/lohi-ai/agentray/internal/usecase"
+	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 )
 
 // registerMcpRoutes mounts the operation registry as an MCP server at POST /mcp,

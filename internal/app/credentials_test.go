@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 // When the feature is off (the default), buildCredentials must return nil so

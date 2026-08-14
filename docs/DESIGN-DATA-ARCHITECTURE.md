@@ -130,12 +130,12 @@ dashboards cover the pipeline with zero new alert machinery.
 *Alternative rejected:* in-process ring buffer w/ WAL file — loses multi-
 instance fan-in and adds a bespoke persistence format for no operational win.
 
-**Files:** `internal/ingestion/queue.go` (JetStream publish/consume),
+**Files:** `internal/dataplane/ingest/queue.go` (JetStream publish/consume),
 `batcher.go` (retry/NAK), `internal/app/app.go` (stream provisioning),
-`internal/config/config.go` (stream/DLQ knobs), `cmd/cli` (replay-dlq),
+`internal/shared/config/config.go` (stream/DLQ knobs), `cmd/cli` (replay-dlq),
 `infra/gce` (nats `-js` flag + volume).
 
-**Verify:** `go test ./internal/ingestion/...`; live drill: `docker stop
+**Verify:** `go test ./internal/dataplane/ingest/...`; live drill: `docker stop
 clickhouse` → send 100 events → restart CH → all 100 land (count via
 `explore_events`); kill server mid-burst → restart → no gap; DLQ replay
 round-trips a poisoned batch.
@@ -164,7 +164,7 @@ starving ingestion.
 **Files:** `storage/store.go` (`migrateClickHouse` + read-path methods),
 `usecase/analytics.go` (unchanged contracts, faster impls).
 
-**Verify:** `go test ./internal/storage/... ./internal/usecase/...`;
+**Verify:** `go test ./internal/dataplane/store/... ./internal/dataplane/usecase/...`;
 `EXPLAIN` shows rollup tables on dashboard queries; rollup counts ==
 raw-scan counts over a fixed window; a deliberate `SELECT * FROM events`
 via `run_sql` fails with the quota error, dashboards still render.

@@ -10,9 +10,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/agentruntime"
-	"github.com/lohi-ai/agentray/internal/connector"
-	"github.com/lohi-ai/agentray/internal/storage"
+	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // registerConnectorRoutes mounts the data-connector surface: connection CRUD

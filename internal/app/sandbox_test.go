@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lohi-ai/agentray/internal/config"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 // When the feature is off (the default), buildSandbox must return nil so agents

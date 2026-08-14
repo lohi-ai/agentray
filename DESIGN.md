@@ -264,24 +264,30 @@ Secondary actions use the `outline`, `ghost`, or `secondary` variants, or sheet 
 
 ### Top-Level Navigation
 
-Organize navigation by outcome:
+Organize navigation by the job, not the backend diagram.
 
-#### Main
+#### Ask
 
-- **Chat** — ask an agent, start work, discuss recommendations.
-- **Agents** — choose, configure, and trust AI teammates.
-- **Dashboards** — saved views and repeatable growth checks.
+- **Chat** — talk to a teammate. One question, one next move.
+
+#### Team
+
+- **Agents** — the people doing the work. Hire, set up, lab, and monitor nest here.
+
+#### Signals
+
+- **Dashboards** — saved views for the weekly check.
 - **Traffic** — acquisition, source quality, page movement, AI platform traffic.
 - **Product** — funnels, retention, trends, product questions.
-- **Settings** — workspace, projects, members, API safety.
-
-#### Explore
-
 - **People** — users, identity, journey context.
 - **Events** — event stream and payload inspection.
 - **Replay** — session story and timeline.
 - **SQL** — advanced analysis and saved queries.
 - **Templates** — starter growth dashboards and proven setups.
+
+#### Workspace
+
+- **Settings** — workspace, people, and how events get in. Alerts nest here.
 
 Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state.
 
@@ -294,7 +300,7 @@ Purpose: start useful work in plain language.
 Must include:
 - one clear input surface
 - agent picker when multiple agents are enabled
-- starter tasks tied to growth, product, traffic, and agent operations
+- starter tasks tied to growth, marketing, data, and runtime health
 - recent work and recommendations near the start state
 - debug traces hidden by default
 - side panel for live work, runs, and recommendations
@@ -523,3 +529,4 @@ For every AgentRay screen:
 | 2026-06-19 | Keep dark calm cockpit visual language | Existing tokens and components already support trust, density, and agent/data workflows. |
 | 2026-06-19 | Make `/chat` the front door and keep SQL/debug secondary | Conversation-first lowers friction while preserving technical trust for operators. |
 | 2026-06-30 | Adopt Astryx (`@astryxdesign/core`) as the single UI library, replacing shadcn/`components/ui` | Astryx owns layout/spacing via a discoverable component set + CLI; `globals.css` bridges its neutral theme onto AgentRay's cool dark ramp so one coherent palette ships. |
+| 2026-08-13 | Sidebar groups follow Ask → Team → Signals → Workspace | Paying users buy a growth teammate, not an OS diagram. Layers stay in docs. |
