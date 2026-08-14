@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -17,13 +15,19 @@ const ToolEditFile = "edit_file"
 // in a workspace file rather than rewriting the whole thing (Claude Code's Edit /
 // pi's edit). This keeps large files cheap to change and makes intent reviewable —
 // the model states the precise text it is swapping. It shares Workspace and the
-// same symlink/escape guards as write_file so it can never touch the host FS.
+// same substrate seam as read_file/write_file, so the read-modify-write happens
+// wherever those happen — on the host under the symlink/escape guards by
+// default, inside the sandbox when one is provided.
 type EditFileTool struct {
 	workspace *Workspace
+	fs        workspaceFS
 }
 
-func NewEditFileTool(workspace *Workspace) *EditFileTool {
-	return &EditFileTool{workspace: workspace}
+// NewEditFileTool builds edit_file over the given sandbox. sb is optional: nil
+// edits the file on the host filesystem under the Workspace guards (the
+// default), non-nil reads and rewrites it from inside the sandbox.
+func NewEditFileTool(sb agentcore.Sandbox, workspace *Workspace) *EditFileTool {
+	return &EditFileTool{workspace: workspace, fs: newWorkspaceFS(sb, workspace)}
 }
 
 func (t *EditFileTool) Name() string { return ToolEditFile }
@@ -53,7 +57,7 @@ func (t *EditFileTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t *EditFileTool) Run(_ context.Context, args string) (string, error) {
+func (t *EditFileTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Path       string `json:"path"`
 		OldString  string `json:"old_string"`
@@ -70,21 +74,11 @@ func (t *EditFileTool) Run(_ context.Context, args string) (string, error) {
 		return "", fmt.Errorf("edit_file: old_string is empty")
 	}
 
-	abs, rel, err := t.workspace.Resolve(in.Path)
+	_, rel, err := t.workspace.Resolve(in.Path)
 	if err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("edit_file: %w", err)
-	}
-	if !inside(t.workspace.Root(), resolved) {
-		return "", fmt.Errorf("edit_file: path escapes workspace")
-	}
-	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("edit_file: refusing to follow symlink")
-	}
-	data, err := os.ReadFile(resolved)
+	data, err := t.fs.ReadFile(ctx, rel)
 	if err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
 	}
@@ -122,7 +116,7 @@ func (t *EditFileTool) Run(_ context.Context, args string) (string, error) {
 	if hadBOM {
 		updated = "\uFEFF" + updated
 	}
-	if err := os.WriteFile(resolved, []byte(updated), 0o644); err != nil {
+	if err := t.fs.WriteFile(ctx, rel, []byte(updated)); err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
 	}
 	return fmt.Sprintf("path: %s\nreplacements: %d\nbytes: %d\nmatch: %s", rel, count, len(updated), matched), nil

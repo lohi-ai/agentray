@@ -34,18 +34,30 @@ const (
 // every resolved address (including each redirect hop) and refuses
 // loopback / private / link-local / metadata, so "no allowlist" does not mean
 // "can reach internal services". HTML is reduced to text to keep results small.
+//
+// With a sandbox injected the fetch is made from inside the container instead.
+// Because the tool has no host allowlist of its own, the container's egress is
+// pinned per call to the requested URL's host (and its subdomains) — an empty
+// egress allowlist would hand the container an open network with no IP guard,
+// which is exactly the SSRF surface this tool exists to close. The visible
+// consequence is that a redirect off that host is refused by the egress proxy
+// rather than followed.
 type WebFetchTool struct {
+	sb           agentcore.Sandbox
 	client       *http.Client
 	maxBodyBytes int64
 }
 
 // NewWebFetchTool builds the web_fetch tool with the SSRF-guarded dialer
-// installed. It follows a bounded number of redirects because every hop is
-// re-validated by the dialer at connect time, unlike http_request which cannot
-// (its allowlist can't re-check a redirected host).
-func NewWebFetchTool() *WebFetchTool {
+// installed. sb is optional: nil fetches from this host process (the default),
+// non-nil fetches from inside the sandbox. It follows a bounded number of
+// redirects because every hop is re-validated at connect time — by the dialer on
+// the host path, by the egress proxy on the sandbox path — unlike http_request
+// which cannot (its allowlist can't re-check a redirected host).
+func NewWebFetchTool(sb agentcore.Sandbox) *WebFetchTool {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	return &WebFetchTool{
+		sb:           sb,
 		maxBodyBytes: webFetchMaxBodyBytes,
 		client: &http.Client{
 			Timeout: webFetchTimeout,
@@ -100,12 +112,42 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 		return "", fmt.Errorf("web_fetch: unsupported scheme %q", u.Scheme)
 	}
 
+	headers := map[string]string{
+		"User-Agent": "agentray-web-fetch/1.0",
+		"Accept":     "text/html,application/xhtml+xml,text/plain,*/*",
+	}
+
+	var (
+		body []byte
+		ct   string
+	)
+	if t.sb != nil {
+		resp, b, err := execSandboxHTTP(ctx, t.sb, ToolWebFetch, sandboxHTTPRequest{
+			Method:  http.MethodGet,
+			URL:     u.String(),
+			Headers: headers,
+			// No host allowlist exists for this tool, so the egress grant is scoped
+			// to the one host the model asked for rather than left open.
+			AllowHosts:      []string{u.Hostname()},
+			FollowRedirects: true,
+			MaxRedirects:    webFetchMaxRedirects,
+			TimeoutSeconds:  int(webFetchTimeout / time.Second),
+			MaxBodyBytes:    t.maxBodyBytes,
+		})
+		if err != nil {
+			return "", err
+		}
+		body, ct = b, resp.Header.Get("Content-Type")
+		return formatWebFetch(u.String(), resp.Status, ct, body), nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("web_fetch: %w", err)
 	}
-	req.Header.Set("User-Agent", "agentray-web-fetch/1.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain,*/*")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -113,9 +155,14 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, t.maxBodyBytes))
-	ct := resp.Header.Get("Content-Type")
+	body, _ = io.ReadAll(io.LimitReader(resp.Body, t.maxBodyBytes))
+	ct = resp.Header.Get("Content-Type")
+	return formatWebFetch(u.String(), resp.Status, ct, body), nil
+}
 
+// formatWebFetch renders one fetched document for the model, identically for
+// both substrates.
+func formatWebFetch(url, status, ct string, body []byte) string {
 	var content string
 	if isHTML(ct, body) {
 		content = htmlToText(body)
@@ -125,14 +172,14 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 	content = strings.TrimSpace(content)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "url: %s\nstatus: %s\n", u.String(), resp.Status)
+	fmt.Fprintf(&b, "url: %s\nstatus: %s\n", url, status)
 	if ct != "" {
 		fmt.Fprintf(&b, "content-type: %s\n", ct)
 	}
 	if content != "" {
 		fmt.Fprintf(&b, "content:\n%s", content)
 	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func isHTML(contentType string, body []byte) bool {

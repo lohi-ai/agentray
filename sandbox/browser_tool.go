@@ -40,43 +40,69 @@ func BrowserUseLimits() agentcore.SandboxLimits {
 	}
 }
 
-// BrowserTool drives a browser via the agent-browser CLI inside the injected
-// Sandbox. Unlike the old thin shell wrapper it ran ephemerally, it now reuses a
-// persistent, browser-scoped session container so the agent-browser daemon (and
-// the page it controls) survive across calls — the property that makes
-// multi-step browsing possible. The daemon self-reaps on idle
-// (AGENT_BROWSER_IDLE_TIMEOUT_MS, set in the image) so no zombie browser pins
-// resources between conversations.
+// BrowserTool drives a browser via the agent-browser CLI on the substrate it
+// was built with. With an injected Sandbox it reuses a persistent,
+// browser-scoped session container so the agent-browser daemon (and the page it
+// controls) survive across calls — the property that makes multi-step browsing
+// possible. The daemon self-reaps on idle (AGENT_BROWSER_IDLE_TIMEOUT_MS, set
+// in the image) so no zombie browser pins resources between conversations.
+// With no sandbox the same CLI is invoked on the host machine, where the daemon
+// is already a long-lived host process and persists without a container.
 type BrowserTool struct {
 	sb        agentcore.Sandbox
 	workspace *Workspace
 	limits    agentcore.SandboxLimits
 	// image is the Chrome-capable sandbox image (agent-browser + Chrome/cloak).
 	// Empty falls back to the backend default — which generally lacks a browser,
-	// so a deployment that grants browser_use should configure it.
+	// so a deployment that grants browser_use should configure it. Ignored on the
+	// host substrate, which has no images.
 	image string
+	// hosted records that no sandbox was injected, so the tool neither asks for a
+	// session container nor claims isolation it is not providing.
+	hosted bool
 }
 
 // NewBrowserTool builds the browser_use tool over sb, with the agent workspace
 // mounted (so screenshots/exports persist on the host) and a Chrome-capable
-// image. limits is the isolation envelope; pass BrowserUseLimits() for the
-// network+writable browser profile.
+// image. sb is optional: nil drives an `agent-browser` installed on the host
+// machine instead, where the daemon persists across calls without a session
+// container and the image is irrelevant. limits is the isolation envelope; pass
+// BrowserUseLimits() for the network+writable browser profile.
 func NewBrowserTool(sb agentcore.Sandbox, workspace *Workspace, limits agentcore.SandboxLimits, image string) *BrowserTool {
-	return &BrowserTool{sb: sb, workspace: workspace, limits: limits, image: image}
+	hosted := sb == nil
+	if hosted {
+		sb = NewHostSandbox()
+	}
+	return &BrowserTool{sb: sb, workspace: workspace, limits: limits, image: image, hosted: hosted}
 }
 
 func (t *BrowserTool) Name() string { return ToolBrowserUse }
 
 func (t *BrowserTool) Schema() agentcore.ToolSchema {
-	return agentcore.ToolSchema{
-		Name: ToolBrowserUse,
-		Description: "Drive a real web browser via the `agent-browser` CLI inside a " +
-			"persistent, network-enabled sandbox. State persists across calls in the " +
-			"same conversation, so browse step by step: `agent-browser --session s open <url>`, " +
+	// The artifact path differs by substrate: inside a sandbox the workspace is
+	// bind-mounted at browserWorkdir, on the host it is simply the working
+	// directory. Telling the model to write to /workspace on the host substrate
+	// would send every screenshot to a path it cannot create.
+	desc := "Drive a real web browser via the `agent-browser` CLI inside a " +
+		"persistent, network-enabled sandbox. State persists across calls in the " +
+		"same conversation, so browse step by step: `agent-browser --session s open <url>`, " +
+		"`agent-browser --session s snapshot -i` (interactive accessibility tree with refs), " +
+		"`agent-browser --session s click @e1`, `agent-browser --session s type @e2 \"text\"`, " +
+		"`agent-browser --session s screenshot " + browserWorkdir + "/page.png`. Use a stable --session " +
+		"name. Artifacts written under " + browserWorkdir + " are saved. Returns exit code, stdout, stderr."
+	if t.hosted {
+		desc = "Drive a real web browser via the `agent-browser` CLI on this machine. " +
+			"State persists across calls, so browse step by step: " +
+			"`agent-browser --session s open <url>`, " +
 			"`agent-browser --session s snapshot -i` (interactive accessibility tree with refs), " +
 			"`agent-browser --session s click @e1`, `agent-browser --session s type @e2 \"text\"`, " +
-			"`agent-browser --session s screenshot /workspace/page.png`. Use a stable --session " +
-			"name. Artifacts written under /workspace are saved. Returns exit code, stdout, stderr.",
+			"`agent-browser --session s screenshot page.png`. Use a stable --session name. " +
+			"Commands run in the agent workspace directory; artifacts written there are saved " +
+			"(use relative paths). Returns exit code, stdout, stderr."
+	}
+	return agentcore.ToolSchema{
+		Name:        ToolBrowserUse,
+		Description: desc,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -91,9 +117,6 @@ func (t *BrowserTool) Schema() agentcore.ToolSchema {
 }
 
 func (t *BrowserTool) Run(ctx context.Context, args string) (string, error) {
-	if t.sb == nil {
-		return "", fmt.Errorf("browser_use: no sandbox configured")
-	}
 	if t.workspace == nil {
 		return "", fmt.Errorf("browser_use: no workspace configured")
 	}

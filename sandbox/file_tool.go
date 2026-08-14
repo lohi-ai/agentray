@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -27,12 +25,20 @@ const (
 	maxReadWholeFileBytes = 16 * 1024 * 1024
 )
 
+// ReadFileTool reads a workspace file. sb decides where the read happens, not
+// what it produces: the windowing, line numbering and truncation notice below
+// run identically over either substrate.
 type ReadFileTool struct {
 	workspace *Workspace
+	fs        workspaceFS
 }
 
-func NewReadFileTool(workspace *Workspace) *ReadFileTool {
-	return &ReadFileTool{workspace: workspace}
+// NewReadFileTool builds read_file over the given sandbox. sb is optional: nil
+// reads the file directly from the host filesystem under the Workspace guards
+// (the default), non-nil reads it from inside the sandbox with the workspace
+// bind-mounted.
+func NewReadFileTool(sb agentcore.Sandbox, workspace *Workspace) *ReadFileTool {
+	return &ReadFileTool{workspace: workspace, fs: newWorkspaceFS(sb, workspace)}
 }
 
 func (t *ReadFileTool) Name() string { return ToolReadFile }
@@ -64,7 +70,7 @@ func (t *ReadFileTool) Schema() agentcore.ToolSchema {
 
 func (t *ReadFileTool) Parallel() bool { return true }
 
-func (t *ReadFileTool) Run(_ context.Context, args string) (string, error) {
+func (t *ReadFileTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Path   string `json:"path"`
 		Offset int    `json:"offset"`
@@ -73,29 +79,22 @@ func (t *ReadFileTool) Run(_ context.Context, args string) (string, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("read_file: invalid arguments: %w", err)
 	}
-	abs, rel, err := t.workspace.Resolve(in.Path)
+	_, rel, err := t.workspace.Resolve(in.Path)
 	if err != nil {
 		return "", fmt.Errorf("read_file: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
+	info, err := t.fs.Stat(ctx, rel)
 	if err != nil {
 		return "", fmt.Errorf("read_file: %w", err)
 	}
-	if !inside(t.workspace.Root(), resolved) {
-		return "", fmt.Errorf("read_file: path escapes workspace")
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("read_file: %w", err)
-	}
-	if info.IsDir() {
+	if info.IsDir {
 		return "", fmt.Errorf("read_file: %s is a directory", rel)
 	}
-	if info.Size() > maxReadWholeFileBytes {
+	if info.Size > maxReadWholeFileBytes {
 		return "", fmt.Errorf("read_file: %s is %d bytes, over the %dMB read cap — use grep to locate the region you need",
-			rel, info.Size(), maxReadWholeFileBytes/(1024*1024))
+			rel, info.Size, maxReadWholeFileBytes/(1024*1024))
 	}
-	data, err := os.ReadFile(resolved)
+	data, err := t.fs.ReadFile(ctx, rel)
 	if err != nil {
 		return "", fmt.Errorf("read_file: %w", err)
 	}
@@ -142,7 +141,7 @@ func (t *ReadFileTool) Run(_ context.Context, args string) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "path: %s\nbytes: %d\nlines: %d", rel, info.Size(), total)
+	fmt.Fprintf(&b, "path: %s\nbytes: %d\nlines: %d", rel, info.Size, total)
 	if last < total {
 		b.WriteString("\ntruncated: true")
 	}
@@ -168,10 +167,15 @@ func clampUTF8(s string, max int) string {
 
 type WriteFileTool struct {
 	workspace *Workspace
+	fs        workspaceFS
 }
 
-func NewWriteFileTool(workspace *Workspace) *WriteFileTool {
-	return &WriteFileTool{workspace: workspace}
+// NewWriteFileTool builds write_file over the given sandbox. sb is optional: nil
+// writes directly to the host filesystem under the Workspace guards (the
+// default), non-nil writes from inside the sandbox with the workspace
+// bind-mounted — where the content rides stdin, never argv or env.
+func NewWriteFileTool(sb agentcore.Sandbox, workspace *Workspace) *WriteFileTool {
+	return &WriteFileTool{workspace: workspace, fs: newWorkspaceFS(sb, workspace)}
 }
 
 func (t *WriteFileTool) Name() string { return ToolWriteFile }
@@ -191,7 +195,7 @@ func (t *WriteFileTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t *WriteFileTool) Run(_ context.Context, args string) (string, error) {
+func (t *WriteFileTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -199,25 +203,11 @@ func (t *WriteFileTool) Run(_ context.Context, args string) (string, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("write_file: invalid arguments: %w", err)
 	}
-	abs, rel, err := t.workspace.Resolve(in.Path)
+	_, rel, err := t.workspace.Resolve(in.Path)
 	if err != nil {
 		return "", fmt.Errorf("write_file: %w", err)
 	}
-	dir := filepath.Dir(abs)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("write_file: %w", err)
-	}
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return "", fmt.Errorf("write_file: %w", err)
-	}
-	if !inside(t.workspace.Root(), resolvedDir) {
-		return "", fmt.Errorf("write_file: path escapes workspace")
-	}
-	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("write_file: refusing to follow symlink")
-	}
-	if err := os.WriteFile(abs, []byte(in.Content), 0o644); err != nil {
+	if err := t.fs.WriteFile(ctx, rel, []byte(in.Content)); err != nil {
 		return "", fmt.Errorf("write_file: %w", err)
 	}
 	return fmt.Sprintf("path: %s\nbytes_written: %d", rel, len(in.Content)), nil

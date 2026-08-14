@@ -60,7 +60,7 @@ func TestReal_CredentialedToolCall(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	tool := sandbox.NewHTTPRequestTool(sandbox.WithHTTPAllowHosts([]string{"127.0.0.1"}))
+	tool := sandbox.NewHTTPRequestTool(nil, sandbox.WithHTTPAllowHosts([]string{"127.0.0.1"}))
 	tool.AllowAllIPsForTest()                                                                // httptest is on loopback, normally refused
 	tool.TrustCertsForTest(srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs) // self-signed cert
 

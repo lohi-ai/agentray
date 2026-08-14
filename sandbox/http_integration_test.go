@@ -31,7 +31,7 @@ func TestEndToEndCredentialReachesServerNotTrace(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	tool := sandbox.NewHTTPRequestTool(
+	tool := sandbox.NewHTTPRequestTool(nil, 
 		sandbox.WithHTTPAllowHosts([]string{"127.0.0.1"}),
 		sandbox.WithHTTPAllowPlain(true), // httptest serves plain http
 	)
@@ -84,7 +84,7 @@ func TestEndToEndCredentialReachesServerNotTrace(t *testing.T) {
 // TestEndToEndBlocksNonAllowlistedHost confirms the tool refuses an off-allowlist
 // host and feeds the reason back to the model rather than making the call.
 func TestEndToEndBlocksNonAllowlistedHost(t *testing.T) {
-	tool := sandbox.NewHTTPRequestTool(sandbox.WithHTTPAllowHosts([]string{"api.allowed.com"}))
+	tool := sandbox.NewHTTPRequestTool(nil, sandbox.WithHTTPAllowHosts([]string{"api.allowed.com"}))
 	args, _ := json.Marshal(map[string]any{"url": "https://evil.example.com/steal"})
 	faux := agentcore.NewFauxProvider(
 		agentcore.AssistantToolCall("c1", sandbox.ToolHTTPRequest, string(args)),

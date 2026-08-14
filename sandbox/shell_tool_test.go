@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,7 +119,7 @@ func TestShellToolSpillsOversizedOutput(t *testing.T) {
 	start := strings.Index(out, shellLogDir+"/")
 	rel := out[start:]
 	rel = rel[:strings.IndexAny(rel, "; ")]
-	logOut, rerr := NewReadFileTool(ws).Run(context.Background(), `{"path":"`+rel+`","offset":1,"limit":2}`)
+	logOut, rerr := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"`+rel+`","offset":1,"limit":2}`)
 	if rerr != nil {
 		t.Fatalf("spilled log not readable via read_file: %v", rerr)
 	}
@@ -151,10 +153,92 @@ func TestShellToolRejectsEmptyAndBadArgs(t *testing.T) {
 	}
 }
 
-func TestShellToolWithoutSandboxErrors(t *testing.T) {
-	tool := NewShellTool(nil, agentcore.SandboxLimits{}, nil)
-	if _, err := tool.Run(context.Background(), `{"command":"echo hi"}`); err == nil {
-		t.Fatal("expected error when no sandbox configured")
+// The sandbox is optional in both directions: with none injected, run_shell
+// runs the command directly on the host machine instead of refusing.
+func TestShellToolWithoutSandboxRunsOnHost(t *testing.T) {
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	tool := NewShellTool(nil, agentcore.SandboxLimits{}, ws)
+	out, err := tool.Run(context.Background(), `{"command":"echo hi"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "exit_code: 0") || !strings.Contains(out, "hi") {
+		t.Fatalf("host run output = %q, want exit 0 and 'hi'", out)
+	}
+}
+
+// D2: host mode is guarded, not raw. A command that runs on the host must see
+// only the env the SandboxExec declared — never the server process's own, which
+// holds DB credentials and API keys a prompt-injected command would love.
+func TestShellToolHostModeHidesHostEnv(t *testing.T) {
+	t.Setenv("AGENTRAY_TEST_SECRET", "leaked-db-password")
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	tool := NewShellTool(nil, agentcore.SandboxLimits{}, ws)
+	out, err := tool.Run(context.Background(), `{"command":"echo \"[$AGENTRAY_TEST_SECRET]\"; env"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "leaked-db-password") {
+		t.Fatalf("host-mode shell leaked a host env var:\n%s", out)
+	}
+	if !strings.Contains(out, "[]") {
+		t.Fatalf("expected the unset variable to expand to nothing, got:\n%s", out)
+	}
+}
+
+// The host substrate runs in the workspace directory, so run_shell and the file
+// tools keep sharing one filesystem without a bind mount to arrange it.
+func TestShellToolHostModeRunsInWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "marker.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	out, err := NewShellTool(nil, agentcore.SandboxLimits{}, ws).Run(context.Background(), `{"command":"ls"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "marker.txt") {
+		t.Fatalf("host run did not start in the workspace: %q", out)
+	}
+}
+
+// Without a workspace the host substrate must not start in the server's own
+// working directory — it gets a throwaway scratch dir, the analogue of the
+// backend's ephemeral tmpfs workdir.
+func TestShellToolHostModeWithoutWorkspaceUsesScratch(t *testing.T) {
+	out, err := NewShellTool(nil, agentcore.SandboxLimits{}, nil).Run(context.Background(), `{"command":"pwd; ls | wc -l"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cwd, _ := os.Getwd()
+	if strings.Contains(out, cwd) {
+		t.Fatalf("host run started in the server's working directory:\n%s", out)
+	}
+	if !strings.Contains(out, "0") {
+		t.Fatalf("expected an empty scratch dir, got:\n%s", out)
+	}
+}
+
+// TimeoutSeconds is the one limit the host substrate can enforce, and it must:
+// an unbounded command would otherwise pin the process forever.
+func TestShellToolHostModeEnforcesTimeout(t *testing.T) {
+	tool := NewShellTool(nil, agentcore.SandboxLimits{TimeoutSeconds: 0.25}, nil)
+	out, err := tool.Run(context.Background(), `{"command":"sleep 5"}`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "killed:") {
+		t.Fatalf("expected the command to be killed, got:\n%s", out)
 	}
 }
 

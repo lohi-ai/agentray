@@ -12,7 +12,7 @@ func TestEditFileReplacesUniqueMatch(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "hello world\n")
 
-	edit := NewEditFileTool(ws)
+	edit := NewEditFileTool(nil, ws)
 	out, err := edit.Run(context.Background(), `{"path":"a.txt","old_string":"world","new_string":"there"}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -29,7 +29,7 @@ func TestEditFileReplacesUniqueMatch(t *testing.T) {
 func TestEditFileRejectsAmbiguousMatch(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "x x x")
-	edit := NewEditFileTool(ws)
+	edit := NewEditFileTool(nil, ws)
 	if _, err := edit.Run(context.Background(), `{"path":"a.txt","old_string":"x","new_string":"y"}`); err == nil {
 		t.Fatal("expected ambiguous match to fail")
 	}
@@ -45,7 +45,7 @@ func TestEditFileRejectsAmbiguousMatch(t *testing.T) {
 func TestEditFileMissingAndIdentical(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "abc")
-	edit := NewEditFileTool(ws)
+	edit := NewEditFileTool(nil, ws)
 	if _, err := edit.Run(context.Background(), `{"path":"a.txt","old_string":"zzz","new_string":"q"}`); err == nil {
 		t.Fatal("expected not-found to fail")
 	}
@@ -56,7 +56,7 @@ func TestEditFileMissingAndIdentical(t *testing.T) {
 
 func TestEditFileRejectsEscape(t *testing.T) {
 	ws := mustWorkspace(t)
-	edit := NewEditFileTool(ws)
+	edit := NewEditFileTool(nil, ws)
 	if _, err := edit.Run(context.Background(), `{"path":"../x","old_string":"a","new_string":"b"}`); err == nil {
 		t.Fatal("expected escape to fail")
 	}

@@ -311,7 +311,10 @@ func buildHTTPTool(cfg config.Config) agentcore.Tool {
 		log.Printf("agentray: AGENTRAY_HTTP_TOOL_ENABLED is set but AGENTRAY_HTTP_TOOL_ALLOW_HOSTS is empty; http_request tool disabled")
 		return nil
 	}
-	tool := sandbox.NewHTTPRequestTool(
+	// Host substrate (nil sandbox): the tool can also make its request from
+	// inside a container, but that needs curl in the sandbox image and the
+	// default one has none. See buildHTTPRequestTool in internal/runtime.
+	tool := sandbox.NewHTTPRequestTool(nil,
 		sandbox.WithHTTPAllowHosts(hosts),
 		sandbox.WithHTTPAllowPlain(cfg.HTTPToolAllowHTTP),
 	)

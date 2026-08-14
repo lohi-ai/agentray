@@ -13,7 +13,7 @@ func TestFileToolsReadWriteWithinWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	write := NewWriteFileTool(ws)
+	write := NewWriteFileTool(nil, ws)
 	out, err := write.Run(context.Background(), `{"path":"notes/a.txt","content":"hello"}`)
 	if err != nil {
 		t.Fatalf("write Run: %v", err)
@@ -21,7 +21,7 @@ func TestFileToolsReadWriteWithinWorkspace(t *testing.T) {
 	if !strings.Contains(out, "bytes_written: 5") {
 		t.Fatalf("write output = %q", out)
 	}
-	read := NewReadFileTool(ws)
+	read := NewReadFileTool(nil, ws)
 	out, err = read.Run(context.Background(), `{"path":"notes/a.txt"}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
@@ -36,11 +36,11 @@ func TestFileToolsRejectEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	read := NewReadFileTool(ws)
+	read := NewReadFileTool(nil, ws)
 	if _, err := read.Run(context.Background(), `{"path":"../secret"}`); err == nil {
 		t.Fatal("expected read escape to fail")
 	}
-	write := NewWriteFileTool(ws)
+	write := NewWriteFileTool(nil, ws)
 	if _, err := write.Run(context.Background(), `{"path":"/tmp/secret","content":"x"}`); err == nil {
 		t.Fatal("expected absolute write to fail")
 	}
@@ -59,7 +59,7 @@ func TestReadFileRejectsSymlinkEscape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	if _, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"link.txt"}`); err == nil {
+	if _, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"link.txt"}`); err == nil {
 		t.Fatal("expected symlink escape to fail")
 	}
 }

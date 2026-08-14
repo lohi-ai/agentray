@@ -14,7 +14,7 @@ func TestEditFuzzySmartQuotesAndDashes(t *testing.T) {
 	// Line 1 uses smart quotes + en dash; line 2 also has smart quotes but is untouched.
 	mustWrite(t, ws, "a.txt", "msg := “Hello – world”\nkeep := ‘untouched’\n")
 
-	out, err := NewEditFileTool(ws).Run(context.Background(),
+	out, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"msg := \"Hello - world\"","new_string":"msg := \"Bye\""}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -37,7 +37,7 @@ func TestEditFuzzyTrailingWhitespace(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.go", "func A() {}   \nfunc B() {}\t\nfunc C() {}\n")
 
-	_, err := NewEditFileTool(ws).Run(context.Background(),
+	_, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.go","old_string":"func A() {}\nfunc B() {}","new_string":"func A() {}\nfunc B2() {}"}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -59,7 +59,7 @@ func TestEditFuzzyPreservesUntouchedTrailingWhitespace(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "first   \nsecond line \nthird\n")
 
-	_, err := NewEditFileTool(ws).Run(context.Background(),
+	_, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"third","new_string":"THIRD"}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -77,7 +77,7 @@ func TestEditCRLFFileRoundTrips(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "alpha\r\nbeta\r\ngamma\r\n")
 
-	out, err := NewEditFileTool(ws).Run(context.Background(),
+	out, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"beta","new_string":"BETA"}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -96,7 +96,7 @@ func TestEditBOMPreserved(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "\uFEFFhello world\n")
 
-	if _, err := NewEditFileTool(ws).Run(context.Background(),
+	if _, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"hello world","new_string":"hello there"}`); err != nil {
 		t.Fatalf("edit Run: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestEditFuzzyAmbiguousRejected(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "say “hi”\nsay “hi”\n")
 
-	_, err := NewEditFileTool(ws).Run(context.Background(),
+	_, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"say \"hi\"","new_string":"say \"yo\""}`)
 	if err == nil || !strings.Contains(err.Error(), "fuzzy normalization") {
 		t.Fatalf("expected fuzzy-ambiguous rejection, got %v", err)
@@ -124,7 +124,7 @@ func TestEditFuzzyReplaceAll(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "say “hi”\nmiddle\nsay “hi”\n")
 
-	out, err := NewEditFileTool(ws).Run(context.Background(),
+	out, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"say \"hi\"","new_string":"say \"yo\"","replace_all":true}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)
@@ -144,7 +144,7 @@ func TestEditFuzzyStillNotFound(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "completely different content\n")
 
-	_, err := NewEditFileTool(ws).Run(context.Background(),
+	_, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"nothing like this","new_string":"x"}`)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected not-found, got %v", err)
@@ -157,7 +157,7 @@ func TestEditFuzzyMultilineSpanPreservesNeighbors(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "before’s line\nspan one \nspan “two”\nafter’s line\n")
 
-	_, err := NewEditFileTool(ws).Run(context.Background(),
+	_, err := NewEditFileTool(nil, ws).Run(context.Background(),
 		`{"path":"a.txt","old_string":"span one\nspan \"two\"","new_string":"replaced"}`)
 	if err != nil {
 		t.Fatalf("edit Run: %v", err)

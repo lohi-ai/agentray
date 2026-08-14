@@ -10,7 +10,7 @@ import (
 func TestReadFileNumbersLines(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "one\ntwo\nthree\n")
-	out, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"a.txt"}`)
+	out, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"a.txt"}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestReadFileNumbersLines(t *testing.T) {
 func TestReadFileOffsetLimit(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "l1\nl2\nl3\nl4\nl5\n")
-	out, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"a.txt","offset":2,"limit":2}`)
+	out, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"a.txt","offset":2,"limit":2}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestReadFilePagesPastByteBudget(t *testing.T) {
 	}
 	mustWrite(t, ws, "big.txt", b.String())
 
-	out, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"big.txt","offset":1500,"limit":3}`)
+	out, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"big.txt","offset":1500,"limit":3}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestReadFilePagesPastByteBudget(t *testing.T) {
 func TestReadFileOffsetBeyondEOFErrors(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "one\ntwo\n")
-	_, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"a.txt","offset":99}`)
+	_, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"a.txt","offset":99}`)
 	if err == nil || !strings.Contains(err.Error(), "beyond end of file (2 lines)") {
 		t.Fatalf("expected beyond-EOF error, got %v", err)
 	}
@@ -83,7 +83,7 @@ func TestReadFileOffsetBeyondEOFErrors(t *testing.T) {
 func TestReadFileClampsOversizedSingleLine(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "wide.txt", strings.Repeat("y", 80*1024)+"\nshort\n")
-	out, err := NewReadFileTool(ws).Run(context.Background(), `{"path":"wide.txt"}`)
+	out, err := NewReadFileTool(nil, ws).Run(context.Background(), `{"path":"wide.txt"}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
 	}

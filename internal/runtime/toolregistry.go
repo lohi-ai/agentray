@@ -376,7 +376,15 @@ func buildHTTPRequestTool(_ ToolBuildContext, configJSON string) (agentcore.Tool
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("http_request requires at least one allow_hosts entry")
 	}
-	return sandbox.NewHTTPRequestTool(
+	// Deliberately host-substrate (nil sandbox), even where one is wired.
+	// sandbox.NewHTTPRequestTool can route the request through a container, but
+	// that path needs curl in the image and the default sandbox image (alpine)
+	// has none — enabling it here would turn a working capability into exit 127
+	// on every deployment with AGENTRAY_SANDBOX_ENABLED set. The host path keeps
+	// its own SSRF defenses (allowlist + guarded dialer), so this is a
+	// deployment-shape choice, not a weaker one. Flip it to ctx.Sandbox once a
+	// curl-capable image is the configured default.
+	return sandbox.NewHTTPRequestTool(nil,
 		sandbox.WithHTTPAllowHosts(hosts),
 		sandbox.WithHTTPAllowPlain(cfg.AllowHTTP),
 	), nil
@@ -385,6 +393,13 @@ func buildHTTPRequestTool(_ ToolBuildContext, configJSON string) (agentcore.Tool
 // buildRunShellTool constructs the sandbox-backed run_shell tool. The shell is
 // selectable per-agent, but the backing Sandbox is host-injected; without it the
 // build fails closed.
+//
+// sandbox.NewShellTool now accepts a nil sandbox and runs on the host, but this
+// hosted control plane never takes that path: AGENT-GOVERNANCE sells sandbox
+// isolation as *the* control for the shell/computer/browser tools, so a
+// deployment that has no sandbox wired must not silently gain a host shell that
+// model-authored commands can drive. Host mode is for embedded and local
+// consumers of the sandbox package, which construct these tools directly.
 func buildRunShellTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
 	if ctx.Sandbox == nil {
 		return nil, fmt.Errorf("run_shell requires the sandbox to be enabled")
@@ -413,6 +428,12 @@ func buildComputerUseTool(ctx ToolBuildContext, configJSON string) (agentcore.To
 	return sandbox.NewComputerUseTool(ctx.Sandbox, ctx.Workspace, ctx.NetworkAllow...), nil
 }
 
+// The file and search tools need the workspace — every path they take is
+// workspace-relative — but the sandbox stays optional, exactly as their
+// constructors describe it: with one wired the I/O happens inside the container
+// against the bind-mounted workspace, without one it happens on the host under
+// the Workspace guards. Either way the tool can only ever touch the workspace,
+// which is why (unlike run_shell) there is nothing here to gate on the sandbox.
 func buildReadFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
 	if ctx.Workspace == nil {
 		return nil, fmt.Errorf("read_file requires the agent workspace to be enabled")
@@ -420,7 +441,7 @@ func buildReadFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 	if err := rejectConfig(sandbox.ToolReadFile, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewReadFileTool(ctx.Workspace), nil
+	return sandbox.NewReadFileTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 func buildEditFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
@@ -430,7 +451,7 @@ func buildEditFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 	if err := rejectConfig(sandbox.ToolEditFile, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewEditFileTool(ctx.Workspace), nil
+	return sandbox.NewEditFileTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 func buildGrepTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
@@ -440,7 +461,7 @@ func buildGrepTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, err
 	if err := rejectConfig(sandbox.ToolGrep, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewGrepTool(ctx.Workspace), nil
+	return sandbox.NewGrepTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 func buildGlobTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
@@ -450,17 +471,19 @@ func buildGlobTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, err
 	if err := rejectConfig(sandbox.ToolGlob, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewGlobTool(ctx.Workspace), nil
+	return sandbox.NewGlobTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 // buildWebFetchTool constructs the open web_fetch tool. It needs no host
 // dependency and no per-agent config: SSRF is closed off at the IP layer inside
-// the tool, so it is always buildable wherever policy grants it.
+// the tool, so it is always buildable wherever policy grants it. It is built on
+// the host substrate for the same reason as http_request — the default sandbox
+// image has no curl.
 func buildWebFetchTool(_ ToolBuildContext, configJSON string) (agentcore.Tool, error) {
 	if err := rejectConfig(sandbox.ToolWebFetch, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewWebFetchTool(), nil
+	return sandbox.NewWebFetchTool(nil), nil
 }
 
 func buildWriteFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
@@ -470,7 +493,7 @@ func buildWriteFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool
 	if err := rejectConfig(sandbox.ToolWriteFile, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewWriteFileTool(ctx.Workspace), nil
+	return sandbox.NewWriteFileTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 func buildBrowserUseTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {

@@ -341,7 +341,7 @@ func snippet(s string, n int) string {
 // outbound request is real, so run with network access.
 func TestReal_ToolCall_And_WebFetch(t *testing.T) {
 	provider, model := realProvider(t)
-	web := sandbox.NewHTTPRequestTool(sandbox.WithHTTPAllowHosts([]string{"example.com"}))
+	web := sandbox.NewHTTPRequestTool(nil, sandbox.WithHTTPAllowHosts([]string{"example.com"}))
 
 	agent, err := agentcore.New(agentcore.Config{
 		Provider: provider,

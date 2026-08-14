@@ -144,7 +144,12 @@ func (p *egressProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("egress to %q is not on the allowlist", host), http.StatusForbidden)
 		return
 	}
-	dst, err := p.dialer.DialContext(r.Context(), "tcp", r.Host)
+	// The name is allowlisted; the address it resolves to still has to pass the
+	// same IP guard the host-process tools use, or an allowlisted name pointed at
+	// 169.254.169.254 (or the host's private network) would tunnel straight
+	// through. This is also what lets http_request and web_fetch run inside the
+	// sandbox without giving up their SSRF backstop.
+	dst, err := guardedDialFunc(p.dialer, blockedIP)(r.Context(), "tcp", r.Host)
 	if err != nil {
 		http.Error(w, "upstream dial failed", http.StatusBadGateway)
 		return
@@ -185,6 +190,9 @@ func (p *egressProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		// Same IP backstop as the CONNECT path: allowlisting the name is not
+		// enough if the name resolves somewhere internal.
+		Transport: &http.Transport{DialContext: guardedDialFunc(p.dialer, blockedIP)},
 	}
 	resp, err := client.Do(outReq)
 	if err != nil {

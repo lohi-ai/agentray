@@ -3,9 +3,8 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -40,13 +39,23 @@ var skipDir = map[string]struct{}{
 }
 
 // GrepTool searches file contents in the workspace by regular expression
-// (Claude Code's Grep / pi's grep). Pure Go regexp over a guarded walk — no
-// shell, no host FS. Returns file:line:match lines, capped for token safety.
+// (Claude Code's Grep / pi's grep). The matching is always pure Go regexp in
+// this process — only the file I/O moves: a guarded host walk by default, or a
+// batched listing + read inside the sandbox when one is provided. Keeping RE2
+// above the substrate seam is what makes both paths return the same lines in
+// the same order. Returns file:line:match lines, capped for token safety.
 type GrepTool struct {
 	workspace *Workspace
+	fs        workspaceFS
 }
 
-func NewGrepTool(workspace *Workspace) *GrepTool { return &GrepTool{workspace: workspace} }
+// NewGrepTool builds grep over the given sandbox. sb is optional: nil walks and
+// reads the host filesystem under the Workspace guards (the default), non-nil
+// lists and reads inside the sandbox — batched into one exec per call, never
+// one per file.
+func NewGrepTool(sb agentcore.Sandbox, workspace *Workspace) *GrepTool {
+	return &GrepTool{workspace: workspace, fs: newWorkspaceFS(sb, workspace)}
+}
 
 func (t *GrepTool) Name() string   { return ToolGrep }
 func (t *GrepTool) Parallel() bool { return true }
@@ -86,7 +95,7 @@ func (t *GrepTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
+func (t *GrepTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Pattern         string `json:"pattern"`
 		Path            string `json:"path"`
@@ -125,10 +134,6 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		return "", fmt.Errorf("grep: invalid pattern: %w", err)
 	}
 
-	root, err := t.searchRoot(in.Path)
-	if err != nil {
-		return "", fmt.Errorf("grep: %w", err)
-	}
 	var globRe *regexp.Regexp
 	if g := strings.TrimSpace(in.Glob); g != "" {
 		globRe, err = compileGlob(g)
@@ -137,32 +142,29 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		}
 	}
 
+	// List first, filter by glob, then read what survives. The glob filter has to
+	// happen before the read so the sandbox substrate only ships the files that
+	// can actually match, instead of the whole tree.
+	all, err := t.fs.List(ctx, in.Path)
+	if err != nil {
+		return "", fmt.Errorf("grep: %w", err)
+	}
+	candidates := all
+	if globRe != nil {
+		candidates = candidates[:0:0]
+		for _, rel := range all {
+			if globRe.MatchString(rel) {
+				candidates = append(candidates, rel)
+			}
+		}
+	}
+
 	var out []string
 	count := 0
 	truncated := false
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries rather than aborting the search
-		}
-		if d.IsDir() {
-			if _, skip := skipDir[d.Name()]; skip && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil // never follow symlinks out of the workspace
-		}
-		rel := t.rel(path)
-		if globRe != nil && !globRe.MatchString(rel) {
-			return nil
-		}
-		if info, ierr := d.Info(); ierr == nil && info.Size() > maxGrepFileBytes {
-			return nil
-		}
-		data, rerr := os.ReadFile(path)
-		if rerr != nil || !utf8.Valid(data) {
-			return nil // unreadable or binary
+	readErr := t.fs.ReadEach(ctx, candidates, maxGrepFileBytes, func(rel string, data []byte) error {
+		if !utf8.Valid(data) {
+			return nil // binary
 		}
 		lines := strings.Split(string(data), "\n")
 		var hits []int
@@ -181,12 +183,12 @@ func (t *GrepTool) Run(_ context.Context, args string) (string, error) {
 		count += len(hits)
 		appendGrepHits(&out, rel, lines, hits, ctxLines)
 		if truncated {
-			return fs.SkipAll
+			return errStopRead
 		}
 		return nil
 	})
-	if walkErr != nil {
-		return "", fmt.Errorf("grep: %w", walkErr)
+	if readErr != nil && !errors.Is(readErr, errStopRead) {
+		return "", fmt.Errorf("grep: %w", readErr)
 	}
 	if count == 0 {
 		return "no matches", nil
@@ -242,9 +244,15 @@ func appendGrepHits(out *[]string, rel string, lines []string, hits []int, ctxLi
 // stable output and capped for token safety.
 type GlobTool struct {
 	workspace *Workspace
+	fs        workspaceFS
 }
 
-func NewGlobTool(workspace *Workspace) *GlobTool { return &GlobTool{workspace: workspace} }
+// NewGlobTool builds glob over the given sandbox. sb is optional: nil walks the
+// host filesystem under the Workspace guards (the default), non-nil lists the
+// tree inside the sandbox in a single exec.
+func NewGlobTool(sb agentcore.Sandbox, workspace *Workspace) *GlobTool {
+	return &GlobTool{workspace: workspace, fs: newWorkspaceFS(sb, workspace)}
+}
 
 func (t *GlobTool) Name() string   { return ToolGlob }
 func (t *GlobTool) Parallel() bool { return true }
@@ -266,7 +274,7 @@ func (t *GlobTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t *GlobTool) Run(_ context.Context, args string) (string, error) {
+func (t *GlobTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Pattern string `json:"pattern"`
 		Path    string `json:"path"`
@@ -281,38 +289,22 @@ func (t *GlobTool) Run(_ context.Context, args string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("glob: invalid pattern: %w", err)
 	}
-	root, err := t.searchRoot(in.Path)
+	all, err := t.fs.List(ctx, in.Path)
 	if err != nil {
 		return "", fmt.Errorf("glob: %w", err)
 	}
 
 	var hits []string
 	truncated := false
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	for _, rel := range all {
+		if !globRe.MatchString(rel) {
+			continue
 		}
-		if d.IsDir() {
-			if _, skip := skipDir[d.Name()]; skip && path != root {
-				return filepath.SkipDir
-			}
-			return nil
+		if len(hits) >= maxGlobMatches {
+			truncated = true
+			break
 		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		rel := t.rel(path)
-		if globRe.MatchString(rel) {
-			if len(hits) >= maxGlobMatches {
-				truncated = true
-				return fs.SkipAll
-			}
-			hits = append(hits, rel)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return "", fmt.Errorf("glob: %w", walkErr)
+		hits = append(hits, rel)
 	}
 	if len(hits) == 0 {
 		return "no files match", nil
@@ -326,12 +318,9 @@ func (t *GlobTool) Run(_ context.Context, args string) (string, error) {
 }
 
 // searchRoot resolves an optional relative subdirectory to an absolute path
-// inside the workspace, defaulting to the workspace root. Shared by grep/glob.
-func (t *GrepTool) searchRoot(sub string) (string, error) { return searchRoot(t.workspace, sub) }
-func (t *GlobTool) searchRoot(sub string) (string, error) { return searchRoot(t.workspace, sub) }
-func (t *GrepTool) rel(abs string) string                 { return workspaceRel(t.workspace, abs) }
-func (t *GlobTool) rel(abs string) string                 { return workspaceRel(t.workspace, abs) }
-
+// inside the workspace, defaulting to the workspace root. It is the host
+// substrate's half of scoping a search; the sandbox substrate scopes with the
+// same relative path inside the mount.
 func searchRoot(ws *Workspace, sub string) (string, error) {
 	if strings.TrimSpace(sub) == "" {
 		if ws.Root() == "" {

@@ -20,10 +20,8 @@ import (
 //
 // It is the legitimate-egress counterpart to the container tools in this
 // package: where run_shell runs untrusted code with --network none, this makes
-// *controlled* outbound calls to an operator-approved host allowlist. Like
-// read_file and grep it runs in the host process rather than a container — its
-// isolation is the allowlist and the guarded dialer, not the sandbox boundary,
-// which is also what keeps a resolved {{cred:NAME}} secret out of any container.
+// *controlled* outbound calls to an operator-approved host allowlist. Where the
+// call is made from depends on the substrate it was built with — see HTTPTool.
 const ToolHTTPRequest = "http_request"
 
 const (
@@ -41,19 +39,30 @@ const (
 // {{cred:API_KEY}}" arrives here already resolved to the real value — the model
 // never saw the literal, and this tool never needs the vault.
 //
-// What it *is* careful about is SSRF. An agent that can make arbitrary outbound
-// requests can reach cloud metadata (169.254.169.254), internal services, and
-// localhost. Defenses, default-deny:
+// Where the request is made from depends on the substrate. With no sandbox (the
+// default) it goes out from the host process over net/http. With a sandbox it
+// goes out from inside the container, so a compromised request cannot reach
+// anything the container's network envelope does not permit. The resolved
+// secret then has to cross that boundary, and it does so on the container's
+// stdin as a curl config — never in argv (readable via `ps` by every process in
+// the container) and never in an environment variable. See httpsandbox.go.
+//
+// What it is careful about either way is SSRF. An agent that can make arbitrary
+// outbound requests can reach cloud metadata (169.254.169.254), internal
+// services, and localhost. Defenses, default-deny:
 //   - scheme must be https (http is opt-in)
 //   - the URL host must be in the configured allowlist
 //   - a guarded dialer re-checks the resolved IP at connect time and refuses
 //     loopback / private / link-local / unspecified addresses, which also closes
-//     the DNS-rebinding TOCTOU gap (allowlisted name re-pointed at a blocked IP)
+//     the DNS-rebinding TOCTOU gap (allowlisted name re-pointed at a blocked IP).
+//     On the sandbox path the same check runs in the egress proxy the container's
+//     traffic is confined to, so the backstop survives the move.
 //   - redirects are not followed (a 3xx is surfaced to the model as-is)
 //
 // Safe for concurrent use: the allowlist is read-only after construction and
 // http.Client is concurrency-safe.
 type HTTPTool struct {
+	sb             agentcore.Sandbox
 	client         *http.Client
 	allowHosts     map[string]struct{}
 	allowPlainHTTP bool
@@ -96,11 +105,15 @@ func WithHTTPTimeout(d time.Duration) HTTPOption {
 	}
 }
 
-// NewHTTPRequestTool builds the http_request tool. The guarded dialer is
-// installed here so every request — including each redirect hop, were they
-// followed — is IP-checked at connect.
-func NewHTTPRequestTool(opts ...HTTPOption) *HTTPTool {
+// NewHTTPRequestTool builds the http_request tool. sb is optional: nil makes
+// the request from this host process (the default), non-nil makes it from
+// inside the sandbox with egress confined to the same allowlist. The guarded
+// dialer is installed either way — for the host path directly on the client, for
+// the sandbox path in the egress proxy — so every request is IP-checked at
+// connect.
+func NewHTTPRequestTool(sb agentcore.Sandbox, opts ...HTTPOption) *HTTPTool {
 	t := &HTTPTool{
+		sb:           sb,
 		allowHosts:   make(map[string]struct{}),
 		maxBodyBytes: httpDefaultMaxBodyBytes,
 		ipBlocked:    blockedIP,
@@ -193,6 +206,25 @@ func (t *HTTPTool) Run(ctx context.Context, args string) (string, error) {
 	}
 	if err := t.validateURL(in.URL); err != nil {
 		return "", err
+	}
+
+	if t.sb != nil {
+		resp, body, err := execSandboxHTTP(ctx, t.sb, ToolHTTPRequest, sandboxHTTPRequest{
+			Method:  method,
+			URL:     in.URL,
+			Headers: in.Headers,
+			Body:    in.Body,
+			// The egress allowlist is the tool's own host allowlist, so the
+			// container can reach exactly the hosts the operator approved and
+			// nothing else — including on a redirect, which is not followed here.
+			AllowHosts:     t.AllowHosts(),
+			TimeoutSeconds: int(t.client.Timeout / time.Second),
+			MaxBodyBytes:   t.maxBodyBytes,
+		})
+		if err != nil {
+			return "", err
+		}
+		return formatHTTPResponse(resp, body), nil
 	}
 
 	var bodyReader io.Reader

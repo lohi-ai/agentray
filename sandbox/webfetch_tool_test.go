@@ -15,7 +15,7 @@ func TestWebFetchStripsHTMLToText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool()
+	tool := NewWebFetchTool(nil)
 	tool.AllowAllIPsForTest()
 	out, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`"}`)
 	if err != nil {
@@ -36,14 +36,14 @@ func TestWebFetchRefusesLoopbackSSRF(t *testing.T) {
 	defer srv.Close()
 
 	// No AllowAllIPsForTest: the guarded dialer must refuse loopback.
-	tool := NewWebFetchTool()
+	tool := NewWebFetchTool(nil)
 	if _, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`"}`); err == nil {
 		t.Fatal("expected loopback fetch to be refused")
 	}
 }
 
 func TestWebFetchRejectsRelativeURL(t *testing.T) {
-	tool := NewWebFetchTool()
+	tool := NewWebFetchTool(nil)
 	if _, err := tool.Run(context.Background(), `{"url":"/just/a/path"}`); err == nil {
 		t.Fatal("expected relative url to be rejected")
 	}

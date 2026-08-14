@@ -11,7 +11,7 @@ func TestGrepFindsMatchesWithLocation(t *testing.T) {
 	mustWrite(t, ws, "src/a.go", "package a\nfunc Foo() {}\n")
 	mustWrite(t, ws, "src/b.txt", "nothing here\nFoo mention\n")
 
-	grep := NewGrepTool(ws)
+	grep := NewGrepTool(nil, ws)
 	out, err := grep.Run(context.Background(), `{"pattern":"Foo"}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
@@ -26,7 +26,7 @@ func TestGrepGlobFilterAndCaseInsensitive(t *testing.T) {
 	mustWrite(t, ws, "a.go", "TODO fix\n")
 	mustWrite(t, ws, "b.md", "todo doc\n")
 
-	grep := NewGrepTool(ws)
+	grep := NewGrepTool(nil, ws)
 	out, err := grep.Run(context.Background(), `{"pattern":"todo","glob":"*.go","case_insensitive":true}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
@@ -39,7 +39,7 @@ func TestGrepGlobFilterAndCaseInsensitive(t *testing.T) {
 func TestGrepNoMatch(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "hello")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"zzz"}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"zzz"}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestGlobMatchesDoublestar(t *testing.T) {
 	mustWrite(t, ws, "src/y.go", "")
 	mustWrite(t, ws, "z.txt", "")
 
-	glob := NewGlobTool(ws)
+	glob := NewGlobTool(nil, ws)
 	out, err := glob.Run(context.Background(), `{"pattern":"**/*.go"}`)
 	if err != nil {
 		t.Fatalf("glob Run: %v", err)
@@ -72,7 +72,7 @@ func TestGlobSingleStarDoesNotCrossSlash(t *testing.T) {
 	mustWrite(t, ws, "a.go", "")
 	mustWrite(t, ws, "sub/b.go", "")
 
-	out, err := NewGlobTool(ws).Run(context.Background(), `{"pattern":"*.go"}`)
+	out, err := NewGlobTool(nil, ws).Run(context.Background(), `{"pattern":"*.go"}`)
 	if err != nil {
 		t.Fatalf("glob Run: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestGlobSingleStarDoesNotCrossSlash(t *testing.T) {
 func TestGrepContextLines(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "l1\nl2\nneedle A\nl4\nl5\nl6\nl7\nl8\nneedle B\nl10\n")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"needle","context":1}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"needle","context":1}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestGrepContextLines(t *testing.T) {
 func TestGrepContextMergesOverlappingWindows(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "x\nhit1\nmid\nhit2\ny\n")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"hit","context":1}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"hit","context":1}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestGrepContextMergesOverlappingWindows(t *testing.T) {
 func TestGrepLiteralMode(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "price is $1.99 (sale)\nprice is X1Y99 Zsale?\n")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"$1.99 (sale)","literal":true}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"$1.99 (sale)","literal":true}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestGrepLiteralMode(t *testing.T) {
 func TestGrepLimitParam(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "a.txt", "m\nm\nm\nm\nm\n")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"m","limit":2}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"m","limit":2}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestGrepSkipsDependencyDirs(t *testing.T) {
 	ws := mustWorkspace(t)
 	mustWrite(t, ws, "node_modules/dep/x.js", "needle")
 	mustWrite(t, ws, "app.js", "needle")
-	out, err := NewGrepTool(ws).Run(context.Background(), `{"pattern":"needle"}`)
+	out, err := NewGrepTool(nil, ws).Run(context.Background(), `{"pattern":"needle"}`)
 	if err != nil {
 		t.Fatalf("grep Run: %v", err)
 	}

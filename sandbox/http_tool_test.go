@@ -3,7 +3,7 @@ package sandbox
 import "testing"
 
 func TestValidateURL(t *testing.T) {
-	tool := NewHTTPRequestTool(WithHTTPAllowHosts([]string{"api.example.com"}))
+	tool := NewHTTPRequestTool(nil, WithHTTPAllowHosts([]string{"api.example.com"}))
 
 	if err := tool.validateURL("https://api.example.com/v1/thing"); err != nil {
 		t.Errorf("allowlisted https host should pass: %v", err)
@@ -18,7 +18,7 @@ func TestValidateURL(t *testing.T) {
 		t.Error("non-http scheme should be refused")
 	}
 
-	httpOK := NewHTTPRequestTool(WithHTTPAllowHosts([]string{"api.example.com"}), WithHTTPAllowPlain(true))
+	httpOK := NewHTTPRequestTool(nil, WithHTTPAllowHosts([]string{"api.example.com"}), WithHTTPAllowPlain(true))
 	if err := httpOK.validateURL("http://api.example.com/x"); err != nil {
 		t.Errorf("plain http should pass when explicitly allowed: %v", err)
 	}

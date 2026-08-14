@@ -68,9 +68,8 @@ func TestBrowserToolThreadsBrowserScopedSession(t *testing.T) {
 }
 
 func TestBrowserToolRejectsMissingDepsAndBadArgs(t *testing.T) {
-	if _, err := NewBrowserTool(nil, &Workspace{}, BrowserUseLimits(), "").Run(context.Background(), `{"command":"x"}`); err == nil {
-		t.Fatal("expected missing sandbox error")
-	}
+	// The sandbox is optional (a nil one falls back to the host), but the
+	// workspace is not: artifacts have nowhere to land without it.
 	if _, err := NewBrowserTool(&stubSandbox{}, nil, BrowserUseLimits(), "").Run(context.Background(), `{"command":"x"}`); err == nil {
 		t.Fatal("expected missing workspace error")
 	}
