@@ -87,9 +87,9 @@ These compose independently and default closed where possible:
 | Sandbox | Runs untrusted shell/file/browser-like work in an isolated container. | `agentcore.Sandbox`, `sandbox` |
 | Computer-use isolation | `computer_use` is a deliberate higher-privilege tool (persistent session, network, writable, container-root) distinct from the locked `run_shell` (ephemeral, no-net, read-only, nobody). Still `--cap-drop ALL`, no-new-privileges, no host env, resource caps; granted only when explicitly selected. | `sandbox.NewComputerUseTool`, `Dockerfile.computeruse` |
 | Browser-use isolation | `browser_use` drives a real browser via the `agent-browser` CLI in its **own** persistent session (browser-scoped `::browser` session id, dedicated Chromium image) — same hard isolation as computer-use (`--cap-drop ALL`, no-new-privileges, no host env, caps). The agent-browser daemon self-reaps on idle (`AGENT_BROWSER_IDLE_TIMEOUT_MS`) and `CloseSession` removes the container, so no zombie Chrome survives a conversation. Granted only when explicitly selected; optional cloakbrowser stealth is opt-in at build time. | `sandbox.NewBrowserTool`, `Dockerfile.browser` |
-| HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `internal/shared/httptool` |
+| HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `sandbox/http_tool.go` |
 | MCP client boundary | Remote tools come from servers the tenant operates, reached over Streamable HTTP only (no stdio — nothing tenant-named is ever spawned on the host). Connections use the same SSRF-guarded client; server auth headers resolve `{{cred:NAME}}` host-side at build time, never through the tool loop; every `mcp__` tool counts as external-write for the unattended-publish rail. | `internal/shared/mcpclient`, `agentruntime.ToolMCP` |
-| Evidence guard (verify-on-stop) | A figure-shaped final answer produced with zero executed read tools re-opens the run once: verify with a granted data tool, cite earlier-turn tool results as the figures' provenance, or restate the figures as not read from project data. Delegation counts (`spawn_subagent` is evidence — the child ran the read tools); list numbering and dates don't count as figures. Policy-only, capped at one nudge, skipped for agents with no read tools. | `agentcore.FinishGuard`, `agentruntime/evidence_guard.go` |
+| Evidence guard (verify-on-stop) | A figure-shaped final answer produced with zero executed read tools re-opens the run once: verify with a granted data tool, cite earlier-turn tool results as the figures' provenance, or restate the figures as not read from project data. Delegation counts (`spawn_subagent` is evidence — the child ran the read tools); list numbering and dates don't count as figures. Policy-only, capped at one nudge, skipped for agents with no read tools. | `finishguard.Guard`, `agentruntime/evidence_guard.go` |
 
 Important properties:
 
@@ -134,12 +134,30 @@ Already shipped: hardened sandbox image and credential vault.
 
 | Concern | File |
 |---|---|
+| Extension-point contract (what a plugin may do) | `agentcore/extension.go` |
+| Plugin composition (seams, priorities, unload) | `agentcore/plugin.go`, `agentcore/compose.go` |
+| Plugin packages (one folder + README per capability) | `agentcore/plugins/*` — see its README |
+| Default composition + parity + eject tests | `agentcore/plugins/preset/` |
+| Composition diagnostics | `Registry.Describe()`, `Agent.Describe()` (`agentcore/describe.go`) |
+| Loop seam (swappable control flow) | `agentcore/driver.go` |
 | Tool loop / trust-boundary credential resolution | `agentcore/loop.go` |
+| Child-agent construction (scope may only narrow) | `agentcore/fork.go` |
+| Delegation depth (survives crossing agents) | `agentcore/delegation.go` |
+| Compaction strategy contract (replaceable) | `agentcore/compactor.go` |
+| Goal as durable state (write + resume recovery) | `agentcore/goal.go` |
+| Goal gate policy (contract, sentinel, nudge, stall) | `agentcore/plugins/goal/` |
 | Policy contract | `agentcore/policy.go` |
+| Oversized tool output (spill + `read_spill`) | `agentcore/plugins/spill/` |
+| Background jobs (`job_*` tools, run-fenced) | `agentcore/plugins/jobs/` |
+| Session retrieval (`session_query`) | `agentcore/plugins/sessionquery/` |
+| Repeated-tool-call reminder | `agentcore/plugins/repeatguard/` |
+| Verify-on-stop (evidence guard) | `agentcore/plugins/finishguard/` |
+| Delegation (`spawn_subagent`) | `agentcore/plugins/subagent/` |
+| "Model-visible means logged" invariant | `agentcore/plugins/observe/` |
 | Sandbox contract | `agentcore/sandbox.go` |
 | Docker sandbox + injection guard | `sandbox/` |
 | Credential vault | `internal/shared/credential/` |
-| HTTP tool + SSRF guard | `internal/shared/httptool/` |
+| HTTP tool + SSRF guard | `sandbox/httpguard.go` + `sandbox/http_tool.go` |
 | MCP client (remote tools) | `internal/shared/mcpclient/` |
 | Lifecycle hooks (first-party extension seam) | `agentcore/hooks.go` |
 | Operation adapters | `internal/shared/opcore/` |

@@ -2,7 +2,6 @@ package agentcore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -98,60 +97,10 @@ func (d AgentDefinition) enabledSkills() []Skill {
 	return out
 }
 
-// DefinitionDraft is the structured result of an authoring-generation pass: a
-// bounded pair of markdown documents, optional warnings, and nothing persisted.
-// The HTTP authoring helper uses this shape so the UI can review/edit before save.
-type DefinitionDraft struct {
-	SoulMD   string   `json:"soul_md"`
-	AgentsMD string   `json:"agents_md"`
-	Warnings []string `json:"warnings,omitempty"`
-}
-
-const definitionDraftSystem = `You write starter agent definitions for non-technical operators.
-Return JSON only, with keys "soul_md", "agents_md", and optional "warnings".
-
-Rules:
-- soul_md = stable identity, tone, boundaries, and non-negotiables.
-- agents_md = mission, workflow, operating steps, escalation rules, and critical context.
-- Keep both concise, clear, and practical.
-- Do not mention JSON, schemas, or that you are an AI.
-- Do not wrap output in markdown fences.
-- warnings must be a short array only when important assumptions or missing details should be flagged.`
-
-// DraftDefinition turns a free-text agent description into structured SOUL.md and
-// AGENTS.md content. The provider must return strict JSON; malformed output fails
-// closed so the caller never guesses how to split prose into the two files.
-func DraftDefinition(ctx context.Context, provider LLMProvider, model, prompt string) (DefinitionDraft, error) {
-	prompt = strings.TrimSpace(prompt)
-	if provider == nil {
-		return DefinitionDraft{}, fmt.Errorf("agentcore: provider is required")
-	}
-	if strings.TrimSpace(model) == "" {
-		return DefinitionDraft{}, fmt.Errorf("agentcore: model is required")
-	}
-	if prompt == "" {
-		return DefinitionDraft{}, fmt.Errorf("agentcore: prompt is required")
-	}
-	resp, err := provider.Chat(ctx, ChatRequest{
-		Model: model,
-		Messages: []Message{
-			{Role: RoleSystem, Content: definitionDraftSystem},
-			{Role: RoleUser, Content: prompt},
-		},
-		Temperature: 0.2,
-		MaxTokens:   1200,
-	})
-	if err != nil {
-		return DefinitionDraft{}, err
-	}
-	var out DefinitionDraft
-	if err := json.Unmarshal([]byte(strings.TrimSpace(resp.Message.Content)), &out); err != nil {
-		return DefinitionDraft{}, fmt.Errorf("agentcore: invalid definition draft response")
-	}
-	out.SoulMD = strings.TrimSpace(out.SoulMD)
-	out.AgentsMD = strings.TrimSpace(out.AgentsMD)
-	if out.SoulMD == "" || out.AgentsMD == "" {
-		return DefinitionDraft{}, fmt.Errorf("agentcore: definition draft missing soul_md or agents_md")
-	}
-	return out, nil
+// IsZero reports whether nothing was authored into this definition. The struct
+// holds slices, so it is not comparable with ==; composition uses this to decide
+// whether a definition seam is actually being claimed.
+func (d AgentDefinition) IsZero() bool {
+	return d.ScopeID == "" && d.Soul == "" && d.Agents == "" &&
+		len(d.Skills) == 0 && d.SkillLoader == nil
 }

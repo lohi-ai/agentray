@@ -21,15 +21,15 @@ import (
 
 // AgentRun is one persisted run (§9 agent_runs).
 type AgentRun struct {
-	ID          string     `json:"id"`
-	ProjectID   string     `json:"project_id"`
-	AgentID     string     `json:"agent_id"`
-	Trigger     string     `json:"trigger"` // chat | scheduled | manual | webhook
-	Status      string     `json:"status"`  // running | done | error
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	AgentID   string `json:"agent_id"`
+	Trigger   string `json:"trigger"` // chat | scheduled | manual | webhook
+	Status    string `json:"status"`  // running | done | error
 	// SessionID is the session this run belongs to: the client conversation id
 	// for a chat run, or — for a resume attempt — the durable session (original
 	// run id) it continued, so ResumeRun can follow the chain back to the log.
-	SessionID string `json:"session_id,omitempty"`
+	SessionID   string     `json:"session_id,omitempty"`
 	TokenInput  int        `json:"token_input"`
 	TokenOutput int        `json:"token_output"`
 	CostUSD     float64    `json:"cost_usd"` // summed model cost for the run (§ tracing)

@@ -16,7 +16,7 @@
 // spawning a tenant-specified process on the API host, which is the exact
 // arbitrary-code-execution boundary this design exists to avoid.
 //
-// Every connection rides httptool's guarded client, so the SSRF backstop that
+// Every connection rides sandbox.NewGuardedClient, so the SSRF backstop that
 // protects http_request also protects an operator-supplied MCP URL: a server
 // resolving to loopback, a private range, or the cloud-metadata address is
 // refused at dial time, and redirects are never followed.
@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // protocolVersion is the MCP revision this client negotiates. It matches the
@@ -139,7 +139,7 @@ func New(cfg ServerConfig, opts ...Option) (*Client, error) {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	c := &Client{cfg: cfg, http: httptool.NewGuardedClient(timeout)}
+	c := &Client{cfg: cfg, http: sandbox.NewGuardedClient(timeout)}
 	for _, opt := range opts {
 		opt(c)
 	}

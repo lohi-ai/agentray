@@ -47,13 +47,107 @@ agent row + definition + skills
   + enabled tools + tool config
   + encrypted secrets → credential vault
   + task tiers → model choices
-  → agentcore.New(...)
+  → preset.Full(...) + the product's own plugins
+  → agentcore.Build(...)
   → chat/manual/schedule/webhook run
 ```
+
+`internal/runtime.Build` is a **plugin composition**, not a `Config` hand-off:
+the default agent comes from `preset.Full` — the same list any other agentcore
+consumer starts from — and everything product-specific is appended as a named
+plugin (the goal gate, the evidence finish guard, delegation, the run plan, the
+sandbox and its guard, the vault, cost accounting). `BuildParams` is still the
+external surface, so no caller changed. What changed is that
+`agent.Describe()` now names which plugin owns which seam, and dropping a
+capability is one entry off a list.
 
 No separate engine exists for user-created agents. The same policy gate,
 credential resolution, HTTP SSRF guard, sandbox, traces, and usecase boundary apply
 to every agent.
+
+### Everything that can be a plugin, is
+
+The rule the design is held to:
+
+> **The loop names no plugin.** Delete every package under
+> `agentcore/plugins/` and `agentcore` still compiles and runs — it just does
+> less.
+
+That forces an honest split, and the split is the interesting part.
+
+**Core** is what a run always does: the turn loop, the provider call, tool
+dispatch, history, the durable log, usage accounting, the permission gate,
+`read_skill`, and forking a child agent. None of these is a plugin, because
+"always used" and "ejectable" are contradictory — a plugin you cannot remove is
+just code in a different folder.
+
+**Plugins** are everything else, and they reach the loop only through the generic
+interfaces in `agentcore/extension.go`: `ToolInterceptor`, `BatchInterceptor`,
+`StepInterceptor`, `StopInterceptor`, `RunObserver`, `LogObserver`,
+`ToolContributor`, `PromptContributor`, `ContextContributor`, `RunCloser`,
+`SelfGated`. The loop discovers what an extension can do by **type assertion** at
+run start, so the set of things a plugin may do is open — adding a new kind of
+plugin does not touch core.
+
+Two sub-kinds, and conflating them is how a plugin system becomes a monolith with
+folders:
+
+- **Seams** configure something the loop always does (driver, model, policy,
+  session, compaction). Exactly one provider each; a second claim is a build
+  error naming both plugins.
+- **Extensions** add something the loop does not do (spill, jobs, session
+  retrieval, repeat guard, verify-on-stop, delegation, observation). Additive and
+  unkeyed — several may intercept the same point and compose in registration
+  order, because two interceptors bounding a tool result is a waterfall, not a
+  conflict.
+
+See [agentcore/plugins/README.md](../agentcore/plugins/README.md) for the full
+table; every folder carries its own README covering what the model sees, the
+token effect, the KV-cache effect, and what the plugin cannot do.
+
+Three properties the machinery buys:
+
+- **Replaceability.** `Registry.Describe()` prints which plugin owns which seam;
+  `Agent.Describe()` prints what an agent actually ended up configured with.
+- **Reversibility.** Registrations are effects owned by the plugin that made
+  them, so `Registry.Unload(name)` unwinds one completely.
+- **Ordering is explicit, not positional.** Hooks carry a `Priority`
+  (`PriorityGate` < `PriorityDefault` < `PriorityLate`), so the permission gate
+  is consulted before any consumer hook regardless of list order — the governance
+  guarantee is a property of the composition, not of construction order.
+
+And one property that is a safety invariant rather than an ergonomic: **the core
+owns persistence.** An extension returns `AdditionalContexts`; the loop appends
+them (after every tool result in a batch, never interleaved, which would break
+tool-call/result adjacency) and writes them to the durable log. No plugin touches
+`appendEntry`. That is what makes "model-visible means logged" structurally true
+instead of a convention every new injector has to remember —
+`observe.LogInvariant` checks it at runtime.
+
+`agentcore/plugins/preset` composes them back into agentcore's default agent, and
+two tests carry the claims: `preset.New(cfg)` and `agentcore.New(cfg)` build the
+same agent (parity), and building the same agent *without* a capability leaves no
+trace of it — no tool, no name in the extension list (ejection). The second is
+the test that fails if someone re-couples the loop to a plugin by name.
+
+`preset.Plugins` stays a pure mirror of `Config` so that parity proof holds.
+`preset.Full(cfg, opts)` is the list a deployment composes: `Plugins` plus the
+capabilities `Config` has no field for — `spill`, `jobs`, `repeatguard`,
+`sessionquery`, and the two `observe` plugins. Every `Options` field degrades to
+*off*, never to *wrong*: a nil spill store leaves the loop's own truncation in
+place rather than minting locators into storage that dies with the process,
+which a resumed run would read back as not-found. AgentRay supplies a
+Postgres-backed one (`agent_spill`, cascading off `agent_runs` exactly like the
+session log).
+
+What is deliberately **not** copied from deepseek-harness / Cordis: the
+dependency-injection framework. No reflection, no service container, no lifecycle
+graph. A plugin is a value with a `Register` method, a seam is a typed field, an
+extension point is a Go interface, and composition is a function call.
+
+For AgentRay this changes nothing about the agents-as-config rule — an agent is
+still a marketplace preset, never Go. It changes what the *platform* can do: swap
+or eject a capability for a tenant or a test without forking the loop.
 
 ### Goal gate (`/goal`)
 
@@ -67,8 +161,13 @@ without either sentinel is
 re-opened with a keep-going nudge. The gate is uncapped but never wedges a run —
 turn/tool/budget limits still bound the loop, a budget wrap-up bypasses it, and a
 verbatim-repeated answer stops as `goal_stalled`. Mechanism:
-`agentcore.Config.Goal` (`agentcore/goal.go`), threaded per run via
-`RunOptions.Goal`; the chat directive parser is `parseGoalDirective`
+the gate is a plugin (`agentcore/plugins/goal`) reaching the loop through the
+generic `PromptContributor` + `StopInterceptor` extension points. Core keeps only
+the goal as durable STATE — it writes `EntryGoal`, recovers it on resume, and
+hands it back as `RunInfo.Goal` (`agentcore/goal.go`), because only the loop may
+write the durable log. `agentcore.Config.Goal` therefore RECORDS a goal;
+enforcing it needs the plugin, which `preset.Plugins` (and therefore
+`internal/runtime`) wires automatically. The chat directive parser is `parseGoalDirective`
 (`internal/runtime/chat.go`).
 
 ## Tools and secrets

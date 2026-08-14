@@ -67,7 +67,7 @@ func buildDemoEvents(projectID string, now time.Time) []Event {
 	for day := 0; day < 2; day++ {
 		// day 0 is ~2 days ago, day 1 is ~1 day ago; every event lands strictly in
 		// the past (the funnel offsets below add at most ~13h, well under 24h).
-		dayStart := now.Add(time.Duration(-(2-day)) * 24 * time.Hour).Truncate(time.Hour)
+		dayStart := now.Add(time.Duration(-(2 - day)) * 24 * time.Hour).Truncate(time.Hour)
 		newVisitors := 40 + rng.Intn(15)
 		for i := 0; i < newVisitors; i++ {
 			user := fmt.Sprintf("demo-%d-%03d", day, i)

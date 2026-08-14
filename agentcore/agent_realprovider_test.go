@@ -33,7 +33,9 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
+	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // realProvider builds the operator's OpenAI-compatible provider, or skips.
@@ -45,7 +47,7 @@ func realProvider(t *testing.T) (agentcore.LLMProvider, string) {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set AGENTRAY_TEST_OPENAI_BASE_URL, AGENTRAY_TEST_OPENAI_API_KEY, AGENTRAY_TEST_OPENAI_MODEL to run real-provider tests")
 	}
-	return agentcore.NewOpenAIProvider(key, base, agentcore.DefaultCompat()), model
+	return ai.NewOpenAIProvider(key, base, ai.DefaultCompat()), model
 }
 
 // recordingProvider wraps a real provider and records every ChatRequest, so a
@@ -69,7 +71,7 @@ func (r *recordingProvider) requests() []agentcore.ChatRequest {
 	return append([]agentcore.ChatRequest(nil), r.reqs...)
 }
 func (r *recordingProvider) Name() string        { return r.inner.Name() }
-func (r *recordingProvider) SupportsTools() bool  { return r.inner.SupportsTools() }
+func (r *recordingProvider) SupportsTools() bool { return r.inner.SupportsTools() }
 func (r *recordingProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	r.record(req)
 	return r.inner.Chat(ctx, req)
@@ -127,7 +129,7 @@ type maxTokensProvider struct {
 	max   int
 }
 
-func (m *maxTokensProvider) Name() string       { return m.inner.Name() }
+func (m *maxTokensProvider) Name() string        { return m.inner.Name() }
 func (m *maxTokensProvider) SupportsTools() bool { return m.inner.SupportsTools() }
 func (m *maxTokensProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	if req.MaxTokens == 0 {
@@ -339,13 +341,13 @@ func snippet(s string, n int) string {
 // outbound request is real, so run with network access.
 func TestReal_ToolCall_And_WebFetch(t *testing.T) {
 	provider, model := realProvider(t)
-	web := httptool.New(httptool.WithAllowHosts([]string{"example.com"}))
+	web := sandbox.NewHTTPRequestTool(sandbox.WithHTTPAllowHosts([]string{"example.com"}))
 
 	agent, err := agentcore.New(agentcore.Config{
 		Provider: provider,
 		Model:    model,
 		Tools:    agentcore.NewToolSet(web),
-		Policy:   agentcore.NewAllowList(httptool.ToolHTTPRequest),
+		Policy:   agentcore.NewAllowList(sandbox.ToolHTTPRequest),
 		Definition: agentcore.AgentDefinition{
 			Agents: "You can fetch web pages with the http_request tool (only allowlisted hosts). " +
 				"When asked about a web page, actually fetch it before answering.",
@@ -363,7 +365,7 @@ func TestReal_ToolCall_And_WebFetch(t *testing.T) {
 	}
 	t.Logf("final: %q", res.Final)
 
-	if !toolWasCalled(res, httptool.ToolHTTPRequest) {
+	if !toolWasCalled(res, sandbox.ToolHTTPRequest) {
 		t.Fatalf("the model never called http_request; traces=%+v", res.Tools)
 	}
 	if !strings.Contains(res.Final, "Example Domain") {
@@ -440,7 +442,7 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 	provider, model := realProvider(t)
 	rec := &recordingProvider{inner: provider}
 
-	todo := agentcore.NewTodoStore()
+	plan := todo.NewStore()
 	step := &recordTool{name: "do_step", reply: "step done"}
 
 	limits := agentcore.DefaultLimits()
@@ -451,9 +453,9 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 		Provider: rec,
 		Model:    model,
 		Limits:   &limits,
-		Tools:    agentcore.NewToolSet(agentcore.NewTodoTool(todo), step),
-		Policy:   agentcore.NewAllowList(agentcore.ToolUpdatePlan, "do_step"),
-		Hooks:    agentcore.Hooks{Context: []agentcore.ContextHook{agentcore.TodoContextHook(todo)}},
+		Tools:    agentcore.NewToolSet(todo.NewTool(plan), step),
+		Policy:   agentcore.NewAllowList(todo.ToolName, "do_step"),
+		Hooks:    agentcore.Hooks{Context: []agentcore.ContextHook{todo.ContextHook(plan)}},
 		Definition: agentcore.AgentDefinition{
 			Agents: "Work methodically and ALWAYS use the tools. Your VERY FIRST action MUST be a single " +
 				"update_plan call recording a four-step plan (steps: gather, analyze, draft, review) with " +
@@ -476,12 +478,12 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 	}
 	t.Logf("final: %q (turns=%d, steps=%d)", res.Final, res.Turns, step.calls())
 
-	if !toolWasCalled(res, agentcore.ToolUpdatePlan) {
+	if !toolWasCalled(res, todo.ToolName) {
 		t.Fatalf("the model never wrote a plan with update_plan; traces=%+v", res.Tools)
 	}
 	// The model must have actually recorded a plan in the store.
-	plan := todo.List()
-	if len(plan) == 0 {
+	items := plan.List()
+	if len(items) == 0 {
 		t.Fatal("update_plan ran but no plan landed in the store")
 	}
 	// It must have been a genuine multi-turn working session (so the pin is
@@ -492,11 +494,11 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 	}
 	// The property the user cares about — "keep todo and plan during a long
 	// session": the live plan the model wrote is still pinned into the LAST
-	// request it saw (TodoContextHook re-injects it every turn, so it survives any
+	// request it saw (todo.ContextHook re-injects it every turn, so it survives any
 	// compaction), and the original goal is still present too. Read the plan's own
 	// first step from the store rather than guessing wording, so the check tracks
 	// whatever the model actually named its steps.
-	firstStep := strings.ToLower(strings.TrimSpace(plan[0].Content))
+	firstStep := strings.ToLower(strings.TrimSpace(items[0].Content))
 	last := reqs[len(reqs)-1]
 	var sawPlan, sawGoal bool
 	for _, m := range last.Messages {

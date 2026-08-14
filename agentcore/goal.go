@@ -1,63 +1,35 @@
 package agentcore
 
-import "strings"
-
-// goal.go — run-level goal gate (Claude Code /goal, codex goal-mode analog).
-// A goal declares the condition under which the run may stop. The contract is
-// injected into the system prompt up front: the model must end its final
-// answer with a STATUS: DONE line once the goal is satisfied, or STATUS:
-// BLOCKED with the reason when only the user can unblock it. A normal finish
-// without either sentinel is not accepted — the loop injects a synthetic
-// "keep going" user message and continues.
+// goal.go — the run's goal as durable STATE.
 //
-// Unlike FinishGuard (a capped verify nudge), the gate is uncapped by design:
-// it holds the line until the model declares done or blocked. It cannot wedge
-// a run — MaxTurns, MaxToolCalls, and the budget gate all still bound the
-// loop, a budget wrap-up bypasses the gate entirely, and a stall breaker
-// accepts the finish when the model repeats the same answer verbatim after a
-// nudge (StopReason "goal_stalled").
+// The loop owns the goal only as a fact about the run: it writes the condition
+// to the durable log once, and recovers it when a crashed run resumes. What to
+// DO about an unmet goal — the completion protocol, the sentinel, the nudge, the
+// stall breaker — is policy, and policy lives in agentcore/plugins/goal as a
+// StopInterceptor. That split is deepseek-harness's: dsh-goal is an
+// event-sourced service, and continuation is a separate consumer package.
+//
+// The state stays here for one reason: only the loop may write the durable log.
+// A plugin that persisted its own gate condition would be a second writer to the
+// record resume depends on, and "model-visible means logged" would stop being a
+// property the core can guarantee.
 
-// GoalDone / GoalBlocked are the completion sentinels the gate looks for in
-// the final answer's closing line (case-insensitive, so "Status: done" also
-// counts).
-const (
-	GoalDone    = "STATUS: DONE"
-	GoalBlocked = "STATUS: BLOCKED"
-)
-
-// goalSatisfied reports whether the final answer declares the goal met or the
-// run honestly blocked. Only the LAST non-empty line is checked — the contract
-// says "end your final answer with the line", and an unanchored match would let
-// an answer that merely mentions the sentinel mid-prose ("I cannot yet write
-// STATUS: DONE — the tests still fail") falsely close the gate. The line match
-// is a contains, not a prefix, so markdown decoration around the sentinel
-// ("**STATUS: DONE**") still counts.
-func goalSatisfied(final string) bool {
-	lines := strings.Split(final, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
+// goalFromLog recovers the goal-gate condition from a durable log, so a crashed
+// goal-gated run comes back gated even when the resuming caller cannot re-supply
+// the condition.
+//
+// The fold matches RecoverSession's: the last EntryGoal wins, and EntryLeaf
+// clears it — the goal belongs to the run that finished, so a later run chained
+// onto the same log (a chat continuation) must not inherit its gate.
+func goalFromLog(entries []SessionEntry) string {
+	goal := ""
+	for _, e := range entries {
+		switch e.Kind {
+		case EntryGoal:
+			goal = e.Goal
+		case EntryLeaf:
+			goal = ""
 		}
-		up := strings.ToUpper(line)
-		return strings.Contains(up, GoalDone) || strings.Contains(up, GoalBlocked)
 	}
-	return false
-}
-
-// goalContract is appended to the system prompt when a goal is set, so the
-// model knows the completion protocol before its first turn.
-func goalContract(goal string) string {
-	return "\n\n## Goal gate\nThis run has a completion goal:\n" + strings.TrimSpace(goal) +
-		"\nDo not stop until it is satisfied. End your final answer with the line \"" + GoalDone +
-		"\" once the goal is met, or \"" + GoalBlocked +
-		"\" plus the reason if only the user can unblock you. A finish without either line re-opens the run."
-}
-
-// goalNudge is the synthetic user message injected when the model tries to
-// finish without declaring the goal met or blocked.
-func goalNudge(goal string) string {
-	return "[goal gate] The run's goal is not met yet:\n" + strings.TrimSpace(goal) +
-		"\nKeep working toward it. When it is fully satisfied, end your answer with the line \"" + GoalDone +
-		"\". If you are genuinely blocked by something only the user can resolve, explain the blocker and end with \"" + GoalBlocked + "\"."
+	return goal
 }

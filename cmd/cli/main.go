@@ -30,8 +30,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lohi-ai/agentray/internal/shared/opcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
 func main() {

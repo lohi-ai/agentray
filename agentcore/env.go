@@ -2,24 +2,11 @@ package agentcore
 
 import (
 	"context"
-	"time"
 )
-
-// Clock is the time source the runtime depends on, injected so scheduling and
-// tests are deterministic (pi harness ExecutionEnv pattern).
-type Clock interface {
-	Now() time.Time
-}
-
-// realClock is the production Clock.
-type realClock struct{}
-
-func (realClock) Now() time.Time { return time.Now().UTC() }
 
 // Env carries injected capabilities the core depends on rather than reaching
 // for concrete infrastructure. Extend with FileSystem/Shell as consumers need.
 type Env struct {
-	Clock Clock
 	// Sandbox is the optional isolation substrate for tools that execute
 	// untrusted code (shell, file, browser). nil when no such tools are wired —
 	// the analytics tools never touch it. The concrete backend lives outside
@@ -51,13 +38,8 @@ type CredentialResolver interface {
 	Resolve(ctx context.Context, args string) (string, error)
 }
 
-// DefaultEnv returns an Env backed by real implementations.
-func DefaultEnv() Env { return Env{Clock: realClock{}} }
-
-// now is a nil-safe accessor for the env clock.
-func (e Env) now() time.Time {
-	if e.Clock == nil {
-		return time.Now().UTC()
-	}
-	return e.Clock.Now()
-}
+// DefaultEnv returns an Env backed by real implementations. Both capabilities
+// are host-injected and optional, so the default env is the empty one: a run
+// with no sandbox and no vault is a complete, working agent that simply cannot
+// execute untrusted code or resolve a secret.
+func DefaultEnv() Env { return Env{} }

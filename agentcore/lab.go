@@ -86,9 +86,9 @@ type LabStep struct {
 	Summary string `json:"summary,omitempty"`
 
 	// Per-step and cumulative accounting (real provider numbers).
-	TokensIn    int     `json:"tokens_in"`
-	TokensOut   int     `json:"tokens_out"`
-	CostUSD     float64 `json:"cost_usd"`
+	TokensIn     int     `json:"tokens_in"`
+	TokensOut    int     `json:"tokens_out"`
+	CostUSD      float64 `json:"cost_usd"`
 	CumTokensIn  int     `json:"cum_tokens_in"`
 	CumTokensOut int     `json:"cum_tokens_out"`
 	CumCostUSD   float64 `json:"cum_cost_usd"`
@@ -321,10 +321,10 @@ func skillIDFromArgs(args string) string {
 // "what changed since the previous step" view. Counts and added items keep it
 // compact; the UI renders the full state from the steps themselves.
 type LabStepDiff struct {
-	ContextAdded   int      `json:"context_added"`   // new messages vs the prior step
-	SkillsLoaded   []string `json:"skills_loaded"`   // skills loaded since the prior step
-	ToolsCalled    []string `json:"tools_called"`    // tools invoked in this step
-	MemoryAdded    []string `json:"memory_added"`    // recalled-memory lines new this step
+	ContextAdded   int      `json:"context_added"` // new messages vs the prior step
+	SkillsLoaded   []string `json:"skills_loaded"` // skills loaded since the prior step
+	ToolsCalled    []string `json:"tools_called"`  // tools invoked in this step
+	MemoryAdded    []string `json:"memory_added"`  // recalled-memory lines new this step
 	TokensInDelta  int      `json:"tokens_in_delta"`
 	TokensOutDelta int      `json:"tokens_out_delta"`
 	CostDelta      float64  `json:"cost_delta"`

@@ -7,6 +7,10 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
@@ -54,12 +58,20 @@ type Runner struct {
 	// run (and the cheap classifier). It captures the request messages, response,
 	// tokens, and computed cost per call. nil (the default) still prices each call
 	// — only the trace emission is skipped.
-	Tracer agentcore.TraceSink
+	Tracer observe.Sink
 	// SessionStore, when non-nil, makes every run durable: the loop appends an
 	// append-only entry log (keyed by run id) so a crashed or compacted run can be
 	// reduced and resumed (ResumeRun / the resume endpoint). nil (the default)
 	// keeps runs in-memory only.
 	SessionStore agentcore.SessionStore
+	// SpillStore, when non-nil, keeps an oversized tool result out of the model's
+	// context WITHOUT destroying it: the full text is persisted and the model gets
+	// a preview plus a locator it can page through with read_spill, instead of a
+	// head+tail truncation whose omitted middle is gone for good. It must be
+	// durable — the locator is written to the session log, so an in-memory store
+	// would make a resumed run read its own spill back as not-found. nil (the
+	// default) leaves the loop's truncation in place.
+	SpillStore spill.SpillStore
 	// Live, when non-nil, is the process-wide registry of in-flight runs that backs
 	// mid-run steering and follow-up. A run with a conversation SessionID registers
 	// here so a sibling request can inject a message into it. nil (the default)
@@ -158,7 +170,7 @@ func WithHTTPTool(tool agentcore.Tool) RunnerOption {
 // WithTraceSink wires a per-LLM-call trace sink into every run this Runner
 // drives. A nil sink is a no-op, preserving the default where calls are priced
 // but not traced.
-func WithTraceSink(sink agentcore.TraceSink) RunnerOption {
+func WithTraceSink(sink observe.Sink) RunnerOption {
 	return func(r *Runner) {
 		if sink != nil {
 			r.Tracer = sink
@@ -173,6 +185,17 @@ func WithSessionStore(s agentcore.SessionStore) RunnerOption {
 	return func(r *Runner) {
 		if s != nil {
 			r.SessionStore = s
+		}
+	}
+}
+
+// WithSpillStore wires durable oversized-output storage into every run this
+// Runner drives. A nil store is a no-op, leaving the loop's head+tail truncation
+// in place.
+func WithSpillStore(s spill.SpillStore) RunnerOption {
+	return func(r *Runner) {
+		if s != nil {
+			r.SpillStore = s
 		}
 	}
 }
@@ -405,14 +428,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// nothing of the caller's capabilities leaks across. Only resolved for a
 	// top-level run: past the delegation depth cap the tool isn't advertised,
 	// so a delegate's own run skips the roster query.
-	var delegates []agentcore.Delegate
+	var delegates []subagent.Delegate
 	if agentcore.DelegationDepth(ctx) == 0 {
 		targets, err := r.Store.AgentDelegatesForRun(ctx, scopeID)
 		if err != nil {
 			return storage.AgentRun{}, agentcore.RunResult{}, err
 		}
 		for _, target := range targets {
-			delegates = append(delegates, agentcore.Delegate{
+			delegates = append(delegates, subagent.Delegate{
 				Name:        target.Name,
 				Description: target.Description,
 				Run:         r.delegateRunner(opts.ProjectID, target.AgentID),
@@ -509,7 +532,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// TracingProvider's records (file + DB sinks) attribute back to this run —
 	// and through agent_runs.agent_id, to this agent. agentcore treats the id as
 	// opaque; the run→agent mapping stays here in the consumer.
-	ctx = agentcore.WithTraceID(ctx, runID)
+	ctx = observe.WithTraceID(ctx, runID)
 
 	// The durable log this run appends to: its own id, or — on a resume — the
 	// original run's session, so the log continues as one durable object across
@@ -539,7 +562,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	start := TierFromName(taskMap[storage.TaskRun])
 	ladder := tierSet.ladder(start, wsTiers.ModelFallback)
 	primary := ladder[0]
-	esc, err := buildRungs(ladder[1:], r.Tracer)
+	esc, err := buildRungs(ladder[1:])
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -549,7 +572,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// the loop so the in-run summary call doesn't borrow whichever rung the run has
 	// escalated to. Build a dedicated provider for it.
 	compactTC := tierSet.resolve(TierFromName(taskMap[storage.TaskCompaction]))
-	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey, r.Tracer)
+	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey)
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -635,7 +658,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		BudgetGate:      budgetGate,
 		// Built-in run todo list (goal stability across compaction) + optional
 		// compaction-budget override. A fresh store per run scopes the plan to it.
-		Todo:             agentcore.NewTodoStore(),
+		Todo:             todo.NewStore(),
 		MaxContextTokens: r.MaxContextTokens,
 		KeepRecentTokens: r.KeepRecentTokens,
 		// Delegation: every solo agent may spawn ephemeral sub-agents (P1 of the
@@ -643,8 +666,21 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		// model-visible answer. Children inherit this agent's exact capabilities.
 		// Delegates extend the same tool with granted teammate agents, each
 		// running under its own identity.
-		Subagents: &agentcore.SubagentSettings{},
+		Subagents: &subagent.Plugin{},
 		Delegates: delegates,
+		// Oversized tool output is persisted rather than truncated away, so the
+		// omitted middle of a large export or log is one read_spill call from the
+		// model instead of a re-run of the tool. Fenced to the durable session, so
+		// the locator stays valid across a resume and invalid everywhere else.
+		Spill: r.SpillStore,
+		// The "model-visible means logged" detector. Advisory: it reports and never
+		// alters the run, which is exactly why it is safe to leave on — a resumed
+		// run replaying a different conversation than the one that ran is a silent
+		// failure otherwise, surfacing weeks later as a model that forgot a
+		// correction it was given.
+		ReportLogInvariant: func(v observe.LogInvariantViolation) {
+			log.Printf("agentray: run %s log invariant: %v", runID, v)
+		},
 	})
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
@@ -714,7 +750,7 @@ func isBackgroundTrigger(trigger string) bool {
 	}
 }
 
-// delegateRunner backs one agentcore.Delegate.Run closure: it executes the
+// delegateRunner backs one subagent.Delegate.Run closure: it executes the
 // delegated task as a full run of the target agent through the same execute
 // path a direct chat uses, so the target runs under its own persona, tools,
 // policy, and secrets and gets its own persisted run row (trigger "delegate").
@@ -903,7 +939,7 @@ func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore
 	}
 	tc := tierSetFromWorkspace(wsTiers, keys).resolve(TierFromName(taskMap[storage.TaskTriage]))
 	// Trace the classifier's cheap calls too — they carry real (small) cost.
-	prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey, r.Tracer)
+	prov, err := buildTracedProvider(tc.Provider, tc.BaseURL, tc.APIKey, r.Tracer)
 	if err != nil {
 		return nil, "", err
 	}

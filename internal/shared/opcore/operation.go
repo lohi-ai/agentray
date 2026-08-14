@@ -54,10 +54,10 @@ type Spec interface {
 	OpInvoke(ctx context.Context, cc CallContext, rawArgs string) (string, error)
 }
 
-func (o Operation[I, O]) OpName() string         { return o.Name }
-func (o Operation[I, O]) OpSummary() string      { return o.Summary }
-func (o Operation[I, O]) OpScope() string        { return o.Scope }
-func (o Operation[I, O]) OpTerminal() bool        { return o.Terminal }
+func (o Operation[I, O]) OpName() string           { return o.Name }
+func (o Operation[I, O]) OpSummary() string        { return o.Summary }
+func (o Operation[I, O]) OpScope() string          { return o.Scope }
+func (o Operation[I, O]) OpTerminal() bool         { return o.Terminal }
 func (o Operation[I, O]) OpSchema() map[string]any { return schemaOf[I]() }
 
 // OpInvoke decodes rawArgs into I, runs the handler, and marshals O back to JSON.

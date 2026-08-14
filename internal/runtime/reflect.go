@@ -47,7 +47,7 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 	if in.Memory == nil {
 		return nil
 	}
-	provider, err := buildProvider(in.Provider, in.BaseURL, in.APIKey, r.Tracer)
+	provider, err := buildTracedProvider(in.Provider, in.BaseURL, in.APIKey, r.Tracer)
 	if err != nil {
 		return err
 	}

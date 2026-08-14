@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -12,7 +11,7 @@ func TestToolCatalogContainsHTTPRequest(t *testing.T) {
 	cat := ToolCatalog()
 	var found bool
 	for _, e := range cat {
-		if e.Name == httptool.ToolHTTPRequest {
+		if e.Name == sandbox.ToolHTTPRequest {
 			found = true
 			if !e.Configurable {
 				t.Error("http_request should be configurable")
@@ -25,7 +24,7 @@ func TestToolCatalogContainsHTTPRequest(t *testing.T) {
 }
 
 func TestIsRegisteredTool(t *testing.T) {
-	if !IsRegisteredTool(httptool.ToolHTTPRequest) {
+	if !IsRegisteredTool(sandbox.ToolHTTPRequest) {
 		t.Error("http_request should be registered")
 	}
 	if IsRegisteredTool("not_a_tool") {
@@ -34,16 +33,16 @@ func TestIsRegisteredTool(t *testing.T) {
 }
 
 func TestBuildToolHTTPRequestHappyPath(t *testing.T) {
-	tool, err := BuildTool(httptool.ToolHTTPRequest, `{"allow_hosts":["api.example.com"],"allow_http":false}`)
+	tool, err := BuildTool(sandbox.ToolHTTPRequest, `{"allow_hosts":["api.example.com"],"allow_http":false}`)
 	if err != nil {
 		t.Fatalf("BuildTool: %v", err)
 	}
-	if tool.Name() != httptool.ToolHTTPRequest {
+	if tool.Name() != sandbox.ToolHTTPRequest {
 		t.Fatalf("tool name = %q", tool.Name())
 	}
-	ht, ok := tool.(*httptool.HTTPTool)
+	ht, ok := tool.(*sandbox.HTTPTool)
 	if !ok {
-		t.Fatalf("expected *httptool.HTTPTool, got %T", tool)
+		t.Fatalf("expected *sandbox.HTTPTool, got %T", tool)
 	}
 	if hosts := ht.AllowHosts(); len(hosts) != 1 || hosts[0] != "api.example.com" {
 		t.Fatalf("allow hosts = %v", hosts)
@@ -52,14 +51,14 @@ func TestBuildToolHTTPRequestHappyPath(t *testing.T) {
 
 func TestBuildToolHTTPRequestRejectsEmptyAllowlist(t *testing.T) {
 	for _, cfg := range []string{``, `{}`, `{"allow_hosts":[]}`, `{"allow_hosts":["  "]}`} {
-		if _, err := BuildTool(httptool.ToolHTTPRequest, cfg); err == nil {
+		if _, err := BuildTool(sandbox.ToolHTTPRequest, cfg); err == nil {
 			t.Errorf("config %q: expected empty-allowlist error", cfg)
 		}
 	}
 }
 
 func TestBuildToolRejectsInvalidConfigAndUnknownName(t *testing.T) {
-	if _, err := BuildTool(httptool.ToolHTTPRequest, `{not json`); err == nil {
+	if _, err := BuildTool(sandbox.ToolHTTPRequest, `{not json`); err == nil {
 		t.Error("expected invalid-config error")
 	}
 	if _, err := BuildTool("not_a_tool", `{}`); err == nil {

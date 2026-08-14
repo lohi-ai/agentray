@@ -28,6 +28,9 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
+	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 const goalNudgeMarkerProbe = "[goal gate]"
@@ -39,7 +42,7 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set AGENTRAY_TEST_OPENAI_BASE_URL, AGENTRAY_TEST_OPENAI_API_KEY, AGENTRAY_TEST_OPENAI_MODEL to run the live benchmark")
 	}
-	rec := &probeRecorder{inner: agentcore.NewOpenAIProvider(key, base, agentcore.DefaultCompat())}
+	rec := &probeRecorder{inner: ai.NewOpenAIProvider(key, base, ai.DefaultCompat())}
 
 	problem, err := os.ReadFile("PROBLEM4.md")
 	if err != nil {
@@ -73,7 +76,7 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 	limits.MaxTurns = 60
 	limits.MaxToolCalls = 150
 
-	agent, err := agentcore.New(agentcore.Config{
+	agent, err := preset.New(agentcore.Config{
 		Provider:             rec,
 		Model:                model,
 		Limits:               &limits,
@@ -155,8 +158,8 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 
 	// --- Goal gate: the run must close with an explicit status line. ---
 	upFinal := strings.ToUpper(res.Final)
-	if !strings.Contains(upFinal, agentcore.GoalDone) {
-		if strings.Contains(upFinal, agentcore.GoalBlocked) {
+	if !strings.Contains(upFinal, goal.Done) {
+		if strings.Contains(upFinal, goal.Blocked) {
 			t.Errorf("agent declared STATUS: BLOCKED: %q", ttsTruncateMiddle(res.Final, 400))
 		} else {
 			t.Errorf("final reply carries no goal status line: %q", ttsTruncateMiddle(res.Final, 400))

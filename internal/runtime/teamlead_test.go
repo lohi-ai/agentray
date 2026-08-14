@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -44,7 +45,7 @@ func TestMergeTeamDelegatesExplicitGrantWins(t *testing.T) {
 	marker := func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error) {
 		return "explicit", agentcore.Usage{}, nil
 	}
-	existing := []agentcore.Delegate{{Name: "writer", Description: "explicit grant", Run: marker}}
+	existing := []subagent.Delegate{{Name: "writer", Description: "explicit grant", Run: marker}}
 	out := mergeTeamDelegates(existing, teamFixture(), noopRunFor)
 	if len(out) != 2 {
 		t.Fatalf("want 2 delegates (writer deduped case-insensitively), got %d", len(out))
@@ -104,7 +105,7 @@ func TestApplyDelegateNameCollisionsRenamesShadowedMember(t *testing.T) {
 	// End to end: the merged delegate list carries the slug, so
 	// spawn_subagent("writer-2") reaches a1 while "Writer" stays the explicit
 	// grant to x9.
-	existing := []agentcore.Delegate{{Name: "Writer", Description: "explicit grant"}}
+	existing := []subagent.Delegate{{Name: "Writer", Description: "explicit grant"}}
 	merged := mergeTeamDelegates(existing, out, noopRunFor)
 	names := make([]string, 0, len(merged))
 	for _, d := range merged {

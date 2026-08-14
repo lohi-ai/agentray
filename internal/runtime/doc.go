@@ -4,8 +4,8 @@
 // channel envelope into a run.
 //
 // Import rules: this package may import agentcore, sandbox, opcore, usecase,
-// storage, credential, httptool, and dataplane (via interfaces). It must not
-// import internal/channels, internal/workloads, or internal/app.
+// storage, credential, and dataplane (via interfaces). It must not import
+// internal/channels, internal/workloads, or internal/app.
 //
 // The portable libraries agentcore/ and sandbox/ stay at the module root so
 // external importers (e.g. swatter) keep a stable path. They are the public

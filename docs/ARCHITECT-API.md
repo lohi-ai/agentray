@@ -29,7 +29,7 @@ agentray/
       ingest/                   — Capture, Batch, Identify, NATS → ClickHouse
       connector/                — source plugin registry (postgres shipped)
     app/                        — composition root (HTTP)
-    shared/                     — config, cronx, credential, opcore, httptool
+    shared/                     — config, cronx, credential, opcore, mcpclient
     dataplane/store · usecase · alerting
   sdk/browser/autocapture.ts   — browser SDK
 ```

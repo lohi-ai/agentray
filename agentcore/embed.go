@@ -35,25 +35,3 @@ func Cosine(a, b []float32) float64 {
 	}
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
-
-// FauxEmbedder is a deterministic, keyless Embedder for tests: each input maps
-// to a fixed vector supplied by Vectors (by exact text), else the Default
-// vector. It lets the recall/ranking path be tested with no network or keys,
-// mirroring FauxProvider.
-type FauxEmbedder struct {
-	Vectors map[string][]float32
-	Default []float32
-}
-
-// Embed returns the scripted vector for each text.
-func (f *FauxEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		if v, ok := f.Vectors[t]; ok {
-			out[i] = v
-			continue
-		}
-		out[i] = f.Default
-	}
-	return out, nil
-}

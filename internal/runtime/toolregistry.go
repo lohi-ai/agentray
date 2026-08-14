@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/internal/shared/mcpclient"
 	"github.com/lohi-ai/agentray/sandbox"
 )
@@ -91,8 +90,8 @@ type ToolCatalogEntry struct {
 }
 
 var toolRegistry = map[string]ToolSpec{
-	httptool.ToolHTTPRequest: {
-		Name:          httptool.ToolHTTPRequest,
+	sandbox.ToolHTTPRequest: {
+		Name:          sandbox.ToolHTTPRequest,
 		Title:         "Fetch / HTTP",
 		Description:   "Make guarded outbound HTTP(S) requests to an allowlisted set of hosts. Use a {{cred:NAME}} placeholder for any secret; it is resolved at the trust boundary and never seen by the model.",
 		Configurable:  true,
@@ -112,8 +111,8 @@ var toolRegistry = map[string]ToolSpec{
 		validate:      validateMCPConfig,
 		buildMany:     buildMCPTools,
 	},
-	httptool.ToolWebFetch: {
-		Name:         httptool.ToolWebFetch,
+	sandbox.ToolWebFetch: {
+		Name:         sandbox.ToolWebFetch,
 		Title:        "Web fetch",
 		Description:  "Fetch a public web page and return its readable text (HTML stripped to text). No host allowlist, but loopback / private / link-local / cloud-metadata addresses are refused. Use http_request for authenticated calls to a specific API.",
 		Configurable: false,
@@ -377,9 +376,9 @@ func buildHTTPRequestTool(_ ToolBuildContext, configJSON string) (agentcore.Tool
 	if len(hosts) == 0 {
 		return nil, fmt.Errorf("http_request requires at least one allow_hosts entry")
 	}
-	return httptool.New(
-		httptool.WithAllowHosts(hosts),
-		httptool.WithAllowPlainHTTP(cfg.AllowHTTP),
+	return sandbox.NewHTTPRequestTool(
+		sandbox.WithHTTPAllowHosts(hosts),
+		sandbox.WithHTTPAllowPlain(cfg.AllowHTTP),
 	), nil
 }
 
@@ -458,10 +457,10 @@ func buildGlobTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, err
 // dependency and no per-agent config: SSRF is closed off at the IP layer inside
 // the tool, so it is always buildable wherever policy grants it.
 func buildWebFetchTool(_ ToolBuildContext, configJSON string) (agentcore.Tool, error) {
-	if err := rejectConfig(httptool.ToolWebFetch, configJSON); err != nil {
+	if err := rejectConfig(sandbox.ToolWebFetch, configJSON); err != nil {
 		return nil, err
 	}
-	return httptool.NewWebFetch(), nil
+	return sandbox.NewWebFetchTool(), nil
 }
 
 func buildWriteFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {

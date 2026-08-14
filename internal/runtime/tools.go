@@ -42,16 +42,16 @@ type DataSource interface {
 // They must equal the opcore operation names registered in usecase.Registry so
 // the scope -> tool allow-list (policy.go) lines up with the registry.
 const (
-	ToolActivitySummary = "activity_summary"
-	ToolRecentEvents    = "recent_events"
-	ToolPersons         = "persons"
-	ToolExploreEvents   = "explore_events"
-	ToolRunSQL          = "run_sql"
-	ToolRunInsight      = "run_insight"
-	ToolListDashboards  = "list_dashboards"
-	ToolCreateDashboard = "create_dashboard"
-	ToolCreateChart     = "create_chart"
-	ToolSubmitRec       = "submit_recommendation"
-	ToolRemember        = "remember"
+	ToolActivitySummary  = "activity_summary"
+	ToolRecentEvents     = "recent_events"
+	ToolPersons          = "persons"
+	ToolExploreEvents    = "explore_events"
+	ToolRunSQL           = "run_sql"
+	ToolRunInsight       = "run_insight"
+	ToolListDashboards   = "list_dashboards"
+	ToolCreateDashboard  = "create_dashboard"
+	ToolCreateChart      = "create_chart"
+	ToolSubmitRec        = "submit_recommendation"
+	ToolRemember         = "remember"
 	ToolSendNotification = "send_notification"
 )

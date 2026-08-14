@@ -7,8 +7,16 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/shared/opcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
+	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
+	sandboxplugin "github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
+	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -75,7 +83,7 @@ type BuildParams struct {
 	// in this run (and its escalation rungs) emits a TraceRecord with the request
 	// messages, response, tokens, and computed cost. nil — the default — still
 	// prices each call (filling Usage.CostUSD) but emits no trace.
-	Tracer agentcore.TraceSink
+	Tracer observe.Sink
 	// StepGate is the optional pause-before-each-turn hook for the Lab's explain
 	// mode. When set it is passed straight to agentcore.Config.StepGate, which
 	// blocks each turn until the consumer permits it; nil — the default — keeps a
@@ -128,7 +136,7 @@ type BuildParams struct {
 	// added + permitted, and a context hook pins the live plan into every request
 	// so a long run stays on its goal across compaction. nil leaves the agent
 	// without the tool (unchanged behavior).
-	Todo *agentcore.TodoStore
+	Todo *todo.Store
 	// MaxContextTokens overrides the loop's soft compaction budget (the context
 	// size above which old turns are summarized). 0 keeps agentcore's default
 	// (200k). A small value is mainly a test/operations knob to exercise or tune
@@ -143,13 +151,13 @@ type BuildParams struct {
 	// inherits this agent's tools/policy/definition, runs with isolated history,
 	// and returns only its final answer. The tool name is added to the policy
 	// allow-list, exactly like update_plan. nil leaves the agent solo.
-	Subagents *agentcore.SubagentSettings
+	Subagents *subagent.Plugin
 	// Delegates are the named other agents this one may route a spawn_subagent
 	// task to (cross-agent delegation). The runner backs each Run closure by
 	// executing the target agent's own full run path — its persona, tools,
 	// policy, and secrets — so a delegate never inherits the caller's
 	// capabilities. Effective only when Subagents is non-nil.
-	Delegates []agentcore.Delegate
+	Delegates []subagent.Delegate
 	// ReasoningEffort, when set ("low" | "medium" | "high"), is passed through
 	// to reasoning models on every turn (OpenAI-wire reasoning_effort).
 	ReasoningEffort string
@@ -161,12 +169,25 @@ type BuildParams struct {
 	// answer (agentcore's verify-on-stop): a non-empty return re-opens the run
 	// with a bounded synthetic follow-up. The runner wires the evidence guard
 	// here (see evidence_guard.go); nil accepts every finish.
-	FinishGuard agentcore.FinishGuard
+	FinishGuard finishguard.Guard
 	// Goal, when non-empty, activates agentcore's run-level goal gate (Claude
 	// Code /goal analog): the completion contract lands in the system prompt
 	// and a finish without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens
 	// the run. Empty — the default — leaves runs ungated.
 	Goal string
+	// Spill persists a tool result too large to sit inline and hands the model a
+	// locator for the rest, so an oversized query export or build log is one
+	// read_spill call away instead of a re-run of the tool. It MUST be durable:
+	// the locator is written to the session log, so a store that dies with the
+	// process would make a resumed run read its own spill back as not-found. nil
+	// — the default — leaves the loop's head+tail truncation in place.
+	Spill spill.SpillStore
+	// ReportLogInvariant receives each divergence between what the model was
+	// shown and what reached the durable log — the check that catches resume
+	// corruption at the turn it is introduced rather than in a resumed run weeks
+	// later. It is advisory: the detector never alters the run, so the right sink
+	// is an error-level log. nil — the default — installs no detector.
+	ReportLogInvariant func(observe.LogInvariantViolation)
 }
 
 // resolveBaseURL applies the §13.1 precedence: per-config base_url ->
@@ -188,13 +209,13 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 	}
 	switch provider {
 	case "", "openai":
-		return agentcore.NewOpenAIEmbedder(apiKey, resolveBaseURL(baseURL), "")
+		return ai.NewOpenAIEmbedder(apiKey, resolveBaseURL(baseURL), "")
 	case "anthropic":
 		return nil
 	default:
 		// OpenAI-compatible vendors serve /embeddings at the same base_url.
 		if strings.TrimSpace(baseURL) != "" {
-			return agentcore.NewOpenAIEmbedder(apiKey, baseURL, "")
+			return ai.NewOpenAIEmbedder(apiKey, baseURL, "")
 		}
 		return nil
 	}
@@ -205,50 +226,71 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 // Exported for the config-test endpoint so a connectivity check uses the exact
 // provider a real run would.
 func NewTierProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, error) {
-	// A connectivity check needs no trace sink; calls are still priced.
-	return buildProvider(provider, baseURL, apiKey, nil)
+	// A connectivity check is not a run and has no trace to attribute; calls are
+	// still priced.
+	return buildTracedProvider(provider, baseURL, apiKey, nil)
+}
+
+// buildTracedProvider builds a provider for a call made OUTSIDE a composition —
+// a connectivity probe, the triage classifier, the reflect pass. Nothing will
+// decorate it, so it is priced and traced here.
+//
+// Inside a composition, use buildProvider: the monitor plugin decorates every
+// rung once, and wrapping twice would double-price the call and emit two trace
+// rows per turn.
+func buildTracedProvider(provider, baseURL, apiKey string, tracer observe.Sink) (agentcore.LLMProvider, error) {
+	prov, err := buildProvider(provider, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return observe.Wrap(prov, observe.DefaultPricing(), tracer), nil
 }
 
 // buildProvider constructs an LLMProvider for one tier's settings, applying the
 // §13.1 base_url precedence for the OpenAI wire and routing any non-anthropic,
 // non-openai label as an OpenAI-compatible vendor (base_url + default compat).
 // Shared by the primary rung and every escalation rung.
-func buildProvider(provider, baseURL, apiKey string, tracer agentcore.TraceSink) (agentcore.LLMProvider, error) {
+//
+// It returns the RAW provider. Pricing and tracing are contributed once, by the
+// monitor plugin in the composition, which decorates every rung the run can
+// reach — primary, escalation, and compaction alike. Wrapping here as well would
+// price each call twice and emit two trace rows per turn.
+func buildProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, error) {
 	var (
 		prov agentcore.LLMProvider
 		err  error
 	)
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", "openai":
-		prov, err = agentcore.NewProvider(agentcore.ProviderSpec{
+		prov, err = ai.NewClient(ai.ClientSpec{
 			Name: "openai", APIKey: apiKey, BaseURL: resolveBaseURL(baseURL),
 		})
 	case "anthropic":
-		prov, err = agentcore.NewProvider(agentcore.ProviderSpec{
+		prov, err = ai.NewClient(ai.ClientSpec{
 			Name: "anthropic", APIKey: apiKey, BaseURL: strings.TrimSpace(baseURL),
 		})
 	default:
 		// OpenAI-compatible vendor (e.g. a router): OpenAI wire at a custom
 		// base_url with default compat. base_url is required and validated by
 		// NewProvider.
-		prov, err = agentcore.NewProvider(agentcore.ProviderSpec{
-			Name: provider, APIKey: apiKey, BaseURL: strings.TrimSpace(baseURL), Compat: agentcore.DefaultCompat(),
+		prov, err = ai.NewClient(ai.ClientSpec{
+			Name: provider, APIKey: apiKey, BaseURL: strings.TrimSpace(baseURL), Compat: ai.DefaultCompat(),
 		})
 	}
 	if err != nil {
 		return nil, err
 	}
-	// Always wrap: this is the single place every model call is priced (filling
-	// Usage.CostUSD) and, when a sink is wired, traced. A nil tracer still prices.
-	return agentcore.NewTracingProvider(prov, agentcore.DefaultPricing(), tracer), nil
+	return prov, nil
 }
 
 // buildRungs turns resolved tier configs into agentcore escalation rungs (used
-// for the tiers above the primary).
-func buildRungs(tcs []TierConfig, tracer agentcore.TraceSink) ([]agentcore.ModelRung, error) {
+// for the tiers above the primary). The rungs are raw; the composition's monitor
+// plugin decorates them, so a run that escalates does not silently stop being
+// priced or traced.
+func buildRungs(tcs []TierConfig) ([]agentcore.ModelRung, error) {
 	rungs := make([]agentcore.ModelRung, 0, len(tcs))
 	for _, tc := range tcs {
-		prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey, tracer)
+		prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey)
 		if err != nil {
 			return nil, err
 		}
@@ -261,6 +303,20 @@ func buildRungs(tcs []TierConfig, tracer agentcore.TraceSink) ([]agentcore.Model
 // a scope-derived permission policy, the per-project definition, and the OpenAI
 // provider. Adding a second consumer reuses agentcore with a different ToolSet +
 // Policy and zero core edits (§5 boundary).
+//
+// It is a PLUGIN COMPOSITION, not a Config hand-off. The default agent comes
+// from preset.Full — the same list any other agentcore consumer starts from —
+// and everything specific to this product is appended to it as a named plugin:
+// the goal gate, the evidence finish guard, delegation, the run plan, the
+// sandbox and its guard, the vault, cost accounting. The payoff is that the
+// composition can be READ: agent.Describe() names which plugin owns which seam,
+// and dropping a capability is one entry off a list rather than an edit to a
+// build function that knows about all of them.
+//
+// BuildParams stays the external surface. Its fields are still routed through an
+// agentcore.Config, because Config is exactly the vocabulary preset.Plugins
+// mirrors — the migration moved where the capabilities come from, not how a
+// caller describes a run.
 func Build(p BuildParams) (*agentcore.Agent, error) {
 	if p.APIKey == "" {
 		return nil, fmt.Errorf("agentruntime: missing API key")
@@ -268,7 +324,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	if p.Data == nil {
 		return nil, fmt.Errorf("agentruntime: missing data source")
 	}
-	llm, err := buildProvider(p.Provider, p.BaseURL, p.APIKey, p.Tracer)
+	llm, err := buildProvider(p.Provider, p.BaseURL, p.APIKey)
 	if err != nil {
 		return nil, fmt.Errorf("agentruntime: %w", err)
 	}
@@ -318,16 +374,6 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		PrepareNextTurn:      p.PrepareNextTurn,
 		BudgetGate:           p.BudgetGate,
 	}
-	// Build a custom Env only when a capability is wired; nil cfg.Env keeps the
-	// analytics-only agent byte-for-byte unchanged.
-	if p.Sandbox != nil || p.Credentials != nil {
-		env := agentcore.DefaultEnv()
-		if p.Sandbox != nil {
-			env.Sandbox = p.Sandbox
-		}
-		env.Credentials = p.Credentials
-		cfg.Env = &env
-	}
 	if p.HTTPTool != nil {
 		names = append(names, p.HTTPTool.Name())
 	}
@@ -337,16 +383,13 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		}
 	}
 	if p.Todo != nil {
-		names = append(names, agentcore.ToolUpdatePlan)
+		names = append(names, todo.ToolName)
 	}
 	if p.Subagents != nil {
-		cfg.Subagents = p.Subagents
-		cfg.Delegates = p.Delegates
-		names = append(names, agentcore.ToolSpawnSubagent)
+		names = append(names, subagent.ToolSpawnSubagent)
 	}
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.OutputSchema = p.OutputSchema
-	cfg.FinishGuard = p.FinishGuard
 	cfg.Goal = p.Goal
 	cfg.Policy = agentcore.NewAllowList(names...)
 	if p.MaxContextTokens > 0 {
@@ -359,7 +402,52 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		cs.KeepRecentTokens = p.KeepRecentTokens
 		cfg.Compaction = &cs
 	}
-	return agentcore.New(cfg)
+
+	// The default agent, plus the capabilities Config has no field for. Spill is
+	// the only one that needs infrastructure; without a durable store it stays
+	// off and the loop's own truncation stands.
+	list := preset.Full(cfg, preset.Options{
+		Spill:              p.Spill,
+		ReportLogInvariant: p.ReportLogInvariant,
+	})
+
+	// --- the product's own plugins -----------------------------------------
+
+	// Cost accounting brackets every model call this composition can make — the
+	// primary rung, each escalation rung, and the compaction rung. A nil tracer
+	// still prices (so Usage.CostUSD is honest) and emits nothing.
+	list = append(list, observe.Monitor{Sink: p.Tracer})
+
+	// The goal gate is already in the list: preset's goal.Plugin registers the
+	// durable half (the seam that records the condition) AND the gate extension,
+	// so it lands ahead of the finish guard appended below. That order is the
+	// contract — the first stop interceptor to re-open the run wins, and an unmet
+	// goal makes any verification pass on that same answer moot.
+	if p.FinishGuard != nil {
+		list = append(list, finishguard.Of(p.FinishGuard))
+	}
+	if p.Subagents != nil {
+		sa := *p.Subagents
+		sa.Delegates = p.Delegates
+		list = append(list, sa)
+	}
+	if p.Todo != nil {
+		// The tool and the context hook are one plugin: either alone is broken —
+		// a plan the model never sees again, or a pin on a plan nothing can write.
+		list = append(list, todo.With(p.Todo))
+	}
+	// A wired sandbox brings its own runtime injection guard for risky selectable
+	// tools (run_shell and friends). One plugin carries both, so the substrate
+	// can never be installed with nothing reading what is sent into it. Tool
+	// exposure itself stays policy/catalog driven — a backend alone exposes
+	// nothing.
+	if p.Sandbox != nil {
+		list = append(list, sandboxplugin.Guarded(p.Sandbox, sandbox.NewInjectionGuard().Hook()))
+	}
+	if p.Credentials != nil {
+		list = append(list, sandboxplugin.Vault(p.Credentials))
+	}
+	return agentcore.Build(list...)
 }
 
 // buildToolsAndHooks assembles the agent's ToolSet from the shared opcore/usecase
@@ -368,6 +456,12 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 // shown. The terminate hook ends the run after a terminal op (submit_recommendation)
 // — except on a chat trigger, where the model must still reply to the user, so
 // the run continues past the recommendation instead of stopping silently.
+//
+// This is the product's own contribution, and it reaches the composition through
+// the tools and hooks plugins (preset routes cfg.Tools / cfg.Hooks to them).
+// Capabilities that own BOTH a tool and a hook — the run plan, the sandbox
+// guard — are plugins of their own instead, so neither half can be wired without
+// the other.
 func buildToolsAndHooks(p BuildParams) (*agentcore.ToolSet, agentcore.Hooks) {
 	reg := usecase.Registry()
 	cc := opcore.CallContext{
@@ -385,11 +479,6 @@ func buildToolsAndHooks(p BuildParams) (*agentcore.ToolSet, agentcore.Hooks) {
 
 	ts := agentcore.NewToolSet(tools...)
 	hooks := agentcore.Hooks{After: []agentcore.AfterToolCall{terminate}}
-	// A wired sandbox installs the runtime injection guard for risky selectable
-	// tools (such as run_shell). Tool exposure itself stays policy/catalog driven.
-	if p.Sandbox != nil {
-		hooks.Before = append(hooks.Before, sandbox.NewInjectionGuard().Hook())
-	}
 	// The outbound HTTP tool is the legitimate-egress consumer of the credential
 	// vault: it makes controlled requests to an allowlisted host, and the loop
 	// resolves any {{cred:NAME}} in its arguments before it runs.
@@ -403,13 +492,6 @@ func buildToolsAndHooks(p BuildParams) (*agentcore.ToolSet, agentcore.Hooks) {
 		if t != nil {
 			ts.Add(t)
 		}
-	}
-	// Built-in run todo list: the update_plan tool writes the plan, and a context
-	// hook pins the live plan into every request so it survives compaction and
-	// keeps a long run anchored to its goal.
-	if p.Todo != nil {
-		ts.Add(agentcore.NewTodoTool(p.Todo))
-		hooks.Context = append(hooks.Context, agentcore.TodoContextHook(p.Todo))
 	}
 	return ts, hooks
 }

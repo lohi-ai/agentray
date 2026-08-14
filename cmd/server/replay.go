@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )

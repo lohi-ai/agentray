@@ -12,6 +12,14 @@ import (
 // AgentDefinition. It is product-agnostic — the same Agent type powers the
 // Growth Analyst and any future consumer.
 type Agent struct {
+	// extensions are the per-run capability providers installed by plugins. The
+	// loop dispatches to them through the interfaces in extension.go and never
+	// names one, so removing a plugin removes its behavior with no core edit.
+	extensions []ExtensionFactory
+	// driver runs the turn loop. It is a seam like every other capability: the
+	// built-in reason→act driver is installed by DriverPlugin, and a composition
+	// may register a different control flow without changing anything else.
+	driver   Driver
 	provider LLMProvider
 	model    string
 	tools    *ToolSet
@@ -30,6 +38,9 @@ type Agent struct {
 	// preserves the default: compaction uses the active rung's model.
 	compactionProvider LLMProvider
 	compactionModel    string
+	// compactor is the strategy that actually shrinks the transcript. Never
+	// nil on a composed agent — the registry defaults it to DefaultCompactor.
+	compactor Compactor
 	// refreshKey, when set, re-resolves the provider's API key before each turn
 	// (pi's per-turn getApiKey) so expiring BYO tokens don't kill long runs. The
 	// returned key is applied only if the provider implements KeyUpdater.
@@ -49,10 +60,6 @@ type Agent struct {
 	// returning, so a conversation continues within one bounded run (pi's
 	// follow-up queue).
 	getFollowUp func(ctx context.Context) []Message
-	// finishGuard, when set, is consulted on a normal finish before the
-	// follow-up drain: a non-empty nudge re-opens the run for a bounded verify/
-	// repair pass (hermes-agent's verify-on-stop; see finishguard.go).
-	finishGuard FinishGuard
 	// goal, when non-empty, activates the run-level goal gate (goal.go): the
 	// completion contract is added to the system prompt and a normal finish
 	// without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens the run.
@@ -122,42 +129,6 @@ type Agent struct {
 	// outputSchema, when set, constrains every text answer to a JSON Schema at
 	// the provider (structured outputs). Verdict-shaped agents only.
 	outputSchema *OutputSchema
-	// subagents, when non-nil, enables the built-in spawn_subagent delegation
-	// tool (still policy-gated): the loop advertises it while the run's
-	// delegation depth (carried on ctx, see DelegationDepth) is below MaxDepth,
-	// and each spawn forks an ephemeral child inheriting this agent's
-	// capabilities with isolated history. nil — the default — leaves the agent
-	// solo.
-	subagents *SubagentSettings
-	// delegates are the named other agents this agent may hand a task to via
-	// spawn_subagent's agent parameter (cross-agent delegation, ARCHITECT-
-	// AGENT-TEAM P3 pulled forward). Each entry is an opaque closure injected by
-	// the consumer — agentcore never loads or builds another agent itself, so it
-	// stays product-agnostic. Empty leaves only self-delegation.
-	delegates []Delegate
-	// onLogInvariantViolation, when set, turns on the "model-visible means
-	// logged" runtime check (loginvariant.go) and receives every divergence
-	// between the live history and the durable log.
-	onLogInvariantViolation func(LogInvariantViolation)
-	// sessionQuery, when non-nil, enables the session_query retrieval tool
-	// (sessionquery.go) so the model can recover detail compaction summarized
-	// away instead of re-running the tool that produced it.
-	sessionQuery *SessionQuerySettings
-	// jobs, when non-nil, enables the background-job seam (jobs.go): tools may
-	// start work that outlives their call, the job_* tools observe and stop it,
-	// and completed jobs are announced at the top of the next turn. The policy
-	// is resolved per run because the owner token is run-scoped.
-	jobs *JobSettings
-	// repeatGuard, when non-nil, are the validated settings for the repeated-
-	// tool-call reminder. The guard's counters are per-RUN state, so the loop
-	// builds a fresh one from these settings at the top of every run rather than
-	// carrying a chain across runs of the same Agent.
-	repeatGuard *RepeatGuardSettings
-	// spill, when non-nil, replaces plain truncation of an oversized tool result
-	// with save-to-artifact + preview + locator, and enables the read_spill
-	// retrieval tool (spill.go). nil keeps truncation, which discards the
-	// omitted bytes irrecoverably.
-	spill *spillPolicy
 	// childUsage accumulates the usage of sub-agent runs spawned during the
 	// current run (written by spawn_subagent, possibly from parallel tool
 	// goroutines); runLoop folds and resets it into the RunResult so a parent
@@ -260,6 +231,9 @@ type Config struct {
 	// task kind onto these.
 	CompactionProvider LLMProvider
 	CompactionModel    string
+	// Compactor replaces the transcript-shrinking strategy. nil keeps
+	// DefaultCompactor (summarize the older span with a model call).
+	Compactor Compactor
 	// RefreshKey is an optional per-turn API-key resolver. It is invoked before
 	// each turn with the provider name; a non-empty result is pushed into the
 	// provider via KeyUpdater. Use it for short-lived / rotating BYO credentials.
@@ -274,13 +248,6 @@ type Config struct {
 	// GetFollowUpMessages is an optional callback drained when the agent would
 	// stop; returned messages restart the loop instead of ending the run.
 	GetFollowUpMessages func(ctx context.Context) []Message
-	// FinishGuard, when set, is consulted when the model produces a final
-	// answer and the run would end normally: a non-empty return is injected as
-	// a synthetic user message and the loop continues, bounded at
-	// maxFinishNudges per run (verify-on-stop). It runs before the follow-up
-	// drain and never fires on a budget wrap-up, tool-budget stop, MaxTurns
-	// stop, abort, or terminal tool. nil accepts every finish.
-	FinishGuard FinishGuard
 	// Goal, when non-empty, declares the condition under which this run may
 	// stop (Claude Code /goal analog; see goal.go). The completion contract is
 	// appended to the system prompt, and a normal finish whose answer lacks a
@@ -351,144 +318,34 @@ type Config struct {
 	// the schema. Providers without the capability ignore it, so callers still
 	// validate the answer. nil — the default — leaves output free-form.
 	OutputSchema *OutputSchema
-	// Subagents, when non-nil, enables the built-in spawn_subagent tool (the
-	// tool must additionally be permitted by Policy): the model may delegate a
-	// self-contained task to an ephemeral child agent that inherits this agent's
-	// capabilities, runs with isolated history, and returns only its final
-	// answer. Zero-value settings apply the defaults (depth 1, 8 per run, 48 KB
-	// answer cap). nil — the default — leaves the agent solo.
-	Subagents *SubagentSettings
-	// OnLogInvariantViolation, when set, enables the "model-visible means
-	// logged" check on durable runs: before every provider request the loop
-	// verifies that each message in the live history has a durable counterpart,
-	// and reports any that does not. It never alters the run — it is a detector
-	// for the silent class of bug where an injected message reaches the model
-	// but not the log, so a resumed run replays a different conversation than
-	// the one that actually happened.
+	// Extensions are the run capabilities this agent is built with — spill,
+	// background jobs, session retrieval, delegation, the repeated-call
+	// reminder, verify-on-stop, log-invariant observation, and whatever a
+	// consumer writes next. Each is a value from a package under
+	// agentcore/plugins/, and the loop reaches them ONLY through the interfaces
+	// in extension.go: it never names one, so the set here is the complete
+	// answer to "what can this agent do beyond the core loop?".
 	//
-	// Cheap enough to leave on in production (a hash per message per turn);
-	// wire it to your error sink. nil — the default — skips the check.
-	OnLogInvariantViolation func(LogInvariantViolation)
-	// SessionQuery, when non-nil, enables the built-in session_query tool: the
-	// model can search this session's own durable log — including spans
-	// compaction has already summarized away — instead of re-running the tool
-	// that produced a fact it can no longer see. With no Provider it searches
-	// the run's own SessionStore, so it needs Session + SessionID; supply a
-	// Provider to search wider (an index-backed one — see SessionQuery).
-	// nil — the default — leaves the agent with no retrieval tool.
-	SessionQuery *SessionQuerySettings
-	// Jobs, when non-nil, enables background jobs for this run: a long-running
-	// tool can call JobsFrom(ctx).Start(...) to return immediately with a job id
-	// instead of blocking the run, the built-in job_list / job_status / job_wait
-	// / job_cancel tools observe and control the work, and finished jobs are
-	// announced to the model at the top of the next turn. Every job is fenced to
-	// this run and cancelled when it ends. nil — the default — keeps every tool
-	// synchronous.
-	Jobs *JobSettings
-	// RepeatGuard, when non-nil, enables the repeated-tool-call reminder: an
-	// advisory nudge injected when the model calls the same tool with identical
-	// arguments N times in a row (repeatguard.go). It never blocks a call. The
-	// zero value applies the defaults (thresholds 3/5/8, update_plan excluded).
-	// nil — the default — leaves the guard off.
-	RepeatGuard *RepeatGuardSettings
-	// Spill, when non-nil with a Store, keeps an oversized tool result out of the
-	// context WITHOUT destroying it: the full text is saved to the store and the
-	// model-facing result becomes a bounded head/tail preview plus a locator it
-	// can read back through the built-in read_spill tool. nil — the default —
-	// keeps plain head+tail truncation, which drops the omitted bytes for good.
-	Spill *SpillSettings
-	// Delegates names the other agents this one may invoke through
-	// spawn_subagent's agent parameter. Each Delegate.Run closure executes the
-	// target agent under its own identity (persona, tools, policy) — the
-	// consumer backs it; agentcore only routes the task and enforces the shared
-	// caps (depth, per-run budget, output size). Requires Subagents non-nil.
-	Delegates []Delegate
+	// Empty — the default — is a working agent. It reasons, calls tools, obeys
+	// its policy, compacts, and logs; it just has no capability that a plugin
+	// would have added.
+	Extensions []ExtensionFactory
 }
 
-// New constructs an Agent from a Config, installing the permission gate as the
-// first beforeToolCall hook so it always runs before consumer hooks.
+// New constructs an Agent from a Config.
+//
+// It is a plugin composition like any other: the Config is applied to a
+// Registry through the same exported setters the plugin packages use, and the
+// Agent is built from that Registry. Config stays the ergonomic front door for
+// the common case; reach for Build with plugins from agentcore/plugins/... when
+// you need to REPLACE a seam (a different Driver, your own governance plugin)
+// rather than configure one.
+//
+// The permission gate is installed by Registry.UsePolicy at PriorityGate, so it
+// is still consulted before any consumer hook — now as a property of the hook
+// ordering rather than a side effect of prepending to a slice.
 func New(cfg Config) (*Agent, error) {
-	if cfg.Provider == nil {
-		return nil, errors.New("agentcore: provider is required")
-	}
-	if cfg.Model == "" {
-		return nil, errors.New("agentcore: model is required")
-	}
-	if cfg.Tools == nil {
-		cfg.Tools = NewToolSet()
-	}
-	if cfg.Policy == nil {
-		cfg.Policy = DenyAll{}
-	}
-	limits := DefaultLimits()
-	if cfg.Limits != nil {
-		limits = *cfg.Limits
-	}
-	env := DefaultEnv()
-	if cfg.Env != nil {
-		env = *cfg.Env
-	}
-	compaction := DefaultCompactionSettings()
-	if cfg.Compaction != nil {
-		compaction = *cfg.Compaction
-	}
-	retry := DefaultRetryPolicy()
-	if cfg.Retry != nil {
-		retry = cfg.Retry.normalized()
-	}
-	// Validate the repeat-guard configuration here so a bad threshold list is a
-	// construction error, not a guard that silently never fires.
-	if _, err := newRepeatGuard(cfg.RepeatGuard); err != nil {
-		return nil, err
-	}
-
-	// The permission gate is itself a beforeToolCall hook, run first.
-	policy := cfg.Policy
-	gate := func(ctx context.Context, call ToolCall) Decision { return policy.Allow(ctx, call) }
-	hooks := cfg.Hooks
-	hooks.Before = append([]BeforeToolCall{gate}, hooks.Before...)
-
-	return &Agent{
-		provider:           cfg.Provider,
-		model:              cfg.Model,
-		tools:              cfg.Tools,
-		policy:             policy,
-		hooks:              hooks,
-		memory:             cfg.Memory,
-		def:                cfg.Definition,
-		limits:             limits,
-		env:                env,
-		compaction:         compaction,
-		compactionProvider: cfg.CompactionProvider,
-		compactionModel:    cfg.CompactionModel,
-		refreshKey:         cfg.RefreshKey,
-		escalation:         cfg.Escalation,
-		getSteering:        cfg.GetSteeringMessages,
-		getFollowUp:        cfg.GetFollowUpMessages,
-		finishGuard:        cfg.FinishGuard,
-		goal:               cfg.Goal,
-		prepareNextTurn:    cfg.PrepareNextTurn,
-		budgetGate:         cfg.BudgetGate,
-		session:            cfg.Session,
-		sessionID:          cfg.SessionID,
-		resumeSession:      cfg.ResumeSession,
-		stepGate:           cfg.StepGate,
-		retry:              retry,
-		cacheKey:           cfg.PromptCacheKey,
-		cacheRetention:     cfg.PromptCacheRetention,
-		seedDisabledTools:  cfg.SeedDisabledTools,
-		maxTokens:          cfg.MaxTokens,
-		reasoningEffort:    cfg.ReasoningEffort,
-		outputSchema:       cfg.OutputSchema,
-		subagents:          cfg.Subagents,
-		delegates:          cfg.Delegates,
-		spill:              newSpillPolicy(cfg.Spill, cfg.SessionID, limits),
-		repeatGuard:        cfg.RepeatGuard,
-		jobs:               cfg.Jobs,
-		sessionQuery:       cfg.SessionQuery,
-
-		onLogInvariantViolation: cfg.OnLogInvariantViolation,
-	}, nil
+	return Build(configPlugin{cfg: cfg})
 }
 
 // Prompt runs a single interactive turn-loop from a user message and returns

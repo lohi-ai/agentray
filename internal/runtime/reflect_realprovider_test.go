@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 func TestReal_Reflection_ProposesImprovementFromRun(t *testing.T) {
@@ -31,7 +32,7 @@ func TestReal_Reflection_ProposesImprovementFromRun(t *testing.T) {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set AGENTRAY_TEST_OPENAI_BASE_URL, AGENTRAY_TEST_OPENAI_API_KEY, AGENTRAY_TEST_OPENAI_MODEL to run real-provider tests")
 	}
-	provider := agentcore.NewOpenAIProvider(key, base, agentcore.DefaultCompat())
+	provider := ai.NewOpenAIProvider(key, base, ai.DefaultCompat())
 
 	// A realistic working session: one tool blocked by policy, one query that
 	// succeeded after the agent adapted. A good reflection should distill a

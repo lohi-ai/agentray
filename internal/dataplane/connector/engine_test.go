@@ -45,7 +45,7 @@ type fakeSource struct {
 	blockCh chan struct{} // when set, PullRows waits until closed
 }
 
-func (f *fakeSource) Kind() string                           { return "faketest" }
+func (f *fakeSource) Kind() string                             { return "faketest" }
 func (f *fakeSource) TestConnection(ctx context.Context) error { return nil }
 func (f *fakeSource) DiscoverSchema(ctx context.Context) ([]Table, error) {
 	return nil, nil

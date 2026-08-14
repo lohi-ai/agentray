@@ -19,10 +19,10 @@ import (
 // Entry kinds in the conversation log. Storage treats kind as an opaque string;
 // these are the values this layer reads and writes.
 const (
-	ConvKindMessage    = "message"     // a chat turn (role user|assistant|system)
-	ConvKindCompaction = "compaction"  // a non-destructive history-compaction bracket
-	ConvKindToolTrace  = "tool_trace"  // a completed tool call (human/debug view only)
-	ConvKindStep       = "step"        // a progress/step marker (human view only)
+	ConvKindMessage    = "message"      // a chat turn (role user|assistant|system)
+	ConvKindCompaction = "compaction"   // a non-destructive history-compaction bracket
+	ConvKindToolTrace  = "tool_trace"   // a completed tool call (human/debug view only)
+	ConvKindStep       = "step"         // a progress/step marker (human view only)
 	ConvKindModelChg   = "model_change" // model/settings change (folded, not shown)
 )
 

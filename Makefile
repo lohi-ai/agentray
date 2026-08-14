@@ -75,7 +75,7 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 	if [ -z "$$AGENTRAY_TEST_OPENAI_API_KEY" ]; then \
 	  echo "AGENTRAY_TEST_OPENAI_* not set — copy .env.example to .env and fill it."; exit 1; \
 	fi; \
-	$(GO) test ./internal/... -run 'TestReal_|RealProvider' -v -count=1
+	$(GO) test ./... -run 'TestReal_|RealProvider' -v -count=1
 
 test-stress: ## Run the long-run stability / compaction stress test
 	$(GO) test ./agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
@@ -117,4 +117,4 @@ sandbox-setup: sandbox-build sandbox-check ## Build the sandbox images, verify, 
 
 test-sandbox: ## Run the computer_use + browser_use integration tests (needs built images; loads .env)
 	@$(LOAD_ENV) \
-	$(GO) test ./internal/sandbox/... -run 'ComputerUseAgent|BrowserUseAgent' -v -count=1
+	$(GO) test ./sandbox/... -run 'ComputerUseAgent|BrowserUseAgent' -v -count=1

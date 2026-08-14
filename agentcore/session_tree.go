@@ -185,15 +185,6 @@ type BranchOptions struct {
 	Summarize func(ctx context.Context, abandoned []Message) (string, Usage, error)
 }
 
-// NewBranchSummarizer adapts a provider+model into BranchOptions.Summarize
-// using the same structured-checkpoint prompt as compaction, so branch
-// summaries and compaction checkpoints read identically to the model.
-func NewBranchSummarizer(provider LLMProvider, model string) func(ctx context.Context, abandoned []Message) (string, Usage, error) {
-	return func(ctx context.Context, abandoned []Message) (string, Usage, error) {
-		return summarizeSpan(ctx, provider, model, abandoned, "")
-	}
-}
-
 // Rewind moves a session's active leaf to targetID (an effective id from
 // SessionTree — an entry's own ID, or "#<index>" for legacy id-less entries).
 // Subsequent appends chain from there, and ReduceSession/RecoverSession

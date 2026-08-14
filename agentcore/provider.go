@@ -1,12 +1,15 @@
 // Package agentcore is a reusable, product-agnostic agent runtime: the turn
-// loop, tool calling, hooks, permissions, LLM providers (bring-your-own-key),
-// memory, and the Agent Definition. It knows nothing about analytics or any
-// other product. A consumer injects a ToolSet, a Policy, a MemoryStore, and an
-// AgentDefinition; agentcore drives them.
+// loop, tool calling, hooks, permissions, memory, and the Agent Definition. It
+// knows nothing about analytics or any other product. A consumer injects a
+// ToolSet, a Policy, a MemoryStore, and an AgentDefinition; agentcore drives
+// them.
 //
 // Boundary rule: this package imports nothing from consumer packages
-// (agentruntime) or storage. Everything product-specific enters through the
-// interfaces defined here.
+// (agentruntime), storage, or vendors. Everything product-specific enters
+// through the interfaces defined here — including the model itself: agentcore
+// declares LLMProvider and never speaks a wire protocol. The OpenAI and
+// Anthropic implementations live in agentray/ai, which imports this package,
+// so a vendor change cannot reach the loop.
 package agentcore
 
 import "context"

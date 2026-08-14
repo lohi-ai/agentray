@@ -22,13 +22,13 @@ func TestEgressAllowPermits(t *testing.T) {
 		ok   bool
 	}{
 		{"pypi.org", true},
-		{"PyPI.org", true},          // case-insensitive
-		{"pypi.org.", true},         // trailing dot (FQDN form)
-		{"files.pypi.org", true},    // subdomain
-		{"a.b.pypi.org", true},      // nested subdomain
+		{"PyPI.org", true},       // case-insensitive
+		{"pypi.org.", true},      // trailing dot (FQDN form)
+		{"files.pypi.org", true}, // subdomain
+		{"a.b.pypi.org", true},   // nested subdomain
 		{"files.pythonhosted.org", true},
-		{"notpypi.org", false},      // suffix look-alike must not match
-		{"pypi.org.evil.com", false},// host that merely contains the entry
+		{"notpypi.org", false},       // suffix look-alike must not match
+		{"pypi.org.evil.com", false}, // host that merely contains the entry
 		{"evil.com", false},
 		{"", false},
 		{"1.2.3.4", false}, // IP literal, not on list

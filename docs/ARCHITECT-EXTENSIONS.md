@@ -71,7 +71,7 @@ Adding a capability this way touches no Go. It is a config row.
   tenant-named process on the API host, which is the exact boundary this design
   exists to keep. Responses may arrive as `application/json` or
   `text/event-stream`; both are handled.
-- **The SSRF backstop applies.** MCP connections use `httptool.NewGuardedClient`,
+- **The SSRF backstop applies.** MCP connections use `sandbox.NewGuardedClient`,
   so an operator-supplied URL resolving to loopback, a private range, or the
   cloud-metadata address is refused at dial, and redirects are never followed —
   the same guard that makes `http_request` safe.

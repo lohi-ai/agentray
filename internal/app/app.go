@@ -10,6 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/internal/dataplane/alerting"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
@@ -17,7 +18,6 @@ import (
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/sandbox"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -140,9 +140,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// on — it is the monitoring console's source of truth (one row per LLM call,
 	// keyed by run → agent_id). An optional JSONL file sink is added for offline
 	// debugging when AGENTRAY_AGENT_TRACE_FILE is set.
-	traceSinks := agentcore.MultiSink{agentruntime.NewStoreTraceSink(store)}
+	traceSinks := observe.MultiSink{agentruntime.NewStoreTraceSink(store)}
 	if cfg.AgentTraceFile != "" {
-		if fs, err := agentcore.NewFileTraceSink(cfg.AgentTraceFile); err != nil {
+		if fs, err := observe.NewFileSink(cfg.AgentTraceFile); err != nil {
 			log.Printf("agent trace file %q: %v (file tracing disabled)", cfg.AgentTraceFile, err)
 		} else {
 			traceSinks = append(traceSinks, fs)
@@ -155,6 +155,12 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// resume endpoint. Always on — it is additive (an unconsumed log) and backs the
 	// resume path.
 	runnerOpts = append(runnerOpts, agentruntime.WithSessionStore(agentruntime.NewSessionStore(store)))
+	// Durable oversized output: a tool result too large to sit inline is persisted
+	// and replaced by a preview plus a locator, so the omitted middle is one
+	// read_spill call away instead of gone. It shares the session log's storage
+	// and lifetime — the locator lives in that log, so the artifact has to outlive
+	// the process the same way the log does.
+	runnerOpts = append(runnerOpts, agentruntime.WithSpillStore(agentruntime.NewSpillStore(store)))
 	// Rotation-safe long runs: re-resolve each rung's BYO key before every turn.
 	runnerOpts = append(runnerOpts, agentruntime.WithKeyRefresh())
 	// Optional compaction-budget override (deployment/test knob); 0 keeps the 200k
@@ -305,9 +311,9 @@ func buildHTTPTool(cfg config.Config) agentcore.Tool {
 		log.Printf("agentray: AGENTRAY_HTTP_TOOL_ENABLED is set but AGENTRAY_HTTP_TOOL_ALLOW_HOSTS is empty; http_request tool disabled")
 		return nil
 	}
-	tool := httptool.New(
-		httptool.WithAllowHosts(hosts),
-		httptool.WithAllowPlainHTTP(cfg.HTTPToolAllowHTTP),
+	tool := sandbox.NewHTTPRequestTool(
+		sandbox.WithHTTPAllowHosts(hosts),
+		sandbox.WithHTTPAllowPlain(cfg.HTTPToolAllowHTTP),
 	)
 	log.Printf("agentray: agent http_request tool enabled (allow-hosts: %v)", tool.AllowHosts())
 	return tool

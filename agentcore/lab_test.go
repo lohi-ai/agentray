@@ -153,9 +153,9 @@ func TestDiffStep(t *testing.T) {
 			TokensIn:  10, TokensOut: 5, CostUSD: 0.1,
 		},
 		{
-			Messages: []Message{{Role: RoleSystem, Content: labPrompt("p", "m1", "- id: s — S: s")}, {Role: RoleUser, Content: "x"}, {Role: RoleAssistant, Content: "y"}},
+			Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "m1", "- id: s — S: s")}, {Role: RoleUser, Content: "x"}, {Role: RoleAssistant, Content: "y"}},
 			ToolCalls: []ToolCall{{ID: "t", Name: "search", Arguments: `{}`}},
-			TokensIn: 20, TokensOut: 8, CostUSD: 0.2,
+			TokensIn:  20, TokensOut: 8, CostUSD: 0.2,
 		},
 	})
 	d := DiffStep(steps[0], steps[1])

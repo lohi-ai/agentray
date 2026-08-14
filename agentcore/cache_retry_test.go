@@ -10,67 +10,11 @@ import (
 )
 
 // --- #1: cache-aware accounting ---
-
-// TestPricingChargesCacheTokensSeparately verifies cache reads bill at the
-// discounted rate and cache writes at the premium, instead of the full input
-// rate — the whole point of the long-session caching steal.
-func TestPricingChargesCacheTokensSeparately(t *testing.T) {
-	p := Pricing{"m": {InputPerM: 10, OutputPerM: 30}}
-
-	full := p.Cost("m", Usage{InputTokens: 1_000_000})
-	if full != 10 {
-		t.Fatalf("full input cost = %v, want 10", full)
-	}
-	// A million cache-read tokens must cost a fraction of a million fresh ones.
-	read := p.Cost("m", Usage{CacheReadTokens: 1_000_000})
-	if read != 10*defaultCacheReadMultiplier {
-		t.Fatalf("cache-read cost = %v, want %v", read, 10*defaultCacheReadMultiplier)
-	}
-	// Cache writes carry a small premium over fresh input.
-	write := p.Cost("m", Usage{CacheWriteTokens: 1_000_000})
-	if write != 10*defaultCacheWriteMultiplier {
-		t.Fatalf("cache-write cost = %v, want %v", write, 10*defaultCacheWriteMultiplier)
-	}
-	// Explicit cache rates override the derived defaults.
-	pe := Pricing{"m": {InputPerM: 10, OutputPerM: 30, CacheReadPerM: 0.5}}
-	if got := pe.Cost("m", Usage{CacheReadTokens: 1_000_000}); got != 0.5 {
-		t.Fatalf("explicit cache-read cost = %v, want 0.5", got)
-	}
-}
-
-// TestOpenAIUsageNormalizesCachedTokens verifies the OpenAI adapter pulls cached
-// tokens out of prompt_tokens so InputTokens stays full-price-only and the cached
-// portion is reported separately.
-func TestOpenAIUsageNormalizesCachedTokens(t *testing.T) {
-	u := oaiUsage{PromptTokens: 1000, CompletionTokens: 200}
-	u.PromptTokensDetails.CachedTokens = 800
-	got := u.usage()
-	if got.InputTokens != 200 {
-		t.Fatalf("InputTokens = %d, want 200 (1000 total - 800 cached)", got.InputTokens)
-	}
-	if got.CacheReadTokens != 800 {
-		t.Fatalf("CacheReadTokens = %d, want 800", got.CacheReadTokens)
-	}
-	if got.OutputTokens != 200 {
-		t.Fatalf("OutputTokens = %d, want 200", got.OutputTokens)
-	}
-}
-
-// TestAnthropicUsageMapsCacheCounters verifies the Anthropic adapter maps its
-// two cache counters onto the neutral read/write fields without touching
-// input_tokens (which already excludes the cached prefix).
-func TestAnthropicUsageMapsCacheCounters(t *testing.T) {
-	got := antUsage{
-		InputTokens:              50,
-		OutputTokens:             10,
-		CacheReadInputTokens:     400,
-		CacheCreationInputTokens: 120,
-	}.usage()
-	want := Usage{InputTokens: 50, OutputTokens: 10, CacheReadTokens: 400, CacheWriteTokens: 120}
-	if got != want {
-		t.Fatalf("usage = %+v, want %+v", got, want)
-	}
-}
+//
+// This file keeps the LOOP's half: that cache token counts accumulate across
+// turns and that retry/escalation layer correctly. Pricing moved to
+// agentcore/plugins/observe (Monitor), and the per-vendor usage normalization
+// that feeds both moved to ai/ with the wire code.
 
 // TestRunSumsCacheTokens verifies the loop accumulates cache tokens across turns
 // into the run total, so a consumer sees honest cache accounting end-to-end.
@@ -217,8 +161,8 @@ func TestRetryClassification(t *testing.T) {
 		{nil, false},
 	}
 	for _, c := range cases {
-		if got := isRetryable(c.err); got != c.want {
-			t.Fatalf("isRetryable(%v) = %v, want %v", c.err, got, c.want)
+		if got := IsRetryable(c.err); got != c.want {
+			t.Fatalf("IsRetryable(%v) = %v, want %v", c.err, got, c.want)
 		}
 	}
 }

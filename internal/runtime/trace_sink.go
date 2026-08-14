@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // storeTraceSink persists every per-LLM-call TraceRecord to agent_llm_calls,
 // keyed by the run id the TracingProvider stamped on the record (the trace id
-// the Runner set via agentcore.WithTraceID). It is the DB-backed half of the
+// the Runner set via observe.WithTraceID). It is the DB-backed half of the
 // trace fan-out — the queryable source for the monitoring console — and lives
 // here, in the consumer, because it is the one place that may import both
 // agentcore and storage (storage never imports agentcore).
@@ -24,11 +24,11 @@ type storeTraceSink struct {
 }
 
 // NewStoreTraceSink returns a TraceSink that writes LLM-call traces to Postgres.
-func NewStoreTraceSink(store *storage.Store) agentcore.TraceSink {
+func NewStoreTraceSink(store *storage.Store) observe.Sink {
 	return &storeTraceSink{store: store}
 }
 
-func (s *storeTraceSink) Record(r agentcore.TraceRecord) {
+func (s *storeTraceSink) Record(r observe.TraceRecord) {
 	if r.TraceID == "" {
 		return // no run correlation → nothing to attach the trace to
 	}

@@ -36,9 +36,15 @@ func (e *ProviderError) Error() string {
 	return e.Provider + ": provider error"
 }
 
-// newProviderError builds a ProviderError from an HTTP response, parsing
+// NewProviderError builds a ProviderError from an HTTP response, parsing
 // Retry-After so the loop can pace a 429/503 backoff to the server's hint.
-func newProviderError(provider string, resp *http.Response, message string) *ProviderError {
+//
+// It is exported because it is the contract between a provider and the loop's
+// retry/escalation logic: IsRetryable classifies structurally (status code,
+// Retry-After) rather than by string-matching a message, so a provider that
+// returns a plain error is silently un-retryable. Any provider — in this repo
+// or out of it — builds its transport failures with this.
+func NewProviderError(provider string, resp *http.Response, message string) *ProviderError {
 	pe := &ProviderError{Provider: provider, Message: message}
 	if resp != nil {
 		pe.Status = resp.StatusCode
@@ -67,12 +73,17 @@ func parseRetryAfter(v string) time.Duration {
 	return 0
 }
 
-// isRetryable reports whether err is a transient failure worth retrying the same
+// IsRetryable reports whether err is a transient failure worth retrying the same
 // model: a rate limit (429), a server-side 5xx (500/502/503/504), a request
 // timeout (408), or a transport-level network blip. A cancellation is never
 // retryable — the caller guards on ctx.Err() — and a client error (4xx other than
 // 408/429) won't be fixed by retrying, so it falls through to escalation.
-func isRetryable(err error) bool {
+//
+// Exported alongside NewProviderError as the other half of the provider↔loop
+// retry contract: a provider builds the error, the loop classifies it, and an
+// out-of-tree provider can assert its own transport failures land on the right
+// side of that line.
+func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}

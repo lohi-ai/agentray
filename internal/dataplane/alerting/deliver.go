@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/shared/credential"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // Notification is one message to deliver. Title/Body are rendered per channel
@@ -45,7 +45,7 @@ type Deliverer struct {
 // credentials are configured.
 func NewDeliverer(vault *credential.Vault) *Deliverer {
 	return &Deliverer{
-		client: httptool.NewGuardedClient(15 * time.Second),
+		client: sandbox.NewGuardedClient(15 * time.Second),
 		vault:  vault,
 	}
 }

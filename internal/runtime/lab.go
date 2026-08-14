@@ -53,10 +53,10 @@ func NewLabService(store *storage.Store, sandboxReady bool, runnerOpts ...Runner
 // expected text reads as criteria rather than a literal answer), plus the full
 // folded step list so the same per-step inspector renders for a test run.
 type LabTestResult struct {
-	RunID       string              `json:"run_id"`
-	Status      string              `json:"status"` // pass | fail | error | blocked
-	Expected    string              `json:"expected"`
-	Actual      string              `json:"actual"`
+	RunID    string `json:"run_id"`
+	Status   string `json:"status"` // pass | fail | error | blocked
+	Expected string `json:"expected"`
+	Actual   string `json:"actual"`
 	// Verdict reports how Status was decided: "exact" (string-equal), "judge"
 	// (LLM rubric), or "" (blocked/error). Rationale is the judge's one-line
 	// reason when Verdict == "judge".

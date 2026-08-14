@@ -5,7 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 )
 
 // evidence_guard.go — the analytics analog of hermes-agent's verify-on-stop
@@ -25,7 +26,7 @@ import (
 // child runs the read tools itself and only its answer returns to the parent's
 // trace.
 var evidenceToolSet = func() map[string]bool {
-	s := map[string]bool{agentcore.ToolSpawnSubagent: true}
+	s := map[string]bool{subagent.ToolSpawnSubagent: true}
 	for name := range readTools {
 		s[name] = true
 	}
@@ -49,7 +50,7 @@ const evidenceNudge = "[System: your answer states figures, but no data tool was
 // only when the final answer carries digits while zero evidence tools executed.
 // Agents with no evidence tools get a nil guard — a persona-only chat agent
 // has no data to consult and must not be nagged.
-func evidenceFinishGuard(s Scopes) agentcore.FinishGuard {
+func evidenceFinishGuard(s Scopes) finishguard.Guard {
 	granted := false
 	for _, name := range ScopeToolNames(s) {
 		if evidenceToolSet[name] {
@@ -60,7 +61,7 @@ func evidenceFinishGuard(s Scopes) agentcore.FinishGuard {
 	if !granted {
 		return nil
 	}
-	return func(_ context.Context, st agentcore.FinishState) string {
+	return func(_ context.Context, st finishguard.State) string {
 		if st.Nudges > 0 {
 			// One nudge only: the model has had its bounded repair pass; a second
 			// rejection would just burn turns against a model that already chose

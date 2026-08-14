@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -299,7 +300,7 @@ func applyDelegateNameCollisions(teams []storage.TeamLeadership, explicit []stor
 // once. Cross-agent name collisions are resolved beforehand by
 // applyDelegateNameCollisions. Pure, so the precedence is unit-testable
 // without a DB.
-func mergeTeamDelegates(existing []agentcore.Delegate, teams []storage.TeamLeadership, runFor func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error)) []agentcore.Delegate {
+func mergeTeamDelegates(existing []subagent.Delegate, teams []storage.TeamLeadership, runFor func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error)) []subagent.Delegate {
 	seen := make(map[string]bool, len(existing))
 	for _, d := range existing {
 		seen[strings.ToLower(d.Name)] = true
@@ -312,7 +313,7 @@ func mergeTeamDelegates(existing []agentcore.Delegate, teams []storage.TeamLeade
 				continue
 			}
 			seen[key] = true
-			out = append(out, agentcore.Delegate{
+			out = append(out, subagent.Delegate{
 				Name:        m.Name,
 				Description: m.Description,
 				Run:         runFor(m.AgentID),

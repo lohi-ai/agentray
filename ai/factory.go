@@ -9,8 +9,9 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 )
 
-// New builds a provider from a Spec. Wire routing matches agentcore.NewProvider
-// so a run and a list-models call share credentials and base URL.
+// New builds a provider from a Spec. Wire routing goes through NewClient, so a
+// run and a list-models call share credentials and base URL by construction
+// rather than by two switches that have to agree.
 func New(spec Spec) (Provider, error) {
 	vendor := NormalizeVendor(spec.Vendor)
 	id := strings.TrimSpace(spec.ID)
@@ -28,23 +29,23 @@ func New(spec Spec) (Provider, error) {
 	)
 	switch vendor {
 	case "openai":
-		inner, err = agentcore.NewProvider(agentcore.ProviderSpec{
+		inner, err = NewClient(ClientSpec{
 			Name: "openai", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
 	case "anthropic":
-		inner, err = agentcore.NewProvider(agentcore.ProviderSpec{
+		inner, err = NewClient(ClientSpec{
 			Name: "anthropic", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
 	case "google":
-		inner, err = agentcore.NewProvider(agentcore.ProviderSpec{
+		inner, err = NewClient(ClientSpec{
 			Name: "google", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
 	default:
 		if strings.TrimSpace(spec.BaseURL) == "" {
 			return nil, fmt.Errorf("ai: provider %q requires a base URL", spec.Vendor)
 		}
-		inner, err = agentcore.NewProvider(agentcore.ProviderSpec{
-			Name: spec.Vendor, APIKey: spec.APIKey, BaseURL: spec.BaseURL, Compat: agentcore.DefaultCompat(),
+		inner, err = NewClient(ClientSpec{
+			Name: spec.Vendor, APIKey: spec.APIKey, BaseURL: spec.BaseURL, Compat: DefaultCompat(),
 		})
 	}
 	if err != nil {
@@ -65,15 +66,19 @@ func New(spec Spec) (Provider, error) {
 	}, nil
 }
 
+// injectHTTP hands the caller's HTTP client to the wire provider, so a test
+// server, a proxy, or a custom timeout applies to the run as well as to
+// list-models. Only *http.Client can be installed: the providers hold a
+// concrete client, not an interface.
 func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
 	std, ok := client.(*http.Client)
 	if !ok {
 		return
 	}
 	switch p := inner.(type) {
-	case *agentcore.OpenAIProvider:
+	case *OpenAIProvider:
 		p.HTTP = std
-	case *agentcore.AnthropicProvider:
+	case *AnthropicProvider:
 		p.HTTP = std
 	}
 }

@@ -187,7 +187,9 @@ func TestRewindDegradesToBareLeafMove(t *testing.T) {
 		}
 	}
 	newLeaf, err := Rewind(ctx, store, sid, "a", BranchOptions{
-		Summarize: func(context.Context, []Message) (string, Usage, error) { return "", Usage{}, errors.New("summarizer down") },
+		Summarize: func(context.Context, []Message) (string, Usage, error) {
+			return "", Usage{}, errors.New("summarizer down")
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

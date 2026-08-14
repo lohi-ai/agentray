@@ -112,36 +112,18 @@ func (ts *ToolSet) Names() []string {
 	return out
 }
 
-// gateExemptTools are the framework's own built-in tools, which run without
-// consulting the (default-deny) permission Policy.
+// gateExemptTools are the built-ins that bypass the permission gate because
+// neither can reach anything the agent does not already have. read_skill only
+// returns definition-authored skill bodies from this agent's own definition.
 //
-// The exemption is narrow and follows one rule: a tool is exempt only if it
-// cannot reach anything the agent does not already have. Each of these reads
-// back something THIS run produced or was authored into its own definition, and
-// each is fenced to the run's session:
-//
-//   - read_skill   — definition-authored skill bodies, nothing else
-//   - read_spill   — output of a tool call this run already made, which the
-//     framework itself truncated away
-//   - job_*        — observation and cancellation of work this run launched
-//   - session_query — this run's own durable log
-//
-// The alternative — making every marketplace preset enumerate them — would be
-// pure friction: a preset that forgot one would silently lose the ability to
-// read its own truncated output, with no security benefit, since none of these
-// tools can be pointed at another agent's data. Anything that CAN reach outside
-// the run (a filesystem read, an HTTP fetch, a SQL query) stays gated.
-var gateExemptTools = func() map[string]bool {
-	m := map[string]bool{
-		readSkillToolName:    true,
-		readSpillToolName:    true,
-		sessionQueryToolName: true,
-	}
-	for _, n := range jobToolNames {
-		m[n] = true
-	}
-	return m
-}()
+// An EXTENSION-contributed tool earns the same bypass by declaring
+// SelfGated (see extension.go) — that keeps the claim next to the capability
+// that makes it true, and keeps it auditable: the loop can list exactly which
+// plugin asked to skip the gate. Anything that CAN reach outside the run (a
+// filesystem read, an HTTP fetch, a SQL query) stays gated, plugin or not.
+var gateExemptTools = map[string]bool{
+	readSkillToolName: true,
+}
 
 // defaultMaxToolResultBytes bounds a tool result before it reaches the LLM —
 // token + safety guard (pi harness truncate.ts, rebuilt UTF-8-safe).

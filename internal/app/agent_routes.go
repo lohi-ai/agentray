@@ -14,6 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/authoring"
 	"github.com/lohi-ai/agentray/internal/channels"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
@@ -288,7 +289,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
 		}
-		draft, err := agentcore.DraftDefinition(c.Request().Context(), provider, pro.Model, prompt)
+		draft, err := authoring.DraftDefinition(c.Request().Context(), provider, pro.Model, prompt)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
 		}

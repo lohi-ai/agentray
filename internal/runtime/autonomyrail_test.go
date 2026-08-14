@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/sandbox"
 )
@@ -13,7 +12,7 @@ import (
 // http_request next to internal tools that must never be touched by the rail.
 func railFixture() []agentcore.Tool {
 	return []agentcore.Tool{
-		fakeTool{name: httptool.ToolHTTPRequest},
+		fakeTool{name: sandbox.ToolHTTPRequest},
 		fakeTool{name: sandbox.ToolReadFile},
 		fakeTool{name: "run_sql"},
 	}
@@ -27,7 +26,7 @@ func TestAutonomyRailStripsExternalWriteFromBackgroundRuns(t *testing.T) {
 		for _, autonomy := range []string{storage.AutonomySuggest, storage.AutonomyScheduled} {
 			out := applyAutonomyRail(railFixture(), trigger, autonomy)
 			names := toolNames(out)
-			if names[httptool.ToolHTTPRequest] {
+			if names[sandbox.ToolHTTPRequest] {
 				t.Errorf("trigger=%s autonomy=%s: http_request must be stripped", trigger, autonomy)
 			}
 			if !names[sandbox.ToolReadFile] || !names["run_sql"] || len(out) != 2 {
@@ -42,7 +41,7 @@ func TestAutonomyRailStripsExternalWriteFromBackgroundRuns(t *testing.T) {
 func TestAutonomyRailAutoKeepsExternalWrite(t *testing.T) {
 	for _, trigger := range []string{"scheduled", "webhook", "delegate"} {
 		out := applyAutonomyRail(railFixture(), trigger, storage.AutonomyAuto)
-		if names := toolNames(out); !names[httptool.ToolHTTPRequest] || len(out) != 3 {
+		if names := toolNames(out); !names[sandbox.ToolHTTPRequest] || len(out) != 3 {
 			t.Errorf("trigger=%s autonomy=auto: http_request must be kept, got %v", trigger, names)
 		}
 	}
@@ -57,7 +56,7 @@ func TestAutonomyRailInteractiveRunsUntouched(t *testing.T) {
 	for _, trigger := range []string{"chat", "manual"} {
 		for _, autonomy := range []string{storage.AutonomySuggest, storage.AutonomyScheduled, storage.AutonomyAuto, ""} {
 			out := applyAutonomyRail(railFixture(), trigger, autonomy)
-			if names := toolNames(out); !names[httptool.ToolHTTPRequest] || len(out) != 3 {
+			if names := toolNames(out); !names[sandbox.ToolHTTPRequest] || len(out) != 3 {
 				t.Errorf("trigger=%s autonomy=%q: interactive run must keep all tools, got %v", trigger, autonomy, names)
 			}
 		}
@@ -70,7 +69,7 @@ func TestAutonomyRailInteractiveRunsUntouched(t *testing.T) {
 func TestAutonomyRailUnknownAutonomyFailsClosed(t *testing.T) {
 	for _, autonomy := range []string{"", "AUTO", "full", "yolo"} {
 		out := applyAutonomyRail(railFixture(), "scheduled", autonomy)
-		if names := toolNames(out); names[httptool.ToolHTTPRequest] {
+		if names := toolNames(out); names[sandbox.ToolHTTPRequest] {
 			t.Errorf("autonomy=%q: rail must fail closed, http_request present", autonomy)
 		}
 	}
@@ -80,10 +79,10 @@ func TestAutonomyRailUnknownAutonomyFailsClosed(t *testing.T) {
 // external-write tool; read-only fetchers, workspace tools, and unregistered
 // (run-derived) names are not.
 func TestToolExternalWriteMarks(t *testing.T) {
-	if !ToolExternalWrite(httptool.ToolHTTPRequest) {
+	if !ToolExternalWrite(sandbox.ToolHTTPRequest) {
 		t.Error("http_request must be marked external-write")
 	}
-	for _, name := range []string{httptool.ToolWebFetch, sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolRunShell, "run_sql", "team_board", "not_a_tool"} {
+	for _, name := range []string{sandbox.ToolWebFetch, sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolRunShell, "run_sql", "team_board", "not_a_tool"} {
 		if ToolExternalWrite(name) {
 			t.Errorf("%s must not be marked external-write", name)
 		}

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // ---------- workspace path safety ----------
@@ -361,7 +362,7 @@ func TestBench_AgentcoreLiteTTS(t *testing.T) {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set AGENTRAY_TEST_OPENAI_BASE_URL, AGENTRAY_TEST_OPENAI_API_KEY, AGENTRAY_TEST_OPENAI_MODEL to run the live benchmark")
 	}
-	rec := &probeRecorder{inner: agentcore.NewOpenAIProvider(key, base, agentcore.DefaultCompat())}
+	rec := &probeRecorder{inner: ai.NewOpenAIProvider(key, base, ai.DefaultCompat())}
 
 	problem, err := os.ReadFile("PROBLEM3.md")
 	if err != nil {

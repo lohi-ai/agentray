@@ -142,13 +142,13 @@ a plain task. Real tests are gated on `AGENTRAY_TEST_OPENAI_BASE_URL` /
 | Tool call | `loop_test.go::TestLoopRunsPermittedTool`, `TestPermittedToolsFiltersSchemas` | `agentcore_test::TestReal_ToolCall_And_WebFetch` |
 | Computer use (persistent session) | `sandbox/agent_computeruse_test.go::TestComputerUseAgent_PersistsStateAndWritesArtifact_Faux` | `…::TestComputerUseAgent_RealProvider_GeneratesDocument` |
 | Write code / run code | `…::TestComputerUseAgent_InstallAndGenerateDocument_Faux` (pip install + python → xlsx) | `…::TestComputerUseAgent_RealProvider_GeneratesDocument` |
-| Fetch web | `httptool::TestValidateURL`, `TestBlockedIP`, `TestParseAbsoluteURLRejectsRelative`, `agentcore::TestEndToEndBlocksNonAllowlistedHost` | `agentcore_test::TestReal_ToolCall_And_WebFetch` |
+| Fetch web | `sandbox::TestValidateURL`, `TestBlockedIP`, `TestParseAbsoluteURLRejectsRelative`, `agentcore::TestEndToEndBlocksNonAllowlistedHost` | `agentcore_test::TestReal_ToolCall_And_WebFetch` |
 | Browser use (real browser) | `sandbox/browser_tool_test.go::TestBrowserToolRunsThroughSandboxWithWorkspaceMount`, `TestBrowserToolThreadsBrowserScopedSession`, `sandbox/agent_browseruse_test.go::TestBrowserUseAgent_ControlsBrowser_Faux` (opens + snapshots a real page; asserts no zombie after `CloseSession`) | `sandbox/agent_browseruse_test.go::TestBrowserUseAgent_RealProvider_DrivesBrowser` |
 | Context auto-compaction | `compaction_test::TestCompactWithSummary_ReplacesOlderSpan`/`_FallsBackOnError`, `stress_test::TestLongRunStaysStableAcrossManyCompactions` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
 | Steer message mid-run | `steering_test::TestSteeringInjectedBeforeNextTurn`, `TestFollowUpRestartsLoop` | `agentcore_test::TestReal_SteeringMidRun` |
-| Todo/plan + keep across long session | `todo_test::TestTodoSurvivesCompaction`, `todo_budget_test::TestPlanUpdatesDoNotStarveTurnBudget`, `goalpin_test::TestGoalSurvivesRepeatedCompaction` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
+| Todo/plan + keep across long session | `plugins/todo::TestTodoSurvivesCompaction`, `plugins/todo::TestPlanUpdatesDoNotStarveTurnBudget`, `goalpin_test::TestGoalSurvivesRepeatedCompaction` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
 | Permission (default-deny gate) | `loop_test::TestPermissionGateBlocks`, `sandbox::TestComputerUseAgent_BlockedWithoutGrant_Faux` | proven inside every real test (default-deny allow-lists) |
-| Trace & monitoring | `tracing_test::TestTracingProviderChat`/`EndToEnd`/`Stream`, `TestPricingCost` | trace records emitted on every real run |
+| Trace & monitoring | `plugins/observe::TestTracingProviderChat`/`EndToEnd`/`Stream`, `TestPluginTracesEveryRung`, `TestPricingCost` | trace records emitted on every real run |
 | Skill use (progressive disclosure) | `skill_loading_test.go` (3 tests) | `agentcore_test::TestReal_SkillUse` |
 | Auto-improvement (reflection) | reflect parse/dispatch path (mechanical) | `agentruntime::TestReal_Reflection_ProposesImprovementFromRun` |
 
@@ -168,7 +168,7 @@ A second review pass against the Claude Code / Codex bar closed three gaps:
 ### 3. Sub-agents — `spawn_subagent` (ARCHITECT-AGENT-TEAM P1)
 
 The one structural capability Claude Code/Codex had that the harness lacked:
-context-isolated task delegation. `spawn_subagent` (built-in, `agentcore/subagent.go`)
+context-isolated task delegation. `spawn_subagent` (built-in, `agentcore/plugins/subagent`)
 forks an ephemeral child Agent for one self-contained task:
 
 - **Inherit-narrow-only:** the child copies the parent's provider, model ladder,
@@ -182,7 +182,7 @@ forks an ephemeral child Agent for one self-contained task:
   answer size (default 48 KB). Parent cancellation cancels children (shared ctx).
 - **Accounting:** child usage/cost folds into the parent `RunResult` on every
   exit path (`addChildUsage`/`takeChildUsage`); child LLM calls are traced under
-  the parent run id via the shared TracingProvider + ctx.
+  the parent run id via the shared `monitor` decorator + ctx.
 - **Observability:** on a streamed run the child's tool activity is forwarded as
   `tool_execution_update` partials (`[sub-agent] running <tool>`).
 - **Governed:** unlike `read_skill`, the tool passes the normal permission gate;
@@ -354,8 +354,18 @@ needed. Two mechanisms landed in `agentcore/`:
   payloads), and `TestLongRunContextEditingBoundsWithoutCompaction` proves a
   bulky redundant-call run stays bounded by clearing alone (≤3 summary calls
   where the same shape previously drove dozens).
+
+  **Superseded.** `contextedit.go` was removed during the plugin refactor.
+  Compaction is now the only mechanism that bounds a long transcript, so a
+  bulky redundant-call run pays for the bounding in summarization calls
+  instead of clearing them away — the guard is now
+  `TestLongRunWithBulkyResultsStaysBounded`, which asserts boundedness rather
+  than rarity. Removing it also exposed a latent hole: the per-turn rebase it
+  emitted was resetting `observe.LogInvariant` every turn, masking the fact
+  that the derived leading system prompt is not in the durable log. The
+  invariant now exempts that one message explicitly.
 - **Provider-neutral cache anchors (`cacheanchor.go`):** breakpoint *placement*
-  moved out of `anthropic.go` into the loop. `markCacheAnchors` stamps
+  moved out of the Anthropic provider (now `ai/anthropic.go`) into the loop. `markCacheAnchors` stamps
   `Message.CacheAnchor` (request-scoped, `json:"-"`, never persisted) on the
   outgoing request view — currently one moving anchor on the final message —
   and each provider only *translates*: Anthropic maps anchors to

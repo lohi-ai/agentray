@@ -7,42 +7,6 @@ import (
 	"testing"
 )
 
-// TestSpawnRetrySafetyIsCallConditional pins the spawn_subagent retry contract:
-// only self-forks are retry-safe (their child session ID is deterministic in
-// the call, so a replay reattaches), while delegate-routed spawns — which have
-// no reattach wiring — and malformed calls are not.
-func TestSpawnRetrySafetyIsCallConditional(t *testing.T) {
-	tool := &subagentTool{parent: &Agent{}}
-	for args, want := range map[string]bool{
-		`{"task":"t"}`:                   true,
-		`{"task":"t","agent":"self"}`:    true,
-		`{"task":"t","agent":"Self"}`:    true,
-		`{"task":"t","agent":"analyst"}`: false,
-		`not json`:                       false,
-	} {
-		if got := tool.RetrySafeCall(ToolCall{Name: ToolSpawnSubagent, Arguments: args}); got != want {
-			t.Errorf("RetrySafeCall(%s) = %v, want %v", args, got, want)
-		}
-	}
-
-	// Recovery classification honors the per-call verdict: a dangling self-fork
-	// is replayed, a dangling delegate spawn is dropped (closed with a note).
-	log := []SessionEntry{
-		{Kind: EntryMessage, Message: &Message{Role: RoleUser, Content: "go"}},
-		{Kind: EntryMessage, Message: &Message{Role: RoleAssistant, ToolCalls: []ToolCall{
-			{ID: "c1", Name: ToolSpawnSubagent, Arguments: `{"task":"t"}`},
-			{ID: "c2", Name: ToolSpawnSubagent, Arguments: `{"task":"t","agent":"analyst"}`},
-		}}},
-	}
-	plan := RecoverSession(log, NewToolSet(tool), RecoveryMarkInterrupted)
-	if len(plan.RetryCalls) != 1 || plan.RetryCalls[0].ID != "c1" {
-		t.Fatalf("self-fork must be retried: %+v", plan.RetryCalls)
-	}
-	if len(plan.DroppedCalls) != 1 || plan.DroppedCalls[0].ID != "c2" {
-		t.Fatalf("delegate spawn must be dropped, not replayed: %+v", plan.DroppedCalls)
-	}
-}
-
 // unreadableLogStore accepts appends but cannot read its log back.
 type unreadableLogStore struct{ *memSessionStore }
 

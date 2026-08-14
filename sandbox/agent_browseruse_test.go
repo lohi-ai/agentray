@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // End-to-end test of the browser_use tool driven through the real agent loop,
@@ -160,7 +161,7 @@ func TestBrowserUseAgent_RealProvider_DrivesBrowser(t *testing.T) {
 	sb := newBrowserSandbox(t)
 	ws := newWorkspaceDir(t)
 
-	provider := agentcore.NewOpenAIProvider(apiKey, baseURL, agentcore.DefaultCompat())
+	provider := ai.NewOpenAIProvider(apiKey, baseURL, ai.DefaultCompat())
 	agent := browserUseAgent(t, provider, model, sb, ws, agentcore.AgentDefinition{
 		Agents: "You can drive a real web browser with the browser_use tool, which runs " +
 			"`agent-browser` CLI commands in a Linux sandbox. Use a stable session, e.g. " +

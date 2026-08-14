@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/bench/judge"
 )
 
@@ -140,7 +141,7 @@ func TestBench_AgentcoreSolvesProblem(t *testing.T) {
 	if base == "" || key == "" || model == "" {
 		t.Skip("set AGENTRAY_TEST_OPENAI_BASE_URL, AGENTRAY_TEST_OPENAI_API_KEY, AGENTRAY_TEST_OPENAI_MODEL to run the live benchmark")
 	}
-	provider := agentcore.NewOpenAIProvider(key, base, agentcore.DefaultCompat())
+	provider := ai.NewOpenAIProvider(key, base, ai.DefaultCompat())
 
 	problem, err := os.ReadFile("PROBLEM.md")
 	if err != nil {

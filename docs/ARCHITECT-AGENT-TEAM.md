@@ -1,6 +1,6 @@
 # AgentRay Agent Teams
 
-**Status:** P0–P1 shipped (`spawn_subagent` lives in `agentcore/subagent.go`,
+**Status:** P0–P1 shipped (`spawn_subagent` lives in `agentcore/plugins/subagent`,
 enabled for every solo agent with the default caps). Cross-agent delegation —
 P3's `delegate(member_id, task)` — is also shipped, pulled forward without the
 team/kanban machinery: a per-agent **Teammates** grant list (FE setup tab →

@@ -12,10 +12,7 @@ import (
 )
 
 const (
-	defaultOpenAIBaseURL    = "https://api.openai.com/v1"
-	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	defaultGoogleBaseURL    = "https://generativelanguage.googleapis.com"
-	anthropicVersion        = "2023-06-01"
+	defaultGoogleBaseURL = "https://generativelanguage.googleapis.com"
 )
 
 // HTTPDoer is the injected HTTP seam so list-models and Chat share a client

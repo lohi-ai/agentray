@@ -102,7 +102,7 @@ window (no ML dependency).
 **Phase 1c — delivery + tool.**
 `internal/alerting/deliver.go`: Slack incoming-webhook JSON, SMTP (config via
 `internal/config/config.go`: `AGENTRAY_SMTP_*`), and generic webhook —
-all outbound HTTP through the existing SSRF guard in `internal/httptool/`.
+all outbound HTTP through the existing SSRF guard in `sandbox/` (httpguard.go).
 Register a `send_notification` operation in `opcore` (args: channel name,
 title, markdown body) and project it as an agent tool in `toolregistry.go`,
 default-deny like every tool. Channel secrets (webhook URLs count) go through

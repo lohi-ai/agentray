@@ -34,12 +34,12 @@ type AgentBudget struct {
 
 // BudgetSpend is the metered usage for one agent within the current period.
 type BudgetSpend struct {
-	Period    string    `json:"period"`
-	CostUSD   float64   `json:"cost_usd"`
-	Tokens    int64     `json:"tokens"`
-	Runs      int       `json:"runs"`
-	Since     time.Time `json:"since"`
-	AsOf      time.Time `json:"as_of"`
+	Period  string    `json:"period"`
+	CostUSD float64   `json:"cost_usd"`
+	Tokens  int64     `json:"tokens"`
+	Runs    int       `json:"runs"`
+	Since   time.Time `json:"since"`
+	AsOf    time.Time `json:"as_of"`
 }
 
 // BudgetStatus pairs a resolved budget with current spend and whether any limit

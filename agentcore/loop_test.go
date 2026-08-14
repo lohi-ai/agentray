@@ -687,7 +687,7 @@ type stuckProvider struct {
 }
 
 func (s *stuckProvider) Name() string        { return "stuck" }
-func (s *stuckProvider) SupportsTools() bool  { return true }
+func (s *stuckProvider) SupportsTools() bool { return true }
 func (s *stuckProvider) toolCall() ChatResponse {
 	return ChatResponse{
 		Message:    Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "x", Name: s.tool, Arguments: "{}"}}},

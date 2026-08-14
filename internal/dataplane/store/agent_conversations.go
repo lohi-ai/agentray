@@ -39,24 +39,24 @@ type AgentConversation struct {
 // conversation sync cursor (clients ask for entries > seq); ParentID carries the
 // tree (for a linear thread it is just the previous entry's id).
 type AgentConversationEntry struct {
-	ID             string    `json:"id"`
-	ConversationID string    `json:"conversation_id"`
-	ParentID       string    `json:"parent_id,omitempty"`
-	Seq            int64     `json:"seq"`
-	Kind           string    `json:"kind"` // message | compaction | tool_trace | step | model_change | branch_summary | leaf
-	Role           string    `json:"role"` // user | assistant | system (message kind)
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	ParentID       string `json:"parent_id,omitempty"`
+	Seq            int64  `json:"seq"`
+	Kind           string `json:"kind"` // message | compaction | tool_trace | step | model_change | branch_summary | leaf
+	Role           string `json:"role"` // user | assistant | system (message kind)
 	// AgentID stamps which agent authored/handled this entry. The acting agent is
 	// chosen per message (a conversation can switch agents mid-thread; the switch
 	// only affects new entries), so it lives on the entry, not the conversation.
 	// Empty for entries written before this column existed and for the project's
 	// default agent (which has no distinct id).
-	AgentID        string    `json:"agent_id,omitempty"`
-	AuthorUserID   string    `json:"author_user_id,omitempty"`
-	RunID          string    `json:"run_id,omitempty"`
-	Turn           int       `json:"turn"`
-	PayloadJSON    string    `json:"payload_json"`
-	TokenEstimate  int       `json:"token_estimate"`
-	CreatedAt      time.Time `json:"created_at"`
+	AgentID       string    `json:"agent_id,omitempty"`
+	AuthorUserID  string    `json:"author_user_id,omitempty"`
+	RunID         string    `json:"run_id,omitempty"`
+	Turn          int       `json:"turn"`
+	PayloadJSON   string    `json:"payload_json"`
+	TokenEstimate int       `json:"token_estimate"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // migrateAgentConversations creates the conversation store tables. Kept out of

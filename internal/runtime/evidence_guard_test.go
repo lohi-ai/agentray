@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 )
 
 func TestEvidenceFinishGuard(t *testing.T) {
@@ -15,14 +17,14 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	}
 
 	t.Run("numeric answer with no tools nudges", func(t *testing.T) {
-		got := guard(ctx, agentcore.FinishState{Final: "You had 1,204 signups last week."})
+		got := guard(ctx, finishguard.State{Final: "You had 1,204 signups last week."})
 		if got == "" {
 			t.Fatal("expected a nudge for an unbacked numeric answer")
 		}
 	})
 
 	t.Run("evidence tool execution accepts", func(t *testing.T) {
-		st := agentcore.FinishState{
+		st := finishguard.State{
 			Final: "You had 1,204 signups last week.",
 			Tools: []agentcore.ToolTrace{{Tool: ToolRunSQL, Allowed: true}},
 		}
@@ -32,7 +34,7 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	})
 
 	t.Run("blocked or failed tool is not evidence", func(t *testing.T) {
-		st := agentcore.FinishState{
+		st := finishguard.State{
 			Final: "42 events",
 			Tools: []agentcore.ToolTrace{
 				{Tool: ToolRunSQL, Allowed: false, Reason: "denied"},
@@ -45,7 +47,7 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	})
 
 	t.Run("write tool is not evidence", func(t *testing.T) {
-		st := agentcore.FinishState{
+		st := finishguard.State{
 			Final: "Filed a recommendation citing a 12% drop.",
 			Tools: []agentcore.ToolTrace{{Tool: ToolSubmitRec, Allowed: true}},
 		}
@@ -55,15 +57,15 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	})
 
 	t.Run("prose answer passes unguarded", func(t *testing.T) {
-		if got := guard(ctx, agentcore.FinishState{Final: "Usage is trending up; no anomalies."}); got != "" {
+		if got := guard(ctx, finishguard.State{Final: "Usage is trending up; no anomalies."}); got != "" {
 			t.Fatalf("digit-free prose must pass, got %q", got)
 		}
 	})
 
 	t.Run("delegated evidence via spawn_subagent accepts", func(t *testing.T) {
-		st := agentcore.FinishState{
+		st := finishguard.State{
 			Final: "The child agent counted 4,812 events yesterday.",
-			Tools: []agentcore.ToolTrace{{Tool: agentcore.ToolSpawnSubagent, Allowed: true}},
+			Tools: []agentcore.ToolTrace{{Tool: subagent.ToolSpawnSubagent, Allowed: true}},
 		}
 		if got := guard(ctx, st); got != "" {
 			t.Fatalf("a delegated child ran the read tools — finish must be accepted, got %q", got)
@@ -71,21 +73,21 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	})
 
 	t.Run("list numbering is not a figure", func(t *testing.T) {
-		st := agentcore.FinishState{Final: "1. Open the Dashboards tab\n2. Click New Chart"}
+		st := finishguard.State{Final: "1. Open the Dashboards tab\n2. Click New Chart"}
 		if got := guard(ctx, st); got != "" {
 			t.Fatalf("markdown step numbering must not count as figures, got %q", got)
 		}
 	})
 
 	t.Run("dates are not figures", func(t *testing.T) {
-		st := agentcore.FinishState{Final: "The schema has had no revenue column since the 2026-07-01 migration."}
+		st := finishguard.State{Final: "The schema has had no revenue column since the 2026-07-01 migration."}
 		if got := guard(ctx, st); got != "" {
 			t.Fatalf("calendar dates must not count as figures, got %q", got)
 		}
 	})
 
 	t.Run("one nudge only", func(t *testing.T) {
-		if got := guard(ctx, agentcore.FinishState{Final: "still 1,204", Nudges: 1}); got != "" {
+		if got := guard(ctx, finishguard.State{Final: "still 1,204", Nudges: 1}); got != "" {
 			t.Fatalf("second consultation must accept, got %q", got)
 		}
 	})

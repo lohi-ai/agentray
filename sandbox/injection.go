@@ -37,7 +37,7 @@ var injectionVectors = []string{
 	`(?i)(?:reveal|print|repeat|show|dump|leak)\s+(?:me\s+)?(?:your\s+)?(?:system\s+prompt|instructions|the\s+prompt)`,
 	// secret / credential exfiltration
 	`(?i)(?:print|read|cat|reveal|exfiltrate|send|leak|dump)\b.{0,40}\b(?:env(?:ironment)?\s*(?:vars?|variables?)?|secrets?|api[_\s-]?keys?|credentials?|passwords?)\b`,
-	`(?i)/proc/self/environ`,  // the canonical "read my process env" path — high-signal on its own
+	`(?i)/proc/self/environ`,   // the canonical "read my process env" path — high-signal on its own
 	`(?i)\bAKIA[0-9A-Z]{16}\b`, // literal AWS access key id
 }
 

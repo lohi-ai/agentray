@@ -6,7 +6,6 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
-	"github.com/lohi-ai/agentray/internal/shared/httptool"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -27,12 +26,12 @@ func toolNames(tools []agentcore.Tool) map[string]bool {
 }
 
 func TestResolveRunToolsNoSelectionsUsesGlobal(t *testing.T) {
-	global := fakeTool{name: httptool.ToolHTTPRequest}
+	global := fakeTool{name: sandbox.ToolHTTPRequest}
 	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, nil)
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
 	}
-	if names := toolNames(tools); !names[httptool.ToolHTTPRequest] || len(names) != 1 {
+	if names := toolNames(tools); !names[sandbox.ToolHTTPRequest] || len(names) != 1 {
 		t.Fatalf("expected only the global http_request, got %v", names)
 	}
 }
@@ -48,9 +47,9 @@ func TestResolveRunToolsNoGlobalNoSelections(t *testing.T) {
 }
 
 func TestResolveRunToolsEnabledSelectionOverridesGlobal(t *testing.T) {
-	global := fakeTool{name: httptool.ToolHTTPRequest}
+	global := fakeTool{name: sandbox.ToolHTTPRequest}
 	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, []storage.AgentToolSelection{
-		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
+		{Name: sandbox.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
 	})
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
@@ -58,16 +57,16 @@ func TestResolveRunToolsEnabledSelectionOverridesGlobal(t *testing.T) {
 	if len(tools) != 1 {
 		t.Fatalf("expected exactly one http_request (per-agent overriding global), got %d", len(tools))
 	}
-	// The per-agent build is a real *httptool.HTTPTool, not the fake global.
-	if _, ok := tools[0].(*httptool.HTTPTool); !ok {
-		t.Fatalf("expected per-agent *httptool.HTTPTool, got %T", tools[0])
+	// The per-agent build is a real *sandbox.HTTPTool, not the fake global.
+	if _, ok := tools[0].(*sandbox.HTTPTool); !ok {
+		t.Fatalf("expected per-agent *sandbox.HTTPTool, got %T", tools[0])
 	}
 }
 
 func TestResolveRunToolsDisabledSelectionSuppressesGlobal(t *testing.T) {
-	global := fakeTool{name: httptool.ToolHTTPRequest}
+	global := fakeTool{name: sandbox.ToolHTTPRequest}
 	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, global, []storage.AgentToolSelection{
-		{Name: httptool.ToolHTTPRequest, Enabled: false},
+		{Name: sandbox.ToolHTTPRequest, Enabled: false},
 	})
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
@@ -79,7 +78,7 @@ func TestResolveRunToolsDisabledSelectionSuppressesGlobal(t *testing.T) {
 
 func TestResolveRunToolsFailsClosedOnBadConfig(t *testing.T) {
 	_, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
-		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":[]}`},
+		{Name: sandbox.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":[]}`},
 	})
 	if err == nil {
 		t.Fatal("expected fail-closed error for an enabled selection with an empty allowlist")
@@ -117,12 +116,12 @@ func TestResolveRunToolsSkipsUnavailableButKeepsAvailable(t *testing.T) {
 	// proceeds with http_request rather than dying on the stale shell selection.
 	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
-		{Name: httptool.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
+		{Name: sandbox.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
 	})
 	if err != nil {
 		t.Fatalf("resolveRunTools: %v", err)
 	}
-	if names := toolNames(tools); !names[httptool.ToolHTTPRequest] || names[sandbox.ToolRunShell] || len(names) != 1 {
+	if names := toolNames(tools); !names[sandbox.ToolHTTPRequest] || names[sandbox.ToolRunShell] || len(names) != 1 {
 		t.Fatalf("expected only http_request, got %v", names)
 	}
 }

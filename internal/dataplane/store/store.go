@@ -1120,6 +1120,11 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 	if err := s.migrateAgentSessionLog(ctx); err != nil {
 		return err
 	}
+	// Spill hangs off the same runs as the session log and shares its lifetime —
+	// a locator only means anything while the log that mentions it exists.
+	if err := s.migrateAgentSpill(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateAgentConversations(ctx); err != nil {
 		return err
 	}

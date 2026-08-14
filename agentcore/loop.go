@@ -58,7 +58,7 @@ type ToolTrace struct {
 	// side effect be correlated back to the exact logical call that caused it.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// SpillLocator is set when the result was too large for the context and its
-	// full text was saved to a spill artifact (spill.go). It makes the complete
+	// full text was saved to a spill artifact (plugins/spill). It makes the complete
 	// output recoverable from the trace long after the run, not just by the model
 	// mid-run — an oversized result is no longer lost to observability either.
 	SpillLocator string `json:"spill_locator,omitempty"`
@@ -187,7 +187,15 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 		emit(StreamEvent{Type: StreamAgentEnd, Turn: res.Turns})
 	}()
 
-	res, err := a.drive(ctx, messages, task, sink, emit)
+	// The loop itself is a seam: runLoop owns the run bracket (single-flight,
+	// agent_start/agent_end, child-usage folding, failure synthesis) and hands
+	// the turn loop to whichever Driver the composition installed. A custom
+	// driver therefore inherits the bracket rather than reimplementing it.
+	driver := a.driver
+	if driver == nil {
+		driver = DefaultDriver()
+	}
+	res, err := driver.Drive(ctx, a, messages, task, sink, emit)
 	// Fold in what spawned sub-agents spent (spawn_subagent accumulates child
 	// usage out-of-band), so a parent run's accounting includes its children on
 	// every exit path.
@@ -226,19 +234,75 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	limits := a.limits
 	res = RunResult{Messages: messages}
 
-	// Background jobs (jobs.go). The owner is the durable session when there is
-	// one, else a token unique to this run — either way every job is fenced to
-	// the run that started it. The launcher rides the run context so a tool can
-	// start work that outlives its own call, and CancelAll on return means no
-	// goroutine survives the run that spawned it.
-	jobOwner := a.sessionID
-	if jobOwner == "" {
-		jobOwner = "run_" + newEntryID()
+	// The resume log is read ONCE, up front, because the run's durable goal has
+	// to be known before the extensions begin: the goal gate is an extension,
+	// and a crash-resumed run must come back gated even when the resuming caller
+	// could not re-supply the condition. Reading it here rather than inside the
+	// resume block below is what lets RunInfo carry the recovered goal.
+	var resumeLog []SessionEntry
+	if a.resumeSession && a.session != nil && a.sessionID != "" {
+		var lerr error
+		if resumeLog, lerr = a.session.Log(ctx, a.sessionID); lerr != nil {
+			// An unreadable log fails the resume rather than silently degrading to
+			// a from-scratch run: a fresh run would splice new seed messages onto
+			// the crashed run's existing log and could redo non-idempotent work
+			// that log already records.
+			return res, fmt.Errorf("resume: reading durable session log: %w", lerr)
+		}
 	}
-	jobs := newJobsPolicy(a.jobs, jobOwner, limits)
-	if jobs != nil {
-		ctx = withJobs(ctx, JobLauncher{store: jobs.store, owner: jobs.owner, base: ctx, maxBytes: jobs.maxBytes})
-		defer jobs.store.CancelAll(jobs.owner)
+	// goal is the run's effective goal-gate condition: the configured one, or —
+	// on a resume that didn't re-supply it — the one recovered from the log.
+	// The loop owns the goal as durable STATE (it writes and recovers the
+	// entry); what to DO about an unmet goal is the goal plugin's business.
+	goal := a.goal
+	if goal == "" {
+		goal = goalFromLog(resumeLog)
+	}
+
+	// Extensions: instantiate every installed capability provider for THIS run.
+	// The loop knows the interfaces in extension.go and nothing else — no plugin
+	// is named here, so a composition without spill, jobs, or retrieval simply
+	// has fewer extensions, not a different loop.
+	//
+	// The owner token fences run-scoped resources: the durable session when
+	// there is one, else a token unique to this run.
+	owner := a.sessionID
+	if owner == "" {
+		owner = "run_" + newEntryID()
+	}
+	// runTools is bound once the run's effective tool registry is assembled
+	// below. The bookkeeping predicate closes over it because extensions are
+	// created BEFORE tools are resolved (an extension may itself contribute
+	// one), so the question can only be answered later — but must be askable
+	// from the moment an extension exists.
+	var runTools *ToolSet
+	exts, xerr := beginExtensions(ctx, a.extensions, RunInfo{
+		SessionID: a.sessionID,
+		Owner:     owner,
+		Limits:    limits,
+		Depth:     DelegationDepth(ctx),
+		Durable:   a.session != nil && a.sessionID != "",
+		Session:   a.session,
+		Agent:     a,
+		Goal:      goal,
+		Bookkeeping: func(name string) bool {
+			return isBookkeeping(runTools, name)
+		},
+	})
+	if xerr != nil {
+		return res, fmt.Errorf("extension setup: %w", xerr)
+	}
+	// Contributions to the run context (a job launcher, a workspace handle) are
+	// folded before the first turn; CloseRun fires on every exit path, so
+	// nothing an extension started outlives the run that owns it.
+	ctx = exts.runContext(ctx)
+	defer exts.closeRun()
+
+	// The compaction strategy, resolved once. Nil-safe like the driver so a
+	// hand-built Agent still bounds its context.
+	compactor := a.compactor
+	if compactor == nil {
+		compactor = DefaultCompactor()
 	}
 
 	// Durable writes are buffered per turn and flushed atomically at the turn
@@ -246,14 +310,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// the whole in-flight turn rather than leaving a half-written one — which is
 	// exactly the shape RecoverSession treats as cleanly interrupted. A nil store
 	// makes both buffer and flush no-ops.
-	// "Model-visible means logged" tracker (loginvariant.go). Only meaningful on
-	// a durable run — without a log there is nothing for the history to diverge
-	// from.
-	var invariant *logInvariant
-	if a.session != nil && a.sessionID != "" {
-		invariant = newLogInvariant(a.onLogInvariantViolation != nil, a.onLogInvariantViolation)
-	}
-
 	var pending []SessionEntry
 	// lastEntryID chains this run's entries into the session tree: each buffered
 	// entry gets a stable id and points at the one before it, so any entry is a
@@ -274,14 +330,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if e.ID != "" {
 			lastEntryID = e.ID
 		}
-		// Every persisted message is one the live history is allowed to show.
-		// Tracking it HERE — at the single choke point every durable write goes
-		// through — is what makes the invariant impossible to forget: a future
-		// feature that injects a message without calling appendEntry trips the
-		// check instead of silently corrupting resume.
-		if e.Kind == EntryMessage && e.Message != nil {
-			invariant.note(*e.Message)
-		}
+		// Report every durable write to the log observers. Doing it HERE — at the
+		// single choke point every persisted entry goes through — is what lets an
+		// observer hold a property over the recorded conversation without the
+		// loop knowing what property it is checking.
+		exts.observeLogged(e)
 		pending = append(pending, e)
 	}
 	// flushCtx survives run cancellation: an aborted run must still commit its
@@ -352,32 +405,24 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	skills := a.def.enabledSkills()
 
 	// Effective tool registry for this run = the host tools, plus the built-in
-	// read_skill tool when the definition carries skills, plus the built-in
-	// spawn_subagent tool when delegation is enabled and this run is still
-	// above the nesting cap (the depth rides the ctx so it survives crossing
-	// into another agent's run; a run at MaxDepth is not offered the tool, so
-	// delegation bottoms out structurally). Both additions clone the set, so
-	// the shared base ToolSet is never mutated per run.
+	// read_skill tool when the definition carries skills, plus whatever the
+	// extensions contributed. Every addition clones the set, so the shared base
+	// ToolSet is never mutated per run.
 	tools := a.tools
 	if len(skills) > 0 {
 		tools = withReadSkill(tools, a.def)
 	}
-	if a.subagents != nil && DelegationDepth(ctx) < a.subagents.normalized().MaxDepth {
-		tools = withSubagent(tools, a)
+	// The loop does not know which extension contributed what, and does not
+	// need to: an extension that has nothing to offer this run declined it at
+	// BeginRun (delegation already at max depth, no store to spill into), so
+	// "should this tool be advertised?" was answered before we got here.
+	extTools, extExempt := exts.contributedTools()
+	if len(extTools) > 0 {
+		tools = tools.With(extTools...)
 	}
-	if a.spill != nil {
-		tools = tools.With(&readSpillTool{policy: a.spill})
-	}
-	if jobs != nil {
-		tools = withJobTools(tools, jobs)
-	}
-	if sq := newSessionQueryPolicy(a.sessionQuery, a.session, a.sessionID); sq != nil {
-		tools = tools.With(&sessionQueryTool{policy: sq})
-	}
-
-	// Repeated-tool-call chain (per run, so a new run never inherits a chain).
-	// The settings were validated in New, so the error here cannot fire.
-	repeatChain, _ := newRepeatGuard(a.repeatGuard)
+	// Bind the run's final registry so RunInfo.Bookkeeping answers about the
+	// tools that actually exist this run, extension-contributed ones included.
+	runTools = tools
 
 	// Circuit-breaker state (per run): consecutive failures per tool, and the set
 	// of tools disabled after crossing maxToolFailures. A disabled tool is dropped
@@ -443,21 +488,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// needs no special step — the reduced history still carries the full span,
 	// so the in-loop compaction guard simply fires again.
 	resumed := false
-	// goal is the run's effective goal-gate condition: the configured one, or —
-	// on a resume that didn't re-supply it — the one recovered from the durable
-	// log below, so a crashed /goal run never resumes ungated.
-	goal := a.goal
-	if a.resumeSession && a.session != nil && a.sessionID != "" {
-		slog, lerr := a.session.Log(ctx, a.sessionID)
-		if lerr != nil {
-			// An unreadable log fails the resume rather than silently degrading to
-			// a from-scratch run: a fresh run would splice new seed messages onto
-			// the crashed run's existing log and could redo non-idempotent work
-			// that log already records.
-			return res, fmt.Errorf("resume: reading durable session log: %w", lerr)
-		}
-		if len(slog) > 0 {
-			plan := RecoverSession(slog, tools, RecoveryMarkInterrupted)
+	{
+		if len(resumeLog) > 0 {
+			plan := RecoverSession(resumeLog, tools, RecoveryMarkInterrupted)
 			switch {
 			case plan.Completed:
 				if final := strings.TrimSpace(lastAssistantText(plan.Messages)); final != "" {
@@ -474,10 +507,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// A recovered history came OUT of the log, so it satisfies the
 				// invariant by definition; seed the tracker with it or every
 				// resumed run would report its whole history as unlogged.
-				invariant.noteAll(plan.Messages)
-				if goal == "" {
-					goal = plan.Goal
-				}
+				exts.observe(ctx, PhaseAppend, res.Turns, plan.Messages)
 				for _, name := range plan.DisabledTools {
 					disabledTools[name] = true
 				}
@@ -507,7 +537,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 					if disabledTools[call.Name] {
 						out = disabledOutcome(call)
 					} else {
-						out = a.runToolCall(ctx, tools, call, limits, emitUpdate)
+						out = a.runToolCall(ctx, exts, extExempt, tools, call, limits, emitUpdate)
 					}
 					applyBreaker(out, &out.message)
 					if out.executed {
@@ -575,12 +605,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 	}
 	system := buildSystemPrompt(a.def, recalled, skills)
-	// A goal-gated run learns the completion protocol up front: the contract
-	// rides in the system prompt (fresh and resumed runs alike — the system
-	// message is rebuilt every run; on a resume the goal itself comes back via
-	// the log's EntryGoal when the caller didn't re-supply it).
-	if goal != "" {
-		system += goalContract(goal)
+	// Extensions that hold the model to a protocol state it here, up front,
+	// where it costs one fixed prefix instead of a per-turn reminder. Appended
+	// in composition order and on every run alike — the system message is
+	// rebuilt each run, so a resumed run re-states the same contract.
+	for _, section := range exts.systemPrompt() {
+		system += "\n\n" + section
 	}
 
 	// before_agent_start (P10): the last seam that can shape the FIRST request.
@@ -662,17 +692,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// budgetFinalizing latches once the budget gate trips: the loop injects one
 	// tool-free wrap-up turn and then stops with StopReason "budget_exhausted".
 	budgetFinalizing := false
-	// finishNudges counts verify-on-stop injections so an unsatisfiable
-	// FinishGuard cannot loop the run against MaxTurns (cap: maxFinishNudges).
-	finishNudges := 0
-	// goalNudges / lastGoalFinal drive the goal gate's stall breaker: after a
-	// nudge, a finish repeating the previous answer verbatim is accepted as
-	// "goal_stalled" instead of burning turns until MaxTurns.
-	goalNudges := 0
-	lastGoalFinal := ""
-	// freeTurns refunds turns spent only on plan bookkeeping (update_plan) so the
-	// built-in todo list can't starve the MaxTurns budget on a long task. The
-	// MaxToolCalls budget still backstops a runaway planning loop.
+	// freeTurns refunds turns spent only on bookkeeping tools (see
+	// BookkeepingTool) so self-management can't starve the MaxTurns budget on a
+	// long task. The MaxToolCalls budget still backstops a runaway loop.
 	freeTurns := 0
 	for res.Turns-freeTurns < limits.MaxTurns {
 		// Honor cancellation between turns so an aborted viewer (SSE client gone)
@@ -770,29 +792,15 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			system = state.System
 		}
 
-		// Cheap context editing before compaction: past the soft threshold (half
-		// the compaction budget) clear superseded, stale, and bulky old tool
-		// results in place — deterministic, no LLM call. It runs independently of
-		// compaction below (both may fire on one turn; they share the single
-		// cache-prefix invalidation): editing keeps tool bulk down between
-		// compactions and makes the compaction summarization span cheaper, while
-		// compaction alone bounds growth the editor can't touch (user/assistant
-		// text).
 		// The keep-recent window is clamped to the actual budget so a small
 		// MaxContextTokens cannot leave compaction with "nothing old enough".
 		compaction := effectiveCompaction(a.compaction, limits.MaxContextTokens)
-		res.Messages, _ = editContext(res.Messages, limits.MaxContextTokens, compaction)
-		// The context editor rewrites superseded tool results in place. That is
-		// a deterministic function of the logged history — a resume replays the
-		// same log and derives the same edit — so it rebases the invariant
-		// rather than tripping it.
-		invariant.rebase(res.Messages)
 
 		// Stop guard: compact old turns when the estimated context approaches
 		// the model window so long autonomous runs stay bounded (§5.2). The older
 		// span is summarized by the active rung's model into a structured
 		// checkpoint; on any failure it degrades to a deterministic elide.
-		if shouldCompact(res.Messages, limits.MaxContextTokens) {
+		if compactor.ShouldCompact(res.Messages, limits.MaxContextTokens) {
 			// before_compact (P10): the consumer may defer this compaction or supply
 			// its own — a domain summarizer, or a cut that pins content the default
 			// would drop. Asked before any durable bracket is written, so a skipped
@@ -824,10 +832,27 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				}
 				// Bracket the compaction in the durable log: a start entry, then the
 				// completion. A start with no completion (crash mid-compaction) tells
-				// recovery to re-run it.
+				// recovery to re-run it. The bracket is the LOOP's, not the
+				// compactor's — a strategy that forgot to record what it did would
+				// leave a resumed run unable to tell a compacted history from a
+				// truncated one.
 				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
 				var cu Usage
-				res.Messages, cu = compactWithSummary(ctx, compactProvider, compactModel, res.Messages, compaction)
+				out, cerr := compactor.Compact(ctx, CompactionRequest{
+					Messages: res.Messages,
+					Budget:   limits.MaxContextTokens,
+					Turn:     res.Turns,
+					Settings: compaction,
+					Provider: compactProvider,
+					Model:    compactModel,
+				})
+				// A compactor that fails leaves the transcript alone: an oversized
+				// context still answers, while a killed run loses the whole thing.
+				// The bracket still closes, so recovery sees a completed attempt
+				// rather than a dangling one it would re-run forever.
+				if cerr == nil && len(out.Messages) > 0 {
+					res.Messages, cu = out.Messages, out.Usage
+				}
 				// The summarization call is real billable spend: fold it into the
 				// run's accounting and stamp it on the completion entry so the audit
 				// trail shows what compaction itself cost (pi #6671).
@@ -841,22 +866,18 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// Compaction replaces the transcript wholesale, but the log carries
 			// the bracket that says so and recovery re-derives the same shape, so
 			// the rewritten history is the new baseline for the invariant.
-			invariant.rebase(res.Messages)
+			exts.observe(ctx, PhaseRebase, res.Turns, res.Messages)
 		}
 
-		// Background-job completion notices: announce work that finished since the
-		// last turn as a synthetic user message, persisted like a steer. Without
-		// this the model has to poll job_status — burning a turn per check, and
-		// never learning the outcome at all if it forgets to look. Drained before
-		// steering so the model reads the results it was waiting on first.
-		if jobs != nil && jobs.notify {
-			if done := jobs.store.DrainCompleted(jobs.owner); len(done) > 0 {
-				if notice := completionNotice(done, jobNoticeInlineLimit); notice != "" {
-					m := Message{Role: RoleUser, Content: notice}
-					res.Messages = append(res.Messages, m)
-					appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
-				}
-			}
+		// Per-turn extension injections: anything an extension needs the model to
+		// know for THIS turn (a background job finished, external state moved).
+		// Drained before steering so the model reads results it was waiting on
+		// first, and persisted here so an injection can never be model-visible
+		// but absent from the log.
+		for _, m := range exts.beforeStep(ctx, StepInfo{Turn: res.Turns, Model: state.Model, Usage: res.Usage}) {
+			m := m
+			res.Messages = append(res.Messages, m)
+			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 		}
 
 		// Steering: drain any user-injected corrections queued since the last turn
@@ -865,10 +886,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if a.getSteering != nil {
 			for _, m := range a.getSteering(ctx) {
 				m := m
-				// New human input breaks the repeat chain: the model has been
-				// given information it did not have, so a call it now repeats is
-				// a fresh decision, not a continuation of the old loop.
-				repeatChain.reset()
+				// New human input is reported to the extensions: one tracking the
+				// model's own behavior must treat this as a break, because the
+				// model now has information it did not have.
+				exts.observe(ctx, PhaseExternalInput, res.Turns, []Message{m})
 				res.Messages = append(res.Messages, m)
 				// Persist the drained steer: the model acts on it this turn, so a
 				// resume that rebuilt history without it would replay a different
@@ -892,7 +913,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// NOT the post-hook request view. Context hooks are documented to shape
 		// the outgoing request without mutating persisted history, so checking
 		// after them would flag every redaction as a violation.
-		invariant.check(res.Turns, res.Messages)
+		exts.observe(ctx, PhaseRequest, res.Turns, res.Messages)
 
 		reqMessages, herr := a.hooks.runContext(ctx, res.Messages)
 		if herr != nil {
@@ -953,54 +974,37 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				flush()
 				return res, nil
 			}
-			// Goal gate (/goal): a goal-gated run may only stop when the answer
-			// declares STATUS: DONE or STATUS: BLOCKED (contract in the system
-			// prompt). Otherwise inject a keep-going nudge — persisted like a
-			// steer — and continue. Runs before the finish guard: an unmet goal
-			// makes any verify pass on this answer moot. A budget wrap-up never
-			// reaches here (returned above), and MaxTurns / MaxToolCalls still
-			// bound the extended loop. The stall breaker accepts a verbatim
-			// repeat of the previous nudged answer so a model with nothing new
-			// to say stops as "goal_stalled" instead of spinning.
-			if goal != "" && !goalSatisfied(res.Final) {
-				if goalNudges > 0 && res.Final == lastGoalFinal {
-					res.StopReason = "goal_stalled"
-					endTurn(true)
-					appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
-					flush()
-					return res, nil
+			// Stop interception: before accepting the finish, let the extensions
+			// hold the run to whatever contract they own (a completion sentinel,
+			// a verification pass, an evidence requirement). The injected message
+			// is persisted like a steer so a resume replays the same conversation.
+			//
+			// Runs before the follow-up drain — a stop interceptor is about the
+			// answer just produced, while follow-ups are new input for after an
+			// accepted finish.
+			if stop, _ := exts.turnStopping(ctx, StopInfo{Final: res.Final, Turns: res.Turns, Tools: res.Tools}); stop.Continue {
+				// The injection is new material in the conversation, so it is
+				// reported like a steer: an extension tracking what the model has
+				// been told (a repeat detector, a transcript mirror) must not
+				// treat the turn after a nudge as a continuation of the one
+				// before it.
+				exts.observe(ctx, PhaseExternalInput, res.Turns, stop.Inject)
+				for _, m := range stop.Inject {
+					m := m
+					res.Messages = append(res.Messages, m)
+					appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 				}
-				goalNudges++
-				lastGoalFinal = res.Final
-				m := Message{Role: RoleUser, Content: goalNudge(goal)}
-				res.Messages = append(res.Messages, m)
-				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
-				emit(StreamEvent{Type: StreamProgress, Note: "Goal not met — continuing.", Turn: res.Turns})
+				if stop.Note != "" {
+					// Curated note, not the raw injection: progress notes reach the
+					// end user's chat feed, while the injection is internal rail
+					// scaffolding.
+					emit(StreamEvent{Type: StreamProgress, Note: stop.Note, Turn: res.Turns})
+				}
 				endTurn(true)
 				flush()
 				continue
-			}
-			// Finish guard (verify-on-stop): before accepting the finish, let a
-			// configured guard inspect the answer + tool trace and demand one
-			// bounded verify/repair pass. The nudge is persisted like a steer so a
-			// resume replays the same conversation. Runs before the follow-up drain
-			// — the guard is about the answer just produced, while follow-ups are
-			// new input for after an accepted finish.
-			if a.finishGuard != nil && finishNudges < maxFinishNudges {
-				state := FinishState{Final: res.Final, Turns: res.Turns, Tools: res.Tools, Nudges: finishNudges}
-				if nudge := consultFinishGuard(ctx, a.finishGuard, state); nudge != "" {
-					finishNudges++
-					m := Message{Role: RoleUser, Content: nudge}
-					res.Messages = append(res.Messages, m)
-					appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
-					// Curated note, not the raw nudge: progress notes reach the end
-					// user's chat feed (same pattern as the goal gate above), while
-					// the nudge text itself is internal rail scaffolding.
-					emit(StreamEvent{Type: StreamProgress, Note: "Verifying the answer before finishing.", Turn: res.Turns})
-					endTurn(true)
-					flush()
-					continue
-				}
+			} else if stop.StopReason != "" {
+				res.StopReason = stop.StopReason
 			}
 			// Follow-up: after the agent would stop, drain any queued follow-up
 			// messages and restart the loop instead of returning, so a conversation
@@ -1008,9 +1012,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// still bounds the extended loop.
 			if a.getFollowUp != nil {
 				if follow := a.getFollowUp(ctx); len(follow) > 0 {
-					// A follow-up is new human input; break the repeat chain for
-					// the same reason a steer does.
-					repeatChain.reset()
+					// A follow-up is new human input; report it for the same
+					// reason a steer is reported.
+					exts.observe(ctx, PhaseExternalInput, res.Turns, follow)
 					for _, m := range follow {
 						m := m
 						res.Messages = append(res.Messages, m)
@@ -1089,7 +1093,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				if disabledTools[calls[lo].Name] {
 					outcomes[lo] = disabledOutcome(calls[lo])
 				} else {
-					outcomes[lo] = a.runToolCall(ctx, tools, calls[lo], limits, emitUpdate)
+					outcomes[lo] = a.runToolCall(ctx, exts, extExempt, tools, calls[lo], limits, emitUpdate)
 				}
 			} else {
 				var wg sync.WaitGroup
@@ -1104,7 +1108,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 							outcomes[i] = disabledOutcome(calls[i])
 							return
 						}
-						outcomes[i] = a.runToolCall(ctx, tools, calls[i], limits, emitUpdate)
+						outcomes[i] = a.runToolCall(ctx, exts, extExempt, tools, calls[i], limits, emitUpdate)
 					}(i)
 				}
 				wg.Wait()
@@ -1116,6 +1120,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// trace, append its tool-result message, count real executions against the
 		// budget, and propagate terminate.
 		terminate := false
+		// extra buffers whatever the extensions asked to add on account of an
+		// individual call. It is NOT appended here: a tool result must follow its
+		// call with nothing in between, so the buffer drains after every result
+		// in the batch has landed.
+		var extra []Message
 		for i := range outcomes {
 			msg := outcomes[i].message
 			applyBreaker(outcomes[i], &msg)
@@ -1125,6 +1134,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if outcomes[i].executed {
 				toolCallCount++
 			}
+			extra = append(extra, outcomes[i].extra...)
 			terminate = terminate || outcomes[i].terminate
 		}
 
@@ -1139,26 +1149,26 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			return res, nil
 		}
 
-		// Repeated-tool-call reminder: if this batch pushed a run of identical
-		// calls to a configured threshold, inject the advisory as a synthetic
-		// user message AFTER the tool results, so the model reads its own
-		// repeated output and the reminder together. Persisted like a steer, so
-		// a resumed run sees the same conversation it was actually given —
-		// "model-visible means logged" (see assertLogged below). Never fires on
-		// a terminating turn: that run is already over.
-		if nudge := repeatChain.observe(calls); nudge != "" {
-			m := Message{Role: RoleUser, Content: nudge}
+		// Additional contexts: messages the extensions asked to add because of
+		// this batch — per-call (buffered above) and per-batch. They land AFTER
+		// every tool result, never interleaved, so tool-call/result adjacency
+		// holds. The core owns the append and the persist, so anything the model
+		// can see is in the durable log by construction ("model-visible means
+		// logged", see assertLogged below) and no extension touches the log.
+		// Never fires on a terminating turn: that run is already over.
+		for _, m := range append(extra, exts.interceptBatch(ctx, calls)...) {
+			m := m
 			res.Messages = append(res.Messages, m)
 			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
 			// Deliberately not emitted as a StreamProgress note: progress notes
-			// reach the end user, and the reminder is internal rail scaffolding.
+			// reach the end user, and batch injections are internal scaffolding.
 		}
 
 		// Refund a turn that did nothing but update the run plan: plan bookkeeping
 		// is not productive progress, so it must not consume the MaxTurns budget on
 		// a long multi-step task (the MaxToolCalls budget still backstops a runaway
 		// planner).
-		if allBookkeeping(calls) {
+		if allBookkeeping(tools, calls) {
 			freeTurns++
 		}
 
@@ -1190,18 +1200,38 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 }
 
 // allBookkeeping reports whether every call in a turn's batch is a non-productive
-// run-plan update (update_plan). Such turns are refunded against MaxTurns so the
-// built-in todo list can't starve a long, multi-step task.
-func allBookkeeping(calls []ToolCall) bool {
+// turn: every call went to a tool that declares itself BookkeepingTool. Such
+// turns are refunded against MaxTurns so self-management (keeping a plan
+// current) can't starve a long, multi-step task.
+//
+// The question is asked of the TOOL, never of a name the loop knows: a planning
+// capability lives in its own package, and the loop must keep working when that
+// package is not installed.
+func allBookkeeping(tools *ToolSet, calls []ToolCall) bool {
 	if len(calls) == 0 {
 		return false
 	}
 	for _, c := range calls {
-		if c.Name != ToolUpdatePlan {
+		if !isBookkeeping(tools, c.Name) {
 			return false
 		}
 	}
 	return true
+}
+
+// isBookkeeping resolves a tool name against the run's registry and asks the
+// tool itself. An unknown tool is not bookkeeping: a call the run cannot even
+// dispatch must never buy back a turn.
+func isBookkeeping(tools *ToolSet, name string) bool {
+	if tools == nil {
+		return false
+	}
+	t, ok := tools.Get(name)
+	if !ok {
+		return false
+	}
+	bk, ok := t.(BookkeepingTool)
+	return ok && bk.Bookkeeping()
 }
 
 // toolOutcome is the result of executing one tool call: the persisted trace, the
@@ -1212,6 +1242,10 @@ type toolOutcome struct {
 	message   Message
 	terminate bool
 	executed  bool
+	// extra are messages an extension asked to add because of this call. They
+	// are buffered and appended by the caller AFTER every result in the batch,
+	// so tool-call/result adjacency is never broken.
+	extra []Message
 }
 
 // runToolCall takes a single model tool call through lookup -> prepareArguments
@@ -1219,7 +1253,7 @@ type toolOutcome struct {
 // afterToolCall. It touches no shared run state, so it is safe to call
 // concurrently for parallel-eligible tools; budget counting and trace recording
 // happen in the caller, in order.
-func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, limits Limits, emitUpdate func(ToolCall, string)) toolOutcome {
+func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[string]bool, tools *ToolSet, call ToolCall, limits Limits, emitUpdate func(ToolCall, string)) toolOutcome {
 	trace := ToolTrace{Tool: call.Name, Args: call.Arguments}
 
 	tool, ok := tools.Get(call.Name)
@@ -1252,7 +1286,7 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 	// away (the store is fenced to the run's session id). Requiring every
 	// marketplace preset to enumerate them would be friction with no security
 	// value.
-	if !gateExemptTools[call.Name] {
+	if !gateExemptTools[call.Name] && !exempt[call.Name] {
 		if d := a.hooks.runBefore(ctx, gated); !d.Allow {
 			trace.Allowed = false
 			trace.Reason = d.Reason
@@ -1293,15 +1327,22 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 	execStart := time.Now()
 	out, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
-	// Bound the result for the model. With a spill store configured the overflow
-	// is SAVED and reachable via read_spill; without one it is head+tail
-	// truncated, keeping the beginning AND end because the end often carries the
-	// signal (a shell error after pages of build output, the final rows of a
-	// query, a stack trace's cause) — but losing the middle for good.
-	var spillLoc string
-	out, spillLoc = a.applySpill(ctx, gated, out, limits)
-	trace.SpillLocator = spillLoc
+	// Bound the result for the model. Interceptors see the RAW output first,
+	// because a lossless bounding strategy (persist the whole thing, hand back a
+	// preview plus a locator) cannot be built on top of an already-truncated
+	// string. Whichever one replaces the result owns the bound; if none does,
+	// the loop falls back to head+tail truncation — keeping the beginning AND
+	// end, because the end often carries the signal (a shell error after pages
+	// of build output, the final rows of a query, a stack trace's cause) — and
+	// the middle is gone for good. The loop does not know which extension, if
+	// any, took the job.
+	out, meta, extra, replaced, extTerm := exts.interceptToolResult(ctx, gated, out, runErr)
+	if !replaced {
+		out = truncateMiddle(out, limits.MaxToolResultLen)
+	}
+	trace.SpillLocator = meta
 	out, term := a.hooks.runAfter(ctx, gated, out, runErr)
+	term = term || extTerm
 
 	trace.Allowed = true
 	if runErr != nil {
@@ -1309,7 +1350,7 @@ func (a *Agent) runToolCall(ctx context.Context, tools *ToolSet, call ToolCall, 
 		out = "error: " + runErr.Error()
 	}
 	trace.ResultMeta = fmt.Sprintf("%d bytes in %dms", len(out), trace.LatencyMS)
-	return toolOutcome{trace: trace, message: toolResult(call, out), terminate: term, executed: true}
+	return toolOutcome{trace: trace, message: toolResult(call, out), terminate: term, executed: true, extra: extra}
 }
 
 // isParallelTool reports whether one call targets a registered tool that opts
@@ -1394,7 +1435,7 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 		lastErr = err
 		// A cancellation or a non-retryable error won't improve with another attempt:
 		// hand it to the escalation logic immediately.
-		if ctx.Err() != nil || !isRetryable(err) {
+		if ctx.Err() != nil || !IsRetryable(err) {
 			return ChatResponse{}, err
 		}
 	}

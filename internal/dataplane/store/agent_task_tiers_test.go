@@ -36,9 +36,9 @@ func TestAgentTaskTiersMerge(t *testing.T) {
 func TestAgentTaskTiersMergeRejectsGarbage(t *testing.T) {
 	// Unknown kinds and unknown tier values are dropped, falling back to defaults.
 	got := AgentTaskTiers{
-		"bogus_kind":   "lite",   // unknown kind
-		TaskTriage:     "ultra",  // unknown tier value
-		TaskReflection: "flash",  // valid override
+		"bogus_kind":   "lite",  // unknown kind
+		TaskTriage:     "ultra", // unknown tier value
+		TaskReflection: "flash", // valid override
 	}.merge()
 	if _, ok := got["bogus_kind"]; ok {
 		t.Error("unknown kind must not survive merge")

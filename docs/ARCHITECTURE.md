@@ -24,7 +24,7 @@ extensible without becoming three products.
 │  ingest · connector · store · usecase · alerting     │
 └──────────────────────────────────────────────────────┘
 
-internal/shared  — config, cronx, credential, opcore, httptool
+internal/shared  — config, cronx, credential, opcore, mcpclient
 internal/app     — composition root (HTTP). cmd/ wires it.
 ```
 
@@ -40,7 +40,7 @@ enforces this.
 | Workloads | `internal/workloads` | (none) | shared, dataplane, runtime, channels, app |
 | Runtime | `internal/runtime` | shared, dataplane, agentcore, sandbox | channels, workloads, app |
 | Dataplane | `internal/dataplane/{ingest,connector,store,usecase,alerting}` | shared | channels, workloads, runtime, app |
-| Shared | `internal/shared/{config,cronx,credential,opcore,httptool}` | (none of the layers) | channels, workloads, runtime, dataplane, app |
+| Shared | `internal/shared/{config,cronx,credential,opcore,mcpclient}` | (none of the layers) | channels, workloads, runtime, dataplane, app |
 
 Persistence (`store`) lives in dataplane. The pack catalog lives in
 workloads; `app.New` injects it into store via `SetPackCatalog` so store

@@ -17,18 +17,22 @@ type fakeMsg struct {
 	deliv   uint64
 	payload []byte
 
-	mu      sync.Mutex
-	acked   bool
-	nakked  bool
-	termed  bool
+	mu     sync.Mutex
+	acked  bool
+	nakked bool
+	termed bool
 }
 
-func (m *fakeMsg) ack() error                { m.mu.Lock(); m.acked = true; m.mu.Unlock(); return nil }
-func (m *fakeMsg) nak(time.Duration) error   { m.mu.Lock(); m.nakked = true; m.mu.Unlock(); return nil }
-func (m *fakeMsg) term() error               { m.mu.Lock(); m.termed = true; m.mu.Unlock(); return nil }
-func (m *fakeMsg) deliveries() uint64        { return m.deliv }
-func (m *fakeMsg) body() []byte              { return m.payload }
-func (m *fakeMsg) state() (bool, bool, bool) { m.mu.Lock(); defer m.mu.Unlock(); return m.acked, m.nakked, m.termed }
+func (m *fakeMsg) ack() error              { m.mu.Lock(); m.acked = true; m.mu.Unlock(); return nil }
+func (m *fakeMsg) nak(time.Duration) error { m.mu.Lock(); m.nakked = true; m.mu.Unlock(); return nil }
+func (m *fakeMsg) term() error             { m.mu.Lock(); m.termed = true; m.mu.Unlock(); return nil }
+func (m *fakeMsg) deliveries() uint64      { return m.deliv }
+func (m *fakeMsg) body() []byte            { return m.payload }
+func (m *fakeMsg) state() (bool, bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.acked, m.nakked, m.termed
+}
 
 // A message whose insert succeeds must be acked (never redelivered).
 func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {

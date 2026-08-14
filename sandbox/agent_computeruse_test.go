@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // This file is the end-to-end test of the computer_use tool driven through the
@@ -283,7 +284,7 @@ func TestComputerUseAgent_RealProvider_GeneratesDocument(t *testing.T) {
 	sb := newComputerUseSandbox(t)
 	ws := newWorkspaceDir(t)
 
-	provider := agentcore.NewOpenAIProvider(apiKey, baseURL, agentcore.DefaultCompat())
+	provider := ai.NewOpenAIProvider(apiKey, baseURL, ai.DefaultCompat())
 	agent, err := agentcore.New(agentcore.Config{
 		Provider: provider,
 		Model:    model,
