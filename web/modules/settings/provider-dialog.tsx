@@ -12,7 +12,7 @@ import { Button } from '@/modules/shared/components/signal-primitives';
 // from each active provider's list-models API. Only the escape hatch is
 // renamed: `openai-compat` still goes over the wire, but a non-technical owner
 // reads it as the advanced choice it is, not a fourth equal vendor.
-export const VENDOR_KINDS = [
+const VENDOR_KINDS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'google', label: 'Google Gemini' },
@@ -25,11 +25,11 @@ export function vendorLabel(vendor: string): string {
 
 // Anything that is not one of the three first-party vendors is reached through
 // an OpenAI-compatible endpoint, and that endpoint has to be typed in.
-export function vendorNeedsBaseURL(vendor: string): boolean {
+function vendorNeedsBaseURL(vendor: string): boolean {
   return vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google';
 }
 
-export type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
+type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
 
 const emptyDraft = (): ProviderDraft => ({ vendor: 'openai', name: '', base_url: '', api_key: '' });
 

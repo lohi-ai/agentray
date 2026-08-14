@@ -62,7 +62,14 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
   };
 }
 
-type TestState = { at: number; ok: boolean; tiers: Record<string, { ok: boolean; error?: string }> };
+// `models` snapshots what each tier pointed at when the check ran. Reading the
+// live draft instead would relabel a finished result with a model that was
+// never called, the moment the user touches a picker.
+type TestState = {
+  ok: boolean;
+  tiers: Record<string, { ok: boolean; error?: string }>;
+  models: Record<string, string>;
+};
 
 export function ModelsTab() {
   const {
@@ -155,7 +162,13 @@ export function ModelsTab() {
     setTestState(null);
     try {
       const res: AgentConfigTestResult = await testModels();
-      setTestState({ at: Date.now(), ok: res.ok, tiers: res.tiers ?? {} });
+      setTestState({
+        ok: res.ok,
+        tiers: res.tiers ?? {},
+        // The server tests the *saved* pool, not the draft on screen — label
+        // the result with what it actually called.
+        models: { flash: models.model, lite: models.lite_model, pro: models.pro_model },
+      });
     } catch {
       // useWorkspaceModels already surfaced the failure as a toast; leaving
       // testState null keeps the last good result from being misread as new.
@@ -272,14 +285,17 @@ export function ModelsTab() {
                 </div>
               );
             })}
-            {orphanErrors.length ? (
-              <div role="alert" className="flex items-start gap-1.5 text-[12px] text-danger">
-                <AlertTriangle size={13} className="mt-0.5 flex-none" />
-                <span>{orphanErrors.join(' · ')}</span>
-              </div>
-            ) : null}
           </div>
         )}
+        {/* A failure whose provider row is gone — the two queries settle
+            independently, so this also covers "the last provider was just
+            deleted", where there is no row to attach it to at all. */}
+        {orphanErrors.length ? (
+          <div role="alert" className="mt-2 flex items-start gap-1.5 text-[12px] text-danger">
+            <AlertTriangle size={13} className="mt-0.5 flex-none" />
+            <span>{orphanErrors.join(' · ')}</span>
+          </div>
+        ) : null}
       </Panel>
 
       {/* ---- Step 2 ---- */}
@@ -348,7 +364,7 @@ export function ModelsTab() {
               <div className="flex flex-col gap-1.5">
                 {TIERS.map((tier) => {
                   const result = testState.tiers[tier.key];
-                  const model = draft[tier.key].model;
+                  const model = testState.models[tier.key];
                   return (
                     <div key={tier.key} className="flex flex-wrap items-baseline gap-2 text-[12.5px]">
                       {!result ? (
