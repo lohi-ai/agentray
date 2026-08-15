@@ -80,7 +80,13 @@ function applyToolUpdate(steps: ChatStep[] | undefined, callID: string, note: st
   return list;
 }
 import { WorkPanel, type PanelTab } from './chat-panel';
-import { useChatThreads, isDraft } from './use-chat-threads';
+import { useChatThreads, isDraft, mergeDelta, syncSeq } from './use-chat-threads';
+
+// Identity for a message this tab just made up. It carries no server cursor
+// (`seq`), which is exactly how the sync merge recognises it as unreconciled and
+// adopts the server's id onto it when the same message comes back.
+let localCounter = 0;
+const localID = () => `local:${Date.now().toString(36)}-${(localCounter++).toString(36)}`;
 
 // Stable StackSheet ids for the narrow-mode chat docks (module scope so they stay
 // referentially constant across renders for effect dependency lists).
@@ -93,7 +99,7 @@ export function ChatPage() {
   const router = useRouter();
   const { chatStream, conversationSend, cancelChat, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
-  const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation } = useChatThreads(projectID);
+  const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation } = useChatThreads(projectID);
 
   // Below this width the chat column can't comfortably share space with both
   // side docks, so the rail and panel switch from docked columns to right-pinned
@@ -132,6 +138,11 @@ export function ChatPage() {
   // `messages` went stale across an await (stop() and steer() both do).
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; });
+  // The assistant message the live stream is writing into. A ref, not a closure
+  // capture, because steering mid-run *moves* the target: the answer so far
+  // settles above the user's redirect and the rest streams into a new message
+  // below it, so the tokens keep landing where the user is looking.
+  const streamTargetRef = useRef('');
 
   // Arriving via a deep-linked question (/chat?q=…, e.g. from the dashboard's
   // "Ask the agent") prefills the composer once so the user can hit send.
@@ -218,7 +229,12 @@ export function ChatPage() {
   // First session: a workspace that has never run an agent gets the FirstRunPanel
   // instead of the chip wall. The gate keys off *runs*, not events — signup seeds
   // a populated Demo project, so an events-based check would never turn off.
-  const firstRun = isFirstRun({ runs, runsReady, turnCount: messages.length });
+  // A turn is one thing the user asked, so it is counted in user messages —
+  // never in `messages.length`, which is two per exchange now that a message is
+  // a message. Steering makes even that a floor rather than an exact count, but
+  // both consumers only care whether the user is still on their first ask.
+  const turnCount = useMemo(() => messages.filter((m) => m.role === 'user').length, [messages]);
+  const firstRun = isFirstRun({ runs, runsReady, turnCount });
   // Whether the seeded first-run prompt was fired from this session. Local state,
   // not derived: once the user has watched the run, the handoff belongs to that
   // turn, and a reload legitimately drops back to the ordinary thread view.
@@ -231,9 +247,7 @@ export function ChatPage() {
     started: firstRunFired,
     settled: !streaming && !!lastMessage?.done,
     failed: !lastMessage?.text || needsKeyRecovery(lastMessage.text),
-    // One ChatMsg is one exchange, so the seeded run is a length of 1. Past
-    // that the user has moved on and the handoff must not reappear.
-    turnCount: messages.length,
+    turnCount,
   });
 
   // Read dropped/picked/pasted files into text attachments, dropping unreadable
@@ -317,8 +331,8 @@ export function ChatPage() {
       // the turn was stopped rather than answered — the stop may have happened
       // somewhere this tab never saw.
       const outcome: ChatMsg['outcome'] = run.status === 'stopped' ? 'stopped' : run.status === 'error' ? 'failed' : 'ok';
-      const next = messages.map((m, i) =>
-        i === messages.length - 1
+      const next = messages.map((m) =>
+        m.id === last.id
           ? {
               ...m,
               text: run.summary || m.text,
@@ -337,87 +351,96 @@ export function ChatPage() {
   }, [activeID, streaming, messages]);
 
   // Realtime fan-out (DESIGN-CONVERSATION-STORE.md §7). While this tab is idle on a
-  // durable conversation, poll the server for turns another machine/user appended and
-  // merge them in. The server projection is leaner than a locally-streamed turn (no
-  // card/tools/steps), so for turns we already hold we keep the richer local fields
-  // and only adopt server turns beyond what we have — a joiner sees new work without a
-  // tab losing its own. Paused while streaming (that path owns updates) and while the
-  // last turn is unfinished (the resume poll owns that). loadConversation is read
-  // through a ref so the interval's identity tracks only the thread + streaming flag.
-  const fanoutRef = useRef({ loadConversation, messages });
-  useEffect(() => { fanoutRef.current = { loadConversation, messages }; });
+  // durable conversation, ask the server for what it has appended past our watermark
+  // and merge that in. Only the tail crosses the wire, so watching a hundred-message
+  // thread costs what watching a two-message one does — the old poll re-read and
+  // re-rendered the entire log every four seconds.
+  //
+  // mergeDelta owns the reconciliation: our own just-streamed messages adopt their
+  // server ids (and stop being re-appended), messages we already hold update in
+  // place, and genuinely new work from another machine or tab lands at the end.
+  // Paused while streaming (that path owns updates) and while the last message is
+  // unfinished (the resume poll owns that).
+  const fanoutRef = useRef({ syncConversation, messages });
+  useEffect(() => { fanoutRef.current = { syncConversation, messages }; });
   useEffect(() => {
     if (streaming || !activeID || isDraft(activeID)) return;
     let stopped = false;
     const tick = async () => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      const server = await fanoutRef.current.loadConversation(activeID);
-      if (stopped || !server) return;
       const local = fanoutRef.current.messages;
       const last = local[local.length - 1];
       if (last && !last.done) return; // don't disturb an in-flight turn
-      if (server.length <= local.length) return; // nothing new from elsewhere
-      const merged = server.map((sm, i) => {
-        const lm = local[i];
-        if (lm && lm.prompt === sm.prompt) {
-          return { ...sm, text: lm.text || sm.text, card: lm.card ?? sm.card, tools: lm.tools.length ? lm.tools : sm.tools, steps: lm.steps?.length ? lm.steps : sm.steps };
-        }
-        return sm;
+      const delta = await fanoutRef.current.syncConversation(activeID, syncSeq(local));
+      if (stopped || !delta?.length) return;
+      setMessages((cur) => {
+        const merged = mergeDelta(cur, delta);
+        return merged === cur ? cur : merged;
       });
-      setMessages(merged);
     };
     const timer = setInterval(() => void tick(), 4000);
     return () => { stopped = true; clearInterval(timer); };
   }, [activeID, streaming]);
 
-  function patch(id: number, fn: (m: ChatMsg) => ChatMsg) {
+  function patch(id: string, fn: (m: ChatMsg) => ChatMsg) {
     if (cancelledRef.current) return;
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
   }
 
-  // A message typed while a turn is streaming is an amendment to that turn, not a
-  // new question: hand it to the live run and record it inside the turn it
-  // amended. The server owns the fallback — if the run finished between our
-  // deciding to steer and its receiving the message, it runs the message as an
-  // ordinary turn and answers it, which we then append as its own settled turn
-  // (its tokens streamed while we had no bubble to put them in, so the answer
-  // lands at once rather than typing out).
+  // A message typed while a turn is streaming is an amendment to that run, not a
+  // new question — so it goes into the log where the user said it: after the
+  // answer so far, before the rest of it. The partial answer settles, the
+  // redirect lands as a ghost bubble, and a fresh assistant message opens below
+  // to catch the continuing stream (streamTargetRef moves with it). That is both
+  // the honest reading and the one a reload reproduces, because it is the order
+  // the entries were appended in.
+  //
+  // The server owns the fallback: if the run finished between our deciding to
+  // steer and its receiving the message, it answers as an ordinary turn — which
+  // lands in the new message we just opened, so the split is right either way.
   async function steer(prompt: string) {
-    const target = messages[messages.length - 1];
-    if (!target) return;
     const mode = steerMode;
-    setMessages((items) => items.map((m) => (m.id === target.id ? { ...m, steers: [...(m.steers ?? []), { text: prompt, mode }] } : m)));
+    const ask: ChatMsg = { id: localID(), role: 'user', text: prompt, done: true, steer: mode };
+    const answer: ChatMsg = { id: localID(), role: 'assistant', text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName };
+    const open = streamTargetRef.current;
+    // The turn hadn't said anything yet: there is nothing to settle above the
+    // redirect, so the redirect slots in ahead of the still-empty message rather
+    // than leaving a blank bubble behind. (Decided out here, off the committed
+    // list, so the ref move isn't a side effect inside a state updater.)
+    const at = messagesRef.current.findIndex((m) => m.id === open);
+    const reuse = at >= 0 && !messagesRef.current[at].text && !messagesRef.current[at].steps?.length;
+    streamTargetRef.current = reuse ? open : answer.id;
+    setMessages((items) => {
+      const i = items.findIndex((m) => m.id === open);
+      if (reuse && i >= 0) return [...items.slice(0, i), ask, ...items.slice(i)];
+      const settled = items.map((m) => (m.id === open ? { ...m, progress: '', done: true, outcome: 'ok' as const } : m));
+      return [...settled, ask, answer];
+    });
     setInput('');
     setAttachments([]);
     setNotice('');
     dirty.current = true;
-    const convID = activeID;
     try {
-      const result = await conversationSend(convID, prompt, {}, { mode, agentID: agent?.id });
-      if (isSteered(result)) return; // delivered — it lives on the turn above
-      // Not delivered: the run had already finished and the server answered it as
-      // a fresh turn. Move the amendment out of the (now closed) turn and give it
-      // the turn it actually got.
-      setMessages((items) => [
-        ...items.map((m) => (m.id === target.id ? { ...m, steers: (m.steers ?? []).filter((s) => s.text !== prompt) } : m)),
-        {
-          id: Date.now(), prompt, text: formatAgentError(result.final), progress: '',
-          card: result.card ?? null, done: true, outcome: 'ok' as const, tools: result.tool_calls,
-          route: result.route, turns: result.turns, usage: result.usage,
-          agentID: agent?.id, agentName,
-        },
-      ]);
+      const result = await conversationSend(activeID, prompt, {}, { mode, agentID: agent?.id });
+      if (isSteered(result)) return; // delivered — the live run is carrying it
+      // The run had already finished, so the server answered this as a fresh
+      // turn. Its tokens streamed while we had no handler attached, so the answer
+      // lands at once instead of typing out — into the message opened above.
+      patch(streamTargetRef.current, (m) => ({
+        ...m, text: formatAgentError(result.final), progress: '', done: true, outcome: 'ok' as const,
+        card: result.card ?? null, tools: result.tool_calls, route: result.route,
+        turns: result.turns, usage: result.usage,
+      }));
     } catch {
       // The amendment never reached the agent. Leave it in the transcript and
       // label it, rather than either dropping the user's words or letting them
-      // read as delivered.
+      // read as delivered — and drop the answer bubble it will never fill.
       setMessages((items) =>
-        items.map((m) =>
-          m.id === target.id
-            ? { ...m, steers: (m.steers ?? []).map((s) => (s.text === prompt ? { ...s, delivered: false } : s)) }
-            : m,
-        ),
+        items
+          .filter((m) => !(m.id === answer.id && !m.text))
+          .map((m) => (m.id === ask.id ? { ...m, delivered: false } : m)),
       );
+      streamTargetRef.current = open;
     }
   }
 
@@ -440,11 +463,10 @@ export function ChatPage() {
       hasModelKey: modelsLoading ? undefined : !!models?.has_key,
     }, prompt);
     if (instant) {
-      const id = Date.now();
-      const seeded: ChatMsg[] = [...messages, {
-        id, prompt, text: instant, progress: '', card: null, done: true, outcome: 'ok', tools: [],
-        agentID: agent?.id, agentName,
-      }];
+      const seeded: ChatMsg[] = [...messages,
+        { id: localID(), role: 'user', text: prompt, done: true },
+        { id: localID(), role: 'assistant', text: instant, card: null, done: true, outcome: 'ok', tools: [], agentID: agent?.id, agentName },
+      ];
       setMessages(seeded);
       setInput('');
       setAttachments([]);
@@ -455,25 +477,32 @@ export function ChatPage() {
       if (activeID) saveMessages(activeID, seeded, agent?.id);
       return;
     }
-    const id = Date.now();
-    const seeded: ChatMsg[] = [...messages, { id, prompt, text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName }];
+    const answerID = localID();
+    const seeded: ChatMsg[] = [...messages,
+      { id: localID(), role: 'user', text: prompt, done: true },
+      { id: answerID, role: 'assistant', text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName },
+    ];
     setMessages(seeded);
     setInput('');
     setAttachments([]);
     setNotice('');
     setStreaming(true);
     cancelledRef.current = false;
+    streamTargetRef.current = answerID;
     dirty.current = true;
+    // Every handler writes to whichever message is currently open, read at call
+    // time — a steer mid-run moves that target, and tokens must follow it.
+    const at = () => streamTargetRef.current;
     const handlers = {
-      onRunID: (rid: string) => patch(id, (m) => ({ ...m, runID: rid })),
-      onToken: (t: string) => patch(id, (m) => ({ ...m, text: m.text + t, progress: '' })),
-      onProgress: (n: string) => patch(id, (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
+      onRunID: (rid: string) => patch(at(), (m) => ({ ...m, runID: rid })),
+      onToken: (t: string) => patch(at(), (m) => ({ ...m, text: m.text + t, progress: '' })),
+      onProgress: (n: string) => patch(at(), (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
       onToolStart: (c: { callID: string; tool: string; target: string }) =>
-        patch(id, (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
-      onToolUpdate: (c: { callID: string; note: string }) => patch(id, (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
-      onCard: (c: AgentResultCard) => patch(id, (m) => ({ ...m, card: c })),
-      onTool: (t: AgentToolTrace) => patch(id, (m) => ({ ...m, tools: [...m.tools, t], steps: applyToolTrace(m.steps, t) })),
-      onError: (msg: string) => patch(id, (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
+        patch(at(), (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
+      onToolUpdate: (c: { callID: string; note: string }) => patch(at(), (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
+      onCard: (c: AgentResultCard) => patch(at(), (m) => ({ ...m, card: c })),
+      onTool: (t: AgentToolTrace) => patch(at(), (m) => ({ ...m, tools: [...(m.tools ?? []), t], steps: applyToolTrace(m.steps, t) })),
+      onError: (msg: string) => patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
     };
     // Open (or reuse) the server conversation, so the thread is durable and shared.
     // If that fails (offline / no project), fall back to the legacy client-history
@@ -492,23 +521,21 @@ export function ChatPage() {
       const useStore = !isDraft(convID);
       const result = useStore
         ? await conversationSend(convID, prompt, handlers, { signal: ac.signal, agentID: agent?.id })
-        : await chatStream(prompt, handlers, messages.flatMap((m) => [
-            { role: 'user' as const, content: m.prompt },
-            { role: 'assistant' as const, content: m.text },
-          ]), { sessionID: activeID, agentID: agent?.id, signal: ac.signal });
+        : await chatStream(prompt, handlers, messages.map((m) => ({ role: m.role, content: m.text })),
+            { sessionID: activeID, agentID: agent?.id, signal: ac.signal });
       if (!isSteered(result)) {
         // `stopped` is the server's word, so a turn stopped from another tab (or
         // one whose cancel call we couldn't confirm) still settles as Stopped
         // rather than as a suspiciously short answer.
         const outcome = result.stopped ? 'stopped' : 'ok';
-        patch(id, (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
+        patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
       } else {
-        patch(id, (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
+        patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
       }
     } catch {
       // A user stop aborts the fetch, which lands here too — stop() has already
       // set the outcome, so only a genuine stream failure is marked failed.
-      patch(id, (m) => ({ ...m, progress: '', done: true, outcome: m.outcome ?? 'failed', steps: settleOrphanSteps(m.steps) }));
+      patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: m.outcome ?? 'failed', steps: settleOrphanSteps(m.steps) }));
     } finally {
       setStreaming(false);
     }
@@ -519,12 +546,14 @@ export function ChatPage() {
   // running, billing, and writing an answer into a conversation the user has
   // already been told is over.
   async function stop() {
-    const target = messages[messages.length - 1];
+    // The open message, not the last one — a steer mid-run leaves the stream
+    // writing into a message that is no longer at the tail.
+    const openID = streamTargetRef.current;
     // Say what is happening while the cancel is in flight, in the one place the
     // user is already watching. The Stopped marker waits for the server's answer
     // rather than appearing on the click, so the UI never claims a halt it
     // hasn't actually got.
-    if (target) setMessages((items) => items.map((m) => (m.id === target.id ? { ...m, progress: 'Stopping…' } : m)));
+    setMessages((items) => items.map((m) => (m.id === openID ? { ...m, progress: 'Stopping…' } : m)));
     // A draft thread has no server-side run to cancel — the legacy client-history
     // path is the only thing streaming, and aborting it is the whole stop.
     const cancelled = isDraft(activeID) ? true : await cancelChat(activeID);
@@ -536,11 +565,11 @@ export function ChatPage() {
     // has a real answer and settled itself — leave it alone rather than stamping
     // "Stopped" over work that actually completed. Read through the live ref: the
     // `messages` this closure captured are from before the await.
-    const raced = !!messagesRef.current.find((m) => m.id === target?.id)?.done;
+    const raced = !!messagesRef.current.find((m) => m.id === openID)?.done;
     if (!raced) {
       setMessages((items) =>
         items.map((m) =>
-          m.id === target?.id
+          m.id === openID
             ? {
                 ...m,
                 progress: '',

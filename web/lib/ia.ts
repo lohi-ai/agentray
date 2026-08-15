@@ -219,9 +219,13 @@ export type FirstRunHandoff = {
 // Returns null until the seeded turn has actually settled, and stays null when
 // it failed: a failed run gets the error surface, not a handover.
 //
-// turnCount scopes it to the seeded exchange. One ChatMsg carries both the ask
-// and the answer, so the first run is turnCount 1 and anything above that is a
-// later question. The "started" flag is session-sticky, so without this bound the
+// turnCount scopes it to the seeded exchange: it counts what the *user* asked
+// (not messages — a ChatMsg is one message, so an exchange is two), so the first
+// run is turnCount 1 and anything above that is a later question. A user who
+// steers their first run counts 2 and loses the handoff — the conservative miss:
+// showing it twice is worse than showing it once, and they have already engaged.
+// The "started" flag is session-sticky,
+// so without this bound the
 // handoff re-renders under every later answer in the session, and under any older
 // thread the user clicks into — a "your dashboard is ready" attached to a turn
 // that built nothing.

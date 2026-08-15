@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Plug, Plus, Square, Trash2 } from 'lucide-react';
 import {
   ChatMessage,
@@ -68,43 +68,67 @@ export type ChatStep =
 // turn with no outcome is read as 'ok'.
 export type ChatOutcome = 'ok' | 'stopped' | 'failed';
 
-// A message the user sent *into* a running turn rather than after it. It belongs
-// inside the turn it amended, so it is carried on that turn instead of becoming
-// one of its own. `mode` is the server's: 'steer' is honored at the run's next
-// turn boundary, 'followup' continues the run once it has answered.
-// `delivered: false` means the amendment never reached the agent (the request
-// failed). It stays in the transcript, labelled, so the user's words are not
-// silently swallowed — the alternative is text that vanishes on a flaky network.
-export type SteerEntry = { text: string; mode: 'steer' | 'followup'; delivered?: boolean };
-
+// ChatMsg is ONE message, not one exchange.
+//
+// It used to be a `{prompt, text}` pair, which the conversation log has never
+// been: the log is an append-only list of single-role entries. Every mismatch
+// followed from that — a message steered into a running turn opened a pair with
+// an empty answer, a stopped turn (which appends no assistant entry) left a
+// dangling half, and the multi-machine merge had to guess at identity by
+// comparing prompt strings, so asking the same question twice collapsed the two
+// turns into one. Reconciliation is now by `id`, and `id` is the server's entry
+// id wherever the server knows about the message.
 export type ChatMsg = {
-  id: number;
-  prompt: string;
+  // Stable identity. `local:<n>` until the message is known to the server, then
+  // the conversation entry's id. Never the array index, never the text.
+  id: string;
+  role: 'user' | 'assistant';
   text: string;
-  progress: string;
-  card: AgentResultCard | null;
-  done: boolean;
+  // The entry's sync cursor, when it came from the server. The highest seq the
+  // client holds is the watermark it asks for deltas from.
+  seq?: number;
+  // Derived from a turn the log hasn't closed yet (tool traces with no answer
+  // behind them), so it is re-derived on every sync rather than kept. Never set
+  // on a message the user or the stream produced.
+  provisional?: boolean;
+
+  // --- assistant only ---
+  // Live narration while the turn runs; empty once it settles.
+  progress?: string;
+  card?: AgentResultCard | null;
+  // Whether the message has settled. A streaming assistant message is not done;
+  // a user message always is.
+  done?: boolean;
   outcome?: ChatOutcome;
-  // Amendments sent while this turn was still streaming, in the order they were
-  // sent. Rendered as ghost bubbles above the agent's body.
-  steers?: SteerEntry[];
-  tools: AgentToolTrace[];
-  // The agent's step-by-step work log for this turn (narration + tool calls),
-  // shown inline so the user sees what the agent is doing, not just the answer.
+  tools?: AgentToolTrace[];
+  // The agent's step-by-step work log (narration + tool calls), shown inline so
+  // the user sees what the agent is doing, not just the answer.
   steps?: ChatStep[];
-  // The backend run id, captured before the first token, so a turn left in flight
-  // can be matched to its (background-finishing) run on return.
+  // The backend run id, captured before the first token, so a message left in
+  // flight can be matched to its (background-finishing) run on return.
   runID?: string;
   route?: string;
   turns?: number;
   usage?: { input_tokens: number; output_tokens: number; cost_usd?: number } | null;
-  // The agent that handled this turn (the per-message agent override). agentID is
-  // stamped on the conversation entry; agentName is the resolved display label.
-  // Empty falls back to the conversation's current agent — older turns keep the
-  // agent that answered them even after the user switches agents mid-thread.
+  // The agent that produced this message (the per-message agent override).
+  // agentID is stamped on the conversation entry; agentName is the resolved
+  // display label. Empty falls back to the conversation's current agent — older
+  // messages keep the agent that answered them after the user switches.
   agentID?: string;
   agentName?: string;
+
+  // --- user only ---
+  // Set when the message was sent *into* a running turn rather than after it:
+  // 'steer' reaches the agent at its next turn boundary, 'followup' runs once
+  // the current answer is finished. Rendered as a ghost bubble so it doesn't
+  // read as a new question. Only ever set on a live message — the conversation
+  // entry doesn't record which mode was used.
+  steer?: 'steer' | 'followup';
+  // false means the message never reached the agent (the request failed). It
+  // stays in the transcript, labelled, rather than vanishing on a flaky network.
+  delivered?: boolean;
 };
+
 
 
 
@@ -536,111 +560,122 @@ function UserMessage({ prompt }: { prompt: string }) {
 export function Conversation({ messages, agentName, agentNameByID, debug }: { messages: ChatMsg[]; agentName: string; agentNameByID?: Record<string, string>; debug: boolean }) {
   return (
     <ChatMessageList density="balanced">
-      {messages.map((m) => {
-        // Per-turn agent label: the bubble's own stamped agent wins, then the
-        // resolved id→name map, then the conversation's current agent.
-        const who = m.agentName || (m.agentID && agentNameByID?.[m.agentID]) || agentName;
-        const calls = toCalls(m.steps);
-        const traceCalls = debug ? tracesToCalls(m.tools) : [];
-        const showMeta = debug && !!(m.route || m.usage || m.turns);
-        const working = !m.done;
-        const stopped = m.done && m.outcome === 'stopped';
-        // While the turn runs, the work log's header carries the agent's live
-        // narration; once settled it reads as a quiet "Worked through N steps".
-        const workLabel = working ? (m.progress || 'Working…') : workSummary(calls);
-        return (
-          <Fragment key={m.id}>
-            <ChatMessage sender="user">
-              <ChatMessageBubble className="!bg-[color-mix(in_srgb,var(--primary)_16%,var(--color-background-surface))] !text-[var(--color-text-primary)] !border !border-[color-mix(in_srgb,var(--primary)_24%,transparent)]">
-                <UserMessage prompt={m.prompt} />
-              </ChatMessageBubble>
-            </ChatMessage>
-            {/* Amendments sent into this turn. A ghost bubble (no filled chip)
-                with a label above says "this is yours, but it is not a new
-                question" — it belongs to the answer forming below it. */}
-            {(m.steers ?? []).map((s, i) => (
-              <ChatMessage sender="user" key={`steer-${i}`}>
-                <VStack gap={0} align="stretch">
-                  <HStack gap={1} align="center" justify="end">
-                    <CornerDownLeft size={12} className="text-[var(--color-text-secondary)]" />
-                    {s.delivered === false ? (
-                      <Text type="supporting" className="!text-[var(--danger)]">Not delivered — the agent never got this</Text>
-                    ) : (
-                      <Text type="supporting" color="secondary">
-                        {s.mode === 'followup' ? 'Queued — will run after this answer' : 'Steered'}
-                      </Text>
-                    )}
-                  </HStack>
-                  <ChatMessageBubble variant="ghost">
-                    <UserMessage prompt={s.text} />
-                  </ChatMessageBubble>
-                </VStack>
-              </ChatMessage>
-            ))}
-            <ChatMessage
-              sender="assistant"
-              avatar={<Avatar name={who} size="small" status={<StatusDot variant="success" label="Online" />} />}
-            >
-              {/* The sender name is the first row *inside* the body (not the
-                  bubble's `name` slot). Astryx adds a name-height top margin to
-                  the avatar whenever the bubble carries a `name`, which drops the
-                  avatar a line below the header; rendering the name in-body keeps
-                  the avatar top-aligned with it (classic avatar-leads-header). */}
-              <ChatMessageBubble
-                variant="ghost"
-                metadata={showMeta ? <ChatMessageMetadata footer={debugFooter(m)} /> : undefined}
-              >
-                {/* Outer gap is tight (name → body), inner VStack owns the 12px
-                    rhythm between the work log, the answer prose, the result card,
-                    and the debug trace — one token-backed gap per seam, no ad-hoc
-                    margins. */}
-                <VStack gap={1} align="stretch">
-                  <Text type="supporting" weight="semibold" color="secondary">{who}</Text>
-                  <VStack gap={3} align="stretch">
-                  {calls.length ? (
-                    <WorkLog calls={calls} working={working} label={workLabel} />
-                  ) : working ? (
-                    // No tools yet — show the agent's live status flush-left so it
-                    // lines up with the agent name above and the answer body that
-                    // replaces it. The spinner *trails* the text as the live cue;
-                    // leading it would indent the text past that left edge. (It
-                    // replaces a `.livedot` span that had no CSS anywhere in the
-                    // repo — the "working" pulse rendered as nothing at all.)
-                    <HStack gap={2} align="center">
-                      <Text type="supporting">{m.progress || 'Thinking…'}</Text>
-                      <Spinner size="sm" />
-                    </HStack>
-                  ) : null}
-                  {m.text ? (
-                    // Native Astryx Markdown: streaming fade-in while the turn is
-                    // live, and headingLevelStart={3} keeps the agent's `#`/`##`
-                    // headings sized to fit inside the chat bubble hierarchy.
-                    <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{m.text}</Markdown>
-                  ) : null}
-                  {m.card ? <ResultCard card={m.card} /> : null}
-                  {/* A stop is deliberate, so it gets the neutral system-message
-                      treatment and never red — the user did this on purpose, it
-                      is not a fault. The word carries the meaning; colour never
-                      does it alone. With no text at all there is no bubble to
-                      annotate, so the marker states that plainly instead of
-                      leaving an empty one. Last in the turn: it says where the
-                      turn ended. */}
-                  {stopped ? (
-                    <ChatSystemMessage icon={<Square size={12} />}>
-                      {m.text ? 'Stopped — the agent didn’t finish this answer.' : 'Stopped before the agent replied.'}
-                    </ChatSystemMessage>
-                  ) : null}
-                  {debug && traceCalls.length ? (
-                    <ChatToolCalls label="Debug trace" calls={traceCalls} defaultIsExpanded={false} />
-                  ) : null}
-                  </VStack>
-                </VStack>
-              </ChatMessageBubble>
-            </ChatMessage>
-          </Fragment>
-        );
-      })}
+      {messages.map((m) => (m.role === 'user'
+        ? <UserTurn key={m.id} m={m} />
+        : <AssistantTurn key={m.id} m={m} agentName={agentName} agentNameByID={agentNameByID} debug={debug} />
+      ))}
     </ChatMessageList>
+  );
+}
+
+// A user message. A plain one gets the filled chip; one sent *into* a running
+// turn gets a ghost bubble under a label, because it isn't a new question — it
+// amends the answer forming below it, and a filled chip would read as a fresh
+// ask the agent had ignored.
+function UserTurn({ m }: { m: ChatMsg }) {
+  if (!m.steer && m.delivered !== false) {
+    return (
+      <ChatMessage sender="user">
+        <ChatMessageBubble className="!bg-[color-mix(in_srgb,var(--primary)_16%,var(--color-background-surface))] !text-[var(--color-text-primary)] !border !border-[color-mix(in_srgb,var(--primary)_24%,transparent)]">
+          <UserMessage prompt={m.text} />
+        </ChatMessageBubble>
+      </ChatMessage>
+    );
+  }
+  return (
+    <ChatMessage sender="user">
+      <VStack gap={0} align="stretch">
+        <HStack gap={1} align="center" justify="end">
+          <CornerDownLeft size={12} className="text-[var(--color-text-secondary)]" />
+          {m.delivered === false ? (
+            <Text type="supporting" className="!text-[var(--danger)]">Not delivered — the agent never got this</Text>
+          ) : (
+            <Text type="supporting" color="secondary">
+              {m.steer === 'followup' ? 'Queued — will run after this answer' : 'Steered'}
+            </Text>
+          )}
+        </HStack>
+        <ChatMessageBubble variant="ghost">
+          <UserMessage prompt={m.text} />
+        </ChatMessageBubble>
+      </VStack>
+    </ChatMessage>
+  );
+}
+
+function AssistantTurn({ m, agentName, agentNameByID, debug }: { m: ChatMsg; agentName: string; agentNameByID?: Record<string, string>; debug: boolean }) {
+  // Per-message agent label: the bubble's own stamped agent wins, then the
+  // resolved id→name map, then the conversation's current agent.
+  const who = m.agentName || (m.agentID && agentNameByID?.[m.agentID]) || agentName;
+  const calls = toCalls(m.steps);
+  const traceCalls = debug ? tracesToCalls(m.tools) : [];
+  const showMeta = debug && !!(m.route || m.usage || m.turns);
+  const working = !m.done;
+  const stopped = m.done && m.outcome === 'stopped';
+  // While the message streams, the work log's header carries the agent's live
+  // narration; once settled it reads as a quiet "Worked through N steps".
+  const workLabel = working ? (m.progress || 'Working…') : workSummary(calls);
+  return (
+    <ChatMessage
+      sender="assistant"
+      avatar={<Avatar name={who} size="small" status={<StatusDot variant="success" label="Online" />} />}
+    >
+      {/* The sender name is the first row *inside* the body (not the
+          bubble's `name` slot). Astryx adds a name-height top margin to
+          the avatar whenever the bubble carries a `name`, which drops the
+          avatar a line below the header; rendering the name in-body keeps
+          the avatar top-aligned with it (classic avatar-leads-header). */}
+      <ChatMessageBubble
+        variant="ghost"
+        metadata={showMeta ? <ChatMessageMetadata footer={debugFooter(m)} /> : undefined}
+      >
+        {/* Outer gap is tight (name → body), inner VStack owns the 12px
+            rhythm between the work log, the answer prose, the result card,
+            and the debug trace — one token-backed gap per seam, no ad-hoc
+            margins. */}
+        <VStack gap={1} align="stretch">
+          <Text type="supporting" weight="semibold" color="secondary">{who}</Text>
+          <VStack gap={3} align="stretch">
+          {calls.length ? (
+            <WorkLog calls={calls} working={working} label={workLabel} />
+          ) : working ? (
+            // No tools yet — show the agent's live status flush-left so it
+            // lines up with the agent name above and the answer body that
+            // replaces it. The spinner *trails* the text as the live cue;
+            // leading it would indent the text past that left edge. (It
+            // replaces a `.livedot` span that had no CSS anywhere in the
+            // repo — the "working" pulse rendered as nothing at all.)
+            <HStack gap={2} align="center">
+              <Text type="supporting">{m.progress || 'Thinking…'}</Text>
+              <Spinner size="sm" />
+            </HStack>
+          ) : null}
+          {m.text ? (
+            // Native Astryx Markdown: streaming fade-in while the turn is
+            // live, and headingLevelStart={3} keeps the agent's `#`/`##`
+            // headings sized to fit inside the chat bubble hierarchy.
+            <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{m.text}</Markdown>
+          ) : null}
+          {m.card ? <ResultCard card={m.card} /> : null}
+          {/* A stop is deliberate, so it gets the neutral system-message
+              treatment and never red — the user did this on purpose, it
+              is not a fault. The word carries the meaning; colour never
+              does it alone. With no text at all there is no bubble to
+              annotate, so the marker states that plainly instead of
+              leaving an empty one. Last in the turn: it says where the
+              turn ended. */}
+          {stopped ? (
+            <ChatSystemMessage icon={<Square size={12} />}>
+              {m.text ? 'Stopped — the agent didn’t finish this answer.' : 'Stopped before the agent replied.'}
+            </ChatSystemMessage>
+          ) : null}
+          {debug && traceCalls.length ? (
+            <ChatToolCalls label="Debug trace" calls={traceCalls} defaultIsExpanded={false} />
+          ) : null}
+          </VStack>
+        </VStack>
+      </ChatMessageBubble>
+    </ChatMessage>
   );
 }
 
