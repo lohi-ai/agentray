@@ -275,6 +275,20 @@ Tests: `session_tree_test.go` (9 — flat-log compat, fork-by-parent, leaf-move
 rewind, synthetic ids, full rewind flow, degraded rewind, unknown target,
 recovery-follows-branch, loop id stamping).
 
+**Wiring status, stated plainly:** the surface splits in two. `ActivePath` and
+the `EntryLeafMove` / `EntryBranchSummary` kinds are load-bearing — `ReduceSession`
+folds over the active branch, and the windowed resume (`LoadResumeLog`) and the
+log-invariant's prune both refuse to shorten a log that has branched, so a leaf
+move changes production behaviour today. `SessionTree`, `ActiveLeaf`, `Rewind`,
+and `SessionNode` are exported with **zero non-test callers** anywhere in the
+repo: nothing writes a leaf move outside `Rewind`, and no HTTP route or web
+client reaches any of it. The chat UI's branching (`editMessage` / `regenerate`
+→ `branchTurn`) is a *different* tree — `agent_conversations.parent_entry_id`,
+with its own `activePath` reimplemented in TypeScript. So the kernel's rewind is
+kept for pi parity and is currently unexercised outside its tests; whether to
+wire it to a surface or drop it in favour of the conversation tree is an open
+product decision, not an oversight.
+
 **7. Compaction robustness** (pi bounds summarizer input at 2,000 chars/tool
 result and split-turns oversized tails). Implemented in `compaction.go`:
 

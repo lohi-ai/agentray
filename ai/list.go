@@ -38,8 +38,25 @@ func doJSON(ctx context.Context, client HTTPDoer, req *http.Request) ([]byte, in
 	return data, resp.StatusCode, nil
 }
 
+// listedModel is one entry from a vendor's list-models response: the id, plus
+// the context window when the vendor reported one. A zero window means "this
+// vendor did not say", which is a different fact from "this model has no
+// window" — callers resolve it through ContextWindowFor rather than treating it
+// as a number.
+type listedModel struct {
+	ID            string
+	ContextWindow int
+}
+
 // listOpenAIModels calls GET {base}/models (OpenAI and OpenAI-compatible).
-func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]string, error) {
+//
+// OpenAI proper reports no context window. OpenAI-*compatible* servers usually
+// do, under a name of their own choosing: OpenRouter uses context_length (and
+// repeats it under top_provider), vLLM uses max_model_len, and several routers
+// use context_window or max_context_length. Reading all of them costs nothing
+// and is the difference between a real window and a guess for exactly the
+// vendors a workspace is most likely to point at.
+func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]listedModel, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		base = defaultOpenAIBaseURL
@@ -59,23 +76,51 @@ func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 	}
 	var decoded struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID               string `json:"id"`
+			ContextLength    int    `json:"context_length"`
+			ContextWindow    int    `json:"context_window"`
+			MaxModelLen      int    `json:"max_model_len"`
+			MaxContextLength int    `json:"max_context_length"`
+			TopProvider      struct {
+				ContextLength int `json:"context_length"`
+			} `json:"top_provider"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, fmt.Errorf("list models: decode: %w", err)
 	}
-	out := make([]string, 0, len(decoded.Data))
+	out := make([]listedModel, 0, len(decoded.Data))
 	for _, m := range decoded.Data {
-		if id := strings.TrimSpace(m.ID); id != "" {
-			out = append(out, id)
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			continue
 		}
+		out = append(out, listedModel{ID: id, ContextWindow: firstPositive(
+			m.ContextLength, m.ContextWindow, m.MaxModelLen, m.MaxContextLength, m.TopProvider.ContextLength,
+		)})
 	}
 	return out, nil
 }
 
+// firstPositive returns the first value above zero, so a vendor that spells the
+// context window differently still lands on one number and an absent field stays
+// absent rather than becoming a zero-length window.
+func firstPositive(vals ...int) int {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
 // listAnthropicModels calls GET {base}/v1/models.
-func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]string, error) {
+//
+// The Messages API's model list reports id, display name, and type — no context
+// window — so these entries resolve through ContextWindowFor. context_window is
+// read anyway so that if Anthropic ever adds it, the live value wins over the
+// table without another change here.
+func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]listedModel, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		base = defaultAnthropicBaseURL
@@ -96,16 +141,17 @@ func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey s
 	}
 	var decoded struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			ContextWindow int    `json:"context_window"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, fmt.Errorf("list models: decode: %w", err)
 	}
-	out := make([]string, 0, len(decoded.Data))
+	out := make([]listedModel, 0, len(decoded.Data))
 	for _, m := range decoded.Data {
 		if id := strings.TrimSpace(m.ID); id != "" {
-			out = append(out, id)
+			out = append(out, listedModel{ID: id, ContextWindow: m.ContextWindow})
 		}
 	}
 	return out, nil
@@ -114,7 +160,11 @@ func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey s
 // listGoogleModels calls the Gemini models.list API. A base URL that already
 // speaks the OpenAI-compatible surface (path contains /openai) uses GET /models
 // instead.
-func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]string, error) {
+//
+// Gemini reports inputTokenLimit per model, which is exactly the number the
+// compaction budget wants: the input side of the window, with the output
+// allowance (outputTokenLimit) already excluded.
+func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]listedModel, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if strings.Contains(base, "/openai") {
 		return listOpenAIModels(ctx, client, base, apiKey)
@@ -157,24 +207,25 @@ func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 	}
 	var decoded struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name            string `json:"name"`
+			InputTokenLimit int    `json:"inputTokenLimit"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, fmt.Errorf("list models: decode: %w", err)
 	}
-	out := make([]string, 0, len(decoded.Models))
+	out := make([]listedModel, 0, len(decoded.Models))
 	for _, m := range decoded.Models {
 		id := strings.TrimSpace(m.Name)
 		id = strings.TrimPrefix(id, "models/")
 		if id != "" {
-			out = append(out, id)
+			out = append(out, listedModel{ID: id, ContextWindow: m.InputTokenLimit})
 		}
 	}
 	return out, nil
 }
 
-func listModelsForVendor(ctx context.Context, client HTTPDoer, vendor, baseURL, apiKey string) ([]string, error) {
+func listModelsForVendor(ctx context.Context, client HTTPDoer, vendor, baseURL, apiKey string) ([]listedModel, error) {
 	switch NormalizeVendor(vendor) {
 	case "anthropic":
 		return listAnthropicModels(ctx, client, baseURL, apiKey)

@@ -68,6 +68,39 @@ func (s *e2eStore) Log(_ context.Context, id string) ([]agentcore.SessionEntry, 
 	return out, nil
 }
 
+// LogFrom and CheckpointSeq make this double a WINDOWING store, like the two
+// real ones. Without them every test using it would quietly exercise
+// LoadResumeLog's fallback instead of the path production takes — and a resume
+// window that is never actually served by any test in the suite is a feature
+// that only runs for the first time in front of a user.
+
+func (s *e2eStore) LogFrom(_ context.Context, id string, sinceSeq int) ([]agentcore.SessionEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []agentcore.SessionEntry
+	for _, e := range s.log[id] {
+		if e.Seq >= sinceSeq {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (s *e2eStore) CheckpointSeq(_ context.Context, id string) (int, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq, branched := 0, false
+	for _, e := range s.log[id] {
+		if e.Kind == agentcore.EntryLeafMove {
+			branched = true
+		}
+		if e.Kind == agentcore.EntryCompaction && e.Final && e.Retained != nil && e.State != nil {
+			seq = e.Seq
+		}
+	}
+	return seq, branched, nil
+}
+
 // --- tools -------------------------------------------------------------------
 
 // e2eWorkTool returns a payload big enough that a handful of calls exhaust the

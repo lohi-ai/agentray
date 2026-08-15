@@ -80,6 +80,27 @@ func (s *pgSessionStore) Log(ctx context.Context, sessionID string) ([]agentcore
 	return out, nil
 }
 
+// LogFrom returns the tail of a session's log (entries with Seq >= sinceSeq),
+// mapped the same way Log maps the whole thing.
+func (s *pgSessionStore) LogFrom(ctx context.Context, sessionID string, sinceSeq int) ([]agentcore.SessionEntry, error) {
+	rows, err := s.store.AgentSessionLogFrom(ctx, sessionID, sinceSeq)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]agentcore.SessionEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, sessionEntryFromRow(r))
+	}
+	return out, nil
+}
+
+// CheckpointSeq answers agentcore's two windowing questions from the partial
+// index over compaction/leaf_move rows, so the cost of deciding whether a
+// window is safe does not itself scale with the log.
+func (s *pgSessionStore) CheckpointSeq(ctx context.Context, sessionID string) (int, bool, error) {
+	return s.store.AgentSessionCheckpoint(ctx, sessionID)
+}
+
 // sessionEntryFromRow reconstructs an agentcore SessionEntry from a stored row.
 // Pure (no DB) so it is unit-testable: the payload carries the full entry; Seq is
 // authoritative from the row. A bad payload yields an entry with just the row's

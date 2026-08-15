@@ -7,6 +7,12 @@ export type ListedModel = {
   provider_name: string;
   provider_vendor: string;
   id: string;
+  /**
+   * Input window in tokens, as resolved server-side: the provider's own figure
+   * when it reported one, else the ai package's fallback, else 0 for unknown.
+   * 0 is a real answer and must stay distinguishable from a small window.
+   */
+  context_window?: number;
 };
 
 export type TierPickerOption = {
@@ -14,6 +20,7 @@ export type TierPickerOption = {
   label: string;
   providerId: string;
   modelId: string;
+  contextWindow: number;
 };
 
 export function encodeTierValue(providerId: string, modelId: string): string {
@@ -34,6 +41,7 @@ export function listedModelsToPickerOptions(models: ListedModel[]): TierPickerOp
       label: `${m.id} · ${m.provider_name || m.provider_vendor || m.provider_id}`,
       providerId: m.provider_id,
       modelId: m.id,
+      contextWindow: m.context_window || 0,
     }));
 }
 
@@ -47,15 +55,36 @@ export function listedModelsToPickerOptions(models: ListedModel[]): TierPickerOp
 export type ModelPickerItem = {
   id: string;
   label: string;
-  auxiliaryData: { provider: string };
+  auxiliaryData: { provider: string; contextWindow: number };
 };
 
 export function listedModelsToItems(models: ListedModel[]): ModelPickerItem[] {
   return listedModelsToPickerOptions(models).map((o) => ({
     id: o.value,
     label: o.modelId,
-    auxiliaryData: { provider: providerLabelFor(models, o.providerId) },
+    auxiliaryData: { provider: providerLabelFor(models, o.providerId), contextWindow: o.contextWindow },
   }));
+}
+
+// How much transcript a tier may accumulate before the agent compacts it. The
+// operator's override wins when they set one; otherwise it is whatever the
+// provider or the model catalog reported; 0 means nobody knows, and the run
+// falls back to the workspace-wide ceiling.
+export function effectiveTierWindow(detected: number, override: number): number {
+  return override > 0 ? override : detected > 0 ? detected : 0;
+}
+
+// Token counts are read as magnitudes, not exact figures — "200K" is what an
+// operator is checking for, and 200,000 makes them count digits.
+export function formatTokens(n: number): string {
+  if (n <= 0) return '';
+  if (n >= 1_000_000) {
+    // One decimal, and drop it when it rounds away: a 1,047,576-token window is
+    // "1M", not "1.0M".
+    return `${n / 1_000_000 >= 10 ? Math.round(n / 1_000_000) : Number((n / 1_000_000).toFixed(1))}M`;
+  }
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
 }
 
 function providerLabelFor(models: ListedModel[], providerId: string): string {
@@ -70,7 +99,10 @@ export function savedModelItem(providerId: string, modelId: string, providerName
   return {
     id: encodeTierValue(providerId, modelId),
     label: modelId,
-    auxiliaryData: { provider: providerName ? `${providerName} · saved` : 'saved' },
+    // No window: the provider is not listing this model, so there is nothing to
+    // detect. 0 reads as "not known", which is the honest state and is exactly
+    // when an operator would want to set one by hand.
+    auxiliaryData: { provider: providerName ? `${providerName} · saved` : 'saved', contextWindow: 0 },
   };
 }
 

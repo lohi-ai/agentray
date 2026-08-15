@@ -86,6 +86,9 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 	if err := setIf(cfg.Escalation != nil, func() error { return r.SetEscalation(cfg.Escalation) }); err != nil {
 		return err
 	}
+	if err := setIf(cfg.ContextWindow > 0, func() error { return r.SetContextWindow(cfg.ContextWindow) }); err != nil {
+		return err
+	}
 	if err := setIf(cfg.Retry != nil, func() error { return r.SetRetry(*orZero(cfg.Retry)) }); err != nil {
 		return err
 	}
@@ -271,6 +274,7 @@ func (r *Registry) build() (*Agent, error) {
 		compactionModel:    r.compactionRung.Model,
 		refreshKey:         r.refreshKey,
 		escalation:         wrapRungs(r.providerWrappers, r.escalation),
+		contextWindow:      r.contextWindow,
 		getSteering:        r.getSteering,
 		getFollowUp:        r.getFollowUp,
 		goal:               r.goal,

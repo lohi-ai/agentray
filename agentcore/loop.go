@@ -99,7 +99,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	var resumeLog []SessionEntry
 	if a.resumeSession && a.session != nil && a.sessionID != "" {
 		var lerr error
-		if resumeLog, lerr = a.session.Log(ctx, a.sessionID); lerr != nil {
+		// Windowed when the store can serve one: a resume needs the newest
+		// checkpoint and the work after it, not the history the checkpoint already
+		// stands for. LoadResumeLog falls back to the whole log whenever a suffix
+		// would not fold to the same state.
+		if resumeLog, lerr = LoadResumeLog(ctx, a.session, a.sessionID); lerr != nil {
 			// An unreadable log fails the resume rather than silently degrading to
 			// a from-scratch run: a fresh run would splice new seed messages onto
 			// the crashed run's existing log and could redo non-idempotent work
@@ -153,6 +157,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// folded before the first turn; CloseRun fires on every exit path, so
 	// nothing an extension started outlives the run that owns it.
 	ctx = exts.runContext(ctx)
+	// Tag every call this run makes with the session it belongs to, so a
+	// provider decorator can tell a sub-agent's calls from its parent's — they
+	// share one provider and one ctx chain, and without this they are
+	// indistinguishable downstream.
+	ctx = WithRunSession(ctx, a.sessionID)
 	defer exts.closeRun()
 
 	// The compaction strategy, resolved once. Nil-safe like the driver so a
@@ -307,6 +316,17 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// run — resume replays included, so a resumed run can't spend more than a
 	// live one.
 	toolCallCount := 0
+	// checkpoint mirrors the non-transcript state a fold of this log would
+	// produce, so a compaction can stamp it onto its completion entry and make
+	// that entry a place a resume may start reading from.
+	//
+	// It is maintained rather than derived: every field below is updated at the
+	// exact line that appends the entry the fold would have read, so the two can
+	// only disagree if a state entry is written without updating it — which is
+	// what the mirrored-state test pins. Deriving it instead would mean reducing
+	// the log on every compaction, i.e. paying the cost the checkpoint exists to
+	// avoid.
+	var checkpoint CheckpointState
 	// applyBreaker is the circuit-breaker accounting shared by live dispatch and
 	// resume replay: a real execution that errored increments its tool's
 	// consecutive-failure counter — crossing maxToolFailures disables the tool
@@ -327,6 +347,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// Log the disable so it is reconstructed on resume (RecoverSession),
 			// keeping a broken tool disabled across a crash rather than retried.
 			appendEntry(SessionEntry{Kind: EntryToolDisabled, Turn: res.Turns, Tool: name})
+			checkpoint.DisabledTools = append(checkpoint.DisabledTools, name)
 			msg.Content += fmt.Sprintf("\n\n[%s has failed %d times in a row and is now disabled for the rest of this run. Do not call it again — complete the task another way.]", name, toolFailures[name])
 			emit(StreamEvent{Type: StreamProgress, Note: fmt.Sprintf("Disabled %q after %d consecutive failures; continuing without it.", name, toolFailures[name]), Turn: res.Turns})
 		}
@@ -348,6 +369,18 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	{
 		if len(resumeLog) > 0 {
 			plan := RecoverSession(resumeLog, tools, RecoveryMarkInterrupted)
+			// Seed the mirror from the log this run inherits, so a checkpoint
+			// written later carries the state accumulated ACROSS the crash and not
+			// just what this process happened to observe. A run that resumes,
+			// compacts, and crashes again would otherwise write a checkpoint that
+			// silently forgets the first run's disabled tools and goal.
+			checkpoint = CheckpointState{
+				Model:         plan.Model,
+				ActiveTools:   plan.ActiveTools,
+				DisabledTools: plan.DisabledTools,
+				Goal:          plan.Goal,
+				Completed:     plan.Completed,
+			}
 			switch {
 			case plan.Completed:
 				if final := strings.TrimSpace(lastAssistantText(plan.Messages)); final != "" {
@@ -493,6 +526,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// run even when the caller cannot re-supply Config.Goal.
 		if goal != "" {
 			appendEntry(SessionEntry{Kind: EntryGoal, Goal: goal})
+			checkpoint.Goal = goal
 		}
 		for i := range messages {
 			m := messages[i]
@@ -538,7 +572,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// Build the model ladder: the primary provider/model first, then the
 	// configured escalation rungs. rung points at the rung currently in use; once
 	// a higher rung succeeds the loop stays there for subsequent turns.
-	ladder := append([]ModelRung{{Provider: a.provider, Model: a.model}}, a.escalation...)
+	ladder := append([]ModelRung{{Provider: a.provider, Model: a.model, ContextWindow: a.contextWindow}}, a.escalation...)
 	rung := 0
 
 	// state is the per-turn save-point. It is applied at the top of each turn and
@@ -649,15 +683,21 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			system = state.System
 		}
 
+		// The budget is re-derived every turn rather than once per run, because
+		// the rung can change under us: an escalation moves the run to a model
+		// with its own window, and a ladder built from a 1M-token model and a
+		// 128k one has no single correct ceiling.
+		budget := effectiveBudget(limits.MaxContextTokens, ladder[rung].ContextWindow)
+
 		// The keep-recent window is clamped to the actual budget so a small
 		// MaxContextTokens cannot leave compaction with "nothing old enough".
-		compaction := effectiveCompaction(a.compaction, limits.MaxContextTokens)
+		compaction := effectiveCompaction(a.compaction, budget)
 
 		// Stop guard: compact old turns when the estimated context approaches
 		// the model window so long autonomous runs stay bounded (§5.2). The older
 		// span is summarized by the active rung's model into a structured
 		// checkpoint; on any failure it degrades to a deterministic elide.
-		if compactor.ShouldCompact(res.Messages, limits.MaxContextTokens) {
+		if compactor.ShouldCompact(res.Messages, budget) {
 			// before_compact (P10): the consumer may defer this compaction or supply
 			// its own — a domain summarizer, or a cut that pins content the default
 			// would drop. Asked before any durable bracket is written, so a skipped
@@ -665,7 +705,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			decision, herr := a.hooks.runBeforeCompact(ctx, CompactRequest{
 				Turn:     res.Turns,
 				Messages: res.Messages,
-				Budget:   limits.MaxContextTokens,
+				Budget:   budget,
 				Settings: compaction,
 			})
 			if herr != nil {
@@ -682,6 +722,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				appendEntry(SessionEntry{
 					Kind: EntryCompaction, Turn: res.Turns, Final: true,
 					Retained: retainedTranscript(res.Messages, system),
+					State:    checkpoint.clone(),
 				})
 			default:
 				// Compaction runs on its own tier when the consumer pinned one
@@ -700,7 +741,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				var cu Usage
 				out, cerr := compactor.Compact(ctx, CompactionRequest{
 					Messages: res.Messages,
-					Budget:   limits.MaxContextTokens,
+					Budget:   budget,
 					Turn:     res.Turns,
 					Settings: compaction,
 					Provider: compactProvider,
@@ -724,6 +765,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				fin := SessionEntry{
 					Kind: EntryCompaction, Turn: res.Turns, Final: true,
 					Retained: retainedTranscript(res.Messages, system),
+					State:    checkpoint.clone(),
 				}
 				if cu != (Usage{}) {
 					fin.Usage = &cu
@@ -826,6 +868,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// model change in the durable log so resume reconstructs the active rung.
 		if ladder[rung].Model != state.Model {
 			appendEntry(SessionEntry{Kind: EntryModelChange, Turn: res.Turns, Model: ladder[rung].Model})
+			checkpoint.Model = ladder[rung].Model
 		}
 		state.Model = ladder[rung].Model
 

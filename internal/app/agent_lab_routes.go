@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
 )
@@ -107,6 +108,17 @@ func registerAgentLabRoutes(e *echo.Echo, store *storage.Store, sandboxReady boo
 	})
 
 	// --- replay (AC4): fold any completed run into steps ---
+	//
+	// Windowed by ?offset=&limit=. The fold itself is whole-run by nature (a
+	// step's loaded skills and cumulative cost depend on every step before it),
+	// but its OUTPUT must not be: a 4,200-turn run folds into thousands of
+	// steps, each carrying the full context that entered it, and returning them
+	// in one body is tens of megabytes for a page that shows a dozen.
+	//
+	// `chapters` is the run's table of contents and is always returned whole —
+	// it is one small entry per compaction, which is the only place a long run
+	// has natural divisions. It is what makes a several-thousand-step run
+	// navigable instead of merely paginated.
 	e.GET("/api/agent/lab/runs/:run_id/steps", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
@@ -116,7 +128,20 @@ func registerAgentLabRoutes(e *echo.Echo, store *storage.Store, sandboxReady boo
 		if err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, map[string]any{"steps": steps})
+		total := len(steps)
+		offset := intParam(c, "offset", 0, 0, 1<<30)
+		limit := intParam(c, "limit", 50, 1, 200)
+		chapters := agentcore.RunChapters(steps)
+		if offset > total {
+			offset = total
+		}
+		end := min(offset+limit, total)
+		return c.JSON(http.StatusOK, map[string]any{
+			"steps":    steps[offset:end],
+			"chapters": chapters,
+			"total":    total,
+			"offset":   offset,
+		})
 	})
 
 	// --- explain mode (AC1, AC3): SSE run paused before each step ---

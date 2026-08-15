@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeTierValue,
   encodeTierValue,
+  effectiveTierWindow,
+  formatTokens,
   friendlyProviderError,
   listedModelsToItems,
   listedModelsToPickerOptions,
@@ -148,5 +150,55 @@ describe('friendlyProviderError', () => {
   it('passes plain text through and never renders an empty alert', () => {
     expect(friendlyProviderError('dial tcp: connection refused')).toBe('dial tcp: connection refused');
     expect(friendlyProviderError('')).toBe('Could not reach this provider.');
+  });
+});
+
+describe('effectiveTierWindow', () => {
+  it('prefers the operator override over what was detected', () => {
+    // The whole point of the override: an endpoint may serve a model truncated,
+    // and only the operator knows. Detection must not win over a typed number.
+    expect(effectiveTierWindow(200_000, 64_000)).toBe(64_000);
+  });
+
+  it('uses the detected window when there is no override', () => {
+    expect(effectiveTierWindow(200_000, 0)).toBe(200_000);
+  });
+
+  it('reports 0 when nobody knows, rather than inventing a default', () => {
+    // 0 renders as "not known" and makes the run fall back to the workspace
+    // ceiling. Substituting a plausible number here is how a run ends up
+    // budgeting a window its model does not have.
+    expect(effectiveTierWindow(0, 0)).toBe(0);
+  });
+});
+
+describe('formatTokens', () => {
+  it('renders magnitudes, which is what the number is read for', () => {
+    expect(formatTokens(200_000)).toBe('200K');
+    expect(formatTokens(128_000)).toBe('128K');
+    expect(formatTokens(1_000_000)).toBe('1M');
+    expect(formatTokens(1_047_576)).toBe('1M');
+    expect(formatTokens(2_000_000)).toBe('2M');
+    expect(formatTokens(8_192)).toBe('8K');
+    expect(formatTokens(512)).toBe('512');
+  });
+
+  it('renders nothing for an unknown window so no caller prints "0 tokens"', () => {
+    expect(formatTokens(0)).toBe('');
+    expect(formatTokens(-1)).toBe('');
+  });
+});
+
+describe('listed models carry their context window', () => {
+  it('passes the provider-reported window through to the picker item', () => {
+    const models: ListedModel[] = [
+      { provider_id: 'p1', provider_name: 'Main', provider_vendor: 'openai', id: 'gpt-4o', context_window: 128_000 },
+      { provider_id: 'p1', provider_name: 'Main', provider_vendor: 'openai', id: 'mystery' },
+    ];
+    const items = listedModelsToItems(models);
+    expect(items[0].auxiliaryData.contextWindow).toBe(128_000);
+    // Absent means unknown, not zero-sized — it must survive as 0 so the UI can
+    // say so instead of showing a confident number.
+    expect(items[1].auxiliaryData.contextWindow).toBe(0);
   });
 });

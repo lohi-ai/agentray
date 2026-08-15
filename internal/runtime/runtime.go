@@ -52,6 +52,11 @@ type BuildParams struct {
 	// primary provider/model errors. Built by the runner from the workspace's
 	// per-tier model pool; empty disables fallback.
 	Escalation []agentcore.ModelRung
+	// ContextWindow is the primary model's input window in tokens, which caps the
+	// compaction budget. Built by the runner from the primary tier (operator
+	// override, else the ai package's answer for the model id); 0 leaves
+	// MaxContextTokens to stand alone.
+	ContextWindow int
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
 	// to the agent's "compaction" task tier instead of borrowing the active rung.
 	// Both unset keeps agentcore's default (the active rung summarizes).
@@ -294,7 +299,14 @@ func buildRungs(tcs []TierConfig) ([]agentcore.ModelRung, error) {
 		if err != nil {
 			return nil, err
 		}
-		rungs = append(rungs, agentcore.ModelRung{Provider: prov, Model: tc.Model})
+		rungs = append(rungs, agentcore.ModelRung{
+			Provider: prov,
+			Model:    tc.Model,
+			// Each rung carries its own window, so escalating from a large-window
+			// model to a small one re-derives the compaction budget instead of
+			// carrying the first rung's headroom onto a model that cannot hold it.
+			ContextWindow: EffectiveContextWindow(tc),
+		})
 	}
 	return rungs, nil
 }
@@ -344,6 +356,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	cfg := agentcore.Config{
 		Provider:           llm,
 		Model:              p.Model,
+		ContextWindow:      p.ContextWindow,
 		Escalation:         p.Escalation,
 		CompactionProvider: p.CompactionProvider,
 		CompactionModel:    p.CompactionModel,

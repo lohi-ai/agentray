@@ -28,7 +28,11 @@ import {
 import { ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
 import { TIERS, TierBlock, type TierKey } from './tier-block';
 
-type TierDraft = { providerId: string; model: string };
+// contextWindow is the operator's OVERRIDE only, in tokens; 0 means "use the
+// window we detected for this model". Storing the override rather than the
+// effective number is what lets a later model change re-detect instead of
+// inheriting a stale figure.
+type TierDraft = { providerId: string; model: string; contextWindow: number };
 type Draft = {
   flash: TierDraft;
   lite: TierDraft;
@@ -42,20 +46,22 @@ type Draft = {
 // for it; nothing new goes over the wire.
 const isInherited = (t: TierDraft) => !t.providerId && !t.model;
 
+const emptyTier = (): TierDraft => ({ providerId: '', model: '', contextWindow: 0 });
+
 // A tier is only selectable when it names both a configured provider and a
 // model. The hosted default fills lite/pro model IDs with no provider behind
 // them, and the legacy per-workspace columns can do the same — rendered
 // literally that is a tier which is neither inherited nor showing a choice.
 // Treat a half-set tier as unset, which is what the runtime already does with
 // it and what "Same as Default" means.
-const tierDraft = (providerId: string, model: string): TierDraft =>
-  providerId && model ? { providerId, model } : { providerId: '', model: '' };
+const tierDraft = (providerId: string, model: string, contextWindow: number): TierDraft =>
+  providerId && model ? { providerId, model, contextWindow } : emptyTier();
 
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
-    flash: tierDraft(c.flash_provider_id || '', c.model || ''),
-    lite: tierDraft(c.lite_provider_id || '', c.lite_model || ''),
-    pro: tierDraft(c.pro_provider_id || '', c.pro_model || ''),
+    flash: tierDraft(c.flash_provider_id || '', c.model || '', c.context_window || 0),
+    lite: tierDraft(c.lite_provider_id || '', c.lite_model || '', c.lite_context_window || 0),
+    pro: tierDraft(c.pro_provider_id || '', c.pro_model || '', c.pro_context_window || 0),
     model_fallback: c.model_fallback,
   };
 }
@@ -69,6 +75,9 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
     pro_provider_id: d.pro.providerId,
     pro_model: d.pro.model,
     model_fallback: d.model_fallback,
+    context_window: d.flash.contextWindow,
+    lite_context_window: d.lite.contextWindow,
+    pro_context_window: d.pro.contextWindow,
   };
 }
 
@@ -150,16 +159,25 @@ export function ModelsTab() {
 
   const setTierItem = (key: TierKey, item: ModelPickerItem | null) => {
     if (!item) {
-      setDraft((d) => (d ? { ...d, [key]: { providerId: '', model: '' } } : d));
+      setDraft((d) => (d ? { ...d, [key]: emptyTier() } : d));
       return;
     }
     const { providerId, modelId } = decodeTierValue(item.id);
-    setDraft((d) => (d ? { ...d, [key]: { providerId, model: modelId } } : d));
+    // Changing the model drops any override: it was a statement about the model
+    // that was there, and carrying it onto a different one is how a tier ends up
+    // budgeting a window its model does not have.
+    setDraft((d) =>
+      d ? { ...d, [key]: { providerId, model: modelId, contextWindow: d[key].model === modelId ? d[key].contextWindow : 0 } } : d,
+    );
   };
 
   const setInheritTier = (key: 'lite' | 'pro', checked: boolean) => {
     setInherit((s) => ({ ...s, [key]: checked }));
-    if (checked) setDraft((d) => (d ? { ...d, [key]: { providerId: '', model: '' } } : d));
+    if (checked) setDraft((d) => (d ? { ...d, [key]: emptyTier() } : d));
+  };
+
+  const setTierWindow = (key: TierKey, tokens: number) => {
+    setDraft((d) => (d ? { ...d, [key]: { ...d[key], contextWindow: tokens } } : d));
   };
 
   const onSave = async () => {
@@ -217,7 +235,7 @@ export function ModelsTab() {
       await deleteProvider(id);
       setDraft((d) => {
         if (!d) return d;
-        const clear = (t: TierDraft): TierDraft => (t.providerId === id ? { providerId: '', model: '' } : t);
+        const clear = (t: TierDraft): TierDraft => (t.providerId === id ? emptyTier() : t);
         return { ...d, flash: clear(d.flash), lite: clear(d.lite), pro: clear(d.pro) };
       });
     } finally {
@@ -347,6 +365,8 @@ export function ModelsTab() {
                   inherit={optional ? inherit[optional] : false}
                   onInheritChange={optional ? (checked) => setInheritTier(optional, checked) : null}
                   onChange={(item) => setTierItem(tier.key, item)}
+                  contextWindow={draft[tier.key].contextWindow}
+                  onContextWindowChange={(tokens) => setTierWindow(tier.key, tokens)}
                   searchSource={searchSource}
                   isLoading={listedLoading}
                 />

@@ -19,15 +19,23 @@ type WorkspaceModelTiers struct {
 	Model    string `json:"model"`
 	BaseURL  string `json:"base_url"`
 	HasKey   bool   `json:"has_key"`
+	// ContextWindow overrides the model's input window in tokens, which caps how
+	// large the transcript may grow before the agent compacts it. 0 — the normal
+	// case — means the window is worked out from the model id, and an operator
+	// only sets it for an endpoint no catalog can know (a self-hosted model, or a
+	// gateway that serves a model truncated).
+	ContextWindow int `json:"context_window,omitempty"`
 
-	LiteProvider string `json:"lite_provider"`
-	LiteModel    string `json:"lite_model"`
-	LiteBaseURL  string `json:"lite_base_url"`
-	LiteHasKey   bool   `json:"lite_has_key"`
-	ProProvider  string `json:"pro_provider"`
-	ProModel     string `json:"pro_model"`
-	ProBaseURL   string `json:"pro_base_url"`
-	ProHasKey    bool   `json:"pro_has_key"`
+	LiteProvider      string `json:"lite_provider"`
+	LiteModel         string `json:"lite_model"`
+	LiteBaseURL       string `json:"lite_base_url"`
+	LiteHasKey        bool   `json:"lite_has_key"`
+	LiteContextWindow int    `json:"lite_context_window,omitempty"`
+	ProProvider       string `json:"pro_provider"`
+	ProModel          string `json:"pro_model"`
+	ProBaseURL        string `json:"pro_base_url"`
+	ProHasKey         bool   `json:"pro_has_key"`
+	ProContextWindow  int    `json:"pro_context_window,omitempty"`
 
 	ModelFallback bool `json:"model_fallback"`
 	// HostedDefault is true when the workspace is using the process-level
@@ -137,15 +145,22 @@ type WorkspaceModelTiersInput struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// ContextWindow (and its lite/pro siblings) override the model's input
+	// window in tokens; 0 restores "work it out from the model id". Unlike
+	// APIKey there is no separate clear sentinel, because 0 already means
+	// "no override".
+	ContextWindow int
 
-	LiteProvider string
-	LiteModel    string
-	LiteBaseURL  string
-	LiteAPIKey   string
-	ProProvider  string
-	ProModel     string
-	ProBaseURL   string
-	ProAPIKey    string
+	LiteProvider      string
+	LiteModel         string
+	LiteBaseURL       string
+	LiteAPIKey        string
+	LiteContextWindow int
+	ProProvider       string
+	ProModel          string
+	ProBaseURL        string
+	ProAPIKey         string
+	ProContextWindow  int
 
 	ModelFallback bool
 
@@ -230,6 +245,10 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			ProProviderID:   strings.TrimSpace(in.ProProviderID),
 			ProModel:        strings.TrimSpace(in.ProModel),
 			ModelFallback:   in.ModelFallback,
+
+			FlashContextWindow: in.ContextWindow,
+			LiteContextWindow:  in.LiteContextWindow,
+			ProContextWindow:   in.ProContextWindow,
 		})
 	}
 	if existing, lerr := s.loadBook(ctx, workspaceID, false); lerr == nil && len(existing.Providers) > 0 {
@@ -241,6 +260,10 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			ProProviderID:   strings.TrimSpace(in.ProProviderID),
 			ProModel:        strings.TrimSpace(in.ProModel),
 			ModelFallback:   in.ModelFallback,
+
+			FlashContextWindow: in.ContextWindow,
+			LiteContextWindow:  in.LiteContextWindow,
+			ProContextWindow:   in.ProContextWindow,
 		})
 	}
 

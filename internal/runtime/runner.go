@@ -624,6 +624,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		APIKey:             primary.APIKey,
 		Trigger:            trigger,
 		Escalation:         esc,
+		ContextWindow:      EffectiveContextWindow(primary),
 		CompactionProvider: compactProvider,
 		CompactionModel:    compactTC.Model,
 		Scopes:             ScopesFromMap(cfg.Scopes),
@@ -874,7 +875,12 @@ func (r *Runner) ResumeRun(ctx context.Context, userID, projectID, runID string)
 		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agentruntime: run %s is still running; wait for it to finish (or be reaped) before resuming", runID)
 	}
 	sessionID := runID
-	log, err := r.SessionStore.Log(ctx, sessionID)
+	// The windowed read, same as the loop's: a suffix that reduces to the same
+	// state, or the whole log when it would not. This pass only reduces the log
+	// (to validate resumability and recover the task), and reduce restarts at the
+	// newest checkpoint either way — so the window and the whole log give it the
+	// identical answer, for a fraction of the read.
+	log, err := agentcore.LoadResumeLog(ctx, r.SessionStore, sessionID)
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
@@ -882,7 +888,7 @@ func (r *Runner) ResumeRun(ctx context.Context, userID, projectID, runID string)
 		// This run has no log of its own but references a session (it was itself
 		// a resume attempt, or a chat run whose log lives under the conversation
 		// chain): continue that session instead.
-		if chained, cerr := r.SessionStore.Log(ctx, run.SessionID); cerr == nil && len(chained) > 0 {
+		if chained, cerr := agentcore.LoadResumeLog(ctx, r.SessionStore, run.SessionID); cerr == nil && len(chained) > 0 {
 			sessionID, log = run.SessionID, chained
 		}
 	}
@@ -969,6 +975,38 @@ func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore
 		return nil, "", err
 	}
 	return prov, tc.Model, nil
+}
+
+// RunTierWindow reports the input context window, in tokens, of the model that
+// answers this project's runs — the operator's per-tier override when set,
+// otherwise whatever the ai package can determine from the model id.
+//
+// It exists so the conversation-level compaction trigger and the in-run
+// compaction budget are capped by the SAME number. They shrink the same thread
+// for the same model, and a disagreement between them means one of the two is
+// wrong for every run: the conversation replays a history the model rejects, or
+// it summarizes far earlier than it needed to.
+//
+// Best-effort by design — every caller is on a path that must not fail because a
+// window could not be resolved, so an error answers 0 and the caller falls back
+// to its own conservative default.
+func (r *Runner) RunTierWindow(ctx context.Context, projectID string) int {
+	if r == nil || r.Store == nil {
+		return 0
+	}
+	wsID, err := r.Store.WorkspaceIDForProject(ctx, projectID)
+	if err != nil {
+		return 0
+	}
+	wsTiers, keys, err := r.Store.WorkspaceTiersForRun(ctx, wsID)
+	if err != nil {
+		return 0
+	}
+	taskMap, err := r.Store.TaskTiersForRun(ctx, projectID)
+	if err != nil {
+		return 0
+	}
+	return EffectiveContextWindow(tierSetFromWorkspace(wsTiers, keys).resolve(TierFromName(taskMap[storage.TaskRun])))
 }
 
 // loadSkills maps active stored skills into agentcore.Skill headers for the
@@ -1121,8 +1159,8 @@ func storageSkill(name, description, body string) storage.AgentSkill {
 // resolves back to flash at call time.
 func tierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string) TierSet {
 	return TierSet{
-		TierFlash: TierConfig{Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"]},
-		TierLite:  TierConfig{Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"]},
-		TierPro:   TierConfig{Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"]},
+		TierFlash: TierConfig{Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ContextWindow: cfg.ContextWindow},
+		TierLite:  TierConfig{Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ContextWindow: cfg.LiteContextWindow},
+		TierPro:   TierConfig{Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ContextWindow: cfg.ProContextWindow},
 	}
 }

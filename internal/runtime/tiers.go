@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"strings"
 
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -61,6 +62,23 @@ type TierConfig struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// ContextWindow is the operator's override for this model's input window in
+	// tokens, capping the compaction budget. 0 means "work it out", and
+	// EffectiveContextWindow does. An override exists because no catalog can
+	// know a self-hosted endpoint's window, and being wrong high there means the
+	// run dies at the provider rather than compacting.
+	ContextWindow int
+}
+
+// EffectiveContextWindow is the window actually applied to a tier: the
+// operator's override when they set one, otherwise whatever the ai package can
+// determine from the model id, otherwise 0 for "unknown" — which leaves the
+// configured compaction budget to stand alone.
+func EffectiveContextWindow(tc TierConfig) int {
+	if tc.ContextWindow > 0 {
+		return tc.ContextWindow
+	}
+	return ai.ContextWindowFor(tc.Provider, tc.Model)
 }
 
 // TierSet is the per-project tier→config mapping. flash is the always-present
@@ -88,6 +106,18 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 	}
 	if c.APIKey != "" {
 		out.APIKey = c.APIKey
+	}
+	// The window is the one field that must NOT simply inherit flash's value: it
+	// describes a specific model, so a tier pointing at a different model would
+	// otherwise silently adopt a number belonging to another one — and inheriting
+	// a larger window is exactly the direction that kills a run. Blank on a tier
+	// that changed the model means "unknown", which resolves from the tier's own
+	// model instead.
+	switch {
+	case c.ContextWindow > 0:
+		out.ContextWindow = c.ContextWindow
+	case strings.TrimSpace(c.Model) != "" || strings.TrimSpace(c.Provider) != "" || strings.TrimSpace(c.BaseURL) != "":
+		out.ContextWindow = 0
 	}
 	return out
 }

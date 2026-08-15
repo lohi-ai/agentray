@@ -253,10 +253,15 @@ func AppendToolTraceEntry(ctx context.Context, store *storage.Store, convID, age
 	})
 }
 
-// ConvContextWindow is the assumed model context window for the conversation-level
-// compaction trigger. Conservative default; the trigger only fires for very long
-// threads, so over-estimating is safe (no premature summarization). Tunable later
-// per-model (design §10).
+// ConvContextWindow is the FALLBACK model context window for the
+// conversation-level compaction trigger, used only when the caller could not
+// determine the real one. Callers pass the answering tier's actual window
+// (agentruntime.EffectiveContextWindow), which is the same fact the run-level
+// compaction budget is capped against — the two layers compact the same thread
+// for the same model, so they must not disagree about how much it holds.
+//
+// Conservative on purpose: a window guessed too small compacts early (wasteful),
+// while one guessed too large replays a history the model cannot accept.
 const ConvContextWindow = 128000
 
 // MaybeCompactConversation appends a compaction entry when the live (post-last-
@@ -272,13 +277,13 @@ const ConvContextWindow = 128000
 // transcript — because only the last compaction's summary survives into
 // BuildHistory, a from-scratch summary of just the new slice would silently drop
 // everything the earlier summary captured. (pi's iterative update-summary.)
-func MaybeCompactConversation(ctx context.Context, store *storage.Store, convID string, summarize func(ctx context.Context, transcript, previousSummary string) (string, error)) (bool, error) {
+func MaybeCompactConversation(ctx context.Context, store *storage.Store, convID string, window int, summarize func(ctx context.Context, transcript, previousSummary string) (string, error)) (bool, error) {
 	entries, err := store.PathToLeaf(ctx, convID)
 	if err != nil {
 		return false, err
 	}
 
-	plan := planCompaction(entries)
+	plan := planCompaction(entries, window)
 	if !plan.ok {
 		return false, nil // below threshold, or no clean cut that keeps a recent window
 	}
@@ -331,7 +336,10 @@ type compactionPlan struct {
 // backward accumulating recent tokens and cuts at the next-older turn boundary (a
 // user message) once past keepRecent — so a tool-call/result or user/assistant
 // pair is never split across the boundary, and at least one recent turn is kept.
-func planCompaction(entries []storage.AgentConversationEntry) compactionPlan {
+func planCompaction(entries []storage.AgentConversationEntry, window int) compactionPlan {
+	if window <= 0 {
+		window = ConvContextWindow
+	}
 	liveStart := 0
 	prevSummary := ""
 	for i, e := range entries {
@@ -350,7 +358,7 @@ func planCompaction(entries []storage.AgentConversationEntry) compactionPlan {
 		total += e.TokenEstimate
 	}
 	plan := compactionPlan{liveStart: liveStart, prevSummary: prevSummary, total: total}
-	if total <= ConvContextWindow-ConvReserveTokens {
+	if total <= window-ConvReserveTokens {
 		return plan
 	}
 

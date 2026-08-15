@@ -108,6 +108,7 @@ type Registry struct {
 	compactionRung  ModelRung
 	compactor       Compactor
 	escalation      []ModelRung
+	contextWindow   int
 	retry           RetryPolicy
 	goal            string
 	maxTokens       int
@@ -225,6 +226,15 @@ func (r *Registry) SetModel(p LLMProvider, model string) error {
 // rung errors.
 func (r *Registry) SetEscalation(rungs []ModelRung) error {
 	return setSeam(r, "escalation", &r.escalation, rungs)
+}
+
+// SetContextWindow declares the primary model's input window in tokens, which
+// caps the compaction budget. It is a separate seam from SetModel because the
+// window is knowledge about the model rather than a way to reach it: the same
+// provider serves models with different windows, and a composition that cannot
+// find out leaves it at 0 rather than guessing.
+func (r *Registry) SetContextWindow(tokens int) error {
+	return setSeam(r, "context_window", &r.contextWindow, tokens)
 }
 
 // SetRetry overrides the same-model backoff policy applied before escalation.

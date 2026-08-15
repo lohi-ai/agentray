@@ -40,7 +40,14 @@ func traceIDFrom(ctx context.Context) string {
 // run — the "message sent to the LLM + est. fee" trace. Emitted once per Chat or
 // streamed turn.
 type TraceRecord struct {
-	TraceID    string               `json:"trace_id,omitempty"` // correlation id (the run id), set via WithTraceID
+	TraceID string `json:"trace_id,omitempty"` // correlation id (the run id), set via WithTraceID
+	// SessionKey identifies WHICH agent made the call — the run's own session,
+	// or a spawned child's derived session. A parent and its children share one
+	// provider and one ctx chain, so without this their calls are one
+	// undifferentiated stream. Empty outside a durable run.
+	SessionKey string `json:"session_key,omitempty"`
+	// Depth is the delegation depth of the caller: 0 for the top-level run.
+	Depth      int                  `json:"depth,omitempty"`
 	Timestamp  time.Time            `json:"timestamp"`
 	Provider   string               `json:"provider"`
 	Model      string               `json:"model"`
@@ -195,6 +202,8 @@ func (t *tracingProvider) emit(ctx context.Context, req agentcore.ChatRequest, r
 	}
 	rec := TraceRecord{
 		TraceID:    traceIDFrom(ctx),
+		SessionKey: agentcore.RunSessionFrom(ctx),
+		Depth:      agentcore.DelegationDepth(ctx),
 		Timestamp:  start(dur),
 		Provider:   t.inner.Name(),
 		Model:      req.Model,

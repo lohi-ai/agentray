@@ -291,7 +291,12 @@ func (s *ChatService) maybeCompact(ctx context.Context, opts ChatOptions) {
 		}
 		return strings.TrimSpace(resp.Message.Content), nil
 	}
-	_, _ = MaybeCompactConversation(wctx, s.runner.Store, opts.ConversationID, summarize)
+	// The window is the RUN tier's, not the summarizer's: it bounds how much
+	// history the next turn replays, and that turn runs on the run tier. 0 on
+	// error falls back to the conservative default rather than failing a
+	// best-effort compaction.
+	_, _ = MaybeCompactConversation(wctx, s.runner.Store, opts.ConversationID,
+		s.runner.RunTierWindow(wctx, opts.ProjectID), summarize)
 }
 
 // compactionSystem instructs the cheap tier to compress an older slice of the

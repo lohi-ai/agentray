@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, ChevronRight, History, Play, Save, Scissors, Send, Square, StepForward, X } from 'lucide-react';
+import { ArrowLeft, History, Play, Save, Send, Square, StepForward, X } from 'lucide-react';
 import { Table } from '@astryxdesign/core/Table';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { TextArea } from '@astryxdesign/core/TextArea';
@@ -15,36 +15,9 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, EmptyState, Intro, Panel, Segment, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { HarnessGuide } from './harness-guide';
 import { StepInspector } from './step-inspector';
+import { StepRail } from './step-rail';
 
 const VERDICT: Record<LabTestResult['status'], string> = { pass: 'healthy', fail: 'attention', error: 'attention', blocked: 'paused' };
-
-// StepRail visualizes the loop: one selectable chip per step, in order. Selecting
-// a chip drives the inspector below — so the user can scrub back through the loop's
-// turns and see exactly what the harness did at each one.
-function StepRail({ steps, selected, onSelect }: { steps: LabStep[]; selected: number; onSelect: (i: number) => void }) {
-  if (steps.length === 0) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      {steps.map((s, i) => (
-        <button
-          key={i}
-          className={`inline-flex h-[30px] items-center gap-1.5 rounded-[20px] border px-2.5 text-[11.5px] cursor-pointer ${
-            s.error
-              ? 'border-danger text-danger bg-[var(--color-background-muted)]'
-              : i === selected
-                ? 'border-agent text-[var(--color-text-primary)] bg-[color-mix(in_srgb,var(--agent)_14%,var(--surface-2))]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] bg-[var(--color-background-muted)]'
-          }`}
-          onClick={() => onSelect(i)}
-        >
-          {s.kind === 'compaction' ? <Scissors size={12} /> : <span className="font-mono tabular-nums">{s.turn}</span>}
-          <span className="whitespace-nowrap">{s.kind === 'compaction' ? 'compact' : `turn ${s.turn}`}</span>
-          {i < steps.length - 1 ? <ChevronRight size={12} className="ml-0.5 text-[var(--color-text-disabled)]" /> : null}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 // DiffView colorizes a unified-style line diff: +added / -removed / context.
 function DiffView({ diff }: { diff: string }) {
@@ -77,7 +50,7 @@ export function AgentLabPage() {
   const [steer, setSteer] = useState('');
   const [result, setResult] = useState<LabTestResult | null>(null);
   const [testSelected, setTestSelected] = useState(0);
-  const [replay, setReplay] = useState<{ name: string; steps: LabStep[] } | null>(null);
+  const [replay, setReplay] = useState<{ name: string; runID: string; steps: LabStep[]; total: number } | null>(null);
   const [replaySelected, setReplaySelected] = useState(0);
 
   const test = useMutation({
@@ -88,10 +61,19 @@ export function AgentLabPage() {
 
   // Replay reopens the folded steps of a past run (saved-case last run), so the
   // user can re-inspect the harness without spending another run.
+  //
+  // A lab case is a short run, so one window is the whole thing in practice —
+  // but "in practice" is not "always", and a rail that quietly stopped at step
+  // 200 would read as a run that ended there. It asks for the largest window the
+  // endpoint serves and says so when the run outgrew it, handing the reader to
+  // the run view, which navigates by chapter instead of by scroll.
   const replayRun = useMutation({
     mutationFn: (vars: { runID: string; name: string }) =>
-      new AgentRayAPI(projectID!).labReplaySteps(vars.runID, agentID).then((d) => ({ ...d, name: vars.name })),
-    onSuccess: (data) => { setReplay({ name: data.name, steps: data.steps ?? [] }); setReplaySelected(0); },
+      new AgentRayAPI(projectID!).labReplaySteps(vars.runID, agentID, 0, 200).then((d) => ({ ...d, ...vars })),
+    onSuccess: (data) => {
+      setReplay({ name: data.name, runID: data.runID, steps: data.steps ?? [], total: data.total ?? 0 });
+      setReplaySelected(0);
+    },
     onError: (e: Error) => setError(e.message),
   });
 
@@ -268,6 +250,18 @@ export function AgentLabPage() {
             <EmptyState title="No steps recorded" detail="This run has no folded steps to replay." />
           ) : (
             <>
+              {replay.total > replay.steps.length ? (
+                <p className="m-0 mb-2.5 text-[11.5px] text-[var(--color-text-secondary)]">
+                  Showing the first {replay.steps.length} of {replay.total} steps.{' '}
+                  <button
+                    className="border-0 bg-transparent p-0 text-[11.5px] text-agent cursor-pointer"
+                    onClick={() => router.push(`/agents/${agentID}/runs/${replay.runID}`)}
+                  >
+                    Open the full run
+                  </button>{' '}
+                  to navigate it by chapter.
+                </p>
+              ) : null}
               <StepRail steps={replay.steps} selected={replaySelected} onSelect={setReplaySelected} />
               {replay.steps[replaySelected] ? <StepInspector step={replay.steps[replaySelected]} /> : null}
             </>

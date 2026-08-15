@@ -479,6 +479,8 @@ export type ListedWorkspaceModel = {
   provider_name: string;
   provider_vendor: string;
   id: string;
+  /** Input window in tokens as the provider reported it, or 0 when unknown. */
+  context_window?: number;
 };
 
 export type ListedWorkspaceModels = {
@@ -506,6 +508,15 @@ export type WorkspaceModelTiers = {
   flash_provider_id?: string;
   lite_provider_id?: string;
   pro_provider_id?: string;
+  /**
+   * Per-tier context-window override in tokens. 0 or absent means the window is
+   * derived from the model id, which is the normal case — it is only set for an
+   * endpoint no catalog can know (self-hosted, or a gateway serving a model
+   * truncated).
+   */
+  context_window?: number;
+  lite_context_window?: number;
+  pro_context_window?: number;
 };
 
 export type WorkspaceModelTiersInput = {
@@ -525,6 +536,9 @@ export type WorkspaceModelTiersInput = {
   flash_provider_id?: string;
   lite_provider_id?: string;
   pro_provider_id?: string;
+  context_window?: number;
+  lite_context_window?: number;
+  pro_context_window?: number;
 };
 
 // --- Alerting (#1) ---

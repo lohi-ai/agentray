@@ -81,8 +81,15 @@ type Config struct {
 	// the default — disables trace emission; cost is still computed and persisted.
 	AgentTraceFile string
 	// AgentMaxContextTokens overrides the loop's soft compaction budget (the
-	// context size above which old turns are summarized). 0 — the default — keeps
-	// agentcore's 200k. A deployment/test knob to tune or exercise compaction.
+	// context size above which old turns are summarized). 0 — the default —
+	// keeps agentcore's 300k. A deployment/test knob to tune or exercise
+	// compaction.
+	//
+	// It is a CEILING, not the budget: the answering model's own context window
+	// caps it further, per rung, so this never has to be sized for the smallest
+	// model a workspace might configure. Lower it to spend less; the per-tier
+	// context window (Settings → AI Provider) is the right place to describe a
+	// specific endpoint.
 	AgentMaxContextTokens int
 	// AgentKeepRecentTokens overrides how much recent context compaction keeps
 	// verbatim (the rest of the older span is summarized). 0 — the default —

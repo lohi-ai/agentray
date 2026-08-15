@@ -79,8 +79,8 @@ func TestListModelsForVendor_PerVendorWireContract(t *testing.T) {
 			if gotPath != c.wantPath {
 				t.Errorf("path = %q, want %q", gotPath, c.wantPath)
 			}
-			if strings.Join(got, ",") != strings.Join(c.want, ",") {
-				t.Fatalf("models = %v, want %v", got, c.want)
+			if strings.Join(modelIDs(got), ",") != strings.Join(c.want, ",") {
+				t.Fatalf("models = %v, want %v", modelIDs(got), c.want)
 			}
 		})
 	}
@@ -100,9 +100,19 @@ func TestListModelsForVendor_UnknownVendorUsesTheOpenAICompatWire(t *testing.T) 
 	if err != nil {
 		t.Fatalf("listModelsForVendor: %v", err)
 	}
-	if path != "/models" || len(got) != 1 || got[0] != "plus" {
+	if path != "/models" || len(got) != 1 || got[0].ID != "plus" {
 		t.Fatalf("path=%q models=%v; want the OpenAI-compat wire", path, got)
 	}
+}
+
+// modelIDs projects a listing to its ids, for assertions that are only about
+// which models came back.
+func modelIDs(ms []listedModel) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.ID)
+	}
+	return out
 }
 
 // A Google base URL already pointing at the OpenAI-compatible surface must not
@@ -122,7 +132,7 @@ func TestListGoogleModels_OpenAICompatBaseURLUsesTheCompatWire(t *testing.T) {
 	if !strings.HasSuffix(path, "/openai/models") {
 		t.Fatalf("path = %q, want the compat /models endpoint", path)
 	}
-	if len(got) != 1 || got[0] != "gemini-3-pro" {
+	if len(got) != 1 || got[0].ID != "gemini-3-pro" {
 		t.Fatalf("models = %v", got)
 	}
 }

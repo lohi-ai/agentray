@@ -14,6 +14,10 @@ import (
 type Plugin struct {
 	Provider agentcore.LLMProvider
 	Model    string
+	// ContextWindow is the primary model's input window in tokens, which caps
+	// the compaction budget. 0 leaves it unknown and the run's configured
+	// MaxContextTokens stands alone.
+	ContextWindow int
 	// Escalation is the ordered fallback ladder tried when the primary rung
 	// fails retryably. The run sticks with the working rung for later turns.
 	Escalation []agentcore.ModelRung
@@ -48,6 +52,9 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 	}
 	for _, set := range []func() error{
 		func() error { return apply(p.Escalation != nil, func() error { return r.SetEscalation(p.Escalation) }) },
+		func() error {
+			return apply(p.ContextWindow > 0, func() error { return r.SetContextWindow(p.ContextWindow) })
+		},
 		func() error {
 			return apply(p.Retry != nil, func() error { return r.SetRetry(*p.Retry) })
 		},

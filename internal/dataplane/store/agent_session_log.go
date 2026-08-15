@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // This file holds the durable session log — the append-only harness that makes a
@@ -61,6 +63,15 @@ func (s *Store) migrateAgentSessionLog(ctx context.Context) error {
 		`ALTER TABLE agent_session_log DROP CONSTRAINT IF EXISTS agent_session_log_run_id_seq_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS agent_session_log_session_seq_key ON agent_session_log (session_key, seq)`,
 		`CREATE INDEX IF NOT EXISTS agent_session_log_run_idx ON agent_session_log (run_id, seq ASC)`,
+		// Resume reads the newest checkpoint and whether the log ever branched.
+		// Both questions are about two rare kinds among a long run's thousands of
+		// message rows, so the index is PARTIAL: it holds only those kinds, stays
+		// tiny next to the table, and answers either question with one backwards
+		// index scan instead of walking a whole session's log — which is the entire
+		// point of a windowed resume.
+		`CREATE INDEX IF NOT EXISTS agent_session_log_resume_idx
+	ON agent_session_log (session_key, seq DESC)
+	WHERE kind IN ('compaction', 'leaf_move')`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -110,6 +121,59 @@ ORDER BY seq ASC`, sessionKey)
 		return nil, err
 	}
 	defer rows.Close()
+	return scanSessionEntries(rows)
+}
+
+// AgentSessionLogFrom returns the tail of one session's log — entries with
+// seq >= sinceSeq, oldest first. It is the read a resume actually needs: a long
+// run's log is mostly history its newest checkpoint already stands for, and
+// reading all of it makes crash recovery slower the longer the run got.
+//
+// The bound is inclusive because the caller starts AT the checkpoint: that row
+// carries the retained transcript and the run state, so excluding it would drop
+// everything the window exists to preserve. Served by the same (session_key, seq)
+// unique index that orders the full read.
+func (s *Store) AgentSessionLogFrom(ctx context.Context, sessionKey string, sinceSeq int) ([]AgentSessionEntry, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT id::text, run_id::text, session_key, seq, kind, turn, payload_json::text, created_at
+FROM agent_session_log
+WHERE session_key = $1 AND seq >= $2
+ORDER BY seq ASC`, sessionKey, sinceSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSessionEntries(rows)
+}
+
+// AgentSessionCheckpoint reports the two facts that decide whether a session can
+// be resumed from a window: the seq of the newest SELF-CONTAINED checkpoint (a
+// completed compaction carrying both a retained transcript and the run state),
+// and whether the log has ever branched.
+//
+// Both are mechanical — no judgement about whether a window is safe lives here;
+// the caller (agentcore.LoadResumeLog) owns that rule, so a second backend
+// cannot get it subtly different. A session with no such checkpoint returns 0,
+// which is unambiguous: seq starts at 1, and a compaction always follows the
+// messages it summarizes.
+func (s *Store) AgentSessionCheckpoint(ctx context.Context, sessionKey string) (int, bool, error) {
+	var seq int
+	var branched bool
+	err := s.pg.QueryRow(ctx, `
+SELECT
+	COALESCE(MAX(seq) FILTER (
+		WHERE kind = 'compaction'
+			AND payload_json->>'final' = 'true'
+			AND jsonb_exists(payload_json, 'retained')
+			AND jsonb_exists(payload_json, 'state')
+	), 0),
+	COALESCE(bool_or(kind = 'leaf_move'), false)
+FROM agent_session_log
+WHERE session_key = $1 AND kind IN ('compaction', 'leaf_move')`, sessionKey).Scan(&seq, &branched)
+	return seq, branched, err
+}
+
+func scanSessionEntries(rows pgx.Rows) ([]AgentSessionEntry, error) {
 	out := []AgentSessionEntry{}
 	for rows.Next() {
 		var e AgentSessionEntry

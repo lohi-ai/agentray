@@ -1,8 +1,9 @@
 'use client';
 
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
+import { TextInput } from '@astryxdesign/core/TextInput';
 import { Typeahead } from '@astryxdesign/core/Typeahead';
-import type { ModelPickerItem } from './model-picker';
+import { effectiveTierWindow, formatTokens, type ModelPickerItem } from './model-picker';
 
 // The three workspace tiers, ordered the way the job happens: Default is the
 // one that must be set, Lite and Pro are refinements of it.
@@ -46,6 +47,8 @@ export function TierBlock({
   inherit,
   onInheritChange,
   onChange,
+  contextWindow,
+  onContextWindowChange,
   searchSource,
   isLoading,
 }: {
@@ -54,6 +57,9 @@ export function TierBlock({
   inherit: boolean;
   onInheritChange: ((checked: boolean) => void) | null;
   onChange: (item: ModelPickerItem | null) => void;
+  /** The operator's override in tokens; 0 means "use what we detected". */
+  contextWindow: number;
+  onContextWindowChange: (tokens: number) => void;
   searchSource: { search: (q: string) => ModelPickerItem[]; bootstrap: () => ModelPickerItem[] };
   isLoading: boolean;
 }) {
@@ -100,8 +106,74 @@ export function TierBlock({
               </span>
             )}
           />
+          {value ? (
+            <ContextWindowField
+              detected={value.auxiliaryData.contextWindow}
+              override={contextWindow}
+              onChange={onContextWindowChange}
+            />
+          ) : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// How much conversation this model can hold. It is shown, not asked: for the
+// audience this tab was built for the right number is already known, and the
+// only reason to type one is an endpoint no catalog can describe — a self-hosted
+// model, or a gateway serving a smaller window than the model's name implies.
+//
+// Getting this wrong upward is what kills a long run (the agent never compacts,
+// then the provider rejects the request), so the unknown case says so plainly
+// rather than showing a confident default.
+function ContextWindowField({
+  detected,
+  override,
+  onChange,
+}: {
+  detected: number;
+  override: number;
+  onChange: (tokens: number) => void;
+}) {
+  const manual = override > 0;
+  const effective = effectiveTierWindow(detected, override);
+
+  return (
+    <div className="mt-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className="text-[12px] text-[var(--color-text-secondary)]">Conversation size limit</span>
+        <span className="text-[12.5px] text-[var(--color-text-primary)]">
+          {effective > 0 ? `${formatTokens(effective)} tokens` : 'Not known for this model'}
+        </span>
+        <button
+          type="button"
+          className="text-[12px] text-[var(--color-text-secondary)] underline underline-offset-2 hover:text-[var(--color-text-primary)]"
+          onClick={() => onChange(manual ? 0 : detected || 128000)}
+        >
+          {manual ? 'Use the detected size' : 'Set it myself'}
+        </button>
+      </div>
+
+      {manual ? (
+        <div className="mt-2 max-w-[220px]">
+          <TextInput
+            label="Tokens"
+            value={String(override)}
+            placeholder="128000"
+            // Digits only: the field feeds a token count, and a stray character
+            // would otherwise parse to NaN and silently save as "no override".
+            onChange={(v: string) => onChange(Number(v.replace(/\D/g, '')) || 0)}
+            width="100%"
+          />
+        </div>
+      ) : (
+        <p className="mt-1 max-w-[560px] text-[11.5px] text-[var(--color-text-secondary)]">
+          {effective > 0
+            ? 'Taken from the model. The agent summarizes older messages before reaching it.'
+            : 'The agent will fall back to the workspace default. Set it yourself if this endpoint holds less.'}
+        </p>
+      )}
     </div>
   );
 }

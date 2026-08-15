@@ -50,6 +50,10 @@ type Agent struct {
 	// product-agnostic: a consumer's tier system maps onto it, but agentcore only
 	// sees an ordered list of provider+model rungs.
 	escalation []ModelRung
+	// contextWindow is the primary model's input window in tokens (0 = unknown).
+	// The loop treats the primary as rung zero of the ladder, so this is the same
+	// fact ModelRung.ContextWindow carries for the rest.
+	contextWindow int
 	// getSteering, when set, is drained at the top of every turn: any messages it
 	// returns are threaded into the conversation before the model reasons, so a
 	// user can inject a mid-run correction honored on the next turn (pi's steering
@@ -194,6 +198,19 @@ func (a *Agent) release() { atomic.StoreInt32(&a.running, 0) }
 type ModelRung struct {
 	Provider LLMProvider
 	Model    string
+	// ContextWindow is this model's input window in tokens, which caps the
+	// compaction budget while this rung is answering. 0 means unknown and the
+	// configured MaxContextTokens stands alone.
+	//
+	// It lives on the rung rather than in Limits because a ladder is routinely
+	// built from models with different windows, and the loop switches between
+	// them mid-run. A single run-wide number is therefore wrong for every rung
+	// but one — too high and the loop never compacts before the provider
+	// rejects the request, which no retry or escalation can rescue.
+	//
+	// agentcore does not know any model's window and must not learn: the value
+	// is supplied by whoever built the rung.
+	ContextWindow int
 }
 
 // TurnState is the per-turn save-point: the model, tools, and system prompt that
@@ -212,9 +229,13 @@ type TurnState struct {
 // Config wires an Agent. Provider, Model, Tools, and Policy are required; the
 // rest have safe defaults (DenyAll policy, no memory, DefaultLimits, DefaultEnv).
 type Config struct {
-	Provider   LLMProvider
-	Model      string
-	Tools      *ToolSet
+	Provider LLMProvider
+	Model    string
+	// ContextWindow is the primary model's input window in tokens — the same
+	// fact ModelRung.ContextWindow carries for the escalation rungs. 0 means
+	// unknown.
+	ContextWindow int
+	Tools         *ToolSet
 	Policy     Policy
 	Hooks      Hooks
 	Memory     MemoryStore

@@ -7,9 +7,55 @@ import (
 )
 
 // defaultContextTokenBudget is the soft ceiling at which the loop compacts old
-// turns so long autonomous runs stay inside the model window (§5.2, §7). It is
-// intentionally conservative; consumers can override via Limits.MaxContextTokens.
-const defaultContextTokenBudget = 200_000
+// turns so long autonomous runs stay inside the model window (§5.2, §7).
+//
+// It is the *configured* ceiling only — the ceiling an operator asked for. The
+// budget actually applied is effectiveBudget(), which caps this against the
+// answering model's own window, so this number never has to be a guess about
+// any particular model. Consumers override it via Limits.MaxContextTokens.
+const defaultContextTokenBudget = 300_000
+
+// outputHeadroomTokens is subtracted from a model's window before it caps the
+// budget, because a context window holds the reply as well as the prompt. Sizing
+// the budget to the whole window leaves the loop compacting only once the input
+// alone has filled it, at which point there is no room left to answer in and the
+// provider rejects the request — the exact failure the window cap exists to
+// prevent. Sized against the loop's own MaxTokens ceiling with room to spare.
+const outputHeadroomTokens = 32_000
+
+// effectiveBudget is the compaction ceiling actually applied: the configured
+// budget, capped by what the answering model can physically hold.
+//
+//	budget = min(window - outputHeadroom, configured)
+//
+// window is 0 when nobody could determine it — a self-hosted endpoint, a model
+// id no catalog knows — and then the configured budget stands alone, which is
+// the old behaviour. That asymmetry is deliberate: compacting earlier than
+// necessary costs tokens, while compacting later than the window allows costs
+// the run, and no retry or escalation can rescue a transcript that no longer
+// fits.
+//
+// A window smaller than the headroom is not treated as "no room at all": such a
+// model cannot serve this loop usefully anyway, and returning 0 would disable
+// compaction entirely (shouldCompact reads 0 as "use the default"), which is the
+// worst possible response to the smallest possible window. Half the window is
+// the floor instead.
+func effectiveBudget(configured, window int) int {
+	if configured <= 0 {
+		configured = defaultContextTokenBudget
+	}
+	if window <= 0 {
+		return configured
+	}
+	usable := window - outputHeadroomTokens
+	if usable < window/2 {
+		usable = window / 2
+	}
+	if usable < configured {
+		return usable
+	}
+	return configured
+}
 
 // defaultKeepRecentTokens is the approximate recent-context budget preserved
 // verbatim after a compaction; everything older is summarized (pi's

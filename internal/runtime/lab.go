@@ -199,7 +199,7 @@ Respond with a single line beginning with PASS or FAIL, followed by a dash and a
 // userID/projectID enforce that the run belongs to a project the caller can read;
 // the fold then reconstructs only what was recorded.
 func (s *LabService) stepsForRun(ctx context.Context, userID, projectID, runID string) ([]agentcore.LabStep, error) {
-	calls, err := s.store.ListAgentLLMCalls(ctx, userID, projectID, runID)
+	calls, err := s.store.AgentLLMCallTrace(ctx, userID, projectID, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -207,15 +207,47 @@ func (s *LabService) stepsForRun(ctx context.Context, userID, projectID, runID s
 }
 
 // recordsFromCalls maps persisted LLM-call rows to the neutral TurnRecord shape
-// the fold consumes. The trace stores Messages/ToolCalls as the exact JSON the
-// trace sink marshalled (agentcore.Message / agentcore.ToolCall), so the reverse
-// is a plain unmarshal; a malformed row degrades to an empty slice rather than
-// failing the whole fold.
+// the fold consumes, reconstructing each call's full request from the delta the
+// trace sink stored.
+//
+// Reconstruction is context(n) = context(BaseSeq)[:KeepPrefix] + delta, chained
+// back to the nearest keyframe (BaseSeq 0, which carries the whole request).
+// Rows are already in seq order, so one left-to-right pass resolves every chain
+// with a map of the contexts seen so far — no back-walking, and no dependence
+// on rows arriving grouped by session, which they do not: a parent and its
+// sub-agents interleave.
+//
+// A row with no base is a keyframe: its payload IS the context. That covers
+// every row written before the delta encoding existed — they were stored whole
+// and are not backfilled — so historical runs replay unchanged.
+//
+// A row whose base is NAMED but absent should not occur: the sink forgets a
+// session whose insert failed, so the next call writes a keyframe rather than
+// chaining onto a row that never landed. If one appears anyway (rows deleted
+// out from under a fold), the delta is shown alone — the tail of that step's
+// context rather than all of it. Degraded, but never invented.
+//
+// A malformed payload degrades to an empty slice rather than failing the fold.
 func recordsFromCalls(calls []storage.AgentLLMCall) []agentcore.TurnRecord {
 	out := make([]agentcore.TurnRecord, 0, len(calls))
+	contexts := make(map[int][]agentcore.Message, len(calls))
 	for _, c := range calls {
-		var msgs []agentcore.Message
-		_ = json.Unmarshal([]byte(c.MessagesJSON), &msgs)
+		var delta []agentcore.Message
+		_ = json.Unmarshal([]byte(c.MessagesJSON), &delta)
+
+		msgs := delta
+		if c.BaseSeq != 0 {
+			if base, ok := contexts[c.BaseSeq]; ok {
+				keep := min(max(c.KeepPrefix, 0), len(base))
+				msgs = make([]agentcore.Message, 0, keep+len(delta))
+				msgs = append(msgs, base[:keep]...)
+				msgs = append(msgs, delta...)
+			}
+		}
+		if c.Seq != 0 {
+			contexts[c.Seq] = msgs
+		}
+
 		var toolCalls []agentcore.ToolCall
 		_ = json.Unmarshal([]byte(c.ToolCallsJSON), &toolCalls)
 		out = append(out, agentcore.TurnRecord{

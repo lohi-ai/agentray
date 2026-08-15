@@ -14,6 +14,11 @@ type Model struct {
 	ProviderVendor string `json:"provider_vendor"`
 	ProviderName   string `json:"provider_name"`
 	ID             string `json:"id"`
+	// ContextWindow is the model's input window in tokens: the vendor's own
+	// figure when its list-models response carried one, otherwise this package's
+	// fallback, otherwise 0 for "unknown". It is what the compaction budget is
+	// capped against, so 0 must stay distinguishable from a real number.
+	ContextWindow int `json:"context_window,omitempty"`
 }
 
 // Provider is the runtime unit: identity, auth, live model list, Chat/Stream.

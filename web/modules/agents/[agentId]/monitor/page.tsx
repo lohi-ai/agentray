@@ -7,7 +7,7 @@ import type { AgentRun } from '@/lib/api';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Intro, Loading, Panel, rowNavPlugin, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 
 function runLatency(run: AgentRun): string {
   if (!run.finished_at) return '—';
@@ -53,6 +53,10 @@ export function AgentMonitorPage() {
             data={runs}
             idKey="id"
             density="compact"
+            /* A run row used to dead-end here. It is the one place a user asks
+               "what did it actually do?", so it opens the run view — chapters
+               first, then the steps of the chapter they pick. */
+            plugins={{ nav: rowNavPlugin<AgentRun>((run) => router.push(`/agents/${agentID}/runs/${run.id}`)) }}
             columns={[
               { key: 'run', header: 'Run', align: 'start', renderCell: (run) => run.summary || run.id.slice(0, 12) },
               { key: 'trigger', header: 'Trigger', align: 'start', renderCell: (run) => <span className="text-[var(--color-text-disabled)]">{run.trigger}</span> },

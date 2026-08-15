@@ -113,10 +113,19 @@ func (v LogInvariantViolation) Error() string {
 // it. Keeping the observed entries lets the plugin run the real fold and
 // compare, which is the question that actually matters: not "was it written?"
 // but "does what was written rebuild what ran?".
+//
+// entries is pruned at every checkpoint, which is what keeps the check
+// affordable on a long run — see prune.
 type logInvariant struct {
 	counts  map[string]int
 	entries []agentcore.SessionEntry
-	report  func(LogInvariantViolation)
+	// branched records that the log is no longer a single chain. The fold walks
+	// the ACTIVE branch, so once a leaf move exists the entries before a
+	// checkpoint may still be reachable and dropping them would change the
+	// answer. Pruning stops for the rest of the run — correctness first, and a
+	// branched run pays the old cost.
+	branched bool
+	report   func(LogInvariantViolation)
 }
 
 // Name identifies the extension in composition diagnostics.
@@ -135,6 +144,40 @@ func (li *logInvariant) ObserveLogged(e agentcore.SessionEntry) {
 	if e.Kind == agentcore.EntryMessage && e.Message != nil {
 		li.note(*e.Message)
 	}
+	li.prune(e)
+}
+
+// prune drops the entries a fold would never read again.
+//
+// The reconstruction check re-runs the real fold on every request, so its cost
+// is the length of the entry list — and that list was the whole run. On a
+// 4,200-turn run that is 10,600 entries folded 4,200 times: quadratic, ~40s of
+// CPU spent proving the same prefix over and over, on a check that is supposed
+// to be cheap enough to leave on.
+//
+// It does not have to be. A completed compaction that carries a retained
+// transcript is a point the fold RESTARTS from: everything older is what the
+// summary now stands for, and ReduceSession discards it the moment it arrives
+// there. So the entries before the newest such checkpoint cannot affect the
+// result, and keeping them buys nothing but time and memory. Dropping them makes
+// the check O(window) — the same fold, over the only entries that can change its
+// answer.
+//
+// This is the same property the windowed resume rests on, applied to the same
+// fold: if pruning here could change the answer, a windowed resume would be
+// wrong too.
+func (li *logInvariant) prune(e agentcore.SessionEntry) {
+	if e.Kind == agentcore.EntryLeafMove {
+		li.branched = true
+		return
+	}
+	if li.branched || e.Kind != agentcore.EntryCompaction || !e.Final || e.Retained == nil {
+		return
+	}
+	// Keep the checkpoint itself: it carries the retained transcript the fold
+	// restarts from, so dropping it would drop the history rather than the
+	// history's redundant prefix.
+	li.entries = append(li.entries[:0:0], e)
 }
 
 // ObserveMessages is the other half: the loop reports what the model is about

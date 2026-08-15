@@ -136,7 +136,7 @@ func TestPlanCompactionBelowThresholdIsNoOp(t *testing.T) {
 		tokEntry("1", "user", "hi", 100),
 		tokEntry("2", "assistant", "hello", 100),
 	}
-	if plan := planCompaction(entries); plan.ok {
+	if plan := planCompaction(entries, 0); plan.ok {
 		t.Fatalf("short thread should not compact, got %+v", plan)
 	}
 }
@@ -154,7 +154,7 @@ func TestPlanCompactionCutsAtUserTurnBoundary(t *testing.T) {
 		tokEntry("3", "user", "recent q", 15000),
 		tokEntry("4", "assistant", "recent a", 25000),
 	}
-	plan := planCompaction(entries)
+	plan := planCompaction(entries, 0)
 	if !plan.ok {
 		t.Fatalf("long thread should compact, got %+v", plan)
 	}
@@ -176,7 +176,7 @@ func TestPlanCompactionDeclinesWhenNoCleanCut(t *testing.T) {
 		tokEntry("1", "user", "one giant turn", 200000),
 		tokEntry("2", "assistant", "answer", 5000),
 	}
-	if plan := planCompaction(entries); plan.ok {
+	if plan := planCompaction(entries, 0); plan.ok {
 		t.Fatalf("no clean cut should decline, got %+v", plan)
 	}
 }
@@ -196,7 +196,7 @@ func TestPlanCompactionCarriesPriorSummaryForward(t *testing.T) {
 		tokEntry("5", "user", "recent q", 15000),
 		tokEntry("6", "assistant", "recent a", 25000),
 	}
-	plan := planCompaction(entries)
+	plan := planCompaction(entries, 0)
 	if !plan.ok {
 		t.Fatalf("should compact, got %+v", plan)
 	}
@@ -258,5 +258,43 @@ func TestModelAndHumanProjectionsDivergeFromOneLog(t *testing.T) {
 		if strings.Contains(m.Content, "old turn") {
 			t.Fatalf("compacted prefix leaked into model context: %+v", model)
 		}
+	}
+}
+
+// The conversation trigger and the in-run compaction budget shrink the same
+// thread for the same model, so they must be capped by the same window. Before
+// this was a parameter it was a hardcoded 128k that disagreed with whatever the
+// run was actually pointed at: on a smaller model the thread replays a history
+// the model rejects, on a larger one it summarizes long before it needed to.
+func TestPlanCompactionUsesTheModelsWindow(t *testing.T) {
+	// A live window of ~60k tokens: comfortably inside 128k, far past 32k.
+	var entries []storage.AgentConversationEntry
+	for i := 0; i < 20; i++ {
+		role := string(agentcore.RoleUser)
+		if i%2 == 1 {
+			role = string(agentcore.RoleAssistant)
+		}
+		entries = append(entries, storage.AgentConversationEntry{
+			Kind: ConvKindMessage, Role: role, TokenEstimate: 3000,
+		})
+	}
+
+	if plan := planCompaction(entries, 128_000); plan.ok {
+		t.Fatal("a 60k thread compacted on a 128k model; the window is being ignored")
+	}
+	if plan := planCompaction(entries, 32_000); !plan.ok {
+		t.Fatal("a 60k thread did not compact on a 32k model; it would replay a history the model cannot accept")
+	}
+}
+
+// 0 means "the caller could not find out", and every caller is on a
+// must-not-fail path. It has to mean the conservative default, not a window of
+// zero (which would compact every thread on its first turn).
+func TestPlanCompactionFallsBackWhenTheWindowIsUnknown(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		{Kind: ConvKindMessage, Role: string(agentcore.RoleUser), TokenEstimate: 100},
+	}
+	if plan := planCompaction(entries, 0); plan.ok {
+		t.Fatal("a tiny thread compacted with an unknown window; 0 was read as a zero-sized window")
 	}
 }

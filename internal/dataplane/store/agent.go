@@ -442,6 +442,14 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS flash_provider_id UUID`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_provider_id UUID`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_provider_id UUID`,
+		// Per-tier context window override, in tokens. 0 means "work it out from
+		// the model id", which is what every existing row gets — so the default is
+		// the behaviour these columns were added to make overridable, not a new
+		// one. One row per workspace, so the constant default is a metadata-only
+		// change rather than a rewrite.
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS context_window INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_context_window INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_context_window INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {

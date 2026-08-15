@@ -47,6 +47,41 @@ func (m *MemorySessionStore) Log(_ context.Context, id string) ([]SessionEntry, 
 	return out, nil
 }
 
+// LogFrom returns the session's entries with Seq >= sinceSeq, in order. The
+// in-memory store gains nothing from a windowed read (the slice is already in
+// hand), but implementing the capability is what lets the resume path be
+// exercised end to end without a database — the alternative is a windowing rule
+// that only ever runs in production.
+func (m *MemorySessionStore) LogFrom(_ context.Context, id string, sinceSeq int) ([]SessionEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []SessionEntry
+	for _, e := range m.log[id] {
+		if e.Seq >= sinceSeq {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// CheckpointSeq reports the newest self-contained checkpoint and whether the log
+// has ever branched. Both are scans here; a real store answers them with an
+// index.
+func (m *MemorySessionStore) CheckpointSeq(_ context.Context, id string) (int, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seq, branched := 0, false
+	for _, e := range m.log[id] {
+		if e.Kind == EntryLeafMove {
+			branched = true
+		}
+		if e.Kind == EntryCompaction && e.Final && e.Retained != nil && e.State != nil {
+			seq = e.Seq
+		}
+	}
+	return seq, branched, nil
+}
+
 // Sessions returns the ids that have at least one entry, in no particular
 // order. Useful for a local resume picker.
 func (m *MemorySessionStore) Sessions() []string {

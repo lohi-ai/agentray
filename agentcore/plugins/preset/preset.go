@@ -54,6 +54,7 @@ func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 		model.Plugin{
 			Provider:        cfg.Provider,
 			Model:           cfg.Model,
+			ContextWindow:   cfg.ContextWindow,
 			Escalation:      cfg.Escalation,
 			Retry:           cfg.Retry,
 			RefreshKey:      cfg.RefreshKey,

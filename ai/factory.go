@@ -116,17 +116,25 @@ func (w *wired) UpdateAPIKey(key string) {
 }
 
 func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
-	ids, err := listModelsForVendor(ctx, w.http, w.vendor, w.effectiveBaseURL(), w.apiKey)
+	listed, err := listModelsForVendor(ctx, w.http, w.vendor, w.effectiveBaseURL(), w.apiKey)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Model, 0, len(ids))
-	for _, id := range ids {
+	out := make([]Model, 0, len(listed))
+	for _, m := range listed {
+		// The vendor's own figure wins; the table only fills a gap. A vendor that
+		// starts reporting the window therefore takes over automatically, and a
+		// stale table entry can never override a live one.
+		window := m.ContextWindow
+		if window <= 0 {
+			window = ContextWindowFor(w.vendor, m.ID)
+		}
 		out = append(out, Model{
 			ProviderID:     w.id,
 			ProviderVendor: w.vendor,
 			ProviderName:   w.name,
-			ID:             id,
+			ID:             m.ID,
+			ContextWindow:  window,
 		})
 	}
 	return out, nil

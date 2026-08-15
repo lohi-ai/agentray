@@ -102,16 +102,18 @@ cannot give one belongs in a plugin, or belongs nowhere.
 
 | file | why core |
 |---|---|
-| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, and reduce/recover. The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. |
+| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, and reduce/recover. The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. Also the windowed read (`SessionWindowStore`, `LoadResumeLog`): the fold restarts at a checkpoint, so a resume reads a suffix rather than a history — and the rule for when that is safe lives here, once, rather than in each backend. |
 | [`session_tree.go`](session_tree.go) | **log** — the log is a tree: parent ids, branches, `EntryLeafMove`, `Rewind`. Reduce and recover walk only the active branch. |
 | [`memsession.go`](memsession.go) | **seam default** — in-process append-only `SessionStore`, so a run is resumable and the log invariant is checkable with nothing wired. |
 | [`goal.go`](goal.go) | **log** — the goal as a *fact about the run*: written once, recovered on resume. What to DO about an unmet goal is [`plugins/goal`](plugins/goal/). |
-| [`compaction.go`](compaction.go) | **log** — WHEN to compact and the durable bracket around it, plus the goal pin that survives summarization. |
+| [`compaction.go`](compaction.go) | **log** — WHEN to compact and the durable bracket around it, plus the goal pin that survives summarization. The trigger is `min(model window − output headroom, configured ceiling)`, re-derived per turn from the answering rung: the ladder routinely mixes models whose windows differ by 30x, and a ceiling too high for the current one means the loop never compacts before the provider rejects the request. The kernel knows no model's window — the rung carries it. |
 | [`compactor.go`](compactor.go) | **seam default** — `Compactor` + `DefaultCompactor`: WHAT replaces the old span, as a strategy with more than one right answer. |
 | [`idempotency.go`](idempotency.go) | **log** — the key derived from `(sessionID, toolCallID)`, which only works because both already survive a crash-resume in the log. |
 | [`delegation.go`](delegation.go) | **log** — delegation depth carried across an agent boundary. A spawn plugin's recursion cap is only enforceable if the depth survives the hop, and nothing outside the kernel can carry it. |
 | [`fork.go`](fork.go) | **loop** — building a child from a parent's *unexported* fields. A delegation plugin cannot do this from outside without those fields becoming exported, which is exactly how a child ends up out-scoping its parent. |
 | [`lab.go`](lab.go) | **log** — the read model: one pure fold from recorded facts to ordered steps, so a live-stepped run and a replayed run read identically. |
+| [`chapters.go`](chapters.go) | **log** — the same read model one level up: a run's compaction summaries ARE its table of contents, and dividing the fold at them is what makes a several-thousand-step run navigable rather than merely paginated. Pure, and derived from the same recorded facts as `lab.go`. |
+| [`runsession.go`](runsession.go) | **log** — which run's session a call belongs to, carried across the fork boundary. A sub-agent shares its parent's provider and ctx, so without this the two are one undifferentiated stream to anything decorating the seam; the id is the log's own key, so a trace tagged with it lines up with the log. |
 
 ### Host capabilities — injected, never reached for
 

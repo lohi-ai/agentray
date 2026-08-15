@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -505,8 +506,30 @@ func TestVeryLongRunKeepsItsGoalAndPlan(t *testing.T) {
 	resumed := agentcore.ReduceSession(log)
 	resumeBytes := transcriptBytes(resumed.Messages)
 
+	// What a resume actually READS, which is a different question from what it
+	// ends up with. Reducing to 35 messages is no comfort if getting there meant
+	// pulling 10,000 entries out of Postgres first — the fold is cheap, the read
+	// is not, and it is the read that grows with the run.
+	resumeWindow, werr := agentcore.LoadResumeLog(context.Background(), r.store, r.sessID)
+	if werr != nil {
+		t.Fatalf("LoadResumeLog: %v", werr)
+	}
 	t.Logf("live window:  %d messages, %d KiB", len(r.res.Messages), windowBytes/1024)
-	t.Logf("resume loads: %d messages, %d KiB", len(resumed.Messages), resumeBytes/1024)
+	t.Logf("resume loads: %d messages, %d KiB, read from %d of %d log entries",
+		len(resumed.Messages), resumeBytes/1024, len(resumeWindow), len(log))
+
+	// The read a resume performs must be bounded by the context window, not by
+	// the length of the run. Anything else means crash recovery gets slower the
+	// longer the agent has been working — precisely backwards.
+	if len(resumeWindow) > 100 {
+		t.Fatalf("resume read %d entries after %d turns; the read still scales with the run",
+			len(resumeWindow), p.parentTurns)
+	}
+	// And it must still be the SAME resume: a smaller read that recovers a
+	// different conversation is not an optimization.
+	if !reflect.DeepEqual(agentcore.ReduceSession(resumeWindow), resumed) {
+		t.Fatal("the windowed read recovers a different state than the whole log")
+	}
 	t.Logf("durable log:  %d sessions, %d entries, %d KiB (%d KiB of it compaction transcripts), %d B/turn",
 		r.fp.sessions, r.fp.entries, r.fp.bytes/1024, r.fp.retained/1024, r.fp.bytes/p.parentTurns)
 

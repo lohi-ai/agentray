@@ -84,11 +84,54 @@ type SessionEntry struct {
 	// entry (and on the start half of the bracket), which reduces exactly as
 	// before.
 	Retained []Message `json:"retained,omitempty"`
+	// State is the rest of the reduced run state as of a completed
+	// EntryCompaction — everything the fold accumulated that Retained does not
+	// carry. Retained makes the checkpoint self-contained for the TRANSCRIPT;
+	// this makes it self-contained for the run, which is what lets a resume read
+	// a suffix of the log instead of all of it (see SessionWindowStore).
+	//
+	// Nil on a legacy entry, and on the start half of the bracket. A nil State is
+	// why a windowed read is an optimization a store opts into rather than the
+	// default: a log whose newest checkpoint predates this field has no suffix
+	// that reduces to the same answer, so it is read whole.
+	State *CheckpointState `json:"state,omitempty"`
 	// Usage records what the summarization call itself cost (EntryCompaction
 	// completion / EntryBranchSummary). Compaction and branch summaries are real
 	// billable provider calls; without this they are invisible spend (pi #6671).
 	Usage     *Usage    `json:"usage,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// CheckpointState is the non-transcript half of a checkpoint: the run state a
+// fold would have accumulated by the time the compaction completed. The loop
+// stamps it from state it already holds rather than re-deriving it, so it is
+// exact by construction.
+// It is AUTHORITATIVE, not additive: the fold adopts it wholesale, because a
+// suffix has no earlier entries to merge with. A writer that fills it partially
+// does not degrade gracefully — it erases the fields it left out — which is why
+// only the loop writes one.
+type CheckpointState struct {
+	Model         string   `json:"model,omitempty"`
+	ActiveTools   []string `json:"active_tools,omitempty"`
+	DisabledTools []string `json:"disabled_tools,omitempty"`
+	Goal          string   `json:"goal,omitempty"`
+	// Completed records whether an EntryLeaf was already seen before this
+	// checkpoint — true only on a chained log whose earlier run finished. Without
+	// it a window would report a chained session as unfinished where the whole
+	// log reports it finished, and the two reads would disagree about whether
+	// there is an answer to reattach to.
+	Completed bool `json:"completed,omitempty"`
+}
+
+// clone snapshots the state for a log entry. The loop keeps one running mirror
+// and stamps it on every checkpoint, so without the copy each entry would share
+// the slice the next disabled tool appends to — and a log's older checkpoints
+// would appear to have known about tools disabled after them.
+func (c CheckpointState) clone() *CheckpointState {
+	out := c
+	out.ActiveTools = slices.Clone(c.ActiveTools)
+	out.DisabledTools = slices.Clone(c.DisabledTools)
+	return &out
 }
 
 // SessionStore is the append-only durability seam (extends the working-memory
@@ -99,6 +142,67 @@ type SessionStore interface {
 	Append(ctx context.Context, sessionID string, entry SessionEntry) error
 	// Log returns the full ordered entry log for a session.
 	Log(ctx context.Context, sessionID string) ([]SessionEntry, error)
+}
+
+// SessionWindowStore is an optional SessionStore capability: read the tail of a
+// log instead of all of it.
+//
+// Resume is the one operation whose cost grows with the whole history. A long
+// run's log is mostly messages the newest checkpoint already stands for — on a
+// 4,200-turn run, 10,600 entries and 8 MiB, of which the resume needs the last
+// few dozen — and reading it whole makes crash recovery slower the longer the
+// run got, which is exactly backwards.
+//
+// The two methods are deliberately MECHANICAL. Neither decides whether a window
+// is safe; both report facts, and LoadResumeLog (in the kernel) applies the
+// rule. A store that answers these correctly cannot make a resume wrong, which
+// is the property that matters when the alternative is every backend
+// re-implementing the fold's preconditions.
+type SessionWindowStore interface {
+	// LogFrom returns the session's entries with Seq >= sinceSeq, in order.
+	LogFrom(ctx context.Context, sessionID string, sinceSeq int) ([]SessionEntry, error)
+	// CheckpointSeq reports the Seq of the newest completed EntryCompaction that
+	// carries BOTH Retained and State (0 when there is none), and whether the
+	// session contains any EntryLeafMove. Zero is unambiguous as "none" whatever
+	// a store's Seq origin: a compaction always follows the messages it
+	// summarizes, so it is never a log's first entry.
+	//
+	// Both facts are needed because both can defeat a window. Without State the
+	// suffix loses the model, tools, and goal the fold had accumulated; with a
+	// leaf move the newest checkpoint by Seq may sit on an ABANDONED branch, and
+	// resuming from it would continue work the log says was rewound away.
+	CheckpointSeq(ctx context.Context, sessionID string) (seq int, branched bool, err error)
+}
+
+// LoadResumeLog reads the entries a resume needs: a suffix when the store can
+// serve one and the log's shape allows it, the whole log otherwise.
+//
+// The suffix begins AT the checkpoint entry, not after it — the checkpoint is
+// what carries the retained transcript and the run state, so dropping it would
+// drop everything the window exists to preserve. Entries after it chain onto it
+// implicitly, so the suffix is a well-formed log in its own right and reduces
+// through the same fold, unchanged.
+//
+// Every failure degrades to the full read rather than to a partial one. A
+// resume that reads too much is slow; a resume that reads too little silently
+// forgets work the run already did.
+func LoadResumeLog(ctx context.Context, store SessionStore, sessionID string) ([]SessionEntry, error) {
+	ws, ok := store.(SessionWindowStore)
+	if !ok {
+		return store.Log(ctx, sessionID)
+	}
+	seq, branched, err := ws.CheckpointSeq(ctx, sessionID)
+	if err != nil || branched || seq <= 0 {
+		return store.Log(ctx, sessionID)
+	}
+	window, err := ws.LogFrom(ctx, sessionID, seq)
+	if err != nil || len(window) == 0 || window[0].Seq != seq {
+		// A window that does not start where it was told to is not the window
+		// this function reasoned about; read the log rather than fold a suffix
+		// whose first entry might not be the checkpoint.
+		return store.Log(ctx, sessionID)
+	}
+	return window, nil
 }
 
 // ReducedState is the run state rebuilt by folding a session log: the message
@@ -170,6 +274,20 @@ func ReduceSession(log []SessionEntry) ReducedState {
 			// full-replay behavior rather than truncating to nothing.
 			if e.Retained != nil {
 				rs.Messages = slices.Clone(e.Retained)
+			}
+			// The rest of the state the checkpoint captured. Applying it here is
+			// what makes a suffix of the log fold to the same answer as the whole
+			// log: the entries before the checkpoint contributed exactly this, so
+			// replacing rather than accumulating is not a shortcut — it is the
+			// same value arrived at directly. A full-log fold reaches this line
+			// having already accumulated it, so the assignment is a no-op there,
+			// which is why one fold serves both reads.
+			if e.State != nil {
+				rs.Model = e.State.Model
+				rs.ActiveTools = slices.Clone(e.State.ActiveTools)
+				rs.DisabledTools = slices.Clone(e.State.DisabledTools)
+				rs.Goal = e.State.Goal
+				rs.Completed = rs.Completed || e.State.Completed
 			}
 		case EntryGoal:
 			rs.Goal = e.Goal

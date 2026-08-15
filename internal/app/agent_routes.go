@@ -111,9 +111,22 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			FlashProviderID string `json:"flash_provider_id"`
 			LiteProviderID  string `json:"lite_provider_id"`
 			ProProviderID   string `json:"pro_provider_id"`
+
+			// Per-tier context-window overrides in tokens; 0 (or absent) means
+			// "derive it from the model id".
+			ContextWindow     int `json:"context_window"`
+			LiteContextWindow int `json:"lite_context_window"`
+			ProContextWindow  int `json:"pro_context_window"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		// A negative window is nonsense and would silently become "no override"
+		// after the >0 checks downstream; reject it where the user can see why.
+		for _, w := range []int{payload.ContextWindow, payload.LiteContextWindow, payload.ProContextWindow} {
+			if w < 0 {
+				return echo.NewHTTPError(http.StatusBadRequest, "context_window must be 0 (auto) or a positive number of tokens")
+			}
 		}
 		cfg, err := store.UpsertWorkspaceModelTiers(c.Request().Context(), ctx.User.ID, project.WorkspaceID, storage.WorkspaceModelTiersInput{
 			Provider: payload.Provider, Model: payload.Model, BaseURL: payload.BaseURL, APIKey: payload.APIKey,
@@ -125,6 +138,10 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			FlashProviderID: payload.FlashProviderID,
 			LiteProviderID:  payload.LiteProviderID,
 			ProProviderID:   payload.ProProviderID,
+
+			ContextWindow:     payload.ContextWindow,
+			LiteContextWindow: payload.LiteContextWindow,
+			ProContextWindow:  payload.ProContextWindow,
 		})
 		if err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
@@ -782,14 +799,28 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if err != nil {
 			return err
 		}
-		// The per-LLM-call trace (messages, est. cost, latency) — the deepest tier
-		// of the loop timeline. Best-effort: a trace read failure must not blank the
-		// run detail, so an empty slice is returned rather than erroring the request.
-		llmCalls, llmErr := store.ListAgentLLMCalls(c.Request().Context(), ctx.User.ID, project.ID, c.Param("run_id"))
+		// The per-LLM-call trace — model, tokens, est. cost, latency, and which
+		// agent made the call. One PAGE of it: a long run makes thousands of
+		// calls, and returning them all (each with its full request attached, as
+		// this once did) answered a single click with tens of megabytes. The
+		// request messages are no longer here at all; the Lab step view is where
+		// a conversation is read, one screen at a time.
+		//
+		// Paging is a seq cursor: ?after_seq=<last row's seq>&limit=<n>.
+		// Best-effort: a trace read failure must not blank the run detail, so an
+		// empty slice is returned rather than erroring the request.
+		llmCalls, llmErr := store.ListAgentLLMCallMetrics(c.Request().Context(), ctx.User.ID, project.ID,
+			c.Param("run_id"), intParam(c, "after_seq", 0, 0, 1<<30), intParam(c, "limit", 200, 1, 500))
 		if llmErr != nil {
 			llmCalls = []storage.AgentLLMCall{}
 		}
-		return c.JSON(http.StatusOK, map[string]any{"run": run, "tool_calls": calls, "llm_calls": llmCalls})
+		next := 0
+		if n := len(llmCalls); n > 0 {
+			next = llmCalls[n-1].Seq
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"run": run, "tool_calls": calls, "llm_calls": llmCalls, "next_seq": next,
+		})
 	})
 
 	// --- recommendations (§8, §13.2) ---

@@ -46,7 +46,8 @@ session:               set
 session_resume:        false
 seed_disabled:         broken
 memory:                -
-compaction:            keep_recent=5000
+context_window:        0
+compaction:            keep_recent=5000 budget=50000
 compactor:             summary
 compaction_model:      -
 steering:              set

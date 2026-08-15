@@ -73,7 +73,12 @@ func (a *Agent) Describe() string {
 	line("session_resume", a.resumeSession)
 	line("seed_disabled", strings.Join(sorted(a.seedDisabledTools), ", "))
 	present("memory", a.memory != nil)
-	line("compaction", fmt.Sprintf("keep_recent=%d", a.compaction.KeepRecentTokens))
+	// The compaction budget an operator configured is not the one that applies:
+	// the answering model's window caps it. Print what will actually be used,
+	// since a run that compacts unexpectedly early or late is diagnosed here.
+	line("context_window", a.contextWindow)
+	line("compaction", fmt.Sprintf("keep_recent=%d budget=%d",
+		a.compaction.KeepRecentTokens, effectiveBudget(a.limits.MaxContextTokens, a.contextWindow)))
 	line("compactor", compactorName(a.compactor))
 	line("compaction_model", orDash(a.compactionModel))
 

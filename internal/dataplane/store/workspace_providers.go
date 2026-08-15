@@ -54,6 +54,12 @@ type WorkspaceTierSelection struct {
 	ProProviderID   string
 	ProModel        string
 	ModelFallback   bool
+	// Per-tier context-window overrides in tokens; 0 means "derive it from the
+	// model id". They sit beside the model rather than on the provider because
+	// the window is a property of the model, and one provider serves several.
+	FlashContextWindow int
+	LiteContextWindow  int
+	ProContextWindow   int
 }
 
 // LegacyWorkspaceTiers is a pre-upgrade one-row-per-workspace tier record
@@ -289,9 +295,9 @@ func ResolveWorkspaceRun(providers []WorkspaceProviderRecord, sel WorkspaceTierS
 	pv, pb, pk, pm, ph := pick(sel.ProProviderID, sel.ProModel)
 
 	cfg := WorkspaceModelTiers{
-		Provider: fv, Model: fm, BaseURL: fb, HasKey: fh,
-		LiteProvider: lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh,
-		ProProvider: pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph,
+		Provider: fv, Model: fm, BaseURL: fb, HasKey: fh, ContextWindow: sel.FlashContextWindow,
+		LiteProvider: lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh, LiteContextWindow: sel.LiteContextWindow,
+		ProProvider: pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph, ProContextWindow: sel.ProContextWindow,
 		ModelFallback:   sel.ModelFallback,
 		FlashProviderID: sel.FlashProviderID,
 		LiteProviderID:  sel.LiteProviderID,
@@ -561,11 +567,14 @@ FROM workspace_providers WHERE workspace_id = $1 ORDER BY created_at ASC`, works
 	var flashID, liteID, proID *string
 	var flashModel, liteModel, proModel string
 	var fallback bool
+	var flashWindow, liteWindow, proWindow int
 	err = s.pg.QueryRow(ctx, `
 SELECT flash_provider_id::text, model, lite_provider_id::text, lite_model,
-       pro_provider_id::text, pro_model, model_fallback
+       pro_provider_id::text, pro_model, model_fallback,
+       context_window, lite_context_window, pro_context_window
 FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
-		&flashID, &flashModel, &liteID, &liteModel, &proID, &proModel, &fallback)
+		&flashID, &flashModel, &liteID, &liteModel, &proID, &proModel, &fallback,
+		&flashWindow, &liteWindow, &proWindow)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -574,6 +583,9 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		book.Sel.FlashModel = flashModel
 		book.Sel.LiteModel = liteModel
 		book.Sel.ProModel = proModel
+		book.Sel.FlashContextWindow = flashWindow
+		book.Sel.LiteContextWindow = liteWindow
+		book.Sel.ProContextWindow = proWindow
 		if flashID != nil {
 			book.Sel.FlashProviderID = *flashID
 		}
@@ -667,8 +679,9 @@ INSERT INTO workspace_model_tiers (
 	workspace_id, provider, model, base_url,
 	lite_provider, lite_model, lite_base_url,
 	pro_provider, pro_model, pro_base_url,
-	model_fallback, flash_provider_id, lite_provider_id, pro_provider_id
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid)
+	model_fallback, flash_provider_id, lite_provider_id, pro_provider_id,
+	context_window, lite_context_window, pro_context_window
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17)
 ON CONFLICT (workspace_id) DO UPDATE SET
 	provider = EXCLUDED.provider,
 	model = EXCLUDED.model,
@@ -683,9 +696,13 @@ ON CONFLICT (workspace_id) DO UPDATE SET
 	flash_provider_id = EXCLUDED.flash_provider_id,
 	lite_provider_id = EXCLUDED.lite_provider_id,
 	pro_provider_id = EXCLUDED.pro_provider_id,
+	context_window = EXCLUDED.context_window,
+	lite_context_window = EXCLUDED.lite_context_window,
+	pro_context_window = EXCLUDED.pro_context_window,
 	updated_at = now()`,
 		workspaceID, fv, fm, fb, lv, lm, lb, pv, pm, pb, sel.ModelFallback,
-		sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID)
+		sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID,
+		sel.FlashContextWindow, sel.LiteContextWindow, sel.ProContextWindow)
 	return err
 }
 
