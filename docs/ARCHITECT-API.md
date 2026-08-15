@@ -25,6 +25,7 @@ agentray/
     channels/                   — ingress catalog (chat, mcp, schedule, webhook, lab)
     workloads/                  — Garden packs (growth, marketing, data)
     runtime/                    — AgentGarden + scheduler + runner (package agentruntime)
+      authoring/                — free text → draft SOUL.md / AGENTS.md (authoring-time)
     dataplane/
       ingest/                   — Capture, Batch, Identify, NATS → ClickHouse
       connector/                — source plugin registry (postgres shipped)

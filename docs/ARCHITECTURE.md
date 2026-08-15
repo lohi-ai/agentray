@@ -17,6 +17,7 @@ extensible without becoming three products.
                             ▼
 ┌── runtime ───────────────────────────────────────────┐
 │  AgentGarden + agentcore loop + policy + sandbox     │
+│  authoring/ — draft a definition (authoring-time)    │
 │  public libs: ./agentcore  ./sandbox                 │
 └───────────────────────────┬──────────────────────────┘
                             ▼
@@ -38,7 +39,7 @@ enforces this.
 |---|---|---|---|
 | Channels | `internal/channels` | shared | dataplane, workloads, runtime, app |
 | Workloads | `internal/workloads` | (none) | shared, dataplane, runtime, channels, app |
-| Runtime | `internal/runtime` | shared, dataplane, agentcore, sandbox | channels, workloads, app |
+| Runtime | `internal/runtime{,/authoring}` | shared, dataplane, agentcore, sandbox | channels, workloads, app |
 | Dataplane | `internal/dataplane/{ingest,connector,store,usecase,alerting}` | shared | channels, workloads, runtime, app |
 | Shared | `internal/shared/{config,cronx,credential,opcore,mcpclient}` | (none of the layers) | channels, workloads, runtime, dataplane, app |
 

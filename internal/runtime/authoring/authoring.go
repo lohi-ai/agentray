@@ -2,17 +2,20 @@
 // description. It is authoring-time, not run-time: nothing here participates in
 // executing an agent, and the loop never names any of it.
 //
-// That is why it sits beside agentcore rather than under it. The kernel tree is
-// the loop and the capabilities it dispatches to — agentcore/ holds the
-// vocabulary read every turn (AgentDefinition, Limits, Env) and agentcore/plugins/
-// holds what extends it. This package is neither: it only produces the markdown
-// a human reviews and saves before any run exists. It makes its own provider call
-// and persists nothing.
+// That is why it is not part of the kernel tree. agentcore/ holds the vocabulary
+// read every turn (AgentDefinition, Limits, Env) and agentcore/plugins/ holds what
+// extends it. This package is neither: it only produces the markdown a human
+// reviews and saves before any run exists. It makes its own provider call and
+// persists nothing.
 //
 // The direction of the dependency is the whole point. authoring imports
 // agentcore to speak its vocabulary; agentcore must never learn that an
 // authoring step exists, because a definition typed by hand and one drafted here
-// have to be indistinguishable to the loop.
+// have to be indistinguishable to the loop. Living under internal/ makes that
+// one-way rule compiler-enforced rather than conventional: agentcore and sandbox
+// are public root libraries, so they cannot import this package even by mistake.
+// It sits in the runtime layer because a draft is only ever an AgentDefinition
+// in waiting, and internal/app is its single caller.
 package authoring
 
 import (

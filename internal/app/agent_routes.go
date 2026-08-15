@@ -14,7 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/authoring"
+	"github.com/lohi-ai/agentray/internal/runtime/authoring"
 	"github.com/lohi-ai/agentray/internal/channels"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
