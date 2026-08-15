@@ -32,8 +32,38 @@ const ToolSpawnSubagent = "spawn_subagent"
 // Sub-agent defaults (ARCHITECT-AGENT-TEAM suggested caps).
 const (
 	defaultSubagentMaxDepth       = 1         // only the top-level agent may spawn
-	defaultSubagentMaxPerRun      = 8         // children per parent run
 	defaultSubagentMaxOutputBytes = 48 * 1024 // model-visible answer per child
+)
+
+// The default spawn budget SCALES WITH THE RUN, because a fixed number cannot
+// be right for both shapes of run this package serves.
+//
+// A spawn is an ordinary tool call, so MaxToolCalls is already the hard ceiling
+// on how many are even reachable; MaxPerRun is the second, tighter bound that
+// exists because a child is not a tool call's worth of work but a whole run's.
+// Expressing it as a SHARE of the tool budget is what makes it transferable: it
+// says "at most a third of this run's actions may be delegation", which is a
+// claim about the shape of the run rather than about its length.
+//
+// At DefaultLimits (24 tool calls) the share reproduces the previous fixed
+// default of 8 exactly, so nothing changes for a short run. A long autonomous
+// run that authorizes thousands of tool calls gets a proportionate delegation
+// budget instead of running out of children on its ninth spawn and being told
+// to "finish the remaining work yourself" for the rest of the task — which is
+// how a fixed 8 failed: it was calibrated against a 12-turn run and silently
+// became a hard stop on delegation for anything longer.
+//
+// The floor keeps a deliberately tool-starved run (a small MaxToolCalls set for
+// some other reason) from losing delegation entirely.
+//
+// Cost note: the product MaxPerRun × the child's own MaxTurns is what a run can
+// ultimately spend, and children inherit the parent's Limits, so raising
+// MaxToolCalls raises the ceiling superlinearly. That is why this is a share
+// and not simply "unbounded": a consumer that wants a specific number should
+// set MaxPerRun explicitly rather than reach it by widening the tool budget.
+const (
+	defaultSubagentSpawnShare = 3 // one child per N tool calls of the run's budget
+	minSubagentMaxPerRun      = 8 // floor, and the historical fixed default
 )
 
 // Plugin caps the delegation surface. A child inherits the parent's provider,
@@ -44,7 +74,10 @@ type Plugin struct {
 	// MaxDepth is how many nesting levels may spawn: 1 (the default) lets the
 	// top-level agent spawn children but forbids grandchildren.
 	MaxDepth int
-	// MaxPerRun caps how many children one run may spawn in total.
+	// MaxPerRun caps how many children one run may spawn in total. Zero derives
+	// it from the run's own tool budget (a third of Limits.MaxToolCalls, floor
+	// 8), so a long run gets a proportionate delegation budget without the
+	// consumer having to restate one.
 	MaxPerRun int
 	// MaxOutputBytes caps the child answer surfaced to the parent model.
 	MaxOutputBytes int
@@ -78,20 +111,21 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 // refusal the model would have to read, reason about, and work around. The
 // depth rides the context, so it survives crossing into another agent's run.
 func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
-	settings := p.normalized()
+	settings := p.normalized(info.Limits)
 	if info.Depth >= settings.MaxDepth {
 		return nil, nil
 	}
 	return &subagentTool{parent: info.Agent, settings: settings, durable: info.Durable}, nil
 }
 
-// normalized fills zero fields with the defaults.
-func (s Plugin) normalized() Plugin {
+// normalized fills zero fields with the defaults, sizing the spawn budget to
+// the run's own limits.
+func (s Plugin) normalized(limits agentcore.Limits) Plugin {
 	if s.MaxDepth <= 0 {
 		s.MaxDepth = defaultSubagentMaxDepth
 	}
 	if s.MaxPerRun <= 0 {
-		s.MaxPerRun = defaultSubagentMaxPerRun
+		s.MaxPerRun = max(limits.MaxToolCalls/defaultSubagentSpawnShare, minSubagentMaxPerRun)
 	}
 	if s.MaxOutputBytes <= 0 {
 		s.MaxOutputBytes = defaultSubagentMaxOutputBytes

@@ -1,0 +1,192 @@
+package subagent_test
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+)
+
+// The spawn budget has to fit the run it is in.
+//
+// It used to be a fixed 8, calibrated against DefaultLimits (12 turns, 24 tool
+// calls) where 8 children is already a third of everything the run may do. On a
+// long autonomous run — thousands of turns, thousands of tool calls — that same
+// 8 is not a budget but a cliff: the ninth spawn and every one after it comes
+// back "sub-agent budget exhausted — finish the remaining work yourself", and
+// the agent spends the remaining thousands of turns doing in its own context
+// exactly the noisy work delegation exists to keep out of it. Nothing fails
+// loudly; the run just gets worse.
+//
+// So the default is now a SHARE of the run's tool budget. These tests pin both
+// ends of that: the share still yields the historical 8 at DefaultLimits, and
+// it grows with a longer run.
+
+// budgetProbe scripts a parent that attempts a fixed number of spawns and then
+// finishes, and answers every child immediately. Routing is by content: a child
+// run is seeded with the task text, so a request whose first non-system message
+// is a child task belongs to a child.
+type budgetProbe struct {
+	mu       sync.Mutex
+	attempts int // spawns the parent will try before finishing
+	served   int // parent turns served
+}
+
+func (*budgetProbe) Name() string        { return "budget-probe" }
+func (*budgetProbe) SupportsTools() bool { return true }
+
+func (p *budgetProbe) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	for _, m := range req.Messages {
+		if m.Role == agentcore.RoleUser && strings.HasPrefix(m.Content, childTaskPrefix) {
+			return agentcore.AssistantText(childAnswer), nil
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.served++
+	if p.served > p.attempts {
+		return agentcore.AssistantText("parent done"), nil
+	}
+	return AssistantToolCall(
+		fmt.Sprintf("s%d", p.served),
+		subagent.ToolSpawnSubagent,
+		fmt.Sprintf(`{"task":%q}`, fmt.Sprintf("%s %d", childTaskPrefix, p.served)),
+	), nil
+}
+
+// Stream must be real: the spawn tool drives its child through ContinueStream,
+// so a probe that only implements Chat fails every child for the wrong reason
+// and the budget assertions below would be measuring provider errors.
+func (p *budgetProbe) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	resp, err := p.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentcore.ChatDelta, 4)
+	go func() {
+		defer close(ch)
+		if resp.Message.Content != "" {
+			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
+		}
+		for i := range resp.Message.ToolCalls {
+			tc := resp.Message.ToolCalls[i]
+			ch <- agentcore.ChatDelta{ToolCall: &tc}
+		}
+		ch <- agentcore.ChatDelta{Done: true}
+	}()
+	return ch, nil
+}
+
+const (
+	childTaskPrefix = "child task"
+	childAnswer     = "child done"
+)
+
+// spawnOutcomes runs one agent that attempts `attempts` spawns under the given
+// limits and plugin settings, and reports how many children actually ran versus
+// how many were refused by the budget.
+func spawnOutcomes(t *testing.T, limits agentcore.Limits, settings subagent.Plugin, attempts int) (ran, blocked int) {
+	t.Helper()
+	agent, err := agentcore.New(agentcore.Config{
+		Provider:   &budgetProbe{attempts: attempts},
+		Model:      "faux-1",
+		Tools:      agentcore.NewToolSet(&echoTool{name: "echo"}),
+		Policy:     agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
+		Limits:     &limits,
+		Extensions: []agentcore.ExtensionFactory{settings},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := agent.Prompt(context.Background(), "fan out")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	// Classify strictly. A spawn that failed for any OTHER reason — a provider
+	// error, the loop's repeated-failure circuit breaker — must not be scored as
+	// a child that ran, or a broken probe reads as a generous budget.
+	for _, m := range res.Messages {
+		if m.Role != agentcore.RoleTool || m.Name != subagent.ToolSpawnSubagent {
+			continue
+		}
+		switch {
+		case m.Content == childAnswer:
+			ran++
+		case strings.Contains(m.Content, "budget exhausted"):
+			blocked++
+		default:
+			t.Fatalf("spawn failed for an unrelated reason: %q", m.Content)
+		}
+	}
+	if ran+blocked != attempts {
+		t.Fatalf("script did not complete: %d spawn results for %d attempts (stop=%q)",
+			ran+blocked, attempts, res.StopReason)
+	}
+	return ran, blocked
+}
+
+// TestSpawnBudget covers both ends of the derived default and the escape hatch.
+//
+// Each case attempts exactly one spawn past its budget. That is deliberate: the
+// loop disables a tool that keeps failing, so a script that kept asking after
+// the budget ran out would collect circuit-breaker refusals rather than budget
+// refusals, and the counts would stop meaning what the case names claim.
+func TestSpawnBudget(t *testing.T) {
+	cases := []struct {
+		name         string
+		maxToolCalls int
+		settings     subagent.Plugin
+		want         int
+		why          string
+	}{{
+		// The compatibility end: the share must reproduce the fixed default it
+		// replaced, or every existing consumer silently gets a different
+		// delegation budget than the one it was tuned against.
+		name:         "default limits are unchanged",
+		maxToolCalls: agentcore.DefaultLimits().MaxToolCalls, // 24 / 3 = 8
+		want:         8,
+		why:          "the historical fixed default",
+	}, {
+		// The reason for the change. Before, this run delegated 8 tasks and did
+		// the other 42 inline, in its own context.
+		name:         "scales with a long run",
+		maxToolCalls: 150,
+		want:         50,
+		why:          "a third of the run's tool budget",
+	}, {
+		// The other direction: a deliberately tool-starved run must not lose
+		// delegation entirely, which a bare share would do (12/3 = 4, floored).
+		name:         "floor for a tool-starved run",
+		maxToolCalls: 12,
+		want:         8,
+		why:          "the floor, since the share would yield 4",
+	}, {
+		// The escape hatch. Without this, the derived default could quietly
+		// override an explicit cap set for cost reasons.
+		name:         "explicit setting wins",
+		maxToolCalls: 600, // would derive 200
+		settings:     subagent.Plugin{MaxPerRun: 3},
+		want:         3,
+		why:          "the number the consumer named",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := agentcore.DefaultLimits()
+			limits.MaxTurns = 4 * (tc.want + 2)
+			limits.MaxToolCalls = tc.maxToolCalls
+
+			ran, blocked := spawnOutcomes(t, limits, tc.settings, tc.want+1)
+			if ran != tc.want {
+				t.Fatalf("spawned %d children, want %d (%s)", ran, tc.want, tc.why)
+			}
+			if blocked != 1 {
+				t.Fatalf("the budget must still bite one past it: %d blocked, want 1", blocked)
+			}
+		})
+	}
+}

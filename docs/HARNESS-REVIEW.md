@@ -178,8 +178,11 @@ forks an ephemeral child Agent for one self-contained task:
   (middle-truncated to `MaxOutputBytes`) returns to the parent, so noisy
   exploration never pollutes the parent's window.
 - **Caps:** depth (default 1 — no grandchildren; the tool simply isn't
-  registered past `MaxDepth`), spawns per run (default 8, atomic counter),
-  answer size (default 48 KB). Parent cancellation cancels children (shared ctx).
+  registered past `MaxDepth`), spawns per run (atomic counter; defaults to a
+  third of `Limits.MaxToolCalls`, floor 8 — so it is still 8 at `DefaultLimits`
+  but scales with a long run instead of cutting delegation off at the ninth
+  child), answer size (default 48 KB). Parent cancellation cancels children
+  (shared ctx).
 - **Accounting:** child usage/cost folds into the parent `RunResult` on every
   exit path (`addChildUsage`/`takeChildUsage`); child LLM calls are traced under
   the parent run id via the shared `monitor` decorator + ctx.
