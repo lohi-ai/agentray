@@ -126,6 +126,15 @@ export function useAgent() {
     chat: (message: string) => chat.mutateAsync(message),
     chatStream,
     conversationSend,
+    // Stop the run live on a conversation. Resolves false when the server had
+    // nothing live to stop (the run had already finished) or the call failed —
+    // either way the caller settles its own view; a failure is surfaced as the
+    // "couldn't stop" copy rather than silently pretending the agent halted.
+    cancelChat: (sessionID: string) =>
+      client()
+        .cancelChat(sessionID)
+        .then((r) => r.stopped)
+        .catch(() => false),
     // Reattach a returning client to the latest run of a conversation; resolves
     // null when the session has no run yet (404). Carries the persisted tool trace
     // so a reloaded client can rebuild the step timeline it lost.

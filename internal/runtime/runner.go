@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -332,6 +333,29 @@ func (r *Runner) RunStream(ctx context.Context, opts RunOptions, sink agentcore.
 
 // execute is the shared run path; a non-nil sink streams the interactive turn.
 func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.StreamSink) (storage.AgentRun, agentcore.RunResult, error) {
+	// Live control, registered FIRST — before any I/O, and in particular before the
+	// run row opens and OnRunID fires. Stop is offered by the UI the moment a turn
+	// is sent, so registering late would leave a window where the user has pressed
+	// Stop, the UI says "Stopped", and the run is still burning tokens because
+	// nothing was there to cancel. runCtx bounds only the model loop: the terminal
+	// FinishAgentRun below stays on the parent ctx, so a stopped run still records
+	// its status and partial answer rather than being resurrected as "still
+	// working" by the client's resume poll.
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	live := r.Live.register(opts.SessionID, opts.ProjectID, cancelRun)
+	defer r.Live.unregister(opts.SessionID)
+	// A caller-supplied source (the Lab) takes precedence; both are nil for a plain
+	// run, leaving the loop's defaults.
+	getSteering := opts.GetSteering
+	if getSteering == nil {
+		getSteering = live.steeringSource()
+	}
+	getFollowUp := opts.GetFollowUp
+	if getFollowUp == nil {
+		getFollowUp = live.followUpSource()
+	}
+
 	// Resolve which agent runs (AgentGarden §3). The scope id keys this agent's
 	// persona/skills/secrets/tools/memory; ProjectID still keys the shared scopes
 	// and the analytics tools. A stale/foreign agent id is refused here, so it can
@@ -583,21 +607,6 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		mem.Embedder = emb
 	}
 
-	// Live control: register this run under its conversation id (when supplied)
-	// so a sibling steer/follow-up request can reach it, then drain the registry's
-	// queues at each turn boundary. A caller-supplied source (the Lab) takes
-	// precedence; both are nil for a plain run, leaving the loop's defaults.
-	live := r.Live.register(opts.SessionID, opts.ProjectID)
-	defer r.Live.unregister(opts.SessionID)
-	getSteering := opts.GetSteering
-	if getSteering == nil {
-		getSteering = live.steeringSource()
-	}
-	getFollowUp := opts.GetFollowUp
-	if getFollowUp == nil {
-		getFollowUp = live.followUpSource()
-	}
-
 	// Default the output cap so large artifacts (long documents, full HTML pages)
 	// aren't truncated at the gateway's low default with stop_reason:"length".
 	// A caller can still override per run via RunOptions.MaxTokens.
@@ -693,19 +702,30 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// from the continued session's log (ResumeRun verified it is non-empty).
 	messages := append(append([]agentcore.Message{}, opts.History...), agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
 
+	// The model loop runs on runCtx (cancellable by Stop); everything after it —
+	// the trace and the terminal row — runs on ctx, so a stopped run still writes
+	// what it got instead of leaving a `running` row for the poller to find.
 	var res agentcore.RunResult
 	var runErr error
 	switch {
 	case sink != nil:
-		res, runErr = agent.ContinueStream(ctx, messages, opts.Prompt, sink)
+		res, runErr = agent.ContinueStream(runCtx, messages, opts.Prompt, sink)
 	default:
-		res, runErr = agent.Continue(ctx, messages, opts.Prompt)
+		res, runErr = agent.Continue(runCtx, messages, opts.Prompt)
 	}
 	r.persistTrace(ctx, runID, res)
 
 	status := "done"
 	summary := res.Final
-	if runErr != nil {
+	switch {
+	case errors.Is(context.Cause(runCtx), ErrRunStopped):
+		// A user stop is not a failure. Keep the partial answer as the summary so a
+		// second tab (or a reload) reattaches to what actually streamed, and hand
+		// the sentinel back so the chat layer skips appending a half-answer to the
+		// conversation the model reads next turn.
+		status = "stopped"
+		runErr = ErrRunStopped
+	case runErr != nil:
 		status = "error"
 		summary = runErr.Error()
 	}

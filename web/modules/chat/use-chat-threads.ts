@@ -65,6 +65,13 @@ export function entriesToMessages(entries: AgentConversationEntry[]): ChatMsg[] 
     if (!text) continue;
     if (e.role === 'assistant') text = formatAgentError(text);
     if (e.role === 'user') {
+      // NOTE: a message steered into a running turn is appended as its own user
+      // entry, so on reload it opens a turn of its own — the original prompt is
+      // left showing an empty answer. The entry schema carries nothing that
+      // separates an amendment from a new question (same turn, no run id, and a
+      // stopped turn legitimately has no assistant entry either), so this is not
+      // fixable here: it needs the message-per-entry model and entry-id
+      // reconciliation. Live rendering is correct; only a reload reads this way.
       cur = { id: e.seq, prompt: text, text: '', progress: '', card: null, done: true, tools: [] };
       out.push(cur);
     } else if (e.role === 'assistant') {

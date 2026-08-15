@@ -2,10 +2,19 @@ package agentruntime
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
+
+// ErrRunStopped is the cancellation cause a user-initiated stop carries. It is
+// what separates "the user pressed Stop" from every other context cancellation
+// (client disconnect, the detached-run ceiling, a provider timeout): the run
+// path checks context.Cause against it to persist a `stopped` terminal status
+// with whatever partial answer had streamed, instead of an `error` row. A stop
+// is a deliberate act, not a fault, and the UI must be able to say so.
+var ErrRunStopped = errors.New("stopped by the user")
 
 // LiveRegistry tracks in-flight runs so a sibling request can drive one without
 // starting a second run: mid-run steering (inject a correction honored on the
@@ -27,11 +36,14 @@ type LiveRegistry struct {
 // liveRun is the live control surface of one in-flight run. projectID scopes
 // steering to the run's own project so a member of another project can't drive
 // it (mirroring explainSession). The channels are buffered so a push never blocks
-// the requesting goroutine; the loop drains them at each turn boundary.
+// the requesting goroutine; the loop drains them at each turn boundary. cancel
+// stops the run outright — the run owns the context it cancels, so a stop ends
+// the model loop while the terminal write still lands on the parent context.
 type liveRun struct {
 	projectID string
 	steer     chan agentcore.Message
 	followup  chan agentcore.Message
+	cancel    context.CancelCauseFunc
 }
 
 // liveQueueDepth bounds how many un-drained steer/follow-up messages a session
@@ -47,10 +59,11 @@ func NewLiveRegistry() *LiveRegistry {
 
 // register opens a live session for sessionID and returns its handle. A second
 // register for the same id supersedes the first (one live run per session); the
-// returned handle's drain closures are wired into the agentcore Config. Returns
-// nil only when sessionID is empty, so callers can treat a nil registry/handle as
-// "no live control" uniformly.
-func (r *LiveRegistry) register(sessionID, projectID string) *liveRun {
+// returned handle's drain closures are wired into the agentcore Config. cancel is
+// the run's own stop handle, invoked by Cancel with ErrRunStopped; nil leaves the
+// session steerable but not stoppable. Returns nil only when sessionID is empty,
+// so callers can treat a nil registry/handle as "no live control" uniformly.
+func (r *LiveRegistry) register(sessionID, projectID string, cancel context.CancelCauseFunc) *liveRun {
 	if r == nil || sessionID == "" {
 		return nil
 	}
@@ -58,6 +71,7 @@ func (r *LiveRegistry) register(sessionID, projectID string) *liveRun {
 		projectID: projectID,
 		steer:     make(chan agentcore.Message, liveQueueDepth),
 		followup:  make(chan agentcore.Message, liveQueueDepth),
+		cancel:    cancel,
 	}
 	r.mu.Lock()
 	r.sessions[sessionID] = lr
@@ -121,6 +135,22 @@ func (r *LiveRegistry) FollowUp(projectID, sessionID, message string) bool {
 	default:
 		return true
 	}
+}
+
+// Cancel stops an in-flight run outright, so Stop is a server-side fact rather
+// than a client that merely looked away: the model loop unwinds with cause
+// ErrRunStopped and the run row settles as `stopped`, carrying whatever partial
+// answer had already streamed. Returns false when no run is live for the session
+// (already finished, or never started) or the project doesn't match — the caller
+// then has nothing to stop and settles its own view. Idempotent: cancelling a
+// context twice is a no-op, so a double-click is harmless.
+func (r *LiveRegistry) Cancel(projectID, sessionID string) bool {
+	lr, ok := r.lookup(projectID, sessionID)
+	if !ok || lr.cancel == nil {
+		return false
+	}
+	lr.cancel(ErrRunStopped)
+	return true
 }
 
 // steeringSource returns the agentcore callback that drains queued steer messages

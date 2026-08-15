@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,11 @@ type ChatResult struct {
 	Usage agentcore.Usage       `json:"usage"`
 	Turns int                   `json:"turns"`
 	Card  *agentcore.ResultCard `json:"card,omitempty"`
+	// Stopped marks a turn the user cancelled mid-run. It is not an error: Final
+	// carries whatever had streamed, nothing is appended to the conversation, and
+	// the client renders a neutral "Stopped" marker rather than a red failure. A
+	// second tab learns the same fact from the run row's `stopped` status.
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // chatDecision is the front-desk classifier's verdict for one turn. A non-empty
@@ -181,6 +187,16 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		OnRunID: opts.OnRunID, Goal: goal,
 	}, sink)
 	res.Route = dec.Route
+	// A user stop unwinds the loop as an error, but it is not one. Persist nothing:
+	// a half-finished answer appended here would be replayed to the model next turn
+	// as its own completed thought. The partial text the user is looking at stays
+	// on their screen (and in the run row's summary) without becoming history.
+	if errors.Is(err, ErrRunStopped) {
+		return ChatResult{
+			RunID: res.RunID, Route: dec.Route, Final: res.Final,
+			Tools: res.Tools, Turns: res.Turns, Stopped: true,
+		}, nil
+	}
 	if err != nil {
 		s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), res.RunID, res.Turns)
 		return ChatResult{RunID: res.RunID, Route: dec.Route, Tools: res.Tools, Turns: res.Turns}, err
@@ -375,7 +391,10 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
 	}, wrapped)
 	if runErr != nil {
-		return ChatResult{RunID: run.ID, Tools: res.Tools, Turns: res.Turns}, runErr
+		// Final is carried even on the error return: a stopped run's partial answer
+		// is the whole point of stopping gracefully, and on a genuine failure it is
+		// empty anyway.
+		return ChatResult{RunID: run.ID, Final: res.Final, Tools: res.Tools, Turns: res.Turns}, runErr
 	}
 
 	card := cardFromMessages(res.Messages)

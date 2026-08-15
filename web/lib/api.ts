@@ -1126,6 +1126,10 @@ export type AgentChatResult = {
   turns: number;
   card?: AgentResultCard | null;
   route?: string; // 'smalltalk' | 'data'
+  // The user stopped this turn mid-run. `final` carries whatever had streamed and
+  // nothing was appended to the conversation, so the turn settles as a neutral
+  // "Stopped" rather than a failure — including in a tab that didn't press Stop.
+  stopped?: boolean;
 };
 
 // AgentChatSteered is the auto-route outcome: the message was injected into a run
@@ -1159,6 +1163,11 @@ export type AgentChatStreamHandlers = {
   // A tool call is starting (name only): lets the step timeline show it as
   // in-flight before its completed `onTool` trace lands.
   onToolStart?: (tool: string) => void;
+  // A running tool's partial output. The frame carries only a note and a turn
+  // index — no call id — so it can be attributed no more precisely than "the
+  // call that is currently running". Until the stream carries call ids, the
+  // client attaches it to the most recent running step.
+  onToolUpdate?: (note: string) => void;
 };
 
 export const apiBase = () => process.env.NEXT_PUBLIC_AGENTRAY_API_URL || 'http://localhost:8088';
@@ -1902,6 +1911,7 @@ export class AgentRayAPI {
           else if (evt.event === 'card') handlers.onCard?.(evt.data as unknown as AgentResultCard);
           else if (evt.event === 'tool') handlers.onTool?.(evt.data as unknown as AgentToolTrace);
           else if (evt.event === 'tool_start') handlers.onToolStart?.(String(evt.data.tool ?? ''));
+          else if (evt.event === 'tool_update') handlers.onToolUpdate?.(String(evt.data.note ?? ''));
           else if (evt.event === 'error') handlers.onError?.(String(evt.data.error ?? 'stream error'));
           else if (evt.event === 'done') result = evt.data as unknown as AgentChatResult;
           // The auto-route folded this message into a live run; acknowledge and stop.
@@ -1914,6 +1924,14 @@ export class AgentRayAPI {
     }
     if (!result) throw new Error('chat stream ended without a result');
     return result;
+  }
+
+  // cancelChat stops the run live on a conversation. Aborting the SSE read is not
+  // a stop — it only stops *watching*; the run keeps going, keeps billing, and
+  // keeps writing. Resolves { stopped: false } when no run was live for the
+  // session, which the caller treats as "the turn is over" all the same.
+  cancelChat(sessionID: string) {
+    return this.post<{ stopped: boolean }>('/api/agent/chat/cancel', { session_id: sessionID });
   }
 
   // --- conversation store (DESIGN-CONVERSATION-STORE.md): server-side durable

@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useRef } from 'react';
-import { Paperclip } from 'lucide-react';
+import { CornerDownLeft, Paperclip } from 'lucide-react';
 import {
   ChatComposer,
   ChatComposerInput,
@@ -11,6 +11,7 @@ import {
 } from '@astryxdesign/core/Chat';
 import { createStaticSource, TypeaheadItem, type SearchableItem } from '@astryxdesign/core/Typeahead';
 import { Button } from '@astryxdesign/core/Button';
+import { HStack } from '@astryxdesign/core/HStack';
 import { Token } from '@astryxdesign/core/Token';
 import type { AgentSkill } from '@/lib/api';
 import { slugify, type Attachment } from './message-format';
@@ -25,7 +26,7 @@ const ACCEPT = '.txt,.md,.mdx,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.xml,.html,
 
 export function Composer({
   value, onChange, onSubmit, onStop, isStopShown, placeholder, footerActions,
-  skills, attachments, onFiles, onRemoveAttachment, notice,
+  skills, attachments, onFiles, onRemoveAttachment, notice, steerMode, onSteerMode,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -39,6 +40,11 @@ export function Composer({
   onFiles: (files: File[]) => void;
   onRemoveAttachment: (id: string) => void;
   notice?: string;
+  // While a turn streams, a send is an amendment to it rather than a new
+  // question: 'steer' reaches the agent at its next turn boundary, 'followup'
+  // runs once the current answer is finished. Only rendered when isStopShown.
+  steerMode: 'steer' | 'followup';
+  onSteerMode: (mode: 'steer' | 'followup') => void;
 }) {
   const handleRef = useRef<ChatComposerInputHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -129,7 +135,43 @@ export function Composer({
               onClick={() => fileInputRef.current?.click()}
             />
             {footerActions}
+            {/* When to deliver an amendment. Not two send buttons — two adjacent
+                equal-weight primary actions is exactly what the design system
+                forbids — so the choice lives here and Steer stays the one
+                button. Defaults to Now. */}
+            {isStopShown ? (
+              <HStack gap={0} align="center">
+                <Button
+                  size="sm"
+                  variant={steerMode === 'steer' ? 'secondary' : 'ghost'}
+                  label="Now"
+                  onClick={() => onSteerMode('steer')}
+                />
+                <Button
+                  size="sm"
+                  variant={steerMode === 'followup' ? 'secondary' : 'ghost'}
+                  label="After this answer"
+                  onClick={() => onSteerMode('followup')}
+                />
+              </HStack>
+            ) : null}
           </>
+        }
+        // The primary button is Stop while streaming, so the send action moves
+        // beside it with a visible text label (never icon-only). isDisabled is
+        // deliberately never set while streaming: it puts pointer-events:none on
+        // the whole composer root and would kill the Stop button's clicks too.
+        sendActions={
+          isStopShown ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              label="Steer"
+              icon={<CornerDownLeft size={14} />}
+              onClick={onSubmit}
+              isDisabled={!value.trim()}
+            />
+          ) : null
         }
       />
     </>

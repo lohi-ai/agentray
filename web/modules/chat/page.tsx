@@ -49,6 +49,32 @@ function applyToolTrace(steps: ChatStep[] | undefined, t: AgentToolTrace): ChatS
 function serverToolStep(tc: AgentToolCall): ChatStep {
   return { kind: 'tool', tool: tc.tool, status: tc.allowed ? 'done' : 'blocked', detail: tc.result_meta || (tc.allowed ? '' : 'blocked') };
 }
+// A turn that ends before its tools do leaves them `running` forever — a spinner
+// that outlives the work it describes. Settling them is part of ending the turn.
+function settleOrphanSteps(steps: ChatStep[] | undefined): ChatStep[] | undefined {
+  if (!steps?.some((s) => s.kind === 'tool' && s.status === 'running')) return steps;
+  return steps.map((s) =>
+    s.kind === 'tool' && s.status === 'running'
+      ? { kind: 'tool' as const, tool: s.tool, status: 'error' as const, detail: 'Stopped before this finished.' }
+      : s,
+  );
+}
+// Attach a streaming tool's partial output to the call it most likely came from.
+// The `tool_update` frame carries no call id, so "the most recent running step"
+// is the best attribution available — the same heuristic applyToolTrace already
+// uses to reconcile a completed call.
+function applyToolUpdate(steps: ChatStep[] | undefined, note: string): ChatStep[] | undefined {
+  if (!steps || !note) return steps;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i];
+    if (s.kind === 'tool' && s.status === 'running') {
+      const list = [...steps];
+      list[i] = { ...s, detail: note };
+      return list;
+    }
+  }
+  return steps;
+}
 import { WorkPanel, type PanelTab } from './chat-panel';
 import { useChatThreads, isDraft } from './use-chat-threads';
 
@@ -61,7 +87,7 @@ export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
   const router = useRouter();
-  const { chatStream, conversationSend, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
+  const { chatStream, conversationSend, cancelChat, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation } = useChatThreads(projectID);
 
@@ -80,6 +106,9 @@ export function ChatPage() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [streaming, setStreaming] = useState(false);
+  // Where a message typed mid-run should land: with the agent now (next turn
+  // boundary) or after it has finished the current answer.
+  const [steerMode, setSteerMode] = useState<'steer' | 'followup'>('steer');
   const [pickedAgentID, setPickedAgentID] = useState('');
   // Composer attachments (text files inlined into the next turn) and a transient
   // notice for files that were skipped (binary, or over the per-turn cap).
@@ -91,10 +120,14 @@ export function ChatPage() {
   const searchParams = useSearchParams();
   const initialAgentID = searchParams.get('agent') ?? '';
   const initialQuery = searchParams.get('q') ?? '';
-  const cancelled = useRef(false);
+  const cancelledRef = useRef(false);
   // Aborts the in-flight fetch ONLY when the user hits Stop — never on unmount
   // or thread switch, so navigating away leaves the run to finish server-side.
   const abortRef = useRef<AbortController | null>(null);
+  // The committed messages, readable from an async handler whose captured
+  // `messages` went stale across an await (stop() and steer() both do).
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; });
 
   // Arriving via a deep-linked question (/chat?q=…, e.g. from the dashboard's
   // "Ask the agent") prefills the composer once so the user can hit send.
@@ -276,9 +309,20 @@ export function ChatPage() {
         timer = setTimeout(tick, 2500);
         return;
       }
+      // The run row's status is how a returning client (or a second tab) learns
+      // the turn was stopped rather than answered — the stop may have happened
+      // somewhere this tab never saw.
+      const outcome: ChatMsg['outcome'] = run.status === 'stopped' ? 'stopped' : run.status === 'error' ? 'failed' : 'ok';
       const next = messages.map((m, i) =>
         i === messages.length - 1
-          ? { ...m, text: run.summary || m.text, steps: m.steps?.length ? m.steps : calls.map(serverToolStep), progress: '', done: true }
+          ? {
+              ...m,
+              text: run.summary || m.text,
+              steps: settleOrphanSteps(m.steps?.length ? m.steps : calls.map(serverToolStep)),
+              progress: '',
+              done: true,
+              outcome,
+            }
           : m,
       );
       setMessages(next);
@@ -323,8 +367,54 @@ export function ChatPage() {
   }, [activeID, streaming]);
 
   function patch(id: number, fn: (m: ChatMsg) => ChatMsg) {
-    if (cancelled.current) return;
+    if (cancelledRef.current) return;
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
+  }
+
+  // A message typed while a turn is streaming is an amendment to that turn, not a
+  // new question: hand it to the live run and record it inside the turn it
+  // amended. The server owns the fallback — if the run finished between our
+  // deciding to steer and its receiving the message, it runs the message as an
+  // ordinary turn and answers it, which we then append as its own settled turn
+  // (its tokens streamed while we had no bubble to put them in, so the answer
+  // lands at once rather than typing out).
+  async function steer(prompt: string) {
+    const target = messages[messages.length - 1];
+    if (!target) return;
+    const mode = steerMode;
+    setMessages((items) => items.map((m) => (m.id === target.id ? { ...m, steers: [...(m.steers ?? []), { text: prompt, mode }] } : m)));
+    setInput('');
+    setAttachments([]);
+    setNotice('');
+    dirty.current = true;
+    const convID = activeID;
+    try {
+      const result = await conversationSend(convID, prompt, {}, { mode, agentID: agent?.id });
+      if (isSteered(result)) return; // delivered — it lives on the turn above
+      // Not delivered: the run had already finished and the server answered it as
+      // a fresh turn. Move the amendment out of the (now closed) turn and give it
+      // the turn it actually got.
+      setMessages((items) => [
+        ...items.map((m) => (m.id === target.id ? { ...m, steers: (m.steers ?? []).filter((s) => s.text !== prompt) } : m)),
+        {
+          id: Date.now(), prompt, text: formatAgentError(result.final), progress: '',
+          card: result.card ?? null, done: true, outcome: 'ok' as const, tools: result.tool_calls,
+          route: result.route, turns: result.turns, usage: result.usage,
+          agentID: agent?.id, agentName,
+        },
+      ]);
+    } catch {
+      // The amendment never reached the agent. Leave it in the transcript and
+      // label it, rather than either dropping the user's words or letting them
+      // read as delivered.
+      setMessages((items) =>
+        items.map((m) =>
+          m.id === target.id
+            ? { ...m, steers: (m.steers ?? []).map((s) => (s.text === prompt ? { ...s, delivered: false } : s)) }
+            : m,
+        ),
+      );
+    }
   }
 
   async function send(override?: string) {
@@ -333,7 +423,13 @@ export function ChatPage() {
     // The same composed string is both displayed and sent, so a reloaded turn
     // re-renders identically from the server projection.
     const prompt = composeMessage(override ?? input, attachments, skills);
-    if (!prompt || streaming) return;
+    if (!prompt) return;
+    // The composer stays live during a run so the user can redirect the agent
+    // instead of waiting it out. Draft threads have no live run to steer.
+    if (streaming) {
+      if (!isDraft(activeID)) await steer(prompt);
+      return;
+    }
     const instant = instantReply({
       eventNames,
       catalogReady,
@@ -342,7 +438,7 @@ export function ChatPage() {
     if (instant) {
       const id = Date.now();
       const seeded: ChatMsg[] = [...messages, {
-        id, prompt, text: instant, progress: '', card: null, done: true, tools: [],
+        id, prompt, text: instant, progress: '', card: null, done: true, outcome: 'ok', tools: [],
         agentID: agent?.id, agentName,
       }];
       setMessages(seeded);
@@ -362,13 +458,14 @@ export function ChatPage() {
     setAttachments([]);
     setNotice('');
     setStreaming(true);
-    cancelled.current = false;
+    cancelledRef.current = false;
     dirty.current = true;
     const handlers = {
       onRunID: (rid: string) => patch(id, (m) => ({ ...m, runID: rid })),
       onToken: (t: string) => patch(id, (m) => ({ ...m, text: m.text + t, progress: '' })),
       onProgress: (n: string) => patch(id, (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
       onToolStart: (tool: string) => patch(id, (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, tool, status: 'running' as const }] })),
+      onToolUpdate: (note: string) => patch(id, (m) => ({ ...m, steps: applyToolUpdate(m.steps, note) })),
       onCard: (c: AgentResultCard) => patch(id, (m) => ({ ...m, card: c })),
       onTool: (t: AgentToolTrace) => patch(id, (m) => ({ ...m, tools: [...m.tools, t], steps: applyToolTrace(m.steps, t) })),
       onError: (msg: string) => patch(id, (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
@@ -395,27 +492,72 @@ export function ChatPage() {
             { role: 'assistant' as const, content: m.text },
           ]), { sessionID: activeID, agentID: agent?.id, signal: ac.signal });
       if (!isSteered(result)) {
-        patch(id, (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools.length ? m.tools : result.tool_calls, progress: '', done: true }));
+        // `stopped` is the server's word, so a turn stopped from another tab (or
+        // one whose cancel call we couldn't confirm) still settles as Stopped
+        // rather than as a suspiciously short answer.
+        const outcome = result.stopped ? 'stopped' : 'ok';
+        patch(id, (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
       } else {
-        patch(id, (m) => ({ ...m, progress: '', done: true }));
+        patch(id, (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
       }
     } catch {
-      patch(id, (m) => ({ ...m, progress: '', done: true }));
+      // A user stop aborts the fetch, which lands here too — stop() has already
+      // set the outcome, so only a genuine stream failure is marked failed.
+      patch(id, (m) => ({ ...m, progress: '', done: true, outcome: m.outcome ?? 'failed', steps: settleOrphanSteps(m.steps) }));
     } finally {
       setStreaming(false);
     }
   }
 
-  function stop() {
-    cancelled.current = true;
+  // Stop is a server-side fact, not a client that looked away: cancel the run
+  // first, then settle the view. Aborting the fetch alone would leave the agent
+  // running, billing, and writing an answer into a conversation the user has
+  // already been told is over.
+  async function stop() {
+    const target = messages[messages.length - 1];
+    // Say what is happening while the cancel is in flight, in the one place the
+    // user is already watching. The Stopped marker waits for the server's answer
+    // rather than appearing on the click, so the UI never claims a halt it
+    // hasn't actually got.
+    if (target) setMessages((items) => items.map((m) => (m.id === target.id ? { ...m, progress: 'Stopping…' } : m)));
+    // A draft thread has no server-side run to cancel — the legacy client-history
+    // path is the only thing streaming, and aborting it is the whole stop.
+    const cancelled = isDraft(activeID) ? true : await cancelChat(activeID);
+    cancelledRef.current = true;
     abortRef.current?.abort();
     setStreaming(false);
     dirty.current = true;
-    setMessages((items) => items.map((m, i) => (i === items.length - 1 ? { ...m, progress: '', done: true } : m)));
+    // The turn can finish on its own during the cancel round-trip. If it did, it
+    // has a real answer and settled itself — leave it alone rather than stamping
+    // "Stopped" over work that actually completed. Read through the live ref: the
+    // `messages` this closure captured are from before the await.
+    const raced = !!messagesRef.current.find((m) => m.id === target?.id)?.done;
+    if (!raced) {
+      setMessages((items) =>
+        items.map((m) =>
+          m.id === target?.id
+            ? {
+                ...m,
+                progress: '',
+                done: true,
+                outcome: 'stopped' as const,
+                // Any step still spinning belongs to work that will never
+                // finish. A live spinner on a turn that is over is the same lie
+                // as the missing Stop marker.
+                steps: settleOrphanSteps(m.steps),
+              }
+            : m,
+        ),
+      );
+    }
+    // The one case where the agent may genuinely still be working: we asked the
+    // server to stop, it didn't confirm, and the turn hasn't settled by itself.
+    // Say so rather than implying it halted.
+    setNotice(cancelled || raced ? '' : 'Couldn’t stop the agent — it may still be working.');
   }
 
   function onNew() {
-    cancelled.current = true;
+    cancelledRef.current = true;
     setStreaming(false);
     setInput('');
     // The handoff belongs to the thread the first run happened in. Leaving it
@@ -427,7 +569,7 @@ export function ChatPage() {
   // Switching threads aborts any in-flight stream (event handler — safe to
   // mutate the cancel ref here); render-time sync then loads the new messages.
   function onSelect(id: string) {
-    cancelled.current = true;
+    cancelledRef.current = true;
     setStreaming(false);
     setFirstRunFired(false);
     selectThread(id);
@@ -547,9 +689,11 @@ export function ChatPage() {
                   value={input}
                   onChange={setInput}
                   onSubmit={() => void send()}
-                  onStop={stop}
+                  onStop={() => void stop()}
                   isStopShown={streaming}
-                  placeholder="Ask anything…  (type / for skills, attach files)"
+                  placeholder={streaming ? 'Redirect the agent…' : 'Ask anything…  (type / for skills, attach files)'}
+                  steerMode={steerMode}
+                  onSteerMode={setSteerMode}
                   skills={skills}
                   attachments={attachments}
                   onFiles={(files) => void addFiles(files)}

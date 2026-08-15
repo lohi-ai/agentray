@@ -927,6 +927,29 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.JSON(http.StatusOK, map[string]any{"delivered": delivered})
 	})
 
+	// --- live control (§ stop): cancel an in-flight run keyed on the client
+	// conversation id. Stop has to be a server-side fact — a client that merely
+	// aborts its SSE read leaves the run streaming into nothing, still billing, and
+	// still writing an answer nobody asked for. Returns stopped:false when no run
+	// is live for the session (it had already finished), which the client treats as
+	// "the turn is over" all the same. ---
+	e.POST("/api/agent/chat/cancel", func(c echo.Context) error {
+		_, project, err := authProject(c, store)
+		if err != nil {
+			return err
+		}
+		if liveReg == nil {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "live control unavailable")
+		}
+		var payload struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := c.Bind(&payload); err != nil || payload.SessionID == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "session_id required")
+		}
+		return c.JSON(http.StatusOK, map[string]any{"stopped": liveReg.Cancel(project.ID, payload.SessionID)})
+	})
+
 	// runConversationTurn appends a user message off the conversation's current leaf
 	// and runs the agent on the server-derived history — the shared tail of the
 	// send-message and fork/regenerate handlers. Callers that want to fork first
@@ -1506,6 +1529,10 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 		safeSSE("done", map[string]any{
 			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
 			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
+			// `stopped` tells a client that did not press Stop itself (a second tab,
+			// or the same tab after a cancel it couldn't confirm) that this turn ended
+			// deliberately — a neutral marker, not a failure.
+			"stopped": res.Stopped,
 		})
 		return nil
 	case <-c.Request().Context().Done():

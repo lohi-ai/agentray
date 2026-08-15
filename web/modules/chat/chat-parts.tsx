@@ -1,15 +1,17 @@
 'use client';
 
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { Check, LayoutDashboard, MessageSquare, Paperclip, Plug, Plus, Trash2 } from 'lucide-react';
+import { Check, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Plug, Plus, Square, Trash2 } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
   ChatMessageList,
   ChatMessageMetadata,
+  ChatSystemMessage,
   ChatToolCalls,
   type ChatToolCallItem,
 } from '@astryxdesign/core/Chat';
+import { Spinner } from '@astryxdesign/core/Spinner';
 import { List } from '@astryxdesign/core/List';
 import { ListItem } from '@astryxdesign/core/List';
 import { Avatar } from '@astryxdesign/core/Avatar';
@@ -44,6 +46,21 @@ export type ChatStep =
   | { kind: 'progress'; text: string }
   | { kind: 'tool'; tool: string; status: 'running' | 'done' | 'blocked' | 'error'; detail?: string };
 
+// How a settled turn ended. `done` alone can't tell "finished" from "the user
+// stopped it" from "it failed", which is why a stopped turn used to render as an
+// ordinary short answer. Absent on turns cached before this existed — a settled
+// turn with no outcome is read as 'ok'.
+export type ChatOutcome = 'ok' | 'stopped' | 'failed';
+
+// A message the user sent *into* a running turn rather than after it. It belongs
+// inside the turn it amended, so it is carried on that turn instead of becoming
+// one of its own. `mode` is the server's: 'steer' is honored at the run's next
+// turn boundary, 'followup' continues the run once it has answered.
+// `delivered: false` means the amendment never reached the agent (the request
+// failed). It stays in the transcript, labelled, so the user's words are not
+// silently swallowed — the alternative is text that vanishes on a flaky network.
+export type SteerEntry = { text: string; mode: 'steer' | 'followup'; delivered?: boolean };
+
 export type ChatMsg = {
   id: number;
   prompt: string;
@@ -51,6 +68,10 @@ export type ChatMsg = {
   progress: string;
   card: AgentResultCard | null;
   done: boolean;
+  outcome?: ChatOutcome;
+  // Amendments sent while this turn was still streaming, in the order they were
+  // sent. Rendered as ghost bubbles above the agent's body.
+  steers?: SteerEntry[];
   tools: AgentToolTrace[];
   // The agent's step-by-step work log for this turn (narration + tool calls),
   // shown inline so the user sees what the agent is doing, not just the answer.
@@ -96,7 +117,16 @@ export function ThreadsRail({
               className="group"
               isSelected={t.id === activeID}
               onClick={() => onSelect(t.id)}
-              startContent={<span className={`livedot ${t.id === activeID ? 'working' : 'idle'}`} />}
+              // `.livedot` had no CSS anywhere in the repo, so this marker was an
+              // invisible empty span. StatusDot is the real primitive: accent for
+              // the open thread, neutral for the rest, and it carries a label so
+              // the distinction isn't colour-only.
+              startContent={
+                <StatusDot
+                  variant={t.id === activeID ? 'accent' : 'neutral'}
+                  label={t.id === activeID ? 'Open chat' : 'Chat'}
+                />
+              }
               label={<span className="block overflow-hidden text-ellipsis whitespace-nowrap">{t.title}</span>}
               endContent={
                 <IconButton
@@ -347,7 +377,9 @@ function toCalls(steps: ChatStep[] | undefined): ChatToolCallItem[] {
       name: prettyTool(s.tool),
       node: s.tool,
       status,
-      resultDetail: s.status === 'done' ? s.detail || undefined : undefined,
+      // A running call shows its partial output as it arrives; a finished one
+      // shows its result summary. Only a failure moves the text to errorMessage.
+      resultDetail: s.status === 'done' || s.status === 'running' ? s.detail || undefined : undefined,
       errorMessage: s.status === 'blocked' ? s.detail || 'Blocked by scope' : s.status === 'error' ? s.detail : undefined,
     });
   });
@@ -368,6 +400,12 @@ function workSummary(calls: ChatToolCallItem[]): string {
 // user watches it move), then auto-collapses to a single chip the moment the
 // turn settles — while still letting the user re-open it. The label carries the
 // agent's live narration mid-turn, and a quiet summary once done.
+//
+// The min-w-0 wrapper is load-bearing, not cosmetic: a ChatToolCalls row is one
+// flex line whose name/target spans default to min-width:auto, so at a 390px
+// viewport they refuse to shrink and push the whole document into horizontal
+// scroll. Forcing min-w-0 down the subtree lets them truncate instead. The `!`
+// is needed because Astryx's StyleX classes otherwise win the cascade.
 function WorkLog({ calls, working, label }: { calls: ChatToolCallItem[]; working: boolean; label?: string }) {
   const [expanded, setExpanded] = useState(working);
   const prevWorking = useRef(working);
@@ -375,7 +413,11 @@ function WorkLog({ calls, working, label }: { calls: ChatToolCallItem[]; working
     if (prevWorking.current && !working) setExpanded(false);
     prevWorking.current = working;
   }, [working]);
-  return <ChatToolCalls calls={calls} label={label} isExpanded={expanded} onExpandedChange={setExpanded} />;
+  return (
+    <div className="w-full min-w-0 [&_*]:!min-w-0">
+      <ChatToolCalls calls={calls} label={label} isExpanded={expanded} onExpandedChange={setExpanded} />
+    </div>
+  );
 }
 
 // tracesToCalls projects the backend's authoritative per-turn tool traces onto
@@ -473,6 +515,7 @@ export function Conversation({ messages, agentName, agentNameByID, debug }: { me
         const traceCalls = debug ? tracesToCalls(m.tools) : [];
         const showMeta = debug && !!(m.route || m.usage || m.turns);
         const working = !m.done;
+        const stopped = m.done && m.outcome === 'stopped';
         // While the turn runs, the work log's header carries the agent's live
         // narration; once settled it reads as a quiet "Worked through N steps".
         const workLabel = working ? (m.progress || 'Working…') : workSummary(calls);
@@ -483,6 +526,28 @@ export function Conversation({ messages, agentName, agentNameByID, debug }: { me
                 <UserMessage prompt={m.prompt} />
               </ChatMessageBubble>
             </ChatMessage>
+            {/* Amendments sent into this turn. A ghost bubble (no filled chip)
+                with a label above says "this is yours, but it is not a new
+                question" — it belongs to the answer forming below it. */}
+            {(m.steers ?? []).map((s, i) => (
+              <ChatMessage sender="user" key={`steer-${i}`}>
+                <VStack gap={0} align="stretch">
+                  <HStack gap={1} align="center" justify="end">
+                    <CornerDownLeft size={12} className="text-[var(--color-text-secondary)]" />
+                    {s.delivered === false ? (
+                      <Text type="supporting" className="!text-[var(--danger)]">Not delivered — the agent never got this</Text>
+                    ) : (
+                      <Text type="supporting" color="secondary">
+                        {s.mode === 'followup' ? 'Queued — will run after this answer' : 'Steered'}
+                      </Text>
+                    )}
+                  </HStack>
+                  <ChatMessageBubble variant="ghost">
+                    <UserMessage prompt={s.text} />
+                  </ChatMessageBubble>
+                </VStack>
+              </ChatMessage>
+            ))}
             <ChatMessage
               sender="assistant"
               avatar={<Avatar name={who} size="small" status={<StatusDot variant="success" label="Online" />} />}
@@ -508,12 +573,13 @@ export function Conversation({ messages, agentName, agentNameByID, debug }: { me
                   ) : working ? (
                     // No tools yet — show the agent's live status flush-left so it
                     // lines up with the agent name above and the answer body that
-                    // replaces it. The pulsing dot *trails* the text as the live
-                    // cue; leading it would indent the text past that left edge
-                    // (and the faint dot reads as stray padding, not a marker).
+                    // replaces it. The spinner *trails* the text as the live cue;
+                    // leading it would indent the text past that left edge. (It
+                    // replaces a `.livedot` span that had no CSS anywhere in the
+                    // repo — the "working" pulse rendered as nothing at all.)
                     <HStack gap={2} align="center">
                       <Text type="supporting">{m.progress || 'Thinking…'}</Text>
-                      <span className="livedot working" />
+                      <Spinner size="sm" />
                     </HStack>
                   ) : null}
                   {m.text ? (
@@ -523,6 +589,18 @@ export function Conversation({ messages, agentName, agentNameByID, debug }: { me
                     <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{m.text}</Markdown>
                   ) : null}
                   {m.card ? <ResultCard card={m.card} /> : null}
+                  {/* A stop is deliberate, so it gets the neutral system-message
+                      treatment and never red — the user did this on purpose, it
+                      is not a fault. The word carries the meaning; colour never
+                      does it alone. With no text at all there is no bubble to
+                      annotate, so the marker states that plainly instead of
+                      leaving an empty one. Last in the turn: it says where the
+                      turn ended. */}
+                  {stopped ? (
+                    <ChatSystemMessage icon={<Square size={12} />}>
+                      {m.text ? 'Stopped — the agent didn’t finish this answer.' : 'Stopped before the agent replied.'}
+                    </ChatSystemMessage>
+                  ) : null}
                   {debug && traceCalls.length ? (
                     <ChatToolCalls label="Debug trace" calls={traceCalls} defaultIsExpanded={false} />
                   ) : null}
