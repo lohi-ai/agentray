@@ -1,15 +1,10 @@
-// Package agentcore is a reusable, product-agnostic agent runtime: the turn
-// loop, tool calling, hooks, permissions, memory, and the Agent Definition. It
-// knows nothing about analytics or any other product. A consumer injects a
-// ToolSet, a Policy, a MemoryStore, and an AgentDefinition; agentcore drives
-// them.
+// The wire seam: the vocabulary of one model call.
 //
-// Boundary rule: this package imports nothing from consumer packages
-// (agentruntime), storage, or vendors. Everything product-specific enters
-// through the interfaces defined here — including the model itself: agentcore
-// declares LLMProvider and never speaks a wire protocol. The OpenAI and
-// Anthropic implementations live in agentray/ai, which imports this package,
-// so a vendor change cannot reach the loop.
+// LLMProvider is the only way the loop reaches a model, and it is deliberately
+// small enough that an implementation is a translation layer and nothing more —
+// no retry, no caching policy, no escalation. Those are the loop's, so that
+// changing vendors cannot change how the agent behaves under failure. The
+// package doc, including the boundary rules this file rests on, is in doc.go.
 package agentcore
 
 import "context"

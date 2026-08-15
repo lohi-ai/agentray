@@ -145,19 +145,22 @@ Already shipped: hardened sandbox image and credential vault.
 
 | Concern | File |
 |---|---|
+| Structural rules, enforced as tests (kernel is a leaf, names no plugin, holds only `plugins/`; plugins never name each other) | `agentcore/boundary_test.go` |
 | Extension-point contract (what a plugin may do) | `agentcore/extension.go` |
 | Plugin composition (seams, priorities, unload) | `agentcore/plugin.go`, `agentcore/compose.go` |
 | Plugin packages (one folder + README per capability) | `agentcore/plugins/*` — see its README |
 | Default composition + parity + eject tests | `agentcore/plugins/preset/` |
 | Composition diagnostics | `Registry.Describe()`, `Agent.Describe()` (`agentcore/describe.go`) |
 | Loop seam (swappable control flow) | `agentcore/driver.go` |
-| Tool loop / trust-boundary credential resolution | `agentcore/loop.go` |
+| Turn loop (reason → act, batches, durable writes) | `agentcore/loop.go` |
+| Tool trust boundary (gate, validation, credential resolution, bounding) | `agentcore/tooldispatch.go` |
+| Model call (same-rung retry, then ladder escalation) | `agentcore/turn.go` |
 | Child-agent construction (scope may only narrow) | `agentcore/fork.go` |
 | Delegation depth (survives crossing agents) | `agentcore/delegation.go` |
 | Compaction strategy contract (replaceable) | `agentcore/compactor.go` |
 | Goal as durable state (write + resume recovery) | `agentcore/goal.go` |
 | Goal gate policy (contract, sentinel, nudge, stall) | `agentcore/plugins/goal/` |
-| Policy contract | `agentcore/policy.go` |
+| Policy contract (`Policy`, `Decision`, `DenyAll`, `AllowList`) | `agentcore/permission.go` |
 | Oversized tool output (spill + `read_spill`) | `agentcore/plugins/spill/` |
 | Background jobs (`job_*` tools, run-fenced) | `agentcore/plugins/jobs/` |
 | Session retrieval (`session_query`) | `agentcore/plugins/sessionquery/` |

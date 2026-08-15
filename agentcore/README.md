@@ -13,6 +13,22 @@ the package's own imports and fails on a `plugins/` import or on any other
 package in this module. That is what makes the kernel publishable on its own and
 what makes [`plugins/README.md`](plugins/README.md)'s ejectability claim true.
 
+Everything structural on this page is enforced the same way, because a rule that
+only this file knows is a rule that drifts:
+
+| test | holds |
+|---|---|
+| `TestKernelNamesNoPlugin` | no `plugins/` import from the root package |
+| `TestKernelIsAModuleLeaf` | no in-module import at all |
+| `TestKernelTreeHoldsOnlyPlugins` | `plugins/` is the only subdirectory |
+| `TestEveryKernelFileJustifiesItself` | every root `.go` file has a row below |
+| `TestPluginsDoNotNameEachOther` | no plugin imports a sibling (except `preset`) |
+| `TestEveryPluginDocumentsItself` | every plugin folder has a `README.md` |
+
+The API-side version of this page — the boundary rules, the three kinds of
+contribution, and the layer map — is [`doc.go`](doc.go), so a reader who arrives
+through `go doc` gets it too.
+
 ## Why the root is flat
 
 The obvious tidy-up — `agentcore/session/`, `agentcore/context/`,
@@ -23,6 +39,15 @@ the compaction, and stamps the idempotency key, all through unexported fields
 of one `Agent`. Splitting them into packages would either export that machinery
 (making it everyone's to break) or produce packages that can only be imported in
 one order — folders pretending to be boundaries.
+
+Flat is not the same as unordered, though, and the distinction is where this
+package earns the choice. The layering is real — composition sits above the
+contracts, the contracts above the loop, the loop above the log — it is just
+carried by *file* rather than by folder, and by a rule about which direction
+knowledge flows rather than by the compiler. One file, one job, named for the
+job: `tooldispatch.go` is the trust boundary, `turn.go` is retry and escalation,
+`limits.go` is the run's bounds. When a file starts needing "and" to describe it,
+it splits. [`doc.go`](doc.go) lists the layers in order.
 
 The real boundary is `plugins/`, and it is enforced above. So the organizing
 question for the root is not "which folder?" but:
@@ -45,7 +70,8 @@ cannot give one belongs in a plugin, or belongs nowhere.
 
 | file | why core |
 |---|---|
-| [`provider.go`](provider.go) | **contract** — package doc, `LLMProvider`, `ChatRequest/ChatResponse`, `Usage`. The wire seam every model call goes through. |
+| [`doc.go`](doc.go) | **contract** — the package doc: the two boundary rules, the three kinds of plugin contribution, and the layer map below rendered where `go doc` can see it. No code. |
+| [`provider.go`](provider.go) | **contract** — `LLMProvider`, `ChatRequest/ChatResponse`, `Usage`. The wire seam every model call goes through, kept small enough that an implementation is a translation layer and nothing more. |
 | [`plugin.go`](plugin.go) | **loop** — `Plugin`, `Registry`, `Priority`. The composition surface itself: seam setters, additive contributions, per-plugin `Unload`. |
 | [`compose.go`](compose.go) | **loop** — `Build`, `BuildRegistry`, `ApplyConfig`. Turns a plugin set into an `Agent`; `Config` is routed through the same setters plugins use. |
 | [`agent.go`](agent.go) | **loop** — the configured runtime instance. Its capability-bearing fields are unexported on purpose (see `fork.go`). |
@@ -57,7 +83,11 @@ cannot give one belongs in a plugin, or belongs nowhere.
 | file | why core |
 |---|---|
 | [`driver.go`](driver.go) | **seam default** — `Driver`: control flow as a replaceable seam. Without this the loop is the one thing you could not change without forking. |
-| [`loop.go`](loop.go) | **loop** — `DefaultDriver`: reason → act, parallel batches, the per-run circuit breaker, `Limits`. Also the **only** writer of the durable log. |
+| [`loop.go`](loop.go) | **loop** — `DefaultDriver`'s body: reason → act, parallel batches, compaction bracketing, the graceful-stop protocol. Also the **only** writer of the durable log. |
+| [`turn.go`](turn.go) | **loop** — one turn against the model: same-rung retry, then escalation down the ladder, plus the streaming path. Retry lives with the loop, not in a provider, so failure behaviour cannot differ per vendor. |
+| [`tooldispatch.go`](tooldispatch.go) | **loop** — one tool call end to end: lookup → prepare → validate → gate → execute → bound → trace. The trust boundary, applied in exactly one place so it is unskippable rather than usually-called. |
+| [`limits.go`](limits.go) | **contract** — `Limits`: the run's bounds, read every turn and published to extensions through `RunInfo`. There is no composition in which a run is unbounded. |
+| [`result.go`](result.go) | **contract** — `RunResult`, `StreamEvent` and the event vocabulary, `ResultCard`. The loop's output side, which consumers render and plugins observe. (`ToolTrace` sits with the code that fills it, in `tooldispatch.go`.) |
 | [`extension.go`](extension.go) | **contract** — every extension point (`ToolInterceptor`, `StepInterceptor`, `StopInterceptor`, `RunObserver`, `ToolContributor`, …) and the `extensionSet` the loop dispatches through. The file that forbids naming a plugin. |
 | [`hooks.go`](hooks.go) | **contract** — the lifecycle hook types and their dispatch, including the `BeforeToolCall` shape the permission gate is built from. |
 | [`tool.go`](tool.go) | **contract** — `Tool`, `ToolSet`, `ArgPreparer`, and the loop's own byte bounding, exported so a plugin bounds text the same way rather than a copy of the way. |

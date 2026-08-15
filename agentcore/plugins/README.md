@@ -26,6 +26,16 @@ never by importing the other package.
 Adding a capability is **a new folder**. It is never an edit to `agentcore`, and
 never an edit to another plugin.
 
+Both halves are enforced in [`../boundary_test.go`](../boundary_test.go), and the
+second half is the one that needs it. Go's cycle check already makes the loop
+importing a plugin a build error. Nothing stops a plugin importing a *sibling* —
+they are peers, so it compiles cleanly — which makes it the cheapest rule here to
+break and the most expensive to unwind: the day the repeat guard imports `todo`
+to ask whether a call was bookkeeping, ejecting `todo` stops being a composition
+change and becomes a build error. `TestPluginsDoNotNameEachOther` fails on that
+import; `preset` is exempt because it is the aggregator, not a capability.
+`TestEveryPluginDocumentsItself` holds the per-folder `README.md` promise above.
+
 ## Three kinds of plugin
 
 They are not the same thing, and calling all three "plugin" without saying which
