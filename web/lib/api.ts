@@ -849,11 +849,27 @@ export type AgentToolCall = {
 };
 
 // AgentLLMCall is one model invocation inside a run — the deepest tier of the
-// loop trace. Mirrors storage.AgentLLMCall; messages_json/tool_calls_json are
-// JSON strings the UI parses lazily for the expanded view.
+// loop trace. Mirrors storage.AgentLLMCall.
+//
+// `messages_json` is a DELTA, not the call's whole context: it holds the
+// messages after the first `keep_prefix` of the call numbered `base_seq`
+// (`base_seq === 0` means the row is a keyframe and carries everything). This is
+// why the run-detail list is fetched without messages at all — the steps
+// endpoint returns contexts already reconstructed by the server, and no client
+// should have to replay the chain itself.
+//
+// `session_key` and `depth` are the attribution pair: a sub-agent shares its
+// parent's run id, so `session_key` is what separates the parent's calls from
+// each child's, and `depth` is how far down the delegation tree the call was
+// made (0 = the run's own agent).
 export type AgentLLMCall = {
   id: string;
   run_id: string;
+  session_key: string;
+  depth: number;
+  seq: number;
+  base_seq: number;
+  keep_prefix: number;
   provider: string;
   model: string;
   messages_json: string;
@@ -912,6 +928,30 @@ export type LabStep = {
   cum_tokens_in: number;
   cum_tokens_out: number;
   cum_cost_usd: number;
+};
+
+// RunChapter is one span of a run bounded by compaction — mirrors
+// agentcore.RunChapter. A run of a few thousand steps has no shape a scrollbar
+// can convey, but it wrote itself a table of contents on the way: every time the
+// context filled, the model summarized what it had done. `summary` is that
+// account, and it CLOSES the chapter (it describes the span behind it), which is
+// why the last chapter of a run has none.
+//
+// `first_step`/`last_step` are inclusive indices into the same step list the
+// replay endpoint pages, so a chapter turns into a page request directly.
+export type RunChapter = {
+  index: number;
+  first_step: number;
+  last_step: number;
+  first_turn: number;
+  last_turn: number;
+  title: string;
+  summary?: string;
+  steps: number;
+  tool_calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
 };
 
 export type LabTestResult = {
@@ -1822,8 +1862,15 @@ export class AgentRayAPI {
     return this.get<{ runs: AgentRun[] }>(`/api/agent/runs?limit=${limit}`);
   }
 
-  agentRun(runID: string) {
-    return this.get<{ run: AgentRun; tool_calls: AgentToolCall[]; llm_calls: AgentLLMCall[] }>(`/api/agent/runs/${runID}`);
+  // agentRun fetches a run's header plus a PAGE of its model calls, newest seq
+  // after `afterSeq`. The calls come back without message bodies — a long run
+  // has thousands of them, and the readable context for any one step comes from
+  // `labReplaySteps` instead. `next_seq` is the cursor for the following page,
+  // and is 0 when the page is the last one.
+  agentRun(runID: string, afterSeq = 0, limit = 200) {
+    return this.get<{ run: AgentRun; tool_calls: AgentToolCall[]; llm_calls: AgentLLMCall[]; next_seq: number }>(
+      `/api/agent/runs/${runID}?after_seq=${afterSeq}&limit=${limit}`,
+    );
   }
 
   // sessionRun reattaches a returning client to the latest run of a conversation
@@ -2011,6 +2058,36 @@ export class AgentRayAPI {
     return this.consumeChatSSE(response, handlers);
   }
 
+  // editMessage rewrites a prior USER message and re-runs from there;
+  // regenerateMessage re-runs the user turn an ASSISTANT message answered. Both
+  // fork the conversation tree at the branch point and stream the new turn over
+  // the same SSE contract as conversationSend — the original branch stays in the
+  // store, reachable, but off the active path. `entryID` must be a server entry
+  // id: a message this tab has not yet reconciled cannot be forked from.
+  editMessage(id: string, entryID: string, message: string, handlers: AgentChatStreamHandlers = {}, opts: { signal?: AbortSignal } = {}) {
+    return this.branchTurn(`${encodeURIComponent(id)}/messages/${encodeURIComponent(entryID)}/edit`, { message }, handlers, opts);
+  }
+
+  regenerateMessage(id: string, entryID: string, handlers: AgentChatStreamHandlers = {}, opts: { signal?: AbortSignal } = {}) {
+    return this.branchTurn(`${encodeURIComponent(id)}/messages/${encodeURIComponent(entryID)}/regenerate`, {}, handlers, opts);
+  }
+
+  private async branchTurn(
+    path: string,
+    body: Record<string, unknown>,
+    handlers: AgentChatStreamHandlers,
+    opts: { signal?: AbortSignal },
+  ): Promise<AgentChatStreamResult> {
+    const response = await fetch(`${apiBase()}${this.withProject(`/api/agent/conversations/${path}`)}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+    return this.consumeChatSSE(response, handlers);
+  }
+
   triggerAgentRun() {
     return this.post<{ queued: boolean }>('/api/agent/run', {});
   }
@@ -2132,8 +2209,16 @@ export class AgentRayAPI {
     return this.post<{ result: LabTestResult }>(`/api/agent/lab/test${agentQuery(agentID)}`, { input, expected, case_id: caseID });
   }
 
-  labReplaySteps(runID: string, agentID = '') {
-    return this.get<{ steps: LabStep[] }>(`/api/agent/lab/runs/${runID}/steps${agentQuery(agentID)}`);
+  // labReplaySteps folds a completed run into steps and returns one WINDOW of
+  // them. `chapters` is always whole (one small entry per compaction) because it
+  // is the run's table of contents — the thing that tells you which window to
+  // ask for. `total` is the run's full step count, not the window's length.
+  labReplaySteps(runID: string, agentID = '', offset = 0, limit = 50) {
+    const q = agentQuery(agentID);
+    const sep = q ? '&' : '?';
+    return this.get<{ steps: LabStep[]; chapters: RunChapter[]; total: number; offset: number }>(
+      `/api/agent/lab/runs/${runID}/steps${q}${sep}offset=${offset}&limit=${limit}`,
+    );
   }
 
   labAdvance(runID: string, agentID = '') {

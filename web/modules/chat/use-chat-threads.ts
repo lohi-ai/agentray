@@ -42,6 +42,7 @@ function dropLegacyCache(projectID?: string) {
     try { window.localStorage.removeItem(key); } catch { /* private mode — ignore */ }
   }
 }
+const CACHED_ROLES = new Set<string>(['user', 'assistant', 'system']);
 const draftID = () => `local:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 // isDraft marks a thread that exists only client-side (no server conversation yet),
@@ -58,7 +59,7 @@ function loadCache(projectID?: string): ChatThread[] {
     // A blob can still be from a build mid-version. Keep only rows whose
     // messages are the current shape rather than trusting the key alone.
     return parsed.filter((t) => t && typeof t.id === 'string' && Array.isArray(t.messages)
-      && t.messages.every((m) => m && typeof m.id === 'string' && (m.role === 'user' || m.role === 'assistant')));
+      && t.messages.every((m) => m && typeof m.id === 'string' && CACHED_ROLES.has(m.role)));
   } catch {
     return [];
   }
@@ -77,15 +78,39 @@ function loadCache(projectID?: string): ChatThread[] {
 // model-only and skipped. `id` is the entry's own id and `seq` its cursor, so
 // reconciliation and the `?since=` watermark both key off the server's record.
 type ToolTracePayload = { call_id?: string; tool?: string; target?: string; allowed?: boolean; reason?: string; error?: string; result_meta?: string };
-export function entriesToMessages(entries: AgentConversationEntry[]): ChatMsg[] {
-  return renderEntries(entries).messages;
+export function entriesToMessages(entries: AgentConversationEntry[], leafEntryID?: string): ChatMsg[] {
+  return renderEntries(entries, leafEntryID).messages;
+}
+
+// activePath narrows a full log to the branch the conversation currently points
+// at. Editing a message or regenerating an answer forks the tree — the store
+// keeps the old branch (nothing is destroyed) and GET returns every entry, so
+// without this the transcript shows the message the user just replaced sitting
+// above its replacement. Every append parents to the leaf, traces included, so
+// the active branch is exactly the ancestor chain of `leaf_entry_id`.
+//
+// A window that doesn't contain the leaf (a `?since=` delta, an older cache)
+// can't be walked, so it is returned untouched — deltas are appends on the
+// current branch by construction, and the full load that follows a fork is what
+// prunes.
+function activePath(entries: AgentConversationEntry[], leafEntryID?: string): AgentConversationEntry[] {
+  if (!leafEntryID) return entries;
+  const byID = new Map(entries.map((e) => [e.id, e]));
+  if (!byID.has(leafEntryID)) return entries;
+  const keep = new Set<string>();
+  for (let id: string | undefined = leafEntryID; id && byID.has(id) && !keep.has(id);) {
+    keep.add(id);
+    id = byID.get(id)?.parent_id;
+  }
+  return entries.filter((e) => keep.has(e.id));
 }
 
 // renderEntries is entriesToMessages plus the sync cursor a caller should ask
 // from next. They differ when the log ends in tool traces: those belong to a
 // turn whose answer hasn't been written yet, so the cursor stops short of them
 // and the next poll reads them again alongside the answer they explain.
-export function renderEntries(entries: AgentConversationEntry[]): { messages: ChatMsg[]; seq: number } {
+export function renderEntries(all: AgentConversationEntry[], leafEntryID?: string): { messages: ChatMsg[]; seq: number } {
+  const entries = activePath(all, leafEntryID);
   const out: ChatMsg[] = [];
   // Traces stream before the answer they explain, so they buffer here until the
   // assistant message that closes the turn arrives.
@@ -105,12 +130,20 @@ export function renderEntries(entries: AgentConversationEntry[]): { messages: Ch
       pending.push({ kind: 'tool', callID: p.call_id, tool: p.tool, target: p.target, status, detail });
       continue;
     }
+    // A compaction folded everything above it into a summary the model still
+    // sees but the reader no longer does. Marking the seam is how the transcript
+    // stops silently disagreeing with the agent's memory of it.
+    if (e.kind === 'compaction') {
+      out.push({ id: entryID(e), role: 'system', text: 'Older messages summarized', seq: e.seq, done: true });
+      seq = Math.max(seq, e.seq);
+      continue;
+    }
     if (e.kind !== 'message') { seq = Math.max(seq, e.seq); continue; }
     let text = '';
     try { text = String((JSON.parse(e.payload_json || '{}') as { text?: string }).text ?? ''); } catch { text = ''; }
     if (!text) { seq = Math.max(seq, e.seq); continue; }
     if (e.role === 'user') {
-      out.push({ id: entryID(e), role: 'user', text, seq: e.seq, done: true });
+      out.push({ id: entryID(e), role: 'user', text, seq: e.seq, done: true, tokens: e.token_estimate });
       seq = Math.max(seq, e.seq);
       continue;
     }
@@ -119,7 +152,7 @@ export function renderEntries(entries: AgentConversationEntry[]): { messages: Ch
     // override), so a thread that switched agents shows the right one per bubble.
     out.push({
       id: entryID(e), role: 'assistant', text: formatAgentError(text), seq: e.seq,
-      done: true, steps: pending.length ? pending : undefined,
+      done: true, steps: pending.length ? pending : undefined, tokens: e.token_estimate,
       agentID: e.agent_id || undefined,
     });
     seq = Math.max(seq, e.seq);
@@ -286,8 +319,11 @@ export function useChatThreads(projectID?: string) {
   const loadConversation = useCallback(async (id: string): Promise<ChatMsg[] | null> => {
     if (!api || isDraft(id)) return null;
     try {
-      const { entries } = await api.getConversation(id);
-      const messages = entriesToMessages(entries);
+      const { conversation, entries } = await api.getConversation(id);
+      // The leaf is what makes an edited or regenerated thread read correctly:
+      // GET returns every branch, and only the leaf's ancestor chain is the
+      // conversation the user is actually in.
+      const messages = entriesToMessages(entries, conversation?.leaf_entry_id);
       setThreads((prev) => {
         const next = prev.map((t) => (t.id === id ? { ...t, messages } : t));
         if (typeof window !== 'undefined') {

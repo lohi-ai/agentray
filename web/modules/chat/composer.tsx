@@ -27,6 +27,7 @@ const ACCEPT = '.txt,.md,.mdx,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.xml,.html,
 export function Composer({
   value, onChange, onSubmit, onStop, isStopShown, placeholder, footerActions,
   skills, attachments, onFiles, onRemoveAttachment, notice, steerMode, onSteerMode,
+  headerContext,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -40,6 +41,9 @@ export function Composer({
   onFiles: (files: File[]) => void;
   onRemoveAttachment: (id: string) => void;
   notice?: string;
+  // The quiet row above the input — capacity and other standing facts. Kept a
+  // slot rather than a fixed control so the composer stays presentational.
+  headerContext?: React.ReactNode;
   // While a turn streams, a send is an amendment to it rather than a new
   // question: 'steer' reaches the agent at its next turn boundary, 'followup'
   // runs once the current answer is finished. Only rendered when isStopShown.
@@ -97,6 +101,7 @@ export function Composer({
         isStopShown={isStopShown}
         placeholder={placeholder}
         status={notice ? { type: 'warning', message: notice } : undefined}
+        headerContext={headerContext}
         input={
           <ChatComposerInput
             handleRef={handleRef}

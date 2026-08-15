@@ -10,7 +10,7 @@ import { ToggleButton } from '@astryxdesign/core/ToggleButton';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Text } from '@astryxdesign/core/Text';
-import { isSteered, type AgentResultCard, type AgentToolCall, type AgentToolTrace } from '@/lib/api';
+import { isSteered, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
@@ -21,72 +21,25 @@ import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { useEventNames } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
-import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, AgentMenu, type ChatMsg, type ChatStep } from './chat-parts';
+import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
-
-// Map a streamed tool trace onto the timeline. Reconciliation is by call id: two
-// concurrent calls to the same tool are identical in every other field, so
-// matching on the name settles whichever row happens to be last and leaves the
-// other spinning forever. Only a trace with no id (older server, synthesized
-// call) falls back to the name match it used to do.
-function toolStatus(t: AgentToolTrace): 'done' | 'blocked' | 'error' {
-  return t.error ? 'error' : t.allowed ? 'done' : 'blocked';
-}
-function applyToolTrace(steps: ChatStep[] | undefined, t: AgentToolTrace): ChatStep[] {
-  const detail = t.error || t.reason || t.result_meta || (t.allowed ? '' : 'blocked');
-  const list = steps ? [...steps] : [];
-  const at = list.findIndex((s) =>
-    s.kind === 'tool' && (t.call_id ? s.callID === t.call_id : s.status === 'running' && s.tool === t.tool),
-  );
-  if (at >= 0) {
-    const prev = list[at];
-    if (prev.kind === 'tool') {
-      // Keep the target the start frame gave us — the completed trace doesn't
-      // carry it, and losing it mid-run makes the row jump.
-      list[at] = { ...prev, status: toolStatus(t), detail, durationMS: t.latency_ms };
-      return list;
-    }
-  }
-  list.push({ kind: 'tool', callID: t.call_id, tool: t.tool, status: toolStatus(t), detail, durationMS: t.latency_ms });
-  return list;
-}
-// Rebuild a tool step from the persisted trace, used to restore the timeline a
-// reload lost (the durable trace has no error column, so allowed drives status).
-function serverToolStep(tc: AgentToolCall): ChatStep {
-  return { kind: 'tool', tool: tc.tool, status: tc.allowed ? 'done' : 'blocked', detail: tc.result_meta || (tc.allowed ? '' : 'blocked') };
-}
-// A turn that ends before its tools do leaves them `running` forever — a spinner
-// that outlives the work it describes. Settling them is part of ending the turn.
-function settleOrphanSteps(steps: ChatStep[] | undefined): ChatStep[] | undefined {
-  if (!steps?.some((s) => s.kind === 'tool' && s.status === 'running')) return steps;
-  return steps.map((s) =>
-    s.kind === 'tool' && s.status === 'running'
-      ? { kind: 'tool' as const, tool: s.tool, status: 'error' as const, detail: 'Stopped before this finished.' }
-      : s,
-  );
-}
-// Attach a streaming tool's partial output to the call that produced it. Keyed
-// by call id, so two calls to the same tool running side by side each show their
-// own output instead of overwriting one another.
-function applyToolUpdate(steps: ChatStep[] | undefined, callID: string, note: string): ChatStep[] | undefined {
-  if (!steps || !note) return steps;
-  const at = steps.findIndex((s) => s.kind === 'tool' && (callID ? s.callID === callID : s.status === 'running'));
-  if (at < 0) return steps;
-  const list = [...steps];
-  const prev = list[at];
-  if (prev.kind !== 'tool') return steps;
-  list[at] = { ...prev, detail: note };
-  return list;
-}
 import { WorkPanel, type PanelTab } from './chat-panel';
 import { useChatThreads, isDraft, mergeDelta, syncSeq } from './use-chat-threads';
+import { applyToolTrace, applyToolUpdate, serverToolStep, settleOrphanSteps } from './tool-steps';
 
 // Identity for a message this tab just made up. It carries no server cursor
 // (`seq`), which is exactly how the sync merge recognises it as unreconciled and
 // adopts the server's id onto it when the same message comes back.
 let localCounter = 0;
 const localID = () => `local:${Date.now().toString(36)}-${(localCounter++).toString(36)}`;
+
+// The conversation store's compaction budget, mirrored from ConvContextWindow /
+// ConvReserveTokens in internal/runtime/conversation.go. The server's own
+// trigger assumes this window, so the readout is a faithful copy of its
+// arithmetic rather than a second opinion. Change these only with those.
+const CONTEXT_WINDOW = 128_000;
+const CONTEXT_RESERVE = 16_384;
 
 // Stable StackSheet ids for the narrow-mode chat docks (module scope so they stay
 // referentially constant across renders for effect dependency lists).
@@ -97,7 +50,7 @@ export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
   const router = useRouter();
-  const { chatStream, conversationSend, cancelChat, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
+  const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation } = useChatThreads(projectID);
 
@@ -120,6 +73,9 @@ export function ChatPage() {
   // boundary) or after it has finished the current answer.
   const [steerMode, setSteerMode] = useState<'steer' | 'followup'>('steer');
   const [pickedAgentID, setPickedAgentID] = useState('');
+  // The message whose edit/regenerate fork is in flight, so its action can say
+  // so without disabling itself out from under the keyboard.
+  const [forking, setForking] = useState('');
   // Composer attachments (text files inlined into the next turn) and a transient
   // notice for files that were skipped (binary, or over the per-turn cap).
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -387,6 +343,32 @@ export function ChatPage() {
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
   }
 
+  // Tokens arrive far faster than the screen refreshes — a fast model emits
+  // hundreds a second, and a setState per token re-renders the whole transcript
+  // (markdown, work log and all) that many times. Buffer them and flush once per
+  // frame: the same text appears at the same moment, at monitor rate instead of
+  // model rate. The buffer is keyed by target so a steer mid-run can't flush a
+  // half-sentence into the message it just moved away from.
+  const tokenBuf = useRef<{ id: string; text: string } | null>(null);
+  const tokenFrame = useRef(0);
+  function flushTokens() {
+    tokenFrame.current = 0;
+    const buf = tokenBuf.current;
+    tokenBuf.current = null;
+    if (buf?.text) patch(buf.id, (m) => ({ ...m, text: m.text + buf.text, progress: '' }));
+  }
+  function pushToken(id: string, t: string) {
+    if (tokenBuf.current && tokenBuf.current.id !== id) flushTokens();
+    tokenBuf.current = { id, text: (tokenBuf.current?.text ?? '') + t };
+    if (tokenFrame.current) return;
+    tokenFrame.current = typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame(flushTokens)
+      : (setTimeout(flushTokens, 16) as unknown as number);
+  }
+  // A stream that ends between frames leaves its last tokens in the buffer, so
+  // the final flush is part of settling — never left to the next paint.
+  useEffect(() => { if (!streaming) flushTokens(); });
+
   // A message typed while a turn is streaming is an amendment to that run, not a
   // new question — so it goes into the log where the user said it: after the
   // answer so far, before the rest of it. The partial answer settles, the
@@ -444,6 +426,80 @@ export function ChatPage() {
     }
   }
 
+  // Edit and regenerate both fork the conversation server-side and stream the
+  // new turn. Everything after the branch point stops being part of the thread,
+  // so the local transcript is truncated there before the stream opens —
+  // otherwise the replaced messages sit above their replacement until a reload.
+  // The original branch is never destroyed; it is simply off the active path,
+  // which is what the server's leaf and the client's path filter agree on.
+  async function fork(m: ChatMsg, edited?: string) {
+    if (forking || streaming || isDraft(activeID)) return;
+    const at = messagesRef.current.findIndex((x) => x.id === m.id);
+    if (at < 0) return;
+    setForking(m.id);
+    setNotice('');
+    const answerID = localID();
+    // An edit re-asks a rewritten question; a regenerate re-asks the same one.
+    // Either way the branch point is where the user last spoke.
+    const kept = edited !== undefined
+      ? [...messagesRef.current.slice(0, at), { ...m, text: edited, id: localID(), seq: undefined }]
+      : messagesRef.current.slice(0, at);
+    const answer: ChatMsg = { id: answerID, role: 'assistant', text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName };
+    setMessages([...kept, answer]);
+    setStreaming(true);
+    cancelledRef.current = false;
+    streamTargetRef.current = answerID;
+    dirty.current = true;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    // The fork rewrites the log's active path, so the cached delta watermark is
+    // meaningless afterwards — force the next server load to be a full one.
+    loadedConvRef.current = null;
+    try {
+      const result = edited !== undefined
+        ? await editMessage(activeID, m.id, edited, streamHandlers(), { signal: ac.signal })
+        : await regenerateMessage(activeID, m.id, streamHandlers(), { signal: ac.signal });
+      // Land any buffered tokens first: settling reads `m.text` to decide
+      // whether the stream produced an answer, and a frame still in flight would
+      // make it look like it hadn't — then append on top of the replacement.
+      flushTokens();
+      // A fork is gated on `!streaming`, so there is no live run for the server
+      // to steer this into — but the send path shares one result union, so the
+      // branch is settled rather than assumed away.
+      if (isSteered(result)) {
+        patch(streamTargetRef.current, (x) => ({ ...x, progress: '', done: true, outcome: 'ok' }));
+        return;
+      }
+      const outcome = result.stopped ? 'stopped' : 'ok';
+      patch(streamTargetRef.current, (x) => ({ ...x, text: x.text || formatAgentError(result.final), card: x.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: x.tools?.length ? x.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(x.steps) : x.steps }));
+    } catch {
+      flushTokens();
+      patch(streamTargetRef.current, (x) => ({ ...x, progress: '', done: true, outcome: x.outcome ?? 'failed', steps: settleOrphanSteps(x.steps) }));
+      setNotice('Couldn’t rerun from that message.');
+    } finally {
+      setForking('');
+      setStreaming(false);
+    }
+  }
+
+  // The SSE handler set, shared by an ordinary send and a fork. Every handler
+  // writes to whichever message is currently open, read at call time — a steer
+  // mid-run moves that target, and tokens must follow it.
+  function streamHandlers() {
+    const at = () => streamTargetRef.current;
+    return {
+      onRunID: (rid: string) => patch(at(), (m) => ({ ...m, runID: rid })),
+      onToken: (t: string) => pushToken(at(), t),
+      onProgress: (n: string) => patch(at(), (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
+      onToolStart: (c: { callID: string; tool: string; target: string }) =>
+        patch(at(), (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
+      onToolUpdate: (c: { callID: string; note: string }) => patch(at(), (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
+      onCard: (c: AgentResultCard) => patch(at(), (m) => ({ ...m, card: c })),
+      onTool: (t: AgentToolTrace) => patch(at(), (m) => ({ ...m, tools: [...(m.tools ?? []), t], steps: applyToolTrace(m.steps, t) })),
+      onError: (msg: string) => patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
+    };
+  }
+
   async function send(override?: string) {
     // Fold the typed /skill commands and any attachments into the single message
     // string the conversation store carries (FE-only — there's no separate channel).
@@ -490,20 +546,8 @@ export function ChatPage() {
     cancelledRef.current = false;
     streamTargetRef.current = answerID;
     dirty.current = true;
-    // Every handler writes to whichever message is currently open, read at call
-    // time — a steer mid-run moves that target, and tokens must follow it.
     const at = () => streamTargetRef.current;
-    const handlers = {
-      onRunID: (rid: string) => patch(at(), (m) => ({ ...m, runID: rid })),
-      onToken: (t: string) => patch(at(), (m) => ({ ...m, text: m.text + t, progress: '' })),
-      onProgress: (n: string) => patch(at(), (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
-      onToolStart: (c: { callID: string; tool: string; target: string }) =>
-        patch(at(), (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
-      onToolUpdate: (c: { callID: string; note: string }) => patch(at(), (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
-      onCard: (c: AgentResultCard) => patch(at(), (m) => ({ ...m, card: c })),
-      onTool: (t: AgentToolTrace) => patch(at(), (m) => ({ ...m, tools: [...(m.tools ?? []), t], steps: applyToolTrace(m.steps, t) })),
-      onError: (msg: string) => patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
-    };
+    const handlers = streamHandlers();
     // Open (or reuse) the server conversation, so the thread is durable and shared.
     // If that fails (offline / no project), fall back to the legacy client-history
     // path so chat still works without the conversation store.
@@ -521,8 +565,14 @@ export function ChatPage() {
       const useStore = !isDraft(convID);
       const result = useStore
         ? await conversationSend(convID, prompt, handlers, { signal: ac.signal, agentID: agent?.id })
-        : await chatStream(prompt, handlers, messages.map((m) => ({ role: m.role, content: m.text })),
+        // Transcript markers (the compaction divider) are a reader's aid, not
+        // conversation — the legacy path ships history verbatim, so they must
+        // not ride along as turns.
+        : await chatStream(prompt, handlers,
+            messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text })),
             { sessionID: activeID, agentID: agent?.id, signal: ac.signal });
+      // See fork(): buffered tokens land before anything reads `m.text`.
+      flushTokens();
       if (!isSteered(result)) {
         // `stopped` is the server's word, so a turn stopped from another tab (or
         // one whose cancel call we couldn't confirm) still settles as Stopped
@@ -535,6 +585,7 @@ export function ChatPage() {
     } catch {
       // A user stop aborts the fetch, which lands here too — stop() has already
       // set the outcome, so only a genuine stream failure is marked failed.
+      flushTokens();
       patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: m.outcome ?? 'failed', steps: settleOrphanSteps(m.steps) }));
     } finally {
       setStreaming(false);
@@ -557,6 +608,9 @@ export function ChatPage() {
     // A draft thread has no server-side run to cancel — the legacy client-history
     // path is the only thing streaming, and aborting it is the whole stop.
     const cancelled = isDraft(activeID) ? true : await cancelChat(activeID);
+    // Everything the agent already said belongs to the user — flush before
+    // `cancelledRef` starts dropping writes, or the last frame of text is lost.
+    flushTokens();
     cancelledRef.current = true;
     abortRef.current?.abort();
     setStreaming(false);
@@ -608,6 +662,36 @@ export function ChatPage() {
     setFirstRunFired(false);
     selectThread(id);
   }
+
+  // Editing and regenerating are only offered on a durable thread — a draft has
+  // no server entries to fork from — and never while a run is in flight, which
+  // would race two writers onto one conversation leaf.
+  const forkActions = useMemo(
+    () => (isDraft(activeID) || streaming
+      ? undefined
+      : { onEdit: (m: ChatMsg, text: string) => void fork(m, text), onRegenerate: (m: ChatMsg) => void fork(m), busyID: forking }),
+    // fork() reads everything it needs through refs; re-creating this on every
+    // render of it would remount the action row mid-hover.
+    [activeID, streaming, forking], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // How full the model's context window is — not an estimate of our own, but a
+  // mirror of the number the server compacts on: the sum of the per-entry token
+  // estimates since the last compaction, against the same window-less-reserve
+  // budget planCompaction uses. Reading 100% is therefore a promise that the
+  // next turn folds, not a guess that it might.
+  //
+  // Null until at least one message carries a server estimate — a thread whose
+  // turns this tab streamed and hasn't yet reconciled has nothing to report, and
+  // an invented number is exactly what this surface must not show.
+  const contextPercent = useMemo(() => {
+    // Everything above the last compaction seam has already left the window.
+    const seam = messages.map((m) => m.role).lastIndexOf('system');
+    const live = messages.slice(seam + 1);
+    if (!live.some((m) => m.tokens)) return null;
+    const used = live.reduce((n, m) => n + (m.tokens ?? 0), 0);
+    return Math.min(100, Math.round((used / (CONTEXT_WINDOW - CONTEXT_RESERVE)) * 100));
+  }, [messages]);
 
   // Docks only occupy grid columns when wide; when narrow they collapse to a
   // full-width chat stage and live in StackSheet panels instead.
@@ -728,6 +812,7 @@ export function ChatPage() {
                   placeholder={streaming ? 'Redirect the agent…' : 'Ask anything…  (type / for skills, attach files)'}
                   steerMode={steerMode}
                   onSteerMode={setSteerMode}
+                  headerContext={contextPercent === null ? undefined : <ContextMeter percent={contextPercent} />}
                   skills={skills}
                   attachments={attachments}
                   onFiles={(files) => void addFiles(files)}
@@ -751,7 +836,13 @@ export function ChatPage() {
                   never renders — which silently blanks the whole front door. */}
               {messages.length ? (
                 <>
-                  <Conversation messages={messages} agentName={agentName} agentNameByID={agentNameByID} debug={debug} />
+                  <Conversation
+                    messages={messages}
+                    agentName={agentName}
+                    agentNameByID={agentNameByID}
+                    debug={debug}
+                    actions={forkActions}
+                  />
                   {handoff ? <FirstRunHandoff handoff={handoff} /> : null}
                 </>
               ) : null}

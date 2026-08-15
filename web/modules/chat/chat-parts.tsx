@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Plug, Plus, Square, Trash2 } from 'lucide-react';
+import { Check, Copy, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Pencil, Plug, Plus, RotateCcw, Square, Trash2 } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
@@ -82,7 +82,9 @@ export type ChatMsg = {
   // Stable identity. `local:<n>` until the message is known to the server, then
   // the conversation entry's id. Never the array index, never the text.
   id: string;
-  role: 'user' | 'assistant';
+  // 'system' is a transcript marker, not a turn — today only the compaction
+  // seam. It renders as a divider and carries none of the fields below.
+  role: 'user' | 'assistant' | 'system';
   text: string;
   // The entry's sync cursor, when it came from the server. The highest seq the
   // client holds is the watermark it asks for deltas from.
@@ -91,6 +93,11 @@ export type ChatMsg = {
   // behind them), so it is re-derived on every sync rather than kept. Never set
   // on a message the user or the stream produced.
   provisional?: boolean;
+  // The server's own token estimate for this entry — the same number its
+  // compaction trigger sums. Absent until the message has been reconciled with
+  // the log, which is why the context readout lags a locally-streamed turn by
+  // one sync tick rather than guessing at it.
+  tokens?: number;
 
   // --- assistant only ---
   // Live narration while the turn runs; empty once it settles.
@@ -537,6 +544,89 @@ const MD_COMPONENTS: Partial<MarkdownComponents> = {
 // same string the store holds means a reloaded turn shows the same chips as the
 // one just sent — the inlined skill directives and file blocks (which the agent
 // needs in full) are folded back into tidy tokens for display.
+// ContextMeter is how much of the model's window this conversation is using.
+// Astryx has no compact inline capacity gauge (ProgressBar is a block element
+// sized for a card), so this is a 3px track and a number — small enough to live
+// in the composer header without ever becoming the loudest thing on screen.
+// Colour never carries the warning alone: the label says it in words.
+export function ContextMeter({ percent }: { percent: number }) {
+  const pct = Math.max(0, Math.min(100, Math.round(percent)));
+  const tone = pct >= 90 ? 'text-danger' : pct >= 75 ? 'text-warning' : 'text-muted-foreground';
+  const fill = pct >= 90 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-primary';
+  const label = pct >= 90 ? `Context ${pct}% — older messages will be summarized soon` : `Context ${pct}%`;
+  return (
+    <div role="meter" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={label} className="flex items-center gap-2">
+      <span className="h-[3px] w-16 overflow-hidden rounded-sm bg-surface-3">
+        <span className={`block h-full ${fill}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className={`text-xs tabular-nums ${tone}`}>{label}</span>
+    </div>
+  );
+}
+
+// What the transcript can do to a message. Editing and regenerating both fork
+// the conversation server-side, so they need the server's entry id — a message
+// this tab hasn't reconciled yet can only be copied.
+export type MessageActions = {
+  onEdit: (m: ChatMsg, text: string) => void;
+  onRegenerate: (m: ChatMsg) => void;
+  // The message with a fork in flight. Its actions go aria-disabled rather than
+  // disabled, so focus is never yanked out from under a keyboard user.
+  busyID?: string;
+};
+
+// A local id belongs to a message the server has never seen, so there is nothing
+// to fork from. `open:` is the provisional marker for a turn the log hasn't
+// closed.
+const isForkable = (m: ChatMsg) => !!m.id && !m.id.startsWith('local:') && !m.id.startsWith('open:');
+
+// Copy is the one action with no server call and no failure worth a dialog, so
+// it reports itself in place: the icon becomes a check for a beat.
+function CopyAction({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1400);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <Button
+      isIconOnly
+      size="sm"
+      variant="ghost"
+      label={copied ? 'Copied' : label}
+      icon={copied ? <Check size={14} /> : <Copy size={14} />}
+      onClick={() => { void navigator.clipboard?.writeText(text).then(() => setCopied(true)).catch(() => {}); }}
+    />
+  );
+}
+
+// The footer action row. Always in the DOM (opacity, not conditional render) so
+// keyboard and screen-reader users reach it; the hover reveal is a pointer
+// nicety. On a coarse pointer it stays visible and pads out to a 44px target.
+function ActionRow({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1 opacity-60 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-100 [@media(pointer:coarse)]:[&_button]:min-h-11 [@media(pointer:coarse)]:[&_button]:min-w-11">
+      {children}
+    </span>
+  );
+}
+
+function RetryAction({ m, actions, label }: { m: ChatMsg; actions: MessageActions; label: string }) {
+  const busy = actions.busyID === m.id;
+  return (
+    <Button
+      isIconOnly
+      size="sm"
+      variant="ghost"
+      label={busy ? 'Working…' : label}
+      icon={busy ? <Spinner size="sm" /> : <RotateCcw size={14} />}
+      aria-disabled={busy}
+      onClick={() => { if (!busy) actions.onRegenerate(m); }}
+    />
+  );
+}
+
 function UserMessage({ prompt }: { prompt: string }) {
   const { text, skills, files } = parseRichMessage(prompt);
   if (!skills.length && !files.length) return <>{prompt}</>;
@@ -557,13 +647,36 @@ function UserMessage({ prompt }: { prompt: string }) {
   );
 }
 
-export function Conversation({ messages, agentName, agentNameByID, debug }: { messages: ChatMsg[]; agentName: string; agentNameByID?: Record<string, string>; debug: boolean }) {
+export function Conversation({ messages, agentName, agentNameByID, debug, actions }: { messages: ChatMsg[]; agentName: string; agentNameByID?: Record<string, string>; debug: boolean; actions?: MessageActions }) {
+  // Which message is open in the inline editor. View state, not thread state:
+  // cancelling discards it and nothing outside the transcript needs to know.
+  const [editingID, setEditingID] = useState('');
   return (
     <ChatMessageList density="balanced">
-      {messages.map((m) => (m.role === 'user'
-        ? <UserTurn key={m.id} m={m} />
-        : <AssistantTurn key={m.id} m={m} agentName={agentName} agentNameByID={agentNameByID} debug={debug} />
-      ))}
+      {messages.map((m) => {
+        // The compaction seam. A divider, not a turn: it marks where the agent's
+        // memory of this conversation stops being verbatim.
+        if (m.role === 'system') {
+          return (
+            <ChatSystemMessage key={m.id} variant="divider" className="w-full min-w-0 overflow-hidden">
+              {m.text}
+            </ChatSystemMessage>
+          );
+        }
+        if (m.role === 'user') {
+          return (
+            <UserTurn
+              key={m.id}
+              m={m}
+              actions={actions}
+              editing={editingID === m.id}
+              onEditOpen={() => setEditingID(m.id)}
+              onEditClose={() => setEditingID('')}
+            />
+          );
+        }
+        return <AssistantTurn key={m.id} m={m} agentName={agentName} agentNameByID={agentNameByID} debug={debug} actions={actions} />;
+      })}
     </ChatMessageList>
   );
 }
@@ -572,13 +685,58 @@ export function Conversation({ messages, agentName, agentNameByID, debug }: { me
 // turn gets a ghost bubble under a label, because it isn't a new question — it
 // amends the answer forming below it, and a filled chip would read as a fresh
 // ask the agent had ignored.
-function UserTurn({ m }: { m: ChatMsg }) {
+function UserTurn({ m, actions, editing, onEditOpen, onEditClose }: {
+  m: ChatMsg;
+  actions?: MessageActions;
+  editing: boolean;
+  onEditOpen: () => void;
+  onEditClose: () => void;
+}) {
+  const busy = actions?.busyID === m.id;
+  const canFork = !!actions && isForkable(m) && !m.steer && m.delivered !== false;
+  const footer = actions ? (
+    <ActionRow>
+      <CopyAction text={m.text} />
+      {canFork ? (
+        <Button
+          isIconOnly
+          size="sm"
+          variant="ghost"
+          label={busy ? 'Working…' : 'Edit'}
+          icon={busy ? <Spinner size="sm" /> : <Pencil size={14} />}
+          aria-disabled={busy}
+          onClick={() => { if (!busy) onEditOpen(); }}
+        />
+      ) : null}
+    </ActionRow>
+  ) : undefined;
+
+  if (editing) {
+    return (
+      <ChatMessage sender="user">
+        <MessageEditor
+          initial={m.text}
+          onCancel={onEditClose}
+          onSave={(text) => { onEditClose(); actions?.onEdit(m, text); }}
+        />
+      </ChatMessage>
+    );
+  }
+
   if (!m.steer && m.delivered !== false) {
     return (
       <ChatMessage sender="user">
-        <ChatMessageBubble className="!bg-[color-mix(in_srgb,var(--primary)_16%,var(--color-background-surface))] !text-[var(--color-text-primary)] !border !border-[color-mix(in_srgb,var(--primary)_24%,transparent)]">
-          <UserMessage prompt={m.text} />
-        </ChatMessageBubble>
+        {/* `group` scopes the hover reveal to this row; the metadata wrap rule
+            keeps the action cluster from pushing the timestamp off a narrow
+            screen. */}
+        <div className="group w-full min-w-0 [&_.astryx-chat-message-metadata]:flex-wrap">
+          <ChatMessageBubble
+            className="!bg-[color-mix(in_srgb,var(--primary)_16%,var(--color-background-surface))] !text-[var(--color-text-primary)] !border !border-[color-mix(in_srgb,var(--primary)_24%,transparent)]"
+            metadata={footer ? <ChatMessageMetadata footer={footer} /> : undefined}
+          >
+            <UserMessage prompt={m.text} />
+          </ChatMessageBubble>
+        </div>
       </ChatMessage>
     );
   }
@@ -603,7 +761,40 @@ function UserTurn({ m }: { m: ChatMsg }) {
   );
 }
 
-function AssistantTurn({ m, agentName, agentNameByID, debug }: { m: ChatMsg; agentName: string; agentNameByID?: Record<string, string>; debug: boolean }) {
+// The inline editor an edited message opens into. It states the consequence
+// before the user commits: saving forks the conversation here, and everything
+// the agent said after this message stops being part of the thread.
+function MessageEditor({ initial, onSave, onCancel }: { initial: string; onSave: (text: string) => void; onCancel: () => void }) {
+  const [text, setText] = useState(initial);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => { ref.current?.focus(); ref.current?.setSelectionRange(text.length, text.length); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const dirty = text.trim().length > 0;
+  return (
+    <VStack gap={2} align="stretch" className="w-full min-w-0">
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && dirty) { e.preventDefault(); onSave(text.trim()); }
+        }}
+        rows={3}
+        aria-label="Edit your message"
+        className="w-full resize-y rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-surface)] p-3 text-sm text-[var(--color-text-primary)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+      />
+      <HStack gap={2} align="center" justify="between" wrap="wrap">
+        <Text type="supporting" color="secondary">Saving will replace everything after this message.</Text>
+        <HStack gap={2} align="center">
+          <Button label="Cancel" size="sm" variant="ghost" onClick={onCancel} />
+          <Button label="Save & rerun" size="sm" variant="primary" isDisabled={!dirty} onClick={() => onSave(text.trim())} />
+        </HStack>
+      </HStack>
+    </VStack>
+  );
+}
+
+function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: ChatMsg; agentName: string; agentNameByID?: Record<string, string>; debug: boolean; actions?: MessageActions }) {
   // Per-message agent label: the bubble's own stamped agent wins, then the
   // resolved id→name map, then the conversation's current agent.
   const who = m.agentName || (m.agentID && agentNameByID?.[m.agentID]) || agentName;
@@ -615,6 +806,25 @@ function AssistantTurn({ m, agentName, agentNameByID, debug }: { m: ChatMsg; age
   // While the message streams, the work log's header carries the agent's live
   // narration; once settled it reads as a quiet "Worked through N steps".
   const workLabel = working ? (m.progress || 'Working…') : workSummary(calls);
+
+  // Actions appear on settle — offering "regenerate" for an answer still being
+  // written is an invitation to race the stream. What they offer depends on how
+  // the message ended: a stopped or failed one gets "Try again", not the
+  // "Regenerate" that implies there was an answer worth redoing.
+  const forkable = !!actions && isForkable(m);
+  const footer = actions && !working ? (
+    <ActionRow>
+      {m.text ? <CopyAction text={m.text} label={m.outcome === 'failed' ? 'Copy error' : 'Copy'} /> : null}
+      {forkable ? (
+        <RetryAction m={m} actions={actions} label={m.outcome === 'ok' ? 'Regenerate' : 'Try again'} />
+      ) : null}
+    </ActionRow>
+  ) : null;
+  // Actions and the debug facts share Astryx's single free-form footer slot;
+  // actions lead, because they are the thing the user reaches for.
+  const metaFooter = footer || showMeta ? (
+    <ChatMessageMetadata footer={<>{footer}{showMeta ? debugFooter(m) : null}</>} />
+  ) : undefined;
   return (
     <ChatMessage
       sender="assistant"
@@ -625,9 +835,10 @@ function AssistantTurn({ m, agentName, agentNameByID, debug }: { m: ChatMsg; age
           the avatar whenever the bubble carries a `name`, which drops the
           avatar a line below the header; rendering the name in-body keeps
           the avatar top-aligned with it (classic avatar-leads-header). */}
+      <div className="group w-full min-w-0 [&_.astryx-chat-message-metadata]:flex-wrap">
       <ChatMessageBubble
         variant="ghost"
-        metadata={showMeta ? <ChatMessageMetadata footer={debugFooter(m)} /> : undefined}
+        metadata={metaFooter}
       >
         {/* Outer gap is tight (name → body), inner VStack owns the 12px
             rhythm between the work log, the answer prose, the result card,
@@ -675,6 +886,7 @@ function AssistantTurn({ m, agentName, agentNameByID, debug }: { m: ChatMsg; age
           </VStack>
         </VStack>
       </ChatMessageBubble>
+      </div>
     </ChatMessage>
   );
 }

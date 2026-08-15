@@ -70,6 +70,45 @@ describe('entriesToMessages', () => {
   });
 });
 
+describe('active branch', () => {
+  // Editing forks the tree and the store keeps both branches; GET returns every
+  // entry. Without the leaf walk the transcript shows the message the user just
+  // replaced sitting directly above its replacement.
+  it('drops the branch the conversation forked away from', () => {
+    seq = 0;
+    const q1 = msg('user', 'first draft');
+    const a1 = msg('assistant', 'answer to the first draft', { parent_id: q1.id });
+    const q2 = msg('user', 'edited question', { parent_id: '' }); // forked at root
+    const a2 = msg('assistant', 'answer to the edit', { parent_id: q2.id });
+    const out = entriesToMessages([q1, a1, q2, a2], a2.id);
+    expect(out.map((m) => m.text)).toEqual(['edited question', 'answer to the edit']);
+  });
+
+  it('renders the whole window when the leaf is not in it', () => {
+    seq = 0;
+    const entries = [msg('user', 'a'), msg('assistant', 'b')];
+    expect(entriesToMessages(entries, 'an-entry-from-a-later-delta')).toHaveLength(2);
+  });
+
+  it('renders everything when no leaf is known', () => {
+    seq = 0;
+    expect(entriesToMessages([msg('user', 'a'), msg('assistant', 'b')])).toHaveLength(2);
+  });
+});
+
+describe('compaction seam', () => {
+  it('marks where the agent stopped remembering verbatim', () => {
+    seq = 0;
+    const out = entriesToMessages([
+      msg('user', 'old'),
+      entry({ kind: 'compaction', role: 'system', payload_json: '{"summary":"…"}' }),
+      msg('user', 'new'),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(['user', 'system', 'user']);
+    expect(out[1].text).toBe('Older messages summarized');
+  });
+});
+
 describe('renderEntries cursor', () => {
   it('advances past every settled entry', () => {
     seq = 0;

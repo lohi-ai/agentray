@@ -100,6 +100,23 @@ export function useAgent() {
     }
   };
 
+  // editMessage / regenerateMessage re-run the conversation from an earlier
+  // point, forking the tree there. They stream exactly like conversationSend, so
+  // they share its error and run-invalidation handling.
+  const branchSend = (
+    call: (handlers: AgentChatStreamHandlers, opts: { signal?: AbortSignal }) => Promise<AgentChatStreamResult>,
+  ) => async (handlers: AgentChatStreamHandlers = {}, opts: { signal?: AbortSignal } = {}) => {
+    try {
+      const result = await call(handlers, opts);
+      queryClient.invalidateQueries({ queryKey: ['agent-runs', projectID] });
+      return result;
+    } catch (e) {
+      const err = e as Error;
+      setError(err.message);
+      throw err;
+    }
+  };
+
   const triggerRun = useMutation({
     mutationFn: () => client().triggerAgentRun(),
     onSuccess: () => setMessage('Autonomous run queued'),
@@ -126,6 +143,10 @@ export function useAgent() {
     chat: (message: string) => chat.mutateAsync(message),
     chatStream,
     conversationSend,
+    editMessage: (convID: string, entryID: string, message: string, handlers?: AgentChatStreamHandlers, opts?: { signal?: AbortSignal }) =>
+      branchSend((h, o) => client().editMessage(convID, entryID, message, h, o))(handlers, opts),
+    regenerateMessage: (convID: string, entryID: string, handlers?: AgentChatStreamHandlers, opts?: { signal?: AbortSignal }) =>
+      branchSend((h, o) => client().regenerateMessage(convID, entryID, h, o))(handlers, opts),
     // Stop the run live on a conversation. Resolves false when the server had
     // nothing live to stop (the run had already finished) or the call failed —
     // either way the caller settles its own view; a failure is surfaced as the
