@@ -41,9 +41,14 @@ export function serverToolStep(tc: AgentToolCall): ChatStep {
 // that outlives the work it describes. Settling them is part of ending the turn.
 export function settleOrphanSteps(steps: ChatStep[] | undefined): ChatStep[] | undefined {
   if (!steps?.some((s) => s.kind === 'tool' && s.status === 'running')) return steps;
+  // Spread, don't rebuild: the row keeps its call id (a trace that still arrives
+  // for it must settle THIS row rather than push a duplicate), its target label
+  // (which is what tells two concurrent calls to the same tool apart), and its
+  // React key. `stopped`, not `error` — the user ended the turn, the tool didn't
+  // fail.
   return steps.map((s) =>
     s.kind === 'tool' && s.status === 'running'
-      ? { kind: 'tool' as const, tool: s.tool, status: 'error' as const, detail: 'Stopped before this finished.' }
+      ? { ...s, status: 'stopped' as const, detail: 'Stopped before this finished.' }
       : s,
   );
 }

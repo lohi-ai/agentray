@@ -72,13 +72,26 @@ function RecsPane({ recs, onAck }: { recs: AgentRecommendation[]; onAck: (id: st
   );
 }
 
+// The runner writes done | error | stopped (runner.go). This pane keyed on
+// 'failed', which nothing writes, so every errored run has been painting itself
+// as a success — and a stopped run would have joined it. A stop is neither: the
+// user ended the run, so it reads muted rather than green or red.
+const isFailedRun = (status: AgentRun['status']) => status === 'error' || status === 'failed';
+const isStoppedRun = (status: AgentRun['status']) => status === 'stopped';
+
 // Activity dot stays a bespoke <span>: "running" is brand agent-purple, which
 // StatusDot's variant enum can't express (no purple). Same exception as StatusPill.
 function activityDot(status: AgentRun['status']) {
-  return <span className={`mt-[5px] h-1.5 w-1.5 flex-none rounded-full bg-faint ${status === 'running' ? 'bg-warning' : status === 'failed' ? '' : 'bg-success'}`} />;
+  const tone = status === 'running' ? 'bg-warning' : isFailedRun(status) ? 'bg-danger' : isStoppedRun(status) ? '' : 'bg-success';
+  return <span className={`mt-[5px] h-1.5 w-1.5 flex-none rounded-full bg-faint ${tone}`} />;
 }
 function runDot(status: AgentRun['status']) {
-  return <span className={`relative inline-block size-2 flex-none rounded-full ${status === 'running' ? 'bg-agent text-agent after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-[\'\']' : status === 'failed' ? 'bg-warning text-warning after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-[\'\']' : 'bg-faint'}`} />;
+  const pulse = "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']";
+  const tone =
+    status === 'running' ? `bg-agent text-agent ${pulse}`
+    : isFailedRun(status) ? `bg-danger text-danger ${pulse}`
+    : 'bg-faint';
+  return <span className={`relative inline-block size-2 flex-none rounded-full ${tone}`} />;
 }
 
 function ActivityPane({ runs }: { runs: AgentRun[] }) {
@@ -113,7 +126,19 @@ function RunsPane({ runs }: { runs: AgentRun[] }) {
               <span>{formatCost(run.cost_usd)}</span>
             </span>
           }
-          endContent={<span className="font-mono tabular-nums text-[11px]" style={{ color: run.status === 'running' ? 'var(--agent)' : run.status === 'failed' ? 'var(--danger)' : 'var(--success)' }}>{run.status}</span>}
+          endContent={
+            <span
+              className="font-mono tabular-nums text-[11px]"
+              style={{
+                color: run.status === 'running' ? 'var(--agent)'
+                  : isFailedRun(run.status) ? 'var(--danger)'
+                  : isStoppedRun(run.status) ? 'var(--color-text-disabled)'
+                  : 'var(--success)',
+              }}
+            >
+              {run.status}
+            </span>
+          }
         />
       ))}
     </List>

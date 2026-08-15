@@ -65,9 +65,21 @@ describe('settleOrphanSteps', () => {
   // A spinner on a turn that is over is the same lie as a missing Stop marker.
   it('ends rows whose work will never finish', () => {
     const out = settleOrphanSteps([running('tc_1', 'run_sql'), { kind: 'progress', text: 'thinking' }]);
-    expect(out?.[0].kind === 'tool' && out[0].status).toBe('error');
+    expect(out?.[0].kind === 'tool' && out[0].status).toBe('stopped');
     expect(out?.[0].kind === 'tool' && out[0].detail).toBe('Stopped before this finished.');
     expect(out?.[1].kind).toBe('progress');
+  });
+
+  // Losing the call id here un-does the addressability the rest of the timeline
+  // is built on: a trace that arrives after the stop would no longer find its
+  // row and would append a second one for a call already shown.
+  it('keeps the identity of the row it settles', () => {
+    const steps: ChatStep[] = [{ kind: 'tool', callID: 'tc_1', tool: 'run_sql', target: 'events, 30', status: 'running' }];
+    const out = settleOrphanSteps(steps)!;
+    expect(out[0].kind === 'tool' && out[0].callID).toBe('tc_1');
+    expect(out[0].kind === 'tool' && out[0].target).toBe('events, 30');
+    const late = applyToolTrace(out, { tool: 'run_sql', allowed: true, call_id: 'tc_1', result_meta: '12 rows' });
+    expect(late).toHaveLength(1);
   });
 
   it('leaves an already-settled timeline untouched', () => {

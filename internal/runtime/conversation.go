@@ -220,8 +220,15 @@ func ToolTarget(args string) string {
 		}
 	}
 	out := strings.Join(parts, ", ")
+	// Cut on a rune boundary, not a byte one: tool arguments carry Vietnamese
+	// titles and search terms, and slicing mid-rune leaves a broken tail that
+	// JSON-encodes as U+FFFD in both the SSE frame and the persisted trace.
 	if len(out) > toolTargetMax {
-		return out[:toolTargetMax] + "…"
+		r := []rune(out)
+		if len(r) > toolTargetMax {
+			r = r[:toolTargetMax]
+		}
+		return string(r) + "…"
 	}
 	return out
 }

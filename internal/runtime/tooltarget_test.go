@@ -1,6 +1,10 @@
 package agentruntime
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 // TestToolTargetRendersScalarArgs verifies the work-log label is the call's
 // scalar arguments in a stable order — the only thing that separates two
@@ -52,5 +56,22 @@ func TestToolTargetIsCapped(t *testing.T) {
 	}
 	if got[len(got)-3:] != "…" {
 		t.Fatalf("ToolTarget = %q, want a trailing ellipsis", got)
+	}
+}
+
+// TestToolTargetCutsOnRuneBoundary verifies a Vietnamese label is truncated
+// between characters. Slicing bytes would split a multi-byte rune, and the
+// broken tail JSON-encodes as U+FFFD in the SSE frame and the persisted trace.
+func TestToolTargetCutsOnRuneBoundary(t *testing.T) {
+	title := strings.Repeat("Đấu Phá Thương Khung ", 12) // every rune is 2–3 bytes
+	got := ToolTarget(`{"q":"` + title + `"}`)
+	if !utf8.ValidString(got) {
+		t.Fatalf("ToolTarget = %q, which is not valid UTF-8", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("ToolTarget = %q, want a trailing ellipsis", got)
+	}
+	if r := []rune(got); len(r) != toolTargetMax+1 {
+		t.Fatalf("ToolTarget rune length = %d, want %d", len(r), toolTargetMax+1)
 	}
 }

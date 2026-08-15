@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentConversationEntry } from '@/lib/api';
 import type { ChatMsg } from './chat-parts';
-import { entriesToMessages, mergeDelta, renderEntries, syncSeq } from './use-chat-threads';
+import { entriesToMessages, mergeDelta, renderEntries, syncSeq, syncTailID } from './use-chat-threads';
 
 let seq = 0;
 function entry(over: Partial<AgentConversationEntry>): AgentConversationEntry {
@@ -61,11 +61,15 @@ describe('entriesToMessages', () => {
     ]);
   });
 
-  it('shows the work of a turn that was stopped before it answered', () => {
+  // Trailing traces mean the answer hasn't been written yet — which is equally
+  // a turn still running on another machine. The work shows; the reason it has
+  // no answer is not claimed, because the log doesn't know it.
+  it('shows the work of an unanswered turn without claiming it was stopped', () => {
     seq = 0;
     const out = entriesToMessages([msg('user', 'q'), trace('run_sql', { call_id: 'tc_1' })]);
     expect(out).toHaveLength(2);
-    expect(out[1].outcome).toBe('stopped');
+    expect(out[1].steps).toHaveLength(1);
+    expect(out[1].outcome).toBeUndefined();
     expect(out[1].provisional).toBe(true);
   });
 });
@@ -188,5 +192,22 @@ describe('syncSeq', () => {
 
   it('is zero when nothing has been synced', () => {
     expect(syncSeq([{ id: 'local:1', role: 'user', text: 'a' }])).toBe(0);
+  });
+});
+
+describe('syncTailID', () => {
+  // The next append parents to this entry. When the server's delta says
+  // otherwise, another tab forked the thread and a merge would stack the new
+  // branch under the abandoned one.
+  it('is the entry id at the watermark, not the last message rendered', () => {
+    expect(syncTailID([
+      { id: 'e1', role: 'user', text: 'a', seq: 3 },
+      { id: 'e2', role: 'assistant', text: 'b', seq: 7 },
+      { id: 'local:1', role: 'user', text: 'c' },
+    ])).toBe('e2');
+  });
+
+  it('is empty when nothing has been synced', () => {
+    expect(syncTailID([{ id: 'local:1', role: 'user', text: 'a' }])).toBe('');
   });
 });

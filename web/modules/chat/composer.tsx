@@ -11,7 +11,7 @@ import {
 } from '@astryxdesign/core/Chat';
 import { createStaticSource, TypeaheadItem, type SearchableItem } from '@astryxdesign/core/Typeahead';
 import { Button } from '@astryxdesign/core/Button';
-import { HStack } from '@astryxdesign/core/HStack';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Token } from '@astryxdesign/core/Token';
 import type { AgentSkill } from '@/lib/api';
 import { slugify, type Attachment } from './message-format';
@@ -145,20 +145,15 @@ export function Composer({
                 forbids — so the choice lives here and Steer stays the one
                 button. Defaults to Now. */}
             {isStopShown ? (
-              <HStack gap={0} align="center">
-                <Button
-                  size="sm"
-                  variant={steerMode === 'steer' ? 'secondary' : 'ghost'}
-                  label="Now"
-                  onClick={() => onSteerMode('steer')}
-                />
-                <Button
-                  size="sm"
-                  variant={steerMode === 'followup' ? 'secondary' : 'ghost'}
-                  label="After this answer"
-                  onClick={() => onSteerMode('followup')}
-                />
-              </HStack>
+              <SegmentedControl
+                size="sm"
+                label="When to deliver this message"
+                value={steerMode}
+                onChange={(v) => onSteerMode(v as 'steer' | 'followup')}
+              >
+                <SegmentedControlItem value="steer" label="Now" />
+                <SegmentedControlItem value="followup" label="After this answer" />
+              </SegmentedControl>
             ) : null}
           </>
         }

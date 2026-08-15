@@ -718,7 +718,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	status := "done"
 	summary := res.Final
 	switch {
-	case errors.Is(context.Cause(runCtx), ErrRunStopped):
+	// `runErr != nil` is load-bearing: a cancel can land in the window between the
+	// model loop returning a complete answer and this switch (persistTrace above is
+	// two DB writes wide). Keying on the cause alone would relabel a finished run
+	// as stopped, and the chat layer skips persistAssistantTurn on that sentinel —
+	// so the answer the user just watched arrive would never reach the log.
+	case runErr != nil && errors.Is(context.Cause(runCtx), ErrRunStopped):
 		// A user stop is not a failure. Keep the partial answer as the summary so a
 		// second tab (or a reload) reattaches to what actually streamed, and hand
 		// the sentinel back so the chat layer skips appending a half-answer to the

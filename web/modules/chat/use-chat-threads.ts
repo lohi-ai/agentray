@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AgentRayAPI, type AgentConversationEntry } from '@/lib/api';
+import { AgentRayAPI, type AgentConversation, type AgentConversationEntry } from '@/lib/api';
 import { formatAgentError } from '@/lib/ia';
 import type { ChatMsg, ChatStep } from './chat-parts';
 
@@ -162,8 +162,13 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
   // it is still running elsewhere. The work happened either way, so it shows —
   // provisionally, because the answer may still arrive. `seq` deliberately does
   // NOT cover these entries, so the next poll re-reads them with their answer.
+  //
+  // No outcome is claimed. Saying `stopped` here would print "Stopped before the
+  // agent replied" over a run that is actively working in another tab, for its
+  // whole duration; the absence of an answer entry is not evidence of a stop.
+  // The run row (resume poll) and the next delta are what actually know.
   if (pending.length) {
-    out.push({ id: `open:${seq}`, role: 'assistant', text: '', done: true, outcome: 'stopped', steps: pending, provisional: true });
+    out.push({ id: `open:${seq}`, role: 'assistant', text: '', done: true, steps: pending, provisional: true });
   }
   return { messages: out, seq };
 }
@@ -205,6 +210,22 @@ export function mergeDelta(local: ChatMsg[], delta: ChatMsg[]): ChatMsg[] {
 // cursor this tab holds. Zero means "nothing synced yet — load the whole thread".
 export const syncSeq = (messages: ChatMsg[]) => messages.reduce((n, m) => (m.seq && m.seq > n ? m.seq : n), 0);
 
+// syncTailID is the entry id at that watermark — the entry the server's next
+// append should parent to. When it doesn't, the thread was forked elsewhere.
+export function syncTailID(messages: ChatMsg[]): string {
+  let seq = 0;
+  let id = '';
+  for (const m of messages) {
+    if (m.seq && m.seq > seq) { seq = m.seq; id = m.id; }
+  }
+  return id;
+}
+
+// What a sync tick learned. `delta` is the tail to merge in; `replace` is the
+// whole active path, because the branch this tab was on is no longer the one the
+// conversation is in and merging cannot prune.
+export type ConvDelta = { mode: 'delta' | 'replace'; messages: ChatMsg[] };
+
 // entryID is the message's stable identity. The store's entry id is preferred;
 // seq is the fallback for a payload shape that predates it, and is unique within
 // a conversation either way.
@@ -228,39 +249,28 @@ export function useChatThreads(projectID?: string) {
     setActiveID(cached[0]?.id ?? '');
   }
 
-  const persist = useCallback((next: ChatThread[]) => {
-    setThreads(next);
-    if (typeof window !== 'undefined') {
-      try { window.localStorage.setItem(storageKey(projectID), JSON.stringify(next)); } catch { /* quota — ignore */ }
-    }
-  }, [projectID]);
-
   // Reconcile the thread LIST from the server (authoritative for which threads
   // exist, their titles, and order). Cached messages are kept so a reopened thread
   // renders instantly; selecting it loads the authoritative entries. A draft thread
   // (unsaved) is preserved at the top so an in-progress new chat isn't dropped.
-  const refreshThreads = useCallback(async () => {
-    if (!api) return;
-    try {
-      const { conversations } = await api.listConversations();
-      setThreads((prev) => {
-        const cacheByID = new Map(prev.map((t) => [t.id, t]));
-        const drafts = prev.filter((t) => isDraft(t.id));
-        const server: ChatThread[] = conversations.map((c) => ({
-          id: c.id,
-          title: c.title || cacheByID.get(c.id)?.title || 'New chat',
-          agentID: c.agent_id && c.agent_id !== projectID ? c.agent_id : undefined,
-          messages: cacheByID.get(c.id)?.messages ?? [],
-          updatedAt: Date.parse(c.updated_at) || Date.now(),
-        }));
-        const merged = [...drafts, ...server];
-        if (typeof window !== 'undefined') {
-          try { window.localStorage.setItem(storageKey(projectID), JSON.stringify(merged)); } catch { /* ignore */ }
-        }
-        return merged;
-      });
-    } catch { /* offline — keep the cache */ }
-  }, [api, projectID]);
+  const mergeServerThreads = useCallback((conversations: AgentConversation[]) => {
+    setThreads((prev) => {
+      const cacheByID = new Map(prev.map((t) => [t.id, t]));
+      const drafts = prev.filter((t) => isDraft(t.id));
+      const server: ChatThread[] = conversations.map((c) => ({
+        id: c.id,
+        title: c.title || cacheByID.get(c.id)?.title || 'New chat',
+        agentID: c.agent_id && c.agent_id !== projectID ? c.agent_id : undefined,
+        messages: cacheByID.get(c.id)?.messages ?? [],
+        updatedAt: Date.parse(c.updated_at) || Date.now(),
+      }));
+      const merged = [...drafts, ...server];
+      if (typeof window !== 'undefined') {
+        try { window.localStorage.setItem(storageKey(projectID), JSON.stringify(merged)); } catch { /* ignore */ }
+      }
+      return merged;
+    });
+  }, [projectID]);
 
   // Reconcile on mount / project change. The setState lives in the promise
   // continuation (an async subscription, not a synchronous effect write), so it
@@ -270,27 +280,10 @@ export function useChatThreads(projectID?: string) {
     let cancel = false;
     api.listConversations().then(({ conversations }) => {
       if (cancel) return;
-      setThreads((prev) => {
-        const cacheByID = new Map(prev.map((t) => [t.id, t]));
-        const drafts = prev.filter((t) => isDraft(t.id));
-        const server: ChatThread[] = conversations.map((c) => ({
-          id: c.id,
-          title: c.title || cacheByID.get(c.id)?.title || 'New chat',
-          agentID: c.agent_id && c.agent_id !== projectID ? c.agent_id : undefined,
-          messages: cacheByID.get(c.id)?.messages ?? [],
-          updatedAt: Date.parse(c.updated_at) || Date.now(),
-        }));
-        const merged = [...drafts, ...server];
-        if (typeof window !== 'undefined') {
-          try { window.localStorage.setItem(storageKey(projectID), JSON.stringify(merged)); } catch { /* ignore */ }
-        }
-        return merged;
-      });
+      mergeServerThreads(conversations);
     }).catch(() => { /* offline — keep the cache */ });
     return () => { cancel = true; };
-  }, [api, projectID]);
-
-  const active = useMemo(() => threads.find((t) => t.id === activeID) ?? null, [threads, activeID]);
+  }, [api, mergeServerThreads]);
 
   // newChat opens a fresh DRAFT thread (client-only). The server conversation is
   // created lazily on the first send (ensureConversation), so empty chats never
@@ -342,11 +335,23 @@ export function useChatThreads(projectID?: string) {
   // the whole log every 4s now pulls the tail, so a long thread costs the same
   // as a short one and a tab that is merely watching doesn't re-render history.
   // `since = 0` degenerates to a full load, which is what a cold thread wants.
-  const syncConversation = useCallback(async (id: string, since: number): Promise<ChatMsg[] | null> => {
+  //
+  // `tailEntryID` is the entry this tab last rendered. A delta can only add, so
+  // when another tab forks the thread (edit / regenerate repoints the leaf
+  // backwards and appends a new branch) merging the delta would stack the new
+  // branch under the superseded one forever. The new branch doesn't parent to
+  // our tail, which is exactly how we detect it — and the honest answer then is
+  // to re-read the whole active path instead of appending to a dead one.
+  const syncConversation = useCallback(async (id: string, since: number, tailEntryID?: string): Promise<ConvDelta | null> => {
     if (!api || isDraft(id)) return null;
     try {
-      const { entries } = await api.getConversation(id, since);
-      return renderEntries(entries).messages;
+      const { conversation, entries } = await api.getConversation(id, since);
+      if (!entries.length) return { mode: 'delta', messages: [] };
+      if (tailEntryID && entries[0].parent_id !== tailEntryID) {
+        const full = await api.getConversation(id);
+        return { mode: 'replace', messages: entriesToMessages(full.entries, full.conversation?.leaf_entry_id) };
+      }
+      return { mode: 'delta', messages: renderEntries(entries, conversation?.leaf_entry_id).messages };
     } catch {
       return null;
     }
@@ -386,5 +391,5 @@ export function useChatThreads(projectID?: string) {
     });
   }, [projectID]);
 
-  return { threads, activeID, active, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation, refreshThreads };
+  return { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation };
 }

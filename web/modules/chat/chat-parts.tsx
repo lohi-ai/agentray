@@ -28,6 +28,7 @@ import { HStack } from '@astryxdesign/core/HStack';
 import { VStack } from '@astryxdesign/core/VStack';
 import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
+import { TextArea } from '@astryxdesign/core/TextArea';
 import type { Agent, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useRouter } from 'next/navigation';
@@ -57,7 +58,11 @@ export type ChatStep =
       // Short human label for the call's arguments, so two rows for the same
       // tool are distinguishable at a glance.
       target?: string;
-      status: 'running' | 'done' | 'blocked' | 'error';
+      // 'stopped' is its own status, not an error: the user ended the turn, so
+      // the row is over but nothing failed. Painting it red (and counting it in
+      // the work-log summary's failure tally) blames the agent for a deliberate
+      // act.
+      status: 'running' | 'done' | 'blocked' | 'error' | 'stopped';
       detail?: string;
       durationMS?: number;
     };
@@ -418,7 +423,14 @@ function toCalls(steps: ChatStep[] | undefined): ChatToolCallItem[] {
   const out: ChatToolCallItem[] = [];
   steps.forEach((s, i) => {
     if (s.kind !== 'tool') return;
-    const status = s.status === 'running' ? 'running' : s.status === 'done' ? 'complete' : 'error';
+    // Astryx has three terminal statuses and none of them is "stopped"; a
+    // stopped call maps to `complete` (the row is settled) and says what
+    // happened in its detail, rather than to `error`, which would read as the
+    // tool having failed.
+    const status =
+      s.status === 'running' ? 'running'
+      : s.status === 'done' || s.status === 'stopped' ? 'complete'
+      : 'error';
     out.push({
       // The call id is the key. Omitting it entirely would be worse than the old
       // index: Astryx then derives a key from [name, status, target, …], so the
@@ -432,7 +444,7 @@ function toCalls(steps: ChatStep[] | undefined): ChatToolCallItem[] {
       duration: s.durationMS ? formatDuration(s.durationMS) : undefined,
       // A running call shows its partial output as it arrives; a finished one
       // shows its result summary. Only a failure moves the text to errorMessage.
-      resultDetail: s.status === 'done' || s.status === 'running' ? s.detail || undefined : undefined,
+      resultDetail: s.status === 'done' || s.status === 'running' || s.status === 'stopped' ? s.detail || undefined : undefined,
       errorMessage: s.status === 'blocked' ? s.detail || 'Blocked by scope' : s.status === 'error' ? s.detail : undefined,
     });
   });
@@ -771,17 +783,21 @@ function MessageEditor({ initial, onSave, onCancel }: { initial: string; onSave:
   const dirty = text.trim().length > 0;
   return (
     <VStack gap={2} align="stretch" className="w-full min-w-0">
-      <textarea
+      {/* Astryx's TextArea, not a raw <textarea>: the design system owns the
+          border, radius, and focus ring, so this box follows theme and density
+          changes with every other field instead of drifting on its own. */}
+      <TextArea
         ref={ref}
+        label="Edit your message"
+        isLabelHidden
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(v) => setText(v)}
         onKeyDown={(e) => {
           if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && dirty) { e.preventDefault(); onSave(text.trim()); }
         }}
         rows={3}
-        aria-label="Edit your message"
-        className="w-full resize-y rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-surface)] p-3 text-sm text-[var(--color-text-primary)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+        className="w-full min-w-0"
       />
       <HStack gap={2} align="center" justify="between" wrap="wrap">
         <Text type="supporting" color="secondary">Saving will replace everything after this message.</Text>

@@ -25,7 +25,7 @@ import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, C
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
 import { WorkPanel, type PanelTab } from './chat-panel';
-import { useChatThreads, isDraft, mergeDelta, syncSeq } from './use-chat-threads';
+import { useChatThreads, isDraft, mergeDelta, syncSeq, syncTailID } from './use-chat-threads';
 import { applyToolTrace, applyToolUpdate, serverToolStep, settleOrphanSteps } from './tool-steps';
 
 // Identity for a message this tab just made up. It carries no server cursor
@@ -99,6 +99,11 @@ export function ChatPage() {
   // settles above the user's redirect and the rest streams into a new message
   // below it, so the tokens keep landing where the user is looking.
   const streamTargetRef = useRef('');
+  // Whether a steer has split this run's answer across more than one message.
+  // The run's `final` is the WHOLE answer, so once part of it is already on
+  // screen above the split, backfilling the open message from `final` would
+  // print that part twice.
+  const splitRef = useRef(false);
 
   // Arriving via a deep-linked question (/chat?q=…, e.g. from the dashboard's
   // "Ask the agent") prefills the composer once so the user can hit send.
@@ -317,8 +322,8 @@ export function ChatPage() {
   // place, and genuinely new work from another machine or tab lands at the end.
   // Paused while streaming (that path owns updates) and while the last message is
   // unfinished (the resume poll owns that).
-  const fanoutRef = useRef({ syncConversation, messages });
-  useEffect(() => { fanoutRef.current = { syncConversation, messages }; });
+  const fanoutRef = useRef({ syncConversation, messages, saveMessages, agentID: agent?.id });
+  useEffect(() => { fanoutRef.current = { syncConversation, messages, saveMessages, agentID: agent?.id }; });
   useEffect(() => {
     if (streaming || !activeID || isDraft(activeID)) return;
     let stopped = false;
@@ -327,12 +332,16 @@ export function ChatPage() {
       const local = fanoutRef.current.messages;
       const last = local[local.length - 1];
       if (last && !last.done) return; // don't disturb an in-flight turn
-      const delta = await fanoutRef.current.syncConversation(activeID, syncSeq(local));
-      if (stopped || !delta?.length) return;
-      setMessages((cur) => {
-        const merged = mergeDelta(cur, delta);
-        return merged === cur ? cur : merged;
-      });
+      const delta = await fanoutRef.current.syncConversation(activeID, syncSeq(local), syncTailID(local));
+      if (stopped || !delta || (delta.mode === 'delta' && !delta.messages.length)) return;
+      // A `replace` means another tab forked this thread: our branch is no longer
+      // the conversation, and merging cannot prune. Take the server's active path.
+      const next = delta.mode === 'replace' ? delta.messages : mergeDelta(fanoutRef.current.messages, delta.messages);
+      if (next === fanoutRef.current.messages) return;
+      setMessages(next);
+      // What arrived from elsewhere has to reach the cache too, or switching
+      // threads and back re-reads the stale row and loses it.
+      fanoutRef.current.saveMessages(activeID, next, fanoutRef.current.agentID);
     };
     const timer = setInterval(() => void tick(), 4000);
     return () => { stopped = true; clearInterval(timer); };
@@ -341,6 +350,17 @@ export function ChatPage() {
   function patch(id: string, fn: (m: ChatMsg) => ChatMsg) {
     if (cancelledRef.current) return;
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
+  }
+
+  // Remove a message that ended up with nothing in it — no prose, no work log.
+  // An empty bubble reads as a broken answer; the absence of one reads as what
+  // it is.
+  function dropEmpty(id: string) {
+    setMessages((items) => {
+      const m = items.find((it) => it.id === id);
+      if (!m || m.text || m.card || m.steps?.length) return items;
+      return items.filter((it) => it.id !== id);
+    });
   }
 
   // Tokens arrive far faster than the screen refreshes — a fast model emits
@@ -392,6 +412,9 @@ export function ChatPage() {
     const at = messagesRef.current.findIndex((m) => m.id === open);
     const reuse = at >= 0 && !messagesRef.current[at].text && !messagesRef.current[at].steps?.length;
     streamTargetRef.current = reuse ? open : answer.id;
+    // Reusing the open message keeps one message for the whole run; splitting
+    // means part of `final` is already rendered above.
+    if (!reuse) splitRef.current = true;
     setMessages((items) => {
       const i = items.findIndex((m) => m.id === open);
       if (reuse && i >= 0) return [...items.slice(0, i), ask, ...items.slice(i)];
@@ -423,6 +446,7 @@ export function ChatPage() {
           .map((m) => (m.id === ask.id ? { ...m, delivered: false } : m)),
       );
       streamTargetRef.current = open;
+      splitRef.current = false;
     }
   }
 
@@ -449,6 +473,7 @@ export function ChatPage() {
     setStreaming(true);
     cancelledRef.current = false;
     streamTargetRef.current = answerID;
+    splitRef.current = false;
     dirty.current = true;
     const ac = new AbortController();
     abortRef.current = ac;
@@ -545,6 +570,7 @@ export function ChatPage() {
     setStreaming(true);
     cancelledRef.current = false;
     streamTargetRef.current = answerID;
+    splitRef.current = false;
     dirty.current = true;
     const at = () => streamTargetRef.current;
     const handlers = streamHandlers();
@@ -578,9 +604,26 @@ export function ChatPage() {
         // one whose cancel call we couldn't confirm) still settles as Stopped
         // rather than as a suspiciously short answer.
         const outcome = result.stopped ? 'stopped' : 'ok';
-        patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(result.final), card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
+        // `result.final` is the whole run's answer. Across a steer split its
+        // opening is already on screen in the message above, so only a message
+        // that IS the whole run may be backfilled from it.
+        const backfill = splitRef.current ? '' : formatAgentError(result.final);
+        patch(at(), (m) => ({ ...m, text: m.text || backfill, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
       } else {
         patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
+      }
+      // A split that the run never wrote into leaves an empty bubble under the
+      // user's redirect. Nothing was said, so nothing is shown — the redirect
+      // stands on its own rather than under a blank answer.
+      if (splitRef.current) {
+        dropEmpty(at());
+        // The split is a live-view convenience: the server persists ONE assistant
+        // entry carrying the whole answer, which matches neither half on screen.
+        // Leaving it that way, the next sync finds no echo and appends the whole
+        // answer a third time. Re-read the thread instead — the canonical render
+        // is also what a reload would show, so the two stop disagreeing. Clearing
+        // the guard is enough: setStreaming(false) below re-runs the load effect.
+        loadedConvRef.current = null;
       }
     } catch {
       // A user stop aborts the fetch, which lands here too — stop() has already
@@ -605,9 +648,17 @@ export function ChatPage() {
     // rather than appearing on the click, so the UI never claims a halt it
     // hasn't actually got.
     setMessages((items) => items.map((m) => (m.id === openID ? { ...m, progress: 'Stopping…' } : m)));
-    // A draft thread has no server-side run to cancel — the legacy client-history
-    // path is the only thing streaming, and aborting it is the whole stop.
-    const cancelled = isDraft(activeID) ? true : await cancelChat(activeID);
+    // Always ask the server, draft or not. The legacy client-history path
+    // registers its run under the same session id the draft is streaming on, so
+    // skipping the call here would abort our reader and leave the agent running,
+    // billing, and writing — the exact failure Stop exists to prevent. With no
+    // live run the endpoint answers `stopped:false`, which costs one request.
+    const cancelled = await cancelChat(activeID);
+    // `stopped:false` usually means the turn finished while the click was in
+    // flight. Give the queued `done` frame a beat to land before tearing the
+    // reader down, or we stamp "Stopped" over an answer the server has already
+    // persisted in full — a transcript that disagrees with itself on reload.
+    if (!cancelled) await new Promise((r) => setTimeout(r, 600));
     // Everything the agent already said belongs to the user — flush before
     // `cancelledRef` starts dropping writes, or the last frame of text is lost.
     flushTokens();

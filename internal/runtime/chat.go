@@ -192,10 +192,16 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	// as its own completed thought. The partial text the user is looking at stays
 	// on their screen (and in the run row's summary) without becoming history.
 	if errors.Is(err, ErrRunStopped) {
-		return ChatResult{
-			RunID: res.RunID, Route: dec.Route, Final: res.Final,
-			Tools: res.Tools, Turns: res.Turns, Stopped: true,
-		}, nil
+		// Everything except the assistant entry still applies: the stopped turn
+		// spent real tokens (a rebuilt result would report the most expensive
+		// turns in a thread as free), and it may have pushed the conversation
+		// past the compaction threshold the next turn has to build history over.
+		res.Usage.InputTokens += dec.Usage.InputTokens
+		res.Usage.OutputTokens += dec.Usage.OutputTokens
+		res.Usage.CostUSD += dec.Usage.CostUSD
+		res.Stopped = true
+		s.maybeCompact(ctx, opts)
+		return res, nil
 	}
 	if err != nil {
 		s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), res.RunID, res.Turns)
