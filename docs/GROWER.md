@@ -49,11 +49,12 @@ runs `review-pr` + `qa` and hands off for a human to run `/bbs:create-pr`
 
 ## AgentRay-specific targets
 
-- `website/` landing underconverting → `/bbs:autopilot grower "improve
-  visitor→signup on the landing page"` or `/bbs:conversion-fix` directly.
+- Landing underconverting (`web/app/page.tsx`, `web/app/pricing`,
+  `web/app/product`) → `/bbs:autopilot grower "improve visitor→signup on the
+  landing page"` or `/bbs:conversion-fix` directly.
 - Onboarding-to-activation (dev signs up but never ingests a first event) →
   `/bbs:conversion-fix` with **first event ingested** as the activation metric.
-- Positioning unclear → `/bbs:copy-rewrite` on the README hero and website copy.
+- Positioning unclear → `/bbs:copy-rewrite` on the README hero and landing copy.
 - Launch content → `/bbs:social-content` for demo-video scripts.
 
 ## Dogfooding: measure with AgentRay itself

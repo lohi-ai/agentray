@@ -175,11 +175,13 @@ docker-compose only) so Dashboards/Web-analytics/Persons render non-empty.
 Time-box a clean-machine run (`docker compose up` → first chart < 5 min) and fix
 what breaks.
 
-**Phase 3c — docs site.**
-Static site (Astro Starlight or equivalent) under `website/`, content sourced
-from `docs/` + README: install, instrument (browser/python/PostHog-compat
-migration), first dashboard, first agent, MCP connect, self-host ops. Deploy via
-the existing GCE Caddy (e.g. `agentray.lohi2.com/docs`) — no new infra service.
+**Phase 3c — docs site.** *Not started.* An earlier `website/` scaffold (Astro
+Starlight, one page of ten, never installed or wired to any deploy) was deleted
+rather than left to look like progress — start from an empty folder.
+Static site (Astro Starlight or equivalent), content sourced from `docs/` +
+README: install, instrument (browser/python/PostHog-compat migration), first
+dashboard, first agent, MCP connect, self-host ops. Deploy via the existing GCE
+Caddy (e.g. `agentray.lohi2.com/docs`) — no new infra service.
 
 **Phase 3d — README repositioning.**
 Rewrite the lead around the loop thesis (per review §1), replace the stale

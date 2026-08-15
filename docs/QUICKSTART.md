@@ -1,8 +1,8 @@
 # AgentRay Quickstart
 
 Clone → **first event visible + first agent answer** in under 15 minutes. This is
-the canonical path a newcomer follows; it is also the source content for the docs
-site (`website/`).
+the canonical path a newcomer follows, and the source content for the docs site
+when it is built (IMPLEMENTATION-PLAN Phase 3c).
 
 ## 1. Run the stack (≈3 min)
 
