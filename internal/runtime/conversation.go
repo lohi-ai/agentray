@@ -3,6 +3,8 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -168,12 +170,66 @@ func estimateTokens(s string) int {
 // same work timeline the originating client streamed (design §7.3). Skipped by the
 // context reducer (human-only projection).
 type convToolTracePayload struct {
+	// CallID is the provider's per-invocation id, mirrored so a reloaded client
+	// keys its rows exactly the way the streaming one did — two concurrent calls
+	// to the same tool stay two rows across a reload instead of collapsing.
+	CallID     string `json:"call_id,omitempty"`
 	Tool       string `json:"tool"`
+	Target     string `json:"target,omitempty"`
 	Allowed    bool   `json:"allowed"`
 	Reason     string `json:"reason,omitempty"`
 	Error      string `json:"error,omitempty"`
 	ResultMeta string `json:"result_meta,omitempty"`
 }
+
+// ToolTarget renders a tool call's arguments as the short human label the work
+// log shows beside the tool name ("signup_completed, 30"). Without it two
+// concurrent calls to the same tool are indistinguishable on screen — which is
+// exactly the case call ids exist to keep separate.
+//
+// It reads only scalar values and caps the result, so a large argument blob
+// never rides the stream or the conversation log: the args are already the
+// gated, validated form (credentials are still {{cred:NAME}} placeholders), but
+// a full dump would be noise on the wire and unreadable in the row.
+func ToolTarget(args string) string {
+	var parsed map[string]any
+	if json.Unmarshal([]byte(args), &parsed) != nil {
+		return ""
+	}
+	// Sort the keys so the same call always renders the same label — Go's map
+	// iteration order would otherwise reshuffle it between the tool_start frame
+	// and the mirrored trace entry.
+	keys := make([]string, 0, len(parsed))
+	for k := range parsed {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		switch v := parsed[k].(type) {
+		case string:
+			if v != "" {
+				parts = append(parts, v)
+			}
+		case float64:
+			parts = append(parts, strconv.FormatFloat(v, 'f', -1, 64))
+		case bool:
+			if v {
+				parts = append(parts, k)
+			}
+		}
+	}
+	out := strings.Join(parts, ", ")
+	if len(out) > toolTargetMax {
+		return out[:toolTargetMax] + "…"
+	}
+	return out
+}
+
+// toolTargetMax caps the rendered argument label. The row truncates visually at
+// far less than this on a narrow viewport; the cap is about what crosses the
+// wire, not what fits.
+const toolTargetMax = 80
 
 // AppendToolTraceEntry mirrors one completed tool call into the conversation log.
 // Best-effort, bounded to the number of tool calls in a turn (not per token), so a

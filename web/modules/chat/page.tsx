@@ -25,23 +25,30 @@ import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, A
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
 
-// Map a streamed tool trace onto the timeline: a completed call reconciles the
-// most recent matching running step (so it flips spinner → check), or appends a
-// done step if no start was seen (non-streaming tools that only emit on finish).
+// Map a streamed tool trace onto the timeline. Reconciliation is by call id: two
+// concurrent calls to the same tool are identical in every other field, so
+// matching on the name settles whichever row happens to be last and leaves the
+// other spinning forever. Only a trace with no id (older server, synthesized
+// call) falls back to the name match it used to do.
 function toolStatus(t: AgentToolTrace): 'done' | 'blocked' | 'error' {
   return t.error ? 'error' : t.allowed ? 'done' : 'blocked';
 }
 function applyToolTrace(steps: ChatStep[] | undefined, t: AgentToolTrace): ChatStep[] {
   const detail = t.error || t.reason || t.result_meta || (t.allowed ? '' : 'blocked');
   const list = steps ? [...steps] : [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const s = list[i];
-    if (s.kind === 'tool' && s.status === 'running' && s.tool === t.tool) {
-      list[i] = { kind: 'tool', tool: t.tool, status: toolStatus(t), detail };
+  const at = list.findIndex((s) =>
+    s.kind === 'tool' && (t.call_id ? s.callID === t.call_id : s.status === 'running' && s.tool === t.tool),
+  );
+  if (at >= 0) {
+    const prev = list[at];
+    if (prev.kind === 'tool') {
+      // Keep the target the start frame gave us — the completed trace doesn't
+      // carry it, and losing it mid-run makes the row jump.
+      list[at] = { ...prev, status: toolStatus(t), detail, durationMS: t.latency_ms };
       return list;
     }
   }
-  list.push({ kind: 'tool', tool: t.tool, status: toolStatus(t), detail });
+  list.push({ kind: 'tool', callID: t.call_id, tool: t.tool, status: toolStatus(t), detail, durationMS: t.latency_ms });
   return list;
 }
 // Rebuild a tool step from the persisted trace, used to restore the timeline a
@@ -59,21 +66,18 @@ function settleOrphanSteps(steps: ChatStep[] | undefined): ChatStep[] | undefine
       : s,
   );
 }
-// Attach a streaming tool's partial output to the call it most likely came from.
-// The `tool_update` frame carries no call id, so "the most recent running step"
-// is the best attribution available — the same heuristic applyToolTrace already
-// uses to reconcile a completed call.
-function applyToolUpdate(steps: ChatStep[] | undefined, note: string): ChatStep[] | undefined {
+// Attach a streaming tool's partial output to the call that produced it. Keyed
+// by call id, so two calls to the same tool running side by side each show their
+// own output instead of overwriting one another.
+function applyToolUpdate(steps: ChatStep[] | undefined, callID: string, note: string): ChatStep[] | undefined {
   if (!steps || !note) return steps;
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const s = steps[i];
-    if (s.kind === 'tool' && s.status === 'running') {
-      const list = [...steps];
-      list[i] = { ...s, detail: note };
-      return list;
-    }
-  }
-  return steps;
+  const at = steps.findIndex((s) => s.kind === 'tool' && (callID ? s.callID === callID : s.status === 'running'));
+  if (at < 0) return steps;
+  const list = [...steps];
+  const prev = list[at];
+  if (prev.kind !== 'tool') return steps;
+  list[at] = { ...prev, detail: note };
+  return list;
 }
 import { WorkPanel, type PanelTab } from './chat-panel';
 import { useChatThreads, isDraft } from './use-chat-threads';
@@ -464,8 +468,9 @@ export function ChatPage() {
       onRunID: (rid: string) => patch(id, (m) => ({ ...m, runID: rid })),
       onToken: (t: string) => patch(id, (m) => ({ ...m, text: m.text + t, progress: '' })),
       onProgress: (n: string) => patch(id, (m) => ({ ...m, progress: n, steps: [...(m.steps ?? []), { kind: 'progress' as const, text: n }] })),
-      onToolStart: (tool: string) => patch(id, (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, tool, status: 'running' as const }] })),
-      onToolUpdate: (note: string) => patch(id, (m) => ({ ...m, steps: applyToolUpdate(m.steps, note) })),
+      onToolStart: (c: { callID: string; tool: string; target: string }) =>
+        patch(id, (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
+      onToolUpdate: (c: { callID: string; note: string }) => patch(id, (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
       onCard: (c: AgentResultCard) => patch(id, (m) => ({ ...m, card: c })),
       onTool: (t: AgentToolTrace) => patch(id, (m) => ({ ...m, tools: [...m.tools, t], steps: applyToolTrace(m.steps, t) })),
       onError: (msg: string) => patch(id, (m) => ({ ...m, text: m.text || formatAgentError(msg) })),

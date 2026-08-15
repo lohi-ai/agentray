@@ -255,7 +255,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 		sinkMu.Lock()
 		defer sinkMu.Unlock()
-		tr := ToolTrace{Tool: call.Name, Args: call.Arguments, Allowed: true, ResultMeta: "partial"}
+		tr := ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: true, ResultMeta: "partial"}
 		sink(StreamEvent{Type: StreamToolExecUpdate, Tool: &tr, Note: partial, Turn: res.Turns})
 	}
 
@@ -298,7 +298,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// won't call it — this catches a model retrying it from memory.
 	disabledOutcome := func(call ToolCall) toolOutcome {
 		return toolOutcome{
-			trace:   ToolTrace{Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "disabled after repeated failures"},
+			trace:   ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "disabled after repeated failures"},
 			message: toolResult(call, "blocked: "+call.Name+" was disabled for this run after repeated failures — do not call it again; finish another way"),
 		}
 	}
@@ -912,7 +912,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// a single turn may run its full batch before the cap takes effect.)
 		if toolCallCount >= limits.MaxToolCalls {
 			for _, call := range calls {
-				recordTool(ToolTrace{Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "tool-call budget exhausted"})
+				recordTool(ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "tool-call budget exhausted"})
 				res.Messages = append(res.Messages, toolResult(call, "stopped: tool-call budget exhausted"))
 			}
 			res.StopReason = "max_tool_calls"
@@ -925,7 +925,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// tool_execution_start for each requested call, in the model's order, before
 		// dispatch (parallel or sequential).
 		for i := range calls {
-			start := ToolTrace{Tool: calls[i].Name, Args: calls[i].Arguments}
+			start := ToolTrace{CallID: calls[i].ID, Tool: calls[i].Name, Args: calls[i].Arguments}
 			emit(StreamEvent{Type: StreamToolExecStart, Tool: &start, Turn: res.Turns})
 		}
 
@@ -950,7 +950,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if err := ctx.Err(); err != nil {
 				for i := lo; i < len(calls); i++ {
 					outcomes[i] = toolOutcome{
-						trace:   ToolTrace{Tool: calls[i].Name, Args: calls[i].Arguments, Allowed: false, Reason: "aborted"},
+						trace:   ToolTrace{CallID: calls[i].ID, Tool: calls[i].Name, Args: calls[i].Arguments, Allowed: false, Reason: "aborted"},
 						message: toolResult(calls[i], "stopped: run aborted"),
 					}
 				}

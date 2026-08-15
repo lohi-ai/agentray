@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
 	"strconv"
 	"strings"
 	"sync"
@@ -14,10 +15,10 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/runtime/authoring"
 	"github.com/lohi-ai/agentray/internal/channels"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/runtime/authoring"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -1475,20 +1476,25 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 			// tool call in the chat debug trace.
 			if ev.Tool != nil {
 				safeSSE("tool", map[string]any{
-					"tool": ev.Tool.Tool, "allowed": ev.Tool.Allowed,
+					"call_id": ev.Tool.CallID,
+					"tool":    ev.Tool.Tool, "allowed": ev.Tool.Allowed,
 					"reason": ev.Tool.Reason, "error": ev.Tool.Error,
 					"result_meta": ev.Tool.ResultMeta,
+					"latency_ms":  ev.Tool.LatencyMS,
 				})
 			}
 		case agentcore.StreamToolExecUpdate:
-			// A streaming tool's partial output (P8): forward as a progress-shaped
-			// note so a client can show live tool output without a new contract.
-			safeSSE("tool_update", map[string]any{"note": ev.Note, "turn": ev.Turn})
-		case agentcore.StreamToolExecStart:
-			// A tool call is about to run: emit its name so the step timeline can show
-			// it as in-flight (reconciled to done/blocked when the `tool` trace lands).
+			// A streaming tool's partial output (P8). It carries the call id, so the
+			// partial lands on the row of the call that produced it even when two
+			// calls to the same tool are running side by side.
 			if ev.Tool != nil {
-				safeSSE("tool_start", map[string]any{"tool": ev.Tool.Tool, "turn": ev.Turn})
+				safeSSE("tool_update", map[string]any{"call_id": ev.Tool.CallID, "tool": ev.Tool.Tool, "note": ev.Note, "turn": ev.Turn})
+			}
+		case agentcore.StreamToolExecStart:
+			// A tool call is about to run: emit its id and name so the step timeline
+			// can open a row for it (settled by the `tool` trace with the same id).
+			if ev.Tool != nil {
+				safeSSE("tool_start", map[string]any{"call_id": ev.Tool.CallID, "tool": ev.Tool.Tool, "target": agentruntime.ToolTarget(ev.Tool.Args), "turn": ev.Turn})
 			}
 		case agentcore.StreamAgentStart, agentcore.StreamAgentEnd,
 			agentcore.StreamTurnStart, agentcore.StreamTurnEnd,

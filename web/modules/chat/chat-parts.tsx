@@ -44,7 +44,23 @@ import { parseRichMessage, slugify } from './message-format';
 // Persisted on the message so a reload keeps the steps the user already saw.
 export type ChatStep =
   | { kind: 'progress'; text: string }
-  | { kind: 'tool'; tool: string; status: 'running' | 'done' | 'blocked' | 'error'; detail?: string };
+  | {
+      kind: 'tool';
+      // The provider's id for this invocation, and the row's React key. Two
+      // concurrent calls to the same tool differ in nothing else, so keying on
+      // the name — or on the array index, which shifts as the list grows —
+      // reconciles one onto the other and remounts rows mid-run. Absent on steps
+      // restored from a trace persisted before the id was carried; those fall
+      // back to positional keying, which is no worse than it used to be.
+      callID?: string;
+      tool: string;
+      // Short human label for the call's arguments, so two rows for the same
+      // tool are distinguishable at a glance.
+      target?: string;
+      status: 'running' | 'done' | 'blocked' | 'error';
+      detail?: string;
+      durationMS?: number;
+    };
 
 // How a settled turn ended. `done` alone can't tell "finished" from "the user
 // stopped it" from "it failed", which is why a stopped turn used to render as an
@@ -373,10 +389,16 @@ function toCalls(steps: ChatStep[] | undefined): ChatToolCallItem[] {
     if (s.kind !== 'tool') return;
     const status = s.status === 'running' ? 'running' : s.status === 'done' ? 'complete' : 'error';
     out.push({
-      key: `${s.tool}-${i}`,
+      // The call id is the key. Omitting it entirely would be worse than the old
+      // index: Astryx then derives a key from [name, status, target, …], so the
+      // row remounts on every status change and slams its detail panel shut
+      // mid-run.
+      key: s.callID || `${s.tool}-${i}`,
       name: prettyTool(s.tool),
-      node: s.tool,
+      node: s.status === 'blocked' ? 'Blocked' : s.tool,
+      target: s.target || undefined,
       status,
+      duration: s.durationMS ? formatDuration(s.durationMS) : undefined,
       // A running call shows its partial output as it arrives; a finished one
       // shows its result summary. Only a failure moves the text to errorMessage.
       resultDetail: s.status === 'done' || s.status === 'running' ? s.detail || undefined : undefined,
@@ -384,6 +406,12 @@ function toCalls(steps: ChatStep[] | undefined): ChatToolCallItem[] {
     });
   });
   return out;
+}
+
+// formatDuration renders a tool call's wall clock the way the row reads it —
+// milliseconds under a second, one decimal above.
+function formatDuration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
 // workSummary is the collapsed work-log chip label once a turn has settled —
@@ -426,9 +454,10 @@ function WorkLog({ calls, working, label }: { calls: ChatToolCallItem[]; working
 function tracesToCalls(tools: AgentToolTrace[] | undefined): ChatToolCallItem[] {
   if (!tools) return [];
   return tools.map((t, i) => ({
-    key: `${t.tool}-${i}`,
+    key: t.call_id || `${t.tool}-${i}`,
     name: prettyTool(t.tool),
     node: t.tool,
+    duration: t.latency_ms ? formatDuration(t.latency_ms) : undefined,
     status: t.error ? 'error' : t.allowed ? 'complete' : 'error',
     resultDetail: t.allowed && !t.error ? (t.result_meta || undefined) : undefined,
     errorMessage: t.error || (!t.allowed ? (t.reason || 'Blocked by scope') : undefined),

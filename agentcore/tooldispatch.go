@@ -40,6 +40,12 @@ func callTool(ctx context.Context, tool Tool, args string, emit func(partial str
 // agent_tool_calls): tool name, validated args, whether it was allowed, and
 // result metadata.
 type ToolTrace struct {
+	// CallID is the provider's id for this specific invocation. It is what makes a
+	// trace addressable: two concurrent calls to the same tool differ in nothing
+	// else, so a consumer keying on name (or on array position, which shifts as
+	// the list grows) reconciles the wrong one onto the other. Empty only for a
+	// synthesized trace with no originating model call.
+	CallID     string `json:"call_id,omitempty"`
 	Tool       string `json:"tool"`
 	Args       string `json:"args"`
 	Allowed    bool   `json:"allowed"`
@@ -78,7 +84,7 @@ type toolOutcome struct {
 // concurrently for parallel-eligible tools; budget counting and trace recording
 // happen in the caller, in order.
 func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[string]bool, tools *ToolSet, call ToolCall, limits Limits, emitUpdate func(ToolCall, string)) toolOutcome {
-	trace := ToolTrace{Tool: call.Name, Args: call.Arguments}
+	trace := ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments}
 
 	tool, ok := tools.Get(call.Name)
 	if !ok {

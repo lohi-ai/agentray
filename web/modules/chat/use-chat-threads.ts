@@ -44,7 +44,7 @@ function loadCache(projectID?: string): ChatThread[] {
 // still sees the work — not just the final answer. System entries (compaction
 // summaries) are model-only and skipped. id uses the entry seq (stable per
 // conversation).
-type ToolTracePayload = { tool?: string; allowed?: boolean; reason?: string; error?: string; result_meta?: string };
+type ToolTracePayload = { call_id?: string; tool?: string; target?: string; allowed?: boolean; reason?: string; error?: string; result_meta?: string };
 export function entriesToMessages(entries: AgentConversationEntry[]): ChatMsg[] {
   const out: ChatMsg[] = [];
   let cur: ChatMsg | null = null;
@@ -56,7 +56,9 @@ export function entriesToMessages(entries: AgentConversationEntry[]): ChatMsg[] 
       if (!p.tool) continue;
       const status = p.error ? 'error' : p.allowed ? 'done' : 'blocked';
       const detail = p.error || p.reason || p.result_meta || (p.allowed ? '' : 'blocked');
-      cur.steps = [...(cur.steps ?? []), { kind: 'tool', tool: p.tool, status, detail }];
+      // call_id and target come from the mirrored trace, so a reloaded timeline
+      // keys and labels its rows exactly the way the streaming one did.
+      cur.steps = [...(cur.steps ?? []), { kind: 'tool', callID: p.call_id, tool: p.tool, target: p.target, status, detail }];
       continue;
     }
     if (e.kind !== 'message') continue;

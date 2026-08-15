@@ -372,7 +372,8 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 				// client renders the same timeline (design §7.3). Best-effort.
 				if req.ConversationID != "" && s.runner != nil && s.runner.Store != nil {
 					_, _ = AppendToolTraceEntry(context.WithoutCancel(ctx), s.runner.Store, req.ConversationID, req.AgentID, runID, convToolTracePayload{
-						Tool: ev.Tool.Tool, Allowed: ev.Tool.Allowed, Reason: ev.Tool.Reason,
+						CallID: ev.Tool.CallID, Tool: ev.Tool.Tool, Target: ToolTarget(ev.Tool.Args),
+						Allowed: ev.Tool.Allowed, Reason: ev.Tool.Reason,
 						Error: ev.Tool.Error, ResultMeta: ev.Tool.ResultMeta,
 					}, ev.Turn)
 				}

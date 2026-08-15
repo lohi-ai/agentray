@@ -1060,7 +1060,20 @@ export type AgentTriggerInput = {
   hmac_secret_name: string;
 };
 
-export type AgentToolTrace = { tool: string; allowed: boolean; reason?: string; error?: string; result_meta?: string };
+// call_id is the provider's per-invocation id. It is what makes a trace
+// addressable: two concurrent calls to the same tool are otherwise identical, so
+// anything keyed on the name (or on array position, which shifts as the list
+// grows) reconciles one onto the other. Optional — a trace persisted before the
+// id was carried, or one synthesized with no originating model call, has none.
+export type AgentToolTrace = {
+  call_id?: string;
+  tool: string;
+  allowed: boolean;
+  reason?: string;
+  error?: string;
+  result_meta?: string;
+  latency_ms?: number;
+};
 
 // AgentResultCard mirrors agentcore.ResultCard: a compact, structured answer the
 // orchestrator attaches to a data reply so the UI renders a stat block or a small
@@ -1160,14 +1173,13 @@ export type AgentChatStreamHandlers = {
   // The run id, emitted before the first token, so the client can persist it and
   // reattach to the (background-continuing) run after navigating away mid-stream.
   onRunID?: (runID: string) => void;
-  // A tool call is starting (name only): lets the step timeline show it as
-  // in-flight before its completed `onTool` trace lands.
-  onToolStart?: (tool: string) => void;
-  // A running tool's partial output. The frame carries only a note and a turn
-  // index — no call id — so it can be attributed no more precisely than "the
-  // call that is currently running". Until the stream carries call ids, the
-  // client attaches it to the most recent running step.
-  onToolUpdate?: (note: string) => void;
+  // A tool call is starting: opens its row in the step timeline, keyed by call
+  // id so the completed trace settles that exact row. `target` is the short
+  // human argument label ("signup_completed, 30") that tells two concurrent
+  // calls to the same tool apart.
+  onToolStart?: (call: { callID: string; tool: string; target: string }) => void;
+  // A running tool's partial output, addressed to the call that produced it.
+  onToolUpdate?: (call: { callID: string; note: string }) => void;
 };
 
 export const apiBase = () => process.env.NEXT_PUBLIC_AGENTRAY_API_URL || 'http://localhost:8088';
@@ -1910,8 +1922,15 @@ export class AgentRayAPI {
           else if (evt.event === 'progress') handlers.onProgress?.(String(evt.data.note ?? ''));
           else if (evt.event === 'card') handlers.onCard?.(evt.data as unknown as AgentResultCard);
           else if (evt.event === 'tool') handlers.onTool?.(evt.data as unknown as AgentToolTrace);
-          else if (evt.event === 'tool_start') handlers.onToolStart?.(String(evt.data.tool ?? ''));
-          else if (evt.event === 'tool_update') handlers.onToolUpdate?.(String(evt.data.note ?? ''));
+          else if (evt.event === 'tool_start') {
+            handlers.onToolStart?.({
+              callID: String(evt.data.call_id ?? ''),
+              tool: String(evt.data.tool ?? ''),
+              target: String(evt.data.target ?? ''),
+            });
+          } else if (evt.event === 'tool_update') {
+            handlers.onToolUpdate?.({ callID: String(evt.data.call_id ?? ''), note: String(evt.data.note ?? '') });
+          }
           else if (evt.event === 'error') handlers.onError?.(String(evt.data.error ?? 'stream error'));
           else if (evt.event === 'done') result = evt.data as unknown as AgentChatResult;
           // The auto-route folded this message into a live run; acknowledge and stop.
