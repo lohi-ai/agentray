@@ -70,6 +70,20 @@ type SessionEntry struct {
 	Goal     string           `json:"goal,omitempty"`    // EntryGoal: the run's completion condition
 	Summary  string           `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
 	Final    bool             `json:"final,omitempty"`   // EntryCompaction completion marker
+	// Retained is the transcript a completed EntryCompaction left behind: the
+	// summary (or elided fallback) plus the recent tail kept verbatim, MINUS the
+	// run's own leading system prompt, which every run re-derives and prepends
+	// itself. It makes the compaction a self-contained checkpoint (pi's
+	// CompactionEntry.retainedTail): reduce restarts history here instead of
+	// replaying the span the summary already represents.
+	//
+	// Without it a resumed run silently rebuilds the FULL pre-compaction
+	// history — measured at 3.75x the messages and 2.8x over the context budget
+	// on a 60-turn run — then pays to summarize it all again, and the fresh
+	// summary is not the one the original run reasoned over. Nil on a legacy
+	// entry (and on the start half of the bracket), which reduces exactly as
+	// before.
+	Retained []Message `json:"retained,omitempty"`
 	// Usage records what the summarization call itself cost (EntryCompaction
 	// completion / EntryBranchSummary). Compaction and branch summaries are real
 	// billable provider calls; without this they are invisible spend (pi #6671).
@@ -137,11 +151,25 @@ func ReduceSession(log []SessionEntry) ReducedState {
 			}
 		case EntryCompaction:
 			// A start (Final=false) opens a pending compaction; the completion
-			// (Final=true) closes it and folds its summary into history.
-			if e.Final {
-				rs.PendingCompaction = false
-			} else {
+			// (Final=true) closes it.
+			if !e.Final {
 				rs.PendingCompaction = true
+				break
+			}
+			rs.PendingCompaction = false
+			// A completed compaction is a CHECKPOINT, so history restarts at its
+			// retained transcript: everything older is what the summary now
+			// stands for, and replaying it would hand the resumed run a context
+			// the live run had already shrunk away (pi: "context never reads past
+			// a compaction"). Entries appended after this one chain on normally,
+			// and a later compaction resets again — so the fold ends on the most
+			// recent checkpoint plus the work done since.
+			//
+			// A nil Retained is a legacy entry or a compaction that predates this
+			// field; leaving the accumulated history alone reproduces the old
+			// full-replay behavior rather than truncating to nothing.
+			if e.Retained != nil {
+				rs.Messages = slices.Clone(e.Retained)
 			}
 		case EntryGoal:
 			rs.Goal = e.Goal

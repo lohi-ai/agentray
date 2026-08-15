@@ -1,6 +1,9 @@
 package agentcore
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // One turn against the model: retry, escalation, streaming.
 //
@@ -130,6 +133,30 @@ func filterSchemas(all []ToolSchema, permitted []string) []ToolSchema {
 		}
 	}
 	return out
+}
+
+// retainedTranscript is what a completed compaction stores on its durable
+// entry: the transcript it left behind, minus the run's own system prompt.
+//
+// The prompt is excluded because it is not part of the conversation — every run
+// rebuilds it from the definition, recalled memory, and the extensions' prompt
+// sections, then prepends it (a resumed run re-states the same contract). The
+// durable log has never carried it, so storing it here would give a resumed run
+// two system prompts: the stored one and the freshly derived one.
+//
+// Matching on the exact prompt content rather than "drop the first message" is
+// what keeps this honest when the leading system message is something else —
+// a goal pin promoted into the head by an earlier compaction, or a caller whose
+// seed history opens with its own system message. Those belong to the
+// conversation and must survive.
+func retainedTranscript(messages []Message, system string) []Message {
+	if len(messages) > 0 && system != "" &&
+		messages[0].Role == RoleSystem && messages[0].Content == system {
+		messages = messages[1:]
+	}
+	// Clone: the caller keeps mutating res.Messages, and a durable entry must be
+	// a snapshot of the moment it was written.
+	return slices.Clone(messages)
 }
 
 // lastAssistantText returns the content of the most recent assistant message.

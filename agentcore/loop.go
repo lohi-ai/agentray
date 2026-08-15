@@ -679,7 +679,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// transcript really did change shape) but costs no summarization call.
 				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
 				res.Messages = decision.Messages
-				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true})
+				appendEntry(SessionEntry{
+					Kind: EntryCompaction, Turn: res.Turns, Final: true,
+					Retained: retainedTranscript(res.Messages, system),
+				})
 			default:
 				// Compaction runs on its own tier when the consumer pinned one
 				// (compactionProvider/Model); otherwise it borrows the active rung.
@@ -714,7 +717,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// run's accounting and stamp it on the completion entry so the audit
 				// trail shows what compaction itself cost (pi #6671).
 				res.Usage = addUsage(res.Usage, cu)
-				fin := SessionEntry{Kind: EntryCompaction, Turn: res.Turns, Final: true}
+				// Record what the compaction LEFT, not just that it happened: the
+				// completion entry carries the retained transcript, so a resumed
+				// run restarts from this checkpoint instead of replaying the span
+				// the summary already stands for and re-summarizing it.
+				fin := SessionEntry{
+					Kind: EntryCompaction, Turn: res.Turns, Final: true,
+					Retained: retainedTranscript(res.Messages, system),
+				}
 				if cu != (Usage{}) {
 					fin.Usage = &cu
 				}
