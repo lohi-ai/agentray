@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Pencil, Plug, Plus, RotateCcw, Square, Trash2 } from 'lucide-react';
+import { Check, Copy, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Pencil, Plug, Plus, RotateCcw, Square, Trash2, TriangleAlert } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
@@ -819,6 +819,10 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
   const showMeta = debug && !!(m.route || m.usage || m.turns);
   const working = !m.done;
   const stopped = m.done && m.outcome === 'stopped';
+  // A turn that failed before it said anything used to render as an empty
+  // bubble: the only signal was a composer notice that fades, so the transcript
+  // was left showing the agent saying nothing at all, for no stated reason.
+  const failed = m.done && m.outcome === 'failed';
   // While the message streams, the work log's header carries the agent's live
   // narration; once settled it reads as a quiet "Worked through N steps".
   const workLabel = working ? (m.progress || 'Working…') : workSummary(calls);
@@ -826,13 +830,17 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
   // Actions appear on settle — offering "regenerate" for an answer still being
   // written is an invitation to race the stream. What they offer depends on how
   // the message ended: a stopped or failed one gets "Try again", not the
-  // "Regenerate" that implies there was an answer worth redoing.
+  // "Regenerate" that implies there was an answer worth redoing. A message with
+  // no outcome at all is a settled turn read back from the server, which the
+  // outcome type reads as 'ok' — so it gets "Regenerate" like any other answer,
+  // rather than a reloaded thread quietly relabelling every good answer.
+  const ended = m.outcome ?? 'ok';
   const forkable = !!actions && isForkable(m);
   const footer = actions && !working ? (
     <ActionRow>
-      {m.text ? <CopyAction text={m.text} label={m.outcome === 'failed' ? 'Copy error' : 'Copy'} /> : null}
+      {m.text ? <CopyAction text={m.text} label={ended === 'failed' ? 'Copy error' : 'Copy'} /> : null}
       {forkable ? (
-        <RetryAction m={m} actions={actions} label={m.outcome === 'ok' ? 'Regenerate' : 'Try again'} />
+        <RetryAction m={m} actions={actions} label={ended === 'ok' ? 'Regenerate' : 'Try again'} />
       ) : null}
     </ActionRow>
   ) : null;
@@ -894,6 +902,14 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
           {stopped ? (
             <ChatSystemMessage icon={<Square size={12} />}>
               {m.text ? 'Stopped — the agent didn’t finish this answer.' : 'Stopped before the agent replied.'}
+            </ChatSystemMessage>
+          ) : null}
+          {/* A failure is not a stop and doesn't get the neutral square: it says
+              what happened and what to do about it, in the same slot, so the
+              turn is never left as a silent empty bubble. */}
+          {failed ? (
+            <ChatSystemMessage icon={<TriangleAlert size={12} />}>
+              {m.text ? 'This answer didn’t finish — try again.' : 'Something went wrong and the agent never answered. Try again.'}
             </ChatSystemMessage>
           ) : null}
           {debug && traceCalls.length ? (

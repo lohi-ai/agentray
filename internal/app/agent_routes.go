@@ -1192,8 +1192,12 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return echo.NewHTTPError(http.StatusBadRequest, "can only regenerate an assistant message")
 		}
 		// The user turn this answer replied to is the branch point; resend it.
-		parent, err := store.GetConversationEntry(c.Request().Context(), convID, target.ParentID)
-		if err != nil || parent.Role != string(agentcore.RoleUser) {
+		// It is NOT necessarily the answer's parent: every append parents to the
+		// leaf, and a turn that called a tool mirrors its traces into the log
+		// first — so the answer's parent is the last trace, and reading only it
+		// rejected every answer that used a tool, which is nearly all of them.
+		parent, err := userTurnAbove(c.Request().Context(), store, convID, target.ParentID)
+		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "cannot resolve the message to regenerate")
 		}
 		message := agentruntime.MessageEntryText(parent)
@@ -1363,6 +1367,26 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		return c.JSON(http.StatusAccepted, map[string]any{"queued": true})
 	})
+}
+
+// userTurnAbove walks the log's parent chain from `entryID` up to the nearest
+// user message. The chain is not alternating question/answer: tool traces and
+// compaction summaries are entries too, and each parents to the leaf that was
+// current when it was written, so an answer's immediate parent is usually the
+// last tool trace of its own turn. Bounded so a cycle in a corrupt log can't
+// hang the request.
+func userTurnAbove(ctx context.Context, store *storage.Store, convID, entryID string) (storage.AgentConversationEntry, error) {
+	for i := 0; i < 128 && entryID != ""; i++ {
+		e, err := store.GetConversationEntry(ctx, convID, entryID)
+		if err != nil {
+			return storage.AgentConversationEntry{}, err
+		}
+		if e.Kind == agentruntime.ConvKindMessage && e.Role == string(agentcore.RoleUser) {
+			return e, nil
+		}
+		entryID = e.ParentID
+	}
+	return storage.AgentConversationEntry{}, fmt.Errorf("agentray: no user message above entry")
 }
 
 // authProject resolves the auth context + project for a request in one step.

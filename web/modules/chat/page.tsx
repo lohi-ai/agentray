@@ -607,7 +607,12 @@ export function ChatPage() {
         // `result.final` is the whole run's answer. Across a steer split its
         // opening is already on screen in the message above, so only a message
         // that IS the whole run may be backfilled from it.
-        const backfill = splitRef.current ? '' : formatAgentError(result.final);
+        //
+        // A stopped run is never backfilled: it has no final by definition, and
+        // formatAgentError('') is the recovery copy "Something went wrong. Try
+        // again." — which turns the user's own deliberate Stop into a reported
+        // failure, directly under the Stopped marker that already explains it.
+        const backfill = splitRef.current || result.stopped ? '' : formatAgentError(result.final);
         patch(at(), (m) => ({ ...m, text: m.text || backfill, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
       } else {
         patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
