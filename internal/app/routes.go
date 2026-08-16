@@ -50,6 +50,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)
 	registerValidationRoutes(e, store)
+	registerOperationsRoutes(e, store, scheduler)
 
 	// The waitlist is posted from the owner's own landing page, so it sits with
 	// the other public, api-key-authenticated collection endpoints and carries

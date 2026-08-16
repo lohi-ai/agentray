@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
@@ -71,7 +72,14 @@ func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 	}
 }
 
-type testStatusInput struct{}
+type testStatusInput struct {
+	// TestID names WHICH test to read. Empty keeps the original behaviour — the
+	// project's active one — so every existing prompt and pack still works. It
+	// exists because the owner can now have five prototypes open on one screen,
+	// and an agent that can only ever read "the" test will confidently answer
+	// about a different one than the one they asked about.
+	TestID string `json:"test_id" desc:"id of the prototype to read (from list_tests). Omit for the project's active test."`
+}
 
 type testStatusOutput struct {
 	// HasTest is false for a project that has never proposed one. The agent must
@@ -106,16 +114,32 @@ type testStatusOutput struct {
 func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 	return opcore.Operation[testStatusInput, testStatusOutput]{
 		Name:    "test_status",
-		Summary: "Read the project's active validation test and how it is doing against the threshold agreed in advance.",
+		Summary: "Read one validation test — by id, or the project's active one — and how it is doing against the threshold agreed in advance.",
 		Scope:   "growth_suggest",
-		Handler: func(ctx context.Context, cc opcore.CallContext, _ testStatusInput) (testStatusOutput, error) {
+		Handler: func(ctx context.Context, cc opcore.CallContext, in testStatusInput) (testStatusOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return testStatusOutput{}, err
 			}
-			test, err := d.Repo.ActiveValidationTest(ctx, cc.ProjectID)
-			if err != nil {
-				return testStatusOutput{}, err
+			var test *storage.ValidationTest
+			if id := strings.TrimSpace(in.TestID); id != "" {
+				found, fErr := d.Repo.ValidationTestForProject(ctx, cc.ProjectID, id)
+				if fErr != nil {
+					// A named test that does not exist is not "no test": answering
+					// with the active one would report a different experiment's
+					// numbers under the name the owner asked about.
+					return testStatusOutput{
+						HasTest: false,
+						Note: "No prototype with id " + id + " in this project. Call list_tests and use an id from it — " +
+							"do not answer about a different test than the one you were asked about.",
+					}, nil
+				}
+				test = &found
+			} else {
+				test, err = d.Repo.ActiveValidationTest(ctx, cc.ProjectID)
+				if err != nil {
+					return testStatusOutput{}, err
+				}
 			}
 			count, err := d.Repo.CountWaitlistSignups(ctx, cc.ProjectID)
 			if err != nil {
@@ -152,12 +176,114 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				out.ConversionPct = float64(p.Metric) / float64(p.Baseline) * 100
 			}
 			if test.Status == storage.TestProposed {
+				// The window opens at COMMIT, so a proposal has no window and its
+				// counts are meaningless. Zero them rather than report a figure
+				// beside a note that says nothing is being counted — the two
+				// disagreeing is how an agent ends up quoting a number nobody
+				// agreed to as if it were progress.
+				out.MetricCount, out.BaselineCount = 0, 0
+				out.ConversionPct = -1
+				out.DaysElapsed, out.DaysLeft = 0, 0
 				out.Note = "This test is still only PROPOSED — the owner has not committed to the number, " +
-					"so nothing is being counted yet. Ask them to commit it on /start?job=validate."
+					"so nothing is being counted yet. Ask them to commit it on /prototypes."
+				return out, nil
+			}
+			if test.Status != storage.TestCommitted {
+				// Already decided. The verdict is what the owner CALLED it, never a
+				// recomputation — a late-arriving event must not turn a test the
+				// owner closed as failed into a pass the product now claims.
+				out.Verdict = test.Status
+				out.Note = "The owner already decided this one: " + test.Status + "." +
+					decisionNoteSuffix(test.DecisionNote) +
+					" Report the decision as it stands; do not re-judge it from the counts."
 				return out, nil
 			}
 			out.Verdict = p.Verdict()
 			out.Note = verdictNote(out)
+			return out, nil
+		},
+	}
+}
+
+// decisionNoteSuffix renders the owner's own words when they left any. "Why" is
+// the part worth reading a month later, and it is the only part of a closed test
+// the agent cannot re-derive.
+func decisionNoteSuffix(note string) string {
+	if strings.TrimSpace(note) == "" {
+		return ""
+	}
+	return " They wrote: " + strings.TrimSpace(note) + "."
+}
+
+type listTestsInput struct{}
+
+// listedTest is deliberately thin: enough to name each prototype and say which
+// one needs the owner, not enough to answer "how is it doing". Measuring every
+// row is one event-store aggregation each, and an agent that wants the numbers
+// for one of them should call test_status with its id.
+type listedTest struct {
+	TestID      string `json:"test_id"`
+	Hypothesis  string `json:"hypothesis"`
+	Status      string `json:"status"`
+	MetricEvent string `json:"metric_event"`
+	TargetCount int    `json:"target_count"`
+	WindowDays  int    `json:"window_days"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type listTestsOutput struct {
+	Tests []listedTest `json:"tests"`
+	// Total is how many exist; Tests is a capped page of them. Reported so an
+	// agent never says "you have three prototypes" while looking at page one of
+	// forty.
+	Total     int    `json:"total"`
+	Truncated bool   `json:"truncated"`
+	Note      string `json:"note"`
+}
+
+// listTests is the op that makes the plural surface answerable in chat. Without
+// it, the only validation read an agent has is "the active test", so an owner
+// who asks "how are my prototypes doing?" gets one of them and no hint that the
+// other four exist.
+func listTests() opcore.Operation[listTestsInput, listTestsOutput] {
+	return opcore.Operation[listTestsInput, listTestsOutput]{
+		Name:    "list_tests",
+		Summary: "List the project's validation tests (prototypes) — open ones first — with the id each one is read by.",
+		Scope:   "growth_suggest",
+		Handler: func(ctx context.Context, cc opcore.CallContext, _ listTestsInput) (listTestsOutput, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return listTestsOutput{}, err
+			}
+			tests, total, err := d.Repo.ValidationTestsForProject(ctx, cc.ProjectID, 0)
+			if err != nil {
+				return listTestsOutput{}, err
+			}
+			out := listTestsOutput{Tests: make([]listedTest, 0, len(tests)), Total: total, Truncated: total > len(tests)}
+			waiting := 0
+			for _, t := range tests {
+				if t.Status == storage.TestProposed {
+					waiting++
+				}
+				out.Tests = append(out.Tests, listedTest{
+					TestID: t.ID, Hypothesis: t.Hypothesis, Status: t.Status, MetricEvent: t.MetricEvent,
+					TargetCount: t.TargetCount, WindowDays: t.WindowDays, CreatedAt: t.CreatedAt.Format(time.RFC3339),
+				})
+			}
+			switch {
+			case total == 0:
+				out.Note = "No prototypes yet. Design one with propose_test — one idea, one number, agreed before the data arrives."
+			case waiting > 0:
+				out.Note = fmt.Sprintf("%d of these are still only PROPOSED — the owner has not agreed to the number, "+
+					"so nothing is being counted for them. Say which ones, and that they commit on /prototypes. "+
+					"Call test_status with a test_id for the numbers on any one of them.", waiting)
+			default:
+				out.Note = "Call test_status with a test_id for how any one of these is doing. " +
+					"Do not compare them by hypothesis alone — each has its own threshold."
+			}
+			if out.Truncated {
+				out.Note += fmt.Sprintf(" Showing the %d most relevant of %d; say so rather than implying this is all of them.", len(out.Tests), total)
+			}
 			return out, nil
 		},
 	}

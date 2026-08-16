@@ -51,16 +51,61 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 		return c.JSON(http.StatusOK, out)
 	})
 
+	// The plural read — every prototype, not the one ActiveValidationTest picks.
+	// Each committed row arrives already measured and already carrying its
+	// verdict, computed server-side for the same reason /status computes it:
+	// the page and any agent reading list_tests must not be able to disagree
+	// about whether a test passed.
+	//
+	// `total` travels with the page because the list is capped (each measured row
+	// costs one event-store aggregation). A project past the cap is told it is
+	// looking at a page; it is never handed a silent fraction of its own record.
 	e.GET("/api/validation/tests", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
 			return err
 		}
-		tests, err := store.ListValidationTests(c.Request().Context(), ctx.User.ID, project.ID)
+		tests, total, err := store.ListValidationTests(c.Request().Context(), ctx.User.ID, project.ID, intParam(c, "limit", 0, 0, 100))
 		if err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, map[string]any{"tests": tests})
+		measured, err := store.MeasureValidationTests(c.Request().Context(), tests)
+		if err != nil {
+			return err
+		}
+		count, err := store.CountWaitlistSignups(c.Request().Context(), project.ID)
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"tests":          measured,
+			"total":          total,
+			"truncated":      total > len(measured),
+			"waitlist_count": count,
+		})
+	})
+
+	e.GET("/api/validation/tests/:id", func(c echo.Context) error {
+		ctx, project, err := authProject(c, store)
+		if err != nil {
+			return err
+		}
+		test, err := store.ValidationTestByID(c.Request().Context(), ctx.User.ID, project.ID, c.Param("id"))
+		if err != nil {
+			if storage.ErrNoSuchValidationTest(err) {
+				return echo.NewHTTPError(http.StatusNotFound, "no prototype with that id")
+			}
+			return err
+		}
+		measured, err := store.MeasureValidationTest(c.Request().Context(), test)
+		if err != nil {
+			return err
+		}
+		count, err := store.CountWaitlistSignups(c.Request().Context(), project.ID)
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{"test": measured, "waitlist_count": count})
 	})
 
 	// The owner writing their own test, for the case where no agent is involved.

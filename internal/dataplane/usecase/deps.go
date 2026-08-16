@@ -35,6 +35,11 @@ type Repo interface {
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
 	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
+	// The plural reads. Without them an agent can only ever discuss the one test
+	// ActiveValidationTest picks, while the owner is looking at a page of five —
+	// the same LIMIT 1 the prototypes surface exists to undo.
+	ValidationTestsForProject(ctx context.Context, projectID string, limit int) ([]storage.ValidationTest, int, error)
+	ValidationTestForProject(ctx context.Context, projectID, id string) (storage.ValidationTest, error)
 	ValidationTestProgress(ctx context.Context, t storage.ValidationTest) (storage.TestProgress, error)
 	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)

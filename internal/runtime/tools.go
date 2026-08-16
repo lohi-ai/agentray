@@ -37,6 +37,8 @@ type DataSource interface {
 	// agent proposes a threshold and reads the running test back against it.
 	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
+	ValidationTestsForProject(ctx context.Context, projectID string, limit int) ([]storage.ValidationTest, int, error)
+	ValidationTestForProject(ctx context.Context, projectID, id string) (storage.ValidationTest, error)
 	ValidationTestProgress(ctx context.Context, t storage.ValidationTest) (storage.TestProgress, error)
 	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 

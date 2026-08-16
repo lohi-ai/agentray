@@ -1341,6 +1341,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return err
 		}
 		var payload struct {
+			Name           string `json:"name"`
 			Kind           string `json:"kind"`
 			Enabled        bool   `json:"enabled"`
 			Cron           string `json:"cron"`
@@ -1351,7 +1352,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
 		trigger, err := store.CreateAgentTrigger(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"), storage.AgentTrigger{
-			Kind: payload.Kind, Enabled: payload.Enabled, Cron: payload.Cron,
+			Name: payload.Name, Kind: payload.Kind, Enabled: payload.Enabled, Cron: payload.Cron,
 			PromptTemplate: payload.PromptTemplate, HMACSecretName: payload.HMACSecretName,
 		})
 		if err != nil {
@@ -1366,6 +1367,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return err
 		}
 		var payload struct {
+			Name           string `json:"name"`
 			Enabled        bool   `json:"enabled"`
 			Cron           string `json:"cron"`
 			PromptTemplate string `json:"prompt_template"`
@@ -1375,7 +1377,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
 		trigger, err := store.UpdateAgentTrigger(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"), c.Param("id"), storage.AgentTrigger{
-			Enabled: payload.Enabled, Cron: payload.Cron,
+			Name: payload.Name, Enabled: payload.Enabled, Cron: payload.Cron,
 			PromptTemplate: payload.PromptTemplate, HMACSecretName: payload.HMACSecretName,
 		})
 		if err != nil {

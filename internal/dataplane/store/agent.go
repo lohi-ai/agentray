@@ -292,6 +292,12 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`,
 		`CREATE INDEX IF NOT EXISTS agent_triggers_scope_idx ON agent_triggers (scope_id)`,
+		// A trigger needs a human name once it is listed project-wide as an
+		// OPERATOR rather than as row 2 of one agent's setup tab: "0 7 * * *" is a
+		// fine label next to the agent that owns it and no label at all in a list
+		// of everything that runs unattended. Additive and nullable-by-default on
+		// a small table, so it is an ALTER that takes no lock worth naming.
+		`ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS name VARCHAR(128) NOT NULL DEFAULT ''`,
 		// The webhook token is the global ingress address, so it must be unique —
 		// but only across webhook rows that actually carry one (schedule rows leave
 		// it empty). A partial unique index enforces that without colliding on ''.

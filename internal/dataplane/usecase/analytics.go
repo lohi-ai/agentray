@@ -41,6 +41,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, submitRecommendation())
 	opcore.Register(r, proposeTest())
 	opcore.Register(r, testStatus())
+	opcore.Register(r, listTests())
 	opcore.Register(r, remember())
 	opcore.Register(r, sendNotification())
 	return r

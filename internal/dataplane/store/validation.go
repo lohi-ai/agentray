@@ -7,6 +7,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // validation.go — the pre-product half of the dataplane.
@@ -192,29 +194,186 @@ LIMIT 1`, projectID)
 	return &t, rows.Err()
 }
 
-// ListValidationTests returns every test for the project, newest first.
-func (s *Store) ListValidationTests(ctx context.Context, userID, projectID string) ([]ValidationTest, error) {
+// validationListCap bounds one read of the list.
+//
+// It is not a display preference. Every row that has been committed is measured
+// against the event store to produce its counts, and that is one ClickHouse
+// aggregation per row — so an uncapped list is a page whose cost grows with the
+// project's whole history of ideas rather than with what is on screen. The cap
+// is paired with the total in the response, so a project past it is TOLD it is
+// seeing a page rather than being quietly handed a fraction of its own record.
+const validationListCap = 25
+
+// ListValidationTests returns a page of the project's tests: the open ones
+// (proposed, then committed) before the decided ones, each group newest first.
+// The second return value is how many exist in total, so the caller can say so
+// when the page is short of it.
+//
+// The ordering is the screen's, not the table's: a proposal nobody has agreed to
+// is the one state where the product is blocked on the human, and burying it
+// under a year of decided history is how it stays unanswered.
+func (s *Store) ListValidationTests(ctx context.Context, userID, projectID string, limit int) ([]ValidationTest, int, error) {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	return s.ValidationTestsForProject(ctx, project.ID, limit)
+}
+
+// ValidationTestsForProject is the same read without a requesting user, for the
+// agent path — a run is already bound to one project by the runtime, exactly as
+// ActiveValidationTest and CountWaitlistSignups are.
+func (s *Store) ValidationTestsForProject(ctx context.Context, projectID string, limit int) ([]ValidationTest, int, error) {
+	if limit <= 0 || limit > validationListCap {
+		limit = validationListCap
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
-       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
-FROM validation_tests WHERE project_id = $1 ORDER BY created_at DESC`, project.ID)
+       target_count, window_days, status, committed_at, decided_at, decision_note, created_at,
+       count(*) OVER () AS total
+FROM validation_tests
+WHERE project_id = $1
+ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END, created_at DESC
+LIMIT $2`, projectID, limit)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []ValidationTest{}
+	total := 0
 	for rows.Next() {
-		t, err := scanValidationTest(rows)
-		if err != nil {
-			return nil, err
+		var t ValidationTest
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.RunID, &t.Hypothesis, &t.MetricEvent, &t.BaselineEvent,
+			&t.TargetCount, &t.WindowDays, &t.Status, &t.CommittedAt, &t.DecidedAt, &t.DecisionNote, &t.CreatedAt,
+			&total); err != nil {
+			return nil, 0, err
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+// ValidationTestByID reads one test the user can see. It is what makes a
+// prototype addressable: without it every reader — the detail page and the
+// agent alike — is stuck with whichever one ActiveValidationTest happens to
+// pick, which is the whole bug the plural surface exists to fix.
+func (s *Store) ValidationTestByID(ctx context.Context, userID, projectID, id string) (ValidationTest, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return ValidationTest{}, err
+	}
+	return s.ValidationTestForProject(ctx, project.ID, id)
+}
+
+// ValidationTestForProject is ValidationTestByID without a requesting user, for
+// the agent path. An id from another project resolves to not-found, so the op
+// cannot be talked into reading across the project boundary.
+func (s *Store) ValidationTestForProject(ctx context.Context, projectID, id string) (ValidationTest, error) {
+	if strings.TrimSpace(id) == "" {
+		return ValidationTest{}, errNoSuchTest
+	}
+	// A malformed id would otherwise reach Postgres as a bad uuid cast and come
+	// back as a 500 for what is really "no such test".
+	if !looksLikeUUID(id) {
+		return ValidationTest{}, errNoSuchTest
+	}
+	row := s.pg.QueryRow(ctx, `
+SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
+       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
+FROM validation_tests WHERE id = $1 AND project_id = $2`, id, projectID)
+	t, err := scanValidationTest(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ValidationTest{}, errNoSuchTest
+	}
+	if err != nil {
+		return ValidationTest{}, err
+	}
+	return t, nil
+}
+
+var errNoSuchTest = errors.New("no test with that id in this project")
+
+// looksLikeUUID is a shape check so a junk id — an agent inventing one, a stale
+// link — answers "no such test" instead of a database cast error dressed up as a
+// server fault.
+func looksLikeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ErrNoSuchValidationTest reports whether err is the not-found from
+// ValidationTestByID, so the HTTP layer can answer 404 instead of 500.
+func ErrNoSuchValidationTest(err error) bool { return errors.Is(err, errNoSuchTest) }
+
+// MeasuredTest is one test as every plural reader wants it: the row, plus what
+// the event store says about it, plus the single verdict both the page and the
+// agent must quote.
+//
+// Measured is false for a proposal. A threshold nobody has agreed to counts
+// nothing, and reporting "0 of 40" against a number the owner never accepted
+// reads as a failing test rather than an unanswered question.
+type MeasuredTest struct {
+	ValidationTest
+	Measured      bool   `json:"measured"`
+	MetricCount   int    `json:"metric_count"`
+	BaselineCount int    `json:"baseline_count"`
+	DaysElapsed   int    `json:"days_elapsed"`
+	DaysLeft      int    `json:"days_left"`
+	// Verdict is passed / failed / committed (still running) for a live test,
+	// and the owner's own decision for a decided one — a closed test's verdict is
+	// what the human called it, never a recomputation that could now disagree.
+	Verdict string `json:"verdict,omitempty"`
+}
+
+// MeasureValidationTest attaches the measurement and the verdict to one test.
+func (s *Store) MeasureValidationTest(ctx context.Context, t ValidationTest) (MeasuredTest, error) {
+	out := MeasuredTest{ValidationTest: t}
+	if t.CommittedAt == nil {
+		return out, nil
+	}
+	p, err := s.ValidationTestProgress(ctx, t)
+	if err != nil {
+		return MeasuredTest{}, err
+	}
+	out.Measured = true
+	out.MetricCount, out.BaselineCount = p.Metric, p.Baseline
+	out.DaysElapsed, out.DaysLeft = p.DaysElapsed, p.DaysLeft
+	if t.Status == TestCommitted {
+		out.Verdict = p.Verdict()
+	} else {
+		out.Verdict = t.Status
+	}
+	return out, nil
+}
+
+// MeasureValidationTests measures a page of tests. One event-store aggregation
+// per committed row — bounded by validationListCap, which is why that cap
+// exists.
+func (s *Store) MeasureValidationTests(ctx context.Context, tests []ValidationTest) ([]MeasuredTest, error) {
+	out := make([]MeasuredTest, 0, len(tests))
+	for _, t := range tests {
+		m, err := s.MeasureValidationTest(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // rowScanner is satisfied by both pgx.Row and pgx.Rows, so the column list above

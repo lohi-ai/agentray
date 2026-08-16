@@ -34,7 +34,11 @@ var errScheduleNeedsCron = errors.New("a schedule trigger needs a cron expressio
 
 // AgentTrigger is one configured trigger for an agent.
 type AgentTrigger struct {
-	ID             string    `json:"id"`
+	ID string `json:"id"`
+	// Name is the operator's human label, used by the project-wide /operations
+	// list. Empty is normal — a trigger created before the column, or from the
+	// per-agent tab, has none, and the reader falls back to the agent's name.
+	Name           string    `json:"name"`
 	Kind           string    `json:"kind"`
 	Enabled        bool      `json:"enabled"`
 	Cron           string    `json:"cron"`
@@ -106,7 +110,7 @@ func (s *Store) ListAgentTriggers(ctx context.Context, userID, projectID, agentI
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at
+SELECT id::text, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at
 FROM agent_triggers WHERE scope_id = $1 ORDER BY kind ASC, created_at ASC`, scopeID)
 	if err != nil {
 		return nil, err
@@ -115,7 +119,7 @@ FROM agent_triggers WHERE scope_id = $1 ORDER BY kind ASC, created_at ASC`, scop
 	out := make([]AgentTrigger, 0)
 	for rows.Next() {
 		var t AgentTrigger
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -157,11 +161,11 @@ func (s *Store) CreateAgentTrigger(ctx context.Context, userID, projectID, agent
 	}
 	var t AgentTrigger
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO agent_triggers (scope_id, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id::text, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at`,
-		scopeID, in.Kind, in.Enabled, in.Cron, in.WebhookToken, in.PromptTemplate, in.HMACSecretName).
-		Scan(&t.ID, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt)
+INSERT INTO agent_triggers (scope_id, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id::text, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at`,
+		scopeID, strings.TrimSpace(in.Name), in.Kind, in.Enabled, in.Cron, in.WebhookToken, in.PromptTemplate, in.HMACSecretName).
+		Scan(&t.ID, &t.Name, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return AgentTrigger{}, err
 	}
@@ -187,11 +191,11 @@ func (s *Store) UpdateAgentTrigger(ctx context.Context, userID, projectID, agent
 	}
 	var t AgentTrigger
 	err = s.pg.QueryRow(ctx, `
-UPDATE agent_triggers SET enabled = $3, cron = $4, prompt_template = $5, hmac_secret_name = $6, updated_at = now()
+UPDATE agent_triggers SET name = $7, enabled = $3, cron = $4, prompt_template = $5, hmac_secret_name = $6, updated_at = now()
 WHERE scope_id = $1 AND id = $2
-RETURNING id::text, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at`,
-		scopeID, triggerID, in.Enabled, in.Cron, in.PromptTemplate, in.HMACSecretName).
-		Scan(&t.ID, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt)
+RETURNING id::text, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at`,
+		scopeID, triggerID, in.Enabled, in.Cron, in.PromptTemplate, in.HMACSecretName, strings.TrimSpace(in.Name)).
+		Scan(&t.ID, &t.Name, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return AgentTrigger{}, err
 	}

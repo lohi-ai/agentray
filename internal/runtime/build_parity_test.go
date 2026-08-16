@@ -53,7 +53,7 @@ compaction_model:      -
 steering:              set
 follow_up:             set
 prepare_next_turn:     set
-tools:                 activity_summary, recent_events, persons, explore_events, run_sql, run_insight, run_funnel, run_retention, list_dashboards, create_dashboard, create_chart, submit_recommendation, propose_test, test_status, remember, send_notification, http_request, run_shell, update_plan
+tools:                 activity_summary, recent_events, persons, explore_events, run_sql, run_insight, run_funnel, run_retention, list_dashboards, create_dashboard, create_chart, submit_recommendation, propose_test, test_status, list_tests, remember, send_notification, http_request, run_shell, update_plan
 hooks:                 before=2 after=1 context=1 turn_start=0 turn_end=0 message_end=0 provider=0 agent_end=0
 hook_error_policy:
 `

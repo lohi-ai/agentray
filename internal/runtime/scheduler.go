@@ -120,6 +120,18 @@ func (s *Scheduler) Publish(projectID, prompt string) error {
 	return s.publishRun(runMessage{ProjectID: projectID, Trigger: "scheduled", Prompt: prompt})
 }
 
+// PublishScheduled enqueues a scheduled-style run for a SPECIFIC agent — what
+// the ticker does for a due per-agent trigger, and what "run now" on that
+// operator has to do to be a faithful rehearsal of it.
+//
+// The trigger stays "scheduled" deliberately. isBackgroundTrigger keys the
+// autonomy rail off this value, so relabelling a hand-started rehearsal
+// "manual" would hand it the external-write tools the real 07:00 run will never
+// have — and the owner would be testing a run that cannot happen.
+func (s *Scheduler) PublishScheduled(projectID, agentID, prompt string) error {
+	return s.publishRun(runMessage{ProjectID: projectID, AgentID: agentID, Trigger: "scheduled", Prompt: prompt})
+}
+
 // PublishWebhook enqueues a webhook-triggered run for a specific agent (the
 // webhook ingress producer). It shares the scheduler's NATS run path, so a
 // webhook is just a second producer — no new run engine.
@@ -184,7 +196,7 @@ func (s *Scheduler) publishDue(ctx context.Context, now time.Time) {
 			if prompt == "" {
 				prompt = MonitorPrompt
 			}
-			_ = s.publishRun(runMessage{ProjectID: t.ProjectID, AgentID: t.AgentID, Trigger: "scheduled", Prompt: prompt})
+			_ = s.PublishScheduled(t.ProjectID, t.AgentID, prompt)
 		}
 	}
 }
