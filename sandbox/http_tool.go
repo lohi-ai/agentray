@@ -165,6 +165,30 @@ func (t *HTTPTool) AllowHosts() []string {
 func (t *HTTPTool) Name() string { return ToolHTTPRequest }
 
 func (t *HTTPTool) Schema() agentcore.ToolSchema {
+	props := map[string]any{
+		"method": map[string]any{
+			"type":        "string",
+			"description": "HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "Absolute https:// URL whose host is on the allowlist.",
+		},
+		"headers": map[string]any{
+			"type":        "object",
+			"description": "Optional request headers. Secret values may use {{cred:NAME}}.",
+		},
+		"body": map[string]any{
+			"type":        "string",
+			"description": "Optional request body (sent verbatim).",
+		},
+	}
+	// Only offered when there is a workspace to save into. The host-global
+	// instance is built once at startup, long before any run has one, and an
+	// advertised save_as it cannot honour would cost a real request per attempt.
+	if t.sink.available() {
+		props["save_as"] = saveAsParam()
+	}
 	return agentcore.ToolSchema{
 		Name: ToolHTTPRequest,
 		Description: "Make an outbound HTTP request to an approved host. Use a " +
@@ -173,27 +197,9 @@ func (t *HTTPTool) Schema() agentcore.ToolSchema {
 			"allowlisted hosts over HTTPS are reachable. Returns the status, " +
 			"response headers, and body.",
 		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"method": map[string]any{
-					"type":        "string",
-					"description": "HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.",
-				},
-				"url": map[string]any{
-					"type":        "string",
-					"description": "Absolute https:// URL whose host is on the allowlist.",
-				},
-				"headers": map[string]any{
-					"type":        "object",
-					"description": "Optional request headers. Secret values may use {{cred:NAME}}.",
-				},
-				"body": map[string]any{
-					"type":        "string",
-					"description": "Optional request body (sent verbatim).",
-				},
-				"save_as": saveAsParam(),
-			},
-			"required": []string{"url"},
+			"type":       "object",
+			"properties": props,
+			"required":   []string{"url"},
 		},
 	}
 }
@@ -271,16 +277,12 @@ func (t *HTTPTool) Run(ctx context.Context, args string) (string, error) {
 // a save is not a reason to hide that the server answered 404 and the "file" is
 // an error page.
 func (t *HTTPTool) respond(ctx context.Context, saveAs string, resp *http.Response, body []byte) (string, error) {
-	if strings.TrimSpace(saveAs) == "" {
-		return formatHTTPResponse(resp, body), nil
-	}
 	// Equal to the limit means ReadAll stopped at the cap, so the document very
 	// likely continues past what we hold.
-	receipt, err := t.sink.save(ctx, ToolHTTPRequest, saveAs, body, int64(len(body)) >= t.maxBodyBytes)
-	if err != nil {
-		return "", err
-	}
-	return formatHTTPResponse(resp, nil) + "\n" + receipt, nil
+	truncated := int64(len(body)) >= t.maxBodyBytes
+	return t.sink.respond(ctx, ToolHTTPRequest, saveAs, body, truncated, func(b []byte) string {
+		return formatHTTPResponse(resp, b)
+	})
 }
 
 // validateURL enforces scheme + host allowlist. The IP-level guard is the

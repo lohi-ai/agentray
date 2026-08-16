@@ -71,7 +71,15 @@ type Config struct {
 	// Deriving it means nobody has to remember a second env var for the
 	// deployment where forgetting it hands one tenant's prompt-injected agent a
 	// shell in the process that serves all of them. AGENTRAY_SANDBOX_REQUIRED
-	// still overrides in either direction.
+	// still overrides this derived default in either direction.
+	//
+	// What it cannot do is re-open the host path once isolation has been asked
+	// for and failed to wire: setting AGENTRAY_SANDBOX_ENABLED is itself an
+	// explicit request, so a sandbox that does not come up withholds the tools
+	// rather than moving them to the host, whatever this is set to (see
+	// internal/app/app.go). "Docker when it's up, the host when it isn't" is not
+	// a supported configuration — leave AGENTRAY_SANDBOX_ENABLED unset for the
+	// host path.
 	SandboxRequired bool
 	// AgentWorkspaceRoot is the BASE for per-conversation agent workspaces
 	// (<base>/<workspaceId>/<projectId>/<agentId>/<conversationId>). Empty uses

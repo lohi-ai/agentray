@@ -112,14 +112,17 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// This runs before the strict config and short-circuits its own preflights,
 	// because two CORS middlewares on one request would emit two
 	// Allow-Origin headers and the browser rejects that.
+	// One set per server, filled by registerRoutes below (which runs to completion
+	// before this server ever serves a request) and read-only from then on.
+	collectPaths := publicCollectSet{}
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		Skipper:      func(c echo.Context) bool { return !isPublicCollectPath(c.Request().URL.Path) },
+		Skipper:      func(c echo.Context) bool { return !collectPaths.has(c.Request().URL.Path) },
 		AllowOrigins: []string{"*"},
 		AllowMethods: []string{echo.GET, echo.POST, echo.OPTIONS},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, "X-API-Key"},
 	}))
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		Skipper:          func(c echo.Context) bool { return isPublicCollectPath(c.Request().URL.Path) },
+		Skipper:          func(c echo.Context) bool { return collectPaths.has(c.Request().URL.Path) },
 		AllowOrigins:     strings.Split(cfg.AllowedOrigins, ","),
 		AllowMethods:     []string{echo.GET, echo.POST, echo.PUT, echo.PATCH, echo.DELETE, echo.OPTIONS},
 		AllowHeaders:     []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-API-Key"},
@@ -143,6 +146,11 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	runnerOpts = append(runnerOpts,
 		agentruntime.WithWorkspaceBase(wsBase),
 		agentruntime.WithSandboxRequired(isolationRequired),
+		// A pinned folder roots the agent anywhere on the host, and is also what the
+		// sandboxed tools bind-mount read-write. That is the user's call on a
+		// self-hosted box they own; on the managed cloud the user is a tenant who
+		// signed up, so the derived layout is the only workspace they get.
+		agentruntime.WithPinnedWorkspacesDisabled(cfg.Hosted),
 	)
 	// The browser_use tool runs its persistent session in a dedicated Chrome image
 	// (separate from the computer_use doc-toolchain image); thread it so both the
@@ -232,7 +240,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)

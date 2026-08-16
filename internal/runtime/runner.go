@@ -54,6 +54,15 @@ type Runner struct {
 	// other's files, and a workspace narrower than a conversation would lose the
 	// file the user is still talking about between turns.
 	WorkspaceBase string
+	// PinnedWorkspacesDisabled ignores an agent's pinned folder and keeps every run
+	// on the derived layout under WorkspaceBase.
+	//
+	// Pinning lets a user root the agent anywhere on the host, which is the right
+	// answer when the user IS the host's operator — a self-hosted install pointed
+	// at a repository. It is the wrong answer on the managed cloud, where workspace
+	// admin is reachable by self-serve signup and the pinned directory is also
+	// bind-mounted into the sandbox read-write.
+	PinnedWorkspacesDisabled bool
 	// BrowserImage is the Chrome-capable sandbox image the browser_use tool runs
 	// its persistent session in. Empty leaves browser_use on the backend default
 	// image (which generally lacks a browser).
@@ -143,6 +152,13 @@ func WithWorkspaceBase(base string) RunnerOption {
 // isolation substrate is wired, instead of letting them run on the host.
 func WithSandboxRequired(required bool) RunnerOption {
 	return func(r *Runner) { r.SandboxRequired = required }
+}
+
+// WithPinnedWorkspacesDisabled ignores every agent's pinned folder, keeping runs
+// on the derived layout. Set on the managed cloud, where the person choosing the
+// folder is a tenant rather than the host's operator.
+func WithPinnedWorkspacesDisabled(disabled bool) RunnerOption {
+	return func(r *Runner) { r.PinnedWorkspacesDisabled = disabled }
 }
 
 // WithBrowserImage sets the Chrome-capable sandbox image the browser_use tool
@@ -318,6 +334,17 @@ type RunOptions struct {
 	// turn the returned TurnState (model / tools / system) drives the next one. nil
 	// (the default) keeps the run static.
 	PrepareNextTurn func(ctx context.Context, state agentcore.TurnState) agentcore.TurnState
+	// WorkspaceKey overrides which conversation this run's workspace belongs to,
+	// without any of SessionID's other effects.
+	//
+	// The workspace segment normally comes from SessionID, but two run shapes have
+	// no SessionID and must not therefore share one directory: a delegated run
+	// (the sub-agent runs under the PARENT's conversation, and reusing SessionID
+	// itself would collide with the parent in the LiveRegistry) and a resumed run
+	// (which continues a conversation it must still be able to read its own files
+	// from). Both set this instead. Empty falls back to SessionID, then
+	// ResumeSessionID.
+	WorkspaceKey string
 	// ResumeSessionID, when set, makes this run CONTINUE the durable session of a
 	// previous run instead of opening a fresh log: the session is the durable
 	// object, runs are attempts on it. A new run row is still created (billing,
@@ -468,12 +495,25 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if perr != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, perr
 	}
+	// Which conversation's directory this is: an explicit WorkspaceKey (delegate,
+	// resume) first, then the live conversation, then the session being resumed.
+	// Without this fallback chain every run that has no SessionID — every delegate,
+	// every resume — collapses onto the agent's single "default" directory, and two
+	// concurrent conversations delegating to the same member overwrite each other.
+	workspaceKey := opts.WorkspaceKey
+	if workspaceKey == "" {
+		workspaceKey = opts.SessionID
+	}
+	if workspaceKey == "" {
+		workspaceKey = opts.ResumeSessionID
+	}
 	runWorkspace, wserr := sandbox.WorkspaceFor(r.WorkspaceBase, sandbox.WorkspaceScope{
 		WorkspaceID:    wsID,
 		ProjectID:      opts.ProjectID,
 		AgentID:        scopeID,
-		ConversationID: opts.SessionID,
+		ConversationID: workspaceKey,
 		Pinned:         pinnedWorkspace,
+		PinDisabled:    r.PinnedWorkspacesDisabled,
 	})
 	if wserr != nil {
 		log.Printf("agentruntime: scope=%s workspace unavailable, file tools will fail closed: %v", scopeID, wserr)
@@ -514,7 +554,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 			delegates = append(delegates, subagent.Delegate{
 				Name:        target.Name,
 				Description: target.Description,
-				Run:         r.delegateRunner(opts.ProjectID, target.AgentID),
+				Run:         r.delegateRunner(opts.ProjectID, target.AgentID, workspaceKey),
 			})
 		}
 
@@ -534,7 +574,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 			// roster, board) so spawn_subagent always reaches the shown agent.
 			teams = applyDelegateNameCollisions(teams, targets)
 			delegates = mergeTeamDelegates(delegates, teams, func(agentID string) func(context.Context, string, agentcore.StreamSink) (string, agentcore.Usage, error) {
-				return r.delegateRunner(opts.ProjectID, agentID)
+				return r.delegateRunner(opts.ProjectID, agentID, workspaceKey)
 			})
 			skills = append(skills, orchestratorSkill(teams))
 			runTools = append(runTools, &teamBoardTool{store: r.Store, teams: teams})
@@ -837,13 +877,18 @@ func isBackgroundTrigger(trigger string) bool {
 // The caller's ctx flows through unchanged — cancelling the parent run cancels
 // the delegate, and the delegation depth on ctx keeps the target's own run
 // from re-delegating past the cap (A→B→A recursion bottoms out).
-func (r *Runner) delegateRunner(projectID, agentID string) func(ctx context.Context, task string, sink agentcore.StreamSink) (string, agentcore.Usage, error) {
+// workspaceKey carries the PARENT's conversation, so the sub-agent's files land
+// under that conversation rather than in the target agent's single unnamed
+// directory — where every delegate of that agent, from every chat, would
+// otherwise write on top of each other.
+func (r *Runner) delegateRunner(projectID, agentID, workspaceKey string) func(ctx context.Context, task string, sink agentcore.StreamSink) (string, agentcore.Usage, error) {
 	return func(ctx context.Context, task string, sink agentcore.StreamSink) (string, agentcore.Usage, error) {
 		_, res, err := r.execute(ctx, RunOptions{
-			ProjectID: projectID,
-			AgentID:   agentID,
-			Trigger:   "delegate",
-			Prompt:    task,
+			ProjectID:    projectID,
+			AgentID:      agentID,
+			Trigger:      "delegate",
+			Prompt:       task,
+			WorkspaceKey: workspaceKey,
 		}, sink)
 		return res.Final, res.Usage, err
 	}
@@ -969,12 +1014,22 @@ func (r *Runner) ResumeRun(ctx context.Context, userID, projectID, runID string)
 	if trigger == "" {
 		trigger = "manual"
 	}
+	// The resumed run continues a conversation, so it must land in that
+	// conversation's workspace — the files the interrupted run wrote are the
+	// context it is resuming with. run.SessionID is the original chat's
+	// conversation id (see rowSession above); the durable session id stands in
+	// when the run had none.
+	workspaceKey := run.SessionID
+	if workspaceKey == "" {
+		workspaceKey = sessionID
+	}
 	return r.Run(ctx, RunOptions{
 		ProjectID:       projectID,
 		AgentID:         agentID,
 		Trigger:         trigger,
 		Prompt:          lastUserPrompt(plan.Messages),
 		ResumeSessionID: sessionID,
+		WorkspaceKey:    workspaceKey,
 	})
 }
 

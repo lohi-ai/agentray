@@ -92,6 +92,15 @@ func (t *WebFetchTool) Name() string   { return ToolWebFetch }
 func (t *WebFetchTool) Parallel() bool { return true }
 
 func (t *WebFetchTool) Schema() agentcore.ToolSchema {
+	props := map[string]any{
+		"url": map[string]any{"type": "string", "description": "Absolute https:// URL to fetch."},
+	}
+	// Advertised only when there is a workspace behind it — a run whose workspace
+	// could not be created still gets the tool, and offering a save it must then
+	// refuse spends a real fetch to learn that.
+	if t.sink.available() {
+		props["save_as"] = saveAsParam()
+	}
 	return agentcore.ToolSchema{
 		Name: ToolWebFetch,
 		Description: "Fetch a public web page over HTTPS and return its readable text content. " +
@@ -99,12 +108,9 @@ func (t *WebFetchTool) Schema() agentcore.ToolSchema {
 			"articles, or API docs. Internal/loopback/private addresses are refused. For authenticated " +
 			"calls to a specific API, use http_request instead.",
 		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"url":     map[string]any{"type": "string", "description": "Absolute https:// URL to fetch."},
-				"save_as": saveAsParam(),
-			},
-			"required": []string{"url"},
+			"type":       "object",
+			"properties": props,
+			"required":   []string{"url"},
 		},
 	}
 }
@@ -179,16 +185,12 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 // exists to fit a page into a context window, and a file the agent is about to
 // parse should be the document the server sent, not a lossy rendering of it.
 func (t *WebFetchTool) respond(ctx context.Context, saveAs, url, status, ct string, body []byte) (string, error) {
-	if strings.TrimSpace(saveAs) == "" {
-		return formatWebFetch(url, status, ct, body), nil
-	}
 	// Equal to the limit means ReadAll stopped at the cap, so the document very
 	// likely continues past what we hold.
-	receipt, err := t.sink.save(ctx, ToolWebFetch, saveAs, body, int64(len(body)) >= t.maxBodyBytes)
-	if err != nil {
-		return "", err
-	}
-	return formatWebFetch(url, status, ct, nil) + "\n" + receipt, nil
+	truncated := int64(len(body)) >= t.maxBodyBytes
+	return t.sink.respond(ctx, ToolWebFetch, saveAs, body, truncated, func(b []byte) string {
+		return formatWebFetch(url, status, ct, b)
+	})
 }
 
 // formatWebFetch renders one fetched document for the model, identically for

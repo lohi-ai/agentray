@@ -130,20 +130,47 @@ func TestTwoConversationsDoNotShareARoot(t *testing.T) {
 // order it works in: unsafe bytes fold to dashes FIRST, so a segment that only
 // becomes a dot-reference after folding is still caught.
 func TestSafeSegmentFoldsRatherThanRejects(t *testing.T) {
+	// An id that is already safe and short passes through untouched — the common
+	// case, and what keeps a directory listing readable.
 	for in, want := range map[string]string{
-		"":                       unnamedSegment,
-		"   ":                    unnamedSegment,
-		".":                      unnamedSegment,
-		"..":                     unnamedSegment,
-		"...":                    unnamedSegment,
-		"ok-id_1.2":              "ok-id_1.2",
-		"a/b":                    "a-b",
-		"a\\b":                   "a-b",
-		"café":                   "caf-", // one multi-byte rune folds to one dash
-		strings.Repeat("x", 200): strings.Repeat("x", maxSegmentLen),
+		"":          unnamedSegment,
+		"   ":       unnamedSegment,
+		".":         unnamedSegment,
+		"..":        unnamedSegment,
+		"...":       unnamedSegment,
+		"ok-id_1.2": "ok-id_1.2",
 	} {
 		if got := safeSegment(in); got != want {
 			t.Fatalf("safeSegment(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Anything that had to be changed keeps a readable prefix and gains a hash of
+	// the original, so the fold stays legible without becoming many-to-one.
+	for _, in := range []string{"a/b", "a\\b", "café", strings.Repeat("x", 200)} {
+		got := safeSegment(in)
+		if len(got) > maxSegmentLen {
+			t.Errorf("safeSegment(%q) = %q, longer than %d", in, got, maxSegmentLen)
+		}
+		if strings.ContainsAny(got, `/\`) {
+			t.Errorf("safeSegment(%q) = %q, still contains a separator", in, got)
+		}
+	}
+}
+
+// TestSafeSegmentIsInjective is the other half of the isolation promise: folding
+// and truncation are both many-to-one, so without a disambiguator two distinct
+// conversation ids would land in one directory and overwrite each other's files.
+// ConversationID is client-supplied, which makes the collision reachable rather
+// than theoretical.
+func TestSafeSegmentIsInjective(t *testing.T) {
+	long := strings.Repeat("c", maxSegmentLen)
+	for _, pair := range [][2]string{
+		{"a/b", "a-b"},             // different ids, same fold
+		{"conv:1", "conv-1"},       // the shape a client actually produces
+		{long + "-1", long + "-2"}, // agree on the first maxSegmentLen bytes
+	} {
+		if a, b := safeSegment(pair[0]), safeSegment(pair[1]); a == b {
+			t.Errorf("safeSegment(%q) and safeSegment(%q) both = %q", pair[0], pair[1], a)
 		}
 	}
 }
@@ -221,5 +248,26 @@ func TestResolvePinnedWorkspaceExpandsHome(t *testing.T) {
 	}
 	if strings.Contains(got, "~") || !filepath.IsAbs(got) {
 		t.Fatalf("~ was not expanded to an absolute path: %q", got)
+	}
+}
+
+// TestPinningCanBeDisabled covers the hosted deployment: the pinned column is
+// still populated (a row written on a self-host, or before this existed), and
+// the run must fall back to the derived layout rather than rooting the agent
+// wherever that value points.
+func TestPinningCanBeDisabled(t *testing.T) {
+	base := resolvedTempDir(t)
+	pinned := filepath.Join(resolvedTempDir(t), "somebody-elses-folder")
+
+	ws, err := WorkspaceFor(base, WorkspaceScope{
+		WorkspaceID: "ws", ProjectID: "p", AgentID: "a", ConversationID: "c",
+		Pinned:      pinned,
+		PinDisabled: true,
+	})
+	if err != nil {
+		t.Fatalf("WorkspaceFor: %v", err)
+	}
+	if want := filepath.Join(base, "ws", "p", "a", "c"); ws.Root() != want {
+		t.Fatalf("a disabled pin still escaped the base:\n got %q\nwant %q", ws.Root(), want)
 	}
 }

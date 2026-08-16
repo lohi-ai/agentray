@@ -118,7 +118,7 @@ func (s *Store) ListWorkspaceAgents(ctx context.Context, userID, workspaceID str
 		return nil, errAgentForbidden
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, slug, is_default, enabled, autonomy, created_at, updated_at
+SELECT id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at
 FROM agents WHERE workspace_id = $1 ORDER BY is_default DESC, name ASC`, workspaceID)
 	if err != nil {
 		return nil, err
@@ -127,7 +127,7 @@ FROM agents WHERE workspace_id = $1 ORDER BY is_default DESC, name ASC`, workspa
 	out := make([]Agent, 0)
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

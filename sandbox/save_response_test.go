@@ -89,8 +89,24 @@ func TestSaveAsCannotEscapeTheWorkspace(t *testing.T) {
 	tool.AllowAllIPsForTest()
 
 	for _, rel := range []string{"../escape.txt", "/etc/passwd", "a/../../escape.txt"} {
-		if _, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`","save_as":"`+rel+`"}`); err == nil {
-			t.Errorf("save_as %q was accepted; it must be refused", rel)
+		out, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`","save_as":"`+rel+`"}`)
+		if err != nil {
+			t.Fatalf("save_as %q: unexpected transport error: %v", rel, err)
+		}
+		// The write is refused — that is the security property. What the model gets
+		// back is the fetched body plus a loud failure, because the request has
+		// already been sent and hiding its result invites a retry of it.
+		if !strings.Contains(out, "save_as FAILED") {
+			t.Errorf("save_as %q was accepted; it must be refused: %q", rel, out)
+		}
+	}
+	// Nothing may have landed next to the workspace.
+	for _, abs := range []string{
+		filepath.Join(filepath.Dir(ws.Root()), "escape.txt"),
+		"/etc/passwd_agentray_probe",
+	} {
+		if _, err := os.Stat(abs); err == nil {
+			t.Errorf("%s was written outside the workspace", abs)
 		}
 	}
 }
@@ -104,10 +120,23 @@ func TestSaveAsWithoutAWorkspaceFailsLoudly(t *testing.T) {
 	tool := NewWebFetchTool(nil, nil)
 	tool.AllowAllIPsForTest()
 
-	// Returning the body inline instead would look like success and break the
-	// agent's next step, which is a read of a file that was never written.
-	if _, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`","save_as":"x.txt"}`); err == nil {
-		t.Fatal("save_as with no workspace must fail rather than quietly returning the body")
+	// Without a workspace the parameter is not offered at all, so the model has no
+	// reason to send it.
+	if props, ok := tool.Schema().Parameters["properties"].(map[string]any); !ok {
+		t.Fatal("schema has no properties map")
+	} else if _, offered := props["save_as"]; offered {
+		t.Error("save_as is advertised by a tool that has no workspace to save into")
+	}
+
+	// And if one sends it anyway, the answer says so. Quietly returning the body
+	// as though it had been saved would break the agent's next step, which is a
+	// read of a file that was never written.
+	out, err := tool.Run(context.Background(), `{"url":"`+srv.URL+`","save_as":"x.txt"}`)
+	if err != nil {
+		t.Fatalf("web_fetch Run: %v", err)
+	}
+	if !strings.Contains(out, "save_as FAILED") {
+		t.Fatalf("save_as with no workspace must say so, got %q", out)
 	}
 }
 

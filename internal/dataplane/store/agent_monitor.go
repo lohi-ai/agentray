@@ -36,6 +36,7 @@ type AgentMonitorRow struct {
 const monitorSelect = `
 SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
        coalesce((SELECT autonomy FROM agent_configs c WHERE c.project_id = a.project_id), 'suggest') AS autonomy,
+       a.workspace_path,
        a.created_at, a.updated_at,
        count(r.id) AS run_count,
        count(r.id) FILTER (WHERE r.status = 'running') AS running_count,
@@ -48,11 +49,11 @@ FROM agents a
 LEFT JOIN agent_runs r ON coalesce(r.agent_id, r.project_id) = a.id`
 
 const monitorGroupBy = `
-GROUP BY a.id, a.project_id, a.name, a.slug, a.is_default, a.enabled, a.created_at, a.updated_at`
+GROUP BY a.id, a.project_id, a.name, a.slug, a.is_default, a.enabled, a.workspace_path, a.created_at, a.updated_at`
 
 func scanMonitorRow(row pgx.Row) (AgentMonitorRow, error) {
 	var m AgentMonitorRow
-	err := row.Scan(&m.ID, &m.ProjectID, &m.Name, &m.Slug, &m.IsDefault, &m.Enabled, &m.Autonomy, &m.CreatedAt, &m.UpdatedAt,
+	err := row.Scan(&m.ID, &m.ProjectID, &m.Name, &m.Slug, &m.IsDefault, &m.Enabled, &m.Autonomy, &m.WorkspacePath, &m.CreatedAt, &m.UpdatedAt,
 		&m.RunCount, &m.RunningCount, &m.ErrorCount, &m.TokenInput, &m.TokenOutput, &m.CostUSD, &m.LastRunAt)
 	return m, err
 }

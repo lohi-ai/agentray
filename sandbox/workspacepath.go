@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,6 +73,17 @@ type WorkspaceScope struct {
 	// that it names a real place — so it is only ever set from an authenticated
 	// operator's configuration, never from anything the model can write.
 	Pinned string
+
+	// PinDisabled refuses Pinned and falls back to the derived layout.
+	//
+	// "The user's call" is only the right default when the user setting the path
+	// is the person who owns the host. On a hosted, multi-tenant deployment they
+	// are not: workspace owner/admin is reachable by self-serve signup, so an
+	// unconfined pin would hand a tenant the host filesystem — read via the file
+	// tools, and read-write via the bind mount the sandboxed tools take on
+	// Workspace.Root(). It is re-checked here rather than only where the value is
+	// saved, because a row written before this existed is still in the database.
+	PinDisabled bool
 }
 
 // DefaultWorkspaceBase is ~/.agentray/workspaces — where agent files live when
@@ -99,7 +112,7 @@ func DefaultWorkspaceBase() (string, error) {
 // path rather than trusted from the sanitizer, because the cost of being wrong
 // here is an agent with a writable root anywhere on the host.
 func WorkspaceFor(base string, scope WorkspaceScope) (*Workspace, error) {
-	if pinned := strings.TrimSpace(scope.Pinned); pinned != "" {
+	if pinned := strings.TrimSpace(scope.Pinned); pinned != "" && !scope.PinDisabled {
 		root, err := ResolvePinnedWorkspace(pinned)
 		if err != nil {
 			return nil, err
@@ -179,6 +192,13 @@ func ResolvePinnedWorkspace(path string) (string, error) {
 // The dot cases are handled after folding, not before, because "..%2f" and its
 // relatives fold INTO dots — checking first would pass a segment that only
 // becomes "‥" once the unsafe bytes are replaced.
+//
+// Folding and truncation are both many-to-one, and the layout's whole promise is
+// that two conversations cannot share a directory: "a/b" and "a-b" both fold to
+// "a-b", and any two ids agreeing on their first maxSegmentLen safe bytes
+// truncate to the same thing. So whenever the result is not already the input,
+// a hash of the FULL original is appended — the segment stays readable, and
+// distinct ids stay distinct.
 func safeSegment(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -195,13 +215,18 @@ func safeSegment(s string) string {
 		}
 	}
 	out := b.String()
-	if len(out) > maxSegmentLen {
-		out = out[:maxSegmentLen]
-	}
 	// "." and ".." are directory references, not names, and a segment of nothing
 	// but dots is one of them however long it is.
 	if strings.Trim(out, ".") == "" {
 		return unnamedSegment
 	}
-	return out
+	if out == s && len(out) <= maxSegmentLen {
+		return out
+	}
+	sum := sha256.Sum256([]byte(s))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	if len(out) > maxSegmentLen-len(suffix) {
+		out = out[:maxSegmentLen-len(suffix)]
+	}
+	return out + suffix
 }

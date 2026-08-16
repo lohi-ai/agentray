@@ -31,7 +31,9 @@ const detachedRunCeiling = 10 * time.Minute
 // registerAgentRoutes wires the AI-agent surface (§8, §14.10): config +
 // definition + skills + memory CRUD, a key test, interactive chat, run history,
 // recommendations, and a manual run trigger.
-func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
+// hosted marks the managed cloud (config.Hosted). Here it gates workspace
+// pinning, which hands its chooser a folder on the host.
+func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
 	registerWorkspaceProviderRoutes(e, store)
 	// --- config ---
 	e.GET("/api/agent/config", func(c echo.Context) error {
@@ -496,6 +498,13 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// typed it, rather than letting a typo surface days later as a tool failure
 		// inside a run.
 		if payload.WorkspacePath != nil && strings.TrimSpace(*payload.WorkspacePath) != "" {
+			// Pinning names a folder on the host, and the sandboxed file tools
+			// bind-mount it read-write. That is a choice only the host's operator can
+			// make: on the managed cloud, workspace admin is one self-serve signup
+			// away, so the answer is no rather than a validated path.
+			if hosted {
+				return echo.NewHTTPError(http.StatusForbidden, "a workspace folder can only be pinned on a self-hosted deployment")
+			}
 			resolved, rerr := sandbox.ResolvePinnedWorkspace(*payload.WorkspacePath)
 			if rerr != nil {
 				return echo.NewHTTPError(http.StatusBadRequest, rerr.Error())

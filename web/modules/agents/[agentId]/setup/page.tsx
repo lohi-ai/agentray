@@ -6,7 +6,7 @@ import { ArrowLeft, Clock, Copy, Cpu, ShieldCheck, Sparkles, Trash2, UserCog, Us
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { Selector } from '@astryxdesign/core/Selector';
-import { AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
+import { type Agent, AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
 import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgents, useAgentTaskTiers } from '@/modules/agent/hooks';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
@@ -106,11 +106,14 @@ function PersonaTab({ agentID }: { agentID: string }) {
 // these tools act?" — the question a person asks the moment they turn on
 // "Write file". Leaving it blank is the good default (a private folder per
 // conversation); filling it in points the agent at work that already exists.
-function WorkspaceFolderPanel({ agentID }: { agentID: string }) {
-  const { agents, updateAgent } = useAgents();
-  const agent = agents.find((a) => a.id === agentID);
+// The agent comes from the page, which has already resolved it — reading it back
+// out of the project-wide list query instead would make the panel depend on a
+// second fetch that can be empty, and a save is not something to offer before
+// there is a row to save into.
+function WorkspaceFolderPanel({ agent }: { agent: Agent }) {
+  const { updateAgent } = useAgents();
   const [draft, setDraft] = useState<string | null>(null);
-  const value = draft ?? agent?.workspace_path ?? '';
+  const value = draft ?? agent.workspace_path ?? '';
 
   return (
     <Panel title="Workspace folder">
@@ -129,11 +132,11 @@ function WorkspaceFolderPanel({ agentID }: { agentID: string }) {
           width="100%"
         />
         <div className="mt-2 flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => { if (agent) void updateAgent(agent.id, agent.name, agent.enabled, value.trim()); }}>
+          <Button variant="outline" size="sm" onClick={() => void updateAgent(agent.id, agent.name, agent.enabled, value.trim())}>
             Save folder
           </Button>
           {value.trim() ? (
-            <Button variant="ghost" size="sm" onClick={() => { setDraft(''); if (agent) void updateAgent(agent.id, agent.name, agent.enabled, ''); }}>
+            <Button variant="ghost" size="sm" onClick={() => { setDraft(''); void updateAgent(agent.id, agent.name, agent.enabled, ''); }}>
               Use a folder per conversation
             </Button>
           ) : null}
@@ -145,7 +148,8 @@ function WorkspaceFolderPanel({ agentID }: { agentID: string }) {
 
 // --- Tools: which capabilities the agent is allowed to use. Configurable tools
 // (e.g. web requests) take a small JSON config; the server validates it on enable.
-function ToolsTab({ agentID }: { agentID: string }) {
+function ToolsTab({ agent }: { agent: Agent }) {
+  const agentID = agent.id;
   const { catalog, selections, toolsLoading, setTool, clearTool } = useAgentBuild(agentID);
   const [configs, setConfigs] = useState<Record<string, string>>({});
 
@@ -157,7 +161,7 @@ function ToolsTab({ agentID }: { agentID: string }) {
   return (
     <div className="flex flex-col gap-[14px]">
       <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Turn on only what this teammate needs. Each tool is a thing the agent can do on your behalf — keeping the list tight keeps it predictable.</p>
-      <WorkspaceFolderPanel agentID={agentID} />
+      <WorkspaceFolderPanel agent={agent} />
       {catalog.map((tool) => {
         const sel = selByName.get(tool.name);
         const on = !!sel?.enabled;
@@ -676,7 +680,7 @@ export function AgentSetupPage() {
       />
       <div className="mb-3.5"><Segment options={TABS.map((t) => ({ value: t.value, label: t.label }))} value={tab} onChange={setTab} /></div>
       {tab === 'persona' ? <PersonaTab agentID={agentID} /> : null}
-      {tab === 'tools' ? <ToolsTab agentID={agentID} /> : null}
+      {tab === 'tools' ? <ToolsTab agent={agent} /> : null}
       {tab === 'teammates' ? <TeammatesTab agentID={agentID} /> : null}
       {tab === 'permissions' ? <PermissionsTab agentID={agentID} /> : null}
       {tab === 'triggers' ? <TriggersTab agentID={agentID} /> : null}

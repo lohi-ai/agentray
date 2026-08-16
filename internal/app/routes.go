@@ -15,37 +15,44 @@ import (
 	"github.com/lohi-ai/agentray/internal/runtime"
 )
 
-// publicCollectPaths are the endpoints a customer's own page calls directly:
+// publicCollectSet is the set of endpoints a customer's own page calls directly:
 // event ingest and the waitlist. They authenticate by project API key and never
 // read a cookie, so they take permissive CORS (see app.go).
 //
-// It is populated only by publicCollect below, never written by hand. A
-// hand-kept list beside the mounts drifts the moment someone adds a route and
-// forgets it — and that failure is invisible everywhere except a real customer's
-// browser, since a Go test and a curl both send no Origin and pass either way.
-var publicCollectPaths = map[string]bool{}
+// It is populated only by collect below, never written by hand. A hand-kept list
+// beside the mounts drifts the moment someone adds a route and forgets it — and
+// that failure is invisible everywhere except a real customer's browser, since a
+// Go test and a curl both send no Origin and pass either way.
+//
+// It belongs to one server rather than to the package: registration writes it
+// and the CORS middleware reads it on every request, so a second server built
+// while the first is serving would be a concurrent map read and write — which is
+// a fatal runtime error, not a recoverable panic. Per-instance, every write
+// happens in registerRoutes before that instance serves anything.
+type publicCollectSet map[string]bool
 
-// publicCollect mounts a collection endpoint and classifies it in the same
-// statement, so the CORS class is a property of the mount rather than of a list
-// that can fall behind it.
-func publicCollect(e *echo.Echo, method, path string, handler echo.HandlerFunc, mw ...echo.MiddlewareFunc) {
-	publicCollectPaths[path] = true
+// collect mounts a collection endpoint and classifies it in the same statement,
+// so the CORS class is a property of the mount rather than of a list that can
+// fall behind it.
+func (s publicCollectSet) collect(e *echo.Echo, method, path string, handler echo.HandlerFunc, mw ...echo.MiddlewareFunc) {
+	s[path] = true
 	e.Add(method, path, handler, mw...)
 }
 
-func isPublicCollectPath(path string) bool { return publicCollectPaths[path] }
+func (s publicCollectSet) has(path string) bool { return s[path] }
 
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
+	publicCollect := collectPaths.collect
 
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
 	})
 
-	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, runnerOpts...)
+	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)

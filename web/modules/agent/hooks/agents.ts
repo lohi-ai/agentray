@@ -21,6 +21,15 @@ export function useAgents() {
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['agents', projectID] });
+  // An agent's name, enabled flag, and workspace folder are all shown by the
+  // monitor surfaces too, and the setup page reads its agent from the detail
+  // query rather than from the list — so a write that only refreshed the list
+  // would leave the page the user is looking at showing what they just changed.
+  const invalidateAgentViews = () => {
+    invalidate();
+    queryClient.invalidateQueries({ queryKey: ['agent-monitor', projectID] });
+    queryClient.invalidateQueries({ queryKey: ['agent-monitor-detail', projectID] });
+  };
   const onErr = (e: Error) => setError(e.message);
 
   const createAgent = useMutation({
@@ -32,13 +41,13 @@ export function useAgents() {
   const updateAgent = useMutation({
     mutationFn: (vars: { id: string; name: string; enabled: boolean; workspacePath?: string }) =>
       client().updateAgent(vars.id, vars.name, vars.enabled, vars.workspacePath),
-    onSuccess: () => { setMessage('Agent saved'); invalidate(); },
+    onSuccess: () => { setMessage('Agent saved'); invalidateAgentViews(); },
     onError: onErr,
   });
 
   const removeAgent = useMutation({
     mutationFn: (id: string) => client().deleteAgent(id),
-    onSuccess: () => { setMessage('Agent deleted'); invalidate(); },
+    onSuccess: () => { setMessage('Agent deleted'); invalidateAgentViews(); },
     onError: onErr,
   });
 
