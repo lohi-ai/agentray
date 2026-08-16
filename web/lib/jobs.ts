@@ -339,8 +339,11 @@ export function jobSteps(job: JobDef, state: JobState): JobStep[] {
   return steps;
 }
 
-export function nextStep(job: JobDef, state: JobState): JobStep | null {
-  return jobSteps(job, state).find((step) => !step.done) ?? null;
+// nextStep takes the already-built list rather than rebuilding it, so the panel
+// that renders the checklist and the rule that picks its next action are looking
+// at the same objects.
+export function nextStep(steps: JobStep[]): JobStep | null {
+  return steps.find((step) => !step.done) ?? null;
 }
 
 // jobProgress is done-count / total, for the one-glance strip on the picker.

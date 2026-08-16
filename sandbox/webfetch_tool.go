@@ -182,7 +182,9 @@ func (t *WebFetchTool) respond(ctx context.Context, saveAs, url, status, ct stri
 	if strings.TrimSpace(saveAs) == "" {
 		return formatWebFetch(url, status, ct, body), nil
 	}
-	receipt, err := t.sink.save(ctx, ToolWebFetch, saveAs, body)
+	// Equal to the limit means ReadAll stopped at the cap, so the document very
+	// likely continues past what we hold.
+	receipt, err := t.sink.save(ctx, ToolWebFetch, saveAs, body, int64(len(body)) >= t.maxBodyBytes)
 	if err != nil {
 		return "", err
 	}

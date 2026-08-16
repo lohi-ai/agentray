@@ -497,3 +497,30 @@ func TestRenderTranscriptSkipsCommandTurns(t *testing.T) {
 		t.Fatalf("transcript = %q", got)
 	}
 }
+
+// A forced /compact must keep the most recent real exchange live. The `/compact`
+// line is itself persisted as a user message and is the newest one when this
+// runs, so a cut-point rule that only asks "is this a user message" lands on the
+// command and folds the entire conversation — including the turn the user is
+// looking at — into the summary.
+func TestForcedCompactKeepsTheLastRealExchange(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "what does the funnel look like"),
+		msgEntry("2", "assistant", "Signups are flat week over week."),
+		msgEntry("3", "user", "and the week before that"),
+		msgEntry("4", "assistant", "Up 12%."),
+		cmdEntry("5", "user", "/compact"),
+	}
+	for i := range entries {
+		entries[i].TokenEstimate = 100
+	}
+
+	plan := planCompaction(entries, 0, true)
+	if !plan.ok {
+		t.Fatal("forced compaction produced no plan")
+	}
+	if plan.firstKept != 2 {
+		t.Fatalf("cut landed at entry index %d, want 2 (the last real user turn); "+
+			"cutting later folds the exchange the user is looking at into the summary", plan.firstKept)
+	}
+}

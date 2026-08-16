@@ -8,6 +8,7 @@
 // projection — there is no separate attachment channel to fall out of sync.
 
 import type { AgentSkill } from '@/lib/api';
+import { parseCommandLine } from './commands';
 
 // Caps keep an attachment from blowing past the model's context (and from dumping
 // a megabyte into a chat bubble). Text-only by design — the runtime has no vision
@@ -101,16 +102,9 @@ export function composeMessage(
     .trim();
 
   // Now split a leading command line off what remains.
-  let command = '';
-  let body = stripped;
-  if (stripped.startsWith('/')) {
-    const [line, ...rest] = stripped.split('\n');
-    const word = line.trim().split(' ')[0].slice(1).toLowerCase();
-    if (commandNames.includes(word)) {
-      command = line.trim().replace(/\s+/g, ' ');
-      body = rest.join('\n');
-    }
-  }
+  const parsed = parseCommandLine(stripped, commandNames);
+  const command = parsed?.line ?? '';
+  const body = parsed ? parsed.rest : stripped;
 
   const directives = [...picked.values()].map(SKILL_DIRECTIVE);
   const blocks = attachments.map(fileBlock);
@@ -149,16 +143,11 @@ export function parseRichMessage(message: string, commandNames: string[] = []): 
 
   let command: string | undefined;
   let commandArg: string | undefined;
-  const trimmed = rest.trim();
-  if (trimmed.startsWith('/')) {
-    const [line, ...after] = trimmed.split('\n');
-    const [word, ...argWords] = line.trim().split(' ');
-    const name = word.slice(1).toLowerCase();
-    if (commandNames.includes(name)) {
-      command = name;
-      commandArg = argWords.join(' ').trim().replace(/^["']|["']$/g, '');
-      rest = after.join('\n');
-    }
+  const parsed = parseCommandLine(rest, commandNames);
+  if (parsed) {
+    command = parsed.name;
+    commandArg = parsed.arg;
+    rest = parsed.rest;
   }
 
   const skills: string[] = [];

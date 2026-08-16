@@ -103,14 +103,21 @@ Important properties:
   request is made from inside a container, because the egress proxy applies the
   same IP guard the host dialer does;
 - every constructor in the `sandbox` package takes an `agentcore.Sandbox` and
-  tolerates `nil`, which runs the tool on the host machine instead. That is a
-  capability for embedded and local consumers of the package, **not** something
-  this control plane exposes: `internal/runtime` still refuses to build
-  `run_shell`, `computer_use` and `browser_use` without a sandbox, so a hosted
-  deployment never gains a host shell by omission. `HostSandbox` keeps what a
-  plain process can keep of the contract — only the declared env is visible, the
-  workspace is the working directory, the timeout hard-kills — and enforces
-  none of the filesystem, network or resource caps.
+  tolerates `nil`, which runs the tool on the host machine instead. `HostSandbox`
+  keeps what a plain process can keep of the contract — only the declared env is
+  visible, the workspace is the working directory, the timeout hard-kills — and
+  enforces **none** of the filesystem, network or resource caps in the table
+  above. The isolation rows describe the sandboxed path only.
+  `config.SandboxRequired` decides which path a deployment gets, and it defaults
+  to `config.Hosted`: a single-operator self-host runs `run_shell` on the machine
+  its owner already trusts rather than demanding Docker before the first agent
+  works, while **a hosted, multi-tenant deployment still never gains a host shell
+  by omission** — the default follows the deployment shape, so no one has to
+  remember a second env var for the install where forgetting it matters. It also
+  fails closed the other way: an operator who set `AGENTRAY_SANDBOX_ENABLED` and
+  whose Docker turned out to be unreachable gets the tools **withheld**, not
+  moved to the host (`internal/app/app.go`), because "someone forgot to wire
+  Docker" and "this operator chose host execution" must not be the same outcome.
 
 ## AgentGarden and teams
 

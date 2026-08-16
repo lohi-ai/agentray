@@ -62,19 +62,26 @@ export function useCommandNames() {
 // The client parses at all for one reason: to render the user's bubble as the
 // command it was, and to know when a turn will be answered instantly. It never
 // decides what happens; that already happened on the server.
+// It takes the catalog as plain names so every caller can reach it — the
+// composer holds full commands, the message encoder and decoder hold only names.
+// One function, or the rule quietly forks and a chip renders one way while being
+// typed and another way after a reload.
 export function parseCommandLine(
   message: string,
-  commands: AgentChatCommand[],
-): { name: string; arg: string; rest: string } | null {
+  commands: readonly string[],
+): { name: string; line: string; arg: string; rest: string } | null {
   const trimmed = message.trim();
   if (!trimmed.startsWith('/')) return null;
   const [line, ...restLines] = trimmed.split('\n');
   const [word, ...argWords] = line.trim().split(' ');
   const name = word.slice(1).toLowerCase();
-  if (!commands.some((c) => c.name === name)) return null;
+  if (!commands.includes(name)) return null;
   return {
     name,
+    // The command line as typed, whitespace normalized — what the user bubble
+    // shows back.
+    line: line.trim().replace(/\s+/g, ' '),
     arg: argWords.join(' ').trim().replace(/^["']|["']$/g, ''),
-    rest: restLines.join('\n').trim(),
+    rest: restLines.join('\n'),
   };
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -281,6 +282,12 @@ type TestProgress struct {
 	// when the test names none.
 	Baseline int `json:"baseline_count"`
 	// DaysElapsed / DaysLeft are whole days against the committed window.
+	//
+	// DaysLeft rounds UP: any time still on the clock has to read as at least
+	// one day, because Verdict() keys `failed` off it reaching zero. Truncating
+	// would call a test dead while twenty-three hours of its window were still
+	// open — and a signup arriving in that last day is exactly the one a
+	// borderline test is decided by.
 	DaysElapsed int `json:"days_elapsed"`
 	DaysLeft    int `json:"days_left"`
 }
@@ -301,7 +308,7 @@ func (s *Store) ValidationTestProgress(ctx context.Context, t ValidationTest) (T
 	if p.DaysElapsed < 0 {
 		p.DaysElapsed = 0
 	}
-	p.DaysLeft = int(until.Sub(now).Hours() / 24)
+	p.DaysLeft = int(math.Ceil(until.Sub(now).Hours() / 24))
 	if p.DaysLeft < 0 {
 		p.DaysLeft = 0
 	}
@@ -361,9 +368,11 @@ func (p TestProgress) Verdict() string {
 // — it updates the row's context and returns the original, so the count stays a
 // count of people.
 //
-// It returns the row and whether it was new, because only a new one deserves an
-// event: counting a double-click as two joins would inflate the very number the
-// threshold is judged against.
+// It returns the row and whether this submit was a JOIN — a first insert, or a
+// return after unsubscribing — because only a join deserves an event: counting a
+// double-click as two would inflate the very number the threshold is judged
+// against, and not counting a genuine return would lose a real signup the
+// subscriber count has already gained.
 func (s *Store) AddWaitlistSignup(ctx context.Context, sn WaitlistSignup) (WaitlistSignup, bool, error) {
 	email := strings.TrimSpace(sn.Email)
 	key := strings.ToLower(email)
@@ -373,8 +382,17 @@ func (s *Store) AddWaitlistSignup(ctx context.Context, sn WaitlistSignup) (Waitl
 	// The cap bounds NEW addresses only: someone already on the list may always
 	// re-submit (that path writes no new row), because refusing them would look
 	// to them like the form is broken.
+	//
+	// It counts SUBSCRIBED rows, the same population CountWaitlistSignups
+	// reports, so the cap and the readout can never disagree: a project whose
+	// list emptied itself through unsubscribes must not read as full while the
+	// owner's scoreboard shows zero. The probe stops at the cap rather than
+	// aggregating the whole table, because this runs on a public endpoint.
 	var count int
-	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM waitlist_signups WHERE project_id = $1`, sn.ProjectID).Scan(&count); err != nil {
+	if err := s.pg.QueryRow(ctx, `
+SELECT count(*) FROM (
+	SELECT 1 FROM waitlist_signups WHERE project_id = $1 AND status = 'subscribed' LIMIT $2
+) capped`, sn.ProjectID, waitlistCap).Scan(&count); err != nil {
 		return WaitlistSignup{}, false, err
 	}
 	if count >= waitlistCap {
@@ -393,24 +411,43 @@ SELECT EXISTS(SELECT 1 FROM waitlist_signups WHERE project_id = $1 AND email_key
 		return WaitlistSignup{}, false, err
 	}
 	var out WaitlistSignup
-	var inserted bool
+	var joined bool
+	// `prev` is read from the snapshot taken before the upsert runs, which is the
+	// only way to see the status the row had on arrival — a RETURNING clause on
+	// DO UPDATE reports the row as it now is. It is what makes "did this person
+	// just join" answerable: a first insert and a return after unsubscribing are
+	// both joins, a double-click on a live subscription is not.
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO waitlist_signups (project_id, email, email_key, source, referrer, distinct_id, consent_text, unsubscribe_token)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (project_id, email_key) DO UPDATE SET
-	source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE waitlist_signups.source END,
-	referrer = CASE WHEN excluded.referrer <> '' THEN excluded.referrer ELSE waitlist_signups.referrer END,
-	distinct_id = CASE WHEN excluded.distinct_id <> '' THEN excluded.distinct_id ELSE waitlist_signups.distinct_id END
-RETURNING id::text, project_id::text, email, source, referrer, distinct_id, consent_text, status, created_at,
-	(xmax = 0) AS inserted, unsubscribe_token`,
+WITH prev AS (
+	SELECT status FROM waitlist_signups WHERE project_id = $1 AND email_key = $3
+), up AS (
+	INSERT INTO waitlist_signups (project_id, email, email_key, source, referrer, distinct_id, consent_text, unsubscribe_token)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	ON CONFLICT (project_id, email_key) DO UPDATE SET
+		source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE waitlist_signups.source END,
+		referrer = CASE WHEN excluded.referrer <> '' THEN excluded.referrer ELSE waitlist_signups.referrer END,
+		distinct_id = CASE WHEN excluded.distinct_id <> '' THEN excluded.distinct_id ELSE waitlist_signups.distinct_id END,
+		-- Re-submitting the form is a subscribe. Without this, someone who left and
+		-- came back stays 'unsubscribed' forever while the page tells them they are
+		-- on the list — the one state where the product's answer and its data
+		-- disagree, and the owner's count silently loses a real signup.
+		status = 'subscribed'
+	RETURNING id::text AS id, project_id::text AS project_id, email, source, referrer, distinct_id,
+		consent_text, status, created_at, (xmax = 0) AS inserted, unsubscribe_token
+)
+SELECT up.id, up.project_id, up.email, up.source, up.referrer, up.distinct_id, up.consent_text,
+	up.status, up.created_at,
+	(up.inserted OR COALESCE(prev.status, '') = 'unsubscribed') AS joined,
+	up.unsubscribe_token
+FROM up LEFT JOIN prev ON true`,
 		sn.ProjectID, email, key, sn.Source, sn.Referrer, sn.DistinctID, sn.ConsentText, token).
 		Scan(&out.ID, &out.ProjectID, &out.Email, &out.Source, &out.Referrer, &out.DistinctID,
-			&out.ConsentText, &out.Status, &out.CreatedAt, &inserted, &token)
+			&out.ConsentText, &out.Status, &out.CreatedAt, &joined, &token)
 	if err != nil {
 		return WaitlistSignup{}, false, err
 	}
 	out.UnsubscribeToken = token
-	return out, inserted, nil
+	return out, joined, nil
 }
 
 // UnsubscribeWaitlist honours a removal request from the address itself, via the
@@ -457,6 +494,68 @@ FROM waitlist_signups WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`, 
 		out = append(out, sn)
 	}
 	return out, rows.Err()
+}
+
+// ExportWaitlistSignups walks the WHOLE list, oldest first, in keyset pages.
+//
+// The listing above is a screenful and is right to be capped. An export is the
+// opposite promise: an owner who mails a launch announcement to the file this
+// produces has to be mailing all of it. A silent LIMIT there would hand them a
+// slice of their own contacts with nothing on the page or in the file saying so
+// — and they would find out from the people who never heard from them.
+//
+// It carries the unsubscribe token, because the owner is the one who sends the
+// mail this list is for and every message needs a way out. That is the token's
+// only exit from the server: an authenticated request from the account that
+// owns the row, never the public form response.
+func (s *Store) ExportWaitlistSignups(ctx context.Context, userID, projectID string, yield func(WaitlistSignup) error) error {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return err
+	}
+	const page = 500
+	var cursor time.Time
+	var cursorID string
+	for {
+		rows, err := s.pg.Query(ctx, `
+SELECT id::text, project_id::text, email, source, referrer, distinct_id, consent_text, status, created_at, unsubscribe_token
+FROM waitlist_signups
+WHERE project_id = $1 AND ($2::timestamptz IS NULL OR (created_at, id::text) > ($2, $3))
+ORDER BY created_at, id::text LIMIT $4`, project.ID, nullableTime(cursor), cursorID, page)
+		if err != nil {
+			return err
+		}
+		n := 0
+		for rows.Next() {
+			var sn WaitlistSignup
+			if err := rows.Scan(&sn.ID, &sn.ProjectID, &sn.Email, &sn.Source, &sn.Referrer,
+				&sn.DistinctID, &sn.ConsentText, &sn.Status, &sn.CreatedAt, &sn.UnsubscribeToken); err != nil {
+				rows.Close()
+				return err
+			}
+			if err := yield(sn); err != nil {
+				rows.Close()
+				return err
+			}
+			cursor, cursorID = sn.CreatedAt, sn.ID
+			n++
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if n < page {
+			return nil
+		}
+	}
+}
+
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 // CountWaitlistSignups counts subscribed addresses — the number the threshold is

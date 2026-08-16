@@ -24,7 +24,7 @@ import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components
 import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
-import { CommandNames, useChatCommands } from './commands';
+import { CommandNames, parseCommandLine, useChatCommands } from './commands';
 import { WorkPanel, type PanelTab } from './chat-panel';
 import { useChatThreads, isDraft, mergeDelta, syncSeq, syncTailID } from './use-chat-threads';
 import { applyToolTrace, applyToolUpdate, serverToolStep, settleOrphanSteps } from './tool-steps';
@@ -559,11 +559,15 @@ export function ChatPage() {
     if (!prompt) return;
     // The composer stays live during a run so the user can redirect the agent
     // instead of waiting it out. Draft threads have no live run to steer.
+    // One parse of the command rule for this whole function, from the module that
+    // owns the rule. Re-deriving it inline is how the composer and the reloaded
+    // transcript end up disagreeing about what the user typed.
+    const parsed = parseCommandLine(prompt, commandNames);
     if (streaming) {
       // A handled command is not something to say to a running agent — it acts on
       // the thread. Sending it now would land its reply in the middle of the
       // answer being written, so it waits for the turn to settle and says so.
-      const cmd = commands.find((c) => c.name === prompt.trim().split('\n')[0].split(' ')[0].slice(1).toLowerCase());
+      const cmd = parsed ? commands.find((c) => c.name === parsed.name) : undefined;
       if (cmd?.handled) {
         setNotice(`Finish or stop this answer first — /${cmd.name} acts on the whole chat.`);
         return;
@@ -575,8 +579,7 @@ export function ChatPage() {
     // we measure next` matches the funnel-shaped-question heuristic word for
     // word, and letting it settle locally would drop a gated run on the floor
     // with a written opinion in its place.
-    const isCommand = commandNames.includes(prompt.trim().split('\n')[0].split(' ')[0].slice(1).toLowerCase());
-    const instant = isCommand ? null : instantReply({
+    const instant = parsed ? null : instantReply({
       eventNames,
       catalogReady,
       hasModelKey: modelsLoading ? undefined : !!models?.has_key,

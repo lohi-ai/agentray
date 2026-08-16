@@ -60,10 +60,18 @@ type Config struct {
 	SandboxDockerBin    string   // optional docker CLI path; empty = "docker"
 	// SandboxRequired withholds run_shell / computer_use / browser_use unless a
 	// working sandbox is wired, instead of running them on the host inside the
-	// agent's workspace. Off by default: requiring Docker to run an agent at all
-	// is a wall in front of every new user, and the common install is one
-	// operator on one machine the agent is already trusted with. Turn it on for
-	// a hosted, multi-tenant deployment.
+	// agent's workspace.
+	//
+	// It defaults to Hosted, and that coupling is the whole point. Requiring
+	// Docker to run an agent at all is a wall in front of every new user, and the
+	// common self-host is one operator on one machine the agent is already
+	// trusted with — so a local install stays open. A hosted, multi-tenant
+	// install is the opposite case, and AGENT-GOVERNANCE.md states the rule it
+	// has to keep: a hosted deployment "never gains a host shell by omission".
+	// Deriving it means nobody has to remember a second env var for the
+	// deployment where forgetting it hands one tenant's prompt-injected agent a
+	// shell in the process that serves all of them. AGENTRAY_SANDBOX_REQUIRED
+	// still overrides in either direction.
 	SandboxRequired bool
 	// AgentWorkspaceRoot is the BASE for per-conversation agent workspaces
 	// (<base>/<workspaceId>/<projectId>/<agentId>/<conversationId>). Empty uses
@@ -146,7 +154,7 @@ func FromEnv() Config {
 		SandboxNetworkAllow:          envList("AGENTRAY_SANDBOX_NETWORK_ALLOW"),
 		SandboxDockerBin:             os.Getenv("AGENTRAY_SANDBOX_DOCKER_BIN"),
 		AgentWorkspaceRoot:           os.Getenv("AGENTRAY_AGENT_WORKSPACE_ROOT"),
-		SandboxRequired:              envBool("AGENTRAY_SANDBOX_REQUIRED", false),
+		SandboxRequired:              envBool("AGENTRAY_SANDBOX_REQUIRED", envBool("AGENTRAY_HOSTED", false)),
 		SeedDemo:                     envBool("AGENTRAY_SEED_DEMO", false),
 		Hosted:                       envBool("AGENTRAY_HOSTED", false),
 		CredentialsEnabled:           envBool("AGENTRAY_CREDENTIALS_ENABLED", false),

@@ -55,7 +55,9 @@ export function useJobBoard(picked: JobId | null) {
   // An explicit pick always wins. Without one, stay null until the workspace has
   // loaded so the page never flashes the wrong job and then swaps under a click.
   const job: JobDef | null = jobById(picked ?? '') ?? (ready ? jobById(suggested) : null);
-  const hired = job ? agentForPack(roster, job.packs.find((slug) => agentForPack(roster, slug)) ?? '') : null;
+  // One pass over the packs, and no empty-string sentinel standing in for "not
+  // found" — that only works while agentForPack happens to miss on ''.
+  const hired = job ? job.packs.map((slug) => agentForPack(roster, slug)).find(Boolean) ?? null : null;
 
   // Only the hired agent's triggers, and only once it exists — the honest
   // signal for "this runs without you", at one request instead of one per

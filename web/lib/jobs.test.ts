@@ -105,7 +105,7 @@ describe('jobSteps', () => {
     const job = jobById('grow')!;
     const steps = jobSteps(job, { ...EMPTY, hasModelKey: false });
     expect(steps.map((s) => s.id)).toEqual(['key', 'hire', 'data', 'standing']);
-    expect(nextStep(job, { ...EMPTY, hasModelKey: false })?.id).toBe('key');
+    expect(nextStep(jobSteps(job, { ...EMPTY, hasModelKey: false }))?.id).toBe('key');
     expect(steps[0].action.href).toBe('/settings?tab=ai');
   });
 
@@ -113,7 +113,7 @@ describe('jobSteps', () => {
   // an owner who already has one.
   it('treats an unresolved model key as satisfied', () => {
     const job = jobById('grow')!;
-    expect(nextStep(job, EMPTY)?.id).toBe('hire');
+    expect(nextStep(jobSteps(job, EMPTY))?.id).toBe('hire');
     expect(jobSteps(job, EMPTY)[0].done).toBe(true);
   });
 
@@ -165,7 +165,7 @@ describe('jobSteps', () => {
       hasModelKey: true,
       scheduled: true,
     };
-    expect(nextStep(job, state)).toBeNull();
+    expect(nextStep(jobSteps(job, state))).toBeNull();
     expect(jobProgress(job, state)).toEqual({ done: 4, total: 4 });
   });
 
@@ -193,12 +193,12 @@ describe('jobSteps', () => {
   it('counts the committed threshold as a real step', () => {
     const job = jobById('validate')!;
     const uncommitted: JobState = { installedPacks: ['product-scout'], eventNameCount: 3, hasModelKey: true };
-    expect(nextStep(job, uncommitted)?.id).toBe('threshold');
+    expect(nextStep(jobSteps(job, uncommitted))?.id).toBe('threshold');
     expect(jobSteps(job, uncommitted).find((s) => s.id === 'threshold')!.observable).toBe(true);
     expect(jobProgress(job, uncommitted)).toEqual({ done: 3, total: 5 });
 
     const done: JobState = { ...uncommitted, testCommitted: true, installedPacks: ['product-scout', 'marketing-lead'] };
-    expect(nextStep(job, done)).toBeNull();
+    expect(nextStep(jobSteps(job, done))).toBeNull();
     expect(jobProgress(job, done)).toEqual({ done: 5, total: 5 });
   });
 

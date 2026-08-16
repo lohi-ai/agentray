@@ -33,7 +33,12 @@ type responseSink struct {
 // The receipt names the path the agent must use to read the file back, which is
 // the workspace-relative one — never the host path, which the agent cannot use
 // and should not learn.
-func (s responseSink) save(ctx context.Context, tool, rel string, data []byte) (string, error) {
+// `truncated` says the body hit the tool's read limit, so what landed on disk is
+// a prefix of the document. It has to be in the receipt: an agent told "saved
+// 262144 bytes" reads that as the whole file, greps it, and reports a row count
+// that is confidently wrong. A partial file is still worth keeping — it is the
+// silence about it that turns a limit into a bad answer.
+func (s responseSink) save(ctx context.Context, tool, rel string, data []byte, truncated bool) (string, error) {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return "", fmt.Errorf("%s: save_as must not be empty", tool)
@@ -43,6 +48,11 @@ func (s responseSink) save(ctx context.Context, tool, rel string, data []byte) (
 	}
 	if err := s.fs.WriteFile(ctx, rel, data); err != nil {
 		return "", fmt.Errorf("%s: save %s: %w", tool, rel, err)
+	}
+	if truncated {
+		return fmt.Sprintf("saved %d bytes to %s — TRUNCATED at this tool's read limit; "+
+			"the document continues past what was written, so do not treat this file as complete",
+			len(data), rel), nil
 	}
 	return fmt.Sprintf("saved %d bytes to %s", len(data), rel), nil
 }

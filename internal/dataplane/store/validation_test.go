@@ -1,6 +1,30 @@
 package storage
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// DaysLeft is what Verdict() keys `failed` off, so how it rounds decides
+// whether a test dies a day early. Truncating integer division reads twenty
+// hours of remaining window as zero days — and the last day of a validation
+// window is exactly when a borderline test is decided.
+func TestDaysLeftDoesNotCloseTheWindowEarly(t *testing.T) {
+	committed := time.Now().UTC().Add(-13*24*time.Hour - 4*time.Hour) // 13d 4h ago
+	test := ValidationTest{TargetCount: 40, WindowDays: 14, CommittedAt: &committed}
+
+	s := &Store{}
+	p, err := s.ValidationTestProgress(t.Context(), test)
+	if err != nil {
+		t.Fatalf("progress: %v", err)
+	}
+	if p.DaysLeft < 1 {
+		t.Fatalf("20 hours of window left reads as %d days left, so the test is already dead", p.DaysLeft)
+	}
+	if got := p.Verdict(); got != TestCommitted {
+		t.Fatalf("a window with 20 hours still on it reads as %q", got)
+	}
+}
 
 // The verdict is the only reason the threshold row exists: with a number agreed
 // in advance, "did it work" becomes a lookup instead of an argument. These are

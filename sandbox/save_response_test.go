@@ -129,3 +129,27 @@ func hostOf(t *testing.T, raw string) string {
 	}
 	return u.Hostname()
 }
+
+// A body that stopped at the read limit is a prefix of the document, and the
+// receipt is the only place the agent can learn that. Without it, "saved 262144
+// bytes" reads as the whole file — the agent parses it and reports a count that
+// is confidently short.
+func TestSaveReceiptAdmitsTruncation(t *testing.T) {
+	sink := responseSink{fs: newWorkspaceFS(nil, newTestWorkspace(t))}
+
+	full, err := sink.save(context.Background(), ToolWebFetch, "data/report.csv", []byte("a,b\n1,2\n"), false)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if strings.Contains(full, "TRUNCATED") {
+		t.Errorf("a complete body was reported as truncated: %s", full)
+	}
+
+	cut, err := sink.save(context.Background(), ToolWebFetch, "data/big.csv", []byte("a,b\n1,2\n"), true)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !strings.Contains(cut, "TRUNCATED") {
+		t.Errorf("a body cut off at the read limit was reported as complete: %s", cut)
+	}
+}

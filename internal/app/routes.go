@@ -17,13 +17,20 @@ import (
 
 // publicCollectPaths are the endpoints a customer's own page calls directly:
 // event ingest and the waitlist. They authenticate by project API key and never
-// read a cookie, so they take permissive CORS (see app.go). Listed here, beside
-// where they are mounted, so a new ingest path cannot be added without its CORS
-// class being an obvious question.
-var publicCollectPaths = map[string]bool{
-	"/capture": true, "/batch": true, "/identify": true, "/alias": true,
-	"/e": true, "/e/": true, "/i/v0/e": true, "/i/v0/e/": true,
-	"/waitlist": true, "/waitlist/unsubscribe": true,
+// read a cookie, so they take permissive CORS (see app.go).
+//
+// It is populated only by publicCollect below, never written by hand. A
+// hand-kept list beside the mounts drifts the moment someone adds a route and
+// forgets it — and that failure is invisible everywhere except a real customer's
+// browser, since a Go test and a curl both send no Origin and pass either way.
+var publicCollectPaths = map[string]bool{}
+
+// publicCollect mounts a collection endpoint and classifies it in the same
+// statement, so the CORS class is a property of the mount rather than of a list
+// that can fall behind it.
+func publicCollect(e *echo.Echo, method, path string, handler echo.HandlerFunc, mw ...echo.MiddlewareFunc) {
+	publicCollectPaths[path] = true
+	e.Add(method, path, handler, mw...)
 }
 
 func isPublicCollectPath(path string) bool { return publicCollectPaths[path] }
@@ -47,19 +54,23 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	// The waitlist is posted from the owner's own landing page, so it sits with
 	// the other public, api-key-authenticated collection endpoints and carries
 	// the same per-IP rate limit.
-	e.POST("/waitlist", h.Waitlist, rateLimit)
-	e.GET("/waitlist/unsubscribe", h.WaitlistUnsubscribe, rateLimit)
+	publicCollect(e, http.MethodPost, "/waitlist", h.Waitlist, rateLimit)
+	// GET renders a confirm page; the removal itself is the POST, because a link
+	// in an email is followed by prefetchers and scanners long before a human
+	// clicks it.
+	publicCollect(e, http.MethodGet, "/waitlist/unsubscribe", h.WaitlistUnsubscribePage, rateLimit)
+	publicCollect(e, http.MethodPost, "/waitlist/unsubscribe", h.WaitlistUnsubscribe, rateLimit)
 
-	e.POST("/capture", h.Capture, rateLimit)
-	e.POST("/batch", h.Batch, rateLimit)
-	e.POST("/identify", h.Identify, rateLimit)
-	e.POST("/alias", h.Alias, rateLimit)
+	publicCollect(e, http.MethodPost, "/capture", h.Capture, rateLimit)
+	publicCollect(e, http.MethodPost, "/batch", h.Batch, rateLimit)
+	publicCollect(e, http.MethodPost, "/identify", h.Identify, rateLimit)
+	publicCollect(e, http.MethodPost, "/alias", h.Alias, rateLimit)
 
 	// PostHog-compatible aliases used by posthog-js and simple SDK shims.
-	e.POST("/e/", h.Capture, rateLimit)
-	e.POST("/e", h.Capture, rateLimit)
-	e.POST("/i/v0/e/", h.Batch, rateLimit)
-	e.POST("/i/v0/e", h.Batch, rateLimit)
+	publicCollect(e, http.MethodPost, "/e/", h.Capture, rateLimit)
+	publicCollect(e, http.MethodPost, "/e", h.Capture, rateLimit)
+	publicCollect(e, http.MethodPost, "/i/v0/e/", h.Batch, rateLimit)
+	publicCollect(e, http.MethodPost, "/i/v0/e", h.Batch, rateLimit)
 
 	e.POST("/api/auth/signup", func(c echo.Context) error {
 		var payload struct {

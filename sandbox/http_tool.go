@@ -274,7 +274,9 @@ func (t *HTTPTool) respond(ctx context.Context, saveAs string, resp *http.Respon
 	if strings.TrimSpace(saveAs) == "" {
 		return formatHTTPResponse(resp, body), nil
 	}
-	receipt, err := t.sink.save(ctx, ToolHTTPRequest, saveAs, body)
+	// Equal to the limit means ReadAll stopped at the cap, so the document very
+	// likely continues past what we hold.
+	receipt, err := t.sink.save(ctx, ToolHTTPRequest, saveAs, body, int64(len(body)) >= t.maxBodyBytes)
 	if err != nil {
 		return "", err
 	}

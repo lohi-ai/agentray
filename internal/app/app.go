@@ -135,9 +135,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		runnerOpts = append(runnerOpts, agentruntime.WithSandbox(sb))
 	}
 	wsBase := workspaceBase(cfg, sb != nil)
+	// An operator who set AGENTRAY_SANDBOX_ENABLED asked for isolation. If Docker
+	// turned out to be unreachable, `sb` is nil — and "someone forgot to wire
+	// Docker" must not resolve to "run the model's commands on the host": the
+	// request was explicit, so the failure fails closed.
+	isolationRequired := cfg.SandboxRequired || (cfg.SandboxEnabled && sb == nil)
 	runnerOpts = append(runnerOpts,
 		agentruntime.WithWorkspaceBase(wsBase),
-		agentruntime.WithSandboxRequired(cfg.SandboxRequired),
+		agentruntime.WithSandboxRequired(isolationRequired),
 	)
 	// The browser_use tool runs its persistent session in a dedicated Chrome image
 	// (separate from the computer_use doc-toolchain image); thread it so both the
@@ -227,7 +232,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: cfg.SandboxRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)
@@ -277,7 +282,7 @@ func buildSandbox(ctx context.Context, cfg config.Config) agentcore.Sandbox {
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if !sb.Available(checkCtx) {
-		log.Printf("agentray: AGENTRAY_SANDBOX_ENABLED is set but Docker/image %q is unavailable; sandboxed agent tools disabled", sb.Image())
+		log.Printf("agentray: AGENTRAY_SANDBOX_ENABLED is set but Docker/image %q is unavailable; run_shell, computer_use and browser_use are WITHHELD (they are not silently moved to the host — this operator asked for isolation)", sb.Image())
 		return nil
 	}
 	log.Printf("agentray: agent sandbox enabled (image %q)", sb.Image())
@@ -305,8 +310,9 @@ func workspaceBase(cfg config.Config, sandboxWired bool) string {
 	switch {
 	case sandboxWired:
 		log.Printf("agentray: agent workspaces under %q, tools run inside the sandbox", base)
-	case cfg.SandboxRequired:
-		log.Printf("agentray: agent workspaces under %q; AGENTRAY_SANDBOX_REQUIRED is set and no sandbox is available, "+
+	case cfg.SandboxRequired || cfg.SandboxEnabled:
+		log.Printf("agentray: agent workspaces under %q; isolation is required (hosted, AGENTRAY_SANDBOX_REQUIRED, or "+
+			"AGENTRAY_SANDBOX_ENABLED with no working sandbox) and none is available, "+
 			"so run_shell/computer_use/browser_use are withheld", base)
 	default:
 		log.Printf("agentray: agent workspaces under %q; NO SANDBOX — run_shell/computer_use/browser_use execute on this "+

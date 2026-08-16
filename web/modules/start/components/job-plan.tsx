@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, Check, MessageSquare } from 'lucide-react';
 import type { AgentPreset, ValidationStatus } from '@/lib/api';
-import { jobLayers, jobPackName, jobSteps, primaryPack, type JobDef, type JobState, type JobStep } from '@/lib/jobs';
+import { jobLayers, jobPackName, jobSteps, nextStep, primaryPack, type JobDef, type JobState, type JobStep } from '@/lib/jobs';
 import { Button, Panel } from '@/modules/shared/components/signal-primitives';
 import { IdeaTest } from './idea-test';
 import { InstrumentSnippet } from './instrument-snippet';
@@ -43,7 +43,10 @@ export function JobPlan({
   apiHost: string;
 }) {
   const steps = jobSteps(job, state);
-  const next = steps.find((s) => !s.done) ?? null;
+  // From jobs.ts, not re-derived here: "the next step" is a rule with tests
+  // behind it, and two copies of it drift the moment one of them learns
+  // something (skipping non-observable steps, say) and the other does not.
+  const next = nextStep(steps);
   const preProduct = !job.needsEvents;
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,340px)]">

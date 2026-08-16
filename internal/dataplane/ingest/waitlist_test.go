@@ -29,8 +29,9 @@ func (c *captureEvents) InsertEvents(_ context.Context, e []storage.Event) error
 }
 
 type fakeWaitlist struct {
-	adds int
-	new  bool
+	adds         int
+	unsubscribes int
+	new          bool
 }
 
 func (f *fakeWaitlist) AddWaitlistSignup(_ context.Context, sn storage.WaitlistSignup) (storage.WaitlistSignup, bool, error) {
@@ -39,7 +40,10 @@ func (f *fakeWaitlist) AddWaitlistSignup(_ context.Context, sn storage.WaitlistS
 	return sn, f.new, nil
 }
 
-func (f *fakeWaitlist) UnsubscribeWaitlist(context.Context, string) error { return nil }
+func (f *fakeWaitlist) UnsubscribeWaitlist(context.Context, string) error {
+	f.unsubscribes++
+	return nil
+}
 
 func postWaitlist(t *testing.T, h Handler, body string) (*httptest.ResponseRecorder, error) {
 	t.Helper()
@@ -146,5 +150,73 @@ func TestWaitlistWithoutAStoreDegrades(t *testing.T) {
 	he, ok := err.(*echo.HTTPError)
 	if !ok || he.Code != http.StatusNotImplemented {
 		t.Fatalf("want 501, got %v", err)
+	}
+}
+
+// The reply is the same bytes whoever posts and whatever is already on the list.
+//
+// This endpoint is called with the project's PUBLIC write key, which ships in
+// the customer's landing-page JavaScript. If the body varied with what the
+// server found, the whole internet would have two things it must never have: an
+// oracle answering "is this address on your list?" for any address someone
+// types, and — worse — that subscriber's own unsubscribe token, which would let
+// a stranger remove them and quietly drain the number the validation test is
+// judged against.
+func TestWaitlistTellsAStrangerNothingAboutWhoIsOnTheList(t *testing.T) {
+	body := `{"api_key":"good-key","email":"someone@example.com","consent":true}`
+
+	joined, err := postWaitlist(t, Handler{projects: fakeProjects{}, events: &captureEvents{}}.
+		WithWaitlist(&fakeWaitlist{new: true}), body)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	already, err := postWaitlist(t, Handler{projects: fakeProjects{}, events: &captureEvents{}}.
+		WithWaitlist(&fakeWaitlist{new: false}), body)
+	if err != nil {
+		t.Fatalf("repeat submit: %v", err)
+	}
+
+	if joined.Body.String() != already.Body.String() {
+		t.Errorf("the reply reveals whether the address was already known:\n new:  %s\n known: %s",
+			joined.Body.String(), already.Body.String())
+	}
+	for _, rec := range []*httptest.ResponseRecorder{joined, already} {
+		if strings.Contains(rec.Body.String(), "tok") {
+			t.Errorf("the unsubscribe token left the server through the public form: %s", rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "unsubscribe") {
+			t.Errorf("the reply carries an unsubscribe link: %s", rec.Body.String())
+		}
+	}
+}
+
+// The link in a signup email is followed by machines — Gmail and Outlook
+// prefetch, corporate scanners detonate every URL, browsers preload. If the GET
+// performed the removal, all of them would unsubscribe the recipient before a
+// human ever saw the page, and the owner's evidence would drain away with it.
+func TestUnsubscribeGetAsksBeforeItActs(t *testing.T) {
+	wl := &fakeWaitlist{}
+	h := Handler{projects: fakeProjects{}, events: &captureEvents{}}.WithWaitlist(wl)
+
+	req := httptest.NewRequest(http.MethodGet, "/waitlist/unsubscribe?token=tok", nil)
+	rec := httptest.NewRecorder()
+	if err := h.WaitlistUnsubscribePage(echo.New().NewContext(req, rec)); err != nil {
+		t.Fatalf("confirm page: %v", err)
+	}
+	if wl.unsubscribes != 0 {
+		t.Fatal("a GET removed the subscriber; a prefetcher would have done the same")
+	}
+	if !strings.Contains(rec.Body.String(), `method="post"`) {
+		t.Error("the confirm page offers no POST for the person to actually leave")
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/waitlist/unsubscribe",
+		strings.NewReader("token=tok"))
+	post.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+	if err := h.WaitlistUnsubscribe(echo.New().NewContext(post, httptest.NewRecorder())); err != nil {
+		t.Fatalf("post unsubscribe: %v", err)
+	}
+	if wl.unsubscribes != 1 {
+		t.Fatalf("POST did not unsubscribe (calls=%d)", wl.unsubscribes)
 	}
 }

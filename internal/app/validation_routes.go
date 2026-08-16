@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/labstack/echo/v4"
+	ingestion "github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -18,7 +19,7 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 	// doing, and the waitlist count. One call because /start renders them
 	// together and three round-trips would each flash their own empty state.
 	e.GET("/api/validation/status", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		_, project, err := authProject(c, store)
 		if err != nil {
 			return err
 		}
@@ -47,7 +48,6 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 				out["verdict"] = progress.Verdict()
 			}
 		}
-		_ = ctx
 		return c.JSON(http.StatusOK, out)
 	})
 
@@ -154,17 +154,21 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 		if err != nil {
 			return err
 		}
-		rows, err := store.ListWaitlistSignups(c.Request().Context(), ctx.User.ID, project.ID, 1000)
-		if err != nil {
-			return err
-		}
 		c.Response().Header().Set(echo.HeaderContentType, "text/csv; charset=utf-8")
 		c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="waitlist.csv"`)
 		c.Response().WriteHeader(http.StatusOK)
 		w := csv.NewWriter(c.Response())
-		_ = w.Write([]string{"email", "status", "source", "referrer", "joined_at"})
-		for _, r := range rows {
-			_ = w.Write([]string{r.Email, r.Status, r.Source, r.Referrer, r.CreatedAt.Format("2006-01-02 15:04:05")})
+		// unsubscribe_url ships in the export because the owner is the one who
+		// sends the mail this file is for, and mail without a way out is spam.
+		_ = w.Write([]string{"email", "status", "source", "referrer", "joined_at", "unsubscribe_url"})
+		// Streamed in keyset pages rather than one capped query: the whole list or
+		// an error, never a quiet fraction of it.
+		err = store.ExportWaitlistSignups(c.Request().Context(), ctx.User.ID, project.ID, func(r storage.WaitlistSignup) error {
+			return w.Write([]string{r.Email, r.Status, r.Source, r.Referrer,
+				r.CreatedAt.Format("2006-01-02 15:04:05"), ingestion.UnsubscribeURL(c, r.UnsubscribeToken)})
+		})
+		if err != nil {
+			return err
 		}
 		w.Flush()
 		return w.Error()

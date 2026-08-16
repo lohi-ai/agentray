@@ -172,8 +172,9 @@ the goal as durable STATE — it writes `EntryGoal`, recovers it on resume, and
 hands it back as `RunInfo.Goal` (`agentcore/goal.go`), because only the loop may
 write the durable log. `agentcore.Config.Goal` therefore RECORDS a goal;
 enforcing it needs the plugin, which `preset.Plugins` (and therefore
-`internal/runtime`) wires automatically. The chat directive parser is `parseGoalDirective`
-(`internal/runtime/chat.go`).
+`internal/runtime`) wires automatically. The chat directive parser is `parseDirective`
+(`internal/runtime/chatcmd.go`) — it owns the whole slash-command catalog now, not
+just `/goal`.
 
 A long run can also discover that the condition itself was wrong — impossible as
 stated, or resting on an assumption the work disproved. `goal.UntilRevisable`

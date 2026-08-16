@@ -356,6 +356,20 @@ func ValidateToolConfig(tctx ToolBuildContext, name, configJSON string) error {
 	if spec.validate != nil {
 		return spec.validate(tctx, configJSON)
 	}
+	// The workspace is created per RUN, so the control plane's context never
+	// carries one — validating by building would reject read_file, write_file,
+	// edit_file, grep, glob, run_shell, computer_use and browser_use on every
+	// deployment, with the catalog offering exactly the tools the writer refuses.
+	// What the write path can honestly check is the same predicate the catalog
+	// advertised them by, plus the config itself.
+	if tctx.Workspace == nil && spec.available != nil {
+		if !spec.available(tctx) {
+			return fmt.Errorf("%s is not available on this deployment", name)
+		}
+		if !spec.Configurable {
+			return rejectConfig(name, configJSON)
+		}
+	}
 	_, err := spec.build(tctx, configJSON)
 	return err
 }

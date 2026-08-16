@@ -552,7 +552,14 @@ func planCompaction(entries []storage.AgentConversationEntry, window int, force 
 	recent := 0
 	for i := len(live) - 1; i >= 0; i-- {
 		recent += live[i].TokenEstimate
-		if recent >= keepRecent && live[i].Kind == ConvKindMessage && live[i].Role == string(agentcore.RoleUser) {
+		// !isCommandEntry, for the same reason hasUserMessage below applies it:
+		// `/compact` is itself persisted as a user message, and it is the NEWEST
+		// one at the moment this runs. Cutting there would keep the invisible
+		// command line live and fold the whole real conversation — the most recent
+		// exchange included — into the summary, which is the one thing /compact
+		// promises not to do.
+		if recent >= keepRecent && live[i].Kind == ConvKindMessage &&
+			live[i].Role == string(agentcore.RoleUser) && !isCommandEntry(live[i]) {
 			if i <= 0 {
 				break // cutting here would drop everything — keep the whole live window
 			}
