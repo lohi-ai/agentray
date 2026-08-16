@@ -18,7 +18,7 @@ var scopeTools = map[string][]string{
 	"monitor":        {ToolActivitySummary, ToolRecentEvents},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL},
 	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolListDashboards, ToolCreateDashboard, ToolCreateChart},
-	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolRemember, ToolSendNotification},
+	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolRemember, ToolSendNotification},
 }
 
 // readTools classifies which scope-granted tools READ project data, versus the
@@ -35,6 +35,10 @@ var readTools = map[string]bool{
 	ToolRunSQL:          true,
 	ToolRunInsight:      true,
 	ToolListDashboards:  true,
+	// test_status reads the live experiment out of the event store against a
+	// committed threshold. It is the pre-product agent's activity_summary, and
+	// leaving it unclassified would nudge the one agent that DID check.
+	ToolTestStatus: true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.

@@ -33,6 +33,10 @@ type Repo interface {
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
+	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
+	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
+	ValidationTestProgress(ctx context.Context, t storage.ValidationTest) (storage.TestProgress, error)
+	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
 }

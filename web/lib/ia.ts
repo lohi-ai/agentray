@@ -16,6 +16,11 @@ export type NavItemDef = {
 };
 
 export const NAV_ITEMS: readonly NavItemDef[] = [
+  // Start is the job index — "where is my product right now" — as opposed to
+  // the artifact index the rest of the nav is. It stays a peer of Chat rather
+  // than becoming the landing page: a returning owner should still land in
+  // conversation, not be re-asked a question they already answered.
+  { href: '/start', label: 'Start', group: 'Ask' },
   { href: '/chat', label: 'Chat', group: 'Ask' },
   { href: '/agents', label: 'Agents', group: 'Team', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
   { href: '/dashboard', label: 'Dashboards', group: 'Signals', aliases: ['/dashboards'] },
@@ -57,25 +62,28 @@ export const CHANNEL_CATALOG: readonly ChannelInfo[] = [
 ];
 
 export type WorkloadCategory = {
-  id: 'growth' | 'marketing' | 'data' | 'operator' | 'support';
+  id: 'validate' | 'growth' | 'marketing' | 'data' | 'operator' | 'support';
   label: string;
   reserved: boolean;
 };
 
+// Mirror of internal/workloads categories. `reserved` means the category ships
+// no pack — the UI says "not yet" rather than inventing a surface. Operator
+// stopped being reserved when ops-watch shipped; validate is the pre-product
+// category, the one whose pack runs with an empty event store.
 export const WORKLOAD_CATEGORIES: readonly WorkloadCategory[] = [
+  { id: 'validate', label: 'Validate', reserved: false },
   { id: 'growth', label: 'Growth', reserved: false },
   { id: 'marketing', label: 'Marketing', reserved: false },
   { id: 'data', label: 'Data', reserved: false },
-  { id: 'operator', label: 'Operator', reserved: true },
+  { id: 'operator', label: 'Operator', reserved: false },
   { id: 'support', label: 'Support', reserved: true },
 ];
 
-export const ARCHITECTURE_STEPS = [
-  { id: 'channel', label: 'Channel', detail: 'You arrive in chat' },
-  { id: 'workload', label: 'Workload', detail: 'A pack takes the job' },
-  { id: 'runtime', label: 'Runtime', detail: 'One engine, safe hands' },
-  { id: 'data', label: 'Data', detail: 'Evidence you can open' },
-] as const;
+// The four layers used to be a static strip here, labelled with our own words
+// ("Channel", "Workload", "Runtime", "Data") and rendered nowhere. They are now
+// jobLayers() in ./jobs, which states each layer as what it does for the job on
+// screen — a layer name on its own teaches a product owner nothing.
 
 export type ChildSurface = { href: string; label: string; parentHref: string };
 
@@ -132,36 +140,11 @@ export function signedInLandingTarget(): string {
   return SIGNED_IN_LANDING;
 }
 
-export type StarterKind = 'growth' | 'marketing' | 'data' | 'runtime';
-
-export type StarterTask = {
-  kind: StarterKind;
-  label: string;
-  prompt: string;
-};
-
-export const STARTER_TASKS: readonly StarterTask[] = [
-  { kind: 'growth', label: 'Growth', prompt: 'What is the single weakest step in my activation funnel?' },
-  { kind: 'growth', label: 'Growth', prompt: 'What should we test this week to lift activation?' },
-  { kind: 'marketing', label: 'Marketing', prompt: 'Where is my best traffic coming from?' },
-  { kind: 'marketing', label: 'Marketing', prompt: 'Is AI crawler traffic growing?' },
-  { kind: 'data', label: 'Data', prompt: 'Which feature drives retention?' },
-  { kind: 'data', label: 'Data', prompt: 'Where do new users drop off?' },
-  { kind: 'runtime', label: 'Your team', prompt: 'What did my agents do today?' },
-  { kind: 'runtime', label: 'Your team', prompt: 'Any agents that need attention?' },
-];
-
-export function starterKinds(tasks: readonly StarterTask[] = STARTER_TASKS): StarterKind[] {
-  return [...new Set(tasks.map((task) => task.kind))];
-}
-
-export function startersByKind(tasks: readonly StarterTask[] = STARTER_TASKS): Array<{ kind: StarterKind; label: string; prompts: string[] }> {
-  const order: StarterKind[] = ['growth', 'marketing', 'data', 'runtime'];
-  return order.map((kind) => {
-    const group = tasks.filter((task) => task.kind === kind);
-    return { kind, label: group[0]?.label ?? kind, prompts: group.map((task) => task.prompt) };
-  }).filter((group) => group.prompts.length > 0);
-}
+// Starter prompts used to live here as a flat catalog keyed by capability
+// (growth / marketing / data / ops / runtime), which asked a new owner to know
+// which of our capabilities their problem belonged to. They now live on the
+// job that owns them — see JOBS in ./jobs — so the front door offers the same
+// prompts grouped by the situation the owner is actually in.
 
 export type FirstRunInput = {
   // Catalog rows or bare names — only length matters for first-run gating.

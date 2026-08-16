@@ -8,7 +8,8 @@ import { Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
-import type { Project, WorkspaceAuditLog, WorkspaceMember, WorkspaceRole } from '@/lib/api';
+import { apiBase, type Project, type WorkspaceAuditLog, type WorkspaceMember, type WorkspaceRole } from '@/lib/api';
+import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { formatCompact, formatNumber, formatRelative } from '@/lib/format';
 import { useCurrentProject, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
@@ -187,6 +188,14 @@ export function ApiKeysTab() {
         <Button variant="ghost" size="sm" onClick={() => setRotating(true)}><span style={{ color: 'var(--danger)' }}>Rotate</span></Button>
       </HStack>
       <Text type="supporting" className="mt-2.5 block max-w-[480px]">Rotating a key immediately revokes the old one. Update any running agents or integrations first.</Text>
+      {/* The key on its own is not an on-ramp. Until this existed the only
+          documented install was `npm install @agentray/browser`, which is
+          useless to an owner whose prototype is a Framer page — so the key sat
+          here and nothing ever arrived. */}
+      <div className="mt-5 border-t border-[var(--color-border)] pt-4">
+        <Text type="supporting" className="mb-3 block">Paste this into your site and events start arriving. No build step required.</Text>
+        <InstrumentSnippet apiKey={key} host={apiBase()} />
+      </div>
     </Panel>
   );
 }

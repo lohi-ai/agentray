@@ -101,7 +101,25 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	e.HideBanner = true
 	e.HidePort = true
 	e.Use(middleware.Recover())
+	// Data collection is called from the CUSTOMER's site, whose origin we cannot
+	// know — a landing page on Framer, Carrd, or their own domain. Those paths
+	// therefore carry their own permissive CORS, with credentials OFF: they
+	// authenticate by the project API key, which is a public write-only key, and
+	// they never read a cookie. Everything else keeps the strict allow-list
+	// below, so the browser is still what stops a third-party page from acting
+	// as a logged-in user against /api.
+	//
+	// This runs before the strict config and short-circuits its own preflights,
+	// because two CORS middlewares on one request would emit two
+	// Allow-Origin headers and the browser rejects that.
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		Skipper:      func(c echo.Context) bool { return !isPublicCollectPath(c.Request().URL.Path) },
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{echo.GET, echo.POST, echo.OPTIONS},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, "X-API-Key"},
+	}))
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		Skipper:          func(c echo.Context) bool { return isPublicCollectPath(c.Request().URL.Path) },
 		AllowOrigins:     strings.Split(cfg.AllowedOrigins, ","),
 		AllowMethods:     []string{echo.GET, echo.POST, echo.PUT, echo.PATCH, echo.DELETE, echo.OPTIONS},
 		AllowHeaders:     []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-API-Key"},
@@ -116,10 +134,11 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	if sb != nil {
 		runnerOpts = append(runnerOpts, agentruntime.WithSandbox(sb))
 	}
-	ws := buildWorkspace(cfg)
-	if ws != nil {
-		runnerOpts = append(runnerOpts, agentruntime.WithWorkspace(ws))
-	}
+	wsBase := workspaceBase(cfg, sb != nil)
+	runnerOpts = append(runnerOpts,
+		agentruntime.WithWorkspaceBase(wsBase),
+		agentruntime.WithSandboxRequired(cfg.SandboxRequired),
+	)
 	// The browser_use tool runs its persistent session in a dedicated Chrome image
 	// (separate from the computer_use doc-toolchain image); thread it so both the
 	// scheduled and HTTP-chat run paths build browser_use against it.
@@ -208,7 +227,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, ws, liveReg, cfg.Hosted, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: cfg.SandboxRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)
@@ -265,17 +284,36 @@ func buildSandbox(ctx context.Context, cfg config.Config) agentcore.Sandbox {
 	return sb
 }
 
-func buildWorkspace(cfg config.Config) *sandbox.Workspace {
-	if strings.TrimSpace(cfg.AgentWorkspaceRoot) == "" {
-		return nil
+// workspaceBase resolves the root under which each run gets its own workspace,
+// and says out loud which execution substrate the risky tools will use.
+//
+// The announcement is the point of doing this at startup rather than lazily per
+// run. Host execution is a legitimate choice and the default one, but it must
+// never be a thing an operator discovers later: "I meant to enable the sandbox"
+// and "I chose host mode" produce identical behavior and very different
+// intentions, and only the log can tell them apart afterwards.
+func workspaceBase(cfg config.Config, sandboxWired bool) string {
+	base := strings.TrimSpace(cfg.AgentWorkspaceRoot)
+	if base == "" {
+		def, err := sandbox.DefaultWorkspaceBase()
+		if err != nil {
+			log.Printf("agentray: no agent workspace root and no home directory (%v); file tools will fail closed", err)
+			return ""
+		}
+		base = def
 	}
-	ws, err := sandbox.NewWorkspace(cfg.AgentWorkspaceRoot)
-	if err != nil {
-		log.Printf("agentray: AGENTRAY_AGENT_WORKSPACE_ROOT is invalid; file/browser tools disabled: %v", err)
-		return nil
+	switch {
+	case sandboxWired:
+		log.Printf("agentray: agent workspaces under %q, tools run inside the sandbox", base)
+	case cfg.SandboxRequired:
+		log.Printf("agentray: agent workspaces under %q; AGENTRAY_SANDBOX_REQUIRED is set and no sandbox is available, "+
+			"so run_shell/computer_use/browser_use are withheld", base)
+	default:
+		log.Printf("agentray: agent workspaces under %q; NO SANDBOX — run_shell/computer_use/browser_use execute on this "+
+			"host as this process, confined to the run's workspace. Set AGENTRAY_SANDBOX_ENABLED=true to isolate them, "+
+			"or AGENTRAY_SANDBOX_REQUIRED=true to withhold them instead.", base)
 	}
-	log.Printf("agentray: agent workspace enabled (%q)", ws.Root())
-	return ws
+	return base
 }
 
 // buildCredentials constructs the {{cred:NAME}} secret vault from the host

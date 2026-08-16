@@ -13,23 +13,42 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
-	"github.com/lohi-ai/agentray/sandbox"
 )
+
+// publicCollectPaths are the endpoints a customer's own page calls directly:
+// event ingest and the waitlist. They authenticate by project API key and never
+// read a cookie, so they take permissive CORS (see app.go). Listed here, beside
+// where they are mounted, so a new ingest path cannot be added without its CORS
+// class being an obvious question.
+var publicCollectPaths = map[string]bool{
+	"/capture": true, "/batch": true, "/identify": true, "/alias": true,
+	"/e": true, "/e/": true, "/i/v0/e": true, "/i/v0/e/": true,
+	"/waitlist": true, "/waitlist/unsubscribe": true,
+}
+
+func isPublicCollectPath(path string) bool { return publicCollectPaths[path] }
 
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
-	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store)
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
+	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
 	})
 
-	registerAgentRoutes(e, store, scheduler, sb, ws, liveReg, runnerOpts...)
+	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)
+	registerValidationRoutes(e, store)
+
+	// The waitlist is posted from the owner's own landing page, so it sits with
+	// the other public, api-key-authenticated collection endpoints and carries
+	// the same per-IP rate limit.
+	e.POST("/waitlist", h.Waitlist, rateLimit)
+	e.GET("/waitlist/unsubscribe", h.WaitlistUnsubscribe, rateLimit)
 
 	e.POST("/capture", h.Capture, rateLimit)
 	e.POST("/batch", h.Batch, rateLimit)

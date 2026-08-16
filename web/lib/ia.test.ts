@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ARCHITECTURE_STEPS,
   CHANNEL_CATALOG,
   CHILD_SURFACES,
   NAV_ITEMS,
-  STARTER_TASKS,
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
   firstRunHandoff,
@@ -28,14 +26,13 @@ import {
   navGroups,
   shouldShowFirstEventGuide,
   signedInLandingTarget,
-  starterKinds,
 } from './ia';
 
 describe('nav grouping', () => {
   it('groups the shell in customer language: Ask → Team → Signals → Workspace', () => {
     const groups = navGroups();
     expect(groups.map((g) => g.id)).toEqual(['Ask', 'Team', 'Signals', 'Workspace']);
-    expect(groups[0].items.map((i) => i.label)).toEqual(['Chat']);
+    expect(groups[0].items.map((i) => i.label)).toEqual(['Start', 'Chat']);
     expect(groups[1].items.map((i) => i.label)).toEqual(['Agents']);
     expect(groups[2].items.map((i) => i.label)).toEqual([
       'Dashboards', 'Traffic', 'Product', 'People', 'Events', 'Replay', 'SQL', 'Templates',
@@ -74,6 +71,7 @@ describe('nav grouping', () => {
 describe('matchActiveHref', () => {
   const cases: Array<[string, string, 'Ask' | 'Team' | 'Signals' | 'Workspace' | '']> = [
     ['/', '', ''],
+    ['/start', '/start', 'Ask'],
     ['/chat', '/chat', 'Ask'],
     ['/agents', '/agents', 'Team'],
     ['/agents/grow-1/lab', '/agents', 'Team'],
@@ -110,18 +108,15 @@ describe('architecture catalogs', () => {
     ]);
   });
 
-  it('mirrors workload categories with operator/support reserved', () => {
+  // Reserved means "ships no pack". Operator stopped being reserved when
+  // ops-watch shipped and validate arrived with product-scout; support is the
+  // one still empty, because a support agent has no inbound channel to read.
+  it('mirrors workload categories with only support reserved', () => {
     expect(WORKLOAD_CATEGORIES.filter((c) => !c.reserved).map((c) => c.id)).toEqual([
-      'growth', 'marketing', 'data',
+      'validate', 'growth', 'marketing', 'data', 'operator',
     ]);
     expect(WORKLOAD_CATEGORIES.filter((c) => c.reserved).map((c) => c.id)).toEqual([
-      'operator', 'support',
-    ]);
-  });
-
-  it('names the four product layers in order', () => {
-    expect(ARCHITECTURE_STEPS.map((s) => s.id)).toEqual([
-      'channel', 'workload', 'runtime', 'data',
+      'support',
     ]);
   });
 });
@@ -130,15 +125,6 @@ describe('signedInLandingTarget', () => {
   it('sends an authenticated session to the conversation front door', () => {
     expect(signedInLandingTarget()).toBe('/chat');
     expect(signedInLandingTarget()).not.toBe('/dashboard');
-  });
-});
-
-describe('starter tasks', () => {
-  it('covers growth, marketing, data, and runtime work', () => {
-    expect(starterKinds()).toEqual(['growth', 'marketing', 'data', 'runtime']);
-    for (const kind of starterKinds()) {
-      expect(STARTER_TASKS.some((task) => task.kind === kind && task.prompt.length > 0)).toBe(true);
-    }
   });
 });
 

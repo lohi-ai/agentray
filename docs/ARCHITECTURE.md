@@ -11,8 +11,8 @@ extensible without becoming three products.
 └───────────────────────────┬──────────────────────────┘
                             ▼
 ┌── workloads (Garden packs, config only) ─────────────┐
-│  growth · marketing · data                           │
-│  reserved: operator · support                        │
+│  validate · growth · marketing · data · operator     │
+│  reserved: support                                   │
 └───────────────────────────┬──────────────────────────┘
                             ▼
 ┌── runtime ───────────────────────────────────────────┐
@@ -81,10 +81,17 @@ Support/voice must land transcripts as events on the same person graph.
 1. Write a `workloads.Pack` literal
 2. `workloads.Register(p)` from `init`
 
-Marketplace list, install, and default-agent seed read the registry.
-Operator and support categories are reserved and empty — an operator agent
-today is a custom Garden config (skill + secret + allow_hosts), not a
-backend package.
+Marketplace list, install, and default-agent seed read the registry. A pack
+carries persona + scopes + skills, and may name non-scope tools in `Tools`
+(e.g. `web_fetch`) — install grants those through the same RBAC-checked setter
+the Tools tab uses, and only tools that need no config. `support` is the one
+category still reserved and empty: a support agent has no inbound channel to
+read yet.
+
+Categories track a product's phases, not org charts. `validate` is the
+pre-product one — `product-scout` runs with an **empty dataplane** by design
+(evidence from `web_fetch` plus the owner's testimony) and ends by writing the
+tracking plan that fills the dataplane, which is the handoff into the others.
 
 ## What this is not
 

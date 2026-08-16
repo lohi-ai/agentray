@@ -15,6 +15,11 @@ const (
 	CategorySupport   Category = "support"
 	CategoryData      Category = "data"
 	CategoryMarketing Category = "marketing"
+	// CategoryValidate is the pre-product phase: an owner with an idea and no
+	// event stream yet. Every other category reads the dataplane; this one is
+	// defined by working *without* it, which is why it is its own category
+	// rather than a growth pack that happens to find no rows.
+	CategoryValidate Category = "validate"
 )
 
 // Skill is one starter skill shipped inside a pack. It maps onto an active
@@ -39,6 +44,17 @@ type Pack struct {
 	AgentsMD    string          `json:"-"`
 	Scopes      map[string]bool `json:"scopes"`
 	Skills      []Skill         `json:"skills"`
+	// Tools names non-scope tools the pack needs turned on at install
+	// (e.g. web_fetch). Scopes cover the analytics tools; everything else is a
+	// per-agent selection a human makes in the Tools tab, so without this a pack
+	// whose job needs one installs silently unable to do it. Install grants each
+	// through the same RBAC-checked setter the UI uses, so a pack still cannot
+	// reach a capability its installer could not. Configurable tools
+	// (http_request, mcp) are deliberately out of reach — they carry an
+	// allowlist and credentials that only a human should choose; a test in
+	// internal/app enforces both halves against the live tool registry, which
+	// this layer may not import.
+	Tools []string `json:"tools,omitempty"`
 }
 
 // DefaultSlug is the pack seeded onto every new project.

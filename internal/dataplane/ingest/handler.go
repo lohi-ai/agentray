@@ -17,6 +17,7 @@ type Handler struct {
 	events   eventWriter
 	aliases  aliasCreator
 	catalog  *catalogGuard
+	waitlist waitlistStore
 }
 
 type projectStore interface {

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Bot,
+  Compass,
   CreditCard,
   Database,
   Globe,
@@ -33,6 +34,7 @@ import { useAuthStore } from '@/lib/app-state';
 export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
+  '/start': Compass,
   '/chat': MessageSquare,
   '/agents': Bot,
   '/dashboard': LayoutDashboard,

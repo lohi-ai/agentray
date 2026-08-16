@@ -33,6 +33,9 @@ type AgentPreset struct {
 	AgentsMD    string             `json:"-"`
 	Scopes      map[string]bool    `json:"scopes"`
 	Skills      []AgentPresetSkill `json:"skills"`
+	// Tools are non-scope tool names (web_fetch, …) enabled at install. See
+	// workloads.Pack.Tools for why a pack gets to ask for them at all.
+	Tools []string `json:"tools,omitempty"`
 }
 
 // Pack catalog is owned by internal/workloads. The composition root injects it
@@ -103,6 +106,14 @@ func (s *Store) InstallAgentPreset(ctx context.Context, userID, projectID, slug 
 			Name: sk.Name, Description: sk.Description, Body: sk.Body, Enabled: true,
 		}); err != nil {
 			return agent, fmt.Errorf("install %s: skill %q: %w", slug, sk.Name, err)
+		}
+	}
+	// Non-scope tools last: the agent is already usable without them, so a
+	// failure here degrades the hire rather than voiding it. Empty config — a
+	// pack may only ask for tools that need none.
+	for _, name := range preset.Tools {
+		if err := s.UpsertAgentTool(ctx, userID, projectID, agent.ID, name, true, ""); err != nil {
+			return agent, fmt.Errorf("install %s: tool %q: %w", slug, name, err)
 		}
 	}
 	return agent, nil

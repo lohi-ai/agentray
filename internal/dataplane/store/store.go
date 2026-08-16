@@ -971,6 +971,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The pre-product tables. validation_tests references agent_runs, so this
+	// has to follow migrateAgent rather than sit with the other feature
+	// migrations above.
+	if err := s.migrateValidation(ctx); err != nil {
+		return err
+	}
+
 	// The plan column and upgrade_requests are Postgres DDL, and the auth path
 	// now selects w.plan on every login — so it must not sit behind the
 	// ClickHouse migration. A CH outage or schema conflict there returns early,

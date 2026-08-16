@@ -1,0 +1,495 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// validation.go — the pre-product half of the dataplane.
+//
+// Every other table here answers a question about a product that exists. These
+// two exist for the phase before that, where the owner has an idea and the event
+// store is empty by design, and they close the two holes that made phase one
+// unanswerable:
+//
+//   - validation_tests — the kill/keep threshold, agreed BEFORE the result. A
+//     number agreed in chat leaves no row, so nothing could ever read it back:
+//     the owner re-remembered it, or (much more often) re-derived it after
+//     seeing the data, which is not a threshold at all. A committed row is a
+//     commitment the product can hold the owner to.
+//   - waitlist_signups — the only pre-product demand signal that costs the
+//     visitor something. A pageview is attention; an address is intent. It lives
+//     in Postgres rather than the event store because it is a contact list: it
+//     must be exportable, deletable and deduped per person, none of which a
+//     1-year-TTL append-only MergeTree does. The matching EVENT is still written
+//     to ClickHouse, so funnels, persons and every agent tool see it without a
+//     new read path.
+
+// ValidationTest is one falsifiable experiment: a hypothesis, the event that
+// counts as success, how many of them mean "keep", and by when.
+type ValidationTest struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	RunID     string `json:"run_id,omitempty"`
+	// Hypothesis is the claim in the owner's words, e.g. "solo Shopify sellers
+	// will give an email for a weekly restock alert".
+	Hypothesis string `json:"hypothesis"`
+	// MetricEvent is the success event name (waitlist.joined, signup.completed).
+	MetricEvent string `json:"metric_event"`
+	// BaselineEvent is the denominator (usually user.pageview). Empty means the
+	// test is judged on the raw count alone — legitimate when traffic is not
+	// measurable, and the readout then shows no rate.
+	BaselineEvent string     `json:"baseline_event"`
+	TargetCount   int        `json:"target_count"`
+	WindowDays    int        `json:"window_days"`
+	Status        string     `json:"status"`
+	CommittedAt   *time.Time `json:"committed_at,omitempty"`
+	DecidedAt     *time.Time `json:"decided_at,omitempty"`
+	DecisionNote  string     `json:"decision_note"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// Test lifecycle. `proposed` is the agent's draft; `committed` is the owner
+// having agreed to it in advance, which is the whole point of the row; the
+// three terminal states are the decision.
+const (
+	TestProposed  = "proposed"
+	TestCommitted = "committed"
+	TestPassed    = "passed"
+	TestFailed    = "failed"
+	TestAbandoned = "abandoned"
+)
+
+// WaitlistSignup is one person who asked to hear when the product ships.
+type WaitlistSignup struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Email     string `json:"email"`
+	Source    string `json:"source"`
+	Referrer  string `json:"referrer"`
+	// DistinctID ties the signup to the same person the event store knows, so a
+	// waitlist row and its pageviews are one person and not two.
+	DistinctID  string    `json:"distinct_id"`
+	ConsentText string    `json:"consent_text"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	// UnsubscribeToken is deliberately not serialised: it is handed to the
+	// person who signed up, once, in the response to their own submission.
+	// Listing a waitlist must never emit tokens that let one visitor remove
+	// another.
+	UnsubscribeToken string `json:"-"`
+}
+
+// waitlistCap bounds one project's list. A pre-product waitlist that reaches
+// five figures has outgrown this table's purpose, and an uncapped public write
+// endpoint holding email addresses is a liability, not a feature.
+const waitlistCap = 50000
+
+// migrateValidation provisions both tables. Idempotent CREATE TABLE IF NOT
+// EXISTS per the repo's inline-migrate convention; both are new, so there is no
+// backfill and no rewrite of an existing table.
+func (s *Store) migrateValidation(ctx context.Context) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS validation_tests (
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	run_id UUID REFERENCES agent_runs(id) ON DELETE SET NULL,
+	hypothesis TEXT NOT NULL,
+	metric_event VARCHAR(128) NOT NULL,
+	baseline_event VARCHAR(128) NOT NULL DEFAULT '',
+	target_count INTEGER NOT NULL DEFAULT 0,
+	window_days INTEGER NOT NULL DEFAULT 14,
+	status VARCHAR(16) NOT NULL DEFAULT 'proposed',
+	committed_at TIMESTAMPTZ,
+	decided_at TIMESTAMPTZ,
+	decision_note TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`,
+		`CREATE INDEX IF NOT EXISTS validation_tests_project_idx ON validation_tests (project_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS waitlist_signups (
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	email TEXT NOT NULL,
+	email_key TEXT NOT NULL,
+	source VARCHAR(128) NOT NULL DEFAULT '',
+	referrer TEXT NOT NULL DEFAULT '',
+	distinct_id VARCHAR(128) NOT NULL DEFAULT '',
+	consent_text TEXT NOT NULL DEFAULT '',
+	status VARCHAR(16) NOT NULL DEFAULT 'subscribed',
+	unsubscribe_token VARCHAR(64) NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	UNIQUE (project_id, email_key)
+)`,
+		`CREATE INDEX IF NOT EXISTS waitlist_signups_project_idx ON waitlist_signups (project_id, created_at DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS waitlist_signups_token_idx ON waitlist_signups (unsubscribe_token)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.pg.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- validation tests -------------------------------------------------------
+
+// CreateValidationTest records a proposed threshold. It lands as `proposed`
+// whoever writes it: an agent may design the test, but only the owner can agree
+// to be bound by it, and that agreement is CommitValidationTest.
+func (s *Store) CreateValidationTest(ctx context.Context, t ValidationTest) (string, error) {
+	if strings.TrimSpace(t.Hypothesis) == "" {
+		return "", errors.New("hypothesis is required")
+	}
+	if strings.TrimSpace(t.MetricEvent) == "" {
+		return "", errors.New("metric_event is required")
+	}
+	if t.TargetCount <= 0 {
+		return "", errors.New("target_count must be greater than zero")
+	}
+	if t.WindowDays <= 0 {
+		t.WindowDays = 14
+	}
+	var runArg any
+	if t.RunID != "" {
+		runArg = t.RunID
+	}
+	var id string
+	err := s.pg.QueryRow(ctx, `
+INSERT INTO validation_tests (project_id, run_id, hypothesis, metric_event, baseline_event, target_count, window_days)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id::text`,
+		t.ProjectID, runArg, strings.TrimSpace(t.Hypothesis), strings.TrimSpace(t.MetricEvent),
+		strings.TrimSpace(t.BaselineEvent), t.TargetCount, t.WindowDays).Scan(&id)
+	return id, err
+}
+
+// ActiveValidationTest returns the test the project is currently running: the
+// newest committed one, else the newest proposal awaiting agreement. Decided
+// tests are history and never come back as active.
+func (s *Store) ActiveValidationTest(ctx context.Context, projectID string) (*ValidationTest, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
+       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
+FROM validation_tests
+WHERE project_id = $1 AND status IN ('committed','proposed')
+ORDER BY (status = 'committed') DESC, created_at DESC
+LIMIT 1`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	t, err := scanValidationTest(rows)
+	if err != nil {
+		return nil, err
+	}
+	return &t, rows.Err()
+}
+
+// ListValidationTests returns every test for the project, newest first.
+func (s *Store) ListValidationTests(ctx context.Context, userID, projectID string) ([]ValidationTest, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pg.Query(ctx, `
+SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
+       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
+FROM validation_tests WHERE project_id = $1 ORDER BY created_at DESC`, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ValidationTest{}
+	for rows.Next() {
+		t, err := scanValidationTest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// rowScanner is satisfied by both pgx.Row and pgx.Rows, so the column list above
+// is written once and cannot drift between the single-row and list reads.
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanValidationTest(row rowScanner) (ValidationTest, error) {
+	var t ValidationTest
+	err := row.Scan(&t.ID, &t.ProjectID, &t.RunID, &t.Hypothesis, &t.MetricEvent, &t.BaselineEvent,
+		&t.TargetCount, &t.WindowDays, &t.Status, &t.CommittedAt, &t.DecidedAt, &t.DecisionNote, &t.CreatedAt)
+	return t, err
+}
+
+// CommitValidationTest is the owner agreeing to the number in advance. It only
+// moves a proposal forward — re-committing a decided test would rewrite history
+// after the fact, which is the exact dishonesty this table exists to prevent.
+func (s *Store) CommitValidationTest(ctx context.Context, userID, projectID, id string) error {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pg.Exec(ctx, `
+UPDATE validation_tests SET status = 'committed', committed_at = now()
+WHERE id = $1 AND project_id = $2 AND status = 'proposed'`, id, project.ID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("no proposed test with that id")
+	}
+	return nil
+}
+
+// DecideValidationTest closes a committed test. The note is kept because "why"
+// is the part worth reading a month later.
+func (s *Store) DecideValidationTest(ctx context.Context, userID, projectID, id, status, note string) error {
+	if status != TestPassed && status != TestFailed && status != TestAbandoned {
+		return errors.New("status must be passed, failed or abandoned")
+	}
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pg.Exec(ctx, `
+UPDATE validation_tests SET status = $3, decided_at = now(), decision_note = $4
+WHERE id = $1 AND project_id = $2 AND status = 'committed'`, id, project.ID, status, note)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("no committed test with that id")
+	}
+	return nil
+}
+
+// TestProgress is a committed test measured against reality.
+type TestProgress struct {
+	Test ValidationTest `json:"test"`
+	// Metric is how many success events have landed inside the window, counted
+	// as distinct PEOPLE rather than raw events: forty pageviews from one
+	// visitor is one interested person, and a threshold of "40 signups" that a
+	// single enthusiastic reloader can clear measures nothing.
+	Metric int `json:"metric_count"`
+	// Baseline is the denominator over the same window, also per person. Zero
+	// when the test names none.
+	Baseline int `json:"baseline_count"`
+	// DaysElapsed / DaysLeft are whole days against the committed window.
+	DaysElapsed int `json:"days_elapsed"`
+	DaysLeft    int `json:"days_left"`
+}
+
+// ValidationTestProgress counts the test's metric and baseline over its window.
+// The window opens at commit time, not creation time — evidence gathered before
+// the owner agreed to the number cannot count toward it, or the threshold is
+// being fitted to data that already exists.
+func (s *Store) ValidationTestProgress(ctx context.Context, t ValidationTest) (TestProgress, error) {
+	p := TestProgress{Test: t}
+	from := t.CreatedAt
+	if t.CommittedAt != nil {
+		from = *t.CommittedAt
+	}
+	until := from.AddDate(0, 0, t.WindowDays)
+	now := time.Now().UTC()
+	p.DaysElapsed = int(now.Sub(from).Hours() / 24)
+	if p.DaysElapsed < 0 {
+		p.DaysElapsed = 0
+	}
+	p.DaysLeft = int(until.Sub(now).Hours() / 24)
+	if p.DaysLeft < 0 {
+		p.DaysLeft = 0
+	}
+	if s.ch == nil {
+		return p, nil
+	}
+	names := []string{t.MetricEvent}
+	if t.BaselineEvent != "" {
+		names = append(names, t.BaselineEvent)
+	}
+	rows, err := s.ch.Query(ctx, `
+SELECT event_name, uniqExact(distinct_id) AS people
+FROM events
+WHERE project_id = ? AND event_name IN (?) AND timestamp >= ? AND timestamp < ?
+GROUP BY event_name`, t.ProjectID, names, from, until)
+	if err != nil {
+		return p, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var people uint64
+		if err := rows.Scan(&name, &people); err != nil {
+			return p, err
+		}
+		switch name {
+		case t.MetricEvent:
+			p.Metric = int(people)
+		case t.BaselineEvent:
+			p.Baseline = int(people)
+		}
+	}
+	return p, rows.Err()
+}
+
+// Verdict reads a progress as the decision it implies, and is the reason the
+// threshold row exists at all: with the number agreed in advance, "did it work"
+// stops being a conversation and becomes a lookup.
+//
+// It never returns `failed` while the window is still open — a test that has not
+// finished has not failed, and calling it early is how a good idea gets killed
+// by a slow first week.
+func (p TestProgress) Verdict() string {
+	if p.Metric >= p.Test.TargetCount {
+		return TestPassed
+	}
+	if p.DaysLeft <= 0 {
+		return TestFailed
+	}
+	return TestCommitted
+}
+
+// --- waitlist ---------------------------------------------------------------
+
+// AddWaitlistSignup records one address, idempotently. A second submit of the
+// same address is the same person pressing the button twice, not demand for two
+// — it updates the row's context and returns the original, so the count stays a
+// count of people.
+//
+// It returns the row and whether it was new, because only a new one deserves an
+// event: counting a double-click as two joins would inflate the very number the
+// threshold is judged against.
+func (s *Store) AddWaitlistSignup(ctx context.Context, sn WaitlistSignup) (WaitlistSignup, bool, error) {
+	email := strings.TrimSpace(sn.Email)
+	key := strings.ToLower(email)
+	if !plausibleEmail(key) {
+		return WaitlistSignup{}, false, errors.New("a valid email address is required")
+	}
+	// The cap bounds NEW addresses only: someone already on the list may always
+	// re-submit (that path writes no new row), because refusing them would look
+	// to them like the form is broken.
+	var count int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM waitlist_signups WHERE project_id = $1`, sn.ProjectID).Scan(&count); err != nil {
+		return WaitlistSignup{}, false, err
+	}
+	if count >= waitlistCap {
+		var known bool
+		if err := s.pg.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM waitlist_signups WHERE project_id = $1 AND email_key = $2)`,
+			sn.ProjectID, key).Scan(&known); err != nil {
+			return WaitlistSignup{}, false, err
+		}
+		if !known {
+			return WaitlistSignup{}, false, fmt.Errorf("waitlist is full (%d addresses)", waitlistCap)
+		}
+	}
+	token, err := randomToken()
+	if err != nil {
+		return WaitlistSignup{}, false, err
+	}
+	var out WaitlistSignup
+	var inserted bool
+	err = s.pg.QueryRow(ctx, `
+INSERT INTO waitlist_signups (project_id, email, email_key, source, referrer, distinct_id, consent_text, unsubscribe_token)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (project_id, email_key) DO UPDATE SET
+	source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE waitlist_signups.source END,
+	referrer = CASE WHEN excluded.referrer <> '' THEN excluded.referrer ELSE waitlist_signups.referrer END,
+	distinct_id = CASE WHEN excluded.distinct_id <> '' THEN excluded.distinct_id ELSE waitlist_signups.distinct_id END
+RETURNING id::text, project_id::text, email, source, referrer, distinct_id, consent_text, status, created_at,
+	(xmax = 0) AS inserted, unsubscribe_token`,
+		sn.ProjectID, email, key, sn.Source, sn.Referrer, sn.DistinctID, sn.ConsentText, token).
+		Scan(&out.ID, &out.ProjectID, &out.Email, &out.Source, &out.Referrer, &out.DistinctID,
+			&out.ConsentText, &out.Status, &out.CreatedAt, &inserted, &token)
+	if err != nil {
+		return WaitlistSignup{}, false, err
+	}
+	out.UnsubscribeToken = token
+	return out, inserted, nil
+}
+
+// UnsubscribeWaitlist honours a removal request from the address itself, via the
+// token handed back at signup. Token-only (no project id, no auth) because the
+// person unsubscribing is not a user of this product and never will be.
+func (s *Store) UnsubscribeWaitlist(ctx context.Context, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return errors.New("token is required")
+	}
+	tag, err := s.pg.Exec(ctx, `
+UPDATE waitlist_signups SET status = 'unsubscribed' WHERE unsubscribe_token = $1`, token)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("unknown or already-used unsubscribe link")
+	}
+	return nil
+}
+
+// ListWaitlistSignups returns the project's list, newest first, bounded.
+func (s *Store) ListWaitlistSignups(ctx context.Context, userID, projectID string, limit int) ([]WaitlistSignup, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.pg.Query(ctx, `
+SELECT id::text, project_id::text, email, source, referrer, distinct_id, consent_text, status, created_at
+FROM waitlist_signups WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`, project.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WaitlistSignup{}
+	for rows.Next() {
+		var sn WaitlistSignup
+		if err := rows.Scan(&sn.ID, &sn.ProjectID, &sn.Email, &sn.Source, &sn.Referrer,
+			&sn.DistinctID, &sn.ConsentText, &sn.Status, &sn.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sn)
+	}
+	return out, rows.Err()
+}
+
+// CountWaitlistSignups counts subscribed addresses — the number the threshold is
+// judged against. Unsubscribes are excluded: someone who left is not demand.
+func (s *Store) CountWaitlistSignups(ctx context.Context, projectID string) (int, error) {
+	var n int
+	err := s.pg.QueryRow(ctx, `
+SELECT count(*) FROM waitlist_signups WHERE project_id = $1 AND status = 'subscribed'`, projectID).Scan(&n)
+	return n, err
+}
+
+// DeleteWaitlistSignup erases one address on request. A real delete, not a flag:
+// "remove my data" has to mean the row is gone.
+func (s *Store) DeleteWaitlistSignup(ctx context.Context, userID, projectID, id string) error {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return err
+	}
+	_, err = s.pg.Exec(ctx, `DELETE FROM waitlist_signups WHERE id = $1 AND project_id = $2`, id, project.ID)
+	return err
+}
+
+// plausibleEmail is a shape check, not a validity check — nothing short of
+// delivery proves an address, and a stricter regex mostly rejects real people.
+func plausibleEmail(s string) bool {
+	if len(s) < 6 || len(s) > 254 || strings.ContainsAny(s, " \t\r\n,;<>\"") {
+		return false
+	}
+	at := strings.LastIndex(s, "@")
+	if at <= 0 || at == len(s)-1 {
+		return false
+	}
+	domain := s[at+1:]
+	dot := strings.LastIndex(domain, ".")
+	return dot > 0 && dot < len(domain)-1
+}

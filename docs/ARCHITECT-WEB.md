@@ -32,10 +32,38 @@ web/
   components/ui/                      — shadcn primitives (Button, Card, …)
   lib/
     api.ts                            — AgentRayAPI class + all TypeScript types
+    ia.ts                             — nav groups, channel/workload catalogs, first-run copy
+    jobs.ts                           — the job model (see below)
     utils.ts                          — cn() helper
 
   modules/                            — feature modules (see Module Layout below)
 ```
+
+## Two indexes: artifact and job
+
+The nav indexes the product by **artifact** — Dashboards, Traffic, Events, SQL.
+That only helps someone who already knows which artifact answers their question.
+`lib/jobs.ts` is the other index: three **jobs**, one per phase of a product's
+life, each binding the backend's four layers for that phase.
+
+| Job | Situation | Workload | Needs events |
+|---|---|---|---|
+| `validate` | "I have an idea, not a product yet" | `product-scout` | **no** |
+| `grow` | "My product is live and I want it to grow" | `growth-lead`, `marketing-lead`, `data-analyst`, `insight-digest` | yes |
+| `operate` | "My product is live and I need it to stay up" | `ops-watch`, `tracking-steward` | yes |
+
+`needsEvents` is the load-bearing field. Every surface in this app assumed a
+full event store, so an owner with only an idea had nowhere to start; for
+`validate` the event stream is the job's **output** (the tracking plan its
+teammate writes), never a precondition.
+
+`/start` (`modules/start/`) renders one job as: the ordered setup steps
+(`jobSteps` — key → hire → data → standing, each with exactly one control), the
+four layers stated as what they do for *this* job (`jobLayers`), its starter
+questions, and the surfaces holding its answers. It derives the active job from
+workspace state (`suggestedJob`) rather than storing a suggestion, so no query
+settling triggers a cascading render. `/` still lands on `/chat` — a returning
+owner should not be re-asked a question they already answered.
 
 ## Module Layout
 
@@ -116,3 +144,5 @@ Each `modules/<name>/index.tsx` exports only what `app/` pages need:
 | `@/modules/shared/sheet` | `AgentRaySheet` |
 | `@/modules/agent/chat-link` | `agentChatHref`, `normalizeChatRouteAgent` |
 | `@/modules/agent/hooks` | `useAgent`, `useAgents`, `useAgentRun`, … |
+| `@/modules/start` | `StartPage` |
+| `@/lib/jobs` | `JOBS`, `jobById`, `jobSteps`, `jobLayers`, `jobChannels`, `suggestedJob`, `startersByJob`, `jobForPack` |

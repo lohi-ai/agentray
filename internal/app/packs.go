@@ -41,5 +41,6 @@ func packToPreset(p workloads.Pack) storage.AgentPreset {
 		AgentsMD:    p.AgentsMD,
 		Scopes:      p.Scopes,
 		Skills:      skills,
+		Tools:       p.Tools,
 	}
 }

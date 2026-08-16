@@ -227,6 +227,9 @@ export type AgentPreset = {
   icon: string;
   scopes: Record<string, boolean>;
   skills: AgentPresetSkill[];
+  // Non-scope tools the pack turns on at install (workloads.Pack.Tools) —
+  // e.g. web_fetch for a teammate whose evidence is the open web.
+  tools?: string[];
 };
 
 export type TrafficClass = {
@@ -1022,6 +1025,9 @@ export type Agent = {
   is_default: boolean;
   enabled: boolean;
   autonomy: string;
+  // The folder this agent works in. Empty means the server derives a
+  // per-conversation directory under ~/.agentray/workspaces instead.
+  workspace_path: string;
   created_at: string;
   updated_at: string;
 };
@@ -1094,6 +1100,47 @@ export type AgentDelegatesResponse = {
 // AgentTrigger is what starts a run (AgentGarden §7): a `schedule` (cron) or a
 // `webhook` (the unguessable `webhook_token` is the ingress address; an optional
 // `hmac_secret_name` names a vault secret used to authenticate the body).
+// A validation test is the kill/keep threshold as a row: agreed before the data
+// arrives, so the result is a lookup rather than an argument.
+export type ValidationTest = {
+  id: string;
+  hypothesis: string;
+  metric_event: string;
+  baseline_event: string;
+  target_count: number;
+  window_days: number;
+  status: 'proposed' | 'committed' | 'passed' | 'failed' | 'abandoned' | string;
+  committed_at?: string;
+  decided_at?: string;
+  decision_note: string;
+  created_at: string;
+};
+
+export type ValidationProgress = {
+  metric_count: number;
+  baseline_count: number;
+  days_elapsed: number;
+  days_left: number;
+};
+
+export type ValidationStatus = {
+  waitlist_count: number;
+  test: ValidationTest | null;
+  progress?: ValidationProgress;
+  // Computed server-side so the page and any agent reading test_status can
+  // never disagree about whether a test passed.
+  verdict?: string;
+};
+
+export type WaitlistSignup = {
+  id: string;
+  email: string;
+  source: string;
+  referrer: string;
+  status: string;
+  created_at: string;
+};
+
 export type AgentTrigger = {
   id: string;
   kind: 'schedule' | 'webhook' | string;
@@ -1185,6 +1232,27 @@ export type AgentConversationEntry = {
   created_at: string;
 };
 
+// AgentPlanItem is one step of the agent's live todo list (agentcore's todo
+// plugin, mirrored into the conversation as `plan` entries). The plan is
+// out-of-band state — it never enters the transcript, which is exactly why it
+// survives compaction — so this is the only shape it reaches the client in.
+export type AgentPlanItem = {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+};
+
+// AgentChatCommand is one entry of the server's slash-command catalog, rendered
+// by the composer's `/` menu. Served from the same list the server parses
+// against (GET /api/agent/commands), so the menu can never offer a command the
+// backend would treat as prose.
+export type AgentChatCommand = {
+  name: string;
+  arg?: string;
+  summary: string;
+  // The server answers this command itself — no agent run, no model spend.
+  handled: boolean;
+};
+
 export type AgentChatResult = {
   run_id: string;
   final: string;
@@ -1234,6 +1302,12 @@ export type AgentChatStreamHandlers = {
   onToolStart?: (call: { callID: string; tool: string; target: string }) => void;
   // A running tool's partial output, addressed to the call that produced it.
   onToolUpdate?: (call: { callID: string; note: string }) => void;
+  // The agent rewrote its todo list. Fires on every revision, so the checklist on
+  // screen tracks the one the agent is actually working from.
+  onPlan?: (items: AgentPlanItem[]) => void;
+  // This turn is gated on a completion condition (`/goal …`): the agent may not
+  // stop until it is met. Fires once, before the run starts.
+  onGoal?: (goal: string) => void;
 };
 
 export const apiBase = () => process.env.NEXT_PUBLIC_AGENTRAY_API_URL || 'http://localhost:8088';
@@ -1991,6 +2065,10 @@ export class AgentRayAPI {
             });
           } else if (evt.event === 'tool_update') {
             handlers.onToolUpdate?.({ callID: String(evt.data.call_id ?? ''), note: String(evt.data.note ?? '') });
+          } else if (evt.event === 'plan') {
+            handlers.onPlan?.((evt.data.items ?? []) as AgentPlanItem[]);
+          } else if (evt.event === 'goal') {
+            handlers.onGoal?.(String(evt.data.goal ?? ''));
           }
           else if (evt.event === 'error') handlers.onError?.(String(evt.data.error ?? 'stream error'));
           else if (evt.event === 'done') result = evt.data as unknown as AgentChatResult;
@@ -2026,6 +2104,13 @@ export class AgentRayAPI {
       title,
     });
     return r.conversation;
+  }
+
+  // listChatCommands returns the slash-command catalog for the composer's `/`
+  // menu. Not project-scoped — the vocabulary is the product's, not the
+  // workspace's — so it is fetched once and cached by the caller.
+  listChatCommands() {
+    return this.get<{ commands: AgentChatCommand[] }>('/api/agent/commands');
   }
 
   // listConversations returns the project's recent threads, newest activity first.
@@ -2116,10 +2201,14 @@ export class AgentRayAPI {
     return this.post<Agent>('/api/agent/agents', { name, slug });
   }
 
-  updateAgent(id: string, name: string, enabled: boolean) {
+  // workspacePath is omitted from the body unless supplied, and the server
+  // reads an absent field as "leave the pinned folder alone" — so the callers
+  // that only rename or pause an agent cannot unpin its folder by accident.
+  // Passing '' is the explicit unpin.
+  updateAgent(id: string, name: string, enabled: boolean, workspacePath?: string) {
     return this.request<Agent>(this.withProject(`/api/agent/agents/${id}`), {
       method: 'PUT',
-      body: JSON.stringify({ name, enabled }),
+      body: JSON.stringify(workspacePath === undefined ? { name, enabled } : { name, enabled, workspace_path: workspacePath }),
     });
   }
 
@@ -2181,6 +2270,28 @@ export class AgentRayAPI {
 
   agentTriggers(agentID = '') {
     return this.get<{ triggers: AgentTrigger[] }>(`/api/agent/triggers${agentQuery(agentID)}`);
+  }
+
+  // --- validation (the pre-product pair: the committed test and the waitlist) ---
+
+  validationStatus() {
+    return this.get<ValidationStatus>('/api/validation/status');
+  }
+
+  commitValidationTest(id: string) {
+    return this.post<{ ok: boolean; status: string }>(`/api/validation/tests/${id}/commit`, {});
+  }
+
+  decideValidationTest(id: string, status: string, note: string) {
+    return this.post<{ ok: boolean; status: string }>(`/api/validation/tests/${id}/decide`, { status, note });
+  }
+
+  waitlistSignups(limit = 200) {
+    return this.get<{ signups: WaitlistSignup[]; count: number }>(`/api/validation/waitlist?limit=${limit}`);
+  }
+
+  deleteWaitlistSignup(id: string) {
+    return this.request<void>(this.withProject(`/api/validation/waitlist/${id}`), { method: 'DELETE' });
   }
 
   createAgentTrigger(input: AgentTriggerInput, agentID = '') {

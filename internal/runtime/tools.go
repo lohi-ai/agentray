@@ -33,6 +33,13 @@ type DataSource interface {
 	// Recommendation write (P3, growth_suggest).
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
 
+	// Validation test + waitlist (growth_suggest). The pre-product pair: the
+	// agent proposes a threshold and reads the running test back against it.
+	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
+	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
+	ValidationTestProgress(ctx context.Context, t storage.ValidationTest) (storage.TestProgress, error)
+	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
+
 	// Notification channel resolution (send_notification, growth_suggest).
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
@@ -52,6 +59,8 @@ const (
 	ToolCreateDashboard  = "create_dashboard"
 	ToolCreateChart      = "create_chart"
 	ToolSubmitRec        = "submit_recommendation"
+	ToolProposeTest      = "propose_test"
+	ToolTestStatus       = "test_status"
 	ToolRemember         = "remember"
 	ToolSendNotification = "send_notification"
 )
