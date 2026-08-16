@@ -1367,19 +1367,23 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return err
 		}
 		var payload struct {
-			Name           string `json:"name"`
-			Enabled        bool   `json:"enabled"`
-			Cron           string `json:"cron"`
-			PromptTemplate string `json:"prompt_template"`
-			HMACSecretName string `json:"hmac_secret_name"`
+			// A pointer, so an omitted key means "leave the name alone". The agent
+			// setup tab predates this field and sends the other four; without the
+			// pointer, toggling a schedule there would erase the operator label the
+			// owner set on /operations.
+			Name           *string `json:"name"`
+			Enabled        bool    `json:"enabled"`
+			Cron           string  `json:"cron"`
+			PromptTemplate string  `json:"prompt_template"`
+			HMACSecretName string  `json:"hmac_secret_name"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
 		trigger, err := store.UpdateAgentTrigger(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"), c.Param("id"), storage.AgentTrigger{
-			Name: payload.Name, Enabled: payload.Enabled, Cron: payload.Cron,
+			Enabled: payload.Enabled, Cron: payload.Cron,
 			PromptTemplate: payload.PromptTemplate, HMACSecretName: payload.HMACSecretName,
-		})
+		}, payload.Name)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}

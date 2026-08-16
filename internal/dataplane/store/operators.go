@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // operators.go — the project-wide read model behind /operations.
@@ -209,10 +211,16 @@ func (s *Store) OperatorByID(ctx context.Context, userID, projectID, id string) 
 	row := s.pg.QueryRow(ctx, operatorSelect+`
 WHERE a.project_id = $1 AND t.id = $2`, project.ID, id)
 	op, err := scanOperator(row)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// A trigger in another project is not this project's business: it reads as
 		// absent, never as a permission error naming a row the caller cannot see.
 		return Operator{}, errNoSuchOperator
+	}
+	if err != nil {
+		// Anything else is the database failing, not the row being absent. Folding
+		// it into not-found would answer 404 for an outage and send the owner
+		// hunting for an operator they never deleted.
+		return Operator{}, err
 	}
 	return op, nil
 }
@@ -247,10 +255,16 @@ FROM agent_configs c
 LEFT JOIN agents a ON a.id = c.project_id
 WHERE c.project_id = $1 AND c.schedule_cron <> ''`, projectID).
 		Scan(&op.Cron, &op.Enabled, &autonomy, &op.AgentName, &op.AgentEnabled)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// No config row, or no cron on it: there is no legacy schedule. Not an
 		// error — most projects have none.
 		return nil, nil
+	}
+	if err != nil {
+		// A real database failure must NOT read as "no legacy schedule". That is
+		// the exact lie this file exists to prevent: the list would say nothing
+		// runs unattended while the project's own schedule fires every morning.
+		return nil, err
 	}
 	// The scheduler only fires this source on the 'scheduled' or 'auto' rung, so
 	// a cron sitting under 'suggest' is armed in the config and dead in practice.

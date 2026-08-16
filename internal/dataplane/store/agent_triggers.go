@@ -173,11 +173,16 @@ RETURNING id::text, name, kind, enabled, cron, webhook_token, prompt_template, h
 	return t, nil
 }
 
-// UpdateAgentTrigger edits a trigger's enabled flag, cron, prompt template, and
-// HMAC secret name (owner/admin only). The kind and the webhook token are
+// UpdateAgentTrigger edits a trigger's name, enabled flag, cron, prompt template
+// and HMAC secret name (owner/admin only). The kind and the webhook token are
 // immutable: changing a token would silently break the ingress URL already
 // handed out, so a new address means a new trigger.
-func (s *Store) UpdateAgentTrigger(ctx context.Context, userID, projectID, agentID, triggerID string, in AgentTrigger) (AgentTrigger, error) {
+//
+// `name` is a POINTER, and nil means "leave it as it is". Every other field on
+// this route is a full replace, but `name` arrived after the agent setup tab
+// shipped — that screen round-trips the fields it knows and would otherwise wipe
+// the operator's label every time someone toggled a schedule off and on.
+func (s *Store) UpdateAgentTrigger(ctx context.Context, userID, projectID, agentID, triggerID string, in AgentTrigger, name *string) (AgentTrigger, error) {
 	project, scopeID, err := s.agentScope(ctx, userID, projectID, agentID)
 	if err != nil {
 		return AgentTrigger{}, err
@@ -189,12 +194,17 @@ func (s *Store) UpdateAgentTrigger(ctx context.Context, userID, projectID, agent
 	if !canManage {
 		return AgentTrigger{}, errAgentForbidden
 	}
+	var trimmed *string
+	if name != nil {
+		v := strings.TrimSpace(*name)
+		trimmed = &v
+	}
 	var t AgentTrigger
 	err = s.pg.QueryRow(ctx, `
-UPDATE agent_triggers SET name = $7, enabled = $3, cron = $4, prompt_template = $5, hmac_secret_name = $6, updated_at = now()
+UPDATE agent_triggers SET name = coalesce($7, name), enabled = $3, cron = $4, prompt_template = $5, hmac_secret_name = $6, updated_at = now()
 WHERE scope_id = $1 AND id = $2
 RETURNING id::text, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at`,
-		scopeID, triggerID, in.Enabled, in.Cron, in.PromptTemplate, in.HMACSecretName, strings.TrimSpace(in.Name)).
+		scopeID, triggerID, in.Enabled, in.Cron, in.PromptTemplate, in.HMACSecretName, trimmed).
 		Scan(&t.ID, &t.Name, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return AgentTrigger{}, err
