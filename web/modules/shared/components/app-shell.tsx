@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
+  Beaker,
   Bot,
   Compass,
   CreditCard,
@@ -19,6 +20,7 @@ import {
   Settings,
   Users,
   Waypoints,
+  Zap,
 } from 'lucide-react';
 import type { ComponentType, ReactNode, SVGProps } from 'react';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
@@ -31,11 +33,13 @@ import { matchActiveHref, navGroups, navItemsFor, signedInLandingTarget } from '
 import { useAuth, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 
-export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings';
+export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'operations';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/start': Compass,
   '/chat': MessageSquare,
+  '/prototypes': Beaker,
+  '/operations': Zap,
   '/agents': Bot,
   '/dashboard': LayoutDashboard,
   '/web-analytics': Globe,

@@ -29,20 +29,23 @@ import {
 } from './ia';
 
 describe('nav grouping', () => {
-  it('groups the shell in customer language: Ask → Team → Signals → Workspace', () => {
+  it('groups the shell in customer language: Ask → Work → Team → Signals → Workspace', () => {
     const groups = navGroups();
-    expect(groups.map((g) => g.id)).toEqual(['Ask', 'Team', 'Signals', 'Workspace']);
+    expect(groups.map((g) => g.id)).toEqual(['Ask', 'Work', 'Team', 'Signals', 'Workspace']);
     expect(groups[0].items.map((i) => i.label)).toEqual(['Start', 'Chat']);
-    expect(groups[1].items.map((i) => i.label)).toEqual(['Agents']);
-    expect(groups[2].items.map((i) => i.label)).toEqual([
+    // Work sits directly under Ask because both its surfaces are the repeatable
+    // half of what /start teaches — the same jobs, run per feature forever.
+    expect(groups[1].items.map((i) => i.label)).toEqual(['Prototypes', 'Operations']);
+    expect(groups[2].items.map((i) => i.label)).toEqual(['Agents']);
+    expect(groups[3].items.map((i) => i.label)).toEqual([
       'Dashboards', 'Traffic', 'Product', 'People', 'Events', 'Replay', 'SQL', 'Templates',
     ]);
-    expect(groups[3].items.map((i) => i.label)).toEqual(['Settings', 'Plans']);
+    expect(groups[4].items.map((i) => i.label)).toEqual(['Settings', 'Plans']);
   });
 
   it('drops the Plans item from the Workspace group on self-host', () => {
     const groups = navGroups(navItemsFor({ hosted: false }));
-    expect(groups[3].items.map((i) => i.label)).toEqual(['Settings']);
+    expect(groups[4].items.map((i) => i.label)).toEqual(['Settings']);
   });
 
   it('does not list lab or agent monitor as peer Team items', () => {
@@ -69,10 +72,16 @@ describe('nav grouping', () => {
 });
 
 describe('matchActiveHref', () => {
-  const cases: Array<[string, string, 'Ask' | 'Team' | 'Signals' | 'Workspace' | '']> = [
+  const cases: Array<[string, string, 'Ask' | 'Work' | 'Team' | 'Signals' | 'Workspace' | '']> = [
     ['/', '', ''],
     ['/start', '/start', 'Ask'],
     ['/chat', '/chat', 'Ask'],
+    ['/prototypes', '/prototypes', 'Work'],
+    // A detail page keeps its list highlighted — matchActiveHref is prefix-based,
+    // so the shell never goes blank on the second level of these two surfaces.
+    ['/prototypes/abc-123', '/prototypes', 'Work'],
+    ['/operations', '/operations', 'Work'],
+    ['/operations/config%3Aproj-1', '/operations', 'Work'],
     ['/agents', '/agents', 'Team'],
     ['/agents/grow-1/lab', '/agents', 'Team'],
     ['/agents/monitor', '/agents', 'Team'],

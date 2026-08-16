@@ -83,6 +83,10 @@ export function JobPlan({
             <InstrumentSnippet apiKey={apiKey} host={apiHost} />
           </Panel>
         ) : null}
+        {/* /start onboards once. The two jobs it teaches are the two an owner
+            then repeats per feature forever, so the page says where the second
+            one lives rather than quietly holding the first hostage. */}
+        <NextTime job={job} state={state} />
         <Panel title="Ask it now">
           <PromptList job={job} agentID={agentID} />
         </Panel>
@@ -106,6 +110,46 @@ export function JobPlan({
         </Panel>
       </div>
     </div>
+  );
+}
+
+// NextTime is the forward edge out of onboarding. It appears only once the job
+// has actually been done once — before that it is noise, and after that it is
+// the answer to the question /start structurally cannot handle: "where does the
+// SECOND one go?"
+function NextTime({ job, state }: { job: JobDef; state: JobState }) {
+  const edge =
+    job.id === 'validate' && (state.testCommitted || state.testProposed)
+      ? {
+          href: '/prototypes',
+          label: 'Open Prototypes',
+          title: 'You’ve set a kill/keep number once.',
+          detail:
+            'Every idea after this one gets its own bet, with its own number agreed before the data arrives. They all live in Prototypes — this page only ever holds the first.',
+        }
+      : job.id === 'operate' && state.scheduled
+        ? {
+            href: '/operations',
+            label: 'Open Operations',
+            title: 'You’ve put one teammate on a schedule.',
+            detail:
+              'Everything that runs without you — every schedule, every webhook, and whether its last run worked — is in Operations.',
+          }
+        : null;
+  if (!edge) return null;
+  return (
+    <Panel title="Doing this again">
+      <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+        <span className="font-[600] text-[var(--color-text-primary)]">{edge.title}</span> {edge.detail}
+      </p>
+      <div className="mt-3">
+        <Link href={edge.href}>
+          <Button variant="outline" size="sm">
+            {edge.label}
+          </Button>
+        </Link>
+      </div>
+    </Panel>
   );
 }
 

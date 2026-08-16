@@ -1132,6 +1132,64 @@ export type ValidationStatus = {
   verdict?: string;
 };
 
+// MeasuredTest is one prototype as the plural surfaces read it: the row, what
+// the event store says about it, and the single verdict the page and any agent
+// must both quote. `measured` is false for a proposal — a threshold nobody has
+// agreed to counts nothing, so its numbers are absent rather than zero.
+export type MeasuredTest = ValidationTest & {
+  measured: boolean;
+  metric_count: number;
+  baseline_count: number;
+  days_elapsed: number;
+  days_left: number;
+  verdict?: string;
+};
+
+export type ValidationTestsResponse = {
+  tests: MeasuredTest[];
+  // total is what the project HAS; tests is a capped page of it. Rendered, so
+  // an owner past the cap is never shown a fraction as if it were everything.
+  total: number;
+  truncated: boolean;
+  waitlist_count: number;
+};
+
+// Operator is one standing unit of unattended work — an agent_triggers row read
+// next to the agent (or the team it leads) that answers it and the runs it has
+// produced. `source: 'config'` is the legacy project schedule, which is listed
+// here for completeness but edited where the setting actually lives.
+export type Operator = {
+  id: string;
+  source: 'trigger' | 'config' | string;
+  name: string;
+  kind: 'schedule' | 'webhook' | string;
+  enabled: boolean;
+  cron: string;
+  webhook_token: string;
+  prompt_template: string;
+  hmac_secret_name: string;
+  agent_id: string;
+  agent_name: string;
+  agent_enabled: boolean;
+  team_id?: string;
+  team_name?: string;
+  run_count: number;
+  running_count: number;
+  runs_24h: number;
+  errors_24h: number;
+  cost_24h: number;
+  last_run_at?: string;
+  last_status: string;
+  last_summary: string;
+  consecutive_failures: number;
+  // A run records the channel that started it, not which trigger, so two
+  // schedules on one agent read the same history. The UI must say so rather
+  // than claim these numbers belong to this operator alone.
+  shared_history: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type WaitlistSignup = {
   id: string;
   email: string;
@@ -1143,6 +1201,10 @@ export type WaitlistSignup = {
 
 export type AgentTrigger = {
   id: string;
+  // The operator's human label. Empty on a trigger created from the per-agent
+  // tab; readers fall back to the agent's name rather than titling a row with a
+  // cron expression.
+  name: string;
   kind: 'schedule' | 'webhook' | string;
   enabled: boolean;
   cron: string;
@@ -1154,6 +1216,7 @@ export type AgentTrigger = {
 };
 
 export type AgentTriggerInput = {
+  name?: string;
   kind: string;
   enabled: boolean;
   cron: string;
@@ -2278,6 +2341,17 @@ export class AgentRayAPI {
     return this.get<ValidationStatus>('/api/validation/status');
   }
 
+  // The plural read behind /prototypes. Every row arrives already measured and
+  // already carrying its verdict — computed server-side so this page and any
+  // agent reading list_tests cannot disagree about whether a test passed.
+  validationTests() {
+    return this.get<ValidationTestsResponse>('/api/validation/tests');
+  }
+
+  validationTest(id: string) {
+    return this.get<{ test: MeasuredTest; waitlist_count: number }>(`/api/validation/tests/${encodeURIComponent(id)}`);
+  }
+
   commitValidationTest(id: string) {
     return this.post<{ ok: boolean; status: string }>(`/api/validation/tests/${id}/commit`, {});
   }
@@ -2307,6 +2381,24 @@ export class AgentRayAPI {
 
   deleteAgentTrigger(id: string, agentID = '') {
     return this.request<void>(this.withProject(`/api/agent/triggers/${id}${agentQuery(agentID)}`), { method: 'DELETE' });
+  }
+
+  // --- operations (the project-wide view of what runs unattended) ---
+  //
+  // Reading is project-wide; EDITING an operator still goes through the
+  // per-agent trigger routes above, which own the permission checks and the
+  // audit trail. There is no second way to configure a trigger.
+
+  operations() {
+    return this.get<{ operators: Operator[] }>('/api/operations');
+  }
+
+  operation(id: string, limit = 25) {
+    return this.get<{ operator: Operator; runs: AgentRun[] }>(`/api/operations/${encodeURIComponent(id)}?limit=${limit}`);
+  }
+
+  runOperation(id: string) {
+    return this.post<{ queued: boolean }>(`/api/operations/${encodeURIComponent(id)}/run`, {});
   }
 
   // --- AgentCore Lab (/agents/:id/lab) ---

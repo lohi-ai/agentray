@@ -3,7 +3,11 @@
 //   → Runtime (lab/monitor under Agents) → Data (dataplane views).
 // Pure functions so unit tests can call the same helpers the shell uses.
 
-export type NavGroupId = 'Ask' | 'Team' | 'Signals' | 'Workspace';
+// 'Work' is the recurring half of the product. /start answers "where is my
+// product right now" once; Prototypes and Operations are the same two jobs done
+// again, per feature — N idea bets and N standing operators — so they are peers
+// of each other and not a second onboarding question.
+export type NavGroupId = 'Ask' | 'Work' | 'Team' | 'Signals' | 'Workspace';
 
 export type NavItemDef = {
   href: string;
@@ -22,6 +26,11 @@ export const NAV_ITEMS: readonly NavItemDef[] = [
   // conversation, not be re-asked a question they already answered.
   { href: '/start', label: 'Start', group: 'Ask' },
   { href: '/chat', label: 'Chat', group: 'Ask' },
+  // The validate job, run N times: one card per idea with a kill/keep number on
+  // it. The rows have existed since validation_tests shipped; they had no home.
+  { href: '/prototypes', label: 'Prototypes', group: 'Work' },
+  // The operate job, run N times: one row per standing operator.
+  { href: '/operations', label: 'Operations', group: 'Work' },
   { href: '/agents', label: 'Agents', group: 'Team', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
   { href: '/dashboard', label: 'Dashboards', group: 'Signals', aliases: ['/dashboards'] },
   { href: '/web-analytics', label: 'Traffic', group: 'Signals', aliases: ['/traffic'] },
@@ -54,8 +63,11 @@ export type ChannelInfo = {
 export const CHANNEL_CATALOG: readonly ChannelInfo[] = [
   { kind: 'chat', label: 'Chat', shipped: true, href: '/chat' },
   { kind: 'mcp', label: 'MCP', shipped: true, href: '/settings' },
-  { kind: 'schedule', label: 'Schedule', shipped: true, href: '/agents' },
-  { kind: 'webhook', label: 'Webhook', shipped: true, href: '/agents' },
+  // Both point at /operations, not /agents: a schedule and a webhook are the two
+  // things that start work without a human, and that is now a surface rather
+  // than tab four of one agent's setup page.
+  { kind: 'schedule', label: 'Schedule', shipped: true, href: '/operations' },
+  { kind: 'webhook', label: 'Webhook', shipped: true, href: '/operations' },
   { kind: 'lab', label: 'Lab', shipped: true, href: '/agents' },
   { kind: 'support_widget', label: 'Support', shipped: false, href: '' },
   { kind: 'voice', label: 'Voice', shipped: false, href: '' },
@@ -102,7 +114,7 @@ export function navPrefixes(item: NavItemDef): string[] {
 }
 
 export function navGroups(items: readonly NavItemDef[] = NAV_ITEMS): Array<{ id: NavGroupId; label: NavGroupId; items: NavItemDef[] }> {
-  const order: NavGroupId[] = ['Ask', 'Team', 'Signals', 'Workspace'];
+  const order: NavGroupId[] = ['Ask', 'Work', 'Team', 'Signals', 'Workspace'];
   return order.map((id) => ({ id, label: id, items: items.filter((item) => item.group === id) }));
 }
 

@@ -69,6 +69,9 @@ export const JOBS: readonly JobDef[] = [
     runtime: 'Reads the open web for real demand, designs a test that can prove you wrong, then markets it before you build it.',
     needsEvents: false,
     surfaces: [
+      // First, because the second idea and the tenth land here too — /start
+      // only ever shows one test, and this job recurs per feature.
+      { href: '/prototypes', label: 'Prototypes' },
       { href: '/settings?tab=keys', label: 'Instrument the test' },
       { href: '/events', label: 'Watch the first events land' },
     ],
@@ -114,6 +117,8 @@ export const JOBS: readonly JobDef[] = [
     runtime: 'Sweeps errors, latency and spend on a schedule, escalates once, files the fix.',
     needsEvents: true,
     surfaces: [
+      // The standing work itself comes before the artifacts it produces.
+      { href: '/operations', label: 'Operations' },
       { href: '/alerts', label: 'Alerts' },
       { href: '/monitor', label: 'Agent health' },
       { href: '/events', label: 'Events' },
