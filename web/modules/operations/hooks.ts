@@ -23,6 +23,10 @@ export function useOperations() {
     enabled: !!projectID,
     staleTime: 30 * 1000,
     refetchOnWindowFocus: false,
+    // One retry, not the default three. Three plus backoff is ~30s of spinner
+    // before the "we couldn't load your operators" callout appears, which reads
+    // as a hang; one still absorbs a transient blip.
+    retry: 1,
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: [OPERATIONS_KEY, projectID] });

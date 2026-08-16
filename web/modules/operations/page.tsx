@@ -68,7 +68,10 @@ function StartsOn({ op }: { op: Operator }) {
 function LastRun({ op }: { op: Operator }) {
   const outcome = lastOutcome(op);
   return (
-    <VStack gap={0}>
+    // min-w-0: the summary is a whole sentence from the run, and a flex item's
+    // default min-width is its content — without this the line refuses to shrink
+    // and runs off the right edge of the 390px card instead of truncating.
+    <VStack gap={0} className="min-w-0">
       <Text>{op.last_run_at ? formatRelative(op.last_run_at) : '—'}</Text>
       <Text type="supporting" maxLines={1} className={outcome.failed ? '!text-danger' : undefined}>
         {outcome.text}
@@ -145,7 +148,9 @@ function OperatorCard({
         <RunnerBadge op={op} />
       </HStack>
       <HStack gap={2} align="center" justify="between" className="flex-wrap">
-        <LastRun op={op} />
+        <div className="min-w-0 flex-1">
+          <LastRun op={op} />
+        </div>
         <HStack gap={1}>
           <Controls op={op} busy={busy} onRun={onRun} onToggle={onToggle} />
         </HStack>
@@ -238,19 +243,14 @@ export function OperationsPage() {
         />
       ) : null}
 
+      {/* The Operators panel carries no `action`: its header sits directly above
+          the table header, so a right-aligned caption lands on top of the
+          ACTIONS column — colliding with it and squeezing "Run now" into
+          "un now". The ordering is legible from the rows themselves. */}
       {isLoading && operators.length === 0 ? (
         <Loading label="Reading what runs unattended…" />
       ) : (
-        <Panel
-          title="Operators"
-          action={
-            rows.length > 0 ? (
-              <Text type="supporting" className="uppercase tracking-[0.08em]">
-                failures &amp; active first
-              </Text>
-            ) : null
-          }
-        >
+        <Panel title="Operators">
           {rows.length === 0 ? (
             error ? (
               <EmptyState

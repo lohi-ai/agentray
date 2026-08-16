@@ -101,7 +101,12 @@ export function countsLine(t: MeasuredTest, waitlistCount: number): string {
     return `Proposes ${t.target_count} people in ${t.window_days} days`;
   }
   const parts = [`${t.metric_count} of ${t.target_count}`];
-  if (t.days_left > 0) parts.push(`${t.days_left} ${t.days_left === 1 ? 'day' : 'days'} left`);
+  // Days left is only true of a test still counting. A decided one keeps a
+  // positive days_left (the window outlives the verdict), and printing it under
+  // a "Passed" pill reads as though the number could still move.
+  if (stateOf(t) === 'running' && t.days_left > 0) {
+    parts.push(`${t.days_left} ${t.days_left === 1 ? 'day' : 'days'} left`);
+  }
   if (t.baseline_event && t.baseline_count > 0) {
     parts.push(`${Math.round((t.metric_count / t.baseline_count) * 100)}% of ${t.baseline_count}`);
   }

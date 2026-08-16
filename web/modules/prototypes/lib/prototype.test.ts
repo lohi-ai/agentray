@@ -72,6 +72,14 @@ describe('countsLine', () => {
     expect(countsLine(test({ days_left: 0 }), 0)).toBe('12 of 50 · 3% of 400');
   });
 
+  it('drops the days-left clause once the test is decided, window open or not', () => {
+    // A verdict outlives the window: a test that passed on day 3 of 14 still
+    // carries days_left: 11. Printing "11 days left" under a "Passed" pill reads
+    // as though the number could still move.
+    expect(countsLine(test({ status: 'passed' }), 0)).toBe('12 of 50 · 3% of 400');
+    expect(countsLine(test({ verdict: 'failed' }), 0)).toBe('12 of 50 · 3% of 400');
+  });
+
   it('only mentions the waitlist next to a test that counts waitlist joins', () => {
     // The waitlist is the project's, not the test's. Printing it beside a test
     // measuring checkout.completed invites reading it as that test's progress.

@@ -35,6 +35,9 @@ export function usePrototypes() {
     enabled: !!projectID,
     staleTime: 30 * 1000,
     refetchOnWindowFocus: false,
+    // Same reason as useOperations: three retries with backoff is ~30s of
+    // spinner before the read-failure callout, which reads as a hang.
+    retry: 1,
   });
 
   const commit = useMutation({
