@@ -181,6 +181,30 @@ func addUsage(u, v Usage) Usage {
 	return u
 }
 
+// mergeUsage folds one report of the SAME turn's usage into what is known so
+// far, taking the newest non-zero value of each field. Reports within a turn are
+// running totals, not increments, so they are overwritten rather than summed —
+// adding them would double-count a provider that restates a field it already
+// sent. Across turns, use addUsage: those are genuinely separate spends.
+func mergeUsage(u, v Usage) Usage {
+	if v.InputTokens != 0 {
+		u.InputTokens = v.InputTokens
+	}
+	if v.OutputTokens != 0 {
+		u.OutputTokens = v.OutputTokens
+	}
+	if v.CacheReadTokens != 0 {
+		u.CacheReadTokens = v.CacheReadTokens
+	}
+	if v.CacheWriteTokens != 0 {
+		u.CacheWriteTokens = v.CacheWriteTokens
+	}
+	if v.CostUSD != 0 {
+		u.CostUSD = v.CostUSD
+	}
+	return u
+}
+
 // ErrBusy is returned by a run entry point (Prompt/Continue/…) when the Agent is
 // already running. One Agent instance drives one run at a time; spin up a second
 // instance (or wait for the first to finish) for concurrent work.
@@ -373,14 +397,14 @@ func New(cfg Config) (*Agent, error) {
 // the result. task seeds skill selection and memory recall (defaults to the
 // user input).
 func (a *Agent) Prompt(ctx context.Context, userInput string) (RunResult, error) {
-	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput}}, userInput, nil)
+	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput, Directive: true}}, userInput, nil)
 }
 
 // PromptStream runs the same turn-loop but streams the assistant's tokens and
 // tool-call traces to sink as they are produced, for a live (SSE) viewer. The
 // returned RunResult is identical to Prompt's — streaming is additive.
 func (a *Agent) PromptStream(ctx context.Context, userInput string, sink StreamSink) (RunResult, error) {
-	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput}}, userInput, sink)
+	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput, Directive: true}}, userInput, sink)
 }
 
 // Continue resumes from an existing message history (a working-memory thread).

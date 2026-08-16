@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"slices"
+	"strings"
 )
 
 // One turn against the model: retry, escalation, streaming.
@@ -111,9 +112,15 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		if d.ToolCall != nil {
 			msg.ToolCalls = append(msg.ToolCalls, *d.ToolCall)
 		}
+		// Usage is not the Done delta's private property: providers report it in
+		// pieces (input up front, output at the end) and as running totals, so
+		// take the newest non-zero value of each field wherever it arrives. A
+		// last-write-wins assignment on Done alone zeroes the whole turn's spend
+		// for any provider that reports early — and the run's budget gate meters
+		// on that number, so the loss is invisible until a run overshoots.
+		resp.Usage = mergeUsage(resp.Usage, d.Usage)
 		if d.Done {
 			resp.StopReason = d.StopReason
-			resp.Usage = d.Usage
 		}
 	}
 	resp.Message = msg
@@ -157,6 +164,20 @@ func retainedTranscript(messages []Message, system string) []Message {
 	// Clone: the caller keeps mutating res.Messages, and a durable entry must be
 	// a snapshot of the moment it was written.
 	return slices.Clone(messages)
+}
+
+// endsWithUserText reports whether the last user message in messages already
+// says exactly text. It is what keeps a retried resume from appending the same
+// instruction twice: the second attempt recovers a log that already ends with
+// it, and a duplicate would be folded into the pin as if the user had said it
+// again.
+func endsWithUserText(messages []Message, text string) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == RoleUser {
+			return strings.TrimSpace(messages[i].Content) == text
+		}
+	}
+	return false
 }
 
 // lastAssistantText returns the content of the most recent assistant message.

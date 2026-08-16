@@ -83,6 +83,46 @@ and work around.
   spent.
 - Spawns are `Parallel`, so a fan-out turn ("spawn three, then synthesize") runs
   them concurrently.
+- **A cancelled child fails the spawn; it does not answer it.** A cancelled run
+  is not an error to its caller — the loop stops between turns and returns what
+  it has with `StopReason: "aborted"` and a nil error, which is right for a
+  viewer that walked away and wrong here. `res.Final` is then whatever the child
+  last happened to say, mid-task, and returning it hands the parent a killed
+  child's partial state as its *answer*: the shard is recorded as reconciled, the
+  batch looks complete, and the interrupted work is never redone. The spawn fails
+  instead, which puts something the model can act on in the transcript and leaves
+  the call replayable.
+
+## When a fan-out is interrupted
+
+The recovery story only holds if the log tells the truth about what was
+finished, and two things in the loop used to record cancellation damage as fact.
+Both are fixed in the kernel, and both were found by cancelling a run mid-batch
+(`agentcore/fanoutfail_test.go`):
+
+- **A cancellation-caused tool result is no longer persisted.** A call answered
+  with `stopped: run aborted` — or with a tool error that is really the
+  cancellation arriving mid-call — used to be written to the log like any other
+  result, and a call with a recorded result is answered *forever*. Nothing
+  retried it. Whether a cancelled fan-out was recoverable came down to timing:
+  the children still in flight left dangling calls and were replayed, while the
+  ones the cancellation reached first were closed permanently. Same crash, same
+  batch, opposite outcomes. Those results now stay out of the log, so recovery
+  sees dangling calls and does what it already knows how to do — reattach and
+  finish the RetrySafe ones, close the rest with an interrupted note.
+- **A cancellation no longer trips the circuit breaker.** Every child still
+  running fails when the parent is cancelled, and a wide batch clears
+  `maxToolFailures` in a single turn. The breaker wrote `EntryToolDisabled`, so
+  the verdict outlived the process: the resumed run came back with
+  `spawn_subagent` **disabled**, answering every interrupted call with
+  `blocked: spawn_subagent was disabled for this run`, structurally unable to
+  redo the work. A cancelled call now says nothing about the tool.
+
+Measured on eight children with the parent killed after four finished: before,
+four shards were abandoned and the run reported `STATUS: DONE` on half a batch;
+after, the completed children reattach with no second provider call, the
+interrupted ones resume from their own logs, and all eight findings reach the
+answer.
 
 ## Known limitations and deferred work
 

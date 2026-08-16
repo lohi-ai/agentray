@@ -347,6 +347,19 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 		if err != nil {
 			return "", fmt.Errorf("sub-agent failed: %w", err)
 		}
+		// A cancelled run is not an error to its caller — the loop stops between
+		// turns and returns what it has with StopReason "aborted" and a nil error,
+		// which is right for a viewer that walked away. It is wrong here. res.Final
+		// is then whatever the child last happened to say, mid-task, and returning
+		// it hands the parent a killed child's partial state as its ANSWER: the
+		// parent records the shard as reconciled, the batch looks complete, and the
+		// work that was actually interrupted is never redone. Failing the spawn
+		// instead puts an interrupted note in the transcript the model can act on,
+		// and leaves the call replayable — the child session id is deterministic,
+		// so a resume reattaches to the child's own log and finishes it.
+		if res.StopReason == "aborted" {
+			return "", fmt.Errorf("sub-agent was interrupted before it finished (stop reason: %s)", res.StopReason)
+		}
 		final = res.Final
 		if strings.TrimSpace(final) == "" {
 			return "", fmt.Errorf("sub-agent produced no answer (stop reason: %s)", res.StopReason)

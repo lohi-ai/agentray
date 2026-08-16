@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -205,5 +206,52 @@ func TestEstimateContextTokens_UsesLatestUsage(t *testing.T) {
 	// Latest usage wins; nothing trails it.
 	if got := estimateContextTokens(msgs); got != 8100 {
 		t.Fatalf("want 8100, got %d", got)
+	}
+}
+
+// TestPinnedRequirementIsBounded drives the pin's accumulation directly rather
+// than through a run, because the number of corrections it takes to overflow it
+// is larger than a readable end-to-end test should need.
+//
+// The pin is preserved verbatim by every compaction and never summarized, so an
+// unbounded pin is a ratchet in the one message nothing can shrink. Bounding it
+// is easy; bounding it without breaking it is the point of this test. Two things
+// the ceiling must never cost: the task at the top, which every correction is
+// relative to, and the newest instruction at the bottom, which is the one
+// actually in force.
+func TestPinnedRequirementIsBounded(t *testing.T) {
+	const maxTokens = 256
+	pin := ""
+	for i := range 400 {
+		pin = composePin(pin, []string{
+			fmt.Sprintf("correction %d: reconcile region %d before filing", i, i),
+		}, maxTokens)
+	}
+	t.Logf("400 corrections render to %d B (ceiling %d B):\n%s", len(pin), maxTokens*4, pin)
+
+	if len(pin) > maxTokens*bytesPerTokenEstimate {
+		t.Fatalf("the pin is %d B against a %d B ceiling: corrections accumulate unbounded",
+			len(pin), maxTokens*bytesPerTokenEstimate)
+	}
+	if !strings.Contains(pin, "correction 0:") {
+		t.Fatalf("the pin dropped its first entry — the task — so later corrections have nothing "+
+			"to correct:\n%s", pin)
+	}
+	if !strings.Contains(pin, "correction 399:") {
+		t.Fatalf("the pin dropped the NEWEST correction, which is the one currently in force:\n%s", pin)
+	}
+	if !strings.Contains(pin, "omitted for space") {
+		t.Fatalf("the pin dropped corrections silently: a model told nothing proceeds on a partial "+
+			"requirement, where one told something was dropped can go and read it:\n%s", pin)
+	}
+}
+
+// A correction steered in twice in a row is one requirement, not two.
+func TestPinDoesNotRepeatAnIdenticalCorrection(t *testing.T) {
+	pin := composePin("", []string{"audit the ledger"}, 256)
+	pin = composePin(pin, []string{"switch to payroll"}, 256)
+	again := composePin(pin, []string{"switch to payroll"}, 256)
+	if again != pin {
+		t.Fatalf("re-steering the same instruction grew the pin:\nbefore %q\nafter  %q", pin, again)
 	}
 }

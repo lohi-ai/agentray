@@ -605,3 +605,372 @@ func TestLogGrowthIsLinearInRunLength(t *testing.T) {
 		t.Fatalf("the two runs are too close in length (%.1fx) to say anything about growth", turnRatio)
 	}
 }
+
+// --- the summarizer that tells the truth -------------------------------------
+
+// TestVeryLongRunKeepsItsCheckpointInsideTheBudget closes the blind spot in the
+// test above.
+//
+// scaleProvider answers every compaction with a fixed 130-byte string. That is
+// convenient and it is a lie: it makes the checkpoint a constant, when the whole
+// reason a checkpoint is dangerous is that it is not one. The update prompt asks
+// the summarizer to preserve what it already captured and fold in what is new,
+// which is a monotonic instruction — every fold appends and none subtracts — so
+// a model that simply DOES WHAT IT IS ASKED returns a longer checkpoint each
+// time. A fixed-size stub can never show that, and so the run above passed
+// while the loop had no ceiling on the summary at all.
+//
+// What that cost, measured on this test before the ceiling existed: the
+// checkpoint climbed until the provider's own output cap stopped it at 2048
+// tokens — half the entire 4000-token budget — and stayed there. The window
+// never came back under its ceiling after a compaction, so compaction re-fired
+// on the next turn: 1 summarization call per 2.1 turns of actual work, and 37%
+// of the run spent over the budget the run was given. Nothing crashed. The agent
+// just quietly spent half its model calls re-summarizing and ran permanently
+// over a limit that existed to keep it inside a real model's window.
+//
+// So this run uses a summarizer that folds honestly, and asserts the three
+// numbers that distinguish a bounded checkpoint from a ratcheting one.
+func TestVeryLongRunKeepsItsCheckpointInsideTheBudget(t *testing.T) {
+	const (
+		turns  = 1500
+		budget = 4000 // tokens
+	)
+
+	prov := &foldingProvider{finishAt: turns}
+	store := newE2EStore()
+	work := &e2eWorkTool{size: 600}
+
+	limits := agentcore.DefaultLimits()
+	limits.MaxTurns = 2 * turns
+	limits.MaxToolCalls = 2 * turns
+	limits.MaxContextTokens = budget
+
+	cs := agentcore.DefaultCompactionSettings()
+	cs.KeepRecentTokens = 1500
+
+	agent, err := agentcore.Build(
+		e2eConfig{cfg: agentcore.Config{
+			Provider:   prov,
+			Model:      "fold-model",
+			Tools:      agentcore.NewToolSet(work),
+			Policy:     agentcore.NewAllowList("work"),
+			Limits:     &limits,
+			Compaction: &cs,
+			Session:    store,
+			SessionID:  "scale-fold",
+		}},
+		goal.Until(scaleGoal),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), scaleTask); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	if prov.summaries < 50 {
+		t.Fatalf("only %d compactions: the checkpoint was never folded enough times to ratchet, "+
+			"so this test proves nothing", prov.summaries)
+	}
+
+	over := 0
+	maxWindow := 0
+	for _, b := range prov.windowBytes {
+		if b > limitsWindowBytes {
+			over++
+		}
+		if b > maxWindow {
+			maxWindow = b
+		}
+	}
+	perCompaction := float64(prov.turns) / float64(prov.summaries)
+	t.Logf("turns %d, compactions %d (1 per %.1f turns)", prov.turns, prov.summaries, perCompaction)
+	t.Logf("checkpoint: %d B at its largest (ceiling %d B)", prov.maxSummaryBytes, checkpointCeilingBytes)
+	t.Logf("window: %d B at its largest, %d of %d turns over the %d B budget",
+		maxWindow, over, prov.turns, limitsWindowBytes)
+
+	// The direct assertion: the checkpoint has a ceiling and it holds. The slack
+	// is for the elision marker the clamp inserts when it has to cut.
+	if prov.maxSummaryBytes > checkpointCeilingBytes+128 {
+		t.Fatalf("the checkpoint grew to %d B against a %d B ceiling: nothing bounds the summary, "+
+			"so it will keep ratcheting until it fills the window by itself",
+			prov.maxSummaryBytes, checkpointCeilingBytes)
+	}
+
+	// The consequence that actually hurts: a compaction must return the
+	// transcript to UNDER the budget, not merely trim it. A run that sits over
+	// its ceiling has lost the guarantee the ceiling exists for — that the
+	// request still fits a real model's window.
+	if over > prov.turns/100 {
+		t.Fatalf("%d of %d turns ran over the %d B budget: compaction is no longer bringing the "+
+			"transcript back under the ceiling", over, prov.turns, limitsWindowBytes)
+	}
+
+	// The cost. A compaction that does not buy headroom re-fires immediately, and
+	// each firing is a full model call — the failure shows up on the bill and in
+	// latency long before it shows up as an error.
+	if perCompaction < 4 {
+		t.Fatalf("compaction ran once per %.1f turns: it is thrashing, so the run spends a large "+
+			"fraction of its model calls re-summarizing instead of working", perCompaction)
+	}
+}
+
+// checkpointCeilingBytes is the share of the run's context budget a compaction
+// checkpoint is allowed to occupy — a quarter of it, at the loop's own
+// ~4-bytes-per-token estimate. The recent tail already claims half, so a
+// checkpoint at this ceiling leaves a compaction real headroom before the next.
+const checkpointCeilingBytes = (4000 / 4) * 4
+
+// foldingProvider is scaleProvider's summarizer, told the truth: it obeys the
+// update prompt literally, carrying the previous checkpoint forward and
+// appending the new work to it. That is the honest reading of "preserve what you
+// captured and fold in what is new", and it is what makes a checkpoint grow.
+//
+// It deliberately IGNORES the request's MaxTokens. A hosted provider honors it,
+// but a self-hosted or OpenAI-compatible endpoint may not, and the difference
+// must not matter: the loop asks for a bounded checkpoint and must also enforce
+// one on what comes back. Ignoring the cap here is what makes this test cover
+// the enforcement rather than the request.
+type foldingProvider struct {
+	mu       sync.Mutex
+	finishAt int
+
+	turns     int
+	summaries int
+
+	maxSummaryBytes int
+	windowBytes     []int // bytes the PARENT model was shown, per turn
+	lastReq         []agentcore.Message
+}
+
+func (*foldingProvider) Name() string        { return "fold" }
+func (*foldingProvider) SupportsTools() bool { return true }
+
+func (p *foldingProvider) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(req.Messages) > 0 && strings.HasPrefix(req.Messages[0].Content, "You are a context summarization") {
+		p.summaries++
+		out := priorCheckpoint(req.Messages[1].Content)
+		if out == "" {
+			out = "## Goal\n" + scaleGoal + "\n## Progress\n### Done"
+		}
+		out += fmt.Sprintf("\n- [x] fold %d: reconciled shard set %d against the clearing file", p.summaries, p.summaries)
+		if len(out) > p.maxSummaryBytes {
+			p.maxSummaryBytes = len(out)
+		}
+		return usageFor(req, agentcore.AssistantText(out)), nil
+	}
+
+	p.turns++
+	p.lastReq = req.Messages
+	p.windowBytes = append(p.windowBytes, transcriptBytes(req.Messages))
+	if p.turns >= p.finishAt {
+		return usageFor(req, agentcore.AssistantText("All shards audited.\n"+goal.Done)), nil
+	}
+	return usageFor(req, agentcore.AssistantToolCall(
+		fmt.Sprintf("w%d", p.turns), "work", fmt.Sprintf(`{"n":%d}`, p.turns))), nil
+}
+
+func (p *foldingProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	resp, err := p.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentcore.ChatDelta, 4)
+	go func() {
+		defer close(ch)
+		if resp.Message.Content != "" {
+			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
+		}
+		for i := range resp.Message.ToolCalls {
+			tc := resp.Message.ToolCalls[i]
+			ch <- agentcore.ChatDelta{ToolCall: &tc}
+		}
+		ch <- agentcore.ChatDelta{Done: true, Usage: resp.Usage}
+	}()
+	return ch, nil
+}
+
+// priorCheckpoint pulls the "## Previous summary" section back out of an update
+// request, which is how the fold is made real: what the loop hands back as the
+// previous checkpoint is exactly what this provider carries forward, so the
+// growth measured here is the growth a real summarizer would produce.
+func priorCheckpoint(userContent string) string {
+	const head = "## Previous summary\n"
+	i := strings.Index(userContent, head)
+	if i < 0 {
+		return ""
+	}
+	rest := userContent[i+len(head):]
+	if j := strings.Index(rest, "\n\n## New messages since that summary"); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// --- the requirement the user changed their mind about -----------------------
+
+// scaleSteeredTask is what the run is originally asked to do, and
+// scaleCorrection is the user changing their mind 150 turns in. They contradict
+// on purpose: an agent that ends the run holding both, with no statement of
+// which wins, has not actually been corrected.
+const (
+	scaleSteeredTask = "Audit every shard in the LEDGER corpus and file one report per region."
+	scaleCorrection  = "CHANGE OF PLAN: stop auditing the ledger corpus entirely. Audit the PAYROLL corpus instead and file one report per department."
+	scaleSecondFix   = "One more change: include contractor payroll in the department reports."
+)
+
+// TestVeryLongRunFollowsTheRequirementTheUserChangedItTo is the other half of
+// "the objective must not drift", and the half that pinning got backwards.
+//
+// TestVeryLongRunKeepsItsGoalAndPlan proves the original task survives being
+// summarized away. That protection is real, and on its own it is dangerous: a
+// run of any length gets steered, and a pin built from the FIRST user message
+// holds the requirement the user has since cancelled. The correction, being an
+// ordinary transcript message, is summarized like anything else and diluted by
+// each fold after that.
+//
+// Measured on this run before the pin was made to accumulate: at turn 1200,
+// after 108 compactions, the superseded LEDGER task was in front of the model
+// word for word under a header reading "keep working toward it", and the word
+// PAYROLL — the thing the user actually asked for — appeared nowhere in the
+// window at all. The agent was not confused. It was diligently working on a
+// cancelled requirement, and every mechanism in the run was helping it.
+func TestVeryLongRunFollowsTheRequirementTheUserChangedItTo(t *testing.T) {
+	const (
+		turns  = 1200
+		budget = 4000
+	)
+
+	prov := &foldingProvider{finishAt: turns}
+	store := newE2EStore()
+	work := &e2eWorkTool{size: 600}
+
+	// Two corrections, far apart, both long after the first compaction has
+	// already pinned the original.
+	var steered []string
+	steer := func(context.Context) []agentcore.Message {
+		prov.mu.Lock()
+		n := prov.turns
+		prov.mu.Unlock()
+		switch {
+		case len(steered) == 0 && n >= 150:
+			steered = append(steered, scaleCorrection)
+			return []agentcore.Message{{Role: agentcore.RoleUser, Content: scaleCorrection}}
+		case len(steered) == 1 && n >= 600:
+			steered = append(steered, scaleSecondFix)
+			return []agentcore.Message{{Role: agentcore.RoleUser, Content: scaleSecondFix}}
+		}
+		return nil
+	}
+
+	limits := agentcore.DefaultLimits()
+	limits.MaxTurns = 2 * turns
+	limits.MaxToolCalls = 2 * turns
+	limits.MaxContextTokens = budget
+
+	cs := agentcore.DefaultCompactionSettings()
+	cs.KeepRecentTokens = 1500
+
+	agent, err := agentcore.Build(
+		e2eConfig{cfg: agentcore.Config{
+			Provider:            prov,
+			Model:               "fold-model",
+			Tools:               agentcore.NewToolSet(work),
+			Policy:              agentcore.NewAllowList("work"),
+			Limits:              &limits,
+			Compaction:          &cs,
+			Session:             store,
+			SessionID:           "scale-steered",
+			GetSteeringMessages: steer,
+		}},
+		goal.Until(scaleGoal),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), scaleSteeredTask); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	prov.mu.Lock()
+	last := prov.lastReq
+	summaries := prov.summaries
+	prov.mu.Unlock()
+
+	if len(steered) != 2 {
+		t.Fatalf("the run ended before both corrections were delivered (%d): nothing was steered, "+
+			"so this test proves nothing", len(steered))
+	}
+	if summaries < 50 {
+		t.Fatalf("only %d compactions: the corrections were never summarized away, so the pin was "+
+			"never what was holding them", summaries)
+	}
+
+	// The corrections were delivered hundreds of turns ago and compacted many
+	// times since. First: they really are gone from the transcript, so whatever
+	// carries them now is doing so deliberately.
+	for _, m := range last {
+		if m.Role == agentcore.RoleUser && strings.TrimSpace(m.Content) == scaleCorrection {
+			t.Fatal("the correction is still in the window as an ordinary message: compaction never " +
+				"reached it, so this run does not test whether a correction survives being summarized away")
+		}
+	}
+
+	pin := ""
+	for _, m := range last {
+		if m.Role == agentcore.RoleSystem && strings.HasPrefix(m.Content, "[pinned goal") {
+			if pin != "" {
+				t.Fatal("two pinned-requirement messages in one window: the pin is being appended to " +
+					"rather than rebuilt, which is how a long run accumulates a second objective")
+			}
+			pin = m.Content
+		}
+	}
+	if pin == "" {
+		t.Fatal("no pinned requirement in the final window")
+	}
+	t.Logf("after %d turns and %d compactions the model is looking at:\n%s", turns, summaries, pin)
+
+	// Both corrections are in front of the model, word for word.
+	for _, want := range []string{scaleCorrection, scaleSecondFix} {
+		if !strings.Contains(pin, want) {
+			t.Fatalf("the pin lost a correction the user steered in:\n missing %q\n pin:\n%s", want, pin)
+		}
+	}
+
+	// The original stays too — "stop auditing the ledger corpus" is not
+	// actionable on its own, and neither is "include contractor payroll".
+	if !strings.Contains(pin, scaleSteeredTask) {
+		t.Fatalf("the pin dropped the original task, leaving corrections with nothing to correct:\n%s", pin)
+	}
+
+	// And the pin says which one wins. Two contradictory requirements in one
+	// message with no ordering is worse than either alone.
+	if !strings.Contains(pin, "supersede") {
+		t.Fatalf("the pin states the original and its corrections without saying which takes "+
+			"precedence, so the model is left to guess:\n%s", pin)
+	}
+	if strings.Index(pin, scaleSteeredTask) > strings.Index(pin, scaleCorrection) {
+		t.Fatalf("corrections are rendered before the task they correct, inverting the precedence "+
+			"the separator claims:\n%s", pin)
+	}
+	if strings.Index(pin, scaleCorrection) > strings.Index(pin, scaleSecondFix) {
+		t.Fatalf("the two corrections are out of order, so 'later supersedes earlier' points the "+
+			"wrong way:\n%s", pin)
+	}
+
+	// The pin is preserved verbatim forever, so it needs a ceiling for the same
+	// reason the checkpoint does — a run steered a thousand times must not end up
+	// with a thousand-entry pin filling the window.
+	if len(pin) > checkpointCeilingBytes {
+		t.Fatalf("the pin grew to %d B: it accumulates without a ceiling, which is the checkpoint "+
+			"ratchet again in a message compaction never even summarizes", len(pin))
+	}
+}

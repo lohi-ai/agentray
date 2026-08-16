@@ -9,8 +9,26 @@
 // Unlike the finishguard plugin (a capped verify nudge), the gate is UNCAPPED by
 // design: it holds the line until the model declares done or blocked. It cannot
 // wedge a run — MaxTurns, MaxToolCalls, and the budget gate still bound the
-// loop, a budget wrap-up never consults a stop interceptor at all, and the stall
-// breaker below stops a model that has nothing new to say.
+// loop, a budget wrap-up never consults a stop interceptor at all, and the two
+// stall breakers below stop a model that has nothing new to say.
+//
+// # Stalling, and why one breaker is not enough
+//
+// Being uncapped is only affordable if "the model has nothing left to give" is
+// detected cheaply. The original breaker compared the finish to the previous one
+// verbatim, which is a good proxy for a strong model — asked the same question
+// against a near-identical context, it tends to emit the same tokens — and a
+// useless one for a weaker model, which paraphrases instead. Measured: a model
+// that answers every nudge with the same claim in different words trips the
+// verbatim breaker never, and burns the entire turn budget re-asserting that it
+// is finished. So the second breaker asks the behavioral question rather than
+// the lexical one: did the model DO anything between one nudge and the next? A
+// run of finishes with no tool call in between is a stall whatever the wording,
+// and unlike text comparison it does not care how the model phrases itself.
+//
+// The nudge escalates for the same reason. A model that ignored an instruction
+// is unlikely to obey a byte-identical repeat of it, so the second and later
+// nudges state the contract far more mechanically than the first.
 //
 // The goal STRING is durable state the loop owns: it writes the EntryGoal record
 // and recovers it on resume, then hands it to this plugin as RunInfo.Goal. So a
@@ -38,18 +56,51 @@ const (
 	Blocked = "STATUS: BLOCKED"
 )
 
-// StopReasonStalled is recorded when the stall breaker accepts a finish because
-// the model repeated its previous answer verbatim after a nudge.
+// StopReasonStalled is recorded when a stall breaker accepts a finish because
+// the model has stopped making progress toward the goal — it either repeated its
+// previous answer verbatim, or kept declaring itself finished without doing any
+// work between one nudge and the next.
 const StopReasonStalled = "goal_stalled"
+
+// maxIdleNudges is how many consecutive finishes with NO tool call in between
+// the gate will nudge before calling the run stalled.
+//
+// It is a small number on purpose. Every one of these is a wasted model call:
+// the run has already been told, in the system prompt and then in a nudge, how
+// to declare itself done. Three attempts is enough slack for a model that
+// misreads the contract once and corrects, and cheap enough that the failure
+// costs a handful of calls rather than the whole turn budget. A model that IS
+// working keeps calling tools and is never counted here, so this bounds only the
+// case where nudging has demonstrably stopped buying anything.
+const maxIdleNudges = 3
 
 // Plugin installs the goal gate. An empty Goal leaves the run ungated, so a
 // composition can wire the plugin unconditionally and let configuration decide.
 type Plugin struct {
 	Goal string
+	// Revisable offers the model the update_goal tool, letting it restate what
+	// finishing means when the work shows the condition to be wrong.
+	//
+	// Off by default, and that default is the honest one: it hands the model the
+	// key to its own gate, so a composition takes it deliberately rather than
+	// inheriting it. See updateGoalTool for what the trade actually is.
+	Revisable bool
+	// Store, when set, is the condition's live home — share it to read the
+	// revision trail after the run. Left nil, the plugin builds its own per run.
+	Store *Store
 }
 
 // Until gates the run on a condition.
 func Until(condition string) Plugin { return Plugin{Goal: condition} }
+
+// UntilRevisable gates the run on a condition the AGENT may restate, with the
+// reason recorded, when the work shows that condition to be wrong. The returned
+// Store is the audit trail: Revisions() holds every condition the run has held,
+// in order, each with the justification the model gave for changing it.
+func UntilRevisable(condition string) (Plugin, *Store) {
+	st := NewStore(condition)
+	return Plugin{Goal: condition, Revisable: true, Store: st}, st
+}
 
 // Name identifies the plugin and the extension it installs.
 func (Plugin) Name() string { return "goal" }
@@ -86,26 +137,57 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 	if info.Goal == "" {
 		return nil, nil
 	}
-	return &gateRun{goal: info.Goal}, nil
+	// The store is seeded from RunInfo, not from p.Goal, for the same reason the
+	// gate is: on a resume the loop has already folded the log's revisions down
+	// to the condition currently in force, and a run that came back holding the
+	// ORIGINAL condition would re-arm an objective it had explicitly moved past.
+	store := p.Store
+	switch {
+	case store == nil:
+		store = NewStore(info.Goal)
+	case store.Goal() != info.Goal:
+		// A caller-supplied store still owns the trail; bring it to the recovered
+		// condition rather than silently running on a private copy. adopt and not
+		// Update, because this is not a revision — the loop read this condition
+		// OUT of the log. Marking it pending would have the resumed run's first
+		// turn drain it and announce a goal change that never happened.
+		store.adopt(info.Goal, "recovered from the durable log")
+	}
+	return &gateRun{store: store, revisable: p.Revisable}, nil
 }
 
-// gateRun is one run's gate state. lastFinal is why this is a factory rather
-// than a bare function: the stall breaker compares against the previous nudged
-// answer, which is per-run.
+// gateRun is one run's gate state. It is why this is a factory rather than a
+// bare function: both stall breakers compare against the previous nudged finish,
+// which is per-run.
 type gateRun struct {
-	goal      string
+	// store holds the condition. It is read on every use rather than copied at
+	// BeginRun, because the condition can change mid-run (update_goal) and a gate
+	// enforcing a stale copy is worse than no gate: it holds the model to a
+	// contract nothing else in the run still states.
+	store     *Store
+	revisable bool
 	nudges    int
 	lastFinal string
+	// lastTools is the size of the run's tool trace at the previous nudge, and
+	// idle counts how many nudges in a row have failed to move it. Tool calls are
+	// the only progress the gate can see from here: a finish is by definition a
+	// turn that called nothing, so a chain of them with a flat trace means the
+	// model answered every nudge with prose alone.
+	lastTools int
+	idle      int
 }
 
 // Name identifies the extension in composition diagnostics.
 func (*gateRun) Name() string { return "goal" }
 
+// goal is the condition currently in force.
+func (g *gateRun) goalText() string { return g.store.Goal() }
+
 // SystemPrompt states the completion protocol before the model's first turn.
 // Stating it once as a fixed prefix costs less than repeating it per turn, and
 // it is in front of the model before the first answer rather than after it.
 func (g *gateRun) SystemPrompt() string {
-	return "## Goal gate\nThis run has a completion goal:\n" + strings.TrimSpace(g.goal) +
+	return "## Goal gate\nThis run has a completion goal:\n" + strings.TrimSpace(g.goalText()) +
 		"\nDo not stop until it is satisfied. End your final answer with the line \"" + Done +
 		"\" once the goal is met, or \"" + Blocked +
 		"\" plus the reason if only the user can unblock you. A finish without either line re-opens the run."
@@ -113,9 +195,11 @@ func (g *gateRun) SystemPrompt() string {
 
 // TurnStopping holds the run to its goal.
 //
-// The stall breaker fires first: after at least one nudge, a finish that repeats
-// the previous answer verbatim means the model has nothing further to say, so
-// the run stops as goal_stalled instead of burning turns until MaxTurns.
+// The stall breakers fire first, before the run is re-opened. Verbatim repeat is
+// checked as an immediate give-up because it is unambiguous — the model was
+// asked to continue and produced the same bytes. No-progress needs a few
+// attempts before it means anything, since the first nudge is exactly the case
+// where a model that simply forgot the sentinel gets to add it.
 func (g *gateRun) TurnStopping(_ context.Context, info agentcore.StopInfo) agentcore.StopDecision {
 	if satisfied(info.Final) {
 		return agentcore.StopDecision{}
@@ -123,21 +207,54 @@ func (g *gateRun) TurnStopping(_ context.Context, info agentcore.StopInfo) agent
 	if g.nudges > 0 && info.Final == g.lastFinal {
 		return agentcore.StopDecision{StopReason: StopReasonStalled}
 	}
+	// Progress resets the count rather than decrementing it: a model that goes
+	// back to work has answered the nudge, and the tally of what it did before
+	// that should not be held against it later in a long run.
+	if g.nudges > 0 && len(info.Tools) == g.lastTools {
+		g.idle++
+		if g.idle >= maxIdleNudges {
+			return agentcore.StopDecision{StopReason: StopReasonStalled}
+		}
+	} else {
+		g.idle = 0
+	}
+	// Built before the counter moves: nudge() escalates on the SECOND and later
+	// nudges, and incrementing first would hand the very first finish the
+	// "your last answer was rejected" wording for an answer nothing had rejected
+	// yet.
+	msg := g.nudge()
 	g.nudges++
 	g.lastFinal = info.Final
+	g.lastTools = len(info.Tools)
 	return agentcore.StopDecision{
 		Continue: true,
-		Inject:   []agentcore.Message{{Role: agentcore.RoleUser, Content: g.nudge()}},
+		Inject:   []agentcore.Message{{Role: agentcore.RoleUser, Content: msg}},
 		Note:     "Goal not met — continuing.",
 	}
 }
 
 // nudge is the synthetic user message injected when the model tries to finish
 // without declaring the goal met or blocked.
+//
+// The first one explains the contract. Later ones stop explaining and start
+// dictating: the model has now ignored the instruction at least twice, so
+// repeating the same prose is the one thing known not to work. The escalated
+// form names the failure, gives the literal line to emit, and rules out the
+// specific near-miss that keeps a compliant-looking answer from counting — a
+// sign-off after the sentinel, which is the most common way a weaker model
+// misses a contract it is otherwise trying to follow.
 func (g *gateRun) nudge() string {
-	return "[goal gate] The run's goal is not met yet:\n" + strings.TrimSpace(g.goal) +
-		"\nKeep working toward it. When it is fully satisfied, end your answer with the line \"" + Done +
-		"\". If you are genuinely blocked by something only the user can resolve, explain the blocker and end with \"" + Blocked + "\"."
+	if g.nudges == 0 {
+		return "[goal gate] The run's goal is not met yet:\n" + strings.TrimSpace(g.goalText()) +
+			"\nKeep working toward it. When it is fully satisfied, end your answer with the line \"" + Done +
+			"\". If you are genuinely blocked by something only the user can resolve, explain the blocker and end with \"" + Blocked + "\"."
+	}
+	return "[goal gate] Your last answer was rejected because it did not end with the required status line. " +
+		"This is a formatting requirement, not a judgment about the work.\n\nThe goal is:\n" + strings.TrimSpace(g.goalText()) +
+		"\n\nIf the goal is met, repeat your answer and make the LAST line of it exactly:\n" + Done +
+		"\nIf you are blocked by something only the user can resolve, state the blocker and make the LAST line exactly:\n" + Blocked +
+		"\n\nWrite nothing at all after that line — no sign-off, no follow-up question. " +
+		"If the goal is not met, ignore the above and keep working."
 }
 
 // satisfied reports whether the final answer declares the goal met or the run

@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -62,6 +63,36 @@ func effectiveBudget(configured, window int) int {
 // keepRecentTokens).
 const defaultKeepRecentTokens = 20_000
 
+// defaultMaxSummaryTokens is the ceiling on the checkpoint a compaction leaves
+// behind, and minSummaryTokens is the floor that ceiling is never clamped below.
+//
+// The checkpoint needs a ceiling for the same reason the recent tail does: after
+// a compaction the window holds the leading system head, the summary, and the
+// tail, and a budget that bounds only the tail bounds nothing. Left unbounded
+// the summary ratchets, because that is what the update prompt asks for —
+// "preserve everything already captured, fold in the new messages" is a
+// monotonic instruction, so every fold appends and none subtracts. The result is
+// not a crash but a slow strangling: the checkpoint grows until it fills the
+// budget by itself, the post-compaction transcript never drops back under the
+// ceiling, and compaction re-fires on the very next turn. Measured by
+// TestVeryLongRunKeepsItsCheckpointInsideTheBudget with these bounds removed —
+// 1500 turns, a 4000-token budget, a summarizer that folds honestly — the
+// checkpoint reached 60 KB against a 4 KB share, 790 of 1500 turns ran over
+// budget, and compaction fired once per 1.6 turns: a summarization call for
+// every turn and a half of actual work.
+//
+// A quarter of the budget is the share that leaves the arithmetic sound: the
+// tail already takes half (effectiveCompaction), so head + summary + tail lands
+// near three quarters and a compaction buys real turns of headroom before the
+// next one. On a normal window the clamp never binds — a quarter of 190k is far
+// above 2048 — so this only changes behaviour where it was broken: the small
+// windows a cheap model gives you, which is exactly where the long cheap runs
+// happen.
+const (
+	defaultMaxSummaryTokens = 2048
+	minSummaryTokens        = 256
+)
+
 // summaryMarker prefixes a compaction summary message so later compactions can
 // recognize a prior summary and fold it into the next one instead of
 // re-summarizing it as raw history.
@@ -72,25 +103,35 @@ const summaryMarker = "[context summary of earlier conversation]"
 // lets observers see that a *degraded* compaction happened rather than none.
 const elideMarker = "[context compaction]"
 
-// goalMarker prefixes the pinned-goal system message. The first time the loop
-// compacts the original task out of the live window, that task is lifted into a
+// goalMarker prefixes the pinned-requirement system message. The first time the
+// loop compacts the task out of the live window, that task is lifted into a
 // goal-marked system message kept verbatim by every later compaction (it sorts
 // into the leading-system head, which is never summarized). This stops the run's
 // objective from drifting as successive lossy summaries fold into one another —
-// the literal goal is always in front of the model. (pi keeps the first user
-// task pinned for the same reason.)
-const goalMarker = "[pinned goal — the original task for this run; keep working toward it]"
+// the literal requirement is always in front of the model. (pi keeps the first
+// user task pinned for the same reason.)
+//
+// Unlike pi's, this pin is REBUILT on every compaction rather than written once,
+// because a long run's requirement changes: see foldDirectivesIntoPin.
+const goalMarker = "[pinned goal — the run's requirement, kept verbatim across compaction; keep working toward it. " +
+	"Where entries below conflict, a LATER one supersedes an earlier one.]"
 
-// CompactionSettings tunes how the loop compacts a long transcript. KeepRecent
-// is the approximate token budget of recent messages kept verbatim; the older
-// span is summarized by the model into a structured checkpoint.
+// CompactionSettings tunes how the loop compacts a long transcript. It sizes
+// both halves of what a compaction leaves behind: KeepRecentTokens is the
+// approximate token budget of recent messages kept verbatim, MaxSummaryTokens
+// the ceiling on the checkpoint that stands for everything older. Both are
+// clamped against the run's real budget by effectiveCompaction.
 type CompactionSettings struct {
 	KeepRecentTokens int
+	MaxSummaryTokens int
 }
 
 // DefaultCompactionSettings returns conservative defaults.
 func DefaultCompactionSettings() CompactionSettings {
-	return CompactionSettings{KeepRecentTokens: defaultKeepRecentTokens}
+	return CompactionSettings{
+		KeepRecentTokens: defaultKeepRecentTokens,
+		MaxSummaryTokens: defaultMaxSummaryTokens,
+	}
 }
 
 // estimateContextTokens estimates how full the context window is, used only to
@@ -125,17 +166,26 @@ func estimateBytesTokens(messages []Message) int {
 			bytes += len(tc.Name) + len(tc.Arguments)
 		}
 	}
-	return bytes / 4
+	return bytes / bytesPerTokenEstimate
 }
 
-// effectiveCompaction clamps the keep-recent window to half the compaction
-// budget. Without the clamp, a consumer who sets Limits.MaxContextTokens below
-// KeepRecentTokens (default 20k) wedges the loop: shouldCompact fires every
-// turn, but findCutPoint sees the entire transcript inside the "recent" window
-// (cut 0) and falls back to the deterministic elide — which only collapses
-// bulky tool results, so a transcript whose bulk lives in assistant tool-call
-// arguments or prose passes through untouched, and compaction runs forever
-// without ever shrinking anything.
+// effectiveCompaction sizes what a compaction is allowed to leave behind
+// against the budget it has to fit inside — both halves of it.
+//
+// The keep-recent window is clamped to half the budget. Without that clamp, a
+// consumer who sets Limits.MaxContextTokens below KeepRecentTokens (default 20k)
+// wedges the loop: shouldCompact fires every turn, but findCutPoint sees the
+// entire transcript inside the "recent" window (cut 0) and falls back to the
+// deterministic elide — which only collapses bulky tool results, so a transcript
+// whose bulk lives in assistant tool-call arguments or prose passes through
+// untouched, and compaction runs forever without ever shrinking anything.
+//
+// The checkpoint is clamped to a quarter, for the symmetric reason: a summary
+// sized by a constant rather than by the budget is a second way for the
+// post-compaction transcript to exceed the ceiling, and the model is being
+// asked to grow it on every fold. The floor keeps a tiny budget from asking for
+// a checkpoint too small to carry a goal and a next step, on the grounds that a
+// useless summary is worse than a slightly oversized one.
 func effectiveCompaction(settings CompactionSettings, budget int) CompactionSettings {
 	if budget <= 0 {
 		budget = defaultContextTokenBudget
@@ -145,6 +195,15 @@ func effectiveCompaction(settings CompactionSettings, budget int) CompactionSett
 	}
 	if settings.KeepRecentTokens > budget/2 {
 		settings.KeepRecentTokens = budget / 2
+	}
+	if settings.MaxSummaryTokens <= 0 {
+		settings.MaxSummaryTokens = defaultMaxSummaryTokens
+	}
+	if settings.MaxSummaryTokens > budget/4 {
+		settings.MaxSummaryTokens = budget / 4
+	}
+	if settings.MaxSummaryTokens < minSummaryTokens {
+		settings.MaxSummaryTokens = minSummaryTokens
 	}
 	return settings
 }
@@ -247,20 +306,36 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 		return out, Usage{}
 	}
 
-	summary, su, err := summarizeSpan(ctx, provider, model, newOlder, prevSummary)
+	maxSummary := settings.MaxSummaryTokens
+	if maxSummary <= 0 {
+		maxSummary = defaultMaxSummaryTokens
+	}
+	summary, su, err := summarizeSpan(ctx, provider, model, newOlder, prevSummary, maxSummary)
 	if err != nil || strings.TrimSpace(summary) == "" {
 		// Degrade, don't break — but still report su: an empty summary from a
 		// successful call was billed even though its output was unusable.
 		return compact(messages, 6), su
 	}
+	// The request asked for a bounded checkpoint; this enforces it. MaxTokens is
+	// a request, not a guarantee — a self-hosted or OpenAI-compatible endpoint
+	// may ignore it — and an over-long checkpoint is not merely this turn's
+	// problem: it is fed back as the next fold's "previous summary", so one
+	// unbounded reply becomes the permanent floor of every window that follows.
+	summary = clampSummary(summary, maxSummary)
 
 	summaryMsg := Message{Role: RoleSystem, Content: summaryMarker + "\n" + strings.TrimSpace(summary)}
 	out := make([]Message, 0, len(head)+2+len(tail))
+	// The pin carries the run's REQUIREMENT past the summaries that would
+	// otherwise erode it — and it is rebuilt here, not written once, because the
+	// requirement is not fixed. Anything the user directed that is about to leave
+	// the window is folded in before it goes.
+	head, pinned := foldDirectivesIntoPin(head, older, maxSummary/2)
 	out = append(out, head...)
-	// Pin the original goal the first time it would be summarized away. Once a
-	// goal pin exists it lives in head (leading system, non-summary) and every
-	// later compaction preserves it verbatim, so the objective never drifts.
-	if !hasGoalPin(messages) {
+	if !pinned {
+		// No pin in head and nothing marked: either the first compaction of a run
+		// whose seed predates the Directive stamp, or a log written by an older
+		// version. Fall back to what compaction always did — pin the first user
+		// message — so an old session still gets its objective held.
 		if goal, ok := firstUserText(older); ok {
 			out = append(out, Message{Role: RoleSystem, Content: goalMarker + "\n" + strings.TrimSpace(goal)})
 		}
@@ -270,13 +345,29 @@ func compactWithSummary(ctx context.Context, provider LLMProvider, model string,
 	return out, su
 }
 
+// elidedResultBytes is what an oversized tool result is cut down to, rather than
+// removed outright.
+//
+// The tail guard used to replace such a result with a bare placeholder telling
+// the model to re-run the tool. That is the wrong half of the content to keep
+// and the wrong advice to give. A tool result puts its CONCLUSION at the end —
+// the finding, the verdict, the error — so dropping everything loses precisely
+// the part the call was made for. And "re-run it" assumes the call is cheap and
+// repeatable: a spawn_subagent result is a whole child run that has already been
+// paid for, and re-running it costs more than every byte this guard saves.
+//
+// Keeping both ends of a kilobyte is nearly free against a context budget and
+// preserves the answer. truncateMiddle already does exactly this everywhere else
+// oversized text meets a ceiling in this package.
+const elidedResultBytes = 1024
+
 // elideOversizedTail bounds the kept-verbatim tail of a compaction: while its
-// estimate exceeds the keep budget, bulky tool results are collapsed to a
-// placeholder, oldest first, never touching the final message (the newest
-// state the model is acting on). Call linkage (ToolCallID/Name) is preserved so
-// the transcript stays provider-valid. Returns the (possibly copied) tail and
-// whether anything was elided; a tail that cannot shrink further is returned
-// best-effort.
+// estimate exceeds the keep budget, bulky tool results are cut down to
+// elidedResultBytes (head and tail kept, middle removed), oldest first, never
+// touching the final message (the newest state the model is acting on). Call
+// linkage (ToolCallID/Name) is preserved so the transcript stays provider-valid.
+// Returns the (possibly copied) tail and whether anything was elided; a tail
+// that cannot shrink further is returned best-effort.
 func elideOversizedTail(tail []Message, keepRecentTokens int) ([]Message, bool) {
 	if keepRecentTokens <= 0 {
 		keepRecentTokens = defaultKeepRecentTokens
@@ -289,14 +380,14 @@ func elideOversizedTail(tail []Message, keepRecentTokens int) ([]Message, bool) 
 	shrunk := false
 	for i := 0; i < len(out)-1 && estimateBytesTokens(out) > keepRecentTokens; i++ {
 		m := out[i]
-		if m.Role != RoleTool || len(m.Content) <= 1024 {
+		if m.Role != RoleTool || len(m.Content) <= elidedResultBytes {
 			continue
 		}
 		out[i] = Message{
 			Role:       RoleTool,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
-			Content:    "[oversized tool result elided to fit context — re-run the tool if you need the detail]",
+			Content:    truncateMiddle(m.Content, elidedResultBytes),
 		}
 		shrunk = true
 	}
@@ -316,15 +407,172 @@ func firstUserText(span []Message) (string, bool) {
 	return "", false
 }
 
-// hasGoalPin reports whether a pinned-goal system message already exists, so the
-// goal is lifted out exactly once and then preserved by head retention.
-func hasGoalPin(msgs []Message) bool {
-	for _, m := range msgs {
+// goalPinIndex locates the pinned-requirement message, or -1.
+func goalPinIndex(msgs []Message) int {
+	for i, m := range msgs {
 		if m.Role == RoleSystem && strings.HasPrefix(m.Content, goalMarker) {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// pinUpdateSep separates the original task from each later correction inside the
+// pin. It is a fixed string this package both writes and splits on, which is what
+// lets the pin be re-read and rebuilt on every compaction rather than parsed out
+// of prose.
+//
+// It is deliberately terse, and the precedence rule it used to restate lives in
+// goalMarker instead. The pin is re-sent on every request for the rest of the
+// run, so a separator is not paid once — it is paid per update, per turn, for
+// thousands of turns. Saying "later supersedes earlier" once in the header says
+// it just as clearly for a third of the bytes.
+const pinUpdateSep = "\n\n--- requirement update ---\n"
+
+// pinDroppedNote stands in for corrections the ceiling forced out of the pin.
+// It names the loss rather than hiding it: the text is still in the durable log
+// and, usually, in the checkpoint, so a model told that something was dropped
+// can ask for it — one told nothing simply proceeds on a partial requirement.
+const pinDroppedNote = "\n\n--- (earlier requirement updates omitted for space; the context summary covers them) ---\n"
+
+// directiveTexts returns, in order, the human-authored requirements in span:
+// the run's task and any correction steered in since. Framework-synthesized
+// user messages — goal-gate nudges, budget wrap-ups, extension injections —
+// are not marked and so are never mistaken for what the run is for.
+func directiveTexts(span []Message) []string {
+	var out []string
+	for _, m := range span {
+		if m.Role == RoleUser && m.Directive {
+			if t := strings.TrimSpace(m.Content); t != "" {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
+}
+
+// foldDirectivesIntoPin brings the pinned requirement up to date before the
+// messages carrying it are summarized away, and reports whether head now holds
+// a pin at all.
+//
+// This is the half of "the objective must not drift" that pinning the first user
+// message gets wrong. A run of any length is steered: the user says stop doing
+// that, do this instead. The correction is an ordinary transcript message, so
+// compaction summarizes it, and successive folds dilute it — while the pin,
+// which every compaction preserves verbatim, still states the requirement that
+// was cancelled and still says to keep working toward it. Measured before this
+// existed, on a 1200-turn run steered at turn 150: the superseded task was in
+// front of the model word for word at the end, and the correction had vanished
+// from the window entirely.
+//
+// So the pin accumulates. The original task stays — a correction is rarely
+// interpretable without the thing it corrects — and each later directive is
+// appended under a separator that tells the model which one wins.
+func foldDirectivesIntoPin(head []Message, older []Message, maxTokens int) ([]Message, bool) {
+	fresh := directiveTexts(older)
+	idx := goalPinIndex(head)
+	if len(fresh) == 0 {
+		return head, idx >= 0
+	}
+
+	existing := ""
+	if idx >= 0 {
+		existing = strings.TrimPrefix(head[idx].Content, goalMarker)
+	}
+	content := goalMarker + "\n" + composePin(existing, fresh, maxTokens)
+
+	// Copy before writing: head aliases the caller's transcript, and compaction
+	// must not mutate the messages it was handed.
+	out := make([]Message, len(head), len(head)+1)
+	copy(out, head)
+	if idx >= 0 {
+		out[idx] = Message{Role: RoleSystem, Content: content}
+		return out, true
+	}
+	return append(out, Message{Role: RoleSystem, Content: content}), true
+}
+
+// composePin renders the original task plus its corrections into one bounded
+// message.
+//
+// Bounded, because the pin is preserved verbatim forever and an unbounded
+// verbatim message in a long run's window is the same ratchet the checkpoint
+// ceiling exists to stop. When the budget binds, the OLDEST corrections go
+// first: the original stays because it anchors everything after it, and the
+// newest stay because they are the operative instruction. What is dropped is the
+// middle — corrections that later ones have most likely already superseded, and
+// that the checkpoint summarized on its way past.
+func composePin(existing string, fresh []string, maxTokens int) string {
+	parts := splitPin(existing)
+	for _, f := range fresh {
+		// Restating a requirement the pin already holds is not a NEW requirement,
+		// and recording it as one is actively wrong: the pin's ordering is its
+		// meaning ("a LATER one supersedes an earlier one"), so re-appending the
+		// original task would push it back in front of the correction that
+		// cancelled it. This is not hypothetical — a resumed run is handed the
+		// transcript's last user message as its task, which is very often
+		// something the pin already carries.
+		if slices.Contains(parts, f) {
+			continue
+		}
+		parts = append(parts, f)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxSummaryTokens / 2
+	}
+	budget := maxTokens * bytesPerTokenEstimate
+
+	// Drop from the second entry inward while the rendered pin is over budget,
+	// keeping the first (the task) and the tail (the live corrections).
+	dropped := 0
+	for {
+		rendered := renderPin(parts, dropped)
+		if len(rendered) <= budget || len(parts)-dropped <= 2 {
+			// Nothing left to drop without losing the task or the newest
+			// correction; truncate what remains rather than return an oversized pin.
+			return truncateMiddle(rendered, budget)
+		}
+		dropped++
+	}
+}
+
+// renderPin joins the task and its corrections, omitting `dropped` entries after
+// the first and noting that it did.
+func renderPin(parts []string, dropped int) string {
+	var b strings.Builder
+	b.WriteString(parts[0])
+	rest := parts[1:]
+	if dropped > 0 && dropped <= len(rest) {
+		rest = rest[dropped:]
+		b.WriteString(pinDroppedNote)
+	}
+	for _, p := range rest {
+		b.WriteString(pinUpdateSep)
+		b.WriteString(p)
+	}
+	return b.String()
+}
+
+// splitPin recovers the parts renderPin wrote, so a pin can be rebuilt from the
+// one already in the window instead of from the transcript it replaced.
+func splitPin(pin string) []string {
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return nil
+	}
+	// The dropped-note is a rendering artifact, not a requirement; fold it into
+	// the separator so it does not come back as a part of its own.
+	pin = strings.ReplaceAll(pin, strings.TrimSuffix(pinDroppedNote, "\n"), "")
+	var out []string
+	for _, p := range strings.Split(pin, pinUpdateSep) {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // splitPriorSummary detects a prior compaction summary at the head of an older
@@ -344,20 +592,30 @@ func splitPriorSummary(older []Message) (string, []Message) {
 // structured checkpoint format. The span is serialized to a single transcript
 // (roles preserved) and handed to a one-shot, non-streaming Chat call with no
 // tools. When previousSummary is non-empty the model is asked to UPDATE it in
-// place — preserving everything already captured and folding in only the new
+// place — preserving what it already captured and folding in only the new
 // messages — instead of summarizing from scratch. The returned Usage is the
 // summarization call's own spend, so it can be billed against the run.
-func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span []Message, previousSummary string) (string, Usage, error) {
+//
+// maxTokens is the checkpoint's ceiling, and it is applied twice over: as the
+// call's MaxTokens, and as a stated rule in the prompt. Both, because they fail
+// differently. MaxTokens truncates mid-sentence at whatever token the limit
+// falls on, which on the update path means the next fold inherits a checkpoint
+// that stops mid-word; the prompt rule instead asks the model to spend the
+// budget deliberately, consolidating what it has rather than being cut off.
+func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span []Message, previousSummary string, maxTokens int) (string, Usage, error) {
 	if len(span) == 0 {
 		return "", Usage{}, fmt.Errorf("empty span")
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxSummaryTokens
 	}
 	var userContent string
 	if strings.TrimSpace(previousSummary) != "" {
 		userContent = "## Previous summary\n" + strings.TrimSpace(previousSummary) +
 			"\n\n## New messages since that summary\n" + serializeConversation(span) +
-			"\n\n" + updateSummarizationPrompt
+			"\n\n" + updateSummarizationPrompt + sizeRule(maxTokens)
 	} else {
-		userContent = serializeConversation(span) + "\n\n" + summarizationPrompt
+		userContent = serializeConversation(span) + "\n\n" + summarizationPrompt + sizeRule(maxTokens)
 	}
 	req := ChatRequest{
 		Model: model,
@@ -365,7 +623,7 @@ func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span
 			{Role: RoleSystem, Content: summarizationSystemPrompt},
 			{Role: RoleUser, Content: userContent},
 		},
-		MaxTokens: 2048,
+		MaxTokens: maxTokens,
 	}
 	resp, err := provider.Chat(ctx, req)
 	if err != nil {
@@ -373,6 +631,95 @@ func summarizeSpan(ctx context.Context, provider LLMProvider, model string, span
 	}
 	return resp.Message.Content, resp.Usage, nil
 }
+
+// sizeRule states the checkpoint's ceiling to the model, in words, and says what
+// to do on reaching it. Naming the limit is not enough on its own: told only
+// "stay under N words" while also told to preserve everything, a model has been
+// handed two rules that eventually contradict, and it will keep the one stated
+// last. So the rule also fixes the tie-break — consolidate the accumulated
+// record of finished work, which is where a long run's checkpoint puts nearly
+// all its growth, and never at the expense of the parts a resuming agent needs
+// to act: the goal, live blockers, next steps, identifiers.
+//
+// Words rather than tokens because a model can approximately count words and
+// cannot count its own tokens; ~3/4 of a word per token is the usual ratio for
+// English prose.
+func sizeRule(maxTokens int) string {
+	return fmt.Sprintf("\n- SIZE LIMIT: keep the whole checkpoint under about %d words. "+
+		"If including everything would exceed that, CONSOLIDATE instead of growing: "+
+		"collapse older completed work into one summarizing line per theme, and drop detail "+
+		"that later work has superseded. Never drop the goal, unresolved blockers, the next "+
+		"steps, or identifiers still needed to continue — compress the record of finished work first.",
+		maxTokens*3/4)
+}
+
+// clampSummary enforces the checkpoint ceiling on a reply that overshot it.
+//
+// The cut takes the middle out rather than the end, because the checkpoint's
+// format puts its most load-bearing sections last: a head-only truncation keeps
+// Goal and the oldest Done items and throws away Next Steps and Critical
+// Context — the two sections a resuming agent actually reads. Keeping both ends
+// costs the middle of the Done list, which is the most compressible thing in the
+// document and the part the run's own transcript still records.
+// The cut lands on LINE boundaries, and that part is not cosmetic. A checkpoint
+// is a list of facts, and a byte-exact cut through one produces a fact that is
+// wrong while still reading as complete — "code FINDING-4=SHARD00" for a code
+// that ends 002OK. Nothing downstream can tell the difference: this checkpoint
+// is handed to the next fold as the previous summary and the model is asked to
+// carry it forward, so the mutilated identifier propagates for the rest of the
+// run and is reported as a finding. Dropping a fact is honest and recoverable —
+// the run can look it up again. Half a fact presented as whole is a fabrication
+// the run will defend. So whole lines go, and the marker says how many, which is
+// something the next fold can read and act on.
+func clampSummary(summary string, maxTokens int) string {
+	summary = strings.TrimSpace(summary)
+	if maxTokens <= 0 {
+		return summary
+	}
+	maxBytes := maxTokens * bytesPerTokenEstimate
+	if len(summary) <= maxBytes {
+		return summary
+	}
+	lines := strings.Split(summary, "\n")
+	// Reserve room for the marker, whose digits vary.
+	const reserve = 80
+	budget := maxBytes - reserve
+	if len(lines) < 3 || budget < 2 {
+		// No line structure to respect, or no room to say what went: a byte cut
+		// is the only thing left, and some cut beats an unbounded checkpoint
+		// becoming the permanent floor of every window after it.
+		return truncateMiddle(summary, maxBytes)
+	}
+
+	// Whole lines from the front, then whole lines from the end with whatever
+	// budget is left. Two thirds to the head so the Goal and the oldest Done
+	// items survive alongside Next Steps and Critical Context at the tail.
+	head, headBytes := 0, 0
+	for head < len(lines) && headBytes+len(lines[head])+1 <= budget*2/3 {
+		headBytes += len(lines[head]) + 1
+		head++
+	}
+	tail, tailBytes := len(lines), 0
+	for tail > head && tailBytes+len(lines[tail-1])+1 <= budget-headBytes {
+		tailBytes += len(lines[tail-1]) + 1
+		tail--
+	}
+	if tail <= head {
+		// One line is bigger than the whole budget; nothing can be kept whole.
+		return truncateMiddle(summary, maxBytes)
+	}
+
+	kept := make([]string, 0, head+1+len(lines)-tail)
+	kept = append(kept, lines[:head]...)
+	kept = append(kept, fmt.Sprintf("…[%d earlier lines dropped to fit the checkpoint budget]…", tail-head))
+	kept = append(kept, lines[tail:]...)
+	return strings.Join(kept, "\n")
+}
+
+// bytesPerTokenEstimate is the ~4-bytes-per-token rule the loop already sizes
+// context with (estimateBytesTokens). Reused here so a ceiling expressed in
+// tokens converts to bytes the same way everywhere.
+const bytesPerTokenEstimate = 4
 
 // Bounds applied when serializing a span for the summarizer, so one giant tool
 // result (a full query dump, pages of build output) cannot blow the compaction
@@ -457,8 +804,8 @@ Produce an UPDATED checkpoint in the EXACT same format as the previous summary:
 ## Critical Context
 
 Rules for the update:
-- PRESERVE everything in the previous summary that is still true — do not drop facts, decisions, identifiers, or critical context just because they are not mentioned again in the new messages.
-- FOLD IN what the new messages add: append new completed work to Done, move finished items out of In Progress into Done, add new decisions and next steps, and update or clear blockers that were resolved.
+- PRESERVE what the previous summary established and is still true — do not drop facts, decisions, identifiers, or critical context just because they are not mentioned again in the new messages. Preserving a fact does not require preserving its original wording: several finished items may be carried as one line.
+- FOLD IN what the new messages add: record new completed work in Done, move finished items out of In Progress into Done, add new decisions and next steps, and update or clear blockers that were resolved.
 - Do NOT invent anything and do NOT re-derive or contradict the previous summary; only correct it when the new messages explicitly supersede it.
 - Output only the updated checkpoint, no preamble.`
 

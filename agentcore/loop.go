@@ -336,6 +336,17 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if !o.executed {
 			return
 		}
+		// A cancelled run fails every call still in flight, and none of those
+		// failures says anything about the tool. Counting them trips the breaker on
+		// a tool that works — and the breaker writes EntryToolDisabled, so the
+		// verdict outlives the process: the resume comes back with the tool off and
+		// answers the interrupted calls with "disabled for this run", permanently
+		// unable to redo the work the cancellation interrupted. A wide parallel
+		// batch reaches maxToolFailures in one turn, which is exactly when this
+		// matters most.
+		if ctx.Err() != nil {
+			return
+		}
 		name := o.trace.Tool
 		if o.trace.Error == "" {
 			delete(toolFailures, name)
@@ -484,6 +495,28 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 	}
 
+	// A resume can carry a NEW instruction — the operator restarted the run and
+	// told it something ("also include contractor payroll", "skip region EU").
+	// The recovered history replaced the caller's seed messages wholesale above,
+	// so without this the instruction never reaches the model at all: the run
+	// comes back on its old objective, does not do the thing it was asked, and
+	// nothing anywhere records that a user was ignored. Silently dropping input
+	// is the worst available outcome — worse than refusing the resume.
+	//
+	// It is stamped Directive for the same reason a fresh Prompt's seed is: it is
+	// human-authored, so the pin has to carry it past the compaction that
+	// summarizes it away, exactly like a steered correction. And it is persisted
+	// here because the resume path skips the seed-persist below, and an
+	// instruction the model can see must be in the log.
+	if resumed {
+		if t := strings.TrimSpace(task); t != "" && !endsWithUserText(messages, t) {
+			m := Message{Role: RoleUser, Content: t, Directive: true}
+			messages = append(messages, m)
+			res.Messages = messages
+			appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
+		}
+	}
+
 	// Perceive: assemble the system prompt once from the definition + recalled
 	// memory + the available-skill headers. Skill bodies are NOT inlined; the
 	// model pulls one on demand via the read_skill tool (progressive disclosure),
@@ -494,14 +527,24 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			recalled = got
 		}
 	}
-	system := buildSystemPrompt(a.def, recalled, skills)
 	// Extensions that hold the model to a protocol state it here, up front,
 	// where it costs one fixed prefix instead of a per-turn reminder. Appended
 	// in composition order and on every run alike — the system message is
 	// rebuilt each run, so a resumed run re-states the same contract.
-	for _, section := range exts.systemPrompt() {
-		system += "\n\n" + section
+	//
+	// A closure rather than a one-off, because a contract can change mid-run: a
+	// revised goal has to reach the model as the SAME standing instruction, not
+	// as a correction appended after the one it contradicts. Re-running it is
+	// safe by the interface's own terms — SystemPrompt() returns the extension's
+	// current instruction and is called once per assembly, never accumulating.
+	buildSystem := func() string {
+		s := buildSystemPrompt(a.def, recalled, skills)
+		for _, section := range exts.systemPrompt() {
+			s += "\n\n" + section
+		}
+		return s
 	}
+	system := buildSystem()
 
 	// before_agent_start (P10): the last seam that can shape the FIRST request.
 	// It runs on the assembled prompt and the seed messages, before either is
@@ -516,6 +559,20 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	system = start.System
 	messages = start.Messages
 	res.Messages = messages
+
+	// Continue() supplies the ask inside a prior thread rather than as a fresh
+	// prompt, so its directive is whichever seed message IS the task. Prompt()
+	// stamps its own message directly; this covers the thread case, and is a
+	// no-op on a resumed log that already carries the stamp. Marking before the
+	// seed is persisted is what puts it in the log, so a later resume rebuilds
+	// the same pin instead of falling back to the first thing ever said.
+	if t := strings.TrimSpace(task); t != "" {
+		for i := range messages {
+			if messages[i].Role == RoleUser && strings.TrimSpace(messages[i].Content) == t {
+				messages[i].Directive = true
+			}
+		}
+	}
 
 	// Persist the seed messages (the user prompt / prior thread) so the log is a
 	// complete, reducible record from the first turn — unless this run resumed an
@@ -683,6 +740,29 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			system = state.System
 		}
 
+		// A revised objective, drained before the model reasons so the turn that
+		// reads the contract is the first turn to run under it.
+		//
+		// Both effects belong to the loop and neither can be left to the reviser.
+		// The EntryGoal is what a resume reads (goalFromLog takes the last one),
+		// so a condition changed without one recovers the ORIGINAL gate after a
+		// crash and quietly re-arms an objective the run has moved past. And the
+		// system prompt is where the contract lives; rewriting it in place is
+		// what keeps the model from holding two conditions at once, and costs
+		// nothing per turn because it replaces text rather than appending.
+		for _, g := range exts.goalRevisions() {
+			goal = g
+			checkpoint.Goal = g
+			appendEntry(SessionEntry{Kind: EntryGoal, Turn: res.Turns, Goal: g})
+			if next := buildSystem(); next != system && len(res.Messages) > 0 && res.Messages[0].Role == RoleSystem {
+				res.Messages[0].Content = next
+				system, state.System = next, next
+			}
+			// Surfaced, because a run that redefines what it is for is the single
+			// thing a watching human most needs to see happen.
+			emit(StreamEvent{Type: StreamProgress, Note: "goal updated: " + g, Turn: res.Turns})
+		}
+
 		// The budget is re-derived every turn rather than once per run, because
 		// the rung can change under us: an escalation moves the run to a model
 		// with its own window, and a ladder built from a 1M-token model and a
@@ -795,6 +875,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if a.getSteering != nil {
 			for _, m := range a.getSteering(ctx) {
 				m := m
+				// A steer is human input by definition — that is what the queue is
+				// for — so the loop stamps it rather than trusting every consumer
+				// to remember. The stamp is what lets compaction keep the pinned
+				// requirement current instead of pinning the one being corrected.
+				if m.Role == RoleUser {
+					m.Directive = true
+				}
 				// New human input is reported to the extensions: one tracking the
 				// model's own behavior must treat this as a break, because the
 				// model now has information it did not have.
@@ -831,7 +918,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// Cache-anchor placement is a loop decision, not a provider one: mark the
 		// stable prefix on the request view and let each provider translate the
 		// marks into its native caching (or ignore them).
-		reqMessages = markCacheAnchors(reqMessages, a.cacheKey)
+		reqMessages = markCacheAnchors(reqMessages, res.Messages, a.cacheKey)
 		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
 		if req, herr = a.hooks.runBeforeProviderRequest(ctx, req); herr != nil {
 			return failTurn(herr)
@@ -927,6 +1014,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 					exts.observe(ctx, PhaseExternalInput, res.Turns, follow)
 					for _, m := range follow {
 						m := m
+						// Stamped for the same reason a steer is: a follow-up is
+						// the user asking for something, and a run that keeps
+						// pinning the FIRST thing they asked for is not following
+						// the conversation it is in.
+						if m.Role == RoleUser {
+							m.Directive = true
+						}
 						res.Messages = append(res.Messages, m)
 						// Persist the drained follow-up for the same reason as a
 						// steer: it is part of the conversation the model saw.
@@ -1035,12 +1129,35 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// call with nothing in between, so the buffer drains after every result
 		// in the batch has landed.
 		var extra []Message
+		// A result that exists only because the run was cancelled is not a settled
+		// fact, and persisting it makes it one. The log is what a resume rebuilds
+		// from: a call with a recorded result is answered forever, so a "stopped:
+		// run aborted" row — or a tool error that is really the cancellation
+		// arriving mid-call — permanently closes work that was never done. Nothing
+		// retries it, because from the log's point of view there is nothing to
+		// retry, and the resumed run reports success on a batch it only half ran.
+		//
+		// Left unpersisted, the call is dangling, which recovery already knows how
+		// to handle: re-issue it when its tool declares RetrySafe (a self-forked
+		// spawn reattaches to the child's own log and finishes it), close it with
+		// an interrupted note otherwise. The in-memory transcript still carries the
+		// message so this dying process stays provider-valid.
+		//
+		// Without this, whether a cancelled fan-out is recoverable comes down to
+		// timing: a child still in flight leaves a dangling call and is replayed,
+		// while a child the cancellation reached first is recorded as permanently
+		// failed. Same crash, same batch, opposite outcomes.
+		aborting := ctx.Err() != nil
 		for i := range outcomes {
 			msg := outcomes[i].message
 			applyBreaker(outcomes[i], &msg)
 			recordTool(outcomes[i].trace)
 			res.Messages = append(res.Messages, msg)
-			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
+			settled := !aborting ||
+				(outcomes[i].trace.Error == "" && outcomes[i].trace.Reason != "aborted")
+			if settled {
+				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
+			}
 			if outcomes[i].executed {
 				toolCallCount++
 			}

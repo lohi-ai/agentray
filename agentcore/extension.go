@@ -1,6 +1,9 @@
 package agentcore
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Extension points: the only way a plugin reaches a running agent.
 //
@@ -267,6 +270,37 @@ type StepInterceptor interface {
 	BeforeStep(ctx context.Context, info StepInfo) StepDecision
 }
 
+// GoalReviser is an extension that can change what the run is trying to
+// achieve, partway through achieving it.
+//
+// A long run discovers things. The requirement it was given can turn out to be
+// impossible, to have been based on a wrong assumption, or to be the wrong shape
+// for what the work actually found — and a run that can only ever pursue the
+// condition it started with either grinds against that discovery until MaxTurns
+// or lies about being done. So an extension may revise the condition, and the
+// loop drains the revision once per turn.
+//
+// The loop owns what follows, because both consequences are the loop's to
+// guarantee. It records the new condition as an EntryGoal, so a crashed run
+// resumes gated on the CURRENT objective rather than the original one; and it
+// rebuilds the system prompt, so the contract the model reads is the contract
+// being enforced. An extension that changed the condition privately would leave
+// the model working against a stale prompt and recovery re-arming a stale gate.
+//
+// This is a real transfer of authority: an agent that can redefine success can
+// declare success. The gate stops being a contract the model cannot relax and
+// becomes one it can renegotiate — which is the point, and the cost. What keeps
+// it accountable is that every revision is durable and attributable: the log
+// holds each condition the run has held, in order, so a narrowing is visible
+// afterwards rather than silent.
+type GoalReviser interface {
+	// ReviseGoal returns the run's new completion condition and true when one
+	// has been set since the last call. It is drained, not polled: returning
+	// (x, true) twice for the same revision would write the same EntryGoal every
+	// turn for the rest of the run.
+	ReviseGoal() (goal string, ok bool)
+}
+
 // StopInfo describes a run that is about to finish normally.
 type StopInfo struct {
 	// Final is the answer the model produced.
@@ -356,6 +390,7 @@ type extensionSet struct {
 	batch     []BatchInterceptor
 	steps     []StepInterceptor
 	stops     []StopInterceptor
+	revisers  []GoalReviser
 	observers []RunObserver
 	logs      []LogObserver
 	closers   []RunCloser
@@ -401,6 +436,9 @@ func (s *extensionSet) add(ext Extension) {
 	}
 	if v, ok := ext.(StopInterceptor); ok {
 		s.stops = append(s.stops, v)
+	}
+	if v, ok := ext.(GoalReviser); ok {
+		s.revisers = append(s.revisers, v)
 	}
 	if v, ok := ext.(RunObserver); ok {
 		s.observers = append(s.observers, v)
@@ -506,6 +544,25 @@ func (s *extensionSet) interceptBatch(ctx context.Context, calls []ToolCall) []M
 		extra = append(extra, d.AdditionalContexts...)
 	}
 	return extra
+}
+
+// goalRevisions drains every extension that changed the run's objective since
+// the last turn. Returned in registration order; the LAST one wins, the same way
+// the durable log's last EntryGoal wins on resume, so the two agree by
+// construction rather than by the caller remembering to make them.
+func (s *extensionSet) goalRevisions() []string {
+	var out []string
+	for _, r := range s.revisers {
+		var g string
+		var ok bool
+		if perr := safe(func() { g, ok = r.ReviseGoal() }); perr != nil {
+			continue
+		}
+		if ok && strings.TrimSpace(g) != "" {
+			out = append(out, strings.TrimSpace(g))
+		}
+	}
+	return out
 }
 
 // beforeStep collects per-turn injections.

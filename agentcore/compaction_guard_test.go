@@ -44,8 +44,12 @@ func TestElideOversizedTailShrinksBelowBudget(t *testing.T) {
 	if out[1].ToolCallID != "c1" || out[1].Name != "q" {
 		t.Fatalf("elided result lost call linkage: %+v", out[1])
 	}
-	if !strings.Contains(out[1].Content, "elided") {
-		t.Fatalf("first bulky result should be elided, got %d bytes", len(out[1].Content))
+	if len(out[1].Content) > elidedResultBytes {
+		t.Fatalf("first bulky result should have been cut down, got %d bytes", len(out[1].Content))
+	}
+	if !strings.Contains(out[1].Content, "truncated") {
+		t.Fatalf("a cut-down result must say so, or the model reads a partial answer as a whole one: %q",
+			out[1].Content)
 	}
 	if out[4].Content != "working on it" {
 		t.Fatal("final message must be untouched")
@@ -53,6 +57,35 @@ func TestElideOversizedTailShrinksBelowBudget(t *testing.T) {
 	// Original slice unmodified (guard copies).
 	if !strings.HasPrefix(tail[1].Content, "xx") {
 		t.Fatal("guard mutated the caller's slice")
+	}
+}
+
+// TestElidedResultKeepsBothEnds is the reason the guard cuts rather than
+// deletes. A tool result puts its CONCLUSION at the end — the finding, the
+// verdict, the error — so a guard that keeps only a placeholder, or only the
+// head, throws away the part the call was made for. It costs a kilobyte to keep
+// both ends, and the alternative advice ("re-run the tool") is not affordable
+// for the results most worth keeping: a spawn_subagent answer is a whole child
+// run that has already been paid for.
+func TestElidedResultKeepsBothEnds(t *testing.T) {
+	const opening = "OPENING: connected to the ledger corpus"
+	const verdict = "VERDICT: unreconciled balance of 1743 in the clearing file"
+	tail := []Message{
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "spawn_subagent"}}},
+		{Role: RoleTool, ToolCallID: "c1", Name: "spawn_subagent",
+			Content: opening + "\n" + bigText(40_000) + "\n" + verdict},
+		{Role: RoleAssistant, Content: "working on it"},
+	}
+	out, shrunk := elideOversizedTail(tail, 5_000)
+	if !shrunk {
+		t.Fatal("guard did not shrink an oversized tail")
+	}
+	got := out[1].Content
+	if !strings.Contains(got, verdict) {
+		t.Fatalf("the child's verdict was cut away — that is the one line the delegation was for:\n%s", got)
+	}
+	if !strings.Contains(got, opening) {
+		t.Fatalf("the result's opening was cut away, so the model cannot tell what produced it:\n%s", got)
 	}
 }
 

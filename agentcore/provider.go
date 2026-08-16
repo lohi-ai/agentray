@@ -39,6 +39,25 @@ type Message struct {
 	// createFailureMessage). It carries the failure reason; it is not produced by
 	// the model.
 	Error string `json:"error,omitempty"`
+	// Directive marks a user message as something the HUMAN asked for: the run's
+	// task, or a correction they steered in mid-run. It separates those from the
+	// user-role messages the framework synthesizes on its own — a goal-gate
+	// nudge, a budget wrap-up, an extension's injection — which look identical
+	// to a provider and must not be mistaken for what the run is FOR.
+	//
+	// It exists because a long run's requirement is not fixed. Compaction pins
+	// the objective so successive lossy summaries cannot erode it, and a pin
+	// built from "the first user message" pins the requirement the user has
+	// since changed — the one thing worse than forgetting the objective is
+	// remembering a superseded one verbatim while the correction decays. The
+	// loop stamps this at the two places human input enters (the seed task, the
+	// steering and follow-up queues), so compaction can keep the pin current
+	// without guessing from message text.
+	//
+	// Persisted, so a resumed run rebuilds the same pin. False on a message from
+	// an older log predates the field; compaction falls back to the first user
+	// message there, which is what it always did.
+	Directive bool `json:"directive,omitempty"`
 	// CacheAnchor marks this message as a prompt-cache breakpoint candidate:
 	// "the prefix ending here is stable — cache it". Placement is decided by the
 	// loop (markCacheAnchors), never by a provider; each provider maps anchors
@@ -141,7 +160,19 @@ type ChatResponse struct {
 }
 
 // ChatDelta is a streamed increment. Done marks the final delta and carries the
-// terminal StopReason + Usage.
+// terminal StopReason.
+//
+// Usage may ride ANY delta, not only the last one, and each field is read as a
+// running total rather than an increment — which is how the wire formats
+// actually report it (Anthropic states input tokens on message_start and
+// cumulative output on message_delta; OpenAI sends one usage-only chunk after
+// the chunk carrying finish_reason). The loop keeps the newest non-zero value of
+// each field, so a provider that reports in pieces is still billed in full. A
+// provider that reports everything on Done — both of this module's do — is the
+// same case with one delta.
+//
+// Getting this wrong is silent: the turn still succeeds, the answer is still
+// right, and only the number the budget gate meters on is zero.
 type ChatDelta struct {
 	ContentDelta string    `json:"content_delta,omitempty"`
 	ToolCall     *ToolCall `json:"tool_call,omitempty"`
