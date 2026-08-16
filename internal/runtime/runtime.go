@@ -8,6 +8,7 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
+	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	sandboxplugin "github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
@@ -180,6 +181,16 @@ type BuildParams struct {
 	// and a finish without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens
 	// the run. Empty — the default — leaves runs ungated.
 	Goal string
+	// ReviseGoal offers the gated model the update_goal tool, letting it restate
+	// what finishing means when the work shows the condition to be wrong. Every
+	// revision and its justification are appended to the durable session log as
+	// an EntryGoal, which is the accountability record that makes the tool safe
+	// to hand over.
+	//
+	// Off by default, and that default is the honest one: it gives the model the
+	// key to its own gate. Effective only when Goal is non-empty — a tool that
+	// revises nothing is not worth showing.
+	ReviseGoal bool
 	// Spill persists a tool result too large to sit inline and hands the model a
 	// locator for the rest, so an oversized query export or build log is one
 	// read_spill call away instead of a re-run of the tool. It MUST be durable:
@@ -311,6 +322,52 @@ func buildRungs(tcs []TierConfig) ([]agentcore.ModelRung, error) {
 	return rungs, nil
 }
 
+// revisableGoal reports whether this run installs the AGENT-revisable goal gate.
+//
+// Both halves of that decision read this one function, because either half alone
+// is broken. The gate must be swapped into the plugin list (so update_goal is
+// contributed at all) AND goal.ToolName must be in the allow-list (so the model
+// is shown it). Installing the plugin without the name is the quiet failure:
+// AllowList.PermittedTools filters every contributed tool through the list, so
+// the tool is registered and then hidden, and nothing anywhere reports it.
+//
+// A revisable gate with no condition to revise is not a capability, so an empty
+// Goal turns it off rather than offering a tool that edits nothing.
+func revisableGoal(p BuildParams) bool { return p.ReviseGoal && p.Goal != "" }
+
+// permittedToolNames is the run's default-deny allow-list: the scope-derived
+// analytics tools, plus every tool a conditionally-installed plugin contributes.
+//
+// It is one function rather than a slice grown across Build because the list has
+// to stay exhaustive. A plugin added to the composition without its name here
+// still registers its tool and still never reaches the model — a capability that
+// is present, permitted by nothing, and silent about it. Keeping the whole
+// decision in one place is what makes that omission visible, and testable.
+//
+// A wired sandbox alone exposes nothing: selectable runtime tools (run_shell and
+// friends) arrive through p.Tools and are named here like any other.
+func permittedToolNames(p BuildParams) []string {
+	names := ScopeToolNames(p.Scopes)
+	if p.HTTPTool != nil {
+		names = append(names, p.HTTPTool.Name())
+	}
+	for _, t := range p.Tools {
+		if t != nil {
+			names = append(names, t.Name())
+		}
+	}
+	if p.Todo != nil {
+		names = append(names, todo.ToolName)
+	}
+	if p.Subagents != nil {
+		names = append(names, subagent.ToolSpawnSubagent)
+	}
+	if revisableGoal(p) {
+		names = append(names, goal.ToolName)
+	}
+	return names
+}
+
 // Build wires a Growth Analyst agentcore.Agent: analytics tools for the project,
 // a scope-derived permission policy, the per-project definition, and the OpenAI
 // provider. Adding a second consumer reuses agentcore with a different ToolSet +
@@ -350,9 +407,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 
 	tools, hooks := buildToolsAndHooks(p)
 
-	// Default-deny allow-list from the enabled scopes. Selectable runtime tools add
-	// their own names below; a wired sandbox alone does not expose run_shell.
-	names := ScopeToolNames(p.Scopes)
+	names := permittedToolNames(p)
 	cfg := agentcore.Config{
 		Provider:           llm,
 		Model:              p.Model,
@@ -386,20 +441,6 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		RefreshKey:           p.RefreshKey,
 		PrepareNextTurn:      p.PrepareNextTurn,
 		BudgetGate:           p.BudgetGate,
-	}
-	if p.HTTPTool != nil {
-		names = append(names, p.HTTPTool.Name())
-	}
-	for _, t := range p.Tools {
-		if t != nil {
-			names = append(names, t.Name())
-		}
-	}
-	if p.Todo != nil {
-		names = append(names, todo.ToolName)
-	}
-	if p.Subagents != nil {
-		names = append(names, subagent.ToolSpawnSubagent)
 	}
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.OutputSchema = p.OutputSchema
@@ -436,6 +477,15 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	// so it lands ahead of the finish guard appended below. That order is the
 	// contract — the first stop interceptor to re-open the run wins, and an unmet
 	// goal makes any verification pass on that same answer moot.
+	//
+	// A revisable gate swaps that entry rather than adding one: two goal plugins
+	// would both claim the durable goal seam. Replace moves the entry to the end
+	// of the list as it stands, which is still ahead of the finish guard appended
+	// just below — the only other stop interceptor in the composition, and the
+	// one the ordering contract is about.
+	if revisableGoal(p) {
+		list = preset.Replace(list, goal.Plugin{Goal: p.Goal, Revisable: true})
+	}
 	if p.FinishGuard != nil {
 		list = append(list, finishguard.Of(p.FinishGuard))
 	}
