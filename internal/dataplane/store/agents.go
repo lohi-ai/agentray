@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // First-class agents (AgentGarden §3). A project owns many agents; the default
@@ -16,13 +18,20 @@ import (
 
 // Agent is one configurable agent within a project.
 type Agent struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	IsDefault bool      `json:"is_default"`
-	Enabled   bool      `json:"enabled"`
-	Autonomy  string    `json:"autonomy"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	IsDefault bool   `json:"is_default"`
+	Enabled   bool   `json:"enabled"`
+	Autonomy  string `json:"autonomy"`
+
+	// WorkspacePath is the folder this agent works in, when its operator picked
+	// one. Empty means the runtime derives a per-conversation directory instead,
+	// which is the right default but is also somewhere the user did not choose —
+	// so an agent pointed at a repository or a document folder says so here.
+	WorkspacePath string `json:"workspace_path"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -103,6 +112,26 @@ func (s *Store) AgentScopeForRun(ctx context.Context, projectID, agentID string)
 	return agentID, nil
 }
 
+// AgentWorkspacePathForRun returns the folder this agent was pinned to, or ""
+// when it was never pinned and the runtime should derive a per-conversation
+// directory instead.
+//
+// A missing row reads back as "" rather than an error: an agent whose row has
+// gone is a problem the run path already refuses upstream, and answering "no pin"
+// here keeps a workspace lookup from being a second, differently-worded way for
+// the same run to fail.
+func (s *Store) AgentWorkspacePathForRun(ctx context.Context, scopeID string) (string, error) {
+	var path string
+	err := s.pg.QueryRow(ctx, `SELECT workspace_path FROM agents WHERE id = $1`, scopeID).Scan(&path)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // agentInProject reports whether agentID operates in projectID — either as its
 // home agent (agents.project_id) or via a workspace grant. A granted agent owned
 // by the same workspace can run in the project without being its home agent.
@@ -128,6 +157,7 @@ func (s *Store) ListAgents(ctx context.Context, userID, projectID string) ([]Age
 	rows, err := s.pg.Query(ctx, `
 SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
        coalesce((SELECT autonomy FROM agent_configs WHERE project_id = $1), 'suggest') AS autonomy,
+       a.workspace_path,
        a.created_at, a.updated_at
 FROM agents a
 WHERE a.project_id = $1
@@ -140,7 +170,7 @@ ORDER BY a.is_default DESC, a.name ASC`, project.ID)
 	out := make([]Agent, 0)
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -174,9 +204,9 @@ func (s *Store) CreateAgent(ctx context.Context, userID, projectID, name, slug s
 	err = s.pg.QueryRow(ctx, `
 INSERT INTO agents (project_id, workspace_id, name, slug, is_default, enabled, autonomy)
 VALUES ($1, $4, $2, $3, false, true, 'suggest')
-RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at`,
 		project.ID, name, slug, project.WorkspaceID).
-		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.CreatedAt, &a.UpdatedAt)
+		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -185,7 +215,14 @@ RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy,
 }
 
 // UpdateAgent renames and/or enables an agent (owner/admin only).
-func (s *Store) UpdateAgent(ctx context.Context, userID, projectID, agentID, name string, enabled bool) (Agent, error) {
+//
+// workspacePath is tri-state on purpose: nil leaves the pinned folder alone, so
+// a client that predates the field cannot silently unpin an agent by sending the
+// payload it has always sent, while a pointer to "" is an explicit unpin that
+// returns the agent to a derived per-conversation workspace. The path itself is
+// validated at the API boundary, where a bad folder can be shown to the person
+// typing it.
+func (s *Store) UpdateAgent(ctx context.Context, userID, projectID, agentID, name string, enabled bool, workspacePath *string) (Agent, error) {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
 		return Agent{}, err
@@ -199,11 +236,11 @@ func (s *Store) UpdateAgent(ctx context.Context, userID, projectID, agentID, nam
 	}
 	var a Agent
 	err = s.pg.QueryRow(ctx, `
-UPDATE agents SET name = $3, enabled = $4, updated_at = now()
+UPDATE agents SET name = $3, enabled = $4, workspace_path = coalesce($5, workspace_path), updated_at = now()
 WHERE project_id = $1 AND id = $2
-RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, created_at, updated_at`,
-		project.ID, agentID, strings.TrimSpace(name), enabled).
-		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.CreatedAt, &a.UpdatedAt)
+RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at`,
+		project.ID, agentID, strings.TrimSpace(name), enabled, workspacePath).
+		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return Agent{}, err
 	}

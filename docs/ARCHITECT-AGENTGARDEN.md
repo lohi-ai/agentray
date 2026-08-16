@@ -85,7 +85,7 @@ just code in a different folder.
 interfaces in `agentcore/extension.go`: `ToolInterceptor`, `BatchInterceptor`,
 `StepInterceptor`, `StopInterceptor`, `RunObserver`, `LogObserver`,
 `ToolContributor`, `PromptContributor`, `ContextContributor`, `RunCloser`,
-`SelfGated`. The loop discovers what an extension can do by **type assertion** at
+`SelfGated`, `GoalReviser`. The loop discovers what an extension can do by **type assertion** at
 run start, so the set of things a plugin may do is open — adding a new kind of
 plugin does not touch core.
 
@@ -158,9 +158,14 @@ met) or `STATUS: BLOCKED` (+ reason). The sentinel is matched on the answer's
 closing line only (mentioning it mid-prose does not count), and the goal is
 recorded in the durable log so a crash-resumed run stays gated. A finish
 without either sentinel is
-re-opened with a keep-going nudge. The gate is uncapped but never wedges a run —
-turn/tool/budget limits still bound the loop, a budget wrap-up bypasses it, and a
-verbatim-repeated answer stops as `goal_stalled`. Mechanism:
+re-opened with a keep-going nudge, which escalates from explaining the contract to
+dictating the literal line on the second and later attempts. The gate is uncapped
+but never wedges a run — turn/tool/budget limits still bound the loop, a budget
+wrap-up bypasses it, and two stall breakers stop it as `goal_stalled`: a
+verbatim-repeated answer, or three consecutive finishes with no tool call in
+between. The second covers the weaker model that paraphrases its way past a text
+comparison; progress is judged by what the model did, so a model that goes back to
+work between nudges is never capped. Mechanism:
 the gate is a plugin (`agentcore/plugins/goal`) reaching the loop through the
 generic `PromptContributor` + `StopInterceptor` extension points. Core keeps only
 the goal as durable STATE — it writes `EntryGoal`, recovers it on resume, and
@@ -169,6 +174,18 @@ write the durable log. `agentcore.Config.Goal` therefore RECORDS a goal;
 enforcing it needs the plugin, which `preset.Plugins` (and therefore
 `internal/runtime`) wires automatically. The chat directive parser is `parseGoalDirective`
 (`internal/runtime/chat.go`).
+
+A long run can also discover that the condition itself was wrong — impossible as
+stated, or resting on an assumption the work disproved. `goal.UntilRevisable`
+adds an opt-in `update_goal(goal, reason)` tool for exactly that, and it is a
+real transfer of authority: the thing that stops a model ending an unfinished run
+becomes something the model can rewrite. It is bounded by accountability rather
+than by restriction — a `reason` is mandatory, the change lands in the durable
+log as an `EntryGoal`, and the store keeps the whole trail in order, so a
+self-serving narrowing is visible afterwards with its own justification attached.
+The user's pinned requirement is never touched; only what finishing means
+changes. Mechanism: `GoalReviser`, drained by the loop once per turn — the plugin
+offers a value, the loop writes the log and rebuilds the system prompt.
 
 ## Tools and secrets
 
@@ -184,6 +201,52 @@ enforcing it needs the plugin, which `preset.Plugins` (and therefore
   `{{cred:NOVEL_API_KEY}}`.
 - Secret values are resolved only at the trust boundary, after tracing and policy
   checks, immediately before tool execution.
+
+## The workspace: one folder, every tool
+
+Every tool that touches a filesystem — `read_file`, `write_file`, `edit_file`,
+`grep`, `glob`, `run_shell`, `computer_use`, `browser_use`, and the `save_as`
+parameter on `http_request` / `web_fetch` — works in **one** directory per run.
+
+That sharing is the capability. An agent that can write a script but not run it,
+or fetch a dataset it cannot then read, has two half-tools instead of one real
+one. Because they share a root, "write this file and execute it" and "download
+this and count the rows" are ordinary tool calls that no tool had to know about.
+
+Where that directory is, in order of precedence:
+
+| | path | when |
+|---|---|---|
+| pinned | the folder the operator chose (`agents.workspace_path`) | the agent was pointed at work that already exists — a repo, a document folder. Same folder in every conversation. |
+| derived | `<base>/<workspaceId>/<projectId>/<agentId>/<conversationId>` | the default. The chain is the ownership chain, so two conversations cannot scribble on each other's files. |
+
+`<base>` is `AGENTRAY_AGENT_WORKSPACE_ROOT`, defaulting to
+`~/.agentray/workspaces`. There is a default *because* requiring configuration to
+get a workspace is how a capability quietly ships turned off.
+
+Pinning is set per agent on Set up → Tools → Workspace folder, and validated when
+it is saved (`sandbox.ResolvePinnedWorkspace`) so a typo is a message under the
+field rather than a tool error inside a run three days later.
+
+## The sandbox is recommended, not required
+
+A sandbox (`AGENTRAY_SANDBOX_ENABLED`) makes the code-executing tools run inside a
+container. Without one they run on the host, in the run's workspace, via
+`sandbox.HostSandbox` — which still withholds the server's environment from the
+child, confines it to the workspace, and kills its process group on timeout.
+
+The earlier rule was a hard gate: no sandbox, no shell. It read as the safe
+default and behaved as a wall — a new user with no Docker got an agent that could
+do nothing, so the isolation protected nobody, because nobody got that far.
+
+`AGENTRAY_SANDBOX_REQUIRED=true` restores the gate for deployments that need it.
+Set it in a hosted, multi-tenant install, where "someone forgot to wire Docker"
+and "this operator chose host execution" are indistinguishable at startup and the
+blast radius is other people's data. With it set and no sandbox wired, the
+code-executing tools are **withheld** rather than silently run on the host.
+
+The file and search tools are unaffected by either flag: they can only ever touch
+the workspace, so there is nothing for the sandbox to gate.
 
 ## Triggers
 

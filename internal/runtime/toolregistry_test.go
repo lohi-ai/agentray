@@ -73,7 +73,7 @@ func TestBuildToolRejectsInvalidConfigAndUnknownName(t *testing.T) {
 // ignoring it: an operator who thinks they constrained the tool would otherwise
 // be granted an unconstrained one. Empty / "{}" config is accepted.
 func TestBuildNonConfigurableToolRejectsStrayConfig(t *testing.T) {
-	ctx := ToolBuildContext{Sandbox: stubSandbox{}}
+	ctx := ToolBuildContext{Sandbox: stubSandbox{}, Workspace: testWorkspace(t)}
 	for _, ok := range []string{``, `  `, `{}`, ` {} `} {
 		if _, err := BuildToolWithContext(ctx, sandbox.ToolRunShell, ok); err != nil {
 			t.Errorf("config %q should be accepted, got %v", ok, err)
@@ -89,64 +89,88 @@ func TestBuildNonConfigurableToolRejectsStrayConfig(t *testing.T) {
 	}
 }
 
-func TestToolCatalogIncludesRunShellOnlyWhenSandboxReady(t *testing.T) {
-	for _, e := range ToolCatalog() {
-		if e.Name == sandbox.ToolRunShell {
-			t.Fatalf("run_shell should be hidden without a sandbox: %+v", e)
-		}
-	}
-	cat := ToolCatalog(ToolBuildContext{Sandbox: stubSandbox{}})
-	var found bool
-	for _, e := range cat {
-		if e.Name == sandbox.ToolRunShell {
-			found = true
-			if e.Configurable {
-				t.Error("run_shell should not be configurable")
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("run_shell not in sandbox-ready catalog: %+v", cat)
-	}
-}
-
-func TestBuildToolRunShellRequiresSandbox(t *testing.T) {
-	if _, err := BuildTool(sandbox.ToolRunShell, `{}`); err == nil {
-		t.Fatal("expected run_shell to require a sandbox")
-	}
-	tool, err := BuildToolWithContext(ToolBuildContext{Sandbox: stubSandbox{}}, sandbox.ToolRunShell, `{}`)
-	if err != nil {
-		t.Fatalf("BuildToolWithContext: %v", err)
-	}
-	if tool.Name() != sandbox.ToolRunShell {
-		t.Fatalf("tool name = %q", tool.Name())
-	}
-}
-
-func TestToolCatalogIncludesWorkspaceToolsOnlyWhenWorkspaceReady(t *testing.T) {
-	ws, err := sandbox.NewWorkspace(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewWorkspace: %v", err)
-	}
-	cat := ToolCatalog(ToolBuildContext{Workspace: ws})
+// catalogNames is the set of tools an operator would see offered on the agent's
+// tool page for a given deployment.
+func catalogNames(ctxs ...ToolBuildContext) map[string]bool {
+	cat := ToolCatalog(ctxs...)
 	names := make(map[string]bool, len(cat))
 	for _, e := range cat {
 		names[e.Name] = true
 	}
-	if !names[sandbox.ToolReadFile] || !names[sandbox.ToolWriteFile] {
-		t.Fatalf("workspace tools missing from catalog: %+v", cat)
-	}
-	if names[sandbox.ToolBrowserUse] {
-		t.Fatalf("browser_use should require sandbox + workspace: %+v", cat)
+	return names
+}
+
+// TestToolCatalogOffersTheShellOnceThereIsAWorkspace pins what the tool page
+// shows, which is the surface the ungating exists for: someone who just ran the
+// binary should be offered the shell, not told to install Docker first.
+//
+// A workspace is the one thing it does still need — the shell's whole value is
+// running what the file tools wrote — and every deployment now has one by
+// default, so this is a floor, not a gate.
+func TestToolCatalogOffersTheShellOnceThereIsAWorkspace(t *testing.T) {
+	if catalogNames()[sandbox.ToolRunShell] {
+		t.Fatal("run_shell was offered by a deployment with nowhere to run it")
 	}
 
-	cat = ToolCatalog(ToolBuildContext{Sandbox: stubSandbox{}, Workspace: ws})
-	names = make(map[string]bool, len(cat))
-	for _, e := range cat {
-		names[e.Name] = true
+	hostOnly := catalogNames(ToolBuildContext{WorkspaceBase: t.TempDir()})
+	for _, name := range []string{sandbox.ToolRunShell, sandbox.ToolComputerUse, sandbox.ToolBrowserUse} {
+		if !hostOnly[name] {
+			t.Errorf("%s is hidden from a deployment with no sandbox; that is the hard gate this change removed", name)
+		}
 	}
-	if !names[sandbox.ToolBrowserUse] {
-		t.Fatalf("browser_use missing from sandbox+workspace catalog: %+v", cat)
+
+	// The one deployment that still hides them: isolation was demanded and is
+	// not there. Withholding beats silently running on the host.
+	demanded := catalogNames(ToolBuildContext{WorkspaceBase: t.TempDir(), SandboxRequired: true})
+	for _, name := range []string{sandbox.ToolRunShell, sandbox.ToolComputerUse, sandbox.ToolBrowserUse} {
+		if demanded[name] {
+			t.Errorf("%s offered even though AGENTRAY_SANDBOX_REQUIRED is set and no sandbox is wired", name)
+		}
+	}
+	if !demanded[sandbox.ToolReadFile] {
+		t.Error("read_file should survive a missing sandbox — it can only ever touch the workspace")
+	}
+
+	sandboxed := catalogNames(ToolBuildContext{WorkspaceBase: t.TempDir(), SandboxRequired: true, Sandbox: stubSandbox{}})
+	if !sandboxed[sandbox.ToolRunShell] {
+		t.Error("run_shell missing from a deployment that both requires and has a sandbox")
+	}
+}
+
+// TestBuildToolRunShellNeedsAWorkspaceNotASandbox states the same rule at the
+// builder, where a stale per-agent selection is resolved.
+func TestBuildToolRunShellNeedsAWorkspaceNotASandbox(t *testing.T) {
+	if _, err := BuildTool(sandbox.ToolRunShell, `{}`); err == nil {
+		t.Fatal("expected run_shell to require a workspace")
+	}
+
+	tool, err := BuildToolWithContext(ToolBuildContext{Workspace: testWorkspace(t)}, sandbox.ToolRunShell, `{}`)
+	if err != nil {
+		t.Fatalf("run_shell must build on the host when no sandbox is wired: %v", err)
+	}
+	if tool.Name() != sandbox.ToolRunShell {
+		t.Fatalf("tool name = %q", tool.Name())
+	}
+
+	_, err = BuildToolWithContext(
+		ToolBuildContext{Workspace: testWorkspace(t), SandboxRequired: true},
+		sandbox.ToolRunShell, `{}`)
+	if err == nil {
+		t.Fatal("run_shell must fail closed when isolation was demanded and is absent")
+	}
+}
+
+func TestToolCatalogIncludesWorkspaceToolsOnlyWhenWorkspaceReady(t *testing.T) {
+	names := catalogNames(ToolBuildContext{Workspace: testWorkspace(t)})
+	if !names[sandbox.ToolReadFile] || !names[sandbox.ToolWriteFile] {
+		t.Fatalf("workspace tools missing from catalog: %v", names)
+	}
+
+	bare := catalogNames()
+	for _, name := range []string{sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolGrep, sandbox.ToolGlob} {
+		if bare[name] {
+			t.Errorf("%s offered by a deployment with no workspace at all", name)
+		}
 	}
 }
 
@@ -169,22 +193,28 @@ func TestBuildWorkspaceToolsRequireWorkspace(t *testing.T) {
 	}
 }
 
-func TestBuildBrowserUseRequiresSandboxAndWorkspace(t *testing.T) {
-	ws, err := sandbox.NewWorkspace(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewWorkspace: %v", err)
-	}
-	if _, err := BuildToolWithContext(ToolBuildContext{Workspace: ws}, sandbox.ToolBrowserUse, `{}`); err == nil {
-		t.Fatal("expected browser_use to require sandbox")
-	}
+func TestBuildBrowserUseRequiresAWorkspaceAlways(t *testing.T) {
+	// The workspace is where a screenshot or a download lands, so browser_use
+	// needs one in every mode.
 	if _, err := BuildToolWithContext(ToolBuildContext{Sandbox: stubSandbox{}}, sandbox.ToolBrowserUse, `{}`); err == nil {
 		t.Fatal("expected browser_use to require workspace")
 	}
-	tool, err := BuildToolWithContext(ToolBuildContext{Sandbox: stubSandbox{}, Workspace: ws}, sandbox.ToolBrowserUse, `{}`)
-	if err != nil {
-		t.Fatalf("BuildToolWithContext: %v", err)
+	if _, err := BuildToolWithContext(
+		ToolBuildContext{Workspace: testWorkspace(t), SandboxRequired: true},
+		sandbox.ToolBrowserUse, `{}`); err == nil {
+		t.Fatal("expected browser_use to fail closed when isolation was demanded and is absent")
 	}
-	if tool.Name() != sandbox.ToolBrowserUse {
-		t.Fatalf("tool name = %q", tool.Name())
+
+	for _, ctx := range []ToolBuildContext{
+		{Workspace: testWorkspace(t)},
+		{Workspace: testWorkspace(t), Sandbox: stubSandbox{}},
+	} {
+		tool, err := BuildToolWithContext(ctx, sandbox.ToolBrowserUse, `{}`)
+		if err != nil {
+			t.Fatalf("BuildToolWithContext(sandbox=%v): %v", ctx.Sandbox != nil, err)
+		}
+		if tool.Name() != sandbox.ToolBrowserUse {
+			t.Fatalf("tool name = %q", tool.Name())
+		}
 	}
 }

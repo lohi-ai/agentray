@@ -6,10 +6,12 @@ import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
 import { List, ListItem } from '@astryxdesign/core/List';
 import { Text } from '@astryxdesign/core/Text';
-import type { AgentRecommendation, AgentRun } from '@/lib/api';
+import { Flag } from 'lucide-react';
+import type { AgentPlanItem, AgentRecommendation, AgentRun } from '@/lib/api';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
+import { PlanList, planProgress } from './chat-parts';
 
-export type PanelTab = 'recs' | 'activity' | 'runs';
+export type PanelTab = 'plan' | 'recs' | 'activity' | 'runs';
 
 function runLatency(run: AgentRun): string {
   if (!run.finished_at) return '—';
@@ -18,10 +20,16 @@ function runLatency(run: AgentRun): string {
 }
 
 export function WorkPanel({
-  tab, onTab, recommendations, runs, onAck, bare,
+  tab, onTab, plan, goal, recommendations, runs, onAck, bare,
 }: {
   tab: PanelTab;
   onTab: (tab: PanelTab) => void;
+  // The thread's current plan and completion condition. These are the two pieces
+  // of agent state a person needs *while* work is happening, so they get the
+  // panel's first tab rather than being buried in a turn they have to scroll back
+  // to find.
+  plan: AgentPlanItem[];
+  goal: string;
   recommendations: AgentRecommendation[];
   runs: AgentRun[];
   onAck: (id: string, status: 'accepted' | 'dismissed') => void;
@@ -34,12 +42,14 @@ export function WorkPanel({
     <>
       <div className="px-3 pt-2.5">
         <TabList value={tab} onChange={(v) => onTab(v as PanelTab)} size="sm" layout="fill">
+          <Tab value="plan" label="Plan" endContent={plan.length ? <Badge variant="blue" label={plan.filter((i) => i.status !== 'completed').length} /> : undefined} />
           <Tab value="recs" label="Recommendations" endContent={open.length ? <Badge variant="purple" label={open.length} /> : undefined} />
           <Tab value="activity" label="Activity" />
           <Tab value="runs" label="Runs" />
         </TabList>
       </div>
       <div className="flex-1 overflow-auto p-3">
+        {tab === 'plan' ? <PlanPane plan={plan} goal={goal} /> : null}
         {tab === 'recs' ? <RecsPane recs={open} onAck={onAck} /> : null}
         {tab === 'activity' ? <ActivityPane runs={runs} /> : null}
         {tab === 'runs' ? <RunsPane runs={runs} /> : null}
@@ -51,6 +61,42 @@ export function WorkPanel({
     <aside className="col-start-3 flex min-h-0 flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-background-card)]">
       {body}
     </aside>
+  );
+}
+
+// PlanPane is the standing view of what the agent is doing and what it is bound
+// to. It says nothing rather than something vague when there is no plan: an agent
+// answering a one-step question has no plan to show, and inventing a placeholder
+// checklist for it would teach the user to ignore this tab.
+function PlanPane({ plan, goal }: { plan: AgentPlanItem[]; goal: string }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {goal ? (
+        <Card padding={3}>
+          <div className="flex items-start gap-2">
+            <Flag size={13} className="mt-[3px] flex-none text-[var(--color-text-secondary)]" />
+            <div className="min-w-0">
+              <Text type="supporting" weight="medium" className="block">Working until this is true</Text>
+              <Text className="block break-words">{goal}</Text>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+      {plan.length ? (
+        <Card padding={3}>
+          <Text type="supporting" weight="medium" className="mb-2 block">Plan · {planProgress(plan)}</Text>
+          <PlanList items={plan} />
+        </Card>
+      ) : (
+        <Text type="supporting" weight="medium" className="block px-1 pt-1 uppercase tracking-[0.08em]">
+          No plan yet
+        </Text>
+      )}
+      <Text type="supporting" className="block px-1 leading-[1.5] opacity-70">
+        The agent writes this itself for multi-step work, and keeps it in front of itself even after older
+        messages are summarized away. Type <code>/plan</code> to have it read back the current one.
+      </Text>
+    </div>
   );
 }
 

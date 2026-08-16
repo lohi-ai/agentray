@@ -86,7 +86,7 @@ func TestSandboxWebFetchPinsEgressToRequestedHost(t *testing.T) {
 	stub := &stubSandbox{result: agentcore.SandboxResult{
 		Stdout: "HTTP/2 200\r\nContent-Type: text/plain\r\n\r\nhello there",
 	}}
-	out, err := NewWebFetchTool(stub).Run(context.Background(), `{"url":"https://docs.example.org/guide"}`)
+	out, err := NewWebFetchTool(stub, nil).Run(context.Background(), `{"url":"https://docs.example.org/guide"}`)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

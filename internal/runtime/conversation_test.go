@@ -136,7 +136,7 @@ func TestPlanCompactionBelowThresholdIsNoOp(t *testing.T) {
 		tokEntry("1", "user", "hi", 100),
 		tokEntry("2", "assistant", "hello", 100),
 	}
-	if plan := planCompaction(entries, 0); plan.ok {
+	if plan := planCompaction(entries, 0, false); plan.ok {
 		t.Fatalf("short thread should not compact, got %+v", plan)
 	}
 }
@@ -154,7 +154,7 @@ func TestPlanCompactionCutsAtUserTurnBoundary(t *testing.T) {
 		tokEntry("3", "user", "recent q", 15000),
 		tokEntry("4", "assistant", "recent a", 25000),
 	}
-	plan := planCompaction(entries, 0)
+	plan := planCompaction(entries, 0, false)
 	if !plan.ok {
 		t.Fatalf("long thread should compact, got %+v", plan)
 	}
@@ -176,7 +176,7 @@ func TestPlanCompactionDeclinesWhenNoCleanCut(t *testing.T) {
 		tokEntry("1", "user", "one giant turn", 200000),
 		tokEntry("2", "assistant", "answer", 5000),
 	}
-	if plan := planCompaction(entries, 0); plan.ok {
+	if plan := planCompaction(entries, 0, false); plan.ok {
 		t.Fatalf("no clean cut should decline, got %+v", plan)
 	}
 }
@@ -196,7 +196,7 @@ func TestPlanCompactionCarriesPriorSummaryForward(t *testing.T) {
 		tokEntry("5", "user", "recent q", 15000),
 		tokEntry("6", "assistant", "recent a", 25000),
 	}
-	plan := planCompaction(entries, 0)
+	plan := planCompaction(entries, 0, false)
 	if !plan.ok {
 		t.Fatalf("should compact, got %+v", plan)
 	}
@@ -279,10 +279,10 @@ func TestPlanCompactionUsesTheModelsWindow(t *testing.T) {
 		})
 	}
 
-	if plan := planCompaction(entries, 128_000); plan.ok {
+	if plan := planCompaction(entries, 128_000, false); plan.ok {
 		t.Fatal("a 60k thread compacted on a 128k model; the window is being ignored")
 	}
-	if plan := planCompaction(entries, 32_000); !plan.ok {
+	if plan := planCompaction(entries, 32_000, false); !plan.ok {
 		t.Fatal("a 60k thread did not compact on a 32k model; it would replay a history the model cannot accept")
 	}
 }
@@ -294,7 +294,206 @@ func TestPlanCompactionFallsBackWhenTheWindowIsUnknown(t *testing.T) {
 	entries := []storage.AgentConversationEntry{
 		{Kind: ConvKindMessage, Role: string(agentcore.RoleUser), TokenEstimate: 100},
 	}
-	if plan := planCompaction(entries, 0); plan.ok {
+	if plan := planCompaction(entries, 0, false); plan.ok {
 		t.Fatal("a tiny thread compacted with an unknown window; 0 was read as a zero-sized window")
+	}
+}
+
+// --- /clear seam + forced compaction -------------------------------------
+
+func compEntry(id, summary, firstKept string) storage.AgentConversationEntry {
+	p, _ := json.Marshal(convCompactionPayload{Summary: summary, FirstKeptEntryID: firstKept})
+	return storage.AgentConversationEntry{ID: id, Kind: ConvKindCompaction, PayloadJSON: string(p)}
+}
+
+// A /clear drops everything above it out of the model's context — and unlike a
+// compaction, leaves nothing standing in for it.
+func TestFoldHistoryClearDropsEverythingAbove(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "old question"),
+		msgEntry("2", "assistant", "old answer"),
+		{ID: "3", Kind: ConvKindClear, PayloadJSON: "{}"},
+		msgEntry("4", "user", "fresh question"),
+	}
+	got := foldHistory(entries)
+	if len(got) != 1 || got[0].Content != "fresh question" {
+		t.Fatalf("want only the post-clear turn, got %+v", got)
+	}
+}
+
+// A clear after a compaction must drop that compaction's summary too: handing
+// the model a summary of what it was just told to forget is not a fresh start.
+func TestFoldHistoryClearSupersedesEarlierCompaction(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "ancient"),
+		compEntry("2", "summary of the ancient part", "3"),
+		msgEntry("3", "user", "middle"),
+		{ID: "4", Kind: ConvKindClear, PayloadJSON: "{}"},
+		msgEntry("5", "user", "fresh"),
+	}
+	got := foldHistory(entries)
+	if len(got) != 1 || got[0].Content != "fresh" {
+		t.Fatalf("clear did not supersede the compaction summary: %+v", got)
+	}
+}
+
+// A compaction after a clear is the ordinary case again: the clear bounds the
+// live window, the compaction summarizes inside it.
+func TestFoldHistoryCompactionAfterClearWins(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "forgotten"),
+		{ID: "2", Kind: ConvKindClear, PayloadJSON: "{}"},
+		msgEntry("3", "user", "since the clear"),
+		compEntry("4", "summary since the clear", "5"),
+		msgEntry("5", "user", "latest"),
+	}
+	got := foldHistory(entries)
+	if len(got) != 2 || got[0].Content != "summary since the clear" || got[1].Content != "latest" {
+		t.Fatalf("want summary + latest, got %+v", got)
+	}
+}
+
+// Forced (/compact) folds a thread that the automatic trigger would leave alone,
+// keeping the most recent user turn verbatim.
+func TestPlanCompactionForcedBelowThreshold(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "first"),
+		msgEntry("2", "assistant", "answer"),
+		msgEntry("3", "user", "second"),
+	}
+	if plan := planCompaction(entries, 128_000, false); plan.ok {
+		t.Fatal("automatic compaction fired on a tiny thread")
+	}
+	plan := planCompaction(entries, 128_000, true)
+	if !plan.ok {
+		t.Fatal("forced compaction did not fire")
+	}
+	if plan.firstKept != 2 {
+		t.Fatalf("forced cut at %d, want the last user turn (2)", plan.firstKept)
+	}
+}
+
+// Nothing to fold is not a failure: a thread whose only user turn is the /compact
+// message itself has no earlier turn to summarize.
+func TestPlanCompactionForcedNoOpOnSingleTurn(t *testing.T) {
+	entries := []storage.AgentConversationEntry{msgEntry("1", "user", "/compact")}
+	if plan := planCompaction(entries, 128_000, true); plan.ok {
+		t.Fatal("forced compaction fired with nothing above the cut")
+	}
+}
+
+// Compaction never reaches back across a clear: the entries above it are gone
+// from context by the user's instruction, and summarizing them would put them
+// straight back.
+func TestPlanCompactionStopsAtClear(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "forgotten"),
+		msgEntry("2", "assistant", "forgotten answer"),
+		{ID: "3", Kind: ConvKindClear, PayloadJSON: "{}"},
+		msgEntry("4", "user", "after"),
+		msgEntry("5", "assistant", "reply"),
+		msgEntry("6", "user", "latest"),
+	}
+	plan := planCompaction(entries, 128_000, true)
+	if !plan.ok {
+		t.Fatal("forced compaction did not fire")
+	}
+	if plan.liveStart != 3 {
+		t.Fatalf("live window starts at %d, want just after the clear (3)", plan.liveStart)
+	}
+	if plan.firstKept != 5 {
+		t.Fatalf("cut at %d, want the last user turn (5)", plan.firstKept)
+	}
+}
+
+// The plan renderer is what /plan and the chat surface both read, so its three
+// states have to be distinguishable at a glance.
+func TestRenderPlanMarksTheStates(t *testing.T) {
+	out := RenderPlan([]PlanItem{
+		{Content: "read the schema", Status: "completed"},
+		{Content: "write the query", Status: "in_progress"},
+		{Content: "verify the numbers", Status: "pending"},
+	})
+	for _, want := range []string{"[x]", "~~read the schema~~", "**write the query**", "- [ ] verify the numbers"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered plan missing %q:\n%s", want, out)
+		}
+	}
+	if RenderPlan(nil) != "" {
+		t.Fatal("an empty plan must render as nothing")
+	}
+}
+
+// /compact twice in a row, or /compact right after /clear, leaves one lonely
+// assistant reply above the newest user turn. Folding that costs a summary call
+// and reports "Compacted" for a thread that did not change.
+func TestForcedCompactionNeedsAnExchangeAbove(t *testing.T) {
+	lonely := []storage.AgentConversationEntry{
+		tokEntry("1", "user", "earlier question", 200),
+		tokEntry("2", "assistant", "earlier answer", 200),
+		{ID: "3", Kind: ConvKindClear, PayloadJSON: "{}"},
+		tokEntry("4", "assistant", "Cleared.", 30),
+		tokEntry("5", "user", "/compact", 5),
+	}
+	if plan := planCompaction(lonely, 8000, true); plan.ok {
+		t.Fatalf("compacted a lone reply above the cut: firstKept=%d", plan.firstKept)
+	}
+
+	// One real exchange above the cut and it proceeds.
+	withExchange := append(lonely[:4:4],
+		tokEntry("5", "user", "a real question", 100),
+		tokEntry("6", "assistant", "a real answer", 100),
+		tokEntry("7", "user", "/compact", 5),
+	)
+	plan := planCompaction(withExchange, 8000, true)
+	if !plan.ok {
+		t.Fatal("refused to compact a thread with a real exchange above the cut")
+	}
+	if plan.firstKept != 6 {
+		t.Fatalf("cut should land on the newest user turn (index 6), got %d", plan.firstKept)
+	}
+}
+
+// cmdEntry is a control-plane turn: a handled slash command or the server's reply
+// to one. It is in the transcript but must never be in the model's context.
+func cmdEntry(id, role, text string) storage.AgentConversationEntry {
+	p, _ := json.Marshal(convMessagePayload{Text: text, Command: true})
+	return storage.AgentConversationEntry{ID: id, Kind: ConvKindMessage, Role: role, PayloadJSON: string(p)}
+}
+
+// Replaying a command turn as history hands the model the server's own words
+// about the conversation. A run whose most recent "assistant" message reads
+// "Cleared. I've forgotten everything above this line" will echo it back as its
+// answer — which is exactly what happened before this was skipped.
+func TestFoldHistorySkipsCommandTurns(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "how did last week go?"),
+		msgEntry("2", "assistant", "signups were up 12%"),
+		cmdEntry("3", "user", "/compact"),
+		cmdEntry("4", "assistant", "Compacted. I've summarized the earlier part of this chat…"),
+		msgEntry("5", "user", "and this week?"),
+	}
+	got := foldHistory(entries)
+	if len(got) != 3 {
+		t.Fatalf("want 3 real messages, got %d: %+v", len(got), got)
+	}
+	for _, m := range got {
+		if strings.Contains(m.Content, "Compacted") || m.Content == "/compact" {
+			t.Fatalf("a command turn leaked into context: %+v", m)
+		}
+	}
+}
+
+// The transcript handed to the summarizer is model context too — a command turn
+// summarized into the running summary comes back on every later turn.
+func TestRenderTranscriptSkipsCommandTurns(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		msgEntry("1", "user", "old q"),
+		cmdEntry("2", "user", "/help"),
+		cmdEntry("3", "assistant", "Here's what you can type in this box."),
+		msgEntry("4", "assistant", "old a"),
+	}
+	if got := renderTranscript(entries); got != "user: old q\nassistant: old a\n" {
+		t.Fatalf("transcript = %q", got)
 	}
 }

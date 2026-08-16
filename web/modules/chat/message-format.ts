@@ -67,54 +67,105 @@ const fileBlock = (a: Attachment) =>
   `Attached file \`${a.name}\`:\n\`\`\`\n${a.text}${a.truncated ? '\n… (truncated)' : ''}\n\`\`\``;
 
 // composeMessage builds the single string sent to (and displayed for) a turn:
-// skill directives first (parsed out of the typed /slug tokens), then the user's
-// prose, then the attachment blocks. `skills` is the current agent's skill set,
-// used to resolve a typed /slug back to its proper name and to ignore stray
-// slashes that aren't real commands.
-export function composeMessage(input: string, attachments: Attachment[], skills: AgentSkill[]): string {
+// a leading slash command if there is one, then skill directives (parsed out of
+// the typed /slug tokens), then the user's prose, then the attachment blocks.
+// `skills` is the current agent's skill set, used to resolve a typed /slug back
+// to its proper name and to ignore stray slashes that aren't real commands.
+//
+// The command line stays FIRST, always. The server reads a directive only at the
+// head of the message (internal/runtime/chatcmd.go), so a skill directive hoisted
+// above it would silently turn `/goal ship the report` into prose — the gate
+// would quietly not happen, which is the worst possible failure for a feature
+// whose entire job is to not let the agent stop early.
+export function composeMessage(
+  input: string,
+  attachments: Attachment[],
+  skills: AgentSkill[],
+  commandNames: string[] = [],
+): string {
   const bySlug = new Map(skills.map((s) => [slugify(s.name), s.name] as const));
   const picked = new Map<string, string>(); // slug -> name, de-duped, first-seen order
-  // Strip the /slug command tokens out of the prose and collect the ones that map
-  // to a real skill. `\B/` so we only catch a slash that starts a token.
-  const body = input
+
+  // Strip the /slug skill tokens out of the whole message — including a command's
+  // argument. One rule everywhere: a /slug that names a real skill is a skill.
+  // The alternative (a command's argument is untouchable prose) means the same
+  // chip behaves differently depending on which line it landed on, which is the
+  // kind of thing a user discovers by having it silently not work.
+  const stripped = input
     .replace(/(^|\s)\/([a-z0-9-]+)/g, (whole, lead: string, slug: string) => {
       const name = bySlug.get(slug);
-      if (!name) return whole; // not a command — leave the text untouched
+      if (!name) return whole; // not a skill — leave the text untouched
       if (!picked.has(slug)) picked.set(slug, name);
       return lead; // drop the token, keep the surrounding whitespace
     })
     .trim();
 
+  // Now split a leading command line off what remains.
+  let command = '';
+  let body = stripped;
+  if (stripped.startsWith('/')) {
+    const [line, ...rest] = stripped.split('\n');
+    const word = line.trim().split(' ')[0].slice(1).toLowerCase();
+    if (commandNames.includes(word)) {
+      command = line.trim().replace(/\s+/g, ' ');
+      body = rest.join('\n');
+    }
+  }
+
   const directives = [...picked.values()].map(SKILL_DIRECTIVE);
   const blocks = attachments.map(fileBlock);
-  return [directives.join('\n'), body, blocks.join('\n\n')].filter(Boolean).join('\n\n');
+  return [command, directives.join('\n'), body.trim(), blocks.join('\n\n')].filter(Boolean).join('\n\n');
 }
 
 // --- decode (user bubble) -------------------------------------------------
 
 export type ParsedMessage = {
-  text: string; // the human prose, with directives + file blocks removed
+  text: string; // the human prose, with the command, directives + file blocks removed
   skills: string[]; // skill names the turn invoked
   files: string[]; // attached file names
+  // The slash command this turn led with, without its slash ("goal"), and its
+  // argument. Rendered as a chip on the user's bubble so a reloaded thread still
+  // shows that the turn was a command rather than a sentence starting with "/".
+  command?: string;
+  commandArg?: string;
 };
 
 const DIRECTIVE_RE = /^Use your "(.+?)" skill\.$/;
 const FILE_BLOCK_RE = /Attached file `(.+?)`:\n```\n[\s\S]*?\n```/g;
 
 // parseRichMessage reverses composeMessage so the user bubble can render the prose
-// plus compact skill/file chips. It runs on whatever string the store holds, so a
-// reloaded turn renders identically to the one just sent.
-export function parseRichMessage(message: string): ParsedMessage {
+// plus compact command/skill/file chips. It runs on whatever string the store
+// holds, so a reloaded turn renders identically to the one just sent.
+//
+// `commandNames` is the catalog; without it the leading line is left as prose,
+// which is the honest fallback while the catalog is still loading — a `/goal …`
+// line reads perfectly well as text.
+export function parseRichMessage(message: string, commandNames: string[] = []): ParsedMessage {
   const files: string[] = [];
   let rest = message.replace(FILE_BLOCK_RE, (_m, name: string) => {
     files.push(name);
     return '';
   });
 
+  let command: string | undefined;
+  let commandArg: string | undefined;
+  const trimmed = rest.trim();
+  if (trimmed.startsWith('/')) {
+    const [line, ...after] = trimmed.split('\n');
+    const [word, ...argWords] = line.trim().split(' ');
+    const name = word.slice(1).toLowerCase();
+    if (commandNames.includes(name)) {
+      command = name;
+      commandArg = argWords.join(' ').trim().replace(/^["']|["']$/g, '');
+      rest = after.join('\n');
+    }
+  }
+
   const skills: string[] = [];
   const lines = rest.split('\n');
   let i = 0;
   while (i < lines.length) {
+    if (!lines[i].trim()) { i++; continue; } // blank separator between blocks
     const m = lines[i].match(DIRECTIVE_RE);
     if (!m) break;
     skills.push(m[1]);
@@ -122,5 +173,5 @@ export function parseRichMessage(message: string): ParsedMessage {
   }
   rest = lines.slice(i).join('\n');
 
-  return { text: rest.trim(), skills, files };
+  return { text: rest.trim(), skills, files, command, commandArg };
 }

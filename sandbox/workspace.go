@@ -29,7 +29,14 @@ func NewWorkspace(root string) (*Workspace, error) {
 			if err := os.MkdirAll(abs, 0o755); err != nil {
 				return nil, fmt.Errorf("workspace root: %w", err)
 			}
-			resolved = abs
+			// Resolve again rather than keeping abs. Root() is the path the shell
+			// and browser tools hand Docker as a bind-mount source, so the same
+			// workspace resolving to one string the run that created it and
+			// another every run after (macOS /var -> /private/var, any symlinked
+			// home) would mount two different-looking sources for one directory.
+			if resolved, err = filepath.EvalSymlinks(abs); err != nil {
+				return nil, fmt.Errorf("workspace root: %w", err)
+			}
 		} else {
 			return nil, fmt.Errorf("workspace root: %w", err)
 		}

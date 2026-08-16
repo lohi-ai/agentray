@@ -30,7 +30,8 @@ export function useAgents() {
   });
 
   const updateAgent = useMutation({
-    mutationFn: (vars: { id: string; name: string; enabled: boolean }) => client().updateAgent(vars.id, vars.name, vars.enabled),
+    mutationFn: (vars: { id: string; name: string; enabled: boolean; workspacePath?: string }) =>
+      client().updateAgent(vars.id, vars.name, vars.enabled, vars.workspacePath),
     onSuccess: () => { setMessage('Agent saved'); invalidate(); },
     onError: onErr,
   });
@@ -45,7 +46,8 @@ export function useAgents() {
     agents: (agentsQuery.data?.agents ?? []) as Agent[],
     agentsLoading: agentsQuery.isLoading,
     createAgent: (name: string, slug = '') => createAgent.mutateAsync({ name, slug }),
-    updateAgent: (id: string, name: string, isEnabled: boolean) => updateAgent.mutateAsync({ id, name, enabled: isEnabled }),
+    updateAgent: (id: string, name: string, isEnabled: boolean, workspacePath?: string) =>
+      updateAgent.mutateAsync({ id, name, enabled: isEnabled, workspacePath }),
     removeAgent: (id: string) => removeAgent.mutateAsync(id),
   };
 }

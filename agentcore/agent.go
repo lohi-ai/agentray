@@ -260,12 +260,12 @@ type Config struct {
 	// unknown.
 	ContextWindow int
 	Tools         *ToolSet
-	Policy     Policy
-	Hooks      Hooks
-	Memory     MemoryStore
-	Definition AgentDefinition
-	Limits     *Limits
-	Env        *Env
+	Policy        Policy
+	Hooks         Hooks
+	Memory        MemoryStore
+	Definition    AgentDefinition
+	Limits        *Limits
+	Env           *Env
 	// Compaction overrides the default compaction settings (recent-token budget
 	// kept verbatim). nil uses DefaultCompactionSettings().
 	Compaction *CompactionSettings

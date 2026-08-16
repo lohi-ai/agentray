@@ -25,6 +25,10 @@ import (
 const (
 	routeData      = "data"
 	routeSmallTalk = "smalltalk"
+	// routeCommand is a turn the server answered itself from a slash command
+	// (/compact, /clear, /plan, /agents, /help). It opens no run and spends
+	// nothing on the model — the client renders it as an instant reply.
+	routeCommand = "command"
 )
 
 // ChatOptions parameterize one chat turn. History is the prior conversation
@@ -54,6 +58,16 @@ type ChatOptions struct {
 	// before any token — so a streaming caller can surface it to the client (which
 	// persists it to reattach to the run after navigating away mid-stream).
 	OnRunID func(string)
+	// OnPlan, when set, is called with each revision of the agent's live todo list
+	// as it is written (the todo plugin's update_plan). The plan is out-of-band by
+	// design — it never enters the transcript — so this callback is the only way a
+	// watching client sees it change in real time. Every revision is also mirrored
+	// into the conversation log, which is what a reload or a second machine reads.
+	OnPlan func([]PlanItem)
+	// OnGoal, when set, is called once with a /goal turn's completion condition,
+	// before the run starts, so the client can pin it above the thread while the
+	// agent works toward it.
+	OnGoal func(string)
 }
 
 // ChatResult is the outcome of one chat turn, shaped to the chat JSON/SSE
@@ -95,32 +109,10 @@ type chatWork struct {
 	// work timeline (design §7.3). Empty disables mirroring (legacy /chat).
 	ConversationID string
 	OnRunID        func(string)
+	OnPlan         func([]PlanItem)
 	// Goal, when non-empty, activates the run-level goal gate for this turn
-	// (parsed from a leading "/goal <condition>" line; see parseGoalDirective).
+	// (parsed from a leading "/goal <condition>" line; see parseDirective).
 	Goal string
-}
-
-// parseGoalDirective splits a leading "/goal <condition>" line off a chat
-// message (Claude Code /goal analog). The first line after "/goal" is the
-// completion condition (surrounding quotes tolerated); the remaining lines are
-// the task. A directive with no task keeps the condition as the prompt, so
-// `/goal all 172 tests pass` alone still starts a gated run. Messages not
-// starting with the directive pass through unchanged (goal == "").
-func parseGoalDirective(message string) (goal, rest string) {
-	trimmed := strings.TrimSpace(message)
-	body, ok := strings.CutPrefix(trimmed, "/goal")
-	if !ok || (body != "" && !strings.ContainsAny(body[:1], " \t\n")) {
-		return "", message // absent, or a different word like "/goals"
-	}
-	line, task, _ := strings.Cut(strings.TrimSpace(body), "\n")
-	goal = strings.Trim(strings.TrimSpace(line), `"'`)
-	if goal == "" {
-		return "", message // bare "/goal" with no condition — treat as plain text
-	}
-	if rest = strings.TrimSpace(task); rest == "" {
-		rest = "Work toward this goal until it is satisfied: " + goal
-	}
-	return goal, rest
 }
 
 // ChatService owns one conversational turn of the general agent. It holds a
@@ -156,9 +148,21 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	}
 	emit(agentcore.StreamEvent{Type: agentcore.StreamProgress, Note: "Reading your message…"})
 
-	// A "/goal …" directive is always work — skip the small-talk classifier and
-	// hand the stripped task plus the goal condition straight to the agent run.
-	goal, message := parseGoalDirective(opts.Message)
+	// Slash commands are decided before anything else — they are the one kind of
+	// message whose meaning does not depend on what the model thinks of it.
+	// A handled command answers the turn outright (no run, no spend); /goal
+	// configures the run that follows; a bare "/goal" with no condition is not a
+	// gate at all and falls through as ordinary text.
+	d := parseDirective(opts.Message)
+	goal, message := "", opts.Message
+	switch {
+	case d.Name == "" || (d.Name == CmdGoal && d.Arg == ""):
+		// not a command
+	case d.Name == CmdGoal:
+		goal, message = goalTurn(d)
+	default:
+		return s.runCommand(ctx, opts, d, sink)
+	}
 
 	dec := chatDecision{Route: routeData}
 	if goal == "" {
@@ -181,12 +185,29 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	if dec.Route != routeData {
 		return ChatResult{Route: dec.Route}, fmt.Errorf("agentruntime: no handler for route %q", dec.Route)
 	}
+	// A gated turn announces its condition before the run opens: the client pins
+	// it above the thread, and the log carries it so a reload still shows what the
+	// agent is working toward. Both are best-effort — a goal that fails to persist
+	// is still enforced, because the gate itself lives in the run's own log.
+	if goal != "" {
+		if opts.OnGoal != nil {
+			opts.OnGoal(goal)
+		}
+		if opts.ConversationID != "" && s.runner != nil && s.runner.Store != nil {
+			_, _ = AppendGoalEntry(context.WithoutCancel(ctx), s.runner.Store, opts.ConversationID, opts.AgentID, "", goal)
+		}
+	}
 	res, err := s.handle(ctx, chatWork{
 		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
 		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
-		OnRunID: opts.OnRunID, Goal: goal,
+		OnRunID: opts.OnRunID, OnPlan: opts.OnPlan, Goal: goal,
 	}, sink)
 	res.Route = dec.Route
+	// The gate's sentinel is a protocol between the loop and the plugin, not
+	// something to hand a reader. Left in, every gated answer in this product ends
+	// with a bare "STATUS: DONE" — and then gets persisted that way, so it is still
+	// there on reload and gets replayed to the model as its own prior words.
+	res.Final = stripGoalSentinel(res.Final)
 	// A user stop unwinds the loop as an error, but it is not one. Persist nothing:
 	// a half-finished answer appended here would be replayed to the model next turn
 	// as its own completed thought. The partial text the user is looking at stays
@@ -264,8 +285,20 @@ func (s *ChatService) maybeCompact(ctx context.Context, opts ChatOptions) {
 		return
 	}
 	wctx := context.WithoutCancel(ctx)
-	summarize := func(sctx context.Context, transcript, previousSummary string) (string, error) {
-		prov, model, err := s.runner.CheapProvider(sctx, opts.ProjectID)
+	// The window is the RUN tier's, not the summarizer's: it bounds how much
+	// history the next turn replays, and that turn runs on the run tier. 0 on
+	// error falls back to the conservative default rather than failing a
+	// best-effort compaction.
+	_, _ = MaybeCompactConversation(wctx, s.runner.Store, opts.ConversationID,
+		s.runner.RunTierWindow(wctx, opts.ProjectID), s.summarizer(opts.ProjectID))
+}
+
+// summarizer returns the running-summary callback both the automatic trigger and
+// the user's /compact hand to the conversation store. It runs on the project's
+// cheap tier — the same provider the front-desk classifier uses.
+func (s *ChatService) summarizer(projectID string) func(context.Context, string, string) (string, error) {
+	return func(sctx context.Context, transcript, previousSummary string) (string, error) {
+		prov, model, err := s.runner.CheapProvider(sctx, projectID)
 		if err != nil {
 			return "", err
 		}
@@ -291,12 +324,6 @@ func (s *ChatService) maybeCompact(ctx context.Context, opts ChatOptions) {
 		}
 		return strings.TrimSpace(resp.Message.Content), nil
 	}
-	// The window is the RUN tier's, not the summarizer's: it bounds how much
-	// history the next turn replays, and that turn runs on the run tier. 0 on
-	// error falls back to the conservative default rather than failing a
-	// best-effort compaction.
-	_, _ = MaybeCompactConversation(wctx, s.runner.Store, opts.ConversationID,
-		s.runner.RunTierWindow(wctx, opts.ProjectID), summarize)
 }
 
 // compactionSystem instructs the cheap tier to compress an older slice of the
@@ -379,6 +406,11 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 		if ev.Type == agentcore.StreamTool {
 			emit(ev) // forward the raw trace (debug)
 			if ev.Tool != nil {
+				// A completed update_plan is the agent's checklist changing. Surface
+				// it as a first-class plan revision (live callback + durable entry)
+				// rather than leaving it as one more anonymous row in the tool trace,
+				// which is all it was before.
+				s.mirrorPlan(ctx, req, runID, *ev.Tool, ev.Turn)
 				// Mirror the completed call into the conversation log so a joining
 				// client renders the same timeline (design §7.3). Best-effort.
 				if req.ConversationID != "" && s.runner != nil && s.runner.Store != nil {
@@ -422,15 +454,26 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 // streamText emits text word-by-word as token events so a direct reply types out
 // naturally, mirroring how a streamed model turn arrives. No-op when sink is nil
 // (the JSON path returns the whole reply at once).
+//
+// Line breaks are preserved. Small talk is one line and never noticed the
+// difference, but a command reply is markdown — a bullet list, a heading — and
+// collapsing it to a single run of words renders as one unreadable paragraph
+// until the closing `done` event replaces it. Streaming has to arrive as the
+// shape it will settle into.
 func streamText(text string, sink agentcore.StreamSink) {
 	if sink == nil || strings.TrimSpace(text) == "" {
 		return
 	}
-	for i, word := range strings.Fields(text) {
-		frag := word
+	for i, line := range strings.Split(text, "\n") {
 		if i > 0 {
-			frag = " " + word
+			sink(agentcore.StreamEvent{Type: agentcore.StreamToken, Token: "\n"})
 		}
-		sink(agentcore.StreamEvent{Type: agentcore.StreamToken, Token: frag})
+		for j, word := range strings.Fields(line) {
+			frag := word
+			if j > 0 {
+				frag = " " + word
+			}
+			sink(agentcore.StreamEvent{Type: agentcore.StreamToken, Token: frag})
+		}
 	}
 }

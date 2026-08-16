@@ -58,8 +58,18 @@ type Config struct {
 	SandboxBrowserImage string   // optional image for persistent browser_use sessions (Chrome + agent-browser); empty disables real browsing
 	SandboxNetworkAllow []string // optional egress allowlist for computer_use (comma-separated hosts); empty = open network (#5b)
 	SandboxDockerBin    string   // optional docker CLI path; empty = "docker"
-	AgentWorkspaceRoot  string   // optional root for read_file/write_file; empty disables file tools
-	SeedDemo            bool     // AGENTRAY_SEED_DEMO: seed ~2 days of synthetic events into the default project on first boot (compose quickstart only, #3b)
+	// SandboxRequired withholds run_shell / computer_use / browser_use unless a
+	// working sandbox is wired, instead of running them on the host inside the
+	// agent's workspace. Off by default: requiring Docker to run an agent at all
+	// is a wall in front of every new user, and the common install is one
+	// operator on one machine the agent is already trusted with. Turn it on for
+	// a hosted, multi-tenant deployment.
+	SandboxRequired bool
+	// AgentWorkspaceRoot is the BASE for per-conversation agent workspaces
+	// (<base>/<workspaceId>/<projectId>/<agentId>/<conversationId>). Empty uses
+	// ~/.agentray/workspaces, so the file tools work with nothing configured.
+	AgentWorkspaceRoot string
+	SeedDemo           bool // AGENTRAY_SEED_DEMO: seed ~2 days of synthetic events into the default project on first boot (compose quickstart only, #3b)
 	// Hosted marks this as the managed cloud (agentray.lohi2.com) rather than a
 	// `docker compose up` instance. Off by default so a self-host operator never
 	// sees a pricing page or a usage ceiling for a plan they cannot buy — the web
@@ -136,6 +146,7 @@ func FromEnv() Config {
 		SandboxNetworkAllow:          envList("AGENTRAY_SANDBOX_NETWORK_ALLOW"),
 		SandboxDockerBin:             os.Getenv("AGENTRAY_SANDBOX_DOCKER_BIN"),
 		AgentWorkspaceRoot:           os.Getenv("AGENTRAY_AGENT_WORKSPACE_ROOT"),
+		SandboxRequired:              envBool("AGENTRAY_SANDBOX_REQUIRED", false),
 		SeedDemo:                     envBool("AGENTRAY_SEED_DEMO", false),
 		Hosted:                       envBool("AGENTRAY_HOSTED", false),
 		CredentialsEnabled:           envBool("AGENTRAY_CREDENTIALS_ENABLED", false),

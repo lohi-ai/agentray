@@ -206,6 +206,67 @@ Defaults, named once: `reserveTokens: 16384`, `keepRecentTokens: 20000`,
 
 ---
 
+## 6.1 Slash commands: the control plane, in the same log
+
+A person needs to reach the capabilities agentcore already has — the goal gate,
+the run plan, compaction, the delegate roster, skills — without an agent run
+standing between them and it. That is what a slash command is: a directive on
+the FIRST line of a message, parsed **on the server** (`internal/runtime/chatcmd.go`).
+
+Server-side parsing is the contract, not an implementation detail. The store
+carries one `message` string per turn (§5), so a command typed on one machine
+has to mean the same thing when the thread is reloaded on another, when it
+arrives through the API with no browser involved, and when the turn is replayed
+out of the log. The client owns the affordance (the `/` menu, fed by
+`GET /api/agent/commands` so the two vocabularies cannot drift); the meaning
+lives on the server.
+
+Two kinds:
+
+| | commands | effect on the turn |
+| --- | --- | --- |
+| **handled** | `/compact` `/clear` `/plan` `/agents` `/help` | answered outright — no run row, no model spend (except `/compact`'s one cheap-tier summary, which *is* the work) |
+| **configuring** | `/goal <condition>` | starts a normal gated run; the condition rides `ChatOptions.Goal` into the goal plugin |
+
+### New entry kinds
+
+`kind` is `VARCHAR(32)` with no CHECK constraint (§4), so these needed no migration:
+
+- **`clear`** — a seam. Unlike `compaction` it leaves *nothing* standing in for
+  what came before: the reducer resumes at the seam with no summary, and
+  `planCompaction` refuses to compact across it (summarizing what the user asked
+  to forget straight back into the window is the one thing `/clear` must not do).
+- **`plan`** — a mirrored `update_plan` snapshot, written only for a call that
+  actually landed (`ToolTrace.Allowed && Error == ""`), so a rejected plan never
+  reaches the screen. Human-only: `token_estimate` is 0 because it never enters
+  the model's context through this log — the run's own plan store holds it.
+- **`goal`** — the completion condition, announced before the run opens so a
+  reload still shows what the agent is working toward. Also `token_estimate` 0.
+
+### Command turns are transcript-only
+
+A handled command and its reply are `message` entries carrying
+`payload.command = true`. They render (the user must see that the thread was
+cleared) and they are skipped by both `foldHistory` and `renderTranscript`, at
+`token_estimate` 0.
+
+This is not tidiness. A command reply is the *server* talking about the
+conversation; replayed as history it arrives as something the agent said. A run
+whose most recent assistant message reads "Cleared. I've forgotten everything
+above this line" will echo that back as its answer — observed on 2026-08-16,
+before the flag existed.
+
+### The gate's sentinel does not reach the reader
+
+The goal plugin closes on a final line of `STATUS: DONE` / `STATUS: BLOCKED`.
+That is a protocol between the loop and the plugin. `stripGoalSentinel` removes
+it before the answer is streamed to the client and persisted, and it is
+deliberately stricter than the gate's own check: the gate does a `Contains` on
+the last line, where a false positive costs one early finish; here a false
+positive silently deletes a sentence the reader was meant to see.
+
+---
+
 ## 7. Multi-machine / multi-user (the parts Pi doesn't ship)
 
 ### 7.1 Identity
@@ -262,7 +323,17 @@ GET    /agent/conversations/:id?since=<seq>        -> { entries[], leafSeq }
 POST   /agent/conversations/:id/messages           -> append user message,
                                                        start run, stream entries (SSE)
 GET    /agent/conversations/:id/stream?since=<seq>  -> SSE of new entries (join/resume)
+GET    /agent/commands                            -> { commands[] }  (the `/` menu)
 ```
+
+SSE events carry two more discriminators for the state §6.1 introduced: `plan`
+(`{items:[{content,status}]}`, one per landed `update_plan`) and `goal`
+(`{goal}`, once, before a gated run opens).
+
+A handled command arriving while a run is live is **not** an amendment to that
+run: `IsHandledCommand` makes both message routes skip the steer/follow-up
+auto-route, so `/compact` compacts the thread instead of being handed to the
+model as the literal text "/compact".
 
 `POST …/messages` is the merge of today's `agentChatStream`: it (1) appends the
 user `message` entry, (2) opens an `agent_run` linked to the conversation,

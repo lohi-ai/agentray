@@ -31,7 +31,7 @@ const detachedRunCeiling = 10 * time.Minute
 // registerAgentRoutes wires the AI-agent surface (§8, §14.10): config +
 // definition + skills + memory CRUD, a key test, interactive chat, run history,
 // recommendations, and a manual run trigger.
-func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, ws *sandbox.Workspace, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
+func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, runnerOpts ...agentruntime.RunnerOption) {
 	registerWorkspaceProviderRoutes(e, store)
 	// --- config ---
 	e.GET("/api/agent/config", func(c echo.Context) error {
@@ -484,11 +484,25 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		var payload struct {
 			Name    string `json:"name"`
 			Enabled bool   `json:"enabled"`
+			// A pointer so an omitted field means "leave the pinned folder alone"
+			// rather than "unpin" — the agent list UI sends name and enabled only.
+			// Sending "" is the explicit unpin.
+			WorkspacePath *string `json:"workspace_path"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		agent, err := store.UpdateAgent(c.Request().Context(), ctx.User.ID, project.ID, c.Param("id"), payload.Name, payload.Enabled)
+		// Resolve the folder here, where the error can be shown to the person who
+		// typed it, rather than letting a typo surface days later as a tool failure
+		// inside a run.
+		if payload.WorkspacePath != nil && strings.TrimSpace(*payload.WorkspacePath) != "" {
+			resolved, rerr := sandbox.ResolvePinnedWorkspace(*payload.WorkspacePath)
+			if rerr != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, rerr.Error())
+			}
+			payload.WorkspacePath = &resolved
+		}
+		agent, err := store.UpdateAgent(c.Request().Context(), ctx.User.ID, project.ID, c.Param("id"), payload.Name, payload.Enabled, payload.WorkspacePath)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -572,7 +586,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if err != nil {
 			return err
 		}
-		toolCtx := agentruntime.ToolBuildContext{Sandbox: sb, Workspace: ws}
+		toolCtx := catalogCtx
 		return c.JSON(http.StatusOK, map[string]any{
 			"catalog":    agentruntime.ToolCatalog(toolCtx),
 			"selections": selections,
@@ -607,7 +621,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// vault is passed, so a {{cred:NAME}} header is accepted here and resolved
 		// (or failed closed) at run time when the agent's secrets are loaded.
 		if payload.Enabled {
-			if err := agentruntime.ValidateToolConfig(agentruntime.ToolBuildContext{Sandbox: sb, Workspace: ws}, name, config); err != nil {
+			if err := agentruntime.ValidateToolConfig(catalogCtx, name, config); err != nil {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 		}
@@ -854,6 +868,14 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.JSON(http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// The slash-command catalog the composer's `/` menu renders. Served from the
+	// same list the server parses against, so the menu can never offer a command
+	// the runtime would treat as prose. No project scope needed — the vocabulary is
+	// the product's, not the workspace's.
+	e.GET("/api/agent/commands", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]any{"commands": agentruntime.ChatCommands})
+	})
+
 	// --- chat (§8): one conversational turn owned by the orchestrator. Small talk
 	// gets an instant cheap reply (no analytics run); a data question is delegated
 	// to the Growth Analyst. Streams tokens + plain-language progress + a result
@@ -892,7 +914,9 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// none started) falls through to a normal turn; the registry's presence +
 		// project-ownership check makes this race-safe. The explicit /chat/steer
 		// endpoint stays for clients that prefer to branch themselves.
-		if liveReg != nil && payload.SessionID != "" {
+		// A handled command addresses the thread, not the running agent — see the
+		// same exception on the conversation /messages route.
+		if liveReg != nil && payload.SessionID != "" && !agentruntime.IsHandledCommand(payload.Message) {
 			mode := "steer"
 			var delivered bool
 			if payload.Mode == "followup" {
@@ -1001,7 +1025,16 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if err != nil {
 			return err
 		}
-		if _, err := agentruntime.AppendMessageEntry(c.Request().Context(), store, conv.ID,
+		// A handled command is control plane, not conversation: it goes in the
+		// transcript so the user can see it happened, and stays out of the history
+		// every later turn replays.
+		appendUser := agentruntime.AppendMessageEntry
+		if agentruntime.IsHandledCommand(message) {
+			appendUser = func(ctx context.Context, st *storage.Store, convID, role, text, agentID, authorUserID, _ string, _ int) (storage.AgentConversationEntry, error) {
+				return agentruntime.AppendCommandEntry(ctx, st, convID, role, text, agentID, authorUserID)
+			}
+		}
+		if _, err := appendUser(c.Request().Context(), store, conv.ID,
 			string(agentcore.RoleUser), message, agentID, ctx.User.ID, "", 0); err != nil {
 			return err
 		}
@@ -1140,7 +1173,11 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// A second message while a run is live on this conversation is an amendment,
 		// not a new run: steer/follow-up it (same auto-route as /chat), keyed on the
 		// conversation id. The amendment is still appended below so it survives.
-		if liveReg != nil {
+		//
+		// A handled command is the exception: it addresses the thread, not the
+		// agent. Injecting "/compact" as a mid-run correction would hand the model
+		// the literal text and compact nothing.
+		if liveReg != nil && !agentruntime.IsHandledCommand(payload.Message) {
 			mode := "steer"
 			delivered := false
 			if payload.Mode == "followup" {
@@ -1565,6 +1602,18 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 	// can persist it and reattach after navigating away.
 	opts.OnRunID = func(runID string) {
 		safeSSE("run", map[string]any{"run_id": runID})
+	}
+	// The agent's live todo list, every time it changes. It is out-of-band state
+	// (the todo plugin pins it into the model's request rather than the
+	// transcript), so without this frame a watching client has no way to see the
+	// plan at all — only an anonymous `update_plan` row in the tool trace.
+	opts.OnPlan = func(items []agentruntime.PlanItem) {
+		safeSSE("plan", map[string]any{"items": items})
+	}
+	// The completion condition of a /goal turn, emitted before the run starts so
+	// the client can pin it while the agent works toward it.
+	opts.OnGoal = func(goal string) {
+		safeSSE("goal", map[string]any{"goal": goal})
 	}
 
 	// Detach the run from the request: WithoutCancel keeps auth/values but drops the

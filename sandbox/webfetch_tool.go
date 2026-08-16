@@ -46,6 +46,9 @@ type WebFetchTool struct {
 	sb           agentcore.Sandbox
 	client       *http.Client
 	maxBodyBytes int64
+	// sink writes a fetched document into the agent's workspace when the call
+	// asks for save_as. Zero value = no workspace, and save_as is refused.
+	sink responseSink
 }
 
 // NewWebFetchTool builds the web_fetch tool with the SSRF-guarded dialer
@@ -54,9 +57,13 @@ type WebFetchTool struct {
 // redirects because every hop is re-validated at connect time — by the dialer on
 // the host path, by the egress proxy on the sandbox path — unlike http_request
 // which cannot (its allowlist can't re-check a redirected host).
-func NewWebFetchTool(sb agentcore.Sandbox) *WebFetchTool {
+//
+// ws is optional and enables save_as: with a workspace the fetched document can
+// be written where read_file, grep, and run_shell can reach it, which is what a
+// page too long to read in one context needs.
+func NewWebFetchTool(sb agentcore.Sandbox, ws *Workspace) *WebFetchTool {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	return &WebFetchTool{
+	t := &WebFetchTool{
 		sb:           sb,
 		maxBodyBytes: webFetchMaxBodyBytes,
 		client: &http.Client{
@@ -75,6 +82,10 @@ func NewWebFetchTool(sb agentcore.Sandbox) *WebFetchTool {
 			},
 		},
 	}
+	if ws != nil {
+		t.sink = responseSink{fs: newWorkspaceFS(sb, ws)}
+	}
+	return t
 }
 
 func (t *WebFetchTool) Name() string   { return ToolWebFetch }
@@ -90,7 +101,8 @@ func (t *WebFetchTool) Schema() agentcore.ToolSchema {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url": map[string]any{"type": "string", "description": "Absolute https:// URL to fetch."},
+				"url":     map[string]any{"type": "string", "description": "Absolute https:// URL to fetch."},
+				"save_as": saveAsParam(),
 			},
 			"required": []string{"url"},
 		},
@@ -99,7 +111,8 @@ func (t *WebFetchTool) Schema() agentcore.ToolSchema {
 
 func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
-		URL string `json:"url"`
+		URL    string `json:"url"`
+		SaveAs string `json:"save_as"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("web_fetch: invalid arguments: %w", err)
@@ -138,7 +151,7 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 			return "", err
 		}
 		body, ct = b, resp.Header.Get("Content-Type")
-		return formatWebFetch(u.String(), resp.Status, ct, body), nil
+		return t.respond(ctx, in.SaveAs, u.String(), resp.Status, ct, body)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -157,7 +170,23 @@ func (t *WebFetchTool) Run(ctx context.Context, args string) (string, error) {
 
 	body, _ = io.ReadAll(io.LimitReader(resp.Body, t.maxBodyBytes))
 	ct = resp.Header.Get("Content-Type")
-	return formatWebFetch(u.String(), resp.Status, ct, body), nil
+	return t.respond(ctx, in.SaveAs, u.String(), resp.Status, ct, body)
+}
+
+// respond returns the readable document, or saves it and returns a receipt.
+//
+// What gets saved is the RAW body, not the HTML-stripped text: the stripping
+// exists to fit a page into a context window, and a file the agent is about to
+// parse should be the document the server sent, not a lossy rendering of it.
+func (t *WebFetchTool) respond(ctx context.Context, saveAs, url, status, ct string, body []byte) (string, error) {
+	if strings.TrimSpace(saveAs) == "" {
+		return formatWebFetch(url, status, ct, body), nil
+	}
+	receipt, err := t.sink.save(ctx, ToolWebFetch, saveAs, body)
+	if err != nil {
+		return "", err
+	}
+	return formatWebFetch(url, status, ct, nil) + "\n" + receipt, nil
 }
 
 // formatWebFetch renders one fetched document for the model, identically for

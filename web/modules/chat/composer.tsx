@@ -13,12 +13,16 @@ import { createStaticSource, TypeaheadItem, type SearchableItem } from '@astryxd
 import { Button } from '@astryxdesign/core/Button';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Token } from '@astryxdesign/core/Token';
-import type { AgentSkill } from '@/lib/api';
+import type { AgentChatCommand, AgentSkill } from '@/lib/api';
 import { slugify, type Attachment } from './message-format';
 
-// Auxiliary data carried on each /command search item, so the dropdown can show a
-// skill's description without re-querying.
-type SkillAux = { description: string };
+// Auxiliary data carried on each `/` search item, so the dropdown can show a
+// row's description without re-querying. `kind` separates the two things that
+// share the `/` key: a COMMAND is an instruction to the runtime (run until this
+// condition, compact this thread), a SKILL is an instruction to the agent for
+// this turn. They read the same to a user typing `/`, so the menu says which is
+// which rather than making them learn two prefixes.
+type SlashAux = { description: string; kind: 'command' | 'skill' };
 
 // Accepted attach types — kept in sync with isReadableFile() in message-format.ts.
 // Used only as the native picker's `accept` hint; the real gate is at read time.
@@ -26,7 +30,7 @@ const ACCEPT = '.txt,.md,.mdx,.csv,.tsv,.json,.jsonl,.log,.yaml,.yml,.xml,.html,
 
 export function Composer({
   value, onChange, onSubmit, onStop, isStopShown, placeholder, footerActions,
-  skills, attachments, onFiles, onRemoveAttachment, notice, steerMode, onSteerMode,
+  skills, commands, attachments, onFiles, onRemoveAttachment, notice, steerMode, onSteerMode,
   headerContext,
 }: {
   value: string;
@@ -37,6 +41,11 @@ export function Composer({
   placeholder: string;
   footerActions: React.ReactNode;
   skills: AgentSkill[];
+  // The server's slash-command catalog. Rendered above the skills in the same
+  // `/` menu — they are the two things a slash can start, and hiding one behind
+  // a different key would only mean the user has to know which is which before
+  // they can look either up.
+  commands: AgentChatCommand[];
   attachments: Attachment[];
   onFiles: (files: File[]) => void;
   onRemoveAttachment: (id: string) => void;
@@ -58,29 +67,63 @@ export function Composer({
   // would name a skill the runtime can't actually load.
   const usable = useMemo(() => skills.filter((s) => s.enabled && s.status === 'active'), [skills]);
 
-  // A static typeahead source over the agent's skills; the item label is the slug
-  // the user types after `/`, so createStaticSource's default substring match keys
-  // on the same token that ends up in the message.
+  // One static typeahead source over both vocabularies; the item label is the
+  // token the user types after `/`, so createStaticSource's default substring
+  // match keys on the same string that ends up in the message.
+  //
+  // Commands come first: they are the shorter list, they are the same in every
+  // workspace, and a user reaching for `/` with nothing typed is far more often
+  // looking for one of six commands than for one of their skills.
   const source = useMemo(
-    () => createStaticSource<SearchableItem<SkillAux>>(
-      usable.map((s) => ({ id: s.id, label: slugify(s.name), auxiliaryData: { description: s.description } })),
-    ),
-    [usable],
+    () => createStaticSource<SearchableItem<SlashAux>>([
+      ...commands.map((c) => ({
+        id: `cmd:${c.name}`,
+        label: c.name,
+        auxiliaryData: { description: c.arg ? `${c.summary} — takes ${c.arg}` : c.summary, kind: 'command' as const },
+      })),
+      ...usable.map((s) => ({
+        id: s.id,
+        label: slugify(s.name),
+        auxiliaryData: { description: s.description, kind: 'skill' as const },
+      })),
+    ]),
+    [commands, usable],
   );
 
-  // The `/` trigger: open the skills menu, render each row with its description,
-  // and insert a purple `/slug` chip whose serialized value the send path parses
-  // back into a "Use your … skill." directive.
-  const skillTrigger: ChatComposerTrigger = useMemo(() => ({
+  // Commands that take an argument are inserted as plain text with the caret left
+  // after them, because the argument is the point: `/goal ` followed by whatever
+  // the user is about to type. A chip would close the token and leave them typing
+  // beside a command rather than into it. Everything else (bare commands, skills)
+  // inserts as a chip, which is compact and unambiguous to re-read.
+  const withArg = useMemo(
+    () => new Set(commands.filter((c) => c.arg).map((c) => `cmd:${c.name}`)),
+    [commands],
+  );
+
+  // The `/` trigger: open the menu, render each row with its description and a
+  // kind marker, and insert either a chip or an argument-ready command line. The
+  // serialized chip value is `/token`, which the send path parses back into a
+  // skill directive — and which the server parses back into a command.
+  const slashTrigger: ChatComposerTrigger = useMemo(() => ({
     character: '/',
     searchSource: source,
-    menuLabel: 'Skills',
-    emptySearchResultsText: 'No matching skills',
-    renderItem: (item) => (
-      <TypeaheadItem item={item} description={(item.auxiliaryData as SkillAux | undefined)?.description} />
-    ),
-    onSelect: (item) => ({ value: `/${item.label}`, label: `/${item.label}`, variant: 'purple' }),
-  }), [source]);
+    menuLabel: 'Commands and skills',
+    emptySearchResultsText: 'No matching command or skill',
+    renderItem: (item) => {
+      const aux = item.auxiliaryData as SlashAux | undefined;
+      return <TypeaheadItem item={item} description={aux?.description} />;
+    },
+    onSelect: (item) => {
+      const aux = item.auxiliaryData as SlashAux | undefined;
+      // A plain string inserts as text, leaving the caret after it.
+      if (withArg.has(item.id)) return `/${item.label} `;
+      return {
+        value: `/${item.label}`,
+        label: `/${item.label}`,
+        variant: aux?.kind === 'command' ? ('blue' as const) : ('purple' as const),
+      };
+    },
+  }), [source, withArg]);
 
   const onPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const list = e.target.files ? Array.from(e.target.files) : [];
@@ -109,7 +152,7 @@ export function Composer({
             onChange={onChange}
             onSubmit={onSubmit}
             placeholder={placeholder}
-            triggers={usable.length ? [skillTrigger] : []}
+            triggers={commands.length || usable.length ? [slashTrigger] : []}
             onFiles={onFiles}
           />
         }

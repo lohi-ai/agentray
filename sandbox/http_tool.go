@@ -72,6 +72,9 @@ type HTTPTool struct {
 	// to exercise the happy path against an httptest server on 127.0.0.1. Read at
 	// dial time, so an option may override it after the client is built.
 	ipBlocked func(net.IP) (bool, string)
+	// sink writes a response body into the agent's workspace when the call asks
+	// for save_as. Zero value = no workspace, and save_as is refused.
+	sink responseSink
 }
 
 // HTTPOption configures an HTTPTool. It is distinct from Option, which
@@ -94,6 +97,18 @@ func WithHTTPAllowHosts(hosts []string) HTTPOption {
 // WithHTTPAllowPlain permits plain http:// URLs (default: https only).
 func WithHTTPAllowPlain(allow bool) HTTPOption {
 	return func(t *HTTPTool) { t.allowPlainHTTP = allow }
+}
+
+// WithHTTPWorkspace gives the tool the run's workspace, enabling save_as.
+// Without it the tool still works — it just cannot hand a body to the file and
+// shell tools, which is the difference between fetching data and being able to
+// use it.
+func WithHTTPWorkspace(ws *Workspace) HTTPOption {
+	return func(t *HTTPTool) {
+		if ws != nil {
+			t.sink = responseSink{fs: newWorkspaceFS(t.sb, ws)}
+		}
+	}
 }
 
 // WithHTTPTimeout overrides the per-request timeout.
@@ -176,6 +191,7 @@ func (t *HTTPTool) Schema() agentcore.ToolSchema {
 					"type":        "string",
 					"description": "Optional request body (sent verbatim).",
 				},
+				"save_as": saveAsParam(),
 			},
 			"required": []string{"url"},
 		},
@@ -187,6 +203,7 @@ type httpRequestArgs struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
 	Body    string            `json:"body"`
+	SaveAs  string            `json:"save_as"`
 }
 
 // Run executes the guarded request. args has already had {{cred:NAME}} resolved
@@ -224,7 +241,7 @@ func (t *HTTPTool) Run(ctx context.Context, args string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return formatHTTPResponse(resp, body), nil
+		return t.respond(ctx, in.SaveAs, resp, body)
 	}
 
 	var bodyReader io.Reader
@@ -246,7 +263,22 @@ func (t *HTTPTool) Run(ctx context.Context, args string) (string, error) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, t.maxBodyBytes))
-	return formatHTTPResponse(resp, body), nil
+	return t.respond(ctx, in.SaveAs, resp, body)
+}
+
+// respond returns the body inline, or writes it to the workspace and returns the
+// status plus a receipt. The status and content-type are reported either way —
+// a save is not a reason to hide that the server answered 404 and the "file" is
+// an error page.
+func (t *HTTPTool) respond(ctx context.Context, saveAs string, resp *http.Response, body []byte) (string, error) {
+	if strings.TrimSpace(saveAs) == "" {
+		return formatHTTPResponse(resp, body), nil
+	}
+	receipt, err := t.sink.save(ctx, ToolHTTPRequest, saveAs, body)
+	if err != nil {
+		return "", err
+	}
+	return formatHTTPResponse(resp, nil) + "\n" + receipt, nil
 }
 
 // validateURL enforces scheme + host allowlist. The IP-level guard is the

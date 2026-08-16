@@ -10,7 +10,7 @@ import { ToggleButton } from '@astryxdesign/core/ToggleButton';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Text } from '@astryxdesign/core/Text';
-import { isSteered, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
+import { isSteered, type AgentPlanItem, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
@@ -24,6 +24,7 @@ import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components
 import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
+import { CommandNames, useChatCommands } from './commands';
 import { WorkPanel, type PanelTab } from './chat-panel';
 import { useChatThreads, isDraft, mergeDelta, syncSeq, syncTailID } from './use-chat-threads';
 import { applyToolTrace, applyToolUpdate, serverToolStep, settleOrphanSteps } from './tool-steps';
@@ -173,8 +174,11 @@ export function ChatPage() {
   const auto = useMemo(() => agents.find((a) => a.enabled && a.is_default) || agents.find((a) => a.enabled) || agents[0], [agents]);
   const agent = useMemo(() => agents.find((a) => a.id === pickedAgentID && a.enabled) || auto, [agents, pickedAgentID, auto]);
   const agentName = agent?.name || 'Agent';
-  // The current agent's skills back the composer's `/` command menu.
+  // The composer's `/` menu is two vocabularies: the runtime's commands (the
+  // same list the server parses against) and this agent's skills.
   const { skills } = useAgentSkills(agent?.id);
+  const { commands } = useChatCommands();
+  const commandNames = useMemo(() => commands.map((c) => c.name), [commands]);
   const { names: eventNames, loading: catalogLoading } = useEventNames();
   const { models, modelsLoading } = useWorkspaceModels();
   const catalogReady = !catalogLoading && !!projectID;
@@ -352,6 +356,20 @@ export function ChatPage() {
     setMessages((items) => items.map((it) => (it.id === id ? fn(it) : it)));
   }
 
+  // Pin a goal marker directly above the message the run is writing into. It goes
+  // *above* rather than onto the message because it governs the run, not the
+  // answer: a steer that splits the answer in two must not print the goal twice,
+  // and a reload reads it back from its own log entry in exactly this position.
+  function pinGoal(id: string, goal: string) {
+    if (cancelledRef.current || !goal) return;
+    setMessages((items) => {
+      if (items.some((m) => m.marker === 'goal' && m.goal === goal)) return items;
+      const at = items.findIndex((m) => m.id === id);
+      const row: ChatMsg = { id: localID(), role: 'system', marker: 'goal', goal, text: goal, done: true };
+      return at < 0 ? [...items, row] : [...items.slice(0, at), row, ...items.slice(at)];
+    });
+  }
+
   // Remove a message that ended up with nothing in it — no prose, no work log.
   // An empty bubble reads as a broken answer; the absence of one reads as what
   // it is.
@@ -519,6 +537,13 @@ export function ChatPage() {
       onToolStart: (c: { callID: string; tool: string; target: string }) =>
         patch(at(), (m) => ({ ...m, steps: [...(m.steps ?? []), { kind: 'tool' as const, callID: c.callID, tool: c.tool, target: c.target, status: 'running' as const }] })),
       onToolUpdate: (c: { callID: string; note: string }) => patch(at(), (m) => ({ ...m, steps: applyToolUpdate(m.steps, c.callID, c.note) })),
+      // The agent rewrote its plan. A full replace, because that is what
+      // update_plan is — the agent always sends the whole list, so merging
+      // revisions would resurrect steps it deliberately dropped.
+      onPlan: (items: AgentPlanItem[]) => patch(at(), (m) => ({ ...m, plan: items })),
+      // The turn is gated. The condition is pinned above the answer being
+      // written, where it stays legible while the run works toward it.
+      onGoal: (goal: string) => pinGoal(at(), goal),
       onCard: (c: AgentResultCard) => patch(at(), (m) => ({ ...m, card: c })),
       onTool: (t: AgentToolTrace) => patch(at(), (m) => ({ ...m, tools: [...(m.tools ?? []), t], steps: applyToolTrace(m.steps, t) })),
       onError: (msg: string) => patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
@@ -530,15 +555,28 @@ export function ChatPage() {
     // string the conversation store carries (FE-only — there's no separate channel).
     // The same composed string is both displayed and sent, so a reloaded turn
     // re-renders identically from the server projection.
-    const prompt = composeMessage(override ?? input, attachments, skills);
+    const prompt = composeMessage(override ?? input, attachments, skills, commandNames);
     if (!prompt) return;
     // The composer stays live during a run so the user can redirect the agent
     // instead of waiting it out. Draft threads have no live run to steer.
     if (streaming) {
+      // A handled command is not something to say to a running agent — it acts on
+      // the thread. Sending it now would land its reply in the middle of the
+      // answer being written, so it waits for the turn to settle and says so.
+      const cmd = commands.find((c) => c.name === prompt.trim().split('\n')[0].split(' ')[0].slice(1).toLowerCase());
+      if (cmd?.handled) {
+        setNotice(`Finish or stop this answer first — /${cmd.name} acts on the whole chat.`);
+        return;
+      }
       if (!isDraft(activeID)) await steer(prompt);
       return;
     }
-    const instant = instantReply({
+    // A command is never answered by the onboarding shortcut. `/goal what should
+    // we measure next` matches the funnel-shaped-question heuristic word for
+    // word, and letting it settle locally would drop a gated run on the floor
+    // with a written opinion in its place.
+    const isCommand = commandNames.includes(prompt.trim().split('\n')[0].split(' ')[0].slice(1).toLowerCase());
+    const instant = isCommand ? null : instantReply({
       eventNames,
       catalogReady,
       hasModelKey: modelsLoading ? undefined : !!models?.has_key,
@@ -613,10 +651,25 @@ export function ChatPage() {
         // again." — which turns the user's own deliberate Stop into a reported
         // failure, directly under the Stopped marker that already explains it.
         const backfill = splitRef.current || result.stopped ? '' : formatAgentError(result.final);
-        patch(at(), (m) => ({ ...m, text: m.text || backfill, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
+        // Where a real `final` exists it is also authoritative, not merely a
+        // fallback for a silent stream. A turn can put text on screen that is not
+        // the answer it settles on: a goal-gated run whose first attempt is
+        // rejected streams that attempt, is told to redo it, and streams a second
+        // one — leaving both on screen, plus the gate's `STATUS: DONE` marker the
+        // server strips out of `final`. Settling to `final` is what a reload shows,
+        // so the live view and the durable one stop disagreeing. When there is no
+        // final, `backfill` stays what it was: the recovery copy for an empty
+        // message, never a replacement for text the user watched arrive.
+        const settled = result.final?.trim() ? backfill : '';
+        patch(at(), (m) => ({ ...m, text: settled || m.text || backfill, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
       } else {
         patch(at(), (m) => ({ ...m, progress: '', done: true, outcome: 'ok' }));
       }
+      // A handled command (/compact, /clear) wrote a seam entry of its own into
+      // the log, between the user's line and the reply. Our optimistic pair has
+      // no such row and can't invent one in the right place, so re-read the
+      // thread: the canonical projection is also what a reload would show.
+      if (!isSteered(result) && result.route === 'command') loadedConvRef.current = null;
       // A split that the run never wrote into leaves an empty bubble under the
       // user's redirect. Nothing was said, so nothing is shown — the redirect
       // stands on its own rather than under a blank answer.
@@ -749,6 +802,24 @@ export function ChatPage() {
     return Math.min(100, Math.round((used / (CONTEXT_WINDOW - CONTEXT_RESERVE)) * 100));
   }, [messages]);
 
+  // The thread's current plan and goal: the last one written, wherever in the
+  // thread it was written. Both are standing facts about the conversation rather
+  // than about one turn — the plan the agent is working from, the condition it is
+  // bound by — which is why the panel shows them at thread level while the
+  // transcript keeps them in the turn they belong to.
+  const livePlan = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].plan?.length) return messages[i].plan!;
+    return [];
+  }, [messages]);
+  const liveGoal = useMemo(() => {
+    // A /clear ends the goal with the context it was set in: the agent no longer
+    // remembers the run it was gating, so continuing to fly the banner would
+    // promise something nothing is enforcing.
+    const cleared = messages.map((m) => m.marker).lastIndexOf('clear');
+    for (let i = messages.length - 1; i > cleared; i--) if (messages[i].marker === 'goal') return messages[i].goal ?? '';
+    return '';
+  }, [messages]);
+
   // Docks only occupy grid columns when wide; when narrow they collapse to a
   // full-width chat stage and live in StackSheet panels instead.
   const railCol = !narrow && threadsOn ? '240px' : '0';
@@ -785,7 +856,7 @@ export function ChatPage() {
       title: 'Workspace',
       width: 380,
       content: (
-        <WorkPanel bare tab={tab} onTab={setTab} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} />
+        <WorkPanel bare tab={tab} onTab={setTab} plan={livePlan} goal={liveGoal} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} />
       ),
     };
   }
@@ -803,6 +874,7 @@ export function ChatPage() {
   }, [narrow, threadsSheetOpen, panelSheetOpen, threads, activeID, tab, recommendations, runs, push, closeById]);
 
   return (
+    <CommandNames.Provider value={commandNames}>
     <AppShell active="chat" bleed>
       <div className="flex h-full flex-col">
         <HStack justify="between" align="center" className="h-12 flex-none border-b border-[var(--color-border)] bg-[var(--color-background-card)] px-4">
@@ -856,7 +928,7 @@ export function ChatPage() {
                   onRun={(q) => { setFirstRunFired(true); void send(q); }}
                 />
               ) : (
-                <FrontDoor onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />
+                <FrontDoor agentName={agentName} onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />
               )}
               composer={
                 <Composer
@@ -865,11 +937,12 @@ export function ChatPage() {
                   onSubmit={() => void send()}
                   onStop={() => void stop()}
                   isStopShown={streaming}
-                  placeholder={streaming ? 'Redirect the agent…' : 'Ask anything…  (type / for skills, attach files)'}
+                  placeholder={streaming ? 'Redirect the agent…' : 'Ask anything…  (type / for commands and skills, attach files)'}
                   steerMode={steerMode}
                   onSteerMode={setSteerMode}
                   headerContext={contextPercent === null ? undefined : <ContextMeter percent={contextPercent} />}
                   skills={skills}
+                  commands={commands}
                   attachments={attachments}
                   onFiles={(files) => void addFiles(files)}
                   onRemoveAttachment={(id) => setAttachments((cur) => cur.filter((a) => a.id !== id))}
@@ -904,9 +977,10 @@ export function ChatPage() {
               ) : null}
             </ChatLayout>
           </main>
-          {!narrow && panelOn ? <WorkPanel tab={tab} onTab={setTab} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} /> : null}
+          {!narrow && panelOn ? <WorkPanel tab={tab} onTab={setTab} plan={livePlan} goal={liveGoal} recommendations={recommendations} runs={runs} onAck={(rid, status) => void ackRecommendation(rid, status)} /> : null}
         </div>
       </div>
     </AppShell>
+    </CommandNames.Provider>
   );
 }

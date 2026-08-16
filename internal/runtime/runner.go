@@ -33,11 +33,27 @@ type Runner struct {
 	Store *storage.Store
 	// Sandbox, when non-nil, is threaded into every BuildParams so agents get
 	// selectable risky tools + injection guard running inside an isolated container.
-	// nil (the default) keeps agents analytics-only.
+	// nil (the default) runs those tools on the host instead — see SandboxRequired.
 	Sandbox agentcore.Sandbox
-	// Workspace, when non-nil, is the host-approved root for file/browser tools.
-	// nil hides those tools and fails stale selections closed.
-	Workspace *sandbox.Workspace
+	// SandboxRequired makes the isolation substrate mandatory: with it set and no
+	// Sandbox wired, run_shell / computer_use / browser_use are withheld instead
+	// of falling back to the host.
+	//
+	// It defaults to false because requiring Docker to run an agent at all is a
+	// wall in front of every new user, and most deployments are one operator on
+	// one machine that the agent is already trusted with. A hosted, multi-tenant
+	// deployment running model-authored commands is the case that needs the wall,
+	// and it is the case that can be expected to configure one.
+	SandboxRequired bool
+	// WorkspaceBase is the root under which each run's workspace is created, as
+	// <base>/<workspaceId>/<projectId>/<agentId>/<conversationId>. Empty uses
+	// sandbox.DefaultWorkspaceBase (~/.agentray/workspaces).
+	//
+	// The workspace is per-run and not a single shared directory because it is
+	// the agent's desk: two conversations that share one would overwrite each
+	// other's files, and a workspace narrower than a conversation would lose the
+	// file the user is still talking about between turns.
+	WorkspaceBase string
 	// BrowserImage is the Chrome-capable sandbox image the browser_use tool runs
 	// its persistent session in. Empty leaves browser_use on the backend default
 	// image (which generally lacks a browser).
@@ -113,14 +129,20 @@ func WithSandbox(sb agentcore.Sandbox) RunnerOption {
 	}
 }
 
-// WithWorkspace wires the host-approved workspace root for file/browser tools.
-// A nil workspace is a no-op, preserving the default hidden/fail-closed behavior.
-func WithWorkspace(ws *sandbox.Workspace) RunnerOption {
+// WithWorkspaceBase overrides the root under which each run's workspace is
+// created. Empty is a no-op, leaving sandbox.DefaultWorkspaceBase in force.
+func WithWorkspaceBase(base string) RunnerOption {
 	return func(r *Runner) {
-		if ws != nil {
-			r.Workspace = ws
+		if strings.TrimSpace(base) != "" {
+			r.WorkspaceBase = base
 		}
 	}
+}
+
+// WithSandboxRequired withholds the shell/computer/browser tools unless a real
+// isolation substrate is wired, instead of letting them run on the host.
+func WithSandboxRequired(required bool) RunnerOption {
+	return func(r *Runner) { r.SandboxRequired = required }
 }
 
 // WithBrowserImage sets the Chrome-capable sandbox image the browser_use tool
@@ -427,11 +449,41 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
+	// One workspace per conversation, shared by every tool this run builds. It is
+	// created here rather than at startup because its path IS the run's identity
+	// — tenant, project, agent, conversation — and because a file the agent wrote
+	// last turn has to still be there this turn, under the same name, for
+	// write-then-run to mean anything.
+	//
+	// A workspace that cannot be created is not a reason to fail the run: the
+	// analytics tools need no filesystem at all, and an agent granted none of the
+	// file tools would be stopped by a directory it never touches. The file tools
+	// themselves fail closed on a nil workspace, so the capability degrades
+	// rather than the run.
+	//
+	// Unless the operator picked a folder. Then that folder is the workspace for
+	// every conversation with this agent, because an agent pointed at a repository
+	// is pointed at the repository, not at a fresh copy of nothing per chat.
+	pinnedWorkspace, perr := r.Store.AgentWorkspacePathForRun(ctx, scopeID)
+	if perr != nil {
+		return storage.AgentRun{}, agentcore.RunResult{}, perr
+	}
+	runWorkspace, wserr := sandbox.WorkspaceFor(r.WorkspaceBase, sandbox.WorkspaceScope{
+		WorkspaceID:    wsID,
+		ProjectID:      opts.ProjectID,
+		AgentID:        scopeID,
+		ConversationID: opts.SessionID,
+		Pinned:         pinnedWorkspace,
+	})
+	if wserr != nil {
+		log.Printf("agentruntime: scope=%s workspace unavailable, file tools will fail closed: %v", scopeID, wserr)
+	}
 	runTools, toolNotes, err := resolveRunTools(ctx, ToolBuildContext{
-		Sandbox:      r.Sandbox,
-		Workspace:    r.Workspace,
-		BrowserImage: r.BrowserImage,
-		NetworkAllow: r.NetworkAllow,
+		Sandbox:         r.Sandbox,
+		SandboxRequired: r.SandboxRequired,
+		Workspace:       runWorkspace,
+		BrowserImage:    r.BrowserImage,
+		NetworkAllow:    r.NetworkAllow,
 		// The vault backs {{cred:NAME}} in a tool's *config* (an MCP server's
 		// Authorization header), resolved here rather than in the tool loop.
 		Credentials: creds,
@@ -630,8 +682,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Scopes:             ScopesFromMap(cfg.Scopes),
 		// Verify-on-stop rail: a figure-shaped answer produced with zero evidence
 		// tool executions re-opens the run once (verify or disclaim). nil when the
-		// agent's scopes grant no read tools, so persona-only agents are untouched.
-		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes)),
+		// agent holds no evidence tool at all, so persona-only agents are untouched.
+		// The run's resolved tools go in alongside the scopes because a pack may
+		// grant an evidence tool (web_fetch) that no scope names.
+		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes), runToolNames(runTools)),
 		Goal:        opts.Goal,
 		Soul:        def.SoulMD,
 		Agents:      def.AgentsMD,

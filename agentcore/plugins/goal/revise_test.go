@@ -328,7 +328,7 @@ func TestResumingOnARevisedGoalDoesNotRecordAnotherRevision(t *testing.T) {
 		t.Fatalf("a real revision after a resume was rejected")
 	}
 	if _, pending := reviser.ReviseGoal(); !pending {
-		t.Fatalf("a real revision after a resume never reached the loop, so it would never "+
+		t.Fatalf("a real revision after a resume never reached the loop, so it would never " +
 			"be recorded or enforced")
 	}
 }

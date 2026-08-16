@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AgentRayAPI, type AgentConversation, type AgentConversationEntry } from '@/lib/api';
+import { AgentRayAPI, type AgentConversation, type AgentConversationEntry, type AgentPlanItem } from '@/lib/api';
 import { formatAgentError } from '@/lib/ia';
 import type { ChatMsg, ChatStep } from './chat-parts';
 
@@ -115,6 +115,11 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
   // Traces stream before the answer they explain, so they buffer here until the
   // assistant message that closes the turn arrives.
   let pending: ChatStep[] = [];
+  // The agent's latest plan revision, buffered the same way: it is written while
+  // the turn is running, and belongs on the answer that turn produces. Only the
+  // last revision is kept — a plan is a replace, not a delta, and showing five
+  // superseded versions of it would bury the one that is true.
+  let pendingPlan: AgentPlanItem[] | undefined;
   // The cursor to resume from: advanced only past entries that produced a
   // settled message, so a half-written turn is re-read rather than skipped.
   let seq = 0;
@@ -134,8 +139,34 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
     // sees but the reader no longer does. Marking the seam is how the transcript
     // stops silently disagreeing with the agent's memory of it.
     if (e.kind === 'compaction') {
-      out.push({ id: entryID(e), role: 'system', text: 'Older messages summarized', seq: e.seq, done: true });
+      out.push({ id: entryID(e), role: 'system', marker: 'compaction', text: 'Older messages summarized', seq: e.seq, done: true });
       seq = Math.max(seq, e.seq);
+      continue;
+    }
+    // A /clear. Unlike a compaction nothing stands in for what came before, so
+    // the marker has to say so — otherwise the transcript above it reads as
+    // context the agent still has.
+    if (e.kind === 'clear') {
+      out.push({ id: entryID(e), role: 'system', marker: 'clear', text: 'Context cleared — the agent starts fresh from here', seq: e.seq, done: true });
+      seq = Math.max(seq, e.seq);
+      continue;
+    }
+    // The completion condition a /goal turn is gated on, pinned above the run it
+    // governs.
+    if (e.kind === 'goal') {
+      let goal = '';
+      try { goal = String((JSON.parse(e.payload_json || '{}') as { goal?: string }).goal ?? ''); } catch { goal = ''; }
+      if (goal) out.push({ id: entryID(e), role: 'system', marker: 'goal', goal, text: goal, seq: e.seq, done: true });
+      seq = Math.max(seq, e.seq);
+      continue;
+    }
+    // A plan revision. Buffered onto the answer this turn produces, exactly like
+    // the tool traces above it — the plan is part of the work, not a turn.
+    if (e.kind === 'plan') {
+      try {
+        const items = (JSON.parse(e.payload_json || '{}') as { items?: AgentPlanItem[] }).items;
+        if (items?.length) pendingPlan = items;
+      } catch { /* a malformed plan entry is not worth failing a thread load over */ }
       continue;
     }
     if (e.kind !== 'message') { seq = Math.max(seq, e.seq); continue; }
@@ -153,10 +184,11 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
     out.push({
       id: entryID(e), role: 'assistant', text: formatAgentError(text), seq: e.seq,
       done: true, steps: pending.length ? pending : undefined, tokens: e.token_estimate,
-      agentID: e.agent_id || undefined,
+      plan: pendingPlan, agentID: e.agent_id || undefined,
     });
     seq = Math.max(seq, e.seq);
     pending = [];
+    pendingPlan = undefined;
   }
   // Tools ran but no answer entry followed them: either the turn was stopped, or
   // it is still running elsewhere. The work happened either way, so it shows —
@@ -167,8 +199,8 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
   // agent replied" over a run that is actively working in another tab, for its
   // whole duration; the absence of an answer entry is not evidence of a stop.
   // The run row (resume poll) and the next delta are what actually know.
-  if (pending.length) {
-    out.push({ id: `open:${seq}`, role: 'assistant', text: '', done: true, steps: pending, provisional: true });
+  if (pending.length || pendingPlan?.length) {
+    out.push({ id: `open:${seq}`, role: 'assistant', text: '', done: true, steps: pending, plan: pendingPlan, provisional: true });
   }
   return { messages: out, seq };
 }

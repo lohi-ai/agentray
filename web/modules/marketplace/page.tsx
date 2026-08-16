@@ -1,7 +1,8 @@
 'use client';
 
-import { BarChart3, Database, LayoutTemplate, Megaphone, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
+import { Activity, BarChart3, Compass, Database, LayoutTemplate, Megaphone, Newspaper, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
 import type { AgentPreset, TemplateChart } from '@/lib/api';
+import { jobForPack } from '@/lib/jobs';
 import { useMarketplace, useTemplates } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, EmptyState, Loading } from '@/modules/shared/components/signal-primitives';
@@ -15,6 +16,9 @@ const PRESET_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
   rocket: Rocket,
   send: Send,
   'shield-check': ShieldCheck,
+  activity: Activity,
+  newspaper: Newspaper,
+  compass: Compass,
 };
 
 // ── Template preview helpers ───────────────────────────────────────────────
@@ -123,7 +127,11 @@ function AgentPresetCard({ preset, installing, onInstall }: { preset: AgentPrese
         <span className="grid h-[38px] w-[38px] flex-none place-items-center rounded-[11px] bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Icon size={19} /></span>
         <div>
           <h3 className="m-0 text-sm font-semibold">{preset.name}</h3>
-          <span className="text-[11px] capitalize text-[var(--color-text-secondary)]">{preset.category}</span>
+          {/* The job this teammate is hired for reads better than the workload
+              category it is filed under — "Prove the idea" says more to an owner
+              than "validate". Falls back to the category for a pack no job
+              claims yet. */}
+          <span className="text-[11px] capitalize text-[var(--color-text-secondary)]">{jobForPack(preset.slug)?.label ?? preset.category}</span>
         </div>
       </div>
       <p className="m-0 text-[13px] leading-[1.45] font-medium text-[var(--color-text-primary)]">{preset.tagline}</p>
@@ -187,7 +195,7 @@ export function MarketplacePage() {
       >
         <span className="mb-3 inline-flex items-center gap-[7px] rounded-[20px] px-[10px] py-1 text-[11.5px] font-semibold bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Store size={13} /> Hire a teammate</span>
         <h1 className="m-0 text-[22px] font-[650] tracking-[-0.02em]">Add a specialist in one click</h1>
-        <p className="mt-[6px] mb-0 max-w-[560px] text-[13px] leading-[1.55] text-[var(--color-text-secondary)]">Growth, marketing, and data teammates you can talk to — plus dashboard starters you can pin this week.</p>
+        <p className="mt-[6px] mb-0 max-w-[560px] text-[13px] leading-[1.55] text-[var(--color-text-secondary)]">Growth, marketing, data, and operations teammates you can talk to — plus dashboard starters you can pin this week.</p>
       </div>
 
       <div className="mt-[26px] mb-3 flex items-baseline gap-[9px]">

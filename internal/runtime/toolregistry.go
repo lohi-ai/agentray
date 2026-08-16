@@ -28,8 +28,33 @@ const ToolMCP = "mcp"
 // need. Most tools are config-only (http_request); risky tools such as run_shell
 // are built only when the host injected the required isolation substrate.
 type ToolBuildContext struct {
-	Sandbox   agentcore.Sandbox
+	Sandbox agentcore.Sandbox
+	// SandboxRequired withholds the shell/computer/browser tools when no Sandbox
+	// is wired, instead of building them against the host workspace.
+	//
+	// The default (false) is what makes the sandbox RECOMMENDED rather than
+	// REQUIRED. A hard requirement reads as safe and behaves as a wall: a new
+	// user with no Docker gets an agent that can do nothing, and the honest
+	// summary of that trade is that the isolation protected no one because
+	// nobody got that far. Host mode is not unguarded either — sandbox.HostSandbox
+	// still withholds the server's environment from the child process, confines
+	// it to the run's workspace, and kills its process group on timeout.
+	//
+	// Set it in a hosted, multi-tenant deployment, where "someone forgot to wire
+	// Docker" and "this operator chose host execution" are indistinguishable at
+	// startup and the blast radius is other people's data.
+	SandboxRequired bool
+	// Workspace is THIS RUN's workspace, set by the runner. It is nil on the
+	// catalog and config-validation paths, which have no run to belong to.
 	Workspace *sandbox.Workspace
+	// WorkspaceBase is what those run-less paths set instead: the root under
+	// which runs get workspaces, which answers the only question the catalog is
+	// actually asking — does this deployment give agents a workspace at all?
+	//
+	// The two exist separately because they answer different questions. A catalog
+	// that required a concrete Workspace would hide read_file from every
+	// deployment that has one, since the catalog is rendered outside any run.
+	WorkspaceBase string
 	// BrowserImage is the Chrome-capable sandbox image browser_use runs its
 	// persistent session in (config: AGENTRAY_SANDBOX_BROWSER_IMAGE). Empty leaves
 	// browser_use on the backend default image, which generally lacks a browser —
@@ -48,6 +73,33 @@ type ToolBuildContext struct {
 	// normal — a config with no placeholder needs no vault, and one with a
 	// placeholder fails closed.
 	Credentials agentcore.CredentialResolver
+}
+
+// isolationSatisfied reports whether the tools that would normally run inside a
+// container may be built for this deployment: either isolation is wired, or the
+// operator has not demanded it and the host substrate stands in.
+func (c ToolBuildContext) isolationSatisfied() bool {
+	return c.Sandbox != nil || !c.SandboxRequired
+}
+
+// workspaceAvailable reports whether the agent gets a working directory —
+// either this run's, or (on the catalog path) because the deployment configures
+// one for every run.
+func (c ToolBuildContext) workspaceAvailable() bool {
+	return c.Workspace != nil || strings.TrimSpace(c.WorkspaceBase) != ""
+}
+
+// workspaceToolAvailable gates the tools that cannot work without a directory to
+// work in. It is what makes a stale selection SKIP rather than abort: a
+// deployment with no workspace at all drops read_file from the run instead of
+// failing a run that was only ever going to fail at the first call.
+func workspaceToolAvailable(c ToolBuildContext) bool { return c.workspaceAvailable() }
+
+// sandboxToolAvailable gates the tools that execute code. They need somewhere to
+// run (the workspace) and permission to run there (isolation, or an operator who
+// did not demand it).
+func sandboxToolAvailable(c ToolBuildContext) bool {
+	return c.isolationSatisfied() && c.workspaceAvailable()
 }
 
 // ToolSpec describes one selectable tool: its stable name, human-facing catalog
@@ -93,7 +145,7 @@ var toolRegistry = map[string]ToolSpec{
 	sandbox.ToolHTTPRequest: {
 		Name:          sandbox.ToolHTTPRequest,
 		Title:         "Fetch / HTTP",
-		Description:   "Make guarded outbound HTTP(S) requests to an allowlisted set of hosts. Use a {{cred:NAME}} placeholder for any secret; it is resolved at the trust boundary and never seen by the model.",
+		Description:   "Make guarded outbound HTTP(S) requests to an allowlisted set of hosts. Use a {{cred:NAME}} placeholder for any secret; it is resolved at the trust boundary and never seen by the model. Large responses can be saved straight into the agent's workspace instead of being read inline.",
 		Configurable:  true,
 		ExternalWrite: true,
 		build:         buildHTTPRequestTool,
@@ -114,16 +166,16 @@ var toolRegistry = map[string]ToolSpec{
 	sandbox.ToolWebFetch: {
 		Name:         sandbox.ToolWebFetch,
 		Title:        "Web fetch",
-		Description:  "Fetch a public web page and return its readable text (HTML stripped to text). No host allowlist, but loopback / private / link-local / cloud-metadata addresses are refused. Use http_request for authenticated calls to a specific API.",
+		Description:  "Fetch a public web page and return its readable text (HTML stripped to text), or save the raw document into the agent's workspace for the file and shell tools to process. No host allowlist, but loopback / private / link-local / cloud-metadata addresses are refused. Use http_request for authenticated calls to a specific API.",
 		Configurable: false,
 		build:        buildWebFetchTool,
 	},
 	sandbox.ToolRunShell: {
 		Name:         sandbox.ToolRunShell,
 		Title:        "Bash / shell",
-		Description:  "Run shell commands inside the server-side sandbox. The tool never sees the host filesystem, host environment, or network unless the sandbox grants it.",
+		Description:  "Run shell commands in the agent's workspace. With a sandbox configured they run inside it, seeing no host filesystem, environment, or network unless granted. Without one they run on the server as this process, still confined to the workspace and still denied the server's environment — convenient for a single-operator install, not isolation.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Sandbox != nil },
+		available:    sandboxToolAvailable,
 		build:        buildRunShellTool,
 	},
 	sandbox.ToolComputerUse: {
@@ -131,7 +183,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Computer use",
 		Description:  "A persistent, network-enabled Linux sandbox where the agent can install tools (pip/apt/npm), write and run code, and produce files — parse or generate PDF, DOCX, XLSX, PPTX, HTML. State persists across calls in the conversation. Higher-privilege than run_shell; grant it deliberately.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Sandbox != nil && ctx.Workspace != nil },
+		available:    sandboxToolAvailable,
 		build:        buildComputerUseTool,
 	},
 	sandbox.ToolReadFile: {
@@ -139,7 +191,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Read file",
 		Description:  "Read text files from the configured agent workspace. Paths must be relative and cannot escape the workspace root.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Workspace != nil },
+		available:    workspaceToolAvailable,
 		build:        buildReadFileTool,
 	},
 	sandbox.ToolWriteFile: {
@@ -147,7 +199,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Write file",
 		Description:  "Write text files inside the configured agent workspace. Paths must be relative and parent directories are created as needed.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Workspace != nil },
+		available:    workspaceToolAvailable,
 		build:        buildWriteFileTool,
 	},
 	sandbox.ToolEditFile: {
@@ -155,7 +207,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Edit file",
 		Description:  "Make a surgical exact-string replacement in a workspace file instead of rewriting it. Refuses an ambiguous match unless replace_all is set.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Workspace != nil },
+		available:    workspaceToolAvailable,
 		build:        buildEditFileTool,
 	},
 	sandbox.ToolGrep: {
@@ -163,7 +215,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Grep",
 		Description:  "Search workspace file contents by regular expression (RE2). Returns path:line:text matches, scoped by an optional subdirectory and filename glob.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Workspace != nil },
+		available:    workspaceToolAvailable,
 		build:        buildGrepTool,
 	},
 	sandbox.ToolGlob: {
@@ -171,7 +223,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Glob",
 		Description:  "List workspace files whose relative path matches a glob pattern (supports *, ?, and ** for any depth).",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Workspace != nil },
+		available:    workspaceToolAvailable,
 		build:        buildGlobTool,
 	},
 	sandbox.ToolBrowserUse: {
@@ -179,7 +231,7 @@ var toolRegistry = map[string]ToolSpec{
 		Title:        "Browser use",
 		Description:  "Run browser automation commands inside the server-side sandbox with the agent workspace mounted for artifacts.",
 		Configurable: false,
-		available:    func(ctx ToolBuildContext) bool { return ctx.Sandbox != nil && ctx.Workspace != nil },
+		available:    sandboxToolAvailable,
 		build:        buildBrowserUseTool,
 	},
 }
@@ -360,7 +412,7 @@ type httpToolConfig struct {
 // mirrors app.buildHTTPTool's refusal of an empty allowlist: an outbound HTTP
 // tool that can reach no host is useless and a standing SSRF risk, so it is
 // rejected rather than built open.
-func buildHTTPRequestTool(_ ToolBuildContext, configJSON string) (agentcore.Tool, error) {
+func buildHTTPRequestTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
 	cfg := httpToolConfig{}
 	if s := strings.TrimSpace(configJSON); s != "" {
 		if err := json.Unmarshal([]byte(s), &cfg); err != nil {
@@ -384,31 +436,46 @@ func buildHTTPRequestTool(_ ToolBuildContext, configJSON string) (agentcore.Tool
 	// its own SSRF defenses (allowlist + guarded dialer), so this is a
 	// deployment-shape choice, not a weaker one. Flip it to ctx.Sandbox once a
 	// curl-capable image is the configured default.
+	//
+	// The workspace is passed even though the request itself runs on the host
+	// substrate: it is what save_as writes into, so a fetched dataset lands in the
+	// same directory read_file and run_shell work in.
 	return sandbox.NewHTTPRequestTool(nil,
 		sandbox.WithHTTPAllowHosts(hosts),
 		sandbox.WithHTTPAllowPlain(cfg.AllowHTTP),
+		sandbox.WithHTTPWorkspace(ctx.Workspace),
 	), nil
 }
 
-// buildRunShellTool constructs the sandbox-backed run_shell tool. The shell is
-// selectable per-agent, but the backing Sandbox is host-injected; without it the
-// build fails closed.
+// buildRunShellTool constructs the run_shell tool. The shell is selectable
+// per-agent; the backing Sandbox is host-injected and OPTIONAL.
 //
-// sandbox.NewShellTool now accepts a nil sandbox and runs on the host, but this
-// hosted control plane never takes that path: AGENT-GOVERNANCE sells sandbox
-// isolation as *the* control for the shell/computer/browser tools, so a
-// deployment that has no sandbox wired must not silently gain a host shell that
-// model-authored commands can drive. Host mode is for embedded and local
-// consumers of the sandbox package, which construct these tools directly.
+// sandbox.NewShellTool accepts a nil sandbox and runs on the host, and this
+// control plane now takes that path by default. The earlier rule — no sandbox,
+// no shell — was the safer-looking half of a trade whose other half was that a
+// user without Docker got an agent that could not do anything, so the isolation
+// protected nobody who never got that far. What replaces it is a choice the
+// operator makes: host mode by default, SandboxRequired for the deployment where
+// the blast radius is other people's data.
+//
+// Host mode is still guarded rather than raw — HostSandbox withholds the
+// server's environment from the child, roots it in the run's workspace, and
+// kills its process group on timeout — but it is NOT isolation, and a
+// deployment that needs isolation must say so.
 func buildRunShellTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
-	if ctx.Sandbox == nil {
+	if !ctx.isolationSatisfied() {
 		return nil, fmt.Errorf("run_shell requires the sandbox to be enabled")
+	}
+	// The shell shares one directory with read_file/write_file/edit_file because
+	// that sharing is the point: an agent writes a script with write_file and
+	// runs it with run_shell. A shell in its own ephemeral scratch dir could not
+	// see the file it had just been asked to execute.
+	if ctx.Workspace == nil {
+		return nil, fmt.Errorf("run_shell requires the agent workspace to be enabled")
 	}
 	if err := rejectConfig(sandbox.ToolRunShell, configJSON); err != nil {
 		return nil, err
 	}
-	// Pass the workspace (when enabled) so run_shell shares a filesystem with the
-	// read_file/write_file tools; nil keeps the legacy ephemeral scratch dir.
 	return sandbox.NewShellTool(ctx.Sandbox, agentcore.SandboxLimits{}, ctx.Workspace), nil
 }
 
@@ -416,7 +483,7 @@ func buildRunShellTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 // both the host-injected sandbox (to run in) and the workspace (so produced
 // files land on the host); without either it fails closed.
 func buildComputerUseTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
-	if ctx.Sandbox == nil {
+	if !ctx.isolationSatisfied() {
 		return nil, fmt.Errorf("computer_use requires the sandbox to be enabled")
 	}
 	if ctx.Workspace == nil {
@@ -479,11 +546,11 @@ func buildGlobTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, err
 // the tool, so it is always buildable wherever policy grants it. It is built on
 // the host substrate for the same reason as http_request — the default sandbox
 // image has no curl.
-func buildWebFetchTool(_ ToolBuildContext, configJSON string) (agentcore.Tool, error) {
+func buildWebFetchTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
 	if err := rejectConfig(sandbox.ToolWebFetch, configJSON); err != nil {
 		return nil, err
 	}
-	return sandbox.NewWebFetchTool(nil), nil
+	return sandbox.NewWebFetchTool(nil, ctx.Workspace), nil
 }
 
 func buildWriteFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
@@ -497,7 +564,7 @@ func buildWriteFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool
 }
 
 func buildBrowserUseTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
-	if ctx.Sandbox == nil {
+	if !ctx.isolationSatisfied() {
 		return nil, fmt.Errorf("browser_use requires the sandbox to be enabled")
 	}
 	if ctx.Workspace == nil {

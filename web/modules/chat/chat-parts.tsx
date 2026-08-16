@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, CornerDownLeft, LayoutDashboard, MessageSquare, Paperclip, Pencil, Plug, Plus, RotateCcw, Square, Trash2, TriangleAlert } from 'lucide-react';
+import { Check, Copy, CornerDownLeft, Eraser, Flag, LayoutDashboard, ListChecks, MessageSquare, Paperclip, Pencil, Plug, Plus, RotateCcw, Square, Trash2, TriangleAlert, Users } from 'lucide-react';
 import {
   ChatMessage,
   ChatMessageBubble,
@@ -29,16 +29,18 @@ import { VStack } from '@astryxdesign/core/VStack';
 import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
-import type { Agent, AgentResultCard, AgentToolTrace } from '@/lib/api';
+import type { Agent, AgentPlanItem, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useRouter } from 'next/navigation';
-import { FIRST_RUN_PROMPT, settingsPath, startersByKind, type FirstRunHandoff as FirstRunHandoffCopy, type FirstSessionNotice } from '@/lib/ia';
+import { FIRST_RUN_PROMPT, settingsPath, type FirstRunHandoff as FirstRunHandoffCopy, type FirstSessionNotice } from '@/lib/ia';
+import { startersByJob } from '@/lib/jobs';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
 import type { ChatThread } from './use-chat-threads';
 import { Chart, type ChartSpec } from '@/modules/shared/components/charts';
 import type { MarkdownComponents } from '@astryxdesign/core/Markdown';
 import { parseRichMessage, slugify } from './message-format';
+import { useCommandNames } from './commands';
 
 // A single entry in the agent's visible work log for a turn — either a plain-
 // language narration note or a tool call moving through running → done/blocked.
@@ -87,10 +89,18 @@ export type ChatMsg = {
   // Stable identity. `local:<n>` until the message is known to the server, then
   // the conversation entry's id. Never the array index, never the text.
   id: string;
-  // 'system' is a transcript marker, not a turn — today only the compaction
-  // seam. It renders as a divider and carries none of the fields below.
+  // 'system' is a transcript marker, not a turn. It renders as a divider or a
+  // pinned note (see `marker`) and carries none of the assistant fields below.
   role: 'user' | 'assistant' | 'system';
   text: string;
+  // Which kind of marker a system row is. 'compaction' is the summarization
+  // seam; 'clear' is a /clear — the point where the agent's memory of this
+  // thread stops, with nothing standing in for what came before; 'goal' pins the
+  // completion condition a /goal turn is running under. Absent on older rows,
+  // which are all compaction seams.
+  marker?: 'compaction' | 'clear' | 'goal';
+  // The completion condition, on a 'goal' marker.
+  goal?: string;
   // The entry's sync cursor, when it came from the server. The highest seq the
   // client holds is the watermark it asks for deltas from.
   seq?: number;
@@ -116,6 +126,10 @@ export type ChatMsg = {
   // The agent's step-by-step work log (narration + tool calls), shown inline so
   // the user sees what the agent is doing, not just the answer.
   steps?: ChatStep[];
+  // The agent's todo list as of this turn (agentcore's todo plugin). It is the
+  // agent's own working plan, not a projection of the work log: the steps say
+  // what it did, the plan says what it still intends to do.
+  plan?: AgentPlanItem[];
   // The backend run id, captured before the first token, so a message left in
   // flight can be matched to its (background-finishing) run on return.
   runID?: string;
@@ -227,18 +241,25 @@ export function AgentMenu({ agents, currentID, currentName, onPick }: { agents: 
 }
 
 export function FrontDoor({
+  agentName,
   onPick,
   onAsk,
   showFirstEvent = false,
   notice = null,
 }: {
+  // Who the composer will actually send to. The heading named "Growth Lead"
+  // unconditionally, which was true only for a workspace that had hired nobody
+  // else — switch to Ops Watch and the front door still offered the growth
+  // agent, so the one line telling you who you're talking to was the one line
+  // that could be wrong.
+  agentName: string;
   onPick: (value: string) => void;
   onAsk?: (value: string) => void;
   showFirstEvent?: boolean;
   notice?: FirstSessionNotice | null;
 }) {
   const router = useRouter();
-  const groups = startersByKind();
+  const groups = startersByJob();
   const ask = notice?.ask ?? groups[0]?.prompts[0] ?? 'What changed in the last 7 days?';
   const go = onAsk ?? onPick;
   const action = notice?.href && (notice.kind === 'setup' || /AI key/i.test(notice.detail ?? ''))
@@ -248,7 +269,7 @@ export function FrontDoor({
   return (
     <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1 pt-4">
       <VStack gap={1}>
-        <Heading level={2}>{noticed ? notice.title : 'Ask Growth Lead what to do next'}</Heading>
+        <Heading level={2}>{noticed ? notice.title : `Ask ${agentName} what to do next`}</Heading>
         <Text type="supporting">
           {noticed ? notice.detail : 'One question. I’ll look at your events and recommend a single next move.'}
         </Text>
@@ -274,7 +295,7 @@ export function FrontDoor({
         />
       ) : null}
       {groups.map((group) => (
-        <VStack gap={2} key={group.kind}>
+        <VStack gap={2} key={group.id}>
           <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">{group.label}</Text>
           <HStack gap={2} wrap="wrap">{group.prompts.map((chip) => <Token key={chip} size="lg" label={chip} onClick={() => go(chip)} />)}</HStack>
         </VStack>
@@ -313,7 +334,7 @@ export function FirstRunPanel({
   hasModelKey?: boolean;
 }) {
   const router = useRouter();
-  const groups = startersByKind();
+  const groups = startersByJob();
   const blocked = hasModelKey === false;
   return (
     <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1 pt-4">
@@ -405,6 +426,13 @@ const TOOL_LABELS: Record<string, string> = {
   submit_recommendation: 'Drafted a recommendation',
   read_skill: 'Read a skill',
   update_plan: 'Updated the plan',
+  // Delegation. Named for what it means to the person watching — the agent
+  // handed a piece of the job to someone else and waited for the answer — not
+  // for the mechanism ("spawn_subagent"), which is the one row in the work log
+  // where the reader most needs to know a second agent was involved.
+  spawn_subagent: 'Handed work to another agent',
+  read_spill: 'Re-read a large result',
+  session_query: 'Looked back at earlier work',
   remember: 'Saved to memory',
   http_request: 'Called an API',
   run_shell: 'Ran a command',
@@ -640,10 +668,19 @@ function RetryAction({ m, actions, label }: { m: ChatMsg; actions: MessageAction
 }
 
 function UserMessage({ prompt }: { prompt: string }) {
-  const { text, skills, files } = parseRichMessage(prompt);
-  if (!skills.length && !files.length) return <>{prompt}</>;
+  const commandNames = useCommandNames();
+  const { text, skills, files, command, commandArg } = parseRichMessage(prompt, commandNames);
+  if (!skills.length && !files.length && !command) return <>{prompt}</>;
   return (
     <VStack gap={2} align="stretch">
+      {/* A command is shown as what it is — the chip plus its argument as prose —
+          so a reloaded thread reads the same as the moment it was typed. */}
+      {command ? (
+        <HStack gap={2} align="center" wrap="wrap">
+          <Token label={`/${command}`} size="sm" color="blue" />
+          {commandArg ? <span>{commandArg}</span> : null}
+        </HStack>
+      ) : null}
       {text ? <span>{text}</span> : null}
       {skills.length || files.length ? (
         <HStack gap={2} align="center" wrap="wrap">
@@ -659,6 +696,108 @@ function UserMessage({ prompt }: { prompt: string }) {
   );
 }
 
+// PlanList renders the agent's todo list: what it has finished, what it is doing
+// right now, what is still ahead. The in-progress item is the one a person
+// actually watches, so it is the only row given weight — a list where every row
+// shouts is a list nobody reads.
+//
+// The plan is the agent's own, written with update_plan and re-pinned into every
+// request it makes. Showing it is not decoration: on a long run it is the only
+// honest answer to "is it still doing what I asked".
+export function PlanList({ items, compact }: { items: AgentPlanItem[]; compact?: boolean }) {
+  if (!items.length) return null;
+  return (
+    <VStack gap={compact ? 1 : 2} align="stretch">
+      {items.map((it, i) => {
+        const done = it.status === 'completed';
+        const now = it.status === 'in_progress';
+        return (
+          <HStack key={`${i}-${it.content}`} gap={2} align="start" className="min-w-0">
+            <span className="mt-[3px] flex-none">
+              {done ? (
+                <Check size={13} className="text-[var(--color-text-success,var(--color-text-secondary))]" />
+              ) : now ? (
+                <Spinner size="sm" />
+              ) : (
+                <span className="block h-[13px] w-[13px] rounded-[3px] border border-[var(--color-border)]" />
+              )}
+            </span>
+            <Text
+              type={done || !now ? 'supporting' : undefined}
+              weight={now ? 'medium' : undefined}
+              className={`min-w-0 break-words ${done ? 'line-through opacity-60' : ''}`}
+            >
+              {it.content}
+            </Text>
+          </HStack>
+        );
+      })}
+    </VStack>
+  );
+}
+
+// planProgress is the one-line summary the collapsed plan shows ("3 of 5 done").
+export function planProgress(items: AgentPlanItem[]): string {
+  const done = items.filter((i) => i.status === 'completed').length;
+  return `${done} of ${items.length} done`;
+}
+
+// PlanBlock is the plan as it appears inside an assistant turn: a quiet titled
+// panel above the answer. Collapsed to its progress line once the turn is over —
+// a finished plan is a record, and the answer is what the user came back for.
+function PlanBlock({ items, live }: { items: AgentPlanItem[]; live: boolean }) {
+  const [open, setOpen] = useState(live);
+  // Re-open when a settled turn starts working again (a steer, a follow-up), so
+  // the plan is expanded exactly while there is something to watch.
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (live && !wasLive.current) setOpen(true);
+    wasLive.current = live;
+  }, [live]);
+  if (!items.length) return null;
+  const current = items.find((i) => i.status === 'in_progress');
+  return (
+    <Card className="w-full min-w-0 !p-3">
+      <VStack gap={2} align="stretch">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 items-center gap-2 text-left"
+          aria-expanded={open}
+        >
+          <ListChecks size={14} className="flex-none text-[var(--color-text-secondary)]" />
+          {/* flex-none: without it the label is a shrinkable flex item and the
+              long progress line next to it squeezes "Plan" onto two lines. */}
+          <Text type="supporting" weight="medium" className="flex-none">Plan</Text>
+          <Text type="supporting" className="truncate opacity-70">
+            {open ? planProgress(items) : current ? `${planProgress(items)} · ${current.content}` : planProgress(items)}
+          </Text>
+        </button>
+        {open ? <PlanList items={items} compact /> : null}
+      </VStack>
+    </Card>
+  );
+}
+
+// GoalNote pins a run's completion condition into the transcript. It is not a
+// divider like the compaction seam: nothing was lost here, something was
+// *promised* — the agent may not stop until this holds.
+function GoalNote({ goal }: { goal: string }) {
+  return (
+    <div className="w-full min-w-0 px-1 py-2">
+      <Card className="!p-3">
+        <HStack gap={2} align="start" className="min-w-0">
+          <Flag size={14} className="mt-[2px] flex-none text-[var(--color-text-secondary)]" />
+          <VStack gap={0} align="stretch" className="min-w-0">
+            <Text type="supporting" weight="medium">Working until this is true</Text>
+            <Text className="min-w-0 break-words">{goal}</Text>
+          </VStack>
+        </HStack>
+      </Card>
+    </div>
+  );
+}
+
 export function Conversation({ messages, agentName, agentNameByID, debug, actions }: { messages: ChatMsg[]; agentName: string; agentNameByID?: Record<string, string>; debug: boolean; actions?: MessageActions }) {
   // Which message is open in the inline editor. View state, not thread state:
   // cancelling discards it and nothing outside the transcript needs to know.
@@ -666,11 +805,18 @@ export function Conversation({ messages, agentName, agentNameByID, debug, action
   return (
     <ChatMessageList density="balanced">
       {messages.map((m) => {
-        // The compaction seam. A divider, not a turn: it marks where the agent's
-        // memory of this conversation stops being verbatim.
+        // Transcript markers, not turns. A compaction seam marks where the
+        // agent's memory stops being verbatim; a /clear marks where it stops
+        // entirely; a goal marks what the run below it is bound to.
         if (m.role === 'system') {
+          if (m.marker === 'goal') return <GoalNote key={m.id} goal={m.goal || m.text} />;
           return (
-            <ChatSystemMessage key={m.id} variant="divider" className="w-full min-w-0 overflow-hidden">
+            <ChatSystemMessage
+              key={m.id}
+              variant="divider"
+              icon={m.marker === 'clear' ? <Eraser size={12} /> : undefined}
+              className="w-full min-w-0 overflow-hidden"
+            >
               {m.text}
             </ChatSystemMessage>
           );
@@ -871,6 +1017,10 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
         <VStack gap={1} align="stretch">
           <Text type="supporting" weight="semibold" color="secondary">{who}</Text>
           <VStack gap={3} align="stretch">
+          {/* The plan sits above the work log: it is what the agent means to
+              do, and the log is what it has done so far. Reading them the
+              other way round tells you the story backwards. */}
+          {m.plan?.length ? <PlanBlock items={m.plan} live={working} /> : null}
           {calls.length ? (
             <WorkLog calls={calls} working={working} label={workLabel} />
           ) : working ? (

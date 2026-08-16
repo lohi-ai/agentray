@@ -211,3 +211,63 @@ describe('syncTailID', () => {
     expect(syncTailID([{ id: 'local:1', role: 'user', text: 'a' }])).toBe('');
   });
 });
+
+describe('runtime-state entries', () => {
+  const plan = (items: Array<{ content: string; status: string }>) =>
+    entry({ kind: 'plan', role: 'assistant', payload_json: JSON.stringify({ items }) });
+  const goal = (g: string) => entry({ kind: 'goal', payload_json: JSON.stringify({ goal: g }) });
+  const clear = () => entry({ kind: 'clear', payload_json: '{}' });
+
+  // The plan is written mid-turn and belongs to the answer that turn produces —
+  // the same buffering the tool traces get.
+  it('attaches the last plan revision to the answer that follows it', () => {
+    seq = 0;
+    const out = entriesToMessages([
+      msg('user', 'do the migration'),
+      plan([{ content: 'read the schema', status: 'in_progress' }]),
+      plan([{ content: 'read the schema', status: 'completed' }, { content: 'write it', status: 'in_progress' }]),
+      msg('assistant', 'Done.'),
+    ]);
+    const answer = out.find((m) => m.role === 'assistant');
+    expect(answer?.plan).toHaveLength(2);
+    expect(answer?.plan?.[0].status).toBe('completed');
+  });
+
+  // A plan written by a turn whose answer hasn't landed yet still shows: the work
+  // is happening, and the whole point of the plan is to be visible while it does.
+  it('shows a plan with no answer behind it on the provisional turn', () => {
+    seq = 0;
+    const out = entriesToMessages([msg('user', 'go'), plan([{ content: 'step', status: 'pending' }])]);
+    expect(out[out.length - 1].provisional).toBe(true);
+    expect(out[out.length - 1].plan).toHaveLength(1);
+  });
+
+  it('renders a goal as a pinned marker carrying its condition', () => {
+    seq = 0;
+    const out = entriesToMessages([msg('user', '/goal all tests pass'), goal('all tests pass')]);
+    const marker = out.find((m) => m.marker === 'goal');
+    expect(marker?.goal).toBe('all tests pass');
+    expect(marker?.role).toBe('system');
+  });
+
+  // A clear must not read like a compaction: nothing summarized what came before,
+  // so the marker has to say the memory is gone, not folded.
+  it('renders a clear as its own marker, distinct from a compaction', () => {
+    seq = 0;
+    const out = entriesToMessages([msg('user', 'old'), clear(), msg('user', 'new')]);
+    const marker = out.find((m) => m.role === 'system');
+    expect(marker?.marker).toBe('clear');
+    expect(marker?.text).toMatch(/fresh/i);
+  });
+
+  it('ignores a malformed plan entry rather than failing the thread', () => {
+    seq = 0;
+    const out = entriesToMessages([
+      msg('user', 'go'),
+      entry({ kind: 'plan', payload_json: 'not json' }),
+      msg('assistant', 'ok'),
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[1].plan).toBeUndefined();
+  });
+});

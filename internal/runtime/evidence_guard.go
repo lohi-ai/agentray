@@ -5,8 +5,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 // evidence_guard.go — the analytics analog of hermes-agent's verify-on-stop
@@ -24,9 +26,19 @@ import (
 // policy.go (write/side-effect tools deliberately do not count — producing an
 // artifact is not reading evidence), plus spawn_subagent, because a delegated
 // child runs the read tools itself and only its answer returns to the parent's
-// trace.
+// trace, plus web_fetch.
+//
+// web_fetch is here because "evidence" is not a synonym for "the event store".
+// A pre-product agent's whole evidence base is pages it fetched this turn — a
+// competitor's real pricing page is a checked source in exactly the sense this
+// guard cares about, and treating it as nothing forces the honest answer
+// ("their plan is 99k VND/month, fetched from this URL") into the same bucket
+// as an invented one.
 var evidenceToolSet = func() map[string]bool {
-	s := map[string]bool{subagent.ToolSpawnSubagent: true}
+	s := map[string]bool{
+		subagent.ToolSpawnSubagent: true,
+		sandbox.ToolWebFetch:       true,
+	}
 	for name := range readTools {
 		s[name] = true
 	}
@@ -39,20 +51,49 @@ var evidenceToolSet = func() map[string]bool {
 // claim the figures are fabricated — evidence gathered in an earlier turn of
 // the conversation (or before a crash-resume) is invisible to this run's
 // trace, so citing that provenance is a legitimate way out.
+//
+// The last sentence is load-bearing and was learned the hard way. The guard
+// injects this as a USER message, so whatever the model says next is what the
+// owner reads — there is no back channel. Without an explicit instruction to
+// re-emit the answer, a model that judges itself already compliant replies with
+// its verdict on the instruction ("I stated no figures, no correction needed"),
+// and that verdict silently REPLACES the answer: the owner asks a question and
+// gets back a self-audit referring to a "previous reply" they never saw. The
+// repair path must always terminate in the full answer, including the case
+// where the repair turns out to be nothing.
 const evidenceNudge = "[System: your answer states figures, but no data tool was executed in this run. " +
 	"If the figures come from data-tool results earlier in this conversation, keep them and briefly " +
 	"note that provenance. Otherwise either verify them now with a granted read tool (run_sql, " +
 	"explore_events, activity_summary, ...) and correct the answer, or restate the answer saying " +
-	"explicitly that the figures are estimates not read from project data.]"
+	"explicitly that the figures are estimates not read from project data. " +
+	"This note is not visible to the user and is not a question to answer: your next message is what " +
+	"the user reads, so reply with the COMPLETE answer they should see, never a comment about this " +
+	"note. If your answer needs no change, send it again unchanged.]"
 
-// evidenceFinishGuard returns a FinishGuard for an agent whose enabled scopes
-// grant at least one evidence (read) tool. It nudges at most once per run, and
-// only when the final answer carries digits while zero evidence tools executed.
-// Agents with no evidence tools get a nil guard — a persona-only chat agent
-// has no data to consult and must not be nagged.
-func evidenceFinishGuard(s Scopes) finishguard.Guard {
+// runToolNames lifts the run's built tools to their names for the guard's
+// arming check.
+func runToolNames(tools []agentcore.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name())
+	}
+	return names
+}
+
+// evidenceFinishGuard returns a FinishGuard for an agent granted at least one
+// evidence tool. It nudges at most once per run, and only when the final answer
+// carries digits while zero evidence tools executed. Agents with no evidence
+// tools get a nil guard — a persona-only chat agent has no data to consult and
+// must not be nagged.
+//
+// runTools is the run's resolved tool names, so a capability granted OUTSIDE
+// the scope map counts. Scopes alone are not the whole grant: a pack may name
+// non-scope tools (Pack.Tools, e.g. web_fetch), and an agent whose only
+// evidence source is the open web must be held to the same rail as one reading
+// the event store — and, more to the point, must be CREDITED for using it.
+func evidenceFinishGuard(s Scopes, runTools []string) finishguard.Guard {
 	granted := false
-	for _, name := range ScopeToolNames(s) {
+	for _, name := range append(ScopeToolNames(s), runTools...) {
 		if evidenceToolSet[name] {
 			granted = true
 			break

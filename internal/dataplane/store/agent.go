@@ -362,6 +362,12 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		// owner. Backfilled from the home project so every existing agent is owned
 		// by the same workspace it already lived under — no behavior change.
 		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS workspace_id UUID`,
+		// The folder this agent works in, when its operator chose one. Empty — the
+		// default for every existing row, hence no backfill — means the runtime
+		// derives a per-conversation directory under ~/.agentray/workspaces
+		// instead. It is a host path rather than an id, so it is stored as written
+		// and resolved at run time; validation happens where it is saved.
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS workspace_path TEXT NOT NULL DEFAULT ''`,
 		`UPDATE agents a SET workspace_id = p.workspace_id
 	FROM projects p WHERE a.project_id = p.id AND a.workspace_id IS NULL`,
 		`CREATE INDEX IF NOT EXISTS agents_workspace_idx ON agents (workspace_id)`,

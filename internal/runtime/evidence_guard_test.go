@@ -2,16 +2,18 @@ package agentruntime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/sandbox"
 )
 
 func TestEvidenceFinishGuard(t *testing.T) {
 	ctx := context.Background()
-	guard := evidenceFinishGuard(Scopes{DataQuality: true})
+	guard := evidenceFinishGuard(Scopes{DataQuality: true}, nil)
 	if guard == nil {
 		t.Fatal("data_quality grants read tools; guard must be non-nil")
 	}
@@ -93,8 +95,58 @@ func TestEvidenceFinishGuard(t *testing.T) {
 	})
 
 	t.Run("no read scopes disables guard", func(t *testing.T) {
-		if g := evidenceFinishGuard(Scopes{}); g != nil {
-			t.Fatal("no scopes -> nil guard")
+		if g := evidenceFinishGuard(Scopes{}, nil); g != nil {
+			t.Fatal("no scopes and no tools -> nil guard")
 		}
 	})
+}
+
+// A pre-product agent's evidence is the open web. web_fetch is granted through
+// Pack.Tools, which no scope names, so the guard has to look past the scope map
+// on both halves: it must ARM for such an agent, and it must CREDIT the fetch.
+// Getting the second half wrong is worse than not guarding at all — it nudges an
+// agent that did exactly what it was built to do.
+func TestEvidenceFinishGuardCountsTheOpenWeb(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("web_fetch alone arms the guard", func(t *testing.T) {
+		guard := evidenceFinishGuard(Scopes{}, []string{sandbox.ToolWebFetch})
+		if guard == nil {
+			t.Fatal("an agent granted web_fetch holds an evidence tool; guard must be non-nil")
+		}
+		if got := guard(ctx, finishguard.State{Final: "The market is growing 30% a year."}); got == "" {
+			t.Fatal("an invented market figure with no fetch must still be nudged")
+		}
+	})
+
+	t.Run("a fetched page is evidence", func(t *testing.T) {
+		guard := evidenceFinishGuard(Scopes{DataQuality: true}, []string{sandbox.ToolWebFetch})
+		st := finishguard.State{
+			Final: "Their Premium plan is 99,000 VND/month (fetched from cookpad.com/vn/premium).",
+			Tools: []agentcore.ToolTrace{{Tool: sandbox.ToolWebFetch, Allowed: true}},
+		}
+		if got := guard(ctx, st); got != "" {
+			t.Fatalf("a price read off a page fetched this turn is checked evidence, got %q", got)
+		}
+	})
+}
+
+// The guard speaks to the model through a USER message, so the model's reply IS
+// the answer the owner reads. The nudge therefore has to end in the answer even
+// when the model concludes nothing needs fixing — otherwise the owner's question
+// is silently answered with a self-audit.
+func TestEvidenceNudgeDemandsTheWholeAnswerBack(t *testing.T) {
+	lower := strings.ToLower(evidenceNudge)
+	for _, want := range []string{
+		"your next message is what the user reads",
+		"complete answer",
+		"send it again unchanged",
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("nudge must tell the model its reply is the user-visible answer; missing %q", want)
+		}
+	}
+	if !strings.Contains(lower, "not visible to the user") {
+		t.Error("nudge must say it is not itself visible, or the model answers it as a question")
+	}
 }

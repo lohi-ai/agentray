@@ -64,3 +64,37 @@ func TestAnthropicEncodeAnchorFallback(t *testing.T) {
 		t.Fatal("fallback must not mark earlier messages")
 	}
 }
+
+// TestAnthropicEncodeDoesNotFallBackOverADeliberateAnchor covers the case where
+// the loop's placement and this encoder's fallback disagree.
+//
+// The loop moves the breakpoint OFF the final message on purpose: a ContextHook
+// re-renders a trailer there every turn, so a prefix ending in it can never be
+// re-read. If the only anchor the loop placed happens to land on a system
+// message — hoisted into the system block here, with no attachment point — the
+// fallback used to fire and re-anchor the final message, quietly restoring the
+// behavior the placement exists to avoid. No anchors REQUESTED is standalone
+// use; anchors requested and unmappable is not.
+func TestAnthropicEncodeDoesNotFallBackOverADeliberateAnchor(t *testing.T) {
+	p := NewAnthropicProvider("k", "")
+	out := p.encode(agentcore.ChatRequest{
+		Model:    "claude-x",
+		CacheKey: "s",
+		Messages: []agentcore.Message{
+			{Role: agentcore.RoleUser, Content: "u1"},
+			{Role: agentcore.RoleAssistant, Content: "a1"},
+			// The loop's chosen breakpoint: a system message (a compaction
+			// checkpoint or the pinned requirement), hoisted out of Messages.
+			{Role: agentcore.RoleSystem, Content: "checkpoint", CacheAnchor: true},
+			// The hook's regenerated trailer, which must NOT be anchored.
+			{Role: agentcore.RoleUser, Content: "[run plan]\n[~] step one"},
+		},
+	})
+	for i, m := range out.Messages {
+		if m.Content[len(m.Content)-1].CacheControl != nil {
+			t.Fatalf("message %d was anchored by the fallback although the loop had already placed "+
+				"a breakpoint; the entry it writes ends in a trailer that is re-rendered every turn "+
+				"and can never be read back", i)
+		}
+	}
+}

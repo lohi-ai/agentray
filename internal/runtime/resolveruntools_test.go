@@ -86,7 +86,8 @@ func TestResolveRunToolsFailsClosedOnBadConfig(t *testing.T) {
 }
 
 func TestResolveRunToolsBuildsRunShellFromSandboxContext(t *testing.T) {
-	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{Sandbox: stubSandbox{}}, nil, []storage.AgentToolSelection{
+	ctx := ToolBuildContext{Sandbox: stubSandbox{}, Workspace: testWorkspace(t)}
+	tools, _, err := resolveRunTools(context.Background(), ctx, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 	})
 	if err != nil {
@@ -97,24 +98,51 @@ func TestResolveRunToolsBuildsRunShellFromSandboxContext(t *testing.T) {
 	}
 }
 
-func TestResolveRunToolsSkipsRunShellWhenNoSandbox(t *testing.T) {
-	// A stale run_shell selection on a deployment with no sandbox must be skipped,
-	// not abort the run — the agent still runs with its remaining tools.
-	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
+// TestResolveRunToolsBuildsRunShellWithoutASandbox is the ungating, stated as
+// the behavior a user actually meets: install AgentRay, grant the shell, no
+// Docker anywhere, and the shell works — on the host, inside the run's
+// workspace.
+//
+// The rule it replaces (no sandbox, no shell) looked like the safe default and
+// was not one. It made the first thing a new user tried fail with a
+// configuration error, which is not a security control; it is a wall in front of
+// the people the control was supposed to protect.
+func TestResolveRunToolsBuildsRunShellWithoutASandbox(t *testing.T) {
+	ctx := ToolBuildContext{Workspace: testWorkspace(t)}
+	tools, _, err := resolveRunTools(context.Background(), ctx, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 	})
 	if err != nil {
-		t.Fatalf("expected run_shell to be skipped, got error: %v", err)
+		t.Fatalf("resolveRunTools: %v", err)
+	}
+	if names := toolNames(tools); !names[sandbox.ToolRunShell] {
+		t.Fatalf("run_shell was withheld from a deployment with no sandbox: %v", names)
+	}
+}
+
+// TestResolveRunToolsWithholdsRunShellWhenTheSandboxIsRequired is the other
+// half, and the one a hosted deployment depends on: having ASKED for isolation,
+// not getting it must withhold the tool rather than quietly run it on the host.
+func TestResolveRunToolsWithholdsRunShellWhenTheSandboxIsRequired(t *testing.T) {
+	ctx := ToolBuildContext{Workspace: testWorkspace(t), SandboxRequired: true}
+	tools, _, err := resolveRunTools(context.Background(), ctx, nil, []storage.AgentToolSelection{
+		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
+	})
+	if err != nil {
+		t.Fatalf("a withheld tool must skip, not abort the run: %v", err)
 	}
 	if len(tools) != 0 {
-		t.Fatalf("expected no tools (run_shell unavailable), got %d", len(tools))
+		t.Fatalf("AGENTRAY_SANDBOX_REQUIRED is set and no sandbox is wired, yet run_shell was built "+
+			"on the host anyway: %v", toolNames(tools))
 	}
 }
 
 func TestResolveRunToolsSkipsUnavailableButKeepsAvailable(t *testing.T) {
-	// run_shell is unavailable (no sandbox) but http_request is fine: the run
-	// proceeds with http_request rather than dying on the stale shell selection.
-	tools, _, err := resolveRunTools(context.Background(), ToolBuildContext{}, nil, []storage.AgentToolSelection{
+	// run_shell is unavailable (isolation demanded, none wired) but http_request
+	// is fine: the run proceeds with http_request rather than dying on the stale
+	// shell selection.
+	ctx := ToolBuildContext{Workspace: testWorkspace(t), SandboxRequired: true}
+	tools, _, err := resolveRunTools(context.Background(), ctx, nil, []storage.AgentToolSelection{
 		{Name: sandbox.ToolRunShell, Enabled: true, ConfigJSON: `{}`},
 		{Name: sandbox.ToolHTTPRequest, Enabled: true, ConfigJSON: `{"allow_hosts":["api.example.com"]}`},
 	})
@@ -124,6 +152,18 @@ func TestResolveRunToolsSkipsUnavailableButKeepsAvailable(t *testing.T) {
 	if names := toolNames(tools); !names[sandbox.ToolHTTPRequest] || names[sandbox.ToolRunShell] || len(names) != 1 {
 		t.Fatalf("expected only http_request, got %v", names)
 	}
+}
+
+// testWorkspace is a throwaway workspace for a run under test. Every
+// code-executing tool needs somewhere to work, so these tests supply one for the
+// same reason a real run does.
+func testWorkspace(t *testing.T) *sandbox.Workspace {
+	t.Helper()
+	ws, err := sandbox.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	return ws
 }
 
 func TestResolveRunToolsFailsClosedOnUnknownTool(t *testing.T) {

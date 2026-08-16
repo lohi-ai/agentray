@@ -7,7 +7,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { Selector } from '@astryxdesign/core/Selector';
 import { AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
-import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgentTaskTiers } from '@/modules/agent/hooks';
+import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgents, useAgentTaskTiers } from '@/modules/agent/hooks';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -101,6 +101,48 @@ function PersonaTab({ agentID }: { agentID: string }) {
   );
 }
 
+// --- Workspace folder: the one directory every file, shell, and browser tool
+// works in. It belongs on the Tools tab because it is the answer to "where do
+// these tools act?" — the question a person asks the moment they turn on
+// "Write file". Leaving it blank is the good default (a private folder per
+// conversation); filling it in points the agent at work that already exists.
+function WorkspaceFolderPanel({ agentID }: { agentID: string }) {
+  const { agents, updateAgent } = useAgents();
+  const agent = agents.find((a) => a.id === agentID);
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? agent?.workspace_path ?? '';
+
+  return (
+    <Panel title="Workspace folder">
+      <p className="max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+        Where this agent&apos;s files live. Every tool below shares it, which is what lets the agent write a
+        script and then run it. Leave it blank and each conversation gets its own private folder under
+        <code className="mx-1 font-mono">~/.agentray/workspaces</code>; set it to point the agent at a folder you
+        already have, and it works there in every conversation.
+      </p>
+      <div className="mt-3 max-w-[520px]">
+        <TextInput
+          label="Folder"
+          value={value}
+          placeholder="~/projects/my-repo"
+          onChange={(v: string) => setDraft(v)}
+          width="100%"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => { if (agent) void updateAgent(agent.id, agent.name, agent.enabled, value.trim()); }}>
+            Save folder
+          </Button>
+          {value.trim() ? (
+            <Button variant="ghost" size="sm" onClick={() => { setDraft(''); if (agent) void updateAgent(agent.id, agent.name, agent.enabled, ''); }}>
+              Use a folder per conversation
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 // --- Tools: which capabilities the agent is allowed to use. Configurable tools
 // (e.g. web requests) take a small JSON config; the server validates it on enable.
 function ToolsTab({ agentID }: { agentID: string }) {
@@ -115,6 +157,7 @@ function ToolsTab({ agentID }: { agentID: string }) {
   return (
     <div className="flex flex-col gap-[14px]">
       <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Turn on only what this teammate needs. Each tool is a thing the agent can do on your behalf — keeping the list tight keeps it predictable.</p>
+      <WorkspaceFolderPanel agentID={agentID} />
       {catalog.map((tool) => {
         const sel = selByName.get(tool.name);
         const on = !!sel?.enabled;
