@@ -33,6 +33,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <AuthScreen
         loading={loading}
         error={error}
+        onModeChange={() => setError('')}
         onSubmit={async (input) => {
           setError('');
           try {
