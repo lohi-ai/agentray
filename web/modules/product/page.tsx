@@ -14,9 +14,10 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
-import { useActivity, useInsight } from '@/modules/app/hooks';
+import { useActivity, useEventNames, useInsight } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { Button, EmptyState, Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 type Mode = 'trend' | 'funnel' | 'retention' | 'table';
@@ -35,6 +36,8 @@ export function ProductPage() {
   const router = useRouter();
   const { insight, runInsight } = useInsight();
   const { summary } = useActivity();
+  const { names: eventNames, loading: namesLoading } = useEventNames();
+  const emptyCatalog = !namesLoading && eventNames.length === 0;
   const [active, setActive] = useState<Mode | null>(null);
   const [running, setRunning] = useState(false);
 
@@ -54,6 +57,7 @@ export function ProductPage() {
   return (
     <AppShell active="product">
       <Intro title="Product" sub="Answer behavior questions without writing SQL first." action={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>} />
+      <div className="mb-3"><RelatedSurfacesLabel parentHref="/product" /></div>
 
       {/* Astryx migration: the question picker is now an Astryx <Card> wrapping a
           responsive <Grid> of <SelectableCard>s — native controlled selection
@@ -92,7 +96,10 @@ export function ProductPage() {
         <EmptyState
           icon={<Sparkles size={22} style={{ color: 'var(--agent)' }} />}
           title="Pick a question to begin"
-          detail="Each question runs against this project's events and returns a chart plus the underlying numbers — no SQL required."
+          detail={emptyCatalog
+            ? 'No product yet? Prove the idea first → Prototypes. Market a landing page, paste the snippet, collect the waitlist — then this page has something to chart.'
+            : 'Each question runs against this project\'s events and returns a chart plus the underlying numbers — no SQL required.'}
+          action={emptyCatalog ? <Button variant="outline" size="sm" onClick={() => router.push('/prototypes')}>Prototypes</Button> : undefined}
         />
       )}
     </AppShell>

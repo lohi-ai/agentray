@@ -4,12 +4,15 @@ import type { ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { CircleDot, Clock, Play, Radio, TriangleAlert, Users, Webhook, Zap } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
+import { Card } from '@astryxdesign/core/Card';
+import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Table } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import type { Operator } from '@/lib/api';
 import { formatCost, formatRelative } from '@/lib/format';
+import { FUTURE_CHANNELS } from '@/lib/ia';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import {
   Button,
@@ -25,7 +28,7 @@ import {
 import { useOperations } from './hooks';
 import { isTeamRun, lastOutcome, operatorStatus, operatorTitle, rank, runnerLabel, startsOn } from './lib/operator';
 
-// /operations — the operate job, run N times.
+// /operations — channels that start a run without a conversation.
 //
 // An operator is one trigger. Not a new object type: an agent with no trigger is
 // a teammate you message, and an agent with a trigger is work that happens
@@ -188,10 +191,10 @@ export function OperationsPage() {
     <AppShell active="operations">
       <Intro
         title="Operations"
-        sub="Work that starts without you — on a schedule, from a webhook, or on demand."
+        sub="Chat is the front door. These channels start a run without a conversation — a schedule or a webhook. Slack, Discord, and Telegram are next."
         action={
           <Button variant="primary" icon={<Zap size={15} aria-hidden />} onClick={() => router.push('/agents')}>
-            New operator
+            Give a teammate a schedule
           </Button>
         }
       />
@@ -214,8 +217,8 @@ export function OperationsPage() {
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
           label="Can’t read"
-          title="We couldn’t load your operators"
-          detail="The API didn’t answer. Nothing has been paused — your operators keep running while this page is blind."
+          title="We couldn’t load your channels"
+          detail="The API didn’t answer. Nothing has been paused — armed schedules keep firing while this page is blind."
           action={
             <Button variant="outline" size="sm" onClick={refetch}>
               Try again
@@ -250,7 +253,7 @@ export function OperationsPage() {
       {isLoading && operators.length === 0 ? (
         <Loading label="Reading what runs unattended…" />
       ) : (
-        <Panel title="Operators">
+        <Panel title="Armed channels">
           {rows.length === 0 ? (
             error ? (
               <EmptyState
@@ -357,6 +360,22 @@ export function OperationsPage() {
           )}
         </Panel>
       )}
+      <div className="h-4" />
+      <Panel title="Coming">
+        <Grid columns={{ minWidth: 180, max: 3 }} gap={3}>
+          {FUTURE_CHANNELS.map((ch) => (
+            <Card key={ch.kind} padding={3}>
+              <VStack gap={1}>
+                <HStack align="center" justify="between">
+                  <Text weight="semibold">{ch.label}</Text>
+                  <Badge variant="neutral" label="Not yet" />
+                </HStack>
+                <Text type="supporting">{ch.detail}</Text>
+              </VStack>
+            </Card>
+          ))}
+        </Grid>
+      </Panel>
     </AppShell>
   );
 }

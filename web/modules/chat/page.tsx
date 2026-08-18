@@ -62,6 +62,7 @@ export function ChatPage() {
   // panels when narrow; their open state is read back from the live stack so the
   // toggle un-presses when the user dismisses a panel from its own close button.
   const narrow = useMediaQuery('(max-width: 1100px)');
+  const compactHeader = useMediaQuery('(max-width: 480px)');
   const [threadsOn, setThreadsOn] = useState(false);
   const [panelOn, setPanelOn] = useState(false);
   const { push, closeById, panels } = useStackSheet();
@@ -884,9 +885,11 @@ export function ChatPage() {
           <HStack align="center" gap={2}>
             <Text weight="semibold">Chat</Text>
             <Badge variant="neutral" label={<>Project <b className="font-medium text-[var(--color-text-primary)]">{projectName || '—'}</b></>} />
+            {messages.length > 0 && !compactHeader ? <Badge variant="neutral" label="Watching the run" /> : null}
           </HStack>
           <HStack align="center" gap={2}>
-            <Button label="New chat" size="sm" variant="secondary" icon={<Plus size={14} />} onClick={onNew} />
+            <Button label="Set up" size="sm" variant="ghost" onClick={() => router.push('/start')} />
+            <Button label="New chat" size="sm" variant="secondary" icon={<Plus size={14} />} isIconOnly={narrow} onClick={onNew} />
             <ToggleButton
               label="Threads"
               size="sm"

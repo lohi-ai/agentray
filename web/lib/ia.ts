@@ -1,13 +1,12 @@
 // Product information architecture mapped onto the four backend layers:
 //   Channel (chat/mcp/schedule/webhook/lab) → Workloads (Garden packs)
-//   → Runtime (lab/monitor under Agents) → Data (dataplane views).
+//   → Runtime (conversation / run) → Data (dataplane views).
 // Pure functions so unit tests can call the same helpers the shell uses.
 
-// 'Work' is the recurring half of the product. /start answers "where is my
-// product right now" once; Prototypes and Operations are the same two jobs done
-// again, per feature — N idea bets and N standing operators — so they are peers
-// of each other and not a second onboarding question.
-export type NavGroupId = 'Ask' | 'Work' | 'Team' | 'Signals' | 'Workspace';
+// Group headings are the layers. Chat is the runtime front door. Operations
+// are channels. Agents are workloads. Prototypes are a Product child, not a
+// peer of Operations.
+export type NavGroupId = 'Runtime' | 'Channels' | 'Workloads' | 'Data' | 'Workspace';
 
 export type NavItemDef = {
   href: string;
@@ -20,26 +19,17 @@ export type NavItemDef = {
 };
 
 export const NAV_ITEMS: readonly NavItemDef[] = [
-  // Start is the job index — "where is my product right now" — as opposed to
-  // the artifact index the rest of the nav is. It stays a peer of Chat rather
-  // than becoming the landing page: a returning owner should still land in
-  // conversation, not be re-asked a question they already answered.
-  { href: '/start', label: 'Start', group: 'Ask' },
-  { href: '/chat', label: 'Chat', group: 'Ask' },
-  // The validate job, run N times: one card per idea with a kill/keep number on
-  // it. The rows have existed since validation_tests shipped; they had no home.
-  { href: '/prototypes', label: 'Prototypes', group: 'Work' },
-  // The operate job, run N times: one row per standing operator.
-  { href: '/operations', label: 'Operations', group: 'Work' },
-  { href: '/agents', label: 'Agents', group: 'Team', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
-  { href: '/dashboard', label: 'Dashboards', group: 'Signals', aliases: ['/dashboards'] },
-  { href: '/web-analytics', label: 'Traffic', group: 'Signals', aliases: ['/traffic'] },
-  { href: '/product', label: 'Product', group: 'Signals' },
-  { href: '/persons', label: 'People', group: 'Signals', aliases: ['/cohorts'] },
-  { href: '/events', label: 'Events', group: 'Signals' },
-  { href: '/replay', label: 'Replay', group: 'Signals' },
-  { href: '/sql', label: 'SQL', group: 'Signals' },
-  { href: '/templates', label: 'Templates', group: 'Signals' },
+  // /start aliases Chat: the checklist leaves the peer nav; the header Set up
+  // control is the rendered door. /agent is NOT here — it renders the Agents
+  // roster and must light Agents.
+  { href: '/chat', label: 'Chat', group: 'Runtime', aliases: ['/start'] },
+  { href: '/operations', label: 'Operations', group: 'Channels' },
+  { href: '/agents', label: 'Agents', group: 'Workloads', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
+  { href: '/dashboard', label: 'Dashboards', group: 'Data', aliases: ['/dashboards', '/templates', '/sql'] },
+  { href: '/web-analytics', label: 'Traffic', group: 'Data', aliases: ['/traffic'] },
+  { href: '/product', label: 'Product', group: 'Data', aliases: ['/prototypes'] },
+  { href: '/persons', label: 'People', group: 'Data', aliases: ['/cohorts'] },
+  { href: '/events', label: 'Events', group: 'Data', aliases: ['/replay'] },
   { href: '/settings', label: 'Settings', group: 'Workspace', aliases: ['/alerts'] },
   { href: '/pricing', label: 'Plans', group: 'Workspace', hostedOnly: true },
 ];
@@ -102,11 +92,27 @@ export type ChildSurface = { href: string; label: string; parentHref: string };
 // Surfaces that used to sit as peer nav items. They stay reachable from a
 // parent Main/Explore screen instead of competing with Chat / Agents / etc.
 export const CHILD_SURFACES: readonly ChildSurface[] = [
+  // Data-only: Chat is bleed. The rendered door is the header Set up control.
+  { href: '/start', label: 'Set up', parentHref: '/chat' },
   { href: '/marketplace', label: 'Hire a teammate', parentHref: '/agents' },
   { href: '/teams', label: 'Teams', parentHref: '/agents' },
   { href: '/agents/monitor', label: 'Monitor', parentHref: '/agents' },
+  { href: '/templates', label: 'Templates', parentHref: '/dashboard' },
+  { href: '/sql', label: 'SQL', parentHref: '/dashboard' },
+  { href: '/prototypes', label: 'Prototypes', parentHref: '/product' },
   { href: '/alerts', label: 'Alerts', parentHref: '/settings' },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
+  { href: '/replay', label: 'Replay', parentHref: '/events' },
+];
+
+// Third-party channels the product will grow. Not CHANNEL_CATALOG kinds —
+// those mirror internal/channels, and slack/discord/telegram are not registered.
+export type FutureChannel = { kind: 'slack' | 'discord' | 'telegram'; label: string; detail: string };
+
+export const FUTURE_CHANNELS: readonly FutureChannel[] = [
+  { kind: 'slack', label: 'Slack', detail: 'Talk to the same teammate from Slack.' },
+  { kind: 'discord', label: 'Discord', detail: 'Same runtime, from a Discord channel.' },
+  { kind: 'telegram', label: 'Telegram', detail: 'Ask on the go. The thread still lands here.' },
 ];
 
 export function navPrefixes(item: NavItemDef): string[] {
@@ -114,7 +120,7 @@ export function navPrefixes(item: NavItemDef): string[] {
 }
 
 export function navGroups(items: readonly NavItemDef[] = NAV_ITEMS): Array<{ id: NavGroupId; label: NavGroupId; items: NavItemDef[] }> {
-  const order: NavGroupId[] = ['Ask', 'Work', 'Team', 'Signals', 'Workspace'];
+  const order: NavGroupId[] = ['Runtime', 'Channels', 'Workloads', 'Data', 'Workspace'];
   return order.map((id) => ({ id, label: id, items: items.filter((item) => item.group === id) }));
 }
 

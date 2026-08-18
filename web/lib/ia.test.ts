@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CHANNEL_CATALOG,
   CHILD_SURFACES,
+  FUTURE_CHANNELS,
   NAV_ITEMS,
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
@@ -29,18 +30,17 @@ import {
 } from './ia';
 
 describe('nav grouping', () => {
-  it('groups the shell in customer language: Ask → Work → Team → Signals → Workspace', () => {
+  it('groups the shell by layer: Runtime → Channels → Workloads → Data → Workspace', () => {
     const groups = navGroups();
-    expect(groups.map((g) => g.id)).toEqual(['Ask', 'Work', 'Team', 'Signals', 'Workspace']);
-    expect(groups[0].items.map((i) => i.label)).toEqual(['Start', 'Chat']);
-    // Work sits directly under Ask because both its surfaces are the repeatable
-    // half of what /start teaches — the same jobs, run per feature forever.
-    expect(groups[1].items.map((i) => i.label)).toEqual(['Prototypes', 'Operations']);
+    expect(groups.map((g) => g.id)).toEqual(['Runtime', 'Channels', 'Workloads', 'Data', 'Workspace']);
+    expect(groups[0].items.map((i) => i.label)).toEqual(['Chat']);
+    expect(groups[1].items.map((i) => i.label)).toEqual(['Operations']);
     expect(groups[2].items.map((i) => i.label)).toEqual(['Agents']);
     expect(groups[3].items.map((i) => i.label)).toEqual([
-      'Dashboards', 'Traffic', 'Product', 'People', 'Events', 'Replay', 'SQL', 'Templates',
+      'Dashboards', 'Traffic', 'Product', 'People', 'Events',
     ]);
     expect(groups[4].items.map((i) => i.label)).toEqual(['Settings', 'Plans']);
+    expect(NAV_ITEMS.some((i) => i.href === '/prototypes')).toBe(false);
   });
 
   it('drops the Plans item from the Workspace group on self-host', () => {
@@ -48,8 +48,8 @@ describe('nav grouping', () => {
     expect(groups[4].items.map((i) => i.label)).toEqual(['Settings']);
   });
 
-  it('does not list lab or agent monitor as peer Team items', () => {
-    const peerHrefs = NAV_ITEMS.filter((i) => i.group === 'Team').map((i) => i.href);
+  it('does not list lab or agent monitor as peer Workloads items', () => {
+    const peerHrefs = NAV_ITEMS.filter((i) => i.group === 'Workloads').map((i) => i.href);
     expect(peerHrefs).toEqual(['/agents']);
     expect(peerHrefs).not.toContain('/agents/monitor');
     expect(peerHrefs.some((href) => href.includes('/lab'))).toBe(false);
@@ -68,37 +68,42 @@ describe('nav grouping', () => {
     );
     expect(childSurfacesFor('/settings').map((s) => s.href)).toContain('/alerts');
     expect(childSurfacesFor('/persons').map((s) => s.href)).toContain('/cohorts');
+    expect(childSurfacesFor('/product').map((s) => s.href)).toContain('/prototypes');
+    expect(childSurfacesFor('/dashboard').map((s) => s.href)).toEqual(
+      expect.arrayContaining(['/templates', '/sql']),
+    );
+    expect(childSurfacesFor('/events').map((s) => s.href)).toContain('/replay');
+    expect(childSurfacesFor('/chat').map((s) => s.href)).toContain('/start');
   });
 });
 
 describe('matchActiveHref', () => {
-  const cases: Array<[string, string, 'Ask' | 'Work' | 'Team' | 'Signals' | 'Workspace' | '']> = [
+  const cases: Array<[string, string, 'Runtime' | 'Channels' | 'Workloads' | 'Data' | 'Workspace' | '']> = [
     ['/', '', ''],
-    ['/start', '/start', 'Ask'],
-    ['/chat', '/chat', 'Ask'],
-    ['/prototypes', '/prototypes', 'Work'],
-    // A detail page keeps its list highlighted — matchActiveHref is prefix-based,
-    // so the shell never goes blank on the second level of these two surfaces.
-    ['/prototypes/abc-123', '/prototypes', 'Work'],
-    ['/operations', '/operations', 'Work'],
-    ['/operations/config%3Aproj-1', '/operations', 'Work'],
-    ['/agents', '/agents', 'Team'],
-    ['/agents/grow-1/lab', '/agents', 'Team'],
-    ['/agents/monitor', '/agents', 'Team'],
-    ['/agents/grow-1/monitor', '/agents', 'Team'],
-    ['/teams', '/agents', 'Team'],
-    ['/marketplace', '/agents', 'Team'],
-    ['/dashboard', '/dashboard', 'Signals'],
-    ['/web-analytics', '/web-analytics', 'Signals'],
-    ['/product', '/product', 'Signals'],
+    ['/start', '/chat', 'Runtime'],
+    ['/chat', '/chat', 'Runtime'],
+    ['/prototypes', '/product', 'Data'],
+    ['/prototypes/abc-123', '/product', 'Data'],
+    ['/operations', '/operations', 'Channels'],
+    ['/operations/config%3Aproj-1', '/operations', 'Channels'],
+    ['/agents', '/agents', 'Workloads'],
+    ['/agents/grow-1/lab', '/agents', 'Workloads'],
+    ['/agents/monitor', '/agents', 'Workloads'],
+    ['/agents/grow-1/monitor', '/agents', 'Workloads'],
+    ['/teams', '/agents', 'Workloads'],
+    ['/marketplace', '/agents', 'Workloads'],
+    ['/agent', '/agents', 'Workloads'],
+    ['/dashboard', '/dashboard', 'Data'],
+    ['/web-analytics', '/web-analytics', 'Data'],
+    ['/product', '/product', 'Data'],
     ['/settings', '/settings', 'Workspace'],
     ['/alerts', '/settings', 'Workspace'],
-    ['/persons', '/persons', 'Signals'],
-    ['/cohorts', '/persons', 'Signals'],
-    ['/events', '/events', 'Signals'],
-    ['/replay', '/replay', 'Signals'],
-    ['/sql', '/sql', 'Signals'],
-    ['/templates', '/templates', 'Signals'],
+    ['/persons', '/persons', 'Data'],
+    ['/cohorts', '/persons', 'Data'],
+    ['/events', '/events', 'Data'],
+    ['/replay', '/events', 'Data'],
+    ['/sql', '/dashboard', 'Data'],
+    ['/templates', '/dashboard', 'Data'],
   ];
 
   it.each(cases)('%s → href %s in %s', (pathname, href, group) => {
@@ -115,6 +120,11 @@ describe('architecture catalogs', () => {
     expect(CHANNEL_CATALOG.filter((c) => !c.shipped).map((c) => c.kind)).toEqual([
       'support_widget', 'voice',
     ]);
+    const kinds = CHANNEL_CATALOG.map((c) => c.kind);
+    expect(kinds).not.toContain('slack');
+    expect(kinds).not.toContain('discord');
+    expect(kinds).not.toContain('telegram');
+    expect(FUTURE_CHANNELS.map((c) => c.kind)).toEqual(['slack', 'discord', 'telegram']);
   });
 
   // Reserved means "ships no pack". Operator stopped being reserved when

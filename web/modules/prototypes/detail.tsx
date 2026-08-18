@@ -7,8 +7,11 @@ import { Badge } from '@astryxdesign/core/Badge';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
+import { apiBase } from '@/lib/api';
+import { useAuthStore } from '@/lib/app-state';
 import { formatRelative } from '@/lib/format';
 import { conversionReadout } from '@/modules/start/validation-readout';
+import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import {
   Button,
@@ -34,6 +37,7 @@ export function PrototypeDetailPage() {
   const id = params?.prototypeId ?? '';
   const router = useRouter();
   const { test, waitlistCount, isLoading, error, commit, committing, decide, deciding } = usePrototype(id);
+  const apiKey = useAuthStore((s) => s.project?.api_key ?? '');
   const [note, setNote] = useState('');
 
   if (isLoading && !test) {
@@ -152,6 +156,10 @@ export function PrototypeDetailPage() {
           ) : null}
         </>
       ) : null}
+
+      <Panel title="Put it on the page">
+        <InstrumentSnippet apiKey={apiKey} host={apiBase()} />
+      </Panel>
 
       <Panel title="The decision">
         <VStack gap={3} align="stretch">

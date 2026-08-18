@@ -41,7 +41,7 @@ web/
 
 ## Two indexes: artifact and job
 
-The nav indexes the product by **artifact** — Dashboards, Traffic, Events, SQL.
+The nav indexes the product by **layer** — Runtime (Chat), Channels (Operations), Workloads (Agents), Data (Dashboards, Traffic, Product, People, Events). SQL, Templates, Replay, and Prototypes nest under those parents.
 That only helps someone who already knows which artifact answers their question.
 `lib/jobs.ts` is the other index: three **jobs**, one per phase of a product's
 life, each binding the backend's four layers for that phase.

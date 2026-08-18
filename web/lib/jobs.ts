@@ -182,8 +182,8 @@ export function jobLayers(job: JobDef): JobLayer[] {
     { id: 'workload', label: 'Who does the work', detail: job.runtime },
     {
       id: 'runtime',
-      label: 'How it stays safe',
-      detail: 'One runtime, one set of guardrails: it reads what you granted, and never states a number it did not check.',
+      label: 'Where you watch it work',
+      detail: 'The conversation is the runtime — you see the teammate read, act, and answer, under one set of guardrails.',
     },
     {
       id: 'data',

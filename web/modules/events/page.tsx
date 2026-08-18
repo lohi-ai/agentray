@@ -9,6 +9,7 @@ import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
 import { useFilters, useLiveEvents } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { EventNameSelect } from '@/modules/shared/components/event-name-picker';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
@@ -179,6 +180,7 @@ export function EventsPage() {
   return (
     <AppShell active="traffic">
       <Intro title="Events" sub="Every signal you sent — people, sessions, and agent work." action={header} />
+      <div className="mb-3"><RelatedSurfacesLabel parentHref="/events" /></div>
       <FilterBar extra={filterExtra} />
       <StatsStrip stats={[
         { label: 'Events', value: formatCompact(events.length) },

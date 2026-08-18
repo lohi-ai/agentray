@@ -11,6 +11,7 @@ import { useActivity, useDashboards, useEventNames } from '@/modules/app/hooks';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { PromptDialog } from '@/modules/shared/components/modal';
 import { Button, EmptyState, Intro, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
@@ -144,6 +145,7 @@ export function DashboardPage() {
         sub={boardSubtitle}
         action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask AI</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
       />
+      <div className="mb-3"><RelatedSurfacesLabel parentHref="/dashboard" /></div>
       <FilterBar extra={selector} />
 
       {/* Sample data being mistaken for real data is a trust failure, not a

@@ -49,10 +49,10 @@ export function PrototypesPage() {
     <AppShell active="prototypes">
       <Intro
         title="Prototypes"
-        sub="One bet per idea. The number is agreed before the data arrives — and you can’t move it after."
+        sub="Market the idea before you build it. Paste the snippet on the page, collect the waitlist, and keep the number you agreed to."
         action={
           <Button variant="agent" icon={<Beaker size={15} aria-hidden />} onClick={() => router.push(chatHref(DESIGN_PROMPT))}>
-            Start a prototype
+            Talk to Marketing Lead
           </Button>
         }
       />

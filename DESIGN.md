@@ -126,7 +126,7 @@ Prefer:
 - “Advanced analysis” over unexplained SQL-first framing
 
 Avoid:
-- Internal implementation nouns as top-level language
+- Internal implementation nouns as top-level language, except the five nav group headings Runtime / Channels / Workloads / Data / Workspace
 - “No data” without explaining how data appears
 - Jargon-only statuses such as “queued”, “errored”, “tool_calls” in default views
 - Multiple equal-weight primary buttons in the same local area
@@ -260,34 +260,36 @@ Secondary actions use the `outline`, `ghost`, or `secondary` variants, or sheet 
 
 ### Front Door
 
-`/chat` is the front door. Root routes should lead users to conversation, not a static dashboard.
+`/chat` is the front door. Root routes should lead users to conversation, not a static dashboard. The open thread is the runtime; the composer on that page is the chat channel.
 
 ### Top-Level Navigation
 
-Organize navigation by the job, not the backend diagram.
+Organize the signed-in chrome around the four backend layers. Group headings may use the layer names (Runtime / Channels / Workloads / Data). Page titles and body copy stay in owner language.
 
-#### Ask
+#### Runtime
 
-- **Chat** — talk to a teammate. One question, one next move.
+- **Chat** — watch the teammate work. `/start` nests here (header Set up). Landing stays `/chat`.
 
-#### Team
+#### Channels
 
-- **Agents** — the people doing the work. Hire, set up, lab, and monitor nest here.
+- **Operations** — schedules and webhooks that start a run without a conversation. Slack / Discord / Telegram are coming cards on this page, not nav rows.
 
-#### Signals
+#### Workloads
 
-- **Dashboards** — saved views for the weekly check.
+- **Agents** — the people doing the work. Hire, set up, lab, and monitor nest here. `/agent` is this roster, not Chat.
+
+#### Data
+
+- **Dashboards** — saved views. Templates and SQL nest here.
 - **Traffic** — acquisition, source quality, page movement, AI platform traffic.
-- **Product** — funnels, retention, trends, product questions.
-- **People** — users, identity, journey context.
-- **Events** — event stream and payload inspection.
-- **Replay** — session story and timeline.
-- **SQL** — advanced analysis and saved queries.
-- **Templates** — starter growth dashboards and proven setups.
+- **Product** — funnels, retention, trends. Prototypes nest here (marketing-first value feature, not a peer).
+- **People** — users, identity, journey context. Cohorts nest here.
+- **Events** — event stream. Replay nests here.
 
 #### Workspace
 
 - **Settings** — workspace, people, and how events get in. Alerts nest here.
+- **Plans** — hosted only.
 
 Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state.
 
@@ -304,6 +306,37 @@ Must include:
 - recent work and recommendations near the start state
 - debug traces hidden by default
 - side panel for live work, runs, and recommendations
+- Project badge stays; an additive “Watching the run” badge appears after it when the thread has turns
+- Set up in the header reaches `/start` whether the thread is empty or live
+
+### `/start`
+
+Purpose: pick the job (validate / grow / operate) and finish its readiness steps once.
+
+Must include:
+- one job at a time, derived from workspace state
+- the four layers stated as what they do for this job
+- a forward link for the second prototype or the second schedule (`/prototypes`, `/operations`)
+
+### `/operations`
+
+Purpose: see every channel that starts a run without a conversation.
+
+Must include:
+- Chat named as the other channel (the front door)
+- schedule and webhook rows with health
+- coming Slack / Discord / Telegram as non-linked “Not yet” cards
+- one CTA to give a teammate a schedule (lands on `/agents`, not a form)
+
+### `/prototypes`
+
+Purpose: market an idea before building it — marketing agent, tracking snippet, waitlist. Value feature, not a major nav item.
+
+Must include:
+- list of bets with the committed number and waitlist count
+- detail stats unchanged from the measured test
+- InstrumentSnippet on the detail page (track + waitlist)
+- no peer nav item; `/prototypes` lights Product
 
 ### `/agents`
 
@@ -530,3 +563,4 @@ For every AgentRay screen:
 | 2026-06-19 | Make `/chat` the front door and keep SQL/debug secondary | Conversation-first lowers friction while preserving technical trust for operators. |
 | 2026-06-30 | Adopt Astryx (`@astryxdesign/core`) as the single UI library, replacing shadcn/`components/ui` | Astryx owns layout/spacing via a discoverable component set + CLI; `globals.css` bridges its neutral theme onto AgentRay's cool dark ramp so one coherent palette ships. |
 | 2026-08-13 | Sidebar groups follow Ask → Team → Signals → Workspace | Paying users buy a growth teammate, not an OS diagram. Layers stay in docs. |
+| 2026-08-18 | Sidebar groups follow Runtime → Channels → Workloads → Data → Workspace | Chrome follows the product architecture. Prototypes nest under Product as a marketing-first value feature. Operations are channels. |

@@ -3,20 +3,15 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  Beaker,
   Bot,
-  Compass,
   CreditCard,
-  Database,
   Globe,
   Languages,
   LayoutDashboard,
-  LayoutTemplate,
   List,
   LogOut,
   MessageSquare,
   Package,
-  PlayCircle,
   Settings,
   Users,
   Waypoints,
@@ -36,9 +31,7 @@ import { useAuthStore } from '@/lib/app-state';
 export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'operations';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
-  '/start': Compass,
   '/chat': MessageSquare,
-  '/prototypes': Beaker,
   '/operations': Zap,
   '/agents': Bot,
   '/dashboard': LayoutDashboard,
@@ -47,9 +40,6 @@ const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/settings': Settings,
   '/persons': Users,
   '/events': List,
-  '/replay': PlayCircle,
-  '/sql': Database,
-  '/templates': LayoutTemplate,
   '/pricing': CreditCard,
 };
 
