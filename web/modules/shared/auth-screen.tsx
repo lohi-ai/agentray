@@ -98,7 +98,14 @@ export function AuthScreen({
 
               {error ? <Banner status="error" title={error} /> : null}
 
+              {/* noValidate: validateAuthForm is the only validator. Without it
+                  the browser's own typeMismatch on type="email" blocks submit
+                  and shows an unstyled native bubble, so the inline TextInput
+                  status this screen is built around never renders. (isRequired
+                  is aria-only in Astryx, so the empty case already reached us —
+                  only the malformed-email case was being swallowed.) */}
               <form
+                noValidate
                 onSubmit={(event) => {
                   event.preventDefault();
                   const next = validateAuthForm({ mode, email, name, password, workspaceName, projectName: HIDDEN_PROJECT_NAME });
