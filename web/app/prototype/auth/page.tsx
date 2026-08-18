@@ -42,7 +42,8 @@ export default function AuthPrototypePage() {
 
 function SessionSplash() {
   return (
-    <Center axis="both" height="80dvh">
+    <main className="min-h-[80dvh] py-8">
+    <Center axis="both">
       <VStack gap={3} align="center">
         <span className="[animation:pulse_2s_var(--ease)_infinite]">
           <NavIcon icon={<Waypoints size={18} />} />
@@ -50,6 +51,7 @@ function SessionSplash() {
         <Text type="supporting">Checking your workspace session…</Text>
       </VStack>
     </Center>
+    </main>
   );
 }
 
@@ -60,13 +62,13 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [workspaceName, setWorkspaceName] = useState('My workspace');
-  const [projectName, setProjectName] = useState('Production');
+  const projectName = 'Production';
   const [issue, setIssue] = useState<{ field: AuthField; message: string } | null>(
     fixture === 'field-error'
       ? { field: 'email', message: 'Enter a valid email address.' }
       : null,
   );
-  const [error] = useState(fixture === 'api-error'
+  const [error, setError] = useState(fixture === 'api-error'
     ? 'Can’t reach AgentRay at http://localhost:8088. Start the API and try again.'
     : '');
   const [loading, setLoading] = useState(false);
@@ -80,11 +82,13 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
   function switchMode(next: AuthMode) {
     setMode(next);
     setIssue(null);
+    setError('');
   }
 
   return (
-    <Center axis="both" height="80dvh">
-      <VStack gap={4} align="center" className="w-full max-w-[400px] px-5">
+    <main className="min-h-[80dvh] py-8 px-5">
+    <Center axis="both">
+      <VStack gap={4} align="center" className="w-full max-w-[400px]">
         <VStack gap={2} align="center">
           <span
             className="grid size-8 flex-none place-items-center rounded-[var(--radius-lg)]"
@@ -101,7 +105,9 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
             <VStack gap={1} align="start">
               <Heading level={1}>{isSignup ? 'Create your workspace' : 'Welcome back'}</Heading>
               <Text type="supporting">
-                {isSignup ? 'Then ask what changed.' : 'Sign in to keep going.'}
+                {isSignup
+                  ? 'You’ll land in a live demo funnel — connect your data after.'
+                  : 'Sign in to keep going.'}
               </Text>
             </VStack>
 
@@ -129,7 +135,7 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
                   placeholder="you@company.com"
                   isRequired
                   status={fieldStatus('email')}
-                  hasAutoFocus
+                  className="min-h-11"
                 />
                 {isSignup ? (
                   <TextInput
@@ -140,6 +146,7 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
                     placeholder="Ada Lovelace"
                     isRequired
                     status={fieldStatus('name')}
+                    className="min-h-11"
                   />
                 ) : null}
                 <TextInput
@@ -151,28 +158,19 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
                   placeholder={isSignup ? 'At least 8 characters' : 'Your password'}
                   isRequired
                   status={fieldStatus('password')}
+                  className="min-h-11"
                 />
                 {isSignup ? (
-                  <>
-                    <TextInput
-                      label="Workspace name"
-                      value={workspaceName}
-                      onChange={(v) => { setWorkspaceName(v); setIssue(null); }}
-                      htmlName="workspaceName"
-                      placeholder="Acme Inc."
-                      isRequired
-                      status={fieldStatus('workspaceName')}
-                    />
-                    <TextInput
-                      label="Project name"
-                      value={projectName}
-                      onChange={(v) => { setProjectName(v); setIssue(null); }}
-                      htmlName="projectName"
-                      placeholder="Production"
-                      isRequired
-                      status={fieldStatus('projectName')}
-                    />
-                  </>
+                  <TextInput
+                    label="Workspace name"
+                    value={workspaceName}
+                    onChange={(v) => { setWorkspaceName(v); setIssue(null); }}
+                    htmlName="workspaceName"
+                    placeholder="Acme Inc."
+                    isRequired
+                    status={fieldStatus('workspaceName')}
+                    className="min-h-11"
+                  />
                 ) : null}
                 <Button
                   type="submit"
@@ -184,7 +182,7 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
                       : isSignup ? 'Create workspace' : 'Log in'
                   }
                   isLoading={loading}
-                  className="w-full"
+                  className="w-full min-h-11"
                 />
               </VStack>
             </form>
@@ -205,5 +203,6 @@ function AuthCard({ fixture }: { fixture: Exclude<Fixture, 'splash'> }) {
         </Card>
       </VStack>
     </Center>
+    </main>
   );
 }
