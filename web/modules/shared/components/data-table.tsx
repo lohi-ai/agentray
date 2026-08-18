@@ -146,7 +146,14 @@ export function DataTable<T extends Record<string, unknown>>({
           ...props,
           htmlProps: {
             ...props.htmlProps,
-            ...(onRowClick ? { onClick: () => onRowClick(item), style: { ...props.htmlProps.style, cursor: 'pointer' } } : {}),
+            ...(onRowClick ? {
+              onClick: (event: { target: EventTarget | null }) => {
+                const el = event.target as HTMLElement | null;
+                if (el?.closest('button, a, [role="menuitem"]')) return;
+                onRowClick(item);
+              },
+              style: { ...props.htmlProps.style, cursor: 'pointer' },
+            } : {}),
             className: [props.htmlProps.className, extra].filter(Boolean).join(' ') || undefined,
           },
         };

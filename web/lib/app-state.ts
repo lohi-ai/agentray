@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import type { AgentReplay, AuthState, Filters, InsightResult, Project, SavedQueryResult, Workspace } from '@/lib/api';
 import { defaultFilters } from '@/lib/api';
+import { pickPreferredProject, readPreferredProjectID } from '@/lib/project-preference';
 
 type AuthSlice = {
   auth: AuthState | null;
@@ -26,14 +27,17 @@ export const useAuthStore = create<AuthSlice>((set) => ({
   projects: [],
   selectedWorkspaceID: '',
   project: null,
-  applyAuth: (state) =>
+  applyAuth: (state) => {
+    const projects = state.projects || [];
+    const picked = pickPreferredProject(projects, readPreferredProjectID(), state.project);
     set({
       auth: state,
       workspaces: state.workspaces || [],
-      projects: state.projects || [],
-      selectedWorkspaceID: state.project?.workspace_id || state.workspaces?.[0]?.id || '',
-      project: state.project || null,
-    }),
+      projects,
+      selectedWorkspaceID: picked?.workspace_id || state.project?.workspace_id || state.workspaces?.[0]?.id || '',
+      project: picked,
+    });
+  },
   setAuthChecked: (value) => set({ authChecked: value }),
   clearAuth: () => set({ auth: null, workspaces: [], projects: [], selectedWorkspaceID: '', project: null }),
   setWorkspaces: (workspaces) => set({ workspaces }),

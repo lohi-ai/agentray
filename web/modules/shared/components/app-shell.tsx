@@ -14,19 +14,18 @@ import {
   Package,
   Settings,
   Users,
-  Waypoints,
   Zap,
 } from 'lucide-react';
 import type { ComponentType, ReactNode, SVGProps } from 'react';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
-import { SideNav, SideNavHeading, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav';
-import { NavIcon } from '@astryxdesign/core/NavIcon';
+import { SideNav, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav';
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
-import { matchActiveHref, navGroups, navItemsFor, signedInLandingTarget } from '@/lib/ia';
+import { matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
 import { useAuth, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
+import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
 
 export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'operations';
 
@@ -100,14 +99,7 @@ export function AppShell({ children, bleed = false }: { active?: AppSection; chi
 
   const sideNav = (
     <SideNav
-      header={
-        <SideNavHeading
-          heading="AgentRay"
-          subheading="Growth · data · agents"
-          headingHref={signedInLandingTarget()}
-          icon={<NavIcon icon={<Waypoints size={16} />} />}
-        />
-      }
+      header={<ProjectSwitcher />}
       footer={<SidebarFooter />}
     >
       {groups.map((group) => (

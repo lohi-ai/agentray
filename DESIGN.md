@@ -457,6 +457,10 @@ Must include:
 - key reveal/rotation safety
 - plain helper copy for destructive or sensitive actions
 
+Create and switch happen in the SideNav heading (project name / workspace name).
+Settings → Projects is the admin table: rename, **Switch** on inactive rows,
+**New project**. Project badges on Chat / filter bars stay display-only.
+
 ### `/sql`
 
 Purpose: support analysts and technical operators.
@@ -564,3 +568,4 @@ For every AgentRay screen:
 | 2026-06-30 | Adopt Astryx (`@astryxdesign/core`) as the single UI library, replacing shadcn/`components/ui` | Astryx owns layout/spacing via a discoverable component set + CLI; `globals.css` bridges its neutral theme onto AgentRay's cool dark ramp so one coherent palette ships. |
 | 2026-08-13 | Sidebar groups follow Ask → Team → Signals → Workspace | Paying users buy a growth teammate, not an OS diagram. Layers stay in docs. |
 | 2026-08-18 | Sidebar groups follow Runtime → Channels → Workloads → Data → Workspace | Chrome follows the product architecture. Prototypes nest under Product as a marketing-first value feature. Operations are channels. |
+| 2026-08-19 | SideNav heading is the project switcher | Create/switch is a chrome job. Heading = project, subheading = workspace. Last project persists via `agentray.projectId` + `/me?project_id=`. |

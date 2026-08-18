@@ -1,8 +1,11 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, type WorkspaceRole } from '@/lib/api';
+import { usePathname, useRouter } from 'next/navigation';
+import { AgentRayAPI, type Project, type WorkspaceRole } from '@/lib/api';
 import { useAuthStore, useFiltersStore, useUIStore } from '@/lib/app-state';
+import { projectDetailRoot } from '@/lib/ia';
+import { writePreferredProjectID } from '@/lib/project-preference';
 
 export function useWorkspaceUsage() {
   const selectedWorkspaceID = useAuthStore((s) => s.selectedWorkspaceID);
@@ -154,10 +157,26 @@ export function useWorkspaceAuditLogs() {
 
 export function useCurrentProject() {
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const pathname = usePathname() ?? '';
   const { auth, workspaces, projects, selectedWorkspaceID, project } = useAuthStore();
   const { setWorkspaces, setProjects, setSelectedWorkspaceID, setProject, applyAuth } = useAuthStore();
+  const { setInsight, setReplay, setSQLRows, setSavedResult } = useUIStore();
   const projectID = project?.id;
   const { setMessage, setError } = useUIStore();
+
+  function activateProject(next: Project, toastText: string) {
+    if (next.id === project?.id) return;
+    setProject(next);
+    writePreferredProjectID(next.id);
+    setInsight(null);
+    setReplay(null);
+    setSQLRows([]);
+    setSavedResult(null);
+    const root = projectDetailRoot(pathname);
+    if (root) router.replace(root);
+    setMessage(toastText);
+  }
 
   const api = projectID ? new AgentRayAPI(projectID) : new AgentRayAPI();
 
@@ -200,8 +219,7 @@ export function useCurrentProject() {
     },
     onSuccess: async (data) => {
       setProjects([...projects, data.project]);
-      setProject(data.project);
-      setMessage('Project created and connected.');
+      activateProject(data.project, 'Project created and connected.');
       await queryClient.invalidateQueries({ queryKey: ['console', projectID] });
       await queryClient.invalidateQueries({ queryKey: ['workspace-audit-logs', selectedWorkspaceID] });
     },
@@ -242,7 +260,7 @@ export function useCurrentProject() {
     selectWorkspace: async (id: string) => { await selectWorkspaceMutation.mutateAsync(id); },
     selectProject: async (id: string) => {
       const next = projects.find((p) => p.id === id) || null;
-      if (next) setProject(next);
+      if (next) activateProject(next, `Switched to ${next.name}.`);
     },
     createWorkspace: async (name: string) => { await createWorkspaceMutation.mutateAsync(name); },
     updateWorkspace: async (name: string) => { await updateWorkspaceMutation.mutateAsync(name); },

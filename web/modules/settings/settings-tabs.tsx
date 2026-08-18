@@ -76,9 +76,9 @@ export function ProjectsTab() {
       align: 'end',
       renderCell: (p) => p.id === project?.id
         ? <Button variant="ghost" size="sm" onClick={() => setDialog('rename')}>Rename</Button>
-        : null,
+        : <Button variant="ghost" size="sm" onClick={() => void selectProject(p.id)}>Switch</Button>,
     },
-  ], [project?.id]);
+  ], [project?.id, selectProject]);
 
   return (
     <>

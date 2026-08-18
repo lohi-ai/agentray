@@ -391,12 +391,26 @@ export type FirstSessionNotice = {
   href?: string;
 };
 
-export function settingsPath(tab?: 'ai' | 'keys' | 'connectors' | 'plan'): string {
+export function settingsPath(tab?: 'ai' | 'keys' | 'connectors' | 'plan' | 'projects'): string {
   if (tab === 'ai') return '/settings?tab=ai';
   if (tab === 'keys') return '/settings?tab=keys';
   if (tab === 'connectors') return '/settings?tab=connectors';
   if (tab === 'plan') return '/settings?tab=plan';
+  if (tab === 'projects') return '/settings?tab=projects';
   return '/settings';
+}
+
+// List root to land on after a project switch, or null when the current route
+// is already safe (chat, list pages, settings, sql). `/agents/monitor` is a
+// fleet page, not an agent id.
+export function projectDetailRoot(pathname: string): string | null {
+  const path = pathname.split('?')[0] || '';
+  if (path === '/agents/monitor' || path.startsWith('/agents/monitor/')) return null;
+  if (/^\/agents\/[^/]+/.test(path)) return '/agents';
+  if (/^\/teams\/[^/]+/.test(path)) return '/teams';
+  if (/^\/operations\/[^/]+/.test(path)) return '/operations';
+  if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
+  return null;
 }
 
 export function settingsTabFromQuery(search: string): string {

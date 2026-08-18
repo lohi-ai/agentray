@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { AgentRayAPI } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
+import { readPreferredProjectID } from '@/lib/project-preference';
 
 export function useAuth() {
   const { auth, authChecked } = useAuthStore();
@@ -14,7 +15,7 @@ export function useAuth() {
 
   const meQuery = useQuery({
     queryKey: ['me'],
-    queryFn: () => new AgentRayAPI().me(),
+    queryFn: () => new AgentRayAPI(readPreferredProjectID()).me(),
     retry: false,
     staleTime: Infinity,
     refetchOnWindowFocus: false,

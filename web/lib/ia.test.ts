@@ -16,6 +16,7 @@ import {
   writtenOpinion,
   recoveryAction,
   settingsPath,
+  projectDetailRoot,
   threadNeedsRecovery,
   weakestLink,
   settingsTabFromQuery,
@@ -273,6 +274,31 @@ describe('needsKeyRecovery', () => {
     expect(threadNeedsRecovery([
       { text: formatAgentError('no workspace model key configured') },
     ], { hasModelKey: true })).toBe(false);
+  });
+});
+
+describe('settingsPath', () => {
+  it('writes the Projects deep link', () => {
+    expect(settingsPath('projects')).toBe('/settings?tab=projects');
+    expect(settingsTabFromQuery('?tab=projects')).toBe('Projects');
+  });
+});
+
+describe('projectDetailRoot', () => {
+  it('sends agent / team / ops / prototype detail to the list root', () => {
+    expect(projectDetailRoot('/agents/abc/setup')).toBe('/agents');
+    expect(projectDetailRoot('/agents/abc/monitor')).toBe('/agents');
+    expect(projectDetailRoot('/teams/t1')).toBe('/teams');
+    expect(projectDetailRoot('/operations/op1')).toBe('/operations');
+    expect(projectDetailRoot('/prototypes/p1')).toBe('/prototypes');
+  });
+
+  it('leaves list pages, chat, sql, and /agents/monitor alone', () => {
+    expect(projectDetailRoot('/agents')).toBeNull();
+    expect(projectDetailRoot('/agents/monitor')).toBeNull();
+    expect(projectDetailRoot('/chat')).toBeNull();
+    expect(projectDetailRoot('/sql')).toBeNull();
+    expect(projectDetailRoot('/settings?tab=projects')).toBeNull();
   });
 });
 
