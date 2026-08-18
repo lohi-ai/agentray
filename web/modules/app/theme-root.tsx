@@ -27,14 +27,14 @@ const STORAGE_KEY = 'agentray-color-mode';
  * + its compiled `theme.css` (imported in globals.css) so component overrides are
  * present during SSR with no hydration flash — the supported path for Next.js.
  *
- * Dark is AgentRay's historical identity, so it's the deterministic first-paint
- * value (SSR and client agree); any stored user choice is adopted after mount.
+ * Light is the default first-paint value (SSR and client agree); any stored
+ * user choice is adopted after mount.
  */
 export function ThemeRoot({ children }: { children: ReactNode }) {
-  const [mode, setModeState] = useState<ColorMode>('dark');
+  const [mode, setModeState] = useState<ColorMode>('light');
 
   // Read the stored choice after mount (not in a lazy initializer) so the server
-  // and first client render both produce 'dark' and never mismatch on hydration.
+  // and first client render both produce 'light' and never mismatch on hydration.
   useEffect(() => {
     const stored = window.localStorage.getItem(STORAGE_KEY);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional post-hydration adoption of persisted mode
