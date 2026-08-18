@@ -45,7 +45,7 @@ import {
   StatusPill,
 } from '@/modules/shared/components/signal-primitives';
 
-type Screen = 'chat-empty' | 'chat-live' | 'operations' | 'operations-empty' | 'operations-error' | 'prototypes';
+type Screen = 'chat-empty' | 'chat-live' | 'operations' | 'operations-empty' | 'operations-error' | 'product' | 'prototypes';
 
 const GROUPS: Array<{
   id: string;
@@ -53,21 +53,15 @@ const GROUPS: Array<{
 }> = [
   { id: 'Runtime', items: [{ href: 'chat-live', label: 'Chat', icon: MessageSquare, live: true }] },
   { id: 'Channels', items: [{ href: 'operations', label: 'Operations', icon: Zap }] },
-  {
-    id: 'Workloads',
-    items: [
-      { href: 'prototypes', label: 'Agents', icon: Bot },
-      { href: 'prototypes', label: 'Prototypes', icon: Beaker },
-    ],
-  },
+  { id: 'Workloads', items: [{ href: 'product', label: 'Agents', icon: Bot }] },
   {
     id: 'Data',
     items: [
-      { href: 'prototypes', label: 'Dashboards', icon: LayoutDashboard },
-      { href: 'prototypes', label: 'Traffic', icon: Globe },
-      { href: 'prototypes', label: 'Product', icon: Package },
-      { href: 'prototypes', label: 'People', icon: Users },
-      { href: 'prototypes', label: 'Events', icon: List },
+      { href: 'product', label: 'Dashboards', icon: LayoutDashboard },
+      { href: 'product', label: 'Traffic', icon: Globe },
+      { href: 'product', label: 'Product', icon: Package },
+      { href: 'product', label: 'People', icon: Users },
+      { href: 'product', label: 'Events', icon: List },
     ],
   },
   { id: 'Workspace', items: [{ href: 'prototypes', label: 'Settings', icon: Settings }] },
@@ -81,7 +75,13 @@ const COMING = [
 
 export default function LayerShellPrototype() {
   const [screen, setScreen] = useState<Screen>('chat-live');
-  const selected = screen.startsWith('chat') ? 'Chat' : screen.startsWith('operations') ? 'Operations' : 'Prototypes';
+  const selected = screen.startsWith('chat')
+    ? 'Chat'
+    : screen.startsWith('operations')
+      ? 'Operations'
+      : screen === 'product' || screen === 'prototypes'
+        ? 'Product'
+        : 'Product';
 
   const sideNav = (
     <SideNav
@@ -120,7 +120,7 @@ export default function LayerShellPrototype() {
                   e.preventDefault();
                   if (item.label === 'Chat') setScreen('chat-live');
                   else if (item.label === 'Operations') setScreen('operations');
-                  else if (item.label === 'Prototypes') setScreen('prototypes');
+                  else if (item.label === 'Product') setScreen('product');
                 }}
               />
             );
@@ -151,12 +151,14 @@ export default function LayerShellPrototype() {
               { value: 'operations', label: 'Operations' },
               { value: 'operations-empty', label: 'Ops empty' },
               { value: 'operations-error', label: 'Ops error' },
-              { value: 'prototypes', label: 'Prototypes' },
+              { value: 'product', label: 'Product' },
+              { value: 'prototypes', label: 'Prototypes (nested)' },
             ]}
           />
           {screen === 'chat-empty' ? <ChatEmpty /> : null}
           {screen === 'chat-live' ? <ChatLive /> : null}
           {screen.startsWith('operations') ? <OperationsFrame mode={screen === 'operations' ? 'ok' : screen === 'operations-empty' ? 'empty' : 'error'} /> : null}
+          {screen === 'product' ? <ProductFrame onOpenPrototypes={() => setScreen('prototypes')} /> : null}
           {screen === 'prototypes' ? <PrototypesFrame /> : null}
         </VStack>
       </AstryxAppShell>
@@ -292,13 +294,32 @@ function ChannelRow({ icon, title, detail, status, label }: { icon: React.ReactN
   );
 }
 
+function ProductFrame({ onOpenPrototypes }: { onOpenPrototypes: () => void }) {
+  return (
+    <VStack gap={0}>
+      <Intro
+        title="Product"
+        sub="Answer behavior questions without writing SQL first."
+        action={<Button variant="agent">Ask Growth Lead</Button>}
+      />
+      <HStack gap={2} align="center" className="mb-4 flex-wrap">
+        <Text type="supporting">Also</Text>
+        <Button variant="outline" size="sm" icon={<Beaker size={13} aria-hidden />} onClick={onOpenPrototypes}>
+          Prototypes
+        </Button>
+      </HStack>
+      <Text type="supporting">Prototypes are a child of Product — marketing-first tests, not a sidebar item.</Text>
+    </VStack>
+  );
+}
+
 function PrototypesFrame() {
   return (
     <VStack gap={0}>
       <Intro
         title="Prototypes"
-        sub="Validate workload — one bet per idea. The number is agreed before the data arrives."
-        action={<Button variant="agent" icon={<Beaker size={15} aria-hidden />}>Start a prototype</Button>}
+        sub="Market the idea before you build it. Paste the snippet on the page, collect the waitlist, and keep the number you agreed to."
+        action={<Button variant="agent" icon={<Beaker size={15} aria-hidden />}>Talk to Marketing Lead</Button>}
       />
       <StatsStrip
         stats={[
@@ -311,8 +332,14 @@ function PrototypesFrame() {
       <Panel title="Running">
         <VStack gap={1}>
           <Text>Solo translators will give an email for a weekly glossary-drift report.</Text>
-          <Text type="supporting">27 of 40 · 6 days left · waitlist.joined · Product Scout</Text>
+          <Text type="supporting">27 of 40 · 6 days left · waitlist.joined · Marketing Lead</Text>
         </VStack>
+      </Panel>
+      <div className="h-4" />
+      <Panel title="Put it on the page">
+        <Text type="supporting">
+          Paste the tracking snippet on the landing page, then collect emails with the waitlist form. No npm — Framer, Carrd, or HTML.
+        </Text>
       </Panel>
     </VStack>
   );
