@@ -906,21 +906,6 @@ ON template_charts (template_id, sort_order ASC)`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS query_feedback (
-	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-	query_id UUID NOT NULL REFERENCES saved_queries(id),
-	rating SMALLINT NOT NULL,
-	correction TEXT,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`); err != nil {
-		return err
-	}
-	if _, err := s.pg.Exec(ctx, `
-CREATE INDEX IF NOT EXISTS query_feedback_query_created_idx
-ON query_feedback (query_id, created_at DESC)`); err != nil {
-		return err
-	}
-	if _, err := s.pg.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS aliases (
 	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 	anonymous_id VARCHAR(1024) NOT NULL,
@@ -4110,10 +4095,6 @@ LIMIT 20`, append([]any{property}, args...)...)
 		out = append(out, item)
 	}
 	return out, rows.Err()
-}
-
-func filteredWhere(projectID string, filter EventFilter) (string, []any) {
-	return filteredWhereWithDefault(projectID, filter, true)
 }
 
 func filteredWhereWithDefault(projectID string, filter EventFilter, defaultTimeWindow bool) (string, []any) {

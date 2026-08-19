@@ -1485,25 +1485,6 @@ func authProject(c echo.Context, store *storage.Store) (authContext, storage.Pro
 	return ctx, project, nil
 }
 
-// testTierProvider runs a 1-token ping against one tier's provider/model and
-// returns {ok, error}. It routes through agentruntime so an OpenAI-compatible
-// vendor (custom base_url) is tested exactly as a real run would call it.
-func testTierProvider(c echo.Context, provider, baseURL, model, key string) map[string]any {
-	p, err := agentruntime.NewTierProvider(provider, baseURL, key)
-	if err != nil {
-		return map[string]any{"ok": false, "error": err.Error()}
-	}
-	_, callErr := p.Chat(c.Request().Context(), agentcore.ChatRequest{
-		Model:     model,
-		Messages:  []agentcore.Message{{Role: agentcore.RoleUser, Content: "ping"}},
-		MaxTokens: 1,
-	})
-	if callErr != nil {
-		return map[string]any{"ok": false, "error": callErr.Error()}
-	}
-	return map[string]any{"ok": true}
-}
-
 // wantsEventStream reports whether the client asked for an SSE token stream.
 func wantsEventStream(c echo.Context) bool {
 	if c.QueryParam("stream") == "1" {

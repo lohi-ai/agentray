@@ -133,9 +133,6 @@ func TierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]strin
 	return tierSetFromWorkspace(cfg, keys)
 }
 
-// ResolveTierName maps a stored tier label (lite/flash/pro) to the runtime Tier.
-func ResolveTierName(name string) Tier { return TierFromName(name) }
-
 // DefaultAuthoringTier is the workspace tier used for authoring helpers that are
 // intentionally Pro-only in the first pass.
 const DefaultAuthoringTier = TierPro
