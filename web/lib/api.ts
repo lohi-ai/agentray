@@ -849,6 +849,11 @@ export type AgentRun = {
   token_input: number;
   token_output: number;
   cost_usd: number;
+  // cost_unpriced is true when cost_usd understates real spend — at least one
+  // LLM call in this run billed against a model with no price-table entry.
+  // Render "unpriced"/"—" (formatCost's second arg), never trust cost_usd
+  // alone as the whole total.
+  cost_unpriced: boolean;
   summary: string;
   started_at: string;
   finished_at?: string;
@@ -897,6 +902,9 @@ export type AgentLLMCall = {
   token_input: number;
   token_output: number;
   cost_usd: number;
+  // cost_unpriced is true when this call's model had no price-table entry, so
+  // cost_usd is a placeholder 0, not a real cost. See AgentRun.cost_unpriced.
+  cost_unpriced: boolean;
   latency_ms: number;
   streamed: boolean;
   error: string;
@@ -1028,6 +1036,11 @@ export type Agent = {
   // The folder this agent works in. Empty means the server derives a
   // per-conversation directory under ~/.agentray/workspaces instead.
   workspace_path: string;
+  // The marketplace preset (AgentPreset.slug) this agent was hired from, or ''
+  // for a hand-created agent. Lets the marketplace show "Already on your team"
+  // instead of "Install agent" without matching on the (editable, collidable)
+  // display name.
+  preset_slug: string;
   created_at: string;
   updated_at: string;
 };
@@ -1042,6 +1055,9 @@ export type AgentMonitorRow = Agent & {
   token_input: number;
   token_output: number;
   cost_usd: number;
+  // cost_unpriced is true when this agent's cost_usd undercounts real spend —
+  // see AgentRun.cost_unpriced (rolled up across its runs).
+  cost_unpriced: boolean;
   last_run_at?: string;
 };
 
@@ -1057,6 +1073,11 @@ export type AgentRecommendation = {
   status: string; // open | accepted | dismissed
   ack_note: string;
   created_at: string;
+  // How many times the agent has re-derived this same finding. A scheduled
+  // agent re-files its findings every cycle, so repeats fold into one row
+  // rather than appending a card; a high count is a standing problem.
+  seen_count: number;
+  last_seen_at: string;
 };
 
 // AgentToolCatalogEntry mirrors agentanalyst.ToolCatalogEntry — one selectable
@@ -1178,6 +1199,9 @@ export type Operator = {
   runs_24h: number;
   errors_24h: number;
   cost_24h: number;
+  // cost_24h_unpriced is true when cost_24h undercounts the real 24h spend —
+  // see AgentRun.cost_unpriced (rolled up over this window).
+  cost_24h_unpriced: boolean;
   last_run_at?: string;
   last_status: string;
   last_summary: string;

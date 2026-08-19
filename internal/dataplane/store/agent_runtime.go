@@ -33,6 +33,12 @@ type AgentRun struct {
 	TokenInput  int        `json:"token_input"`
 	TokenOutput int        `json:"token_output"`
 	CostUSD     float64    `json:"cost_usd"` // summed model cost for the run (§ tracing)
+	// CostUnpriced is true when CostUSD understates the run's real spend — at
+	// least one of its LLM calls billed against a model with no price-table
+	// entry, so that call's contribution is 0 rather than a real number. A
+	// reader must show this run's cost as "unpriced"/partial, never trust
+	// CostUSD alone as the full total.
+	CostUnpriced bool      `json:"cost_unpriced"`
 	Summary     string     `json:"summary"`
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
@@ -77,9 +83,9 @@ func (s *Store) LatestRunForSession(ctx context.Context, userID, projectID, sess
 	}
 	var r AgentRun
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs WHERE project_id = $1 AND session_id = $2 ORDER BY started_at DESC LIMIT 1`, project.ID, sessionID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
 	if err != nil {
 		return AgentRun{}, err
 	}
@@ -103,11 +109,14 @@ WHERE status = 'running' AND started_at < now() - $1::interval`,
 }
 
 // FinishAgentRun closes a run with status, summary, summed token usage, and the
-// summed model cost in USD (from the tracing/pricing layer).
-func (s *Store) FinishAgentRun(ctx context.Context, runID, status, summary string, tokenIn, tokenOut int, costUSD float64) error {
+// summed model cost in USD (from the tracing/pricing layer). costUnpriced is
+// true when any call the run made billed against a model with no price-table
+// entry, so costUSD is a partial total, not the whole story — see
+// AgentRun.CostUnpriced.
+func (s *Store) FinishAgentRun(ctx context.Context, runID, status, summary string, tokenIn, tokenOut int, costUSD float64, costUnpriced bool) error {
 	_, err := s.pg.Exec(ctx, `
-UPDATE agent_runs SET status = $2, summary = $3, token_input = $4, token_output = $5, cost_usd = $6, finished_at = now()
-WHERE id = $1`, runID, status, summary, tokenIn, tokenOut, costUSD)
+UPDATE agent_runs SET status = $2, summary = $3, token_input = $4, token_output = $5, cost_usd = $6, cost_unpriced = $7, finished_at = now()
+WHERE id = $1`, runID, status, summary, tokenIn, tokenOut, costUSD, costUnpriced)
 	return err
 }
 
@@ -134,7 +143,7 @@ func (s *Store) ListAgentRuns(ctx context.Context, userID, projectID string, lim
 		limit = 50
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs WHERE project_id = $1 ORDER BY started_at DESC LIMIT $2`, project.ID, limit)
 	if err != nil {
 		return nil, err
@@ -143,7 +152,7 @@ FROM agent_runs WHERE project_id = $1 ORDER BY started_at DESC LIMIT $2`, projec
 	out := []AgentRun{}
 	for rows.Next() {
 		var r AgentRun
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -159,9 +168,9 @@ func (s *Store) GetAgentRun(ctx context.Context, userID, projectID, runID string
 	}
 	var r AgentRun
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs WHERE id = $1 AND project_id = $2`, runID, project.ID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
 	if err != nil {
 		return AgentRun{}, nil, err
 	}
@@ -492,9 +501,37 @@ type AgentRecommendation struct {
 	Status       string    `json:"status"`
 	AckNote      string    `json:"ack_note"`
 	CreatedAt    time.Time `json:"created_at"`
+	// SeenCount is how many times the agent has re-derived this same finding.
+	// 1 means "said once"; a high count means a standing problem the owner has
+	// not acted on, which is worth surfacing rather than hiding.
+	SeenCount  int       `json:"seen_count"`
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
+// recommendationSimilarity is the trigram score above which two titles are
+// treated as the same finding. Tuned against real repeat output, where one
+// ingestion problem was re-filed as "Investigate 24-hour ingestion gap and
+// unplanned subscription replay" and "Investigate 24h ingestion gap and
+// subscription-event replay" — clearly one finding, but sharing no exact
+// string. Lower values start merging genuinely different findings that happen
+// to share vocabulary, which is the more expensive mistake: a merged finding
+// is one the owner never sees.
+const recommendationSimilarity = 0.55
+
+// recommendationRepeatWindow bounds how far back a repeat can fold into. Past
+// this, the same finding recurring is itself news — the problem came back —
+// so it earns a fresh card.
+const recommendationRepeatWindow = 14 * 24 * time.Hour
+
 // CreateRecommendation persists a recommendation and returns its id.
+//
+// A scheduled agent re-derives its findings on every cycle, so the same insight
+// arrives again and again in slightly different words. Left alone that turns
+// the daily readout into one finding restated hundreds of times, which is
+// indistinguishable from noise. So a recommendation that closely matches an
+// open one from the same project and category folds into it: the existing row
+// records that it was seen again, keeps the highest impact score observed, and
+// takes the newest wording. Only a genuinely new finding creates a card.
 func (s *Store) CreateRecommendation(ctx context.Context, rec AgentRecommendation) (string, error) {
 	evidence := rec.EvidenceJSON
 	if evidence == "" {
@@ -508,13 +545,48 @@ func (s *Store) CreateRecommendation(ctx context.Context, rec AgentRecommendatio
 	if rec.RunID != "" {
 		runArg = rec.RunID
 	}
-	var id string
+
+	// Fold into the closest open match, if one is close enough. The trigram
+	// index serves the candidate lookup, so this stays cheap as the table grows.
+	var existing string
 	err := s.pg.QueryRow(ctx, `
+SELECT id::text FROM agent_recommendations
+WHERE project_id = $1 AND category = $2 AND status = 'open'
+  AND last_seen_at > now() - $3::interval
+  AND similarity(title, $4) >= $5
+ORDER BY similarity(title, $4) DESC
+LIMIT 1`, rec.ProjectID, category, recommendationRepeatWindow.String(), rec.Title, recommendationSimilarity).Scan(&existing)
+	if err == nil && existing != "" {
+		if _, err := s.pg.Exec(ctx, `
+UPDATE agent_recommendations
+SET seen_count = seen_count + 1,
+    last_seen_at = now(),
+    impact_score = GREATEST(impact_score, $2),
+    title = $3,
+    rationale = $4,
+    evidence_json = $5::jsonb,
+    run_id = COALESCE($6, run_id)
+WHERE id = $1::uuid`, existing, rec.ImpactScore, rec.Title, rec.Rationale, evidence, runArg); err != nil {
+			return "", err
+		}
+		return existing, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+
+	var id string
+	err = s.pg.QueryRow(ctx, `
 INSERT INTO agent_recommendations (project_id, run_id, category, title, rationale, evidence_json, impact_score)
 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
 RETURNING id::text`, rec.ProjectID, runArg, category, rec.Title, rec.Rationale, evidence, rec.ImpactScore).Scan(&id)
 	return id, err
 }
+
+// recommendationListLimit bounds the readout. This query had no limit at all,
+// so every recommendation the project had ever accumulated was fetched and
+// rendered — a list that only grows is a list nobody reads.
+const recommendationListLimit = 50
 
 // ListRecommendations returns open-first recommendations ranked by impact.
 func (s *Store) ListRecommendations(ctx context.Context, userID, projectID string) ([]AgentRecommendation, error) {
@@ -524,9 +596,10 @@ func (s *Store) ListRecommendations(ctx context.Context, userID, projectID strin
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
-       evidence_json::text, impact_score, status, ack_note, created_at
+       evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at
 FROM agent_recommendations WHERE project_id = $1
-ORDER BY (status = 'open') DESC, impact_score DESC, created_at DESC`, project.ID)
+ORDER BY (status = 'open') DESC, impact_score DESC, last_seen_at DESC
+LIMIT $2`, project.ID, recommendationListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +608,8 @@ ORDER BY (status = 'open') DESC, impact_score DESC, created_at DESC`, project.ID
 	for rows.Next() {
 		var r AgentRecommendation
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.RunID, &r.Category, &r.Title, &r.Rationale,
-			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt); err != nil {
+			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt,
+			&r.SeenCount, &r.LastSeenAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -15,6 +15,26 @@ import { EventNameSelect } from '@/modules/shared/components/event-name-picker';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { Button, Intro, Loading, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 
+// isAnonymousDistinctId flags the nil UUID an event carries when no person has
+// been identified yet. Deliberately strict: only an all-zero UUID means "nobody".
+// A sentinel that merely *looks* nil — the platform account's
+// 00000000-0000-0000-0000-000000000001, which accounts for 784 events on this
+// instance — is a real principal, and labelling it "Anonymous" would be a
+// different lie than the one we set out to fix.
+function isAnonymousDistinctId(id: string): boolean {
+  return /^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(id);
+}
+
+// shortDistinctId keeps a person cell scannable without making distinct people
+// look identical. Slicing the first 12 characters rendered every zero-prefixed
+// id as the same "00000000-000", so the column silently claimed that unrelated
+// rows shared a person. Lead and tail together stay unique in practice, and the
+// cell carries the full id in its tooltip.
+function shortDistinctId(id: string): string {
+  if (id.length <= 14) return id;
+  return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
 export function EventsPage() {
   const router = useRouter();
   const { filters, setFilters, refresh } = useFilters();
@@ -80,25 +100,43 @@ export function EventsPage() {
     {
       key: 'distinct_id',
       header: 'Person',
-      renderCell: (e) => <span className="font-mono text-[var(--color-text-secondary)]">{e.distinct_id.slice(0, 12)}</span>,
+      renderCell: (e) => isAnonymousDistinctId(e.distinct_id)
+        ? <span className="text-[var(--color-text-secondary)]">Anonymous</span>
+        : (
+          <span className="font-mono text-[var(--color-text-secondary)]" title={e.distinct_id}>
+            {shortDistinctId(e.distinct_id)}
+          </span>
+        ),
     },
     {
       key: 'tokens',
       header: 'Tokens',
       sortValue: (e) => (e.tokens_input ?? 0) + (e.tokens_output ?? 0),
-      renderCell: (e) => <span className="font-mono tabular-nums">{formatCompact((e.tokens_input ?? 0) + (e.tokens_output ?? 0))}</span>,
+      // Tokens/cost/latency only mean something for agent-run events — an
+      // ordinary web/product event has none of these, so a "0" or "$0.00" reads
+      // as a real (false) measurement instead of "not applicable".
+      renderCell: (e) => e.event_type === 'agent'
+        ? <span className="font-mono tabular-nums">{formatCompact((e.tokens_input ?? 0) + (e.tokens_output ?? 0))}</span>
+        : <span className="text-[var(--color-text-secondary)]">—</span>,
     },
     {
       key: 'cost',
       header: 'Cost',
-      sortValue: (e) => e.cost_usd ?? 0,
-      renderCell: (e) => <span className="font-mono tabular-nums">{formatCost(e.cost_usd ?? 0)}</span>,
+      // Sort unrecorded cost to the bottom rather than folding it into 0 — an
+      // agent event that never reported a cost (no price for its model, or a
+      // non-LLM agent event like a tool call) is unknown, not free.
+      sortValue: (e) => e.cost_usd ?? -1,
+      renderCell: (e) => e.event_type === 'agent' && e.cost_usd != null
+        ? <span className="font-mono tabular-nums">{formatCost(e.cost_usd)}</span>
+        : <span className="text-[var(--color-text-secondary)]">—</span>,
     },
     {
       key: 'latency',
       header: 'Latency',
       sortValue: (e) => e.latency_ms ?? 0,
-      renderCell: (e) => <span className="font-mono tabular-nums">{formatLatency(e.latency_ms ?? 0)}</span>,
+      renderCell: (e) => e.event_type === 'agent'
+        ? <span className="font-mono tabular-nums">{formatLatency(e.latency_ms ?? 0)}</span>
+        : <span className="text-[var(--color-text-secondary)]">—</span>,
     },
     {
       key: 'timestamp',

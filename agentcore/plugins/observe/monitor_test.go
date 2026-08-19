@@ -37,17 +37,18 @@ func TestPricingCost(t *testing.T) {
 	p := Pricing{"gpt-4o": {InputPerM: 2.50, OutputPerM: 10.00}}
 
 	// 1M input + 1M output at the listed price.
-	got := p.Cost("gpt-4o", agentcore.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
-	if want := 12.50; got != want {
-		t.Fatalf("exact: got %v want %v", got, want)
+	got, priced := p.Cost("gpt-4o", agentcore.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000})
+	if want := 12.50; got != want || !priced {
+		t.Fatalf("exact: got %v priced=%v want %v true", got, priced, want)
 	}
 	// Prefix match: a dated variant resolves to the family price.
-	if got := p.Cost("gpt-4o-2024-08-06", agentcore.Usage{InputTokens: 1_000_000}); got != 2.50 {
-		t.Fatalf("prefix: got %v want 2.50", got)
+	if got, priced := p.Cost("gpt-4o-2024-08-06", agentcore.Usage{InputTokens: 1_000_000}); got != 2.50 || !priced {
+		t.Fatalf("prefix: got %v priced=%v want 2.50 true", got, priced)
 	}
-	// Unknown model prices at zero, no panic.
-	if got := p.Cost("mystery-model", agentcore.Usage{InputTokens: 1_000_000}); got != 0 {
-		t.Fatalf("unknown: got %v want 0", got)
+	// Unknown model prices at zero AND reports itself unpriced — a caller must
+	// not mistake this for a genuinely free call.
+	if got, priced := p.Cost("mystery-model", agentcore.Usage{InputTokens: 1_000_000}); got != 0 || priced {
+		t.Fatalf("unknown: got %v priced=%v want 0 false", got, priced)
 	}
 }
 

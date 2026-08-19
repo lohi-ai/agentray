@@ -33,6 +33,7 @@ function op(over: Partial<Operator> = {}): Operator {
     runs_24h: 0,
     errors_24h: 0,
     cost_24h: 0,
+    cost_24h_unpriced: false,
     last_run_at: '',
     last_status: '',
     last_summary: '',

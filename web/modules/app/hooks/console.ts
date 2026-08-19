@@ -3,7 +3,7 @@
 import { useEffect, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
-import { AgentRayAPI, type AudienceInput, type Filters, type SubscriptionMappingInput } from '@/lib/api';
+import { AgentRayAPI, type Agent, type AudienceInput, type Filters, type SubscriptionMappingInput } from '@/lib/api';
 import { buildIdentityMap } from '@/lib/identity';
 import { useAuthStore, useFiltersStore, useUIStore } from '@/lib/app-state';
 
@@ -299,9 +299,34 @@ export function useMarketplace() {
     enabled: !!projectID,
   });
 
+  // Same query key as useAgents() (modules/agent/hooks/agents.ts) so the two
+  // hooks share one cache entry — mounting the marketplace page next to the
+  // team roster costs no extra request, and the install mutation's existing
+  // invalidateQueries(['agents', projectID]) refreshes this too. Every agent
+  // installed from a preset carries that preset's slug (Agent.preset_slug),
+  // so this is the "already hired" check the marketplace card renders against.
+  const agents = useQuery({
+    queryKey: ['agents', projectID],
+    queryFn: () => new AgentRayAPI(projectID!).agents(),
+    enabled: !!projectID,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const installedByPreset = useMemo(() => {
+    const map = new Map<string, Agent>();
+    for (const a of agents.data?.agents ?? []) {
+      if (a.preset_slug) map.set(a.preset_slug, a);
+    }
+    return map;
+  }, [agents.data]);
+
   const installMutation = useMutation({
     mutationFn: (slug: string) => new AgentRayAPI(projectID!).installAgentPreset(slug),
     onSuccess: (data) => {
+      // The install is idempotent server-side: hiring a preset the project
+      // already has returns the existing agent rather than a new one, so this
+      // message and navigation are correct either way.
       setMessage(`Installed agent: ${data.agent.name}`);
       queryClient.invalidateQueries({ queryKey: ['agents', projectID] });
       // Land on the agent's setup page so the user can finish wiring (enable +
@@ -315,6 +340,10 @@ export function useMarketplace() {
     loading: presets.isLoading,
     installing: installMutation.isPending,
     installAgent: async (slug: string) => { await installMutation.mutateAsync(slug); },
+    installedByPreset,
+    // Already-hired presets don't need a round trip: route straight to the
+    // agent that preset installed.
+    openInstalled: (agentID: string) => router.push(`/agents/${agentID}/monitor`),
   };
 }
 

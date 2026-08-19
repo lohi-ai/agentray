@@ -297,10 +297,19 @@ const FUNNEL_STAGES = [
 export type WeakestLink = {
   from: string;
   to: string;
+  // Plain-language stage names ("visit", "purchase"). `from`/`to` carry the raw
+  // event name, which is the developer's word for the step, not the owner's —
+  // the headline reads with these and keeps the event name as the evidence.
+  fromLabel: string;
+  toLabel: string;
   fromCount: number;
   toCount: number;
   rate: number;
   missing: boolean;
+  // How many funnel stages sit untracked between the two we matched. Anything
+  // above zero means we are NOT looking at a step, we are looking across a hole,
+  // and the honest headline is the hole rather than a conversion rate.
+  stagesSkipped: number;
 };
 
 // weakestLink finds the biggest drop in a recognised activation funnel from
@@ -310,17 +319,33 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
   const events = catalogEvents(names);
   if (events.length === 0) return null;
 
-  const steps: Array<{ id: string; label: string; event: string; count: number }> = [];
-  for (const stage of FUNNEL_STAGES) {
-    const matched = events.filter((e) => stage.match.test(e.name));
-    if (matched.length === 0) continue;
+  // One event belongs to exactly one funnel stage. The stage patterns overlap —
+  // `subscription_activated` matches both `activat` (activation) and `subscri`
+  // (revenue) — and letting an event sit in two stages at once invented a
+  // phantom 100%-converting step between them. When a name matches more than
+  // one stage we take the deepest, because the stage patterns grow more
+  // specific toward revenue: a subscription that activated is a purchase, not
+  // an onboarding milestone.
+  const stageOf = (name: string): number => {
+    let claimed = -1;
+    FUNNEL_STAGES.forEach((stage, order) => {
+      if (stage.match.test(name)) claimed = order;
+    });
+    return claimed;
+  };
+
+  const steps: Array<{ id: string; label: string; event: string; count: number; order: number }> = [];
+  FUNNEL_STAGES.forEach((stage, order) => {
+    const matched = events.filter((e) => stageOf(e.name) === order);
+    if (matched.length === 0) return;
     steps.push({
       id: stage.id,
       label: stage.label,
       event: matched[0].name,
       count: matched.reduce((sum, e) => sum + e.count, 0),
+      order,
     });
-  }
+  });
 
   if (steps.length >= 2) {
     let worst: WeakestLink | null = null;
@@ -329,7 +354,15 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
       const to = steps[i + 1];
       const rate = from.count > 0 ? to.count / from.count : 0;
       const cand: WeakestLink = {
-        from: from.event, to: to.event, fromCount: from.count, toCount: to.count, rate, missing: false,
+        from: from.event,
+        to: to.event,
+        fromLabel: from.label,
+        toLabel: to.label,
+        fromCount: from.count,
+        toCount: to.count,
+        rate,
+        missing: false,
+        stagesSkipped: to.order - from.order - 1,
       };
       if (!worst || rate < worst.rate) worst = cand;
     }
@@ -343,15 +376,30 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
       return {
         from: steps[0].event,
         to: next.label,
+        fromLabel: steps[0].label,
+        toLabel: next.label,
         fromCount: steps[0].count,
         toCount: 0,
         rate: 0,
         missing: true,
+        stagesSkipped: 0,
       };
     }
   }
 
   return null;
+}
+
+// formatRate never rounds a real conversion down to "0%". A funnel that
+// converts 16 of 4,783 is 0.3%, not zero — and printing "0%" next to a
+// non-zero count is the fastest way to make an owner stop believing the
+// numbers. Below 0.1% we say so rather than inventing precision.
+export function formatRate(rate: number): string {
+  const pct = rate * 100;
+  if (pct <= 0) return '0%';
+  if (pct < 0.1) return '<0.1%';
+  if (pct < 10) return `${Number(pct.toFixed(1))}%`;
+  return `${Math.round(pct)}%`;
 }
 
 function countLabel(n: number, noun = 'people'): string {
@@ -362,24 +410,38 @@ function countLabel(n: number, noun = 'people'): string {
 function weakestNotice(link: WeakestLink): FirstSessionNotice {
   const fromN = link.fromCount > 0 ? countLabel(link.fromCount) : '';
   const toN = link.toCount.toLocaleString();
-  const pct = Math.round(link.rate * 100);
+  const pct = formatRate(link.rate);
   if (link.missing) {
     return {
       kind: 'noticed',
-      title: fromN ? `${fromN} hit ${link.from}, then nothing` : `I can see ${link.from}`,
+      title: fromN ? `${fromN} hit ${link.fromLabel}, then nothing` : `I can see ${link.fromLabel}`,
       detail: fromN
-        ? `${fromN} hit ${link.from}. I don’t see ${link.to} — 0% conversion, and the weakest step.`
-        : `I only see ${link.from}. The next step — ${link.to} — isn’t tracked, so the funnel stops here.`,
-      ask: `What should we track for ${link.to} after ${link.from}?`,
+        ? `${fromN} hit ${link.fromLabel} (${link.from}). I don’t see ${link.toLabel} at all — so the funnel stops there.`
+        : `I only see ${link.fromLabel} (${link.from}). The next step — ${link.toLabel} — isn’t tracked, so the funnel stops here.`,
+      ask: `What should we track for ${link.toLabel} after ${link.fromLabel}?`,
+    };
+  }
+  // A gap between the two matched stages means the stages in between are
+  // untracked. Reporting that span as "the biggest drop" invites the owner to
+  // go optimise a step, when the real finding is that they cannot see the
+  // steps. Name the hole instead — it is both truer and more actionable.
+  if (link.stagesSkipped > 0) {
+    return {
+      kind: 'noticed',
+      title: `Nothing is tracked between ${link.fromLabel} and ${link.toLabel}`,
+      detail: fromN
+        ? `${toN} of ${fromN} reach ${link.toLabel} (${pct}), but the steps in between aren’t tracked — so I can’t tell you where the rest go.`
+        : `${link.fromLabel} and ${link.toLabel} are tracked; the steps in between aren’t, so the drop-off is invisible.`,
+      ask: `What should we track between ${link.fromLabel} and ${link.toLabel} to see where people drop off?`,
     };
   }
   return {
     kind: 'noticed',
-    title: `${link.from} → ${link.to} is the weakest step`,
+    title: `${link.fromLabel} → ${link.toLabel} is the weakest step`,
     detail: fromN
-      ? `${toN} of ${fromN} (${pct}%) make it from ${link.from} to ${link.to}. That’s the biggest drop.`
-      : `The biggest drop is ${link.from} → ${link.to}.`,
-    ask: `What should we test this week to lift ${link.from} → ${link.to}?`,
+      ? `${toN} of ${fromN} (${pct}) make it from ${link.fromLabel} to ${link.toLabel}. That’s the biggest drop.`
+      : `The biggest drop is ${link.fromLabel} → ${link.toLabel}.`,
+    ask: `What should we test this week to lift ${link.fromLabel} → ${link.toLabel}?`,
   };
 }
 

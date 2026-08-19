@@ -81,11 +81,28 @@ func (s *Store) InstallAgentPreset(ctx context.Context, userID, projectID, slug 
 		return Agent{}, fmt.Errorf("unknown agent preset %q", slug)
 	}
 
+	// Idempotent install: hiring a preset the project already has returns the
+	// teammate already hired from it instead of minting a second one. This is
+	// what stops the marketplace's "Install agent" button from silently
+	// duplicating a hire on a double click or a repeat visit — without it, two
+	// installs of the same preset produce two agents named identically, which
+	// is exactly the "two Product Scouts" bug this link exists to prevent. A
+	// project member can read this; only the write paths below require
+	// owner/admin.
+	if _, err := s.ProjectByIDForUser(ctx, userID, projectID); err != nil {
+		return Agent{}, err
+	}
+	if existing, found, err := s.AgentByPresetSlug(ctx, projectID, preset.Slug); err != nil {
+		return Agent{}, err
+	} else if found {
+		return existing, nil
+	}
+
 	agentSlug, err := s.freeAgentSlug(ctx, userID, projectID, preset.Slug)
 	if err != nil {
 		return Agent{}, err
 	}
-	agent, err := s.CreateAgent(ctx, userID, projectID, preset.Name, agentSlug)
+	agent, err := s.createAgent(ctx, userID, projectID, preset.Name, agentSlug, preset.Slug)
 	if err != nil {
 		return Agent{}, err
 	}

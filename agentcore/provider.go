@@ -98,6 +98,16 @@ type Usage struct {
 	CacheReadTokens  int     `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd"`
+	// CostUnpriced is true when CostUSD is NOT a real total — some or all of the
+	// tokens above were billed by a model with no entry in the price table, so
+	// the price lookup returned "unknown" rather than "zero". Zero-value default
+	// (false) means "priced": every Usage built by hand (tests, synthetic zero-
+	// cost turns, error responses) is trusted as accurate unless the one place
+	// that actually resolves a price (observe.tracingProvider.price) says
+	// otherwise. A consumer MUST check this before rendering CostUSD as a dollar
+	// figure — "$0.00" and "we don't know" must never look the same to a reader
+	// deciding whether to trust the number.
+	CostUnpriced bool `json:"cost_unpriced,omitempty"`
 }
 
 // ChatRequest is one provider call: the message history plus the tool schemas

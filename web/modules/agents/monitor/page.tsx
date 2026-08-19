@@ -33,6 +33,7 @@ export function AgentsMonitorPage() {
   const failures = agents.reduce((sum, a) => sum + a.error_count, 0);
   const tokens = agents.reduce((sum, a) => sum + a.token_input + a.token_output, 0);
   const spend = agents.reduce((sum, a) => sum + a.cost_usd, 0);
+  const spendUnpriced = agents.some((a) => a.cost_unpriced);
   const needsReview = agents.find((a) => a.enabled && a.error_count > 0);
   const sorted = [...agents].sort((a, b) => rank(a) - rank(b));
 
@@ -46,7 +47,7 @@ export function AgentsMonitorPage() {
           { label: 'Failures (24h)', value: String(failures), tone: failures ? 'danger' : undefined },
           { label: 'Agents', value: String(agents.length) },
           { label: 'Tokens (24h)', value: formatCompact(tokens) },
-          { label: 'Spend (24h)', value: formatCost(spend) },
+          { label: 'Spend (24h)', value: formatCost(spend, spendUnpriced) },
         ]}
       />
       {needsReview ? (
@@ -86,7 +87,7 @@ export function AgentsMonitorPage() {
               },
               { key: 'runs', header: 'Runs', align: 'end', renderCell: (row) => <span className="font-mono tabular-nums">{row.run_count}</span> },
               { key: 'tokens', header: 'Tokens', align: 'end', renderCell: (row) => <span className="font-mono tabular-nums">{formatCompact(row.token_input + row.token_output)}</span> },
-              { key: 'cost', header: 'Cost', align: 'end', renderCell: (row) => <span className="font-mono tabular-nums">{formatCost(row.cost_usd)}</span> },
+              { key: 'cost', header: 'Cost', align: 'end', renderCell: (row) => <span className="font-mono tabular-nums">{formatCost(row.cost_usd, row.cost_unpriced)}</span> },
             ]}
           />
         </Panel>

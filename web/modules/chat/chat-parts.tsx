@@ -21,7 +21,7 @@ import { Token } from '@astryxdesign/core/Token';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
-import { DropdownMenu, type DropdownMenuOption } from '@astryxdesign/core/DropdownMenu';
+import { DropdownMenu, DropdownMenuItem } from '@astryxdesign/core/DropdownMenu';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { Card } from '@astryxdesign/core/Card';
 import { HStack } from '@astryxdesign/core/HStack';
@@ -214,8 +214,15 @@ export function ThreadsRail({
 
 // AgentMenu turns the composer's agent chip into a real switcher: it lists the
 // project's enabled agents and lets the user target a specific one for the turn.
-// Built on Astryx DropdownMenu (data-driven items) with a pulsing StatusDot in the
-// trigger; when only one agent is enabled it degrades to a plain disabled Button.
+// Built on Astryx DropdownMenu in *compound* mode (explicit DropdownMenuItem
+// children, each with its own React key) rather than its data-driven `items`
+// mode — that mode's renderer keys purely by the rendered label
+// (`item-${item.label}`, see @astryxdesign/core's renderDropdownItems), so two
+// agents that happen to share a display name collide on the same React key and
+// React drops one silently ("two children with the same key"). Keying by
+// agent.id — which is always unique — needs the mode where we control the key
+// ourselves. A pulsing StatusDot lives in the trigger; when only one agent is
+// enabled it degrades to a plain disabled Button.
 export function AgentMenu({ agents, currentID, currentName, onPick }: { agents: Agent[]; currentID?: string; currentName: string; onPick: (id: string) => void }) {
   const enabled = agents.filter((a) => a.enabled);
   const online = <StatusDot variant="success" label="Agent online" isPulsing />;
@@ -224,19 +231,32 @@ export function AgentMenu({ agents, currentID, currentName, onPick }: { agents: 
     return <Button variant="secondary" size="sm" label={currentName} icon={online} isDisabled />;
   }
 
-  const items: DropdownMenuOption[] = enabled.map((a) => ({
-    label: a.is_default ? `${a.name} · default` : a.name,
-    icon: a.id === currentID ? <Check size={13} className="text-success" /> : undefined,
-    onClick: () => onPick(a.id),
-  }));
+  // Disambiguate the visible label too, not just the key: a duplicate name
+  // (e.g. a preset hired twice before installs were made idempotent) should
+  // still read as two distinguishable rows, not two identical ones a click
+  // can't tell apart.
+  const nameCounts = new Map<string, number>();
+  for (const a of enabled) nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
 
   return (
     <DropdownMenu
       menuWidth={200}
       placement="above"
       button={{ label: currentName, variant: 'secondary', size: 'sm', icon: online }}
-      items={items}
-    />
+    >
+      {enabled.map((a) => {
+        let label = a.is_default ? `${a.name} · default` : a.name;
+        if ((nameCounts.get(a.name) ?? 0) > 1) label = `${label} (#${a.id.slice(0, 6)})`;
+        return (
+          <DropdownMenuItem
+            key={a.id}
+            label={label}
+            icon={a.id === currentID ? <Check size={13} className="text-success" /> : undefined}
+            onClick={() => onPick(a.id)}
+          />
+        );
+      })}
+    </DropdownMenu>
   );
 }
 

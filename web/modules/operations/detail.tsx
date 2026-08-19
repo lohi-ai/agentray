@@ -301,7 +301,7 @@ export function OperationDetailPage() {
         title="Run history"
         action={
           <Text type="supporting">
-            {operator.run_count} total · {formatCost(operator.cost_24h)} in 24h
+            {operator.run_count} total · {formatCost(operator.cost_24h, operator.cost_24h_unpriced)} in 24h
           </Text>
         }
       >
@@ -349,7 +349,7 @@ export function OperationDetailPage() {
                   key: 'cost',
                   header: 'Cost',
                   align: 'end',
-                  renderCell: (row: AgentRun) => <span className="font-mono tabular-nums">{formatCost(row.cost_usd)}</span>,
+                  renderCell: (row: AgentRun) => <span className="font-mono tabular-nums">{formatCost(row.cost_usd, row.cost_unpriced)}</span>,
                 },
               ]}
             />

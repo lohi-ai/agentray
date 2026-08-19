@@ -934,6 +934,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		res.Usage.CacheReadTokens += resp.Usage.CacheReadTokens
 		res.Usage.CacheWriteTokens += resp.Usage.CacheWriteTokens
 		res.Usage.CostUSD += resp.Usage.CostUSD
+		res.Usage.CostUnpriced = res.Usage.CostUnpriced || resp.Usage.CostUnpriced
 		res.StopReason = resp.StopReason
 		// Stamp the turn's usage onto the assistant message so compaction can use
 		// the provider's real token count (not a byte heuristic) to find when the

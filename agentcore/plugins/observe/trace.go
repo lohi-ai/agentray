@@ -189,11 +189,20 @@ func (t *tracingProvider) Stream(ctx context.Context, req agentcore.ChatRequest)
 }
 
 // price fills CostUSD from the table only when the provider didn't already
-// report a cost, so a vendor that returns native pricing wins.
+// report a cost, so a vendor that returns native pricing wins. A call with no
+// billable tokens at all (an empty/error turn) is trivially free regardless of
+// whether the model is in the table, so it is never marked unpriced — only a
+// call that actually spent tokens against an unrecognized model is.
 func (t *tracingProvider) price(model string, u *agentcore.Usage) {
-	if u.CostUSD == 0 {
-		u.CostUSD = t.pricing.Cost(model, *u)
+	if u.CostUSD != 0 {
+		return
 	}
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 {
+		return
+	}
+	cost, priced := t.pricing.Cost(model, *u)
+	u.CostUSD = cost
+	u.CostUnpriced = !priced
 }
 
 func (t *tracingProvider) emit(ctx context.Context, req agentcore.ChatRequest, resp agentcore.ChatResponse, dur time.Duration, streamed bool, err error) {

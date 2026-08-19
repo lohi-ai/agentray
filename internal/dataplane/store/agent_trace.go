@@ -46,19 +46,24 @@ type AgentLLMCall struct {
 	// BaseSeq names the call this one's context extends (0 = keyframe), and
 	// KeepPrefix how many of that call's messages are retained in front of the
 	// delta. Reconstruction is context(n) = context(BaseSeq)[:KeepPrefix] + delta.
-	BaseSeq       int       `json:"base_seq"`
-	KeepPrefix    int       `json:"keep_prefix"`
-	Tools         []string  `json:"tools"`           // tool names advertised this turn
-	Response      string    `json:"response"`        // assistant text returned
-	ToolCallsJSON string    `json:"tool_calls_json"` // tool calls the model requested
-	StopReason    string    `json:"stop_reason"`
-	TokenInput    int       `json:"token_input"`
-	TokenOutput   int       `json:"token_output"`
-	CostUSD       float64   `json:"cost_usd"`
-	LatencyMS     int       `json:"latency_ms"`
-	Streamed      bool      `json:"streamed"`
-	Error         string    `json:"error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	BaseSeq       int      `json:"base_seq"`
+	KeepPrefix    int      `json:"keep_prefix"`
+	Tools         []string `json:"tools"`           // tool names advertised this turn
+	Response      string   `json:"response"`        // assistant text returned
+	ToolCallsJSON string   `json:"tool_calls_json"` // tool calls the model requested
+	StopReason    string   `json:"stop_reason"`
+	TokenInput    int      `json:"token_input"`
+	TokenOutput   int      `json:"token_output"`
+	CostUSD       float64  `json:"cost_usd"`
+	// CostUnpriced is true when CostUSD does not reflect a real total — the
+	// model this call billed against had no entry in the price table, so the
+	// cost could not be computed and CostUSD stays 0 as a placeholder, not a
+	// fact. A reader must render "unpriced", never "$0.00", when this is true.
+	CostUnpriced bool      `json:"cost_unpriced"`
+	LatencyMS    int       `json:"latency_ms"`
+	Streamed     bool      `json:"streamed"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // migrateAgentTrace creates the per-LLM-call trace table. Kept out of
@@ -80,6 +85,7 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 	token_input INT NOT NULL DEFAULT 0,
 	token_output INT NOT NULL DEFAULT 0,
 	cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+	cost_unpriced BOOLEAN NOT NULL DEFAULT false,
 	latency_ms INT NOT NULL DEFAULT 0,
 	streamed BOOLEAN NOT NULL DEFAULT false,
 	error TEXT NOT NULL DEFAULT '',
@@ -97,6 +103,12 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS seq INT NOT NULL DEFAULT 0`,
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS base_seq INT NOT NULL DEFAULT 0`,
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS keep_prefix INT NOT NULL DEFAULT 0`,
+		// Constant default (not a rewrite): existing rows read as "priced", which
+		// is the honest answer for cost_usd 0 rows written before this column
+		// existed — mixing "genuinely free" and "unpriced" for pre-existing rows
+		// is an acceptable historical gap; every row written from here on is
+		// stamped with the real answer at record time.
+		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS cost_unpriced BOOLEAN NOT NULL DEFAULT false`,
 		// Deliberately NOT backfilled: an UPDATE over every historical row would
 		// rewrite the largest table in the database while deploy holds the
 		// migration open. Legacy rows keep session_key '' and are read as the
@@ -144,16 +156,16 @@ func (s *Store) RecordAgentLLMCall(ctx context.Context, c AgentLLMCall) (int, er
 INSERT INTO agent_llm_calls (
 	run_id, session_key, depth, seq, base_seq, keep_prefix,
 	provider, model, messages_json, tools, response, tool_calls_json,
-	stop_reason, token_input, token_output, cost_usd, latency_ms, streamed, error
+	stop_reason, token_input, token_output, cost_usd, cost_unpriced, latency_ms, streamed, error
 ) VALUES (
 	$1, $2, $3,
 	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_llm_calls WHERE run_id = $1),
-	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18
+	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19
 )
 RETURNING seq`,
 		c.RunID, key, c.Depth, c.BaseSeq, c.KeepPrefix,
 		c.Provider, c.Model, msgs, tools, c.Response, calls,
-		c.StopReason, c.TokenInput, c.TokenOutput, c.CostUSD, c.LatencyMS, c.Streamed, c.Error).Scan(&seq)
+		c.StopReason, c.TokenInput, c.TokenOutput, c.CostUSD, c.CostUnpriced, c.LatencyMS, c.Streamed, c.Error).Scan(&seq)
 	return seq, err
 }
 
@@ -163,7 +175,7 @@ const llmCallColumns = `c.id::text, c.run_id::text,
        COALESCE(NULLIF(c.session_key, ''), c.run_id::text), c.depth, c.seq,
        c.provider, c.model, c.base_seq, c.keep_prefix, c.tools,
        c.response, c.tool_calls_json::text, c.stop_reason, c.token_input, c.token_output,
-       c.cost_usd, c.latency_ms, c.streamed, c.error, c.created_at`
+       c.cost_usd, c.cost_unpriced, c.latency_ms, c.streamed, c.error, c.created_at`
 
 // scanLLMCall reads one row of llmCallColumns, optionally with the messages
 // delta appended to the projection.
@@ -172,7 +184,7 @@ func scanLLMCall(rows interface{ Scan(...any) error }, withMessages bool) (Agent
 	dest := []any{&c.ID, &c.RunID, &c.SessionKey, &c.Depth, &c.Seq,
 		&c.Provider, &c.Model, &c.BaseSeq, &c.KeepPrefix, &c.Tools,
 		&c.Response, &c.ToolCallsJSON, &c.StopReason, &c.TokenInput, &c.TokenOutput,
-		&c.CostUSD, &c.LatencyMS, &c.Streamed, &c.Error, &c.CreatedAt}
+		&c.CostUSD, &c.CostUnpriced, &c.LatencyMS, &c.Streamed, &c.Error, &c.CreatedAt}
 	if withMessages {
 		dest = append(dest, &c.MessagesJSON)
 	}

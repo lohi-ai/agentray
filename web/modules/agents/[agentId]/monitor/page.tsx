@@ -41,7 +41,7 @@ export function AgentMonitorPage() {
         { label: 'Running now', value: String(agent.running_count), tone: agent.running_count ? 'agent' : undefined },
         { label: 'Failures', value: String(agent.error_count), tone: agent.error_count ? 'danger' : undefined },
         { label: 'Tokens', value: formatCompact(agent.token_input + agent.token_output) },
-        { label: 'Spend', value: formatCost(agent.cost_usd) },
+        { label: 'Spend', value: formatCost(agent.cost_usd, agent.cost_unpriced) },
         { label: 'Last run', value: agent.last_run_at ? formatRelative(agent.last_run_at) : '—' },
       ]} />
       <Panel title="Recent runs">
@@ -63,7 +63,7 @@ export function AgentMonitorPage() {
               { key: 'status', header: 'Status', align: 'start', renderCell: (run) => <span style={run.status === 'failed' ? { color: 'var(--danger)' } : undefined}>{run.status}</span> },
               { key: 'latency', header: 'Latency', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{runLatency(run)}</span> },
               { key: 'tokens', header: 'Tokens', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{formatCompact(run.token_input + run.token_output)}</span> },
-              { key: 'cost', header: 'Cost', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{formatCost(run.cost_usd)}</span> },
+              { key: 'cost', header: 'Cost', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{formatCost(run.cost_usd, run.cost_unpriced)}</span> },
               { key: 'when', header: 'When', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums text-[var(--color-text-disabled)]">{formatRelative(run.finished_at || run.started_at)}</span> },
             ]}
           />

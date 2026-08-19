@@ -149,6 +149,7 @@ func (a *Agent) addChildUsage(u Usage) {
 	a.childUsage.CacheReadTokens += u.CacheReadTokens
 	a.childUsage.CacheWriteTokens += u.CacheWriteTokens
 	a.childUsage.CostUSD += u.CostUSD
+	a.childUsage.CostUnpriced = a.childUsage.CostUnpriced || u.CostUnpriced
 	a.childMu.Unlock()
 }
 
@@ -178,6 +179,7 @@ func addUsage(u, v Usage) Usage {
 	u.CacheReadTokens += v.CacheReadTokens
 	u.CacheWriteTokens += v.CacheWriteTokens
 	u.CostUSD += v.CostUSD
+	u.CostUnpriced = u.CostUnpriced || v.CostUnpriced
 	return u
 }
 
@@ -199,8 +201,14 @@ func mergeUsage(u, v Usage) Usage {
 	if v.CacheWriteTokens != 0 {
 		u.CacheWriteTokens = v.CacheWriteTokens
 	}
-	if v.CostUSD != 0 {
+	// CostUSD and CostUnpriced are one fact from one source (observe's pricing
+	// pass) and must be overwritten together: a fresher report of "unpriced,
+	// $0" (CostUSD == 0, CostUnpriced == true) is real information, and gating
+	// solely on "CostUSD != 0" (as every other field above does) would silently
+	// drop it, leaving a stale "priced" flag from an earlier report.
+	if v.CostUSD != 0 || v.CostUnpriced {
 		u.CostUSD = v.CostUSD
+		u.CostUnpriced = v.CostUnpriced
 	}
 	return u
 }

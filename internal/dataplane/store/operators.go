@@ -57,14 +57,18 @@ type Operator struct {
 	TeamID   string `json:"team_id,omitempty"`
 	TeamName string `json:"team_name,omitempty"`
 
-	RunCount     int        `json:"run_count"`
-	RunningCount int        `json:"running_count"`
-	Runs24h      int        `json:"runs_24h"`
-	Errors24h    int        `json:"errors_24h"`
-	Cost24h      float64    `json:"cost_24h"`
-	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
-	LastStatus   string     `json:"last_status"`
-	LastSummary  string     `json:"last_summary"`
+	RunCount     int     `json:"run_count"`
+	RunningCount int     `json:"running_count"`
+	Runs24h      int     `json:"runs_24h"`
+	Errors24h    int     `json:"errors_24h"`
+	Cost24h      float64 `json:"cost_24h"`
+	// Cost24hUnpriced is true when Cost24h undercounts real 24h spend — at
+	// least one contributing run billed a call against a model with no price
+	// entry. Same fact as AgentRun.CostUnpriced, rolled up to this window.
+	Cost24hUnpriced bool       `json:"cost_24h_unpriced"`
+	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
+	LastStatus      string     `json:"last_status"`
+	LastSummary     string     `json:"last_summary"`
 	// ConsecutiveFailures counts error runs since the last successful one. It is
 	// what turns "the last run failed" into "it has been failing since Tuesday",
 	// which is the difference between a blip and an operator nobody is watching.
@@ -107,7 +111,7 @@ SELECT t.id::text, t.name, t.kind, t.enabled, t.cron, t.webhook_token, t.prompt_
        a.id::text, a.name, a.enabled,
        coalesce(tm.id::text, ''), coalesce(tm.name, ''),
        coalesce(agg.run_count, 0), coalesce(agg.running_count, 0), coalesce(agg.runs_24h, 0),
-       coalesce(agg.errors_24h, 0), coalesce(agg.cost_24h, 0),
+       coalesce(agg.errors_24h, 0), coalesce(agg.cost_24h, 0), coalesce(agg.cost_24h_unpriced, false),
        agg.last_run_at, coalesce(agg.last_status, ''), coalesce(agg.last_summary, ''),
        coalesce(fail.streak, 0),
        (SELECT count(*) > 1 FROM agent_triggers t2 WHERE t2.scope_id = t.scope_id AND t2.kind = t.kind)
@@ -120,6 +124,7 @@ LEFT JOIN LATERAL (
          count(*) FILTER (WHERE r.started_at > now() - interval '24 hours') AS runs_24h,
          count(*) FILTER (WHERE r.status = 'error' AND r.started_at > now() - interval '24 hours') AS errors_24h,
          coalesce(sum(r.cost_usd) FILTER (WHERE r.started_at > now() - interval '24 hours'), 0) AS cost_24h,
+         coalesce(bool_or(r.cost_unpriced) FILTER (WHERE r.started_at > now() - interval '24 hours'), false) AS cost_24h_unpriced,
          max(r.started_at) AS last_run_at,
          (array_agg(r.status ORDER BY r.started_at DESC))[1] AS last_status,
          (array_agg(r.summary ORDER BY r.started_at DESC))[1] AS last_summary
@@ -146,7 +151,7 @@ func scanOperator(row rowScanner) (Operator, error) {
 	err := row.Scan(&op.ID, &op.Name, &op.Kind, &op.Enabled, &op.Cron, &op.WebhookToken,
 		&op.PromptTemplate, &op.HMACSecretName, &op.CreatedAt, &op.UpdatedAt,
 		&op.AgentID, &op.AgentName, &op.AgentEnabled, &op.TeamID, &op.TeamName,
-		&op.RunCount, &op.RunningCount, &op.Runs24h, &op.Errors24h, &op.Cost24h,
+		&op.RunCount, &op.RunningCount, &op.Runs24h, &op.Errors24h, &op.Cost24h, &op.Cost24hUnpriced,
 		&op.LastRunAt, &op.LastStatus, &op.LastSummary, &op.ConsecutiveFailures, &op.SharedHistory)
 	op.Source = OperatorSourceTrigger
 	return op, err
@@ -277,7 +282,7 @@ WHERE c.project_id = $1 AND c.schedule_cron <> ''`, projectID).
 		return nil, err
 	}
 	op.RunCount, op.RunningCount, op.Runs24h = agg.RunCount, agg.RunningCount, agg.Runs24h
-	op.Errors24h, op.Cost24h = agg.Errors24h, agg.Cost24h
+	op.Errors24h, op.Cost24h, op.Cost24hUnpriced = agg.Errors24h, agg.Cost24h, agg.Cost24hUnpriced
 	op.LastRunAt, op.LastStatus, op.LastSummary = agg.LastRunAt, agg.LastStatus, agg.LastSummary
 	op.ConsecutiveFailures = agg.ConsecutiveFailures
 	// The default agent may also carry its own schedule triggers, and those runs
@@ -296,6 +301,7 @@ SELECT count(*),
        count(*) FILTER (WHERE r.started_at > now() - interval '24 hours'),
        count(*) FILTER (WHERE r.status = 'error' AND r.started_at > now() - interval '24 hours'),
        coalesce(sum(r.cost_usd) FILTER (WHERE r.started_at > now() - interval '24 hours'), 0),
+       coalesce(bool_or(r.cost_unpriced) FILTER (WHERE r.started_at > now() - interval '24 hours'), false),
        max(r.started_at),
        coalesce((array_agg(r.status ORDER BY r.started_at DESC))[1], ''),
        coalesce((array_agg(r.summary ORDER BY r.started_at DESC))[1], ''),
@@ -308,7 +314,7 @@ SELECT count(*),
 FROM agent_runs r
 WHERE r.project_id = $1 AND coalesce(r.agent_id, r.project_id) = $2 AND r.trigger = $3`,
 		projectID, agentID, trigger).
-		Scan(&op.RunCount, &op.RunningCount, &op.Runs24h, &op.Errors24h, &op.Cost24h,
+		Scan(&op.RunCount, &op.RunningCount, &op.Runs24h, &op.Errors24h, &op.Cost24h, &op.Cost24hUnpriced,
 			&op.LastRunAt, &op.LastStatus, &op.LastSummary, &op.ConsecutiveFailures)
 	return op, err
 }
@@ -330,7 +336,7 @@ func (s *Store) OperatorRuns(ctx context.Context, userID, projectID, id string, 
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status,
-       token_input, token_output, cost_usd, summary, started_at, finished_at
+       token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs
 WHERE project_id = $1 AND coalesce(agent_id, project_id) = $2 AND trigger = $3
 ORDER BY started_at DESC LIMIT $4`, project.ID, op.AgentID, runTriggerFor(op.Kind), limit)
@@ -342,7 +348,7 @@ ORDER BY started_at DESC LIMIT $4`, project.ID, op.AgentID, runTriggerFor(op.Kin
 	for rows.Next() {
 		var r AgentRun
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput,
-			&r.TokenOutput, &r.CostUSD, &r.Summary, &r.StartedAt, &r.FinishedAt); err != nil {
+			&r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

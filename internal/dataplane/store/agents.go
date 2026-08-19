@@ -32,6 +32,12 @@ type Agent struct {
 	// so an agent pointed at a repository or a document folder says so here.
 	WorkspacePath string `json:"workspace_path"`
 
+	// PresetSlug is the marketplace preset (internal/workloads.Pack.Slug) this
+	// agent was hired from, or "" for a hand-created agent. It is the stable
+	// link the marketplace uses to tell "already on your team" from "not hired
+	// yet" — see InstallAgentPreset.
+	PresetSlug string `json:"preset_slug"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -157,7 +163,7 @@ func (s *Store) ListAgents(ctx context.Context, userID, projectID string) ([]Age
 	rows, err := s.pg.Query(ctx, `
 SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
        coalesce((SELECT autonomy FROM agent_configs WHERE project_id = $1), 'suggest') AS autonomy,
-       a.workspace_path,
+       a.workspace_path, a.preset_slug,
        a.created_at, a.updated_at
 FROM agents a
 WHERE a.project_id = $1
@@ -170,7 +176,7 @@ ORDER BY a.is_default DESC, a.name ASC`, project.ID)
 	out := make([]Agent, 0)
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.PresetSlug, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -182,6 +188,15 @@ ORDER BY a.is_default DESC, a.name ASC`, project.ID)
 // is derived from the name when not supplied and must satisfy the slug rule;
 // uniqueness within the project is enforced by the table constraint.
 func (s *Store) CreateAgent(ctx context.Context, userID, projectID, name, slug string) (Agent, error) {
+	return s.createAgent(ctx, userID, projectID, name, slug, "")
+}
+
+// createAgent is CreateAgent plus an optional presetSlug — the marketplace
+// provenance link (see Agent.PresetSlug). Kept unexported so the public,
+// hand-created-agent path (CreateAgent, called from the plain "add agent" API
+// and from InstallAgentPreset) cannot accidentally claim preset provenance it
+// doesn't have; only InstallAgentPreset passes a non-empty presetSlug.
+func (s *Store) createAgent(ctx context.Context, userID, projectID, name, slug, presetSlug string) (Agent, error) {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
 		return Agent{}, err
@@ -202,11 +217,11 @@ func (s *Store) CreateAgent(ctx context.Context, userID, projectID, name, slug s
 	}
 	var a Agent
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO agents (project_id, workspace_id, name, slug, is_default, enabled, autonomy)
-VALUES ($1, $4, $2, $3, false, true, 'suggest')
-RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at`,
-		project.ID, name, slug, project.WorkspaceID).
-		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt)
+INSERT INTO agents (project_id, workspace_id, name, slug, is_default, enabled, autonomy, preset_slug)
+VALUES ($1, $4, $2, $3, false, true, 'suggest', $5)
+RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, preset_slug, created_at, updated_at`,
+		project.ID, name, slug, project.WorkspaceID, presetSlug).
+		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.PresetSlug, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -238,14 +253,42 @@ func (s *Store) UpdateAgent(ctx context.Context, userID, projectID, agentID, nam
 	err = s.pg.QueryRow(ctx, `
 UPDATE agents SET name = $3, enabled = $4, workspace_path = coalesce($5, workspace_path), updated_at = now()
 WHERE project_id = $1 AND id = $2
-RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, preset_slug, created_at, updated_at`,
 		project.ID, agentID, strings.TrimSpace(name), enabled, workspacePath).
-		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt)
+		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.PresetSlug, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return Agent{}, err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "agent.update", "project", project.ID, project.Name, "{}")
 	return a, nil
+}
+
+// AgentByPresetSlug returns the project's existing home agent installed from
+// the given marketplace preset, if any. This is the idempotency check
+// InstallAgentPreset uses so hiring the same teammate twice returns the
+// teammate you already hired instead of creating a duplicate. Scoped to
+// agents.project_id (the agent's home project) rather than every agent
+// operating in the project via a grant — a preset install always creates a
+// home agent, so that is the only place a duplicate could come from.
+func (s *Store) AgentByPresetSlug(ctx context.Context, projectID, presetSlug string) (Agent, bool, error) {
+	if presetSlug == "" {
+		return Agent{}, false, nil
+	}
+	var a Agent
+	err := s.pg.QueryRow(ctx, `
+SELECT id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, preset_slug, created_at, updated_at
+FROM agents
+WHERE project_id = $1 AND preset_slug = $2
+ORDER BY created_at ASC
+LIMIT 1`, projectID, presetSlug).
+		Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.PresetSlug, &a.CreatedAt, &a.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Agent{}, false, nil
+	}
+	if err != nil {
+		return Agent{}, false, err
+	}
+	return a, true, nil
 }
 
 // DeleteAgent removes a non-default agent (owner/admin only). The default agent

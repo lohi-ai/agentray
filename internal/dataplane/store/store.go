@@ -639,6 +639,13 @@ func (s *Store) migratePostgres(ctx context.Context, cfg config.Config) error {
 	if _, err := s.pg.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
 		return err
 	}
+	// pg_trgm backs the recommendation de-duplication in agent_runtime.go. A
+	// scheduled agent re-files the same finding in slightly different words on
+	// every cycle, so "have I already said this?" is a fuzzy question, and it
+	// has to be answered by an index rather than a scan of every open row.
+	if _, err := s.pg.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pg_trgm`); err != nil {
+		return err
+	}
 	if _, err := s.pg.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS users (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

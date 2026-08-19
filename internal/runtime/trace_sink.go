@@ -117,6 +117,7 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 		TokenInput:    r.Usage.InputTokens,
 		TokenOutput:   r.Usage.OutputTokens,
 		CostUSD:       r.Usage.CostUSD,
+		CostUnpriced:  r.Usage.CostUnpriced,
 		LatencyMS:     int(r.LatencyMS),
 		Streamed:      r.Streamed,
 		Error:         r.Err,

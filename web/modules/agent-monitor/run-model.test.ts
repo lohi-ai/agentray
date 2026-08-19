@@ -7,7 +7,8 @@ function call(over: Partial<AgentLLMCall>): AgentLLMCall {
     id: 'c', run_id: 'run-1', session_key: '', depth: 0, seq: 0, base_seq: 0, keep_prefix: 0,
     provider: 'anthropic', model: 'claude-opus-5', messages_json: '[]', tools: [], response: '',
     tool_calls_json: '[]', stop_reason: 'end_turn', token_input: 100, token_output: 20,
-    cost_usd: 0.01, latency_ms: 900, streamed: false, error: '', created_at: '2026-08-15T00:00:00Z',
+    cost_usd: 0.01, cost_unpriced: false, latency_ms: 900, streamed: false, error: '',
+    created_at: '2026-08-15T00:00:00Z',
     ...over,
   };
 }

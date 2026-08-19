@@ -38,7 +38,12 @@ function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id:
     <div className={`mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5 ${recTone(rec.category) === 'growth' ? '' : ''}`}>
       <span className={`grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] ${recTone(rec.category) === 'growth' ? 'bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary' : 'bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent'}`}><TrendingUp size={15} /></span>
       <div style={{ minWidth: 0 }}>
-        <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{rec.category || 'recommendation'} · impact {Math.round(rec.impact_score)}</div>
+        <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+          {rec.category || 'recommendation'} · impact {Math.round(rec.impact_score)}
+          {/* A finding the agent keeps re-deriving is a standing problem, not
+              news. Saying so is more useful than printing the same card twice. */}
+          {rec.seen_count > 1 ? ` · raised ${rec.seen_count} times` : ''}
+        </div>
         <div className="mb-0.5 text-sm font-semibold">{rec.title}</div>
         <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{rec.rationale}</div>
       </div>
@@ -62,7 +67,7 @@ function RunNarration({ run }: { run: AgentRun }) {
       content: (
         <div style={{ padding: '16px 18px' }}>
           <div className="mb-[10px] text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
-            {when} · {run.token_input + run.token_output} tokens · {formatCost(run.cost_usd)}
+            {when} · {run.token_input + run.token_output} tokens · {formatCost(run.cost_usd, run.cost_unpriced)}
           </div>
           <AgentMarkdown text={run.summary} />
         </div>

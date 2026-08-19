@@ -199,7 +199,7 @@ export function AgentRunPage() {
           { label: 'Chapters', value: String(chapters.length) },
           { label: 'Tool calls', value: formatCompact(toolCalls.length) },
           { label: 'Tokens', value: run ? formatCompact(run.token_input + run.token_output) : '—' },
-          { label: 'Spend', value: run ? formatCost(run.cost_usd) : '—' },
+          { label: 'Spend', value: run ? formatCost(run.cost_usd, run.cost_unpriced) : '—' },
           { label: 'Duration', value: run ? runDuration(run.started_at, run.finished_at) : '—' },
         ]}
       />

@@ -14,7 +14,18 @@ export function formatCompact(value: number | undefined): string {
 }
 
 // formatCost renders a USD amount with cents (e.g. 1.4 → $1.40).
-export function formatCost(value: number | undefined): string {
+//
+// `unpriced` marks a total that is NOT a real number — some or all of the
+// underlying spend billed against a model with no entry in the price table,
+// so the cost could not be computed. A false "$0.00" is worse than an honest
+// unknown (a reader treats a dollar figure as fact), so an unpriced total with
+// nothing known renders as "—", and a partial total (some calls priced, some
+// not) is marked with a trailing "+" so it reads as a floor, not the whole
+// story. Never pass `unpriced: true` for a total that is genuinely zero.
+export function formatCost(value: number | undefined, unpriced?: boolean): string {
+  if (unpriced) {
+    return value ? `$${value.toFixed(2)}+` : '—';
+  }
   return `$${(value ?? 0).toFixed(2)}`;
 }
 

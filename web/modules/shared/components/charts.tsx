@@ -16,6 +16,13 @@ export type ChartSpec = {
   unit?: string;
   stack?: boolean;
   height?: number;
+  // Set false for a series that counts discrete things (people, sessions, runs) —
+  // a smoothed curve visually implies fractional values ("1.5 people") that don't
+  // exist. Defaults to true for line/area, matching prior behavior.
+  smooth?: boolean;
+  // Force whole-number y-axis ticks. Pair with smooth: false for count series —
+  // otherwise ECharts' auto interval can still land on 0.5 steps.
+  integerY?: boolean;
 };
 
 // cssVar reads a design token at runtime so charts match the app theme instead
@@ -34,6 +41,30 @@ function palette(): string[] {
     cssVar('--warning', '#E8A23C'),
     '#E86F9E', '#5AD1C5',
   ];
+}
+
+// Timeline x-axes arrive as raw ISO-8601 UTC strings ("2026-08-18T10:00:00Z")
+// from the API. Rendering that string verbatim on an axis tick is unreadable
+// and the leftmost tick gets clipped by the chart's own width. Format as local
+// time appropriate to the range instead — one place, shared by every ECharts
+// surface (dashboard, chat, product insights, persons) since they all build
+// their option through this module.
+const ISO_LIKE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function formatAxisTick(value: string | number, series?: (string | number)[]): string {
+  if (typeof value !== 'string' || !ISO_LIKE.test(value)) return String(value);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const xs = series ?? [];
+  const first = xs[0];
+  const last = xs[xs.length - 1];
+  const spanMs = typeof first === 'string' && typeof last === 'string'
+    ? Math.abs(new Date(last).getTime() - new Date(first).getTime())
+    : 0;
+  return spanMs > DAY_MS
+    ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 // buildOption turns a ChartSpec into a themed ECharts option: transparent
@@ -77,18 +108,26 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
       type: 'category', data: spec.x ?? spec.series[0]?.data.map((_, i) => i + 1),
       boundaryGap: spec.type === 'bar',
       axisLine: { lineStyle: { color: gridColor } },
-      axisLabel: { color: axisColor, fontSize: 11, hideOverlap: true },
+      axisLabel: {
+        color: axisColor, fontSize: 11, hideOverlap: true,
+        formatter: (value: string) => formatAxisTick(value, spec.x),
+      },
       axisTick: { show: false },
     },
     yAxis: {
       type: 'value',
+      min: spec.integerY ? 0 : undefined,
+      minInterval: spec.integerY ? 1 : undefined,
       splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
-      axisLabel: { color: axisColor, fontSize: 11 },
+      axisLabel: {
+        color: axisColor, fontSize: 11,
+        formatter: spec.integerY ? (v: number) => String(Math.round(v)) : undefined,
+      },
     },
     series: spec.series.map((s, i) => ({
       name: s.name, type: spec.type === 'bar' ? 'bar' : 'line', data: s.data,
       stack: spec.stack ? 'total' : undefined,
-      smooth: spec.type !== 'bar', showSymbol: false,
+      smooth: spec.smooth ?? (spec.type !== 'bar'), showSymbol: false,
       lineStyle: spec.type !== 'bar' ? { width: 2 } : undefined,
       itemStyle: spec.type === 'bar' ? { borderRadius: [3, 3, 0, 0] } : undefined,
       areaStyle: spec.type === 'area' ? {

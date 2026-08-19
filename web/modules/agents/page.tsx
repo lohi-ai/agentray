@@ -38,6 +38,7 @@ export function AgentsPage() {
   const runs = agents.reduce((sum, a) => sum + a.run_count, 0);
   const tokens = agents.reduce((sum, a) => sum + a.token_input + a.token_output, 0);
   const spend = agents.reduce((sum, a) => sum + a.cost_usd, 0);
+  const spendUnpriced = agents.some((a) => a.cost_unpriced);
 
   const onCreate = () => setCreating(true);
 
@@ -66,7 +67,7 @@ export function AgentsPage() {
           { label: 'Needs attention', value: String(attention), tone: attention ? 'warning' : undefined },
           { label: 'Runs (24h)', value: formatCompact(runs) },
           { label: 'Tokens (24h)', value: formatCompact(tokens) },
-          { label: 'Spend (24h)', value: formatCost(spend) },
+          { label: 'Spend (24h)', value: formatCost(spend, spendUnpriced) },
         ]}
       />
       {agents.length === 0 && !isLoading ? (
@@ -89,21 +90,27 @@ export function AgentsPage() {
                 <div className="flex gap-3.5 pt-0.5 text-[11.5px] text-[var(--color-text-secondary)]">
                   <span>last run <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatRelative(row.last_run_at)}</b></span>
                   <span>runs <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{row.run_count}</b></span>
-                  <span>cost <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatCost(row.cost_usd)}</b></span>
+                  <span>cost <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatCost(row.cost_usd, row.cost_unpriced)}</b></span>
                 </div>
-                <div className="mt-0.5 flex items-center gap-2">
-                  {needsKey ? (
-                    <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(settingsPath('ai'))}>Add AI key</Button>
-                  ) : status === 'attention' ? (
-                    <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(`/agents/${row.id}/monitor`)}>Fix setup</Button>
-                  ) : status === 'paused' ? (
-                    <Button variant="outline" size="sm" icon={<Play size={15} />} onClick={() => void updateAgent(row.id, row.name, true)}>Resume</Button>
-                  ) : (
-                    <Button variant="primary" size="sm" icon={<MessagesSquare size={15} />} onClick={() => router.push(`/chat?agent=${row.id}`)}>Talk to agent</Button>
-                  )}
-                  <Button variant="ghost" size="sm" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${row.id}/setup`)}>Set up</Button>
-                  <Button variant="ghost" size="sm" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${row.id}/lab`)}>Lab</Button>
-                  <Button variant="ghost" size="sm" icon={<Share2 size={15} />} onClick={() => setAssigning({ id: row.id, name: row.name })}>Assign</Button>
+                <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5">
+                  <div className="min-w-0 flex-1">
+                    {needsKey ? (
+                      <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(settingsPath('ai'))}>Add AI key</Button>
+                    ) : status === 'attention' ? (
+                      <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(`/agents/${row.id}/monitor`)}>Fix setup</Button>
+                    ) : status === 'paused' ? (
+                      <Button variant="outline" size="sm" icon={<Play size={15} />} onClick={() => void updateAgent(row.id, row.name, true)}>Resume</Button>
+                    ) : (
+                      <Button variant="primary" size="sm" icon={<MessagesSquare size={15} />} onClick={() => router.push(`/chat?agent=${row.id}`)}>Talk to agent</Button>
+                    )}
+                  </div>
+                  {/* Secondary actions go icon-only with a tooltip + aria-label so the
+                      row never depends on card width to fit — a labeled row here used
+                      to overflow the card's overflow-hidden bound and clip "Lab" to a
+                      single letter on narrower cards. */}
+                  <Button variant="ghost" size="sm" isIconOnly tooltip="Set up" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${row.id}/setup`)}>Set up</Button>
+                  <Button variant="ghost" size="sm" isIconOnly tooltip="Lab" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${row.id}/lab`)}>Lab</Button>
+                  <Button variant="ghost" size="sm" isIconOnly tooltip="Assign" icon={<Share2 size={15} />} onClick={() => setAssigning({ id: row.id, name: row.name })}>Assign</Button>
                 </div>
               </div>
             );

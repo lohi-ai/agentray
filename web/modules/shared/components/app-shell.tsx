@@ -69,11 +69,13 @@ function SidebarFooter() {
         <Button label="EN" size="sm" variant="secondary" />
         <Button label="VI" size="sm" variant="ghost" />
       </div>
-      <div className="flex items-center gap-[9px] p-2 rounded-md bg-[var(--color-background-muted)]">
-        <Avatar name={accountName} size={24} />
-        <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-medium truncate">{accountName}</div>
-          <div className="text-[var(--color-text-secondary)] text-[11px] truncate">{workspace?.name || 'workspace'}</div>
+      <div className="flex items-center gap-2 p-2 rounded-md bg-[var(--color-background-muted)]">
+        <div className="flex-none">
+          <Avatar name={accountName} size={24} />
+        </div>
+        <div className="min-w-0 flex-1 overflow-hidden">
+          <div className="truncate text-[12.5px] font-medium">{accountName}</div>
+          <div className="truncate text-[11px] text-[var(--color-text-secondary)]">{workspace?.name || 'workspace'}</div>
         </div>
         <IconButton
           label="Log out"

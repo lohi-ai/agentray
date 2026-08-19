@@ -169,7 +169,7 @@ function RunsPane({ runs }: { runs: AgentRun[] }) {
             <span className="flex gap-3 font-mono tabular-nums">
               <span>{runLatency(run)}</span>
               <span>{formatCompact(run.token_input + run.token_output)} tok</span>
-              <span>{formatCost(run.cost_usd)}</span>
+              <span>{formatCost(run.cost_usd, run.cost_unpriced)}</span>
             </span>
           }
           endContent={

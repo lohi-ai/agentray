@@ -182,6 +182,7 @@ export function OperationsPage() {
   const failing = operators.filter((op) => operatorStatus(op).status === 'attention');
   const runs24h = operators.reduce((sum, op) => sum + op.runs_24h, 0);
   const spend24h = operators.reduce((sum, op) => sum + op.cost_24h, 0);
+  const spend24hUnpriced = operators.some((op) => op.cost_24h_unpriced);
   const needsReview = failing[0];
   const busyID = savingID ?? runningID;
 
@@ -205,7 +206,7 @@ export function OperationsPage() {
           { label: 'Needs attention', value: String(failing.length), tone: failing.length ? 'danger' : undefined },
           { label: 'Paused', value: String(operators.length - armed) },
           { label: 'Runs (24h)', value: String(runs24h) },
-          { label: 'Spend (24h)', value: formatCost(spend24h) },
+          { label: 'Spend (24h)', value: formatCost(spend24h, spend24hUnpriced) },
         ]}
       />
 

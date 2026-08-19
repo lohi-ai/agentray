@@ -41,8 +41,8 @@ function TraitChips({ traits }: { traits?: Record<string, unknown> }) {
           title={`${k}: ${traitText(v)}`}
           className="inline-flex max-w-[220px] items-center gap-1 rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)]"
         >
-          <span className="font-medium text-[var(--color-text-primary)]">{k}</span>
-          <span className="truncate">{traitText(v)}</span>
+          <span className="shrink-0 whitespace-nowrap font-medium text-[var(--color-text-primary)]">{k}</span>
+          <span className="min-w-0 truncate">{traitText(v)}</span>
         </span>
       ))}
       {rest > 0 ? <span className="text-[11px] text-[var(--color-text-secondary)]">+{rest}</span> : null}
@@ -127,6 +127,10 @@ export function PersonsPage() {
               x: persons.active_timeline.map((p) => p.hour),
               series: [{ name: 'Active people', data: persons.active_timeline.map((p) => p.count) }],
               height: 200,
+              // A count of discrete people — no smoothed curve through fractional
+              // values, and the y-axis should only ever print whole numbers.
+              smooth: false,
+              integerY: true,
             }} />
           )}
         </Panel>

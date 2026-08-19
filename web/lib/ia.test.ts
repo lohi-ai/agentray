@@ -28,6 +28,7 @@ import {
   navGroups,
   shouldShowFirstEventGuide,
   signedInLandingTarget,
+  formatRate,
 } from './ia';
 
 describe('nav grouping', () => {
@@ -230,6 +231,40 @@ describe('weakestLink', () => {
       missing: false,
     }));
     expect(link?.rate).toBeCloseTo(0.08);
+  });
+
+  it('never rounds a real conversion down to zero percent', () => {
+    // 16 of 4,783 is 0.3%, not 0%. Printing "0%" beside a non-zero count is
+    // how an owner learns to stop trusting the numbers.
+    expect(formatRate(16 / 4783)).toBe('0.3%');
+    expect(formatRate(0.0004)).toBe('<0.1%');
+    expect(formatRate(0)).toBe('0%');
+    expect(formatRate(0.08)).toBe('8%');
+    expect(formatRate(0.5)).toBe('50%');
+  });
+
+  it('carries plain-language stage labels alongside the raw event name', () => {
+    const link = weakestLink([
+      { event_name: 'user.pageview', count: 4783 },
+      { event_name: 'subscription_activated', count: 16 },
+    ]);
+    expect(link?.from).toBe('user.pageview');
+    expect(link?.fromLabel).toBe('visit');
+    expect(link?.toLabel).toBe('purchase');
+  });
+
+  it('counts the untracked stages between the two it matched', () => {
+    // visit -> purchase skips signup, activation and return.
+    const gap = weakestLink([
+      { event_name: 'user.pageview', count: 4783 },
+      { event_name: 'subscription_activated', count: 16 },
+    ]);
+    expect(gap?.stagesSkipped).toBe(3);
+    const adjacent = weakestLink([
+      { event_name: 'pageview', count: 1000 },
+      { event_name: 'signup', count: 80 },
+    ]);
+    expect(adjacent?.stagesSkipped).toBe(0);
   });
 
   it('treats a missing next stage as 0% conversion', () => {

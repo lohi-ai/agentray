@@ -1,7 +1,7 @@
 'use client';
 
-import { Activity, BarChart3, Compass, Database, LayoutTemplate, Megaphone, Newspaper, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
-import type { AgentPreset, TemplateChart } from '@/lib/api';
+import { Activity, ArrowUpRight, BarChart3, Check, Compass, Database, LayoutTemplate, Megaphone, Newspaper, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
+import type { Agent, AgentPreset, TemplateChart } from '@/lib/api';
 import { jobForPack } from '@/lib/jobs';
 import { useMarketplace, useTemplates } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -119,14 +119,37 @@ function MiniChart({ chart, index }: { chart: TemplateChart; index: number }) {
   );
 }
 
-function AgentPresetCard({ preset, installing, onInstall }: { preset: AgentPreset; installing: boolean; onInstall: () => void }) {
+function AgentPresetCard({
+  preset,
+  installing,
+  installedAgent,
+  onInstall,
+  onOpen,
+}: {
+  preset: AgentPreset;
+  installing: boolean;
+  // Set when this project already has an agent hired from this preset
+  // (Agent.preset_slug === preset.slug) — the card switches from "Install
+  // agent" to "Already on your team" so hiring the same teammate twice
+  // is not even offered, let alone silent.
+  installedAgent?: Agent;
+  onInstall: () => void;
+  onOpen: () => void;
+}) {
   const Icon = PRESET_ICON[preset.icon] ?? Sparkles;
   return (
     <div className="rounded-xl bg-[var(--color-background-card)] p-4 flex flex-col gap-[10px] transition-[transform,background,box-shadow] duration-[120ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] hover:-translate-y-0.5 hover:bg-[var(--color-background-muted)] hover:shadow-[0_8px_24px_-14px_rgba(0,0,0,0.75)]">
       <div className="flex items-center gap-[11px]">
         <span className="grid h-[38px] w-[38px] flex-none place-items-center rounded-[11px] bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Icon size={19} /></span>
-        <div>
-          <h3 className="m-0 text-sm font-semibold">{preset.name}</h3>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-[7px]">
+            <h3 className="m-0 text-sm font-semibold">{preset.name}</h3>
+            {installedAgent ? (
+              <span className="inline-flex items-center gap-1 rounded-[20px] px-[7px] py-[2px] text-[10.5px] font-semibold bg-[color-mix(in_srgb,var(--success)_16%,transparent)] text-success">
+                <Check size={10} /> On your team
+              </span>
+            ) : null}
+          </div>
           {/* The job this teammate is hired for reads better than the workload
               category it is filed under — "Prove the idea" says more to an owner
               than "validate". Falls back to the category for a pack no job
@@ -150,9 +173,15 @@ function AgentPresetCard({ preset, installing, onInstall }: { preset: AgentPrese
         </div>
       ) : null}
       <div className="mt-auto pt-[6px]">
-        <Button variant="primary" size="sm" icon={<Sparkles size={15} />} disabled={installing} onClick={onInstall}>
-          {installing ? 'Installing…' : 'Install agent'}
-        </Button>
+        {installedAgent ? (
+          <Button variant="outline" size="sm" icon={<ArrowUpRight size={15} />} onClick={onOpen}>
+            Open {installedAgent.name}
+          </Button>
+        ) : (
+          <Button variant="primary" size="sm" icon={<Sparkles size={15} />} disabled={installing} onClick={onInstall}>
+            {installing ? 'Installing…' : 'Install agent'}
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -181,7 +210,7 @@ function TemplateCard({ name, isSystem, description, charts, onApply }: { name: 
 }
 
 export function MarketplacePage() {
-  const { presets, loading, installing, installAgent } = useMarketplace();
+  const { presets, loading, installing, installAgent, installedByPreset, openInstalled } = useMarketplace();
   const { templates, applyTemplate } = useTemplates();
 
   return (
@@ -209,7 +238,17 @@ export function MarketplacePage() {
       ) : (
         <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
           {presets.map((p) => (
-            <AgentPresetCard key={p.slug} preset={p} installing={installing} onInstall={() => void installAgent(p.slug)} />
+            <AgentPresetCard
+              key={p.slug}
+              preset={p}
+              installing={installing}
+              installedAgent={installedByPreset.get(p.slug)}
+              onInstall={() => void installAgent(p.slug)}
+              onOpen={() => {
+                const agent = installedByPreset.get(p.slug);
+                if (agent) openInstalled(agent.id);
+              }}
+            />
           ))}
         </div>
       )}

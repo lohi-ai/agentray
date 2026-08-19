@@ -12,6 +12,7 @@ function agent(slug: string, id = slug): Agent {
     enabled: true,
     autonomy: 'suggest',
     workspace_path: '',
+    preset_slug: '',
     created_at: '',
     updated_at: '',
   };

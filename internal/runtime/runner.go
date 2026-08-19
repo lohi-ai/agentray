@@ -609,7 +609,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		if status.Exceeded && isBackgroundTrigger(trigger) {
 			runID, cerr := r.Store.CreateAgentRun(ctx, opts.ProjectID, scopeID, trigger, opts.SessionID)
 			if cerr == nil {
-				_ = r.Store.FinishAgentRun(ctx, runID, "error", "budget exhausted: "+status.Reason, 0, 0, 0)
+				_ = r.Store.FinishAgentRun(ctx, runID, "error", "budget exhausted: "+status.Reason, 0, 0, 0, false)
 			}
 			return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agent budget exhausted: %s", status.Reason)
 		}
@@ -680,7 +680,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	primary := ladder[0]
 	esc, err := buildRungs(ladder[1:])
 	if err != nil {
-		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
+		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 
@@ -690,7 +690,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	compactTC := tierSet.resolve(TierFromName(taskMap[storage.TaskCompaction]))
 	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey)
 	if err != nil {
-		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
+		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 
@@ -787,7 +787,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		},
 	})
 	if err != nil {
-		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0)
+		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 
@@ -836,7 +836,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if res.UnpersistedEntries > 0 {
 		summary = fmt.Sprintf("[warning: %d durable-log entries were not persisted — a resume may miss the last turn(s)]\n\n", res.UnpersistedEntries) + summary
 	}
-	_ = r.Store.FinishAgentRun(ctx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD)
+	_ = r.Store.FinishAgentRun(ctx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
 
 	if opts.Reflect && runErr == nil {
 		// Reflection resolves the agent's "reflection" task tier (defaults to pro,
@@ -851,7 +851,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	run := storage.AgentRun{
 		ID: runID, ProjectID: opts.ProjectID, Trigger: trigger, Status: status,
 		Summary: summary, TokenInput: res.Usage.InputTokens, TokenOutput: res.Usage.OutputTokens,
-		CostUSD: res.Usage.CostUSD,
+		CostUSD: res.Usage.CostUSD, CostUnpriced: res.Usage.CostUnpriced,
 	}
 	return run, res, runErr
 }

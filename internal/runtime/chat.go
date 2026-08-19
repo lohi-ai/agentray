@@ -220,6 +220,7 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		res.Usage.InputTokens += dec.Usage.InputTokens
 		res.Usage.OutputTokens += dec.Usage.OutputTokens
 		res.Usage.CostUSD += dec.Usage.CostUSD
+		res.Usage.CostUnpriced = res.Usage.CostUnpriced || dec.Usage.CostUnpriced
 		res.Stopped = true
 		s.maybeCompact(ctx, opts)
 		return res, nil
@@ -233,6 +234,7 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	res.Usage.InputTokens += dec.Usage.InputTokens
 	res.Usage.OutputTokens += dec.Usage.OutputTokens
 	res.Usage.CostUSD += dec.Usage.CostUSD
+	res.Usage.CostUnpriced = res.Usage.CostUnpriced || dec.Usage.CostUnpriced
 	s.persistAssistantTurn(ctx, opts, res.Final, res.RunID, res.Turns)
 	s.maybeCompact(ctx, opts)
 	return res, nil

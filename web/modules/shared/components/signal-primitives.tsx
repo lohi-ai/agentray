@@ -40,7 +40,7 @@ export type Tone = 'agent' | 'warning' | 'success' | 'danger';
 // height) is restored globally by the `.astryx-button` override in globals.css.
 const ASTRYX_VARIANT = { primary: 'primary', agent: 'primary', outline: 'secondary', ghost: 'ghost' } as const;
 
-export function Button({ children, variant, size, icon, onClick, disabled }: { children: ReactNode; variant: 'primary' | 'agent' | 'outline' | 'ghost'; size?: 'sm'; icon?: ReactNode; onClick?: () => void; disabled?: boolean }) {
+export function Button({ children, variant, size, icon, onClick, disabled, isIconOnly, tooltip }: { children: ReactNode; variant: 'primary' | 'agent' | 'outline' | 'ghost'; size?: 'sm'; icon?: ReactNode; onClick?: () => void; disabled?: boolean; isIconOnly?: boolean; tooltip?: string }) {
   const label = typeof children === 'string' ? children : '';
   return (
     <AstryxButton
@@ -50,6 +50,8 @@ export function Button({ children, variant, size, icon, onClick, disabled }: { c
       label={label}
       onClick={onClick}
       isDisabled={disabled}
+      isIconOnly={isIconOnly}
+      tooltip={tooltip}
       className={variant === 'agent' ? '![background:var(--agent)] !text-[var(--agent-foreground)]' : undefined}
     >
       {children}

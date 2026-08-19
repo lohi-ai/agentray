@@ -134,6 +134,19 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		// Summed model cost (USD) per run, filled by the tracing/pricing layer.
 		// Additive + nullable-with-default so existing runs read back 0.
 		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0`,
+		// Constant default, metadata-only on Postgres 11+: existing rows read as
+		// "priced" (the honest default for historical data written before this
+		// column existed — see agent_llm_calls' identical note). Every run
+		// finished from here on is stamped with the real answer.
+		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS cost_unpriced BOOLEAN NOT NULL DEFAULT false`,
+		// Backfill the history the constant default gets wrong. A run that burned
+		// tokens and recorded $0.00 was not free — it was unpriced, because its
+		// model was an alias the price table could not resolve. Leaving those rows
+		// as "priced, and it cost nothing" reproduces on every historical run the
+		// exact false zero the cost_unpriced column exists to end. Idempotent: once
+		// flipped, the WHERE no longer matches.
+		`UPDATE agent_runs SET cost_unpriced = true
+	WHERE cost_unpriced = false AND cost_usd = 0 AND token_input + token_output > 0`,
 		`CREATE TABLE IF NOT EXISTS agent_tool_calls (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
@@ -191,6 +204,16 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		// fall back to keyword recall.
 		`ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS embedding JSONB`,
 		`CREATE INDEX IF NOT EXISTS agent_memory_scope_idx ON agent_memory (scope_id, created_at DESC)`,
+		// A scheduled agent re-derives the same finding every cycle and words it
+		// slightly differently each time, so the readout filled up with one
+		// insight restated N times. seen_count/last_seen_at let a repeat fold
+		// into the row it repeats instead of appending a new card; the trigram
+		// index serves the "is this the same finding?" lookup so the check
+		// cannot degrade into a scan of every open row.
+		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1`,
+		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+		`CREATE INDEX IF NOT EXISTS agent_recommendations_title_trgm ON agent_recommendations USING gin (title gin_trgm_ops)`,
+		`CREATE INDEX IF NOT EXISTS agent_recommendations_open_idx ON agent_recommendations (project_id, status, last_seen_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS agent_sessions (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	scope_id UUID NOT NULL,
@@ -462,6 +485,19 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS context_window INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_context_window INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_context_window INTEGER NOT NULL DEFAULT 0`,
+		// Provenance: which marketplace preset (internal/workloads.Pack.Slug) an
+		// agent was hired from, if any — empty for a hand-created agent. This is
+		// what lets the marketplace tell "already hired" from "not hired yet"
+		// without matching on display name (names are user-editable and can
+		// collide, which is exactly how a project ends up with two agents both
+		// named "Product Scout" and no way to tell them apart in a menu). Additive
+		// + nullable-by-default on a small table, so no backfill is needed.
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS preset_slug VARCHAR(64) NOT NULL DEFAULT ''`,
+		// Installing the same preset twice into one project needs a fast lookup to
+		// stay idempotent (InstallAgentPreset checks this before creating a row).
+		// Partial: most agents have no preset_slug, so the index only carries the
+		// rows the check actually queries.
+		`CREATE INDEX IF NOT EXISTS agents_project_preset_idx ON agents (project_id, preset_slug) WHERE preset_slug <> ''`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
