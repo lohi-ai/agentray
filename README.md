@@ -116,8 +116,41 @@ Dashboards tab gives a readable answer before any custom chart is built.
 
 ## SDKs
 
-**Browser — `@agentray/browser`** (`sdk/browser/`). `npm install @agentray/browser`.
-One `init()` wires identity, batched delivery, retries, and `sendBeacon` flush on unload:
+`@agentray/browser`, `@agentray/server`, and PyPI `agentray` are **not published
+yet**. Do not `npm install` / `pip install` them — those names 404. Until they
+ship, paste the no-npm snippet below (it sends `user.pageview`, which lights
+Traffic and the Product funnel), or copy `sdk/browser/` / `sdk/server/` /
+`sdk/python/` into the product repo. Same hedge as `docs/SDK.md`.
+
+**Browser — no npm.** Paste before `</body>` (Framer, Carrd, Webflow, or a
+plain HTML file). Source of truth:
+`web/modules/start/components/instrument-snippet.tsx`.
+
+```html
+<script>
+(function () {
+  var HOST = 'https://agentray.example.com';
+  var KEY  = 'YOUR_PROJECT_API_KEY';
+  var id = localStorage.getItem('ar_id');
+  if (!id) { id = 'a-' + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('ar_id', id); }
+  function send(event, props) {
+    fetch(HOST + '/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: KEY, event: event, distinct_id: id,
+        properties: Object.assign({ '$referrer': document.referrer, '$current_url': location.href }, props || {})
+      }),
+      keepalive: true
+    });
+  }
+  send('user.pageview', { title: document.title, path: location.pathname });
+})();
+</script>
+```
+
+With a build step, copy `sdk/browser/` and `import { init } from './sdk/browser'`
+(or `@agentray/browser` **once that package is published**):
 
 ```ts
 import { init } from '@agentray/browser';
@@ -135,8 +168,9 @@ click capture with an explicit label, `data-track-ignore` mutes a subtree, and
 `data-track-view="label"` fires `element_viewed` once when the element becomes at
 least half visible. See `sdk/browser/README.md`.
 
-**Python — `agentray`** (`sdk/python/`). Non-blocking server-side capture with a
-background batch thread; PostHog-compatible payloads:
+**Python — `sdk/python/`.** Copy the package in; `pip install agentray` is not
+published. Non-blocking server-side capture with a background batch thread;
+PostHog-compatible payloads:
 
 ```python
 from agentray import Client
@@ -145,9 +179,9 @@ ar.capture("order_paid", distinct_id="user-123", properties={"amount": 29})
 ar.flush()
 ```
 
-**Node/Bun server — `@agentray/server`** (`sdk/server/`). Awaitable, idempotent
-capture for events the browser must not be trusted to send — payments,
-subscriptions, refunds:
+**Node/Bun server — `sdk/server/`.** Copy in; `@agentray/server` is not
+published. Awaitable, idempotent capture for events the browser must not be
+trusted to send — payments, subscriptions, refunds:
 
 ```ts
 import { AgentRayServerClient } from '@agentray/server';

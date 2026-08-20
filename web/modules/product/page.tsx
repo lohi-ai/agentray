@@ -5,7 +5,7 @@ import { Activity, Filter, LineChart, Sparkles, Table2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import type { ReactNode } from 'react';
 import type { InsightResult } from '@/lib/api';
-import { formatCompact, formatPercent } from '@/lib/format';
+import { formatFractionAsPercent } from '@/lib/format';
 import { Card } from '@astryxdesign/core/Card';
 import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
@@ -20,6 +20,7 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { Button, EmptyState, Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { headlineStats } from './headline';
 
 type Mode = 'trend' | 'funnel' | 'retention' | 'table';
 
@@ -144,49 +145,6 @@ function Headline({ insight }: { insight: InsightResult }) {
   return <StatsStrip stats={stats} />;
 }
 
-function headlineStats(insight: InsightResult): Parameters<typeof StatsStrip>[0]['stats'] {
-  if (insight.series?.length) {
-    const counts = insight.series.map((p) => p.count);
-    const total = counts.reduce((s, c) => s + c, 0);
-    const peak = Math.max(...counts, 0);
-    const first = counts[0] ?? 0;
-    const last = counts[counts.length - 1] ?? 0;
-    const delta = first > 0 ? ((last - first) / first) * 100 : 0;
-    return [
-      { label: 'Total events', value: formatCompact(total) },
-      { label: 'Peak / bucket', value: formatCompact(peak) },
-      { label: 'Latest', value: formatCompact(last), delta: `${Math.abs(delta).toFixed(0)}%`, deltaTone: delta >= 0 ? 'up' : 'down' },
-    ];
-  }
-  if (insight.funnel?.length) {
-    const first = insight.funnel[0];
-    const last = insight.funnel[insight.funnel.length - 1];
-    const conv = last?.conversion ?? 0;
-    return [
-      { label: 'Entered', value: formatCompact(first?.users ?? 0) },
-      { label: 'Completed', value: formatCompact(last?.users ?? 0) },
-      { label: 'Conversion', value: formatPercent(conv, 0), tone: conv >= 50 ? 'success' : conv >= 20 ? 'warning' : 'danger' },
-    ];
-  }
-  if (insight.retention?.length) {
-    const rates = insight.retention.map((r) => r.rate);
-    const avg = rates.reduce((s, r) => s + r, 0) / rates.length;
-    const best = Math.max(...rates, 0);
-    return [
-      { label: 'Periods', value: String(insight.retention.length) },
-      { label: 'Avg retention', value: formatPercent(avg * 100, 0) },
-      { label: 'Best period', value: formatPercent(best * 100, 0), tone: 'success' },
-    ];
-  }
-  if (insight.rows?.length) {
-    return [
-      { label: 'Rows', value: formatCompact(insight.rows.length) },
-      { label: 'Columns', value: String(Object.keys(insight.rows[0] ?? {}).length) },
-    ];
-  }
-  return [];
-}
-
 function ResultBody({ insight }: { insight: InsightResult }) {
   if (insight.series?.length) {
     return (
@@ -253,7 +211,7 @@ function FunnelTable({ funnel }: { funnel: FunnelStep[] }) {
     { key: 'step', header: 'Step', sortValue: (f) => f.step, renderCell: (f) => <span className="font-mono tabular-nums">{f.step + 1}</span> },
     { key: 'event_name', header: 'Event', renderCell: (f) => <span className="font-mono">{f.event_name}</span> },
     { key: 'users', header: 'Users', renderCell: (f) => <span className="font-mono tabular-nums">{f.users}</span> },
-    { key: 'conversion', header: 'Conv.', renderCell: (f) => <span className="font-mono tabular-nums">{f.conversion.toFixed(0)}%</span> },
+    { key: 'conversion', header: 'Conv.', renderCell: (f) => <span className="font-mono tabular-nums">{formatFractionAsPercent(f.conversion)}</span> },
   ], []);
   return <DataTable title="Funnel steps" columns={columns} data={funnel} idKey="step" pageSize={10} />;
 }

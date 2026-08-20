@@ -45,17 +45,43 @@ Refresh **Events / Web analytics** in the web app — your `hello_agentray` even
 appears alongside the seeded demo funnel.
 
 Instrument a real app instead. Event names that match `user.pageview` /
-`user.signup` / `user.conversion` light the Product funnel without a custom query:
+`user.signup` / `user.conversion` light the Product funnel without a custom query.
+`@agentray/browser` and PyPI `agentray` are **not published yet** — do not
+`npm install` / `pip install`. Paste this before `</body>` (same snippet as
+`web/modules/start/components/instrument-snippet.tsx`):
+
+```html
+<script>
+(function () {
+  var HOST = 'http://localhost:8088';
+  var KEY  = 'lohi_dev_project_token';
+  var id = localStorage.getItem('ar_id');
+  if (!id) { id = 'a-' + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('ar_id', id); }
+  function send(event, props) {
+    fetch(HOST + '/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: KEY, event: event, distinct_id: id, properties: props || {} }),
+      keepalive: true
+    });
+  }
+  send('user.pageview', { path: location.pathname });
+})();
+</script>
+```
+
+With a build step, copy `sdk/browser/` or `sdk/python/` into the product repo
+(`npm install @agentray/browser` / `pip install agentray` once those packages
+are published):
 
 ```ts
-// Browser — npm install @agentray/browser
 import { init } from '@agentray/browser';
 const ar = init({ host: 'http://localhost:8088', apiKey: 'lohi_dev_project_token', autocapture: true });
 ar.capture('user.pageview', { path: location.pathname });
 ```
 
 ```python
-# Python — pip install agentray
+# copy sdk/python/ — pip install agentray is not published
 from agentray import Client
 Client(host="http://localhost:8088", api_key="lohi_dev_project_token").capture(
     "user.signup", distinct_id="you", properties={"plan": "free"})

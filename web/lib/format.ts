@@ -34,6 +34,12 @@ export function formatPercent(value: number | undefined, digits = 1): string {
   return `${(value ?? 0).toFixed(digits)}%`;
 }
 
+// Store funnel conversion is users_at_step / users_at_first — a 0..1 fraction.
+// formatPercent takes 0..100. Scale here so Product never prints "0%" for 6/45.
+export function formatFractionAsPercent(fraction: number, digits = 0): string {
+  return formatPercent(fraction * 100, digits);
+}
+
 // formatDuration turns seconds into a compact human reading (2m 41s, 48s).
 export function formatDuration(seconds: number | undefined): string {
   const total = Math.max(0, Math.round(seconds ?? 0));
