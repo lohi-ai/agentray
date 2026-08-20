@@ -1417,7 +1417,7 @@ function parseSSEFrame(frame: string): { event: string; data: Record<string, unk
 }
 
 // agentQuery builds the `?agent=` selector the per-agent endpoints use (Lab,
-// AgentGarden definition/skills/tools/secrets/triggers); empty selects the
+// AgentGarden definition/skills/tools/secrets/triggers/memory); empty selects the
 // project's default agent. project_id is appended later by withProject.
 function agentQuery(agentID: string): string {
   return agentID ? `?agent=${encodeURIComponent(agentID)}` : '';
@@ -2025,12 +2025,12 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/agent/skills/${id}${agentQuery(agentID)}`), { method: 'DELETE' });
   }
 
-  agentMemory() {
-    return this.get<{ memory: AgentMemory[] }>('/api/agent/memory');
+  agentMemory(agentID = '') {
+    return this.get<{ memory: AgentMemory[] }>(`/api/agent/memory${agentQuery(agentID)}`);
   }
 
-  deleteAgentMemory(id: string) {
-    return this.request<void>(this.withProject(`/api/agent/memory/${id}`), { method: 'DELETE' });
+  deleteAgentMemory(id: string, agentID = '') {
+    return this.request<void>(this.withProject(`/api/agent/memory/${id}${agentQuery(agentID)}`), { method: 'DELETE' });
   }
 
   agentRuns(limit = 50) {

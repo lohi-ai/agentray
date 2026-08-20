@@ -64,6 +64,29 @@ type ToolTrace struct {
 	SpillLocator string `json:"spill_locator,omitempty"`
 }
 
+// ToolDenialReason is why a tool call was refused (ToolTrace.Reason).
+// Distinct from RunResult.StopReason — they share the "aborted" spelling
+// by coincidence (a cancelled run stops with StopReason "aborted" AND
+// remaining tool calls are denied with this reason). The JSON/wire value
+// is the existing literal so rows already written keep classifying.
+type ToolDenialReason string
+
+const (
+	// ToolDenialAborted is the loop's denial reason when a remaining call
+	// is short-circuited because the run was cancelled (agentcore/loop.go).
+	// ClassifyTool buckets this as ToolAborted; the loop itself also
+	// compares against it to decide whether a result is settled enough to
+	// persist. A typed constant so those two sites cannot drift from a typo.
+	ToolDenialAborted ToolDenialReason = "aborted"
+)
+
+// DeniedAborted reports whether this trace is the loop's cancel-denial.
+// Historical rows carry the bare string "aborted"; the comparison is on
+// that wire value.
+func (t ToolTrace) DeniedAborted() bool {
+	return t.Reason == string(ToolDenialAborted)
+}
+
 // toolOutcome is the result of executing one tool call: the persisted trace, the
 // tool-result message fed back to the model, whether the run should terminate,
 // and whether it counted against the tool-call budget (only real executions do).

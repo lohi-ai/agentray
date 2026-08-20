@@ -204,6 +204,24 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		// fall back to keyword recall.
 		`ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS embedding JSONB`,
 		`CREATE INDEX IF NOT EXISTS agent_memory_scope_idx ON agent_memory (scope_id, created_at DESC)`,
+		// Memory hygiene, ported from omp's mnemopi (packages/mnemopi): a store
+		// that only ever appends fills up with one fact restated N times. The
+		// reflection pass re-derives the same learning every run and words it
+		// differently each time, so seen_count/last_seen_at let a repeat fold
+		// into the row it repeats (the same fix agent_recommendations already
+		// got below, for the same symptom), and the trigram index serves the
+		// "is this the same memory?" lookup so the check cannot degrade into a
+		// scan of every row in the scope. superseded_by is mnemopi's soft
+		// retraction (store.ts invalidate): a memory that turned out wrong is
+		// filtered out of recall without losing the history of having held it.
+		// All additive + nullable/defaulted, matching the embedding column
+		// above; agent_memory is a small table (a scope holds tens of rows, not
+		// millions), so the defaulted ADD COLUMNs cannot stall startup.
+		`ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1`,
+		`ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+		`ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS superseded_by UUID`,
+		`CREATE INDEX IF NOT EXISTS agent_memory_content_trgm ON agent_memory USING gin (content gin_trgm_ops)`,
+		`CREATE INDEX IF NOT EXISTS agent_memory_live_idx ON agent_memory (scope_id, last_seen_at DESC) WHERE superseded_by IS NULL`,
 		// A scheduled agent re-derives the same finding every cycle and words it
 		// slightly differently each time, so the readout filled up with one
 		// insight restated N times. seen_count/last_seen_at let a repeat fold

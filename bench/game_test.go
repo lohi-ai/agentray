@@ -230,10 +230,10 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 			t.Logf("artifact copy %s: %v", f, cerr)
 		}
 	}
-	if derr := obs.dump(outDir); derr != nil {
+	if derr := obs.dump(outDir, res); derr != nil {
 		t.Logf("observer dump: %v", derr)
 	}
-	t.Logf("observed: %+v", obs.summarize())
+	t.Logf("observed: %+v", obs.summarize(res))
 	if slData, jerr := json.MarshalIndent(shellLog, "", "  "); jerr == nil {
 		if err := os.MkdirAll(outDir, 0o755); err == nil {
 			_ = os.WriteFile(filepath.Join(outDir, "shell-log.json"), slData, 0o644)

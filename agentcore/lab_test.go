@@ -145,6 +145,84 @@ func TestFoldNoSecretsLeak(t *testing.T) {
 	}
 }
 
+// Replayed runs used to hardcode Allowed: true because the persisted LLM-call
+// trace carried no gate outcome. That is worse than missing data: a blocked
+// call rendered as allowed on the Lab. Empty ToolGates is the historical
+// encoding and must stay allowed; a recorded denial must not.
+func TestFoldStepsCarriesToolDenial(t *testing.T) {
+	steps := FoldSteps([]TurnRecord{{
+		Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "", "")}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "write_dashboard", Arguments: "{}"}},
+		ToolGates: []ToolGate{{CallID: "c1", Allowed: false, Reason: "tool 'write_dashboard' is not permitted"}},
+	}})
+	if len(steps) != 1 || len(steps[0].ToolCalls) != 1 {
+		t.Fatalf("want 1 step with 1 tool call, got %+v", steps)
+	}
+	tc := steps[0].ToolCalls[0]
+	if tc.Allowed {
+		t.Fatal("replayed denial rendered as allowed")
+	}
+	if tc.Error != "tool 'write_dashboard' is not permitted" {
+		t.Fatalf("denial reason = %q", tc.Error)
+	}
+}
+
+func TestFoldStepsLegacyGatesDefaultAllowed(t *testing.T) {
+	steps := FoldSteps([]TurnRecord{{
+		Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "", "")}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "search", Arguments: "{}"}},
+	}})
+	if !steps[0].ToolCalls[0].Allowed {
+		t.Fatal("historical row without gates must not be rewritten as denied")
+	}
+}
+
+// Live explain folds at StepGate, before persistTrace has written
+// tool_gates_json. Without the overlay, FoldSteps treats empty gates as the
+// historical Allowed:true default and a live denial renders as allowed until
+// the run ends. ApplyLiveGates is the in-memory feed that closes that gap.
+func TestApplyLiveGatesOverlaysInMemoryDenial(t *testing.T) {
+	records := []TurnRecord{{
+		Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "", "")}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "write_dashboard", Arguments: "{}"}},
+	}}
+	traces := []ToolTrace{{CallID: "c1", Tool: "write_dashboard", Allowed: false, Reason: "not permitted"}}
+	steps := FoldSteps(ApplyLiveGates(records, traces))
+	if len(steps) != 1 || len(steps[0].ToolCalls) != 1 {
+		t.Fatalf("want 1 step with 1 tool call, got %+v", steps)
+	}
+	if steps[0].ToolCalls[0].Allowed {
+		t.Fatal("live denial rendered as allowed")
+	}
+	if steps[0].ToolCalls[0].Error != "not permitted" {
+		t.Fatalf("denial reason = %q", steps[0].ToolCalls[0].Error)
+	}
+}
+
+func TestApplyLiveGatesLeavesPersistedGates(t *testing.T) {
+	records := []TurnRecord{{
+		Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "", "")}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "search", Arguments: "{}"}},
+		ToolGates: []ToolGate{{CallID: "c1", Allowed: false, Reason: "persisted"}},
+	}}
+	traces := []ToolTrace{{CallID: "c1", Allowed: true}}
+	got := ApplyLiveGates(records, traces)
+	if len(got[0].ToolGates) != 1 || got[0].ToolGates[0].Allowed || got[0].ToolGates[0].Reason != "persisted" {
+		t.Fatalf("persisted gates rewritten: %+v", got[0].ToolGates)
+	}
+}
+
+func TestApplyLiveGatesEmptyTracesIsIdentity(t *testing.T) {
+	records := []TurnRecord{{
+		Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "", "")}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "search", Arguments: "{}"}},
+	}}
+	got := ApplyLiveGates(records, nil)
+	if len(got) != 1 || len(got[0].ToolGates) != 0 {
+		t.Fatalf("empty traces must not invent gates: %+v", got)
+	}
+}
+
 func TestDiffStep(t *testing.T) {
 	steps := FoldSteps([]TurnRecord{
 		{

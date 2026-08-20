@@ -20,12 +20,12 @@ import (
 // is a single flat object (id, name, … run_count, cost_usd, …).
 type AgentMonitorRow struct {
 	Agent
-	RunCount     int        `json:"run_count"`
-	RunningCount int        `json:"running_count"`
-	ErrorCount   int        `json:"error_count"`
-	TokenInput   int        `json:"token_input"`
-	TokenOutput  int        `json:"token_output"`
-	CostUSD      float64    `json:"cost_usd"`
+	RunCount     int     `json:"run_count"`
+	RunningCount int     `json:"running_count"`
+	ErrorCount   int     `json:"error_count"`
+	TokenInput   int     `json:"token_input"`
+	TokenOutput  int     `json:"token_output"`
+	CostUSD      float64 `json:"cost_usd"`
 	// CostUnpriced is true when CostUSD undercounts this agent's real spend —
 	// at least one of its runs billed a call against a model with no price
 	// entry. See AgentRun.CostUnpriced; this is the same fact, rolled up.

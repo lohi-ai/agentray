@@ -754,12 +754,20 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 	})
 
 	// --- long-term memory (§14.7, §14.10) ---
+	// Memory is agent-private: writes land on the agent scope, so list/delete
+	// must resolve that same scope. An empty `agent` query param keeps the
+	// default agent (the project id), so existing callers are unchanged.
 	e.GET("/api/agent/memory", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
 			return err
 		}
-		mem, err := store.ListAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, intParam(c, "limit", 50, 1, 200))
+		agentID := c.QueryParam("agent")
+		scopeID, serr := store.AgentScopeForRun(c.Request().Context(), project.ID, agentID)
+		if serr != nil {
+			return echo.NewHTTPError(http.StatusForbidden, serr.Error())
+		}
+		mem, err := store.ListAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, scopeID, intParam(c, "limit", 50, 1, 200))
 		if err != nil {
 			return err
 		}
@@ -771,7 +779,12 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if err != nil {
 			return err
 		}
-		if err := store.DeleteAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, c.Param("id")); err != nil {
+		agentID := c.QueryParam("agent")
+		scopeID, serr := store.AgentScopeForRun(c.Request().Context(), project.ID, agentID)
+		if serr != nil {
+			return echo.NewHTTPError(http.StatusForbidden, serr.Error())
+		}
+		if err := store.DeleteAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, scopeID, c.Param("id")); err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
 		return c.NoContent(http.StatusNoContent)

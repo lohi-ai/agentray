@@ -405,7 +405,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		scopeID = p.ProjectID
 	}
 
-	tools, hooks := buildToolsAndHooks(p)
+	tools, hooks := buildToolsAndHooks(p, scopeID)
 
 	names := permittedToolNames(p)
 	cfg := agentcore.Config{
@@ -525,10 +525,16 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 // Capabilities that own BOTH a tool and a hook — the run plan, the sandbox
 // guard — are plugins of their own instead, so neither half can be wired without
 // the other.
-func buildToolsAndHooks(p BuildParams) (*agentcore.ToolSet, agentcore.Hooks) {
+//
+// scopeID is the RESOLVED agent scope (already defaulted to the project), passed
+// separately from p because a handler that writes agent-private state — the
+// remember tool — must file it where recall reads it, and p.ScopeID is still
+// empty for the default agent.
+func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agentcore.Hooks) {
 	reg := usecase.Registry()
 	cc := opcore.CallContext{
 		ProjectID: p.ProjectID,
+		ScopeID:   scopeID,
 		RunID:     p.RunID,
 		Deps:      &usecase.Deps{Repo: p.Data, Memory: p.Memory, Notifier: p.Notifier},
 	}

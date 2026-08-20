@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -843,7 +844,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		// itself falling back to flash when pro is unconfigured). Best-effort.
 		rt := tierSet.resolve(TierFromName(taskMap[storage.TaskReflection]))
 		_ = r.reflect(ctx, reflectInput{
-			ProjectID: opts.ProjectID, RunID: runID, Provider: rt.Provider,
+			ProjectID: opts.ProjectID, ScopeID: scopeID, RunID: runID, Provider: rt.Provider,
 			Model: rt.Model, BaseURL: rt.BaseURL, APIKey: rt.APIKey, Memory: mem, Result: res,
 		})
 	}
@@ -1121,8 +1122,8 @@ func (r *Runner) RunTierWindow(ctx context.Context, projectID string) int {
 // loadSkills maps active stored skills into agentcore.Skill headers for the
 // definition. The full body is loaded only for the selected skills via
 // skillLoader, mirroring Claude Code's split metadata/content handling.
-func (r *Runner) loadSkills(ctx context.Context, projectID string) ([]agentcore.Skill, error) {
-	rows, err := r.Store.ActiveSkillHeadersForScope(ctx, projectID)
+func (r *Runner) loadSkills(ctx context.Context, scopeID string) ([]agentcore.Skill, error) {
+	rows, err := r.Store.ActiveSkillHeadersForScope(ctx, scopeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1233,8 +1234,13 @@ func applyAutonomyRail(tools []agentcore.Tool, trigger, autonomy string) []agent
 	return kept
 }
 
-// persistTrace writes each tool-call projection to agent_tool_calls (§5.2, §9).
+// persistTrace writes each tool-call projection to agent_tool_calls (§5.2, §9)
+// and attaches the gate outcome onto the LLM-call rows that requested those
+// tools. The LLM-call INSERT happens at provider-return, before the dispatcher
+// has a verdict, so a replayed Lab fold that only read tool_calls_json had
+// nothing to show and hardcoded Allowed: true.
 func (r *Runner) persistTrace(ctx context.Context, runID string, res agentcore.RunResult) {
+	gates := make([]agentcore.ToolGate, 0, len(res.Tools))
 	for _, t := range res.Tools {
 		meta := t.ResultMeta
 		if t.Reason != "" {
@@ -1246,7 +1252,18 @@ func (r *Runner) persistTrace(ctx context.Context, runID string, res agentcore.R
 		_ = r.Store.RecordAgentToolCall(ctx, runID, storage.AgentToolCall{
 			Tool: t.Tool, ArgsJSON: t.Args, Allowed: t.Allowed, ResultMeta: truncate(meta, 1000),
 		})
+		gates = append(gates, agentcore.ToolGate{
+			CallID: t.CallID, Allowed: t.Allowed, Reason: t.Reason, Error: t.Error,
+		})
 	}
+	if len(gates) == 0 {
+		return
+	}
+	raw, err := json.Marshal(gates)
+	if err != nil {
+		return
+	}
+	_ = r.Store.AttachAgentLLMCallGates(ctx, runID, string(raw))
 }
 
 func truncate(s string, n int) string {

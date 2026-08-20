@@ -29,19 +29,19 @@ type AgentRun struct {
 	// SessionID is the session this run belongs to: the client conversation id
 	// for a chat run, or — for a resume attempt — the durable session (original
 	// run id) it continued, so ResumeRun can follow the chain back to the log.
-	SessionID   string     `json:"session_id,omitempty"`
-	TokenInput  int        `json:"token_input"`
-	TokenOutput int        `json:"token_output"`
-	CostUSD     float64    `json:"cost_usd"` // summed model cost for the run (§ tracing)
+	SessionID   string  `json:"session_id,omitempty"`
+	TokenInput  int     `json:"token_input"`
+	TokenOutput int     `json:"token_output"`
+	CostUSD     float64 `json:"cost_usd"` // summed model cost for the run (§ tracing)
 	// CostUnpriced is true when CostUSD understates the run's real spend — at
 	// least one of its LLM calls billed against a model with no price-table
 	// entry, so that call's contribution is 0 rather than a real number. A
 	// reader must show this run's cost as "unpriced"/partial, never trust
 	// CostUSD alone as the full total.
-	CostUnpriced bool      `json:"cost_unpriced"`
-	Summary     string     `json:"summary"`
-	StartedAt   time.Time  `json:"started_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	CostUnpriced bool       `json:"cost_unpriced"`
+	Summary      string     `json:"summary"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 }
 
 // AgentToolCall is one persisted tool execution (§9 agent_tool_calls).
@@ -262,11 +262,50 @@ type AgentMemoryRow struct {
 	Confidence float64   `json:"confidence"`
 	SourceRun  string    `json:"source_run_id"`
 	CreatedAt  time.Time `json:"created_at"`
+	// SeenCount/LastSeenAt record re-confirmation: a memory the agent derives
+	// again folds into this row instead of appending a paraphrase of it, so a
+	// count above 1 means "learned repeatedly", not "said once". LastSeenAt is
+	// the recency the ranker uses, so re-confirming a fact makes it recent.
+	SeenCount  int       `json:"seen_count"`
+	LastSeenAt time.Time `json:"last_seen_at"`
 	Embedding  []float32 `json:"-"`
 }
 
+// memorySimilarity is the trigram score above which two memories in the same
+// scope and of the same kind are treated as the same fact. Deliberately higher
+// than recommendationSimilarity: a memory's content is longer and more specific
+// than a recommendation title, and the cost of being wrong is worse — folding
+// two genuinely distinct facts overwrites the older one's wording, and a fact
+// nobody can read back is a fact the agent has lost. Start conservative; the
+// read-time paraphrase dedup (agentcore/prompt.go) still catches what the fold
+// declines to merge.
+const memorySimilarity = 0.65
+
+// memoryRepeatWindow bounds how far back a repeat can fold into. Past this, the
+// same fact being re-derived is itself information — the agent re-learned it
+// after a long gap — so it earns its own row. Matches the recommendation
+// window for the same reason.
+const memoryRepeatWindow = 14 * 24 * time.Hour
+
 // RememberAgentMemory persists a memory entry. Caller redacts PII first (§7) and
 // supplies an optional embedding for semantic recall.
+//
+// A write is not an unconditional INSERT. The reflection pass re-derives the
+// same learning on every run and words it differently each time, so an
+// append-only store fills with one fact restated N times: the 500-row candidate
+// cap silently starves older, better memories out of vector recall, and every
+// recall pays for the restatements in the system prefix. So a memory that
+// closely matches a live one in the same scope and of the same kind folds into
+// it — the existing row records that it was seen again, keeps the highest
+// confidence observed, and takes the newest wording. This is the same fold
+// CreateRecommendation below already performs for the identical symptom, served
+// by the same kind of trigram index, and it is mnemopi's findDuplicate →
+// UPDATE (omp packages/mnemopi, core/beam/store.ts) made fuzzy.
+//
+// The embedding is rewritten alongside the content, because a vector that still
+// describes the superseded wording would rank the row against a query it no
+// longer says (mnemopi re-schedules the embedding on its update branch for the
+// same reason).
 func (s *Store) RememberAgentMemory(ctx context.Context, m AgentMemoryRow) error {
 	var srun any
 	if m.SourceRun != "" {
@@ -284,25 +323,80 @@ func (s *Store) RememberAgentMemory(ctx context.Context, m AgentMemoryRow) error
 		}
 		embedding = string(b)
 	}
-	_, err := s.pg.Exec(ctx, `
+
+	// Fold into the closest live match, if one is close enough. The trigram
+	// index serves the candidate lookup, so this stays cheap as the scope grows.
+	var existing string
+	err := s.pg.QueryRow(ctx, `
+SELECT id::text FROM agent_memory
+WHERE scope_id = $1 AND kind = $2 AND superseded_by IS NULL
+  AND last_seen_at > now() - $3::interval
+  AND similarity(content, $4) >= $5
+ORDER BY similarity(content, $4) DESC
+LIMIT 1`, m.ScopeID, m.Kind, memoryRepeatWindow.String(), m.Content, memorySimilarity).Scan(&existing)
+	if err == nil && existing != "" {
+		_, err = s.pg.Exec(ctx, `
+UPDATE agent_memory
+SET seen_count = seen_count + 1,
+    last_seen_at = now(),
+    confidence = GREATEST(confidence, $2),
+    content = $3,
+    tags = $4,
+    embedding = $5,
+    source_run_id = COALESCE($6, source_run_id)
+WHERE id = $1::uuid`, existing, m.Confidence, m.Content, tags, embedding, srun)
+		return err
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	_, err = s.pg.Exec(ctx, `
 INSERT INTO agent_memory (scope_id, kind, content, tags, confidence, source_run_id, embedding)
 VALUES ($1, $2, $3, $4, $5, $6, $7)`, m.ScopeID, m.Kind, m.Content, tags, m.Confidence, srun, embedding)
+	return err
+}
+
+// SupersedeAgentMemory soft-retracts one memory in favour of another: the row
+// stays, but every recall path filters it out. This is mnemopi's invalidate()
+// (core/beam/store.ts) — the minimum honest answer to "a memory written last
+// session is wrong this session", which a hard DELETE cannot give because it
+// loses the fact that the agent ever held the belief.
+//
+// Nothing calls it yet. It is the seam the soft-supersede column exists to
+// open: the model-facing edit/forget tool and a softer option for the existing
+// delete route are both owner decisions (docs/AGENT-GOVERNANCE.md), not
+// something this change assumes. replacementID may be empty, which retracts the
+// memory without naming a successor.
+func (s *Store) SupersedeAgentMemory(ctx context.Context, scopeID, id, replacementID string) error {
+	var replacement any
+	if replacementID != "" {
+		replacement = replacementID
+	}
+	_, err := s.pg.Exec(ctx, `
+UPDATE agent_memory SET superseded_by = COALESCE($3::uuid, id)
+WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL`, id, scopeID, replacement)
 	return err
 }
 
 // RecallAgentMemoryCandidates returns recent entries that have an embedding, for
 // Go-side cosine ranking (vector recall, §14.7). Bounded so ranking stays cheap;
 // pgvector + an ANN index is the scale upgrade when per-scope memory grows large.
+//
+// Retracted rows never leave the store, and "recent" means last SEEN, not first
+// written: a memory the agent re-confirmed this week is a recent memory even if
+// it was first learned months ago, and under the 500-row cap that is exactly the
+// row that must not be starved out by a wall of fresher one-offs.
 func (s *Store) RecallAgentMemoryCandidates(ctx context.Context, scopeID string, max int) ([]AgentMemoryRow, error) {
 	if max <= 0 || max > 1000 {
 		max = 500
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, scope_id::text, kind, content, tags, confidence,
-       coalesce(source_run_id::text,''), created_at, embedding
+       coalesce(source_run_id::text,''), created_at, seen_count, last_seen_at, embedding
 FROM agent_memory
-WHERE scope_id = $1 AND embedding IS NOT NULL
-ORDER BY created_at DESC LIMIT $2`, scopeID, max)
+WHERE scope_id = $1 AND embedding IS NOT NULL AND superseded_by IS NULL
+ORDER BY last_seen_at DESC LIMIT $2`, scopeID, max)
 	if err != nil {
 		return nil, err
 	}
@@ -374,6 +468,8 @@ func extractKeywords(query string) []string {
 // no usable terms — returns the most recent entries (recency fallback).
 // Vector recall (when embeddings exist) is a higher-relevance path layered above
 // this in the consumer; this keyword path is the always-available floor.
+// Superseded rows are excluded here too, so a retraction holds on both paths and
+// not only on the one that happened to be configured.
 func (s *Store) RecallAgentMemory(ctx context.Context, scopeID, query string, limit int) ([]AgentMemoryRow, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 8
@@ -382,10 +478,11 @@ func (s *Store) RecallAgentMemory(ctx context.Context, scopeID, query string, li
 	if len(keywords) == 0 {
 		// No usable terms: most-recent entries for the scope.
 		rows, err := s.pg.Query(ctx, `
-SELECT id::text, scope_id::text, kind, content, tags, confidence, coalesce(source_run_id::text,''), created_at
+SELECT id::text, scope_id::text, kind, content, tags, confidence, coalesce(source_run_id::text,''),
+       created_at, seen_count, last_seen_at
 FROM agent_memory
-WHERE scope_id = $1
-ORDER BY created_at DESC LIMIT $2`, scopeID, limit)
+WHERE scope_id = $1 AND superseded_by IS NULL
+ORDER BY last_seen_at DESC LIMIT $2`, scopeID, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -417,10 +514,11 @@ ORDER BY created_at DESC LIMIT $2`, scopeID, limit)
 	scoreExpr := strings.Join(score, " + ")
 
 	q := fmt.Sprintf(`
-SELECT id::text, scope_id::text, kind, content, tags, confidence, coalesce(source_run_id::text,''), created_at
+SELECT id::text, scope_id::text, kind, content, tags, confidence, coalesce(source_run_id::text,''),
+       created_at, seen_count, last_seen_at
 FROM agent_memory
-WHERE scope_id = $1 AND (%s)
-ORDER BY (%s) DESC, created_at DESC LIMIT $%d`, where, scoreExpr, limitParam)
+WHERE scope_id = $1 AND superseded_by IS NULL AND (%s)
+ORDER BY (%s) DESC, last_seen_at DESC LIMIT $%d`, where, scoreExpr, limitParam)
 
 	rows, err := s.pg.Query(ctx, q, args...)
 	if err != nil {
@@ -431,16 +529,26 @@ ORDER BY (%s) DESC, created_at DESC LIMIT $%d`, where, scoreExpr, limitParam)
 }
 
 // ListAgentMemory returns recent entries for a scope (member-readable).
-func (s *Store) ListAgentMemory(ctx context.Context, userID, projectID string, limit int) ([]AgentMemoryRow, error) {
+//
+// scopeID is the resolved agent scope (AgentScopeForRun): the default agent
+// is the project id, so an empty agent query param is byte-for-byte the old
+// path. userID+projectID remain the authorization boundary — naming an agent
+// must not let a caller read another user's project.
+func (s *Store) ListAgentMemory(ctx context.Context, userID, projectID, scopeID string, limit int) ([]AgentMemoryRow, error) {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
 		return nil, err
 	}
-	return s.RecallAgentMemory(ctx, project.ID, "", limit)
+	if scopeID == "" {
+		scopeID = project.ID
+	}
+	return s.RecallAgentMemory(ctx, scopeID, "", limit)
 }
 
-// DeleteAgentMemory removes one entry (owner/admin only).
-func (s *Store) DeleteAgentMemory(ctx context.Context, userID, projectID, id string) error {
+// DeleteAgentMemory removes one entry (owner/admin only). scopeID is the
+// resolved agent scope, same contract as ListAgentMemory; the row is keyed
+// on (id, scope_id) so a caller cannot delete another agent's memory by id.
+func (s *Store) DeleteAgentMemory(ctx context.Context, userID, projectID, scopeID, id string) error {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
 		return err
@@ -452,7 +560,10 @@ func (s *Store) DeleteAgentMemory(ctx context.Context, userID, projectID, id str
 	if !canManage {
 		return errAgentForbidden
 	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM agent_memory WHERE id = $1 AND scope_id = $2`, id, project.ID)
+	if scopeID == "" {
+		scopeID = project.ID
+	}
+	_, err = s.pg.Exec(ctx, `DELETE FROM agent_memory WHERE id = $1 AND scope_id = $2`, id, scopeID)
 	return err
 }
 
@@ -460,7 +571,8 @@ func scanMemoryRows(rows pgx.Rows) ([]AgentMemoryRow, error) {
 	out := []AgentMemoryRow{}
 	for rows.Next() {
 		var m AgentMemoryRow
-		if err := rows.Scan(&m.ID, &m.ScopeID, &m.Kind, &m.Content, &m.Tags, &m.Confidence, &m.SourceRun, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScopeID, &m.Kind, &m.Content, &m.Tags, &m.Confidence, &m.SourceRun,
+			&m.CreatedAt, &m.SeenCount, &m.LastSeenAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -475,7 +587,8 @@ func scanMemoryRowsWithEmbedding(rows pgx.Rows) ([]AgentMemoryRow, error) {
 	for rows.Next() {
 		var m AgentMemoryRow
 		var emb []byte
-		if err := rows.Scan(&m.ID, &m.ScopeID, &m.Kind, &m.Content, &m.Tags, &m.Confidence, &m.SourceRun, &m.CreatedAt, &emb); err != nil {
+		if err := rows.Scan(&m.ID, &m.ScopeID, &m.Kind, &m.Content, &m.Tags, &m.Confidence, &m.SourceRun,
+			&m.CreatedAt, &m.SeenCount, &m.LastSeenAt, &emb); err != nil {
 			return nil, err
 		}
 		if len(emb) > 0 {

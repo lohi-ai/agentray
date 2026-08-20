@@ -23,13 +23,30 @@ import (
 )
 
 // CallContext carries the per-invocation scope a handler runs under: the project
-// it acts on, the agent run that triggered it (empty for web/CLI callers), and
-// the dependency bundle it may touch. Deps is opaque to opcore (the usecase layer
-// type-asserts it) which keeps opcore free of any storage import.
+// it acts on, the agent whose persona/skills/memory the run is filed under, the
+// agent run that triggered it (empty for web/CLI callers), and the dependency
+// bundle it may touch. Deps is opaque to opcore (the usecase layer type-asserts
+// it) which keeps opcore free of any storage import.
 type CallContext struct {
 	ProjectID string
+	ScopeID   string // agent scope; empty for web/CLI/MCP callers, which act as the project
 	RunID     string
 	Deps      any
+}
+
+// MemoryScope is the scope key a handler must file agent-private state under —
+// long-term memory above all. It is the AGENT's scope id, not the project's,
+// because that is what recall reads (agentcore/loop.go passes def.ScopeID to
+// Recall). Writing under the project id instead made every non-default agent's
+// memory write-only: it filed under the project and recalled from itself, so
+// nothing it remembered ever came back. Falls back to the project for callers
+// that have no agent (REST, CLI, MCP), which is also what the default agent
+// resolves to — so its behaviour is unchanged.
+func (c CallContext) MemoryScope() string {
+	if c.ScopeID != "" {
+		return c.ScopeID
+	}
+	return c.ProjectID
 }
 
 // Operation is one capability, defined once. I is the decoded input struct, O the

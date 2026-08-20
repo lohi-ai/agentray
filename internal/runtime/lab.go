@@ -22,7 +22,10 @@ import (
 // Every step view the Lab renders — live (explain) or replayed (historical) — is
 // produced by agentcore.FoldSteps over the run's persisted agent_llm_calls trace,
 // so a run reads identically both ways (AC4) and secrets never surface (the trace
-// holds {{cred:NAME}} placeholders, AC2).
+// holds {{cred:NAME}} placeholders, AC2). Live explain overlays in-memory
+// ToolTrace verdicts onto that fold because persistTrace writes tool_gates_json
+// only after the loop returns; folding the table mid-run would render every
+// denial as Allowed:true until the run ends.
 type LabService struct {
 	store  *storage.Store
 	runner *Runner
@@ -197,13 +200,29 @@ Respond with a single line beginning with PASS or FAIL, followed by a dash and a
 
 // stepsForRun folds a run's persisted trace into Lab steps (AC4 replay). The
 // userID/projectID enforce that the run belongs to a project the caller can read;
-// the fold then reconstructs only what was recorded.
+// the fold then reconstructs only what was recorded. Live explain uses foldLive
+// instead, which overlays in-memory ToolTrace verdicts because persistTrace has
+// not yet written tool_gates_json when StepGate fires.
 func (s *LabService) stepsForRun(ctx context.Context, userID, projectID, runID string) ([]agentcore.LabStep, error) {
+	return s.foldLive(ctx, userID, projectID, runID, nil)
+}
+
+// foldLive is the live-explain fold: persisted LLM-call rows plus the
+// in-memory dispatcher traces. traces is nil/empty for replay.
+func (s *LabService) foldLive(ctx context.Context, userID, projectID, runID string, traces []agentcore.ToolTrace) ([]agentcore.LabStep, error) {
 	calls, err := s.store.AgentLLMCallTrace(ctx, userID, projectID, runID)
 	if err != nil {
 		return nil, err
 	}
-	return agentcore.FoldSteps(recordsFromCalls(calls)), nil
+	return foldRecords(calls, traces), nil
+}
+
+// foldRecords maps persisted LLM-call rows onto TurnRecords and overlays
+// in-memory gates before FoldSteps. Extracted so the live-explain contract
+// (empty tool_gates_json + dispatcher denial → not Allowed) is unit-testable
+// without a store.
+func foldRecords(calls []storage.AgentLLMCall, traces []agentcore.ToolTrace) []agentcore.LabStep {
+	return agentcore.FoldSteps(agentcore.ApplyLiveGates(recordsFromCalls(calls), traces))
 }
 
 // recordsFromCalls maps persisted LLM-call rows to the neutral TurnRecord shape
@@ -250,10 +269,15 @@ func recordsFromCalls(calls []storage.AgentLLMCall) []agentcore.TurnRecord {
 
 		var toolCalls []agentcore.ToolCall
 		_ = json.Unmarshal([]byte(c.ToolCallsJSON), &toolCalls)
+		var toolGates []agentcore.ToolGate
+		if c.ToolGatesJSON != "" && c.ToolGatesJSON != "[]" {
+			_ = json.Unmarshal([]byte(c.ToolGatesJSON), &toolGates)
+		}
 		out = append(out, agentcore.TurnRecord{
 			Messages:   msgs,
 			Response:   c.Response,
 			ToolCalls:  toolCalls,
+			ToolGates:  toolGates,
 			Tools:      c.Tools,
 			StopReason: c.StopReason,
 			Error:      c.Error,
@@ -325,6 +349,18 @@ func (s *LabService) StartExplain(ctx context.Context, userID, projectID, agentI
 		steer:     make(chan agentcore.Message, liveQueueDepth),
 	}
 	var runID string
+	// Live traces are the dispatcher verdicts persistTrace has not written yet.
+	// StreamTool is the completed trace (recordTool); StreamToolExecStart must
+	// not be collected — its zero Allowed would overlay a fake denial.
+	var liveMu sync.Mutex
+	var liveTraces []agentcore.ToolTrace
+	snapshotTraces := func() []agentcore.ToolTrace {
+		liveMu.Lock()
+		defer liveMu.Unlock()
+		out := make([]agentcore.ToolTrace, len(liveTraces))
+		copy(out, liveTraces)
+		return out
+	}
 
 	opts := RunOptions{
 		ProjectID: projectID,
@@ -345,8 +381,9 @@ func (s *LabService) StartExplain(ctx context.Context, userID, projectID, agentI
 				return nil // step 1 runs on start
 			}
 			// A turn just completed; fold the trace so far and show it, then wait for
-			// the user to advance (or stop / disconnect).
-			steps, _ := s.stepsForRun(gctx, userID, projectID, runID)
+			// the user to advance (or stop / disconnect). Overlay in-memory gates
+			// because persistTrace runs only after the loop returns.
+			steps, _ := s.foldLive(gctx, userID, projectID, runID, snapshotTraces())
 			emit(LabEvent{Type: "step", RunID: runID, Steps: steps, Current: len(steps) - 1})
 			select {
 			case <-sess.advance:
@@ -359,7 +396,14 @@ func (s *LabService) StartExplain(ctx context.Context, userID, projectID, agentI
 		},
 	}
 
-	run, res, err := s.runner.Run(ctx, opts)
+	run, res, err := s.runner.RunStream(ctx, opts, func(ev agentcore.StreamEvent) {
+		if ev.Type != agentcore.StreamTool || ev.Tool == nil {
+			return
+		}
+		liveMu.Lock()
+		liveTraces = append(liveTraces, *ev.Tool)
+		liveMu.Unlock()
+	})
 	if runID != "" {
 		s.unregister(runID)
 	}
@@ -368,7 +412,9 @@ func (s *LabService) StartExplain(ctx context.Context, userID, projectID, agentI
 		return err
 	}
 
-	steps, _ := s.stepsForRun(ctx, userID, projectID, run.ID)
+	// res.Tools is the complete in-memory trace; persistTrace has usually
+	// landed by now and ApplyLiveGates leaves those rows alone.
+	steps, _ := s.foldLive(ctx, userID, projectID, run.ID, res.Tools)
 	cur := len(steps) - 1
 	emit(LabEvent{Type: "done", RunID: run.ID, Steps: steps, Current: cur, Status: run.Status, Final: res.Final})
 	return nil

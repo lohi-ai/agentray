@@ -7,36 +7,51 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // reflectInput carries everything the reflect pass needs.
 type reflectInput struct {
 	ProjectID string
-	RunID     string
-	Provider  string
-	Model     string
-	BaseURL   string
-	APIKey    string
-	Memory    *PgMemory
-	Result    agentcore.RunResult
+	// ScopeID is the agent's own scope — where recall reads from and where
+	// loadSkills reads from. Memories and skill proposals are filed here, not
+	// under ProjectID; see applyMemories and applySkills.
+	ScopeID  string
+	RunID    string
+	Provider string
+	Model    string
+	BaseURL  string
+	APIKey   string
+	// Memory is the store the pass writes through — the interface, not *PgMemory,
+	// because the pass only ever calls Remember, and the scope it writes under is
+	// the thing worth testing without a database behind it.
+	Memory agentcore.MemoryStore
+	Result agentcore.RunResult
 }
 
 // reflectMaxTokens caps the offline pass; reflection is token-bounded and never
 // gains tool access (§14.9).
 const reflectMaxTokens = 1024
 
+// reflectMemory is one durable memory the reflection pass proposes.
+type reflectMemory struct {
+	Kind    string   `json:"kind"`
+	Content string   `json:"content"`
+	Tags    []string `json:"tags"`
+}
+
 // reflectOutput is the structured proposal the model returns.
 type reflectOutput struct {
-	Memories []struct {
-		Kind    string   `json:"kind"`
-		Content string   `json:"content"`
-		Tags    []string `json:"tags"`
-	} `json:"memories"`
-	Skills []struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Body        string `json:"body"`
-	} `json:"skills"`
+	Memories []reflectMemory `json:"memories"`
+	Skills   []reflectSkill  `json:"skills"`
+}
+
+// reflectSkill is one playbook the reflection pass proposes. It is recorded as
+// a proposal, not auto-applied — skill writes are capability-adjacent.
+type reflectSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Body        string `json:"body"`
 }
 
 // reflect runs the self-improvement pass (§14.9): the model reviews the run's
@@ -70,7 +85,56 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 	}
 
 	// Memory writes auto-apply (PgMemory redacts PII on the write path).
-	for _, m := range out.Memories {
+	in.applyMemories(ctx, out.Memories)
+
+	// Skill writes are capability-adjacent → human-approved (recorded as proposals).
+	in.applySkills(ctx, r.Store, out.Skills)
+	return nil
+}
+
+// skillProposer is the write seam applySkills needs — ProposeAgentSkill on
+// *storage.Store, narrowed so the pass can be tested without a database.
+type skillProposer interface {
+	ProposeAgentSkill(ctx context.Context, scopeID string, sk storage.AgentSkill) error
+}
+
+// applySkills records the pass's proposed skills under the AGENT's scope.
+// Skills are read from that same scope (loadSkills → ActiveSkillHeadersForScope),
+// so filing them under the project made every self-authored skill by a
+// non-default agent invisible to the agent that proposed it — even after the
+// owner approved it, because ApproveAgentSkill / ListAgentSkills already key
+// on the agent scope. For the default agent the two ids are the same, so its
+// behaviour is unchanged.
+//
+// Best-effort by design: a proposal that fails to persist must not fail the
+// run that produced it, exactly as before.
+func (in reflectInput) applySkills(ctx context.Context, store skillProposer, proposed []reflectSkill) {
+	if store == nil {
+		return
+	}
+	for _, s := range proposed {
+		name := strings.TrimSpace(s.Name)
+		if name == "" || strings.TrimSpace(s.Body) == "" {
+			continue
+		}
+		_ = store.ProposeAgentSkill(ctx, in.ScopeID, storageSkill(name, s.Description, s.Body))
+	}
+}
+
+// applyMemories persists the pass's proposed memories under the AGENT's
+// scope. That scope — not the project's — is the one recall reads
+// (agentcore/loop.go hands def.ScopeID to Recall), so filing them under the
+// project made every reflection by a non-default agent write-only: it wrote to
+// the project and read from itself, and nothing it learned ever came back. For
+// the default agent the two ids are the same, so its behaviour is unchanged.
+//
+// Best-effort by design: a memory that fails to persist must not fail the run
+// that produced it, exactly as before.
+func (in reflectInput) applyMemories(ctx context.Context, proposed []reflectMemory) {
+	if in.Memory == nil {
+		return
+	}
+	for _, m := range proposed {
 		content := strings.TrimSpace(m.Content)
 		if content == "" {
 			continue
@@ -80,20 +144,10 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 			kind = agentcore.MemoryLearning
 		}
 		_ = in.Memory.Remember(ctx, agentcore.MemoryEntry{
-			ScopeID: in.ProjectID, Kind: kind, Content: content, Tags: m.Tags,
+			ScopeID: in.ScopeID, Kind: kind, Content: content, Tags: m.Tags,
 			Confidence: 0.6, SourceRun: in.RunID,
 		})
 	}
-
-	// Skill writes are capability-adjacent → human-approved (recorded as proposals).
-	for _, s := range out.Skills {
-		name := strings.TrimSpace(s.Name)
-		if name == "" || strings.TrimSpace(s.Body) == "" {
-			continue
-		}
-		_ = r.Store.ProposeAgentSkill(ctx, in.ProjectID, storageSkill(name, s.Description, s.Body))
-	}
-	return nil
 }
 
 const reflectSystemPrompt = `You are the reflection pass of an analytics agent. You do NOT act or call tools.

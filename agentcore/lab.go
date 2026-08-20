@@ -98,15 +98,82 @@ type LabStep struct {
 // A consumer maps its persisted trace rows (storage.AgentLLMCall) onto this
 // neutral shape so the fold itself imports no storage.
 type TurnRecord struct {
-	Messages   []Message  // the request messages sent to the model this turn
-	Response   string     // assistant text returned
-	ToolCalls  []ToolCall // the tool calls the model requested this turn
-	Tools      []string   // advertised tool names this turn
+	Messages  []Message  // the request messages sent to the model this turn
+	Response  string     // assistant text returned
+	ToolCalls []ToolCall // the tool calls the model requested this turn
+	// ToolGates is the gate outcome of each call in ToolCalls. Empty means the
+	// recording predates this field (or the turn requested no tools) — FoldSteps
+	// then keeps the historical default rather than inventing denials. See ToolGate.
+	ToolGates  []ToolGate
+	Tools      []string // advertised tool names this turn
 	StopReason string
 	Error      string
 	TokensIn   int
 	TokensOut  int
 	CostUSD    float64
+}
+
+// ToolGate is the persisted gate outcome of one tool call the model requested.
+// CallID matches ToolCall.ID. The LLM-call trace used to carry only the request
+// (name + args), so FoldSteps had nothing to read and hardcoded Allowed: true —
+// a replayed denial rendered as an allowed call, which is worse than missing
+// data on a debugging surface. Empty ToolGates on a TurnRecord is the
+// pre-column default; FoldSteps does not rewrite those as denied.
+type ToolGate struct {
+	CallID  string `json:"call_id"`
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ApplyLiveGates overlays in-memory dispatcher verdicts onto TurnRecords
+// whose ToolGates are still empty. Live explain folds at StepGate, which
+// fires before persistTrace writes tool_gates_json; FoldSteps then treats
+// empty gates as the historical Allowed:true default and a live denial
+// renders as allowed until the run ends. This is the consumer mapping
+// that closes that gap without a DB round-trip and without importing
+// storage into FoldSteps (TurnRecord exists for that reason).
+//
+// Records that already carry gates (replay, or a persistTrace that has
+// landed) are left alone — live overlay must not rewrite persisted truth.
+// A crash mid-run therefore degrades to today's empty-gates view rather
+// than inventing denials. Pure: same inputs → same records.
+//
+// The join key is ToolCall.ID / ToolTrace.CallID. Traces without a CallID
+// cannot be paired and are skipped.
+func ApplyLiveGates(records []TurnRecord, traces []ToolTrace) []TurnRecord {
+	if len(records) == 0 || len(traces) == 0 {
+		return records
+	}
+	byID := make(map[string]ToolGate, len(traces))
+	for _, t := range traces {
+		if t.CallID == "" {
+			continue
+		}
+		byID[t.CallID] = ToolGate{CallID: t.CallID, Allowed: t.Allowed, Reason: t.Reason, Error: t.Error}
+	}
+	if len(byID) == 0 {
+		return records
+	}
+	out := make([]TurnRecord, len(records))
+	copy(out, records)
+	for i := range out {
+		if len(out[i].ToolGates) > 0 {
+			continue
+		}
+		gates := make([]ToolGate, 0, len(out[i].ToolCalls))
+		for _, c := range out[i].ToolCalls {
+			g, ok := byID[c.ID]
+			if !ok {
+				continue
+			}
+			gates = append(gates, g)
+		}
+		if len(gates) > 0 {
+			out[i].ToolGates = gates
+		}
+	}
+	return out
 }
 
 // FoldSteps turns a run's ordered turn records into the Lab's step list. It
@@ -171,12 +238,14 @@ func FoldSteps(records []TurnRecord) []LabStep {
 
 		calls := make([]LabToolCall, 0, len(r.ToolCalls))
 		for _, c := range r.ToolCalls {
+			allowed, errStr := gateOutcome(r.ToolGates, c.ID)
 			calls = append(calls, LabToolCall{
 				ID:      c.ID,
 				Name:    c.Name,
 				Args:    c.Arguments,
 				Result:  results[c.ID],
-				Allowed: true,
+				Allowed: allowed,
+				Error:   errStr,
 			})
 		}
 
@@ -208,6 +277,26 @@ func FoldSteps(records []TurnRecord) []LabStep {
 		})
 	}
 	return steps
+}
+
+// gateOutcome looks up the recorded gate for one tool call. No gates on the
+// record is the historical encoding (Allowed: true) — we must not rewrite
+// those rows as denials. A matching gate is the live/replayed truth.
+func gateOutcome(gates []ToolGate, callID string) (allowed bool, errStr string) {
+	if len(gates) == 0 {
+		return true, ""
+	}
+	for _, g := range gates {
+		if g.CallID != callID {
+			continue
+		}
+		errStr = g.Error
+		if errStr == "" {
+			errStr = g.Reason
+		}
+		return g.Allowed, errStr
+	}
+	return true, ""
 }
 
 // systemPrompt returns the leading system message's content, the assembled

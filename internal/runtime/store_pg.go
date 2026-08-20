@@ -3,7 +3,9 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -72,22 +74,59 @@ func (m *PgMemory) recallByVector(ctx context.Context, scopeID, query string, li
 	return toEntries(ranked), true
 }
 
-// rankByVector orders rows with embeddings by descending cosine similarity to
-// query and returns the top `limit`. Pure (no IO) so it is unit-testable without
-// Postgres or an LLM key.
+// recallCosineFloor is the similarity below which a row is not about the query
+// at all. Without a floor, an off-topic task still returns the eight
+// highest-cosine rows in the scope however low those cosines are, and they then
+// sit in the system prefix for the whole run — paid for on every turn, relevant
+// to nothing. Ported from mnemopi's minimumRelevance (omp packages/mnemopi,
+// core/beam/recall.ts scoreCandidate, which drops a candidate outright rather
+// than ranking it low). Dropping every candidate is not a new failure mode: the
+// caller reports ok=false and the keyword path — which has always been the
+// always-available floor — runs instead.
+//
+// 0.25 is a starting point, not a measured one: low enough that a genuinely
+// related memory survives a mediocre embedding, high enough that an unrelated
+// one does not.
+const recallCosineFloor = 0.25
+
+// recallHalfLife is how fast the recency term decays. Re-confirming a memory
+// resets it (the store folds a repeat into last_seen_at), so this measures
+// "when was this last true", not "when was it first written".
+const recallHalfLife = 30 * 24 * time.Hour
+
+// rankByVector orders rows with embeddings by descending relevance to query and
+// returns the top `limit`. Pure (no IO) so it is unit-testable without Postgres
+// or an LLM key.
+//
+// Relevance is cosine, adjusted — never overruled — by two bounded multipliers,
+// which is mnemopi's shape (score * (0.7 + 0.3*decay), plus a per-source weight
+// table): a materially better cosine always wins, and the adjustments only
+// settle rows that the vector cannot separate.
+//
+//   - confidence, which the store has always persisted and nothing has ever
+//     read: 0.7 for a fact the model chose to remember via the tool, 0.6 for one
+//     the reflection pass inferred on its own. Clamped to [0.6, 1.0] so the
+//     discount is mild and a low-confidence row is demoted, not silenced.
+//   - recency of last confirmation, contributing at most 30% either way, so a
+//     stale-but-on-topic memory still outranks a fresh irrelevance.
 func rankByVector(query []float32, rows []storage.AgentMemoryRow, limit int) []storage.AgentMemoryRow {
 	type scored struct {
-		row storage.AgentMemoryRow
-		sim float64
+		row   storage.AgentMemoryRow
+		score float64
 	}
+	now := time.Now()
 	cand := make([]scored, 0, len(rows))
 	for _, r := range rows {
 		if len(r.Embedding) == 0 {
 			continue
 		}
-		cand = append(cand, scored{row: r, sim: agentcore.Cosine(query, r.Embedding)})
+		sim := agentcore.Cosine(query, r.Embedding)
+		if sim < recallCosineFloor {
+			continue
+		}
+		cand = append(cand, scored{row: r, score: sim * confidenceWeight(r.Confidence) * (0.7 + 0.3*recencyDecay(r, now))})
 	}
-	sort.SliceStable(cand, func(i, j int) bool { return cand[i].sim > cand[j].sim })
+	sort.SliceStable(cand, func(i, j int) bool { return cand[i].score > cand[j].score })
 	if limit <= 0 || limit > len(cand) {
 		limit = len(cand)
 	}
@@ -96,6 +135,41 @@ func rankByVector(query []float32, rows []storage.AgentMemoryRow, limit int) []s
 		out = append(out, cand[i].row)
 	}
 	return out
+}
+
+// confidenceWeight maps a row's persisted confidence to a bounded rank
+// multiplier. Clamped to [0.6, 1.0]: an unset/legacy 0 confidence must not
+// zero a row out of recall, and a 0.6 reflection-derived memory is discounted
+// against a 0.7 model-asserted one by 14%, not silenced.
+func confidenceWeight(confidence float64) float64 {
+	switch {
+	case confidence < 0.6:
+		return 0.6
+	case confidence > 1.0:
+		return 1.0
+	default:
+		return confidence
+	}
+}
+
+// recencyDecay returns 1 for a memory confirmed now, halving every
+// recallHalfLife, and never below 0. Rows written before last_seen_at existed
+// carry a zero timestamp; those fall back to created_at, and a row with neither
+// scores as fully decayed rather than as maximally fresh — the safe direction,
+// since an unknown age must not outrank a known-recent memory.
+func recencyDecay(r storage.AgentMemoryRow, now time.Time) float64 {
+	at := r.LastSeenAt
+	if at.IsZero() {
+		at = r.CreatedAt
+	}
+	if at.IsZero() {
+		return 0
+	}
+	age := now.Sub(at)
+	if age <= 0 {
+		return 1
+	}
+	return math.Pow(0.5, age.Seconds()/recallHalfLife.Seconds())
 }
 
 // toEntries maps storage rows into agentcore memory entries.

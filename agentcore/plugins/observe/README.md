@@ -119,6 +119,49 @@ Adopted from deepseek-harness, which asserts the same property at runtime
   errors, because losing a trace line is strictly better than losing the run
   that produced it.
 
+### RunSummary
+
+`runsummary.go` is a pure fold, not a plugin: it registers nothing, persists
+nothing, and touches no run state. `FoldRun(res, records)` turns the two values
+a finished run already produced — the `agentcore.RunResult` an `AgentEndHook`
+receives and the `TraceRecord` stream `Monitor` emitted — into a `RunSummary`
+and a `RunCoverage`. Mirrors `LogInvariant`: it reports, it does not act.
+
+Adopted from omp's `packages/agent/src/run-collector.ts`
+(`AgentRunSummary` / `AgentRunCoverage`).
+
+- **A blocked call is counted.** The rollup folds `RunResult.Tools`, where
+  `ToolTrace.Allowed`/`Reason` have carried the denial all along — so
+  `ToolCounters` splits `ok / error / blocked / aborted` as a closed vocabulary,
+  per run and per tool name, and `Total` is every call the MODEL ASKED FOR
+  whether or not it executed. This is what closes the `After`-hook limitation
+  listed below.
+- **Coverage is the prompt-surface audit.** `ToolsAvailable` (union of
+  `TraceRecord.Tools`) minus `ToolsInvoked` (union of `RunResult.Tools[].Tool`)
+  is `ToolsUnused` — the tools a persona pays schema tokens to advertise on
+  every request and never calls. A name in `ToolsInvoked` that is absent from
+  `ToolsAvailable` is the other direction worth catching: the model called
+  something that was never offered.
+- **Delegated calls are filtered out.** A parent and its spawned children share
+  one provider and one `Sink`, so `FoldRun` keeps only `Depth == 0` records.
+  Without that a subagent's advertisements land in the parent's coverage.
+- **Coverage is a PER-INVOCATION claim.** A resumed run's records start at the
+  resume point, so its `ToolsUnused` is not the session's. Use
+  `AggregateRunCoverage` to span invocations.
+- **No tokens, no cost — on purpose.** See "No aggregation" below.
+- **`AggregateRunSummaries` / `AggregateRunCoverage`** fold N runs into the same
+  shape, so a harness repeating a task has somewhere to put the repetitions and
+  a consumer needs no second rendering path.
+- **`IsGhostRun`** classifies a run with a failed provider call, no tool the
+  model asked for, and no billable tokens as infrastructure noise rather than a
+  model failure — omp's `isGhostRun`, whose point is to keep a flaky provider
+  out of the score denominator. `RunSummary.GhostRuns` carries the count, so a
+  scoreable denominator is `Runs - GhostRuns`.
+- **Derived and discarded.** The value is deliberately not persisted and not a
+  second source of truth. Making it durable would be a separate governance
+  decision, and it should be a materialized view over `agent_llm_calls`, not a
+  new write on the run path.
+
 ## Composition
 
 As a plugin, over a whole composition:
@@ -152,7 +195,10 @@ function.
   in a different order passes.
 - **No hook for a *blocked* tool call** distinct from an executed one — the
   `After` hook runs post-gate, so a consumer wanting to meter denials must read
-  the trace instead.
+  the trace instead. **Closed at the rollup level:** `RunSummary` folds
+  `RunResult.Tools`, not the hook stream, so denials are counted (`ToolBlocked`)
+  even though no hook fires for them. The gap that remains is only the live
+  per-call *event* — there is still nothing to subscribe to mid-run.
 - **`Hooks` cannot observe extension activity.** An additional context injected
   by another plugin arrives as an ordinary message; there is no event saying
   which plugin produced it.
@@ -166,6 +212,12 @@ function.
   writing JSONL will fill the disk eventually.
 - **Sinks are called synchronously** on the request path. A slow sink slows the
   run. Buffer inside your own `Sink` if that matters.
-- **No aggregation.** `Monitor` emits per-call records; rolling them into
-  per-run or per-agent totals is the consumer's job (agentray does it in
-  Postgres).
+- **No token or cost aggregation, and this holds.** `Monitor` emits per-call
+  records; rolling tokens and spend into per-run or per-agent totals is the
+  consumer's job, and agentray does it in Postgres (`agent_runs.cost_usd`,
+  `token_input`, `token_output` — `internal/dataplane/store/agent_runtime.go`).
+  `RunSummary` folds per-call records into per-run *counts* in process, for
+  tests and the bench, and deliberately carries no `Usage` or cost fields:
+  duplicating them here would create a second source of truth for numbers
+  Postgres already owns. `IsGhostRun` takes the usage it needs as an argument
+  for exactly that reason.

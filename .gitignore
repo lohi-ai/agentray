@@ -16,3 +16,6 @@ web/.next
 bench/results/
 bench/solutions/
 /air-tmp/
+
+# Stray vitest cache at the repo root (the web app has its own node_modules)
+/node_modules

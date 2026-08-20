@@ -749,3 +749,15 @@ func TestTruncateBytesIsRuneSafe(t *testing.T) {
 		t.Fatalf("expected truncation marker, got %q", out)
 	}
 }
+
+func TestDeniedAbortedMatchesWireLiteral(t *testing.T) {
+	if ToolDenialAborted != "aborted" {
+		t.Fatalf("wire value changed: %q (historical rows carry \"aborted\")", ToolDenialAborted)
+	}
+	if !(ToolTrace{Reason: "aborted"}).DeniedAborted() {
+		t.Fatal("historical reason=aborted must classify as abort denial")
+	}
+	if (ToolTrace{Reason: "tool-call budget exhausted"}).DeniedAborted() {
+		t.Fatal("other denials must not classify as abort")
+	}
+}

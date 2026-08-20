@@ -1088,7 +1088,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			if err := ctx.Err(); err != nil {
 				for i := lo; i < len(calls); i++ {
 					outcomes[i] = toolOutcome{
-						trace:   ToolTrace{CallID: calls[i].ID, Tool: calls[i].Name, Args: calls[i].Arguments, Allowed: false, Reason: "aborted"},
+						trace:   ToolTrace{CallID: calls[i].ID, Tool: calls[i].Name, Args: calls[i].Arguments, Allowed: false, Reason: string(ToolDenialAborted)},
 						message: toolResult(calls[i], "stopped: run aborted"),
 					}
 				}
@@ -1155,7 +1155,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			recordTool(outcomes[i].trace)
 			res.Messages = append(res.Messages, msg)
 			settled := !aborting ||
-				(outcomes[i].trace.Error == "" && outcomes[i].trace.Reason != "aborted")
+				(outcomes[i].trace.Error == "" && !outcomes[i].trace.DeniedAborted())
 			if settled {
 				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
 			}

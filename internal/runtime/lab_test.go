@@ -116,6 +116,7 @@ func TestRecordsFromCalls(t *testing.T) {
 		{
 			MessagesJSON:  `[{"role":"system","content":"# Identity\nYou help."},{"role":"user","content":"hi"}]`,
 			ToolCallsJSON: `[{"id":"c1","name":"search","arguments":"{\"q\":\"x\"}"}]`,
+			ToolGatesJSON: `[{"call_id":"c1","allowed":false,"reason":"not permitted"}]`,
 			Tools:         []string{"search"},
 			Response:      "thinking",
 			StopReason:    "tool_calls",
@@ -135,8 +136,48 @@ func TestRecordsFromCalls(t *testing.T) {
 	if len(r.ToolCalls) != 1 || r.ToolCalls[0].Name != "search" {
 		t.Fatalf("tool calls not parsed: %+v", r.ToolCalls)
 	}
+	if len(r.ToolGates) != 1 || r.ToolGates[0].Allowed || r.ToolGates[0].CallID != "c1" {
+		t.Fatalf("tool gates not parsed: %+v", r.ToolGates)
+	}
 	if r.TokensIn != 100 || r.CostUSD != 0.002 {
 		t.Fatalf("accounting not carried: %+v", r)
+	}
+}
+
+// Live explain folds before persistTrace writes tool_gates_json. The
+// persisted row therefore carries empty gates; the dispatcher already has
+// the verdict in memory. foldRecords must overlay that verdict so a live
+// denial does not render as Allowed:true.
+func TestFoldRecordsOverlaysLiveDenial(t *testing.T) {
+	calls := []storage.AgentLLMCall{{
+		MessagesJSON:  `[{"role":"system","content":"# Identity\nYou help."}]`,
+		ToolCallsJSON: `[{"id":"c1","name":"write_dashboard","arguments":"{}"}]`,
+		ToolGatesJSON: `[]`,
+	}}
+	traces := []agentcore.ToolTrace{{
+		CallID: "c1", Tool: "write_dashboard", Allowed: false, Reason: "not permitted",
+	}}
+	steps := foldRecords(calls, traces)
+	if len(steps) != 1 || len(steps[0].ToolCalls) != 1 {
+		t.Fatalf("want 1 step with 1 call, got %+v", steps)
+	}
+	if steps[0].ToolCalls[0].Allowed {
+		t.Fatal("live denial rendered as allowed")
+	}
+	if steps[0].ToolCalls[0].Error != "not permitted" {
+		t.Fatalf("denial reason = %q", steps[0].ToolCalls[0].Error)
+	}
+}
+
+func TestFoldRecordsWithoutTracesDefaultsAllowed(t *testing.T) {
+	calls := []storage.AgentLLMCall{{
+		MessagesJSON:  `[{"role":"system","content":"# Identity\nYou help."}]`,
+		ToolCallsJSON: `[{"id":"c1","name":"search","arguments":"{}"}]`,
+		ToolGatesJSON: `[]`,
+	}}
+	steps := foldRecords(calls, nil)
+	if !steps[0].ToolCalls[0].Allowed {
+		t.Fatal("historical/empty gates without live traces must stay allowed")
 	}
 }
 

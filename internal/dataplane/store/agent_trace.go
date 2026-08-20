@@ -51,10 +51,16 @@ type AgentLLMCall struct {
 	Tools         []string `json:"tools"`           // tool names advertised this turn
 	Response      string   `json:"response"`        // assistant text returned
 	ToolCallsJSON string   `json:"tool_calls_json"` // tool calls the model requested
-	StopReason    string   `json:"stop_reason"`
-	TokenInput    int      `json:"token_input"`
-	TokenOutput   int      `json:"token_output"`
-	CostUSD       float64  `json:"cost_usd"`
+	// ToolGatesJSON is the gate outcome of each tool call this turn requested
+	// (opaque JSON: [{call_id, allowed, reason, error}]). Empty ('[]') on rows
+	// written before the column existed and on the INSERT — Monitor records the
+	// LLM call before the dispatcher has a verdict, so persistTrace fills this
+	// with a follow-up UPDATE. Constant default, not a rewrite.
+	ToolGatesJSON string  `json:"tool_gates_json"`
+	StopReason    string  `json:"stop_reason"`
+	TokenInput    int     `json:"token_input"`
+	TokenOutput   int     `json:"token_output"`
+	CostUSD       float64 `json:"cost_usd"`
 	// CostUnpriced is true when CostUSD does not reflect a real total — the
 	// model this call billed against had no entry in the price table, so the
 	// cost could not be computed and CostUSD stays 0 as a placeholder, not a
@@ -109,6 +115,12 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 		// is an acceptable historical gap; every row written from here on is
 		// stamped with the real answer at record time.
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS cost_unpriced BOOLEAN NOT NULL DEFAULT false`,
+		// Gate outcomes cannot ride the INSERT: the LLM-call row is written at
+		// provider-return, before tools run. persistTrace UPDATEs this column
+		// after the dispatcher has a verdict. Constant default so historical
+		// rows read as "no gates recorded" (FoldSteps keeps Allowed true)
+		// without rewriting the table.
+		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS tool_gates_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		// Deliberately NOT backfilled: an UPDATE over every historical row would
 		// rewrite the largest table in the database while deploy holds the
 		// migration open. Legacy rows keep session_key '' and are read as the
@@ -169,12 +181,34 @@ RETURNING seq`,
 	return seq, err
 }
 
+// AttachAgentLLMCallGates writes each tool's gate outcome onto the LLM-call
+// row that requested it. Matching is by ToolCall.ID inside tool_calls_json
+// against the gate's call_id; unmatched gates are dropped rather than attached
+// to the wrong turn. One UPDATE for the run — not a per-call rewrite.
+func (s *Store) AttachAgentLLMCallGates(ctx context.Context, runID, gatesJSON string) error {
+	if gatesJSON == "" {
+		gatesJSON = "[]"
+	}
+	_, err := s.pg.Exec(ctx, `
+UPDATE agent_llm_calls c
+SET tool_gates_json = COALESCE((
+	SELECT jsonb_agg(g)
+	FROM jsonb_array_elements($2::jsonb) g
+	WHERE EXISTS (
+		SELECT 1 FROM jsonb_array_elements(c.tool_calls_json) tc
+		WHERE tc->>'id' = g->>'call_id'
+	)
+), '[]'::jsonb)
+WHERE c.run_id = $1`, runID, gatesJSON)
+	return err
+}
+
 // llmCallColumns is the projection shared by the two read paths. session_key
 // falls back to the run id for rows written before the column existed.
 const llmCallColumns = `c.id::text, c.run_id::text,
        COALESCE(NULLIF(c.session_key, ''), c.run_id::text), c.depth, c.seq,
        c.provider, c.model, c.base_seq, c.keep_prefix, c.tools,
-       c.response, c.tool_calls_json::text, c.stop_reason, c.token_input, c.token_output,
+       c.response, c.tool_calls_json::text, c.tool_gates_json::text, c.stop_reason, c.token_input, c.token_output,
        c.cost_usd, c.cost_unpriced, c.latency_ms, c.streamed, c.error, c.created_at`
 
 // scanLLMCall reads one row of llmCallColumns, optionally with the messages
@@ -183,7 +217,7 @@ func scanLLMCall(rows interface{ Scan(...any) error }, withMessages bool) (Agent
 	var c AgentLLMCall
 	dest := []any{&c.ID, &c.RunID, &c.SessionKey, &c.Depth, &c.Seq,
 		&c.Provider, &c.Model, &c.BaseSeq, &c.KeepPrefix, &c.Tools,
-		&c.Response, &c.ToolCallsJSON, &c.StopReason, &c.TokenInput, &c.TokenOutput,
+		&c.Response, &c.ToolCallsJSON, &c.ToolGatesJSON, &c.StopReason, &c.TokenInput, &c.TokenOutput,
 		&c.CostUSD, &c.CostUnpriced, &c.LatencyMS, &c.Streamed, &c.Error, &c.CreatedAt}
 	if withMessages {
 		dest = append(dest, &c.MessagesJSON)

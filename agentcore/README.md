@@ -124,6 +124,7 @@ cannot give one belongs in a plugin, or belongs nowhere.
 | [`memory.go`](memory.go) | **contract** — `MemoryEntry`, `MemoryStore`: cross-run recall as a seam the consumer backs. A nil store is valid. |
 | [`embed.go`](embed.go) | **contract** — `Embedder` and `Cosine`, for semantic recall. Ranking degrades to keyword recall rather than failing. |
 | [`faux.go`](faux.go) | **seam default** — `FauxProvider`: a scripted provider so the loop, hooks, and gate are testable with no network and no key. |
+| [`replay.go`](replay.go) | **seam default** — `ReplayProvider`: plays a recorded `[]TurnRecord` and asserts the loop rebuilt the same request, so a transcript is a regression test. omp has no record/replay; this is agentray's. |
 
 ## Tests in the root
 

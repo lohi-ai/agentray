@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -726,9 +727,17 @@ const bytesPerTokenEstimate = 4
 // call's own context window (pi truncates serialized tool results the same
 // way). Head+tail truncation keeps the end of the result, where the signal
 // usually is.
+//
+// Arguments get a per-VALUE ceiling *before* the per-call one, the ordering omp
+// uses in snapcompact's serializer. With only the per-call cap, a single fat
+// value (a file body, a SQL blob) eats the whole budget and truncates its
+// siblings — including their *names* — out of the text the summarizer reads, so
+// the checkpoint's "Key Decisions" section is written blind about exactly the
+// calls that matter most: writes, edits, SQL.
 const (
-	maxSerializedToolResult = 2000
-	maxSerializedToolArgs   = 600
+	maxSerializedToolResult   = 2000
+	maxSerializedToolArgs     = 600
+	maxSerializedToolArgValue = 200
 )
 
 // serializeConversation renders a span of messages into a plain-text transcript
@@ -747,13 +756,43 @@ func serializeConversation(span []Message) string {
 				fmt.Fprintf(&b, "ASSISTANT: %s\n", c)
 			}
 			for _, tc := range m.ToolCalls {
-				fmt.Fprintf(&b, "ASSISTANT called tool %s(%s)\n", tc.Name, truncateMiddle(tc.Arguments, maxSerializedToolArgs))
+				fmt.Fprintf(&b, "ASSISTANT called tool %s(%s)\n", tc.Name, serializeToolArgs(tc.Arguments))
 			}
 		case RoleTool:
 			fmt.Fprintf(&b, "TOOL %s -> %s\n", m.Name, truncateMiddle(strings.TrimSpace(m.Content), maxSerializedToolResult))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// serializeToolArgs renders a tool call's JSON arguments for the summarizer,
+// applying the per-value ceiling before the per-call one (omp's ordering in
+// snapcompact's serializer). Capping the whole blob alone let one fat argument
+// starve its siblings: a write call's 40 KB "content" consumed the entire
+// budget and the name of every argument after it vanished, so the summarizer
+// described a call it could not read. Per value first, every key name survives.
+//
+// Keys are emitted sorted, which makes the rendering deterministic — the
+// summarization request participates in the provider's prefix cache, and Go's
+// randomized map iteration would churn it on every compaction.
+//
+// Arguments that are not a JSON object (a bare string, an array, malformed
+// JSON) fall through to the previous whole-blob truncation unchanged.
+func serializeToolArgs(raw string) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil || fields == nil {
+		return truncateMiddle(raw, maxSerializedToolArgs)
+	}
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+truncateMiddle(string(fields[k]), maxSerializedToolArgValue))
+	}
+	return truncateMiddle(strings.Join(parts, ", "), maxSerializedToolArgs)
 }
 
 const summarizationSystemPrompt = `You are a context summarization assistant. Read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.

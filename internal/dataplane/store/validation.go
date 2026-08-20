@@ -329,11 +329,11 @@ func ErrNoSuchValidationTest(err error) bool { return errors.Is(err, errNoSuchTe
 // reads as a failing test rather than an unanswered question.
 type MeasuredTest struct {
 	ValidationTest
-	Measured      bool   `json:"measured"`
-	MetricCount   int    `json:"metric_count"`
-	BaselineCount int    `json:"baseline_count"`
-	DaysElapsed   int    `json:"days_elapsed"`
-	DaysLeft      int    `json:"days_left"`
+	Measured      bool `json:"measured"`
+	MetricCount   int  `json:"metric_count"`
+	BaselineCount int  `json:"baseline_count"`
+	DaysElapsed   int  `json:"days_elapsed"`
+	DaysLeft      int  `json:"days_left"`
 	// Verdict is passed / failed / committed (still running) for a live test,
 	// and the owner's own decision for a decided one — a closed test's verdict is
 	// what the human called it, never a recomputation that could now disagree.

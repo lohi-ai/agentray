@@ -452,8 +452,12 @@ func remember() opcore.Operation[rememberInput, rememberOutput] {
 			if kind != agentcore.MemoryFact && kind != agentcore.MemoryLearning && kind != agentcore.MemoryOutcome {
 				kind = agentcore.MemoryFact
 			}
+			// The agent's own scope, not the project's: recall reads the agent
+			// scope, so a write filed under the project is a write the agent can
+			// never read back. MemoryScope falls back to the project for callers
+			// with no agent, which is exactly what the default agent resolves to.
 			if err := d.Memory.Remember(ctx, agentcore.MemoryEntry{
-				ScopeID: cc.ProjectID, Kind: kind, Content: in.Content, Tags: in.Tags,
+				ScopeID: cc.MemoryScope(), Kind: kind, Content: in.Content, Tags: in.Tags,
 				Confidence: 0.7, SourceRun: cc.RunID,
 			}); err != nil {
 				return rememberOutput{}, err
