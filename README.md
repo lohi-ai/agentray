@@ -116,14 +116,14 @@ Dashboards tab gives a readable answer before any custom chart is built.
 
 ## SDKs
 
-**Browser — `@agentray/browser`** (`sdk/browser/`). One `init()` wires identity,
-batched delivery, retries, and `sendBeacon` flush on unload:
+**Browser — `@agentray/browser`** (`sdk/browser/`). `npm install @agentray/browser`.
+One `init()` wires identity, batched delivery, retries, and `sendBeacon` flush on unload:
 
 ```ts
 import { init } from '@agentray/browser';
 
 const ar = init({ host: 'https://agentray.example.com', apiKey: 'phc_...', autocapture: true });
-ar.capture('checkout_started', { plan: 'pro' });
+ar.capture('user.pageview', { path: location.pathname });
 ar.identify('user-123', { email: 'alice@example.com' });
 ```
 
@@ -211,7 +211,7 @@ codex mcp add agentray --url https://agentray.lohi2.com/mcp \
   --header "X-API-Key: <project-key>"
 ```
 
-Self-hosted: swap the host for your instance (e.g. `http://localhost:8080/mcp`).
+Self-hosted: swap the host for your instance (e.g. `http://localhost:8088/mcp`).
 The API key scopes every call to one project — there is no separate login step.
 
 ### What the agent can do

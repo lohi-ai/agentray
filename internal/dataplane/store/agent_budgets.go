@@ -36,10 +36,13 @@ type AgentBudget struct {
 type BudgetSpend struct {
 	Period  string    `json:"period"`
 	CostUSD float64   `json:"cost_usd"`
-	Tokens  int64     `json:"tokens"`
-	Runs    int       `json:"runs"`
-	Since   time.Time `json:"since"`
-	AsOf    time.Time `json:"as_of"`
+	// CostUnpriced is true when CostUSD undercounts real spend — at least one
+	// LLM call in the period billed a model with no price-table entry.
+	CostUnpriced bool      `json:"cost_unpriced"`
+	Tokens       int64     `json:"tokens"`
+	Runs         int       `json:"runs"`
+	Since        time.Time `json:"since"`
+	AsOf         time.Time `json:"as_of"`
 }
 
 // BudgetStatus pairs a resolved budget with current spend and whether any limit
@@ -246,11 +249,11 @@ func (s *Store) SpendForAgentPeriod(ctx context.Context, scopeID, period string)
 	spend := BudgetSpend{Period: period, Since: since, AsOf: now}
 	// Cost + tokens from the trace rows within the period.
 	err = s.pg.QueryRow(ctx, `
-SELECT COALESCE(SUM(c.cost_usd), 0), COALESCE(SUM(c.token_input + c.token_output), 0)
+SELECT COALESCE(SUM(c.cost_usd), 0), COALESCE(SUM(c.token_input + c.token_output), 0), COALESCE(BOOL_OR(c.cost_unpriced), false)
 FROM agent_llm_calls c
 JOIN agent_runs r ON r.id = c.run_id
 WHERE r.agent_id = $1 AND c.created_at >= $2`, scopeID, since).
-		Scan(&spend.CostUSD, &spend.Tokens)
+		Scan(&spend.CostUSD, &spend.Tokens, &spend.CostUnpriced)
 	if err != nil {
 		return BudgetSpend{}, err
 	}
@@ -287,6 +290,9 @@ func (s *Store) BudgetStatusForRun(ctx context.Context, scopeID, workspaceID, pe
 // budgetExceeded reports whether spend has reached or passed any set limit, and
 // which one. A 0 limit on a dimension is uncapped and never trips.
 func budgetExceeded(b AgentBudget, spend BudgetSpend) (bool, string) {
+	if b.MaxCostUSD > 0 && spend.CostUnpriced {
+		return true, "cost cap set, model unpriced — use token or run caps, or price this model"
+	}
 	if b.MaxCostUSD > 0 && spend.CostUSD >= b.MaxCostUSD {
 		return true, fmt.Sprintf("cost $%.4f ≥ cap $%.4f (%s)", spend.CostUSD, b.MaxCostUSD, b.Period)
 	}

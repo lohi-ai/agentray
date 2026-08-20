@@ -44,10 +44,10 @@ func TestBuildDemoEventsShape(t *testing.T) {
 	}
 
 	// Strictly-decreasing funnel — the picture that makes PMF analysis meaningful.
-	if !(counts["pageview"] > counts["signup"] && counts["signup"] > counts["activation"] && counts["activation"] > counts["purchase"]) {
+	if !(counts["user.pageview"] > counts["user.signup"] && counts["user.signup"] > counts["activation"] && counts["activation"] > counts["user.conversion"]) {
 		t.Fatalf("funnel is not strictly decreasing: %v", counts)
 	}
-	if counts["purchase"] == 0 {
+	if counts["user.conversion"] == 0 {
 		t.Error("no purchases — revenue dashboard would be empty")
 	}
 	// Multiple channels so the Web-analytics breakdown is not one bar.

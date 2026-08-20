@@ -16,6 +16,8 @@ func TestBudgetExceeded(t *testing.T) {
 		{"cost under cap", AgentBudget{MaxCostUSD: 0.50}, BudgetSpend{CostUSD: 0.49}, false},
 		{"cost at cap trips", AgentBudget{MaxCostUSD: 0.50}, BudgetSpend{CostUSD: 0.50}, true},
 		{"cost over cap trips", AgentBudget{MaxCostUSD: 0.50}, BudgetSpend{CostUSD: 0.51}, true},
+		{"unpriced + cap set trips", AgentBudget{MaxCostUSD: 1}, BudgetSpend{CostUnpriced: true}, true},
+		{"unpriced + no cap runs", AgentBudget{}, BudgetSpend{CostUnpriced: true, Tokens: 1e6}, false},
 		{"tokens at cap trips", AgentBudget{MaxTokens: 1000}, BudgetSpend{Tokens: 1000}, true},
 		{"runs at cap trips", AgentBudget{MaxRuns: 5}, BudgetSpend{Runs: 5}, true},
 		{"runs under cap", AgentBudget{MaxRuns: 5}, BudgetSpend{Runs: 4}, false},
@@ -29,6 +31,13 @@ func TestBudgetExceeded(t *testing.T) {
 		if got && reason == "" {
 			t.Errorf("%s: exceeded but empty reason", c.name)
 		}
+	}
+	reason, _ := func() (string, bool) {
+		_, r := budgetExceeded(AgentBudget{MaxCostUSD: 1}, BudgetSpend{CostUnpriced: true})
+		return r, true
+	}()
+	if reason != "cost cap set, model unpriced — use token or run caps, or price this model" {
+		t.Errorf("unpriced cap reason=%q", reason)
 	}
 }
 

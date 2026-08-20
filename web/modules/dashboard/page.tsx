@@ -143,7 +143,7 @@ export function DashboardPage() {
       <Intro
         title="Dashboards"
         sub={boardSubtitle}
-        action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask AI</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
+        action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask Growth Lead</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
       />
       <div className="mb-3"><RelatedSurfacesLabel parentHref="/dashboard" /></div>
       <FilterBar extra={selector} />

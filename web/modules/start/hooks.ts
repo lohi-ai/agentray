@@ -102,6 +102,7 @@ export function useJobBoard(picked: JobId | null) {
     scheduled: (triggers.data?.triggers ?? []).some((t) => t.kind === 'schedule' && t.enabled),
     testCommitted: test?.status === 'committed',
     testProposed: test?.status === 'proposed',
+    testID: test?.id,
     waitlistCount: validation.data?.waitlist_count ?? 0,
   };
 

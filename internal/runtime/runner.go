@@ -616,8 +616,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		}
 		baseCost := status.Spend.CostUSD
 		baseTokens := status.Spend.Tokens
+		baseUnpriced := status.Spend.CostUnpriced
 		b := status.Budget
 		budgetGate = func(_ context.Context, u agentcore.Usage) bool {
+			if b.MaxCostUSD > 0 && (baseUnpriced || u.CostUnpriced) {
+				return true
+			}
 			if b.MaxCostUSD > 0 && baseCost+u.CostUSD >= b.MaxCostUSD {
 				return true
 			}

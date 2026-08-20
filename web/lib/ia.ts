@@ -19,10 +19,11 @@ export type NavItemDef = {
 };
 
 export const NAV_ITEMS: readonly NavItemDef[] = [
-  // /start aliases Chat: the checklist leaves the peer nav; the header Set up
-  // control is the rendered door. /agent is NOT here — it renders the Agents
-  // roster and must light Agents.
-  { href: '/chat', label: 'Chat', group: 'Runtime', aliases: ['/start'] },
+  // Chat is the landing. Set up is the job index — it used to alias Chat and
+  // hide behind a ghost header button, which made the clearest screen the
+  // hardest to find.
+  { href: '/chat', label: 'Chat', group: 'Runtime' },
+  { href: '/start', label: 'Set up', group: 'Runtime' },
   { href: '/operations', label: 'Operations', group: 'Channels' },
   { href: '/agents', label: 'Agents', group: 'Workloads', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
   { href: '/dashboard', label: 'Dashboards', group: 'Data', aliases: ['/dashboards', '/templates', '/sql'] },
@@ -291,8 +292,45 @@ const FUNNEL_STAGES = [
   { id: 'signup', label: 'signup', match: /sign[_\s-]?up|register|account_created|signed_up/i },
   { id: 'activation', label: 'activation', match: /activat|onboard|first_value|aha|setup_complete|completed_setup|first_(action|event|project)|value_realized/i },
   { id: 'retention', label: 'return', match: /return|repeat|day_?[27]|habit|engaged/i },
-  { id: 'revenue', label: 'purchase', match: /purchase|paid|checkout|subscri|upgrade|payment|invoice/i },
+  { id: 'revenue', label: 'purchase', match: /purchase|paid|checkout|subscri|upgrade|payment|invoice|conversion/i },
 ] as const;
+
+export const DEFAULT_FUNNEL_STEPS = ['user.pageview', 'user.signup', 'user.conversion'] as const;
+
+type FunnelMatch = { id: string; label: string; event: string; count: number; order: number };
+
+function stageOfName(name: string): number {
+  let claimed = -1;
+  FUNNEL_STAGES.forEach((stage, order) => {
+    if (stage.match.test(name)) claimed = order;
+  });
+  return claimed;
+}
+
+function matchedFunnelSteps(names: FirstRunInput['eventNames']): FunnelMatch[] {
+  const events = catalogEvents(names);
+  const steps: FunnelMatch[] = [];
+  FUNNEL_STAGES.forEach((stage, order) => {
+    const matched = events.filter((e) => stageOfName(e.name) === order);
+    if (matched.length === 0) return;
+    steps.push({
+      id: stage.id,
+      label: stage.label,
+      event: matched[0].name,
+      count: matched.reduce((sum, e) => sum + e.count, 0),
+      order,
+    });
+  });
+  return steps;
+}
+
+// funnelStepNames is the honest Product-page funnel: matched activation stages
+// in order, or the default contract when the catalog has fewer than two.
+export function funnelStepNames(names: FirstRunInput['eventNames']): string[] {
+  const steps = matchedFunnelSteps(names);
+  if (steps.length >= 2) return steps.map((s) => s.event);
+  return [...DEFAULT_FUNNEL_STEPS];
+}
 
 export type WeakestLink = {
   from: string;
@@ -316,36 +354,8 @@ export type WeakestLink = {
 // catalog names + counts. No model required — this is the written opinion the
 // empty-state used to fake with a "track activation" hint.
 export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | null {
-  const events = catalogEvents(names);
-  if (events.length === 0) return null;
-
-  // One event belongs to exactly one funnel stage. The stage patterns overlap —
-  // `subscription_activated` matches both `activat` (activation) and `subscri`
-  // (revenue) — and letting an event sit in two stages at once invented a
-  // phantom 100%-converting step between them. When a name matches more than
-  // one stage we take the deepest, because the stage patterns grow more
-  // specific toward revenue: a subscription that activated is a purchase, not
-  // an onboarding milestone.
-  const stageOf = (name: string): number => {
-    let claimed = -1;
-    FUNNEL_STAGES.forEach((stage, order) => {
-      if (stage.match.test(name)) claimed = order;
-    });
-    return claimed;
-  };
-
-  const steps: Array<{ id: string; label: string; event: string; count: number; order: number }> = [];
-  FUNNEL_STAGES.forEach((stage, order) => {
-    const matched = events.filter((e) => stageOf(e.name) === order);
-    if (matched.length === 0) return;
-    steps.push({
-      id: stage.id,
-      label: stage.label,
-      event: matched[0].name,
-      count: matched.reduce((sum, e) => sum + e.count, 0),
-      order,
-    });
-  });
+  const steps = matchedFunnelSteps(names);
+  if (steps.length === 0) return null;
 
   if (steps.length >= 2) {
     let worst: WeakestLink | null = null;
@@ -369,24 +379,21 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
     return worst;
   }
 
-  if (steps.length === 1) {
-    const idx = FUNNEL_STAGES.findIndex((s) => s.id === steps[0].id);
-    const next = FUNNEL_STAGES[idx + 1];
-    if (next) {
-      return {
-        from: steps[0].event,
-        to: next.label,
-        fromLabel: steps[0].label,
-        toLabel: next.label,
-        fromCount: steps[0].count,
-        toCount: 0,
-        rate: 0,
-        missing: true,
-        stagesSkipped: 0,
-      };
-    }
+  const idx = FUNNEL_STAGES.findIndex((s) => s.id === steps[0].id);
+  const next = FUNNEL_STAGES[idx + 1];
+  if (next) {
+    return {
+      from: steps[0].event,
+      to: next.label,
+      fromLabel: steps[0].label,
+      toLabel: next.label,
+      fromCount: steps[0].count,
+      toCount: 0,
+      rate: 0,
+      missing: true,
+      stagesSkipped: 0,
+    };
   }
-
   return null;
 }
 

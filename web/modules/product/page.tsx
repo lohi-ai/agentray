@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Filter, LineChart, Sparkles, Table2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import type { ReactNode } from 'react';
@@ -14,7 +14,8 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
-import { useActivity, useEventNames, useInsight } from '@/modules/app/hooks';
+import { funnelStepNames } from '@/lib/ia';
+import { useEventNames, useInsight } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
@@ -35,24 +36,30 @@ const QUESTIONS: Array<{ mode: Mode; label: string; blurb: string; icon: ReactNo
 export function ProductPage() {
   const router = useRouter();
   const { insight, runInsight } = useInsight();
-  const { summary } = useActivity();
   const { names: eventNames, loading: namesLoading } = useEventNames();
   const emptyCatalog = !namesLoading && eventNames.length === 0;
   const [active, setActive] = useState<Mode | null>(null);
   const [running, setRunning] = useState(false);
+  const didAuto = useRef(false);
 
-  // run picks the funnel step events from the project's top events so a funnel
-  // has something to walk; trend/retention/table let the backend choose.
   async function ask(mode: Mode) {
     setActive(mode);
     setRunning(true);
-    const steps = mode === 'funnel' ? (summary?.event_counts ?? []).slice(0, 4).map((e) => e.event_name) : [];
+    const steps = mode === 'funnel' ? funnelStepNames(eventNames) : [];
     try {
       await runInsight(mode, 'events', steps);
     } finally {
       setRunning(false);
     }
   }
+
+  useEffect(() => {
+    if (didAuto.current || namesLoading || emptyCatalog) return;
+    didAuto.current = true;
+    void ask('funnel');
+    // Catalog-ready auto-run of the drop-off question. ask closes over eventNames.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [namesLoading, emptyCatalog, eventNames]);
 
   return (
     <AppShell active="product">

@@ -233,7 +233,7 @@ export function EventsPage() {
         pageSize={20}
         onRowClick={(e) => { if (e.session_id) router.push(`/replay?session=${encodeURIComponent(e.session_id)}`); }}
         rowClassName={(e) => (e.is_error ? 'text-[color:var(--danger)]' : undefined)}
-        emptyMessage={unplannedOnly ? 'No unplanned events in this window — instrumentation matches the plan.' : 'No events match these filters.'}
+        emptyMessage={unplannedOnly ? 'No unplanned events in this window — instrumentation matches the plan.' : 'No events match these filters. Events can take a few seconds to appear.'}
       />
     </AppShell>
   );

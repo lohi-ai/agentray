@@ -40,8 +40,7 @@ await ar.revenue('user-123', { amount: 19, currency: 'USD', plan: 'pro', kind: '
 ```
 
 Differences from the browser client: identity is explicit (`distinctId` on every
-call — no anonymous lifecycle), calls are **awaitable and throw** (a dropped
-payment event must be retryable), and every event carries an idempotency key.
+call), payments must be retryable, and every event carries an idempotency key.
 
 ### Idempotency (`$insert_id`)
 
@@ -57,21 +56,21 @@ SELECT sum(amount) AS revenue FROM (
 )
 ```
 
-The conventional event name is `revenue`; the Growth Lead and Data Analyst
-presets know to read MRR/LTV/conversion from it.
 
----
-
-## Browser client (`sdk/browser/client.ts`)
+## Browser client (`@agentray/browser`, `sdk/browser/`)
 
 Manages anonymous → identified identity and sends events from the browser.
+`npm install @agentray/browser` when the package is published; until then copy
+`sdk/browser/` into the product repo, or paste the no-npm HTML snippet from
+`web/modules/start/components/instrument-snippet.tsx`.
 
 ```ts
-import { AgentRayClient } from '@/sdk/browser/client';
+import { init } from '@agentray/browser';
 
-const ar = new AgentRayClient({
-  apiUrl: 'https://agentray.example.com',
+const ar = init({
+  host: 'https://agentray.example.com',
   apiKey: 'your-project-api-key',
+  autocapture: true,
 });
 ```
 
@@ -110,6 +109,8 @@ ar.alias('anon-uuid-from-cookie', 'user-123');
 ## Autocapture (`sdk/browser/autocapture.ts`)
 
 Zero-config pageview, click, and element-view tracking. Pass your own `capture` function — works with the client above or any compatible sink.
+Autocapture reports `user.pageview` (the event the web-analytics tab and the
+seeded Product funnel read). A hand-rolled `pageview` will not light those surfaces.
 
 ```ts
 import { installAutocapture } from '@/sdk/browser/autocapture';

@@ -58,7 +58,7 @@ export function ReplayPage() {
             { label: 'Events', value: formatCompact(replay.event_count) },
             { label: 'Tokens in', value: formatCompact(replay.total_tokens_in) },
             { label: 'Tokens out', value: formatCompact(replay.total_tokens_out) },
-            { label: 'Cost', value: formatCost(replay.total_cost_usd) },
+            { label: 'Cost', value: formatCost(replay.total_cost_usd, (replay.total_tokens_in + replay.total_tokens_out) > 0 && !(replay.total_cost_usd > 0)) },
           ]} />
           <Panel title={`Timeline · ${replay.session_id.slice(0, 16)}`}>
             {/* Astryx migration: the timeline now renders through the data-driven

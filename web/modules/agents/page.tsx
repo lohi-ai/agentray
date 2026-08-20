@@ -71,7 +71,7 @@ export function AgentsPage() {
         ]}
       />
       {agents.length === 0 && !isLoading ? (
-        <EmptyState icon={<Plus size={22} />} title="No agents yet" detail="Spin up a teammate from a blank recipe. No backend code needed." action={<Button variant="outline" size="sm" onClick={onCreate}>Create agent</Button>} />
+        <EmptyState icon={<Plus size={22} />} title="No agents yet" detail="Hire a teammate from a blank recipe. No backend code needed." action={<Button variant="outline" size="sm" onClick={onCreate}>Hire a teammate</Button>} />
       ) : (
         <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
           {agents.map((row) => {
@@ -120,7 +120,7 @@ export function AgentsPage() {
               <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-[13px] font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
               <span className="text-[13.5px] font-semibold">New agent</span>
             </div>
-            <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Spin up a teammate from a template or a blank recipe. No backend code needed.</div>
+            <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Hire a teammate from a template or a blank recipe. No backend code needed.</div>
             <div className="mt-0.5 flex items-center gap-2"><Button variant="outline" size="sm" onClick={onCreate}>Create agent</Button></div>
           </div>
         </div>

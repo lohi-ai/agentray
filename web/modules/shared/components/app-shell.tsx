@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Bot,
+  ClipboardList,
   CreditCard,
   Globe,
   Languages,
@@ -31,6 +32,7 @@ export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' |
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/chat': MessageSquare,
+  '/start': ClipboardList,
   '/operations': Zap,
   '/agents': Bot,
   '/dashboard': LayoutDashboard,

@@ -20,6 +20,7 @@ import { firstRunHandoff, firstSessionNotice, firstValuePath, formatAgentError, 
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { useEventNames } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
+import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
 import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
@@ -906,6 +907,9 @@ export function ChatPage() {
             />
           </HStack>
         </HStack>
+        <div className="flex-none border-b border-[var(--color-border)] bg-[var(--color-background-card)] px-4 py-1">
+          <RelatedSurfacesLabel parentHref="/chat" />
+        </div>
 
         <div
           className="grid min-h-0 flex-1"

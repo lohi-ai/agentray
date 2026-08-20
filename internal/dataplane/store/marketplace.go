@@ -142,8 +142,7 @@ func (s *Store) InstallAgentPreset(ctx context.Context, userID, projectID, slug 
 // starter skills — via direct, RBAC-free inserts (this runs at signup, before
 // any session exists). It is idempotent: ON CONFLICT DO NOTHING means a project
 // that already has a configured default agent is left untouched, so a returning
-// owner never has their edits overwritten. The agent is seeded *disabled* (no
-// model key yet); the user enables it once a model is configured.
+// owner never has their edits overwritten.
 func (s *Store) SeedDefaultFoundationAgent(ctx context.Context, projectID string) error {
 	preset, ok := AgentPresetBySlug("growth-lead")
 	if !ok {
@@ -152,13 +151,21 @@ func (s *Store) SeedDefaultFoundationAgent(ctx context.Context, projectID string
 	}
 	scopes := normalizeScopes(preset.Scopes)
 
-	// The default agent's id equals the project id (isDefaultAgent). Create it
-	// only if the project has no default agent yet.
+	// The agent is seeded enabled so chat works once a model key exists; the
+	// FirstRunPanel still blocks on the key. preset_slug must be set so a later
+	// marketplace Hire of growth-lead is idempotent instead of minting a duplicate.
 	if _, err := s.pg.Exec(ctx, `
-INSERT INTO agents (id, project_id, workspace_id, name, slug, is_default, enabled, autonomy)
-SELECT $1, $1, p.workspace_id, $2, 'default', true, true, 'suggest'
+INSERT INTO agents (id, project_id, workspace_id, name, slug, is_default, enabled, autonomy, preset_slug)
+SELECT $1, $1, p.workspace_id, $2, 'default', true, true, 'suggest', 'growth-lead'
 FROM projects p WHERE p.id = $1
 ON CONFLICT (id) DO NOTHING`, projectID, preset.Name); err != nil {
+		return err
+	}
+	// Existing default agents seeded before preset_slug existed would otherwise
+	// still look un-hired on the marketplace. Agents is a small table.
+	if _, err := s.pg.Exec(ctx, `
+UPDATE agents SET preset_slug = 'growth-lead'
+WHERE is_default AND slug = 'default' AND coalesce(preset_slug, '') = ''`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `

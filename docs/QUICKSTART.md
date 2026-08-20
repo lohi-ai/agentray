@@ -44,20 +44,21 @@ curl -X POST http://localhost:8088/capture \
 Refresh **Events / Web analytics** in the web app — your `hello_agentray` event
 appears alongside the seeded demo funnel.
 
-Instrument a real app instead:
+Instrument a real app instead. Event names that match `user.pageview` /
+`user.signup` / `user.conversion` light the Product funnel without a custom query:
 
 ```ts
 // Browser — npm install @agentray/browser
 import { init } from '@agentray/browser';
 const ar = init({ host: 'http://localhost:8088', apiKey: 'lohi_dev_project_token', autocapture: true });
-ar.capture('signup', { plan: 'free' });
+ar.capture('user.pageview', { path: location.pathname });
 ```
 
 ```python
 # Python — pip install agentray
 from agentray import Client
 Client(host="http://localhost:8088", api_key="lohi_dev_project_token").capture(
-    "signup", distinct_id="you", properties={"plan": "free"})
+    "user.signup", distinct_id="you", properties={"plan": "free"})
 ```
 
 ## 3. Get your first agent answer (≈3 min)

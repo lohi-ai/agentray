@@ -179,7 +179,7 @@ function AgentPresetCard({
           </Button>
         ) : (
           <Button variant="primary" size="sm" icon={<Sparkles size={15} />} disabled={installing} onClick={onInstall}>
-            {installing ? 'Installing…' : 'Install agent'}
+            {installing ? 'Hiring…' : 'Hire'}
           </Button>
         )}
       </div>

@@ -75,13 +75,13 @@ func buildDemoEvents(projectID string, now time.Time) []Event {
 			ts := dayStart.Add(time.Duration(rng.Intn(12)) * time.Hour).Add(time.Duration(rng.Intn(60)) * time.Minute)
 			session := uuid.NewString()
 
-			events = append(events, demoEvent(projectID, user, session, "pageview", "web", ts, ch.host, ch.channel,
+			events = append(events, demoEvent(projectID, user, session, "user.pageview", "web", ts, ch.host, ch.channel,
 				`{"$current_url":"/","path":"/"}`))
 
 			// 55% sign up.
 			if rng.Float64() > 0.45 {
 				su := ts.Add(2 * time.Minute)
-				events = append(events, demoEvent(projectID, user, session, "signup", "web", su, ch.host, ch.channel,
+				events = append(events, demoEvent(projectID, user, session, "user.signup", "web", su, ch.host, ch.channel,
 					`{"plan":"free"}`))
 				// 60% of signups activate.
 				if rng.Float64() > 0.40 {
@@ -91,7 +91,7 @@ func buildDemoEvents(projectID string, now time.Time) []Event {
 					// 25% of activated purchase.
 					if rng.Float64() > 0.75 {
 						pv := av.Add(20 * time.Minute)
-						events = append(events, demoEvent(projectID, user, session, "purchase", "web", pv, ch.host, ch.channel,
+						events = append(events, demoEvent(projectID, user, session, "user.conversion", "web", pv, ch.host, ch.channel,
 							`{"plan":"pro","amount":29}`))
 					}
 					if day == 0 {

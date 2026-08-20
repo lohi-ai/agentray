@@ -19,6 +19,7 @@ import {
   projectDetailRoot,
   threadNeedsRecovery,
   weakestLink,
+  funnelStepNames,
   settingsTabFromQuery,
   isFirstRun,
   matchActiveHref,
@@ -35,7 +36,7 @@ describe('nav grouping', () => {
   it('groups the shell by layer: Runtime → Channels → Workloads → Data → Workspace', () => {
     const groups = navGroups();
     expect(groups.map((g) => g.id)).toEqual(['Runtime', 'Channels', 'Workloads', 'Data', 'Workspace']);
-    expect(groups[0].items.map((i) => i.label)).toEqual(['Chat']);
+    expect(groups[0].items.map((i) => i.label)).toEqual(['Chat', 'Set up']);
     expect(groups[1].items.map((i) => i.label)).toEqual(['Operations']);
     expect(groups[2].items.map((i) => i.label)).toEqual(['Agents']);
     expect(groups[3].items.map((i) => i.label)).toEqual([
@@ -82,7 +83,7 @@ describe('nav grouping', () => {
 describe('matchActiveHref', () => {
   const cases: Array<[string, string, 'Runtime' | 'Channels' | 'Workloads' | 'Data' | 'Workspace' | '']> = [
     ['/', '', ''],
-    ['/start', '/chat', 'Runtime'],
+    ['/start', '/start', 'Runtime'],
     ['/chat', '/chat', 'Runtime'],
     ['/prototypes', '/product', 'Data'],
     ['/prototypes/abc-123', '/product', 'Data'],
@@ -277,6 +278,22 @@ describe('weakestLink', () => {
       rate: 0,
       missing: true,
     }));
+  });
+});
+
+describe('funnelStepNames', () => {
+  it('returns matched catalog events in stage order', () => {
+    expect(funnelStepNames([
+      { event_name: 'user.conversion', count: 2 },
+      { event_name: 'user.pageview', count: 10 },
+      { event_name: 'user.signup', count: 4 },
+    ])).toEqual(['user.pageview', 'user.signup', 'user.conversion']);
+  });
+
+  it('falls back to the contract when fewer than two stages match', () => {
+    expect(funnelStepNames([{ event_name: 'hello_agentray', count: 1 }])).toEqual([
+      'user.pageview', 'user.signup', 'user.conversion',
+    ]);
   });
 });
 

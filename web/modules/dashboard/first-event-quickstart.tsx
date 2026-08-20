@@ -10,6 +10,7 @@ import { isSampleProject, settingsPath, shouldShowFirstEventGuide } from '@/lib/
 import { useAuthStore } from '@/lib/app-state';
 import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
 import { Button, Segment } from '@/modules/shared/components/signal-primitives';
+import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 
 type Source = 'website' | 'app' | 'warehouse';
 type Lang = 'curl' | 'js' | 'python';
@@ -26,26 +27,7 @@ const LANGS: Array<{ value: Lang; label: string }> = [
   { value: 'python', label: 'Python' },
 ];
 
-function websiteSnippet(base: string, key: string): string {
-  return [
-    `<script>`,
-    `(function () {`,
-    `  var id = localStorage.getItem("ar_id") || (crypto.randomUUID && crypto.randomUUID());`,
-    `  if (id) localStorage.setItem("ar_id", id);`,
-    `  fetch("${base}/capture", {`,
-    `    method: "POST",`,
-    `    headers: { "Content-Type": "application/json" },`,
-    `    body: JSON.stringify({`,
-    `      api_key: "${key}",`,
-    `      event: "pageview",`,
-    `      distinct_id: id || "anon",`,
-    `      properties: { path: location.pathname }`,
-    `    })`,
-    `  });`,
-    `})();`,
-    `</script>`,
-  ].join('\n');
-}
+
 
 function appSnippet(lang: Lang, base: string, key: string): string {
   const url = `${base}/capture`;
@@ -55,7 +37,7 @@ function appSnippet(lang: Lang, base: string, key: string): string {
       `  -H "Content-Type: application/json" \\`,
       `  -d '{`,
       `    "api_key": "${key}",`,
-      `    "event": "signup",`,
+      `    "event": "user.signup",`,
       `    "distinct_id": "user_123",`,
       `    "properties": { "plan": "free" }`,
       `  }'`,
@@ -67,8 +49,7 @@ function appSnippet(lang: Lang, base: string, key: string): string {
       `  method: "POST",`,
       `  headers: { "Content-Type": "application/json" },`,
       `  body: JSON.stringify({`,
-      `    api_key: "${key}",`,
-      `    event: "signup",`,
+      `    event: "user.signup",`,
       `    distinct_id: "user_123",`,
       `    properties: { plan: "free" },`,
       `  }),`,
@@ -79,8 +60,7 @@ function appSnippet(lang: Lang, base: string, key: string): string {
     `import requests`,
     ``,
     `requests.post("${url}", json={`,
-    `    "api_key": "${key}",`,
-    `    "event": "signup",`,
+    `    "event": "user.signup",`,
     `    "distinct_id": "user_123",`,
     `    "properties": {"plan": "free"},`,
     `})`,
@@ -104,8 +84,8 @@ export function FirstEventQuickstart() {
   const key = project?.api_key ?? '';
   const base = apiBase();
   const code = useMemo(
-    () => (source === 'website' ? websiteSnippet(base, key) : appSnippet(lang, base, key)),
-    [source, lang, base, key],
+    () => appSnippet(lang, base, key),
+    [lang, base, key],
   );
   // The website snippet is a <script> tag, so it highlights as HTML; the app
   // snippets follow the picked language.
@@ -184,13 +164,14 @@ export function FirstEventQuickstart() {
                 </div>
               ) : (
                 <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
-                  <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">pageview</code>.
+                  <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">user.pageview</code>.
                 </p>
               )}
-              {/* Astryx migration: native <CodeBlock> — syntax highlighting,
-                  horizontal scroll inside its own box, and its own copy button,
-                  which retires the hand-rolled one that had no accessible name. */}
-              <CodeBlock code={code} language={codeLang} size="sm" width="100%" container="section" />
+              {source === 'website' ? (
+                <InstrumentSnippet apiKey={key} host={base} />
+              ) : (
+                <CodeBlock code={code} language={codeLang} size="sm" width="100%" container="section" />
+              )}
             </>
           )}
         </div>
@@ -198,7 +179,8 @@ export function FirstEventQuickstart() {
         <div className="flex items-center gap-2">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
           <span className="text-[11.5px] text-[var(--color-text-disabled)]">
-            {sample ? 'Your Production project stays empty until a real event lands.' : 'This card disappears once your first event lands.'}
+            Events can take a few seconds to appear.
+            {sample ? ' Your Production project stays empty until a real event lands.' : ' This card disappears once your first event lands.'}
           </span>
         </div>
       </div>

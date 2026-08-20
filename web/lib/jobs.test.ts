@@ -210,11 +210,11 @@ describe('jobSteps', () => {
     const none = jobSteps(job, { ...EMPTY, installedPacks: ['product-scout'] }).find((s) => s.id === 'threshold')!;
     expect(none.action.label).toBe('Design the test');
 
-    const proposed = jobSteps(job, { ...EMPTY, installedPacks: ['product-scout'], testProposed: true })
+    const proposed = jobSteps(job, { ...EMPTY, installedPacks: ['product-scout'], testProposed: true, testID: 't-1' })
       .find((s) => s.id === 'threshold')!;
     expect(proposed.done).toBe(false);
     expect(proposed.action.label).toBe('Review it');
-    expect(proposed.detail).toMatch(/commit/i);
+    expect(proposed.action.href).toBe('/prototypes/t-1');
   });
 
   // The campaign teammate is an ADDITIONAL hire, not an alternative one. If it

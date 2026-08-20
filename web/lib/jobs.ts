@@ -215,8 +215,8 @@ export type JobState = {
   // no test at all, because the next action is completely different: one is
   // "design a test", the other is "agree to this number".
   testProposed?: boolean;
-  // Addresses collected so far. Reported in the step's detail because a count
-  // the owner can see is the difference between a checklist and a scoreboard.
+  // The proposed/committed test id, so "Review it" opens the prototype, not /start.
+  testID?: string;
   waitlistCount?: number;
 };
 
@@ -313,7 +313,7 @@ export function jobSteps(job: JobDef, state: JobState): JobStep[] {
     // that nothing could ever read back.
     observable: true,
     action: state.testProposed
-      ? { label: 'Review it', href: '/start?job=validate' }
+      ? { label: 'Review it', href: state.testID ? `/prototypes/${encodeURIComponent(state.testID)}` : '/prototypes' }
       : { label: 'Design the test', href: '/chat' },
   });
 

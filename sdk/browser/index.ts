@@ -3,7 +3,7 @@
  *
  *   import { init } from '@agentray/browser';
  *   const ar = init({ host: 'https://agentray.example.com', apiKey: 'phc_...' });
- *   ar.capture('pageview', { path: location.pathname });
+ *   ar.capture('user.pageview', { path: location.pathname });
  *   ar.identify('user-123', { email: 'alice@example.com' });
  *
  * `init()` wires the identity lifecycle (anonymous ↔ identified, alias on login,

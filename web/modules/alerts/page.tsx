@@ -47,13 +47,16 @@ const emptyDraft: AlertRuleInput = {
 
 export function AlertsPage() {
   const { rules, loading, create, update, remove } = useAlertRules();
-  const { channels } = useAlertChannels();
+  const { channels, create: createChannel } = useAlertChannels();
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<AlertRuleInput>(emptyDraft);
+  const [hookName, setHookName] = useState('Slack');
+  const [hookURL, setHookURL] = useState('');
 
   const channelName = useMemo(() => new Map(channels.map((c) => [c.id, c.name])), [channels]);
 
   const canSave = draft.name.trim() !== '' && draft.source_ref.trim() !== '';
+  const canAddChannel = hookURL.trim() !== '';
 
   const submit = async () => {
     if (!canSave) return;
@@ -62,12 +65,21 @@ export function AlertsPage() {
     setCreating(false);
   };
 
+  const addChannel = async () => {
+    if (!canAddChannel) return;
+    await createChannel.mutateAsync({
+      kind: 'slack',
+      name: hookName.trim() || 'Slack',
+      config: { webhook_url: hookURL.trim() },
+    });
+    setHookURL('');
+  };
+
   const toggleChannel = (id: string) =>
     setDraft((d) => ({
       ...d,
       channels: d.channels.includes(id) ? d.channels.filter((c) => c !== id) : [...d.channels, id],
     }));
-
   return (
     <AppShell>
       <Intro
@@ -79,6 +91,35 @@ export function AlertsPage() {
           </Button>
         )}
       />
+
+      <Panel title="Notification channels">
+        {channels.length === 0 ? (
+          <p className="mb-3 text-[12px] text-[var(--color-text-secondary)]">
+            Add a Slack incoming-webhook URL so a firing alert can leave the app.
+          </p>
+        ) : (
+          <div className="mb-3 flex flex-col gap-1.5">
+            {channels.map((c) => (
+              <p key={c.id} className="text-[12.5px]">{c.name} <span className="text-[var(--color-text-secondary)]">({c.kind})</span></p>
+            ))}
+          </div>
+        )}
+        <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
+          <div>
+            <label className={labelCls}>Name</label>
+            <TextInput label="Channel name" isLabelHidden value={hookName} placeholder="Slack" onChange={setHookName} width="100%" />
+          </div>
+          <div>
+            <label className={labelCls}>Slack webhook URL</label>
+            <TextInput label="Webhook URL" isLabelHidden value={hookURL} placeholder="https://hooks.slack.com/services/…" onChange={setHookURL} width="100%" />
+          </div>
+        </Grid>
+        <div className="mt-3">
+          <Button variant="outline" size="sm" onClick={() => void addChannel()} disabled={!canAddChannel || createChannel.isPending}>
+            {createChannel.isPending ? 'Adding…' : 'Add Slack webhook'}
+          </Button>
+        </div>
+      </Panel>
 
       {creating ? (
         <Panel title="New alert rule">
@@ -158,8 +199,7 @@ export function AlertsPage() {
             <label className={labelCls}>Notify channels</label>
             {channels.length === 0 ? (
               <p className="text-[12px] text-[var(--color-text-disabled)]">
-                No channels configured yet. The alert still fires and appears here; add a Slack/email/webhook
-                channel in workspace settings to get notified.
+                No channels yet — add a Slack webhook above, then tick it here.
               </p>
             ) : (
               <div className="flex flex-col gap-1.5">
