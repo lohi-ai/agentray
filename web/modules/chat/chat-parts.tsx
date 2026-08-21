@@ -40,6 +40,7 @@ import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart
 import type { ChatThread } from './use-chat-threads';
 import { Chart, type ChartSpec } from '@/modules/shared/components/charts';
 import type { MarkdownComponents } from '@astryxdesign/core/Markdown';
+import { stripInlineMath } from '@/modules/shared/components/plain-math';
 import { parseRichMessage, slugify } from './message-format';
 import { useCommandNames } from './commands';
 
@@ -1133,7 +1134,11 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
             // Native Astryx Markdown: streaming fade-in while the turn is
             // live, and headingLevelStart={3} keeps the agent's `#`/`##`
             // headings sized to fit inside the chat bubble hierarchy.
-            <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{m.text}</Markdown>
+            // stripInlineMath first: models emit "pageview $to$ chapter_open"
+            // unprompted, nothing on this surface renders math, and the parser
+            // splits the escaped form into separate nodes — so it has to go
+            // before the parse, not after.
+            <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{stripInlineMath(m.text)}</Markdown>
           ) : null}
           {m.card ? <ResultCard card={m.card} /> : null}
           {/* A stop is deliberate, so it gets the neutral system-message

@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { Table, TableHeader, TableBody, TableRow, TableHeaderCell, TableCell } from '@astryxdesign/core/Table';
 import { Card } from '@astryxdesign/core/Card';
 import { Chart, type ChartSpec } from '@/modules/shared/components/charts';
+import { remarkPlainMath } from '@/modules/shared/components/plain-math';
 
 // ChartFence draws a ```chart code fence — the agent's way to render a real
 // graph inline, the same ECharts engine the dashboard uses. The fence body is a
@@ -33,7 +34,7 @@ export function AgentMarkdown({ text }: { text: string }) {
   return (
     <div className="[&>*]:m-0 [&>*+*]:mt-2 [&>:first-child]:mt-0 [&_strong]:font-[650] [&_h1]:mt-[14px] [&_h1]:text-[15px] [&_h1]:font-[650] [&_h1]:leading-[1.4] [&_h2]:mt-3 [&_h2]:text-sm [&_h2]:font-[650] [&_h2]:leading-[1.4] [&_h2]:text-[var(--color-text-primary)] [&_h3]:mt-[10px] [&_h3]:text-[13.5px] [&_h3]:font-[650] [&_h3]:leading-[1.4] [&_h3]:text-[var(--color-text-secondary)] [&_h4]:mt-[10px] [&_h4]:text-[13.5px] [&_h4]:font-[650] [&_h4]:leading-[1.4] [&_h4]:text-[var(--color-text-secondary)] [&_h5]:mt-[10px] [&_h5]:text-[13.5px] [&_h5]:font-[650] [&_h5]:leading-[1.4] [&_h5]:text-[var(--color-text-secondary)] [&_h6]:mt-[10px] [&_h6]:text-[13.5px] [&_h6]:font-[650] [&_h6]:leading-[1.4] [&_h6]:text-[var(--color-text-secondary)] [&_a]:text-primary [&_a]:underline [&_ul]:m-0 [&_ul]:flex [&_ul]:flex-col [&_ul]:gap-[3px] [&_ul]:pl-5 [&_ol]:m-0 [&_ol]:flex [&_ol]:flex-col [&_ol]:gap-[3px] [&_ol]:pl-5 [&_li]:pl-0.5 [&_ul_li]:list-disc [&_ol_li]:list-decimal">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkPlainMath]}
         components={{
           // Unwrap the library's <pre>: block code renders its own wrapper below,
           // and a ```chart fence renders a <div> (a chart), which must not nest
