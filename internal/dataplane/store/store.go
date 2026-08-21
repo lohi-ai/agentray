@@ -469,6 +469,11 @@ type Person struct {
 	EventCount    uint64    `json:"event_count"`
 	Sessions      uint64    `json:"sessions"`
 	LastEventName string    `json:"last_event_name"`
+	// Platforms is every app this person was seen in, sorted. A reader who used
+	// the website and then the app is one row with two platforms — which is the
+	// only place identify()/alias stitching is visible as a fact rather than as a
+	// number that happens to be smaller than the sum of its parts.
+	Platforms []string `json:"platforms"`
 	// Traits are the merged $set / $set_once person properties from the profile
 	// store (P3). Nil when the profile store has no row yet for this person.
 	Traits map[string]json.RawMessage `json:"traits,omitempty"`
@@ -1396,7 +1401,13 @@ ORDER BY (project_id, day, agent_id, model_name)`); err != nil {
 		return err
 	}
 
-	return s.backfillRollups(ctx)
+	if err := s.backfillRollups(ctx); err != nil {
+		return err
+	}
+	// Recover the platform of everything captured before the column existed. Runs
+	// after schema_markers is created (above) and, like backfillRollups, exactly
+	// once.
+	return s.backfillPlatform(ctx)
 }
 
 // backfillRollups seeds the rollup tables from all pre-existing events, once. The
@@ -2330,7 +2341,7 @@ func (s *Store) RecentEvents(ctx context.Context, projectID string, limit int) (
 	rows, err := s.ch.Query(ctx, `
 SELECT
 	project_id::String, event_id::String, distinct_id, session_id, event_name,
-	event_type, properties, is_error, timestamp, inserted_at
+	event_type, properties, is_error, timestamp, inserted_at, platform
 FROM events
 WHERE project_id = ?
 ORDER BY inserted_at DESC
@@ -2356,6 +2367,7 @@ LIMIT ?`, projectID, limit)
 			&isError,
 			&event.Timestamp,
 			&inserted,
+			&event.Platform,
 		); err != nil {
 			return nil, err
 		}
@@ -3025,7 +3037,7 @@ func (s *Store) Persons(ctx context.Context, projectID string, filter EventFilte
 
 	traitSource := `
 SELECT
-	` + canonicalID + ` AS canonical_distinct_id, session_id, event_name, timestamp,
+	` + canonicalID + ` AS canonical_distinct_id, session_id, event_name, timestamp, platform,
 	if(JSONExtractString(properties, 'email') != '', JSONExtractString(properties, 'email'), JSONExtractString(properties, '$set', 'email')) AS email_trait,
 	if(JSONExtractString(properties, 'name') != '', JSONExtractString(properties, 'name'), JSONExtractString(properties, '$set', 'name')) AS name_trait
 FROM events
@@ -3079,7 +3091,8 @@ SELECT
 	max(timestamp) AS last_seen,
 	count() AS event_count,
 	uniqExactIf(session_id, session_id != '') AS sessions,
-	argMax(event_name, timestamp) AS last_event_name
+	argMax(event_name, timestamp) AS last_event_name,
+	arraySort(groupUniqArrayIf(platform, platform != '')) AS platforms
 FROM (`+traitSource+`)
 GROUP BY canonical_distinct_id
 ORDER BY (email != '' OR name != '') DESC, last_seen DESC
@@ -3094,6 +3107,7 @@ LIMIT ?`, personArgs...)
 			&person.DistinctID, &person.Email, &person.Name,
 			&person.FirstSeen, &person.LastSeen,
 			&person.EventCount, &person.Sessions, &person.LastEventName,
+			&person.Platforms,
 		); err != nil {
 			return summary, err
 		}
@@ -3162,7 +3176,8 @@ SELECT
 	ifNull(tool_input, ''), ifNull(tool_output, ''),
 	ifNull(tokens_input, toUInt32(0)), ifNull(tokens_output, toUInt32(0)),
 	toFloat64(ifNull(cost_usd, toFloat32(0))), ifNull(latency_ms, toUInt32(0)),
-	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned
+	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned,
+	platform
 FROM events
 WHERE `+where+`
 ORDER BY timestamp DESC
@@ -3203,7 +3218,8 @@ SELECT
 	ifNull(tool_input, ''), ifNull(tool_output, ''),
 	ifNull(tokens_input, toUInt32(0)), ifNull(tokens_output, toUInt32(0)),
 	toFloat64(ifNull(cost_usd, toFloat32(0))), ifNull(latency_ms, toUInt32(0)),
-	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned
+	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned,
+	platform
 FROM events
 WHERE `+timelineWhere+`
 ORDER BY timestamp ASC
@@ -4792,6 +4808,7 @@ func scanEvent(rows eventScanner) (Event, error) {
 		&event.Timestamp,
 		&inserted,
 		&isUnplanned,
+		&event.Platform,
 	); err != nil {
 		return event, err
 	}

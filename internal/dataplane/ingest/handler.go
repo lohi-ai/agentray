@@ -18,6 +18,7 @@ type Handler struct {
 	aliases  aliasCreator
 	catalog  *catalogGuard
 	waitlist waitlistStore
+	sessions *sessionizer
 }
 
 type projectStore interface {
@@ -33,7 +34,12 @@ type aliasCreator interface {
 }
 
 func NewHandler(projects projectStore, events eventWriter, aliases aliasCreator) Handler {
-	return Handler{projects: projects, events: events, aliases: aliases}
+	return Handler{
+		projects: projects,
+		events:   events,
+		aliases:  aliases,
+		sessions: newSessionizer(sessionWindow),
+	}
 }
 
 // WithCatalogGuard enables the tracking-plan signal: incoming events whose name
@@ -162,6 +168,16 @@ func (h Handler) toEvent(c echo.Context, payload capturePayload, inheritedAPIKey
 	referrer := stringProp(props, "$referrer")
 	refHost, refChannel := classifyReferrer(referrer)
 
+	// A client that tracks its own session wins — it knows about tab focus and
+	// app foregrounding, which the server cannot see. Otherwise derive one, so a
+	// customer who pasted the quickstart snippet still gets Sessions and Avg
+	// session instead of two tiles permanently reading 0. Crawlers are skipped:
+	// every read path counts sessions humans-only anyway, and minting one per
+	// bot hit would fill the tracking table with entries nothing ever reads.
+	if sessionID == "" && visitorClass == VisitorHuman {
+		sessionID = h.sessions.sessionFor(project.ID, distinctID, ts)
+	}
+
 	return storage.Event{
 		ProjectID:       project.ID,
 		EventID:         uuid.NewString(),
@@ -187,9 +203,13 @@ func (h Handler) toEvent(c echo.Context, payload capturePayload, inheritedAPIKey
 		ReferrerHost:    refHost,
 		ReferrerChannel: refChannel,
 		UserAgent:       ua,
-		Platform:        classifyPlatform(props, ua),
-		InsertID:        stringProp(props, "$insert_id"),
-		IsUnplanned:     h.catalog.isUnplanned(c.Request().Context(), project.ID, payload.Event),
+		Platform: storage.ClassifyPlatform(
+			firstNonEmpty(stringProp(props, "platform"), stringProp(props, "$platform")),
+			stringProp(props, "$os"),
+			ua,
+		),
+		InsertID:    stringProp(props, "$insert_id"),
+		IsUnplanned: h.catalog.isUnplanned(c.Request().Context(), project.ID, payload.Event),
 	}, nil
 }
 
