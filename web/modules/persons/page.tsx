@@ -3,7 +3,8 @@
 import { useMemo } from 'react';
 import type { Person } from '@/lib/api';
 import { formatCompact, formatNumber, formatPercent, formatRelative } from '@/lib/format';
-import { usePersons } from '@/modules/app/hooks';
+import { platformLabel } from '@/lib/platform';
+import { useActivity, usePersons } from '@/modules/app/hooks';
 import { Chart } from '@/modules/shared/components/charts';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
@@ -52,6 +53,11 @@ function TraitChips({ traits }: { traits?: Record<string, unknown> }) {
 
 export function PersonsPage() {
   const { persons, focusPerson } = usePersons();
+  // Self-hiding for the same reason the filter bar's facet is: a single-app
+  // product would get a column that only ever repeats itself. It earns its width
+  // the moment a second app starts sending.
+  const { summary } = useActivity();
+  const showApps = (summary?.platforms?.length ?? 0) > 1;
 
   const columns = useMemo<DataColumn<Person>[]>(() => [
     {
@@ -69,6 +75,27 @@ export function PersonsPage() {
       header: 'Traits',
       renderCell: (p) => <TraitChips traits={p.traits} />,
     },
+    ...(showApps ? [{
+      key: 'platforms',
+      header: 'Apps',
+      // Two apps on one row is the whole point: it says this is one human who
+      // used the site and then the app, not two anonymous halves. '—' means the
+      // classifier could not tell, never "web".
+      renderCell: (p: Person) => p.platforms?.length
+        ? (
+          <span className="inline-flex flex-wrap gap-1">
+            {p.platforms.map((platform) => (
+              <span
+                key={platform}
+                className="inline-flex items-center rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)]"
+              >
+                {platformLabel(platform)}
+              </span>
+            ))}
+          </span>
+        )
+        : <span className="text-[var(--color-text-secondary)]">—</span>,
+    }] : []),
     {
       key: 'last_event_name',
       header: 'Last event',
@@ -90,7 +117,7 @@ export function PersonsPage() {
       sortValue: (p) => p.last_seen,
       renderCell: (p) => <span className="font-mono text-[var(--color-text-secondary)]">{formatRelative(p.last_seen)}</span>,
     },
-  ], []);
+  ], [showApps]);
 
   if (!persons) {
     return (

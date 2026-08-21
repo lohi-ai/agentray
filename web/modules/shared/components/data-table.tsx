@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Table,
   useTableSortable,
@@ -86,6 +86,31 @@ export function DataTable<T extends Record<string, unknown>>({
   // Active column keys drive the column-settings plugin; always-visible columns
   // (hideable === false) stay pinned in the set regardless of the menu.
   const [activeKeys, setActiveKeys] = useState<string[]>(() => columns.map((c) => c.key));
+
+  // Column sets are not fixed at mount: a data-driven column (the platform "App"
+  // column, which only exists once a second app has sent events) appears on the
+  // render *after* its summary loads. The lazy initializer above runs once, so
+  // such a column was born hidden and no amount of waiting revealed it.
+  //
+  // Reconcile instead of re-initializing: a key never seen before is switched on,
+  // a key whose column is gone is dropped, and a key the reader has explicitly
+  // hidden through the menu stays hidden — it was seen, so it is not new.
+  const seenKeys = useRef<Set<string>>(new Set(columns.map((c) => c.key)));
+  const columnKeys = columns.map((c) => c.key).join('\u0000');
+  useEffect(() => {
+    const current = columnKeys ? columnKeys.split('\u0000') : [];
+    const currentSet = new Set(current);
+    const fresh = current.filter((key) => !seenKeys.current.has(key));
+    seenKeys.current = currentSet;
+    setActiveKeys((prev) => {
+      const kept = prev.filter((key) => currentSet.has(key));
+      if (fresh.length === 0 && kept.length === prev.length) return prev;
+      // Re-derive from `current` so a newly-added column lands in its declared
+      // position rather than at the end of the table.
+      const active = new Set([...kept, ...fresh]);
+      return current.filter((key) => active.has(key));
+    });
+  }, [columnKeys]);
 
   // Make every column sortable by default — that's what surfaces Astryx's native
   // sort affordance — unless a column opts out. Columns keep their own align/width.

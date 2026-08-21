@@ -114,6 +114,9 @@ export type Event = {
   timestamp: string;
   inserted_at?: string;
   is_unplanned?: boolean;
+  /** Which app sent it — 'web' | 'ios' | 'android' | 'server', or '' when the
+   *  classifier could not tell. Render through platformLabel. */
+  platform?: string;
 };
 
 export type Session = {
@@ -311,6 +314,9 @@ export type Person = {
   event_count: number;
   sessions: number;
   last_event_name: string;
+  // Every app this person was seen in, sorted. Two entries means one human who
+  // used the site and the app — the visible payoff of identify()/alias.
+  platforms?: string[];
   // Merged $set / $set_once person profile traits (present only for identified
   // people with stored properties). Values are raw JSON — string, number, bool.
   traits?: Record<string, unknown>;

@@ -7,7 +7,8 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import type { Event } from '@/lib/api';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
-import { useFilters, useLiveEvents } from '@/modules/app/hooks';
+import { platformLabel } from '@/lib/platform';
+import { useActivity, useFilters, useLiveEvents } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
@@ -48,6 +49,13 @@ export function EventsPage() {
   // counts below), so it needs no extra request.
   const [unplannedOnly, setUnplannedOnly] = useState(false);
   const { explorer, loading, fetching, updatedAt } = useLiveEvents(live);
+  // The App column is data-driven and self-hiding, like the platform facet in the
+  // filter bar: a product that only ships a website would get a column that can
+  // only ever read "Web". It appears the day a second app starts sending, and
+  // stays while a platform filter is applied so the filtered rows say what they
+  // were filtered to.
+  const { summary } = useActivity();
+  const showPlatform = (summary?.platforms?.length ?? 0) > 1 || !!filters.platform;
 
   // Tick once a second so the "updated …" label and the relative timestamps in
   // the table keep counting up between refetches — that motion is what makes the
@@ -97,6 +105,13 @@ export function EventsPage() {
       header: 'Type',
       renderCell: (e) => <span className="text-[var(--color-text-secondary)]">{e.event_type}</span>,
     },
+    ...(showPlatform ? [{
+      key: 'platform',
+      header: 'App',
+      renderCell: (e: Event) => e.platform
+        ? <span className="text-[var(--color-text-secondary)]">{platformLabel(e.platform)}</span>
+        : <span className="text-[var(--color-text-secondary)]" title="No platform property and no user agent the classifier recognised.">Unknown</span>,
+    }] : []),
     {
       key: 'distinct_id',
       header: 'Person',
@@ -143,7 +158,7 @@ export function EventsPage() {
       header: 'When',
       renderCell: (e) => <span className="font-mono text-[var(--color-text-secondary)]">{formatRelative(e.timestamp)}</span>,
     },
-  ], []);
+  ], [showPlatform]);
 
   const header = (
     <div className="flex items-center gap-2">

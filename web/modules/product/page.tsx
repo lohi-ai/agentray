@@ -15,10 +15,12 @@ import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
 import { funnelStepNames, retentionAnchorEvent } from '@/lib/ia';
+import { useFiltersStore } from '@/lib/app-state';
 import { useActivity, useEventNames, useFunnelByPlatform, useInsight } from '@/modules/app/hooks';
 import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
+import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { Button, EmptyState, Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { headlineStats } from './headline';
@@ -48,7 +50,15 @@ export function ProductPage() {
   // The same steps the funnel question runs, split per app. A product with one
   // platform gets nothing extra; one with a site and a native app gets the two
   // curves the blended funnel was averaging.
-  const platforms = useMemo(() => summary?.platforms ?? [], [summary?.platforms]);
+  // Under a platform filter there is only one app to ask about, so the split
+  // drops to a single series and PlatformFunnels' own two-or-more guard hides it
+  // — the funnel above is already that app's. Without this the comparison table
+  // would keep listing every platform, contradicting the filter above it.
+  const applied = useFiltersStore((s) => s.appliedFilters);
+  const platforms = useMemo(
+    () => (applied.platform ? [applied.platform] : summary?.platforms ?? []),
+    [applied.platform, summary?.platforms],
+  );
   const funnelSteps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames)), [emptyCatalog, eventNames]);
   const { splits: platformFunnels, loading: splitsLoading } = useFunnelByPlatform(
     active === 'funnel' ? funnelSteps : [],
@@ -81,10 +91,26 @@ export function ProductPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [namesLoading, emptyCatalog, eventNames]);
 
+  // The insight endpoint has always taken the applied filters — nothing on this
+  // page ever asked it again, so changing the range or the platform left the
+  // previous answer on screen looking like the new one. Re-run the question that
+  // is already open; skip the first pass, which the auto-run above owns.
+  const lastFilters = useRef<string>('');
+  useEffect(() => {
+    const key = JSON.stringify(applied);
+    const first = lastFilters.current === '';
+    lastFilters.current = key;
+    if (first || !active) return;
+    void ask(active);
+    // ask closes over eventNames, which the catalog effect already tracks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applied]);
+
   return (
     <AppShell active="product">
       <Intro title="Product" sub="Answer behavior questions without writing SQL first." action={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>} />
       <div className="mb-3"><RelatedSurfacesLabel parentHref="/product" /></div>
+      <FilterBar showEventType={false} showErrors={false} />
 
       {/* Astryx migration: the question picker is now an Astryx <Card> wrapping a
           responsive <Grid> of <SelectableCard>s — native controlled selection
