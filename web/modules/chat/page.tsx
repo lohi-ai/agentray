@@ -16,13 +16,13 @@ import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
 import { useAgentSkills } from '@/modules/agent/hooks';
 import { useMediaQuery } from '@/modules/app/hooks/media';
-import { firstRunHandoff, firstSessionNotice, firstValuePath, formatAgentError, instantReply, isFirstRun, isSampleProject, needsKeyRecovery, recoveryAction, threadNeedsRecovery } from '@/lib/ia';
+import { firstSessionNotice, firstValuePath, formatAgentError, instantReply, isRunError, needsKeyRecovery, recoveryAction, threadNeedsRecovery, tourHandoff } from '@/lib/ia';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
-import { useEventNames } from '@/modules/app/hooks';
+import { useEventNames, useTour } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
-import { ThreadsRail, FrontDoor, FirstRunPanel, FirstRunHandoff, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
+import { ThreadsRail, FrontDoor, TourPanel, TourNext, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
 import { composeMessage, readAttachment, MAX_ATTACHMENTS, type Attachment } from './message-format';
 import { CommandNames, parseCommandLine, useChatCommands } from './commands';
@@ -52,7 +52,7 @@ export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
   const router = useRouter();
-  const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, runs, runsReady, recommendations, ackRecommendation } = useAgent();
+  const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, runs, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation } = useChatThreads(projectID);
 
@@ -184,37 +184,43 @@ export function ChatPage() {
   const { names: eventNames, loading: catalogLoading } = useEventNames();
   const { models, modelsLoading } = useWorkspaceModels();
   const catalogReady = !catalogLoading && !!projectID;
-  const sample = isSampleProject({ name: projectName });
-  const firstValue = firstValuePath({ eventNames, catalogReady, sample });
+  const firstValue = firstValuePath({ eventNames, catalogReady });
   const sessionNotice = firstSessionNotice({
     eventNames,
     catalogReady,
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
-    sample,
   });
+  // The guided tour. Every tick it reports is a server answer about the user's
+  // OWN workspace, so it resumes on the right step after a reload and on a
+  // second device — never from a flag this browser wrote.
+  const tour = useTour(agentName);
 
-  // First session: a workspace that has never run an agent gets the FirstRunPanel
-  // instead of the chip wall. The gate keys off *runs*, not events — signup seeds
-  // a populated Demo project, so an events-based check would never turn off.
+  // The demo's threads are not private: it is one project many visitors read,
+  // and the thread list is cached per project, so a second visit can otherwise
+  // open on a stranger's conversation. While the tour is running, the demo
+  // opens on a fresh chat instead. `ownThread` is what stops it: a thread the
+  // reader picked from the rail, or one they have already sent into, is theirs
+  // and is never replaced under them.
+  const ownThread = useRef(false);
+  useEffect(() => {
+    if (!projectID || !tour.visible || !tour.input.inDemo || ownThread.current) return;
+    if (!activeID || isDraft(activeID)) return;
+    newChat();
+  }, [projectID, tour.visible, tour.input.inDemo, activeID, newChat]);
+
+
   // A turn is one thing the user asked, so it is counted in user messages —
   // never in `messages.length`, which is two per exchange now that a message is
   // a message. Steering makes even that a floor rather than an exact count, but
   // both consumers only care whether the user is still on their first ask.
   const turnCount = useMemo(() => messages.filter((m) => m.role === 'user').length, [messages]);
-  const firstRun = isFirstRun({ runs, runsReady, turnCount });
-  // Whether the seeded first-run prompt was fired from this session. Local state,
-  // not derived: once the user has watched the run, the handoff belongs to that
-  // turn, and a reload legitimately drops back to the ordinary thread view.
-  const [firstRunFired, setFirstRunFired] = useState(false);
   const lastMessage = messages[messages.length - 1];
-  // A turn that settled with no prose is the failure shape the stream leaves
-  // behind (abort, network, agent error) — that gets the error surface, not a
-  // "your dashboard is ready" pointing at a board nothing was pinned to.
-  const handoff = firstRunHandoff({
-    started: firstRunFired,
-    settled: !streaming && !!lastMessage?.done,
-    failed: !lastMessage?.text || needsKeyRecovery(lastMessage.text),
-    turnCount,
+  // What to do after the demo has answered. Derived, not remembered: the tour's
+  // own state says whether the reader still has a project to connect, so this
+  // survives a reload and cannot show up under a thread it doesn't belong to.
+  const handoff = tourHandoff(tour.input, {
+    settled: !streaming && !!lastMessage?.done && turnCount === 1,
+    failed: isRunError(lastMessage?.text ?? ''),
   });
 
   // Read dropped/picked/pasted files into text attachments, dropping unreadable
@@ -552,7 +558,12 @@ export function ChatPage() {
     };
   }
 
-  async function send(override?: string) {
+  // `live` skips the local written-opinion shortcut below. The tour's seeded
+  // question is the one moment the whole product is being judged on — the reader
+  // is meant to watch the agent read the events and answer — so it always
+  // reaches the runtime, even though it is exactly the funnel-shaped question
+  // the shortcut was written to answer without one.
+  async function send(override?: string, opts?: { live?: boolean }) {
     // Fold the typed /skill commands and any attachments into the single message
     // string the conversation store carries (FE-only — there's no separate channel).
     // The same composed string is both displayed and sent, so a reloaded turn
@@ -581,7 +592,7 @@ export function ChatPage() {
     // we measure next` matches the funnel-shaped-question heuristic word for
     // word, and letting it settle locally would drop a gated run on the floor
     // with a written opinion in its place.
-    const instant = parsed ? null : instantReply({
+    const instant = parsed || opts?.live ? null : instantReply({
       eventNames,
       catalogReady,
       hasModelKey: modelsLoading ? undefined : !!models?.has_key,
@@ -621,6 +632,9 @@ export function ChatPage() {
     // If that fails (offline / no project), fall back to the legacy client-history
     // path so chat still works without the conversation store.
     let convID = activeID;
+    // From here the active thread is the reader's own, so the demo's
+    // open-on-a-fresh-chat rule stops applying to it.
+    ownThread.current = true;
     try { convID = await ensureConversation(activeID, agent?.id); } catch { convID = activeID; }
     // Don't let the server-load effect re-fetch and replace this richer local turn
     // (card/tools/steps) once streaming ends — we already hold the freshest state.
@@ -762,18 +776,15 @@ export function ChatPage() {
     cancelledRef.current = true;
     setStreaming(false);
     setInput('');
-    // The handoff belongs to the thread the first run happened in. Leaving it
-    // armed would re-show it on any other two-message thread the user opens.
-    setFirstRunFired(false);
     newChat();
   }
 
   // Switching threads aborts any in-flight stream (event handler — safe to
   // mutate the cancel ref here); render-time sync then loads the new messages.
   function onSelect(id: string) {
+    ownThread.current = true;
     cancelledRef.current = true;
     setStreaming(false);
-    setFirstRunFired(false);
     selectThread(id);
   }
 
@@ -929,13 +940,13 @@ export function ChatPage() {
             })() : null}
             <ChatLayout
               density="balanced"
-              emptyState={firstRun ? (
-                <FirstRunPanel
+              emptyState={tour.visible ? (
+                <TourPanel
+                  tour={tour}
                   agentName={agentName}
-                  sampleProjectName={projectName || 'Demo'}
                   hasModelKey={modelsLoading ? undefined : !!models?.has_key}
                   onPick={setInput}
-                  onRun={(q) => { setFirstRunFired(true); void send(q); }}
+                  onAsk={(q) => void send(q, { live: true })}
                 />
               ) : (
                 <FrontDoor agentName={agentName} onPick={setInput} onAsk={(q) => void send(q)} showFirstEvent={firstValue.showFirstEvent} notice={sessionNotice} />
@@ -982,7 +993,7 @@ export function ChatPage() {
                     debug={debug}
                     actions={forkActions}
                   />
-                  {handoff ? <FirstRunHandoff handoff={handoff} /> : null}
+                  {handoff ? <TourNext step={handoff} demoName={tour.input.demoName} onAct={tour.openOwn} /> : null}
                 </>
               ) : null}
             </ChatLayout>

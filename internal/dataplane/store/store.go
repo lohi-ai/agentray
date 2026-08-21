@@ -10,6 +10,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,15 @@ type Store struct {
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
 	// key inherit it so the first ask works. Zero-value (empty APIKey) = off.
 	hostModel HostModelDefaults
+
+	// The one shared demo (config.DemoProjectID): a REAL project fed by a real
+	// site, that every account is added to as a read-only viewer. Both empty
+	// means this instance has no demo — the common case, because a self-hosted
+	// `docker compose up` operator never sets AGENTRAY_DEMO_PROJECT_ID. Resolved
+	// once at boot by migrateDemoWorkspace; read on every signup and on every
+	// workspace/project list, so it must not cost a query.
+	demoProjectID   string
+	demoWorkspaceID string
 }
 
 // readConn returns the connection that untrusted SELECTs (run_sql, saved
@@ -119,6 +129,14 @@ type Project struct {
 	Name        string    `json:"name"`
 	APIKey      string    `json:"api_key"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Role is the requesting user's role in the owning workspace, and IsDemo
+	// says the project lives in the shared demo workspace (see demo.go). Both
+	// are additive read-only truth for the UI: without them it cannot tell a
+	// project the viewer owns from a live demo of someone else's site, and it
+	// would offer write affordances that the API will refuse. Empty/false on the
+	// api-key path, which has no user to have a role.
+	Role   string `json:"role,omitempty"`
+	IsDemo bool   `json:"is_demo,omitempty"`
 }
 
 type Dashboard struct {
@@ -234,10 +252,16 @@ type EventCount struct {
 // in an autocomplete. The catalog spans all history, not the active time window,
 // so picking from it never hides a name just because it was quiet lately.
 type EventCatalogEntry struct {
-	EventName string    `json:"event_name"`
-	EventType string    `json:"event_type"`
-	Count     uint64    `json:"count"`
-	LastSeen  time.Time `json:"last_seen"`
+	EventName string `json:"event_name"`
+	EventType string `json:"event_type"`
+	// Count is event volume; Users is how many stitched, human identities are
+	// behind it. They are wildly different numbers — one person can fire a
+	// pageview two hundred times — and only Users may be labelled "people".
+	// The first-run written opinion reads this catalog, so shipping only Count
+	// is what let the headline print event volume under a "people" noun.
+	Count    uint64    `json:"count"`
+	Users    uint64    `json:"users"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 type TimelinePoint struct {
@@ -294,6 +318,14 @@ type RetentionPoint struct {
 	Period string  `json:"period"`
 	Users  uint64  `json:"users"`
 	Rate   float64 `json:"rate"`
+	// Mature is false when this period's window has not finished elapsing, so a
+	// 0 here means "nobody could have returned yet", not "nobody returned". The
+	// curve used to emit those as a flat 0% and the headline averaged them into
+	// an "Avg retention" figure — on the default 24-hour range every weekly
+	// period is in the future, so the product reported a precise-looking number
+	// for a question the data cannot answer. Renderers must not chart, average,
+	// or colour an immature point.
+	Mature bool `json:"mature"`
 }
 
 // CohortCell is one square in the retention triangle: the audience of a cohort
@@ -437,9 +469,37 @@ type identityResolver struct {
 }
 
 type EventExplorer struct {
-	Events    []Event   `json:"events"`
-	Timeline  []Event   `json:"timeline"`
-	Generated time.Time `json:"generated_at"`
+	// Schema is the catalog the sample is drawn from, and it is the field an
+	// agent actually reads. Events is up to 500 raw rows: enough to see what a
+	// payload looks like, and nothing you can safely conclude a shape from — an
+	// event that fires once a week is not in a 100-row sample of a busy project.
+	// Without Schema every analysis run opened by rebuilding it in SQL (SELECT
+	// DISTINCT event_name, SELECT DISTINCT properties, min/max(timestamp)),
+	// spending a third of its turn budget rediscovering what one GROUP BY knows.
+	Schema    []EventSchemaEntry `json:"schema"`
+	Events    []Event            `json:"events"`
+	Timeline  []Event            `json:"timeline"`
+	Generated time.Time          `json:"generated_at"`
+}
+
+// EventSchemaEntry is one event name as the store knows it: how much of it there
+// is, how many people are behind it, the span it covers, and the property keys
+// it carries.
+type EventSchemaEntry struct {
+	EventName string `json:"event_name"`
+	EventType string `json:"event_type"`
+	// Events is volume; People is stitched, human identities. Only People may be
+	// reported to anyone as a count of anybody — see EventCatalogEntry.
+	Events uint64 `json:"events"`
+	People uint64 `json:"people"`
+	// FirstSeen/LastSeen bound this event inside the window that was explored,
+	// which is not the same as the life of the project: an agent reading a 24h
+	// window must not conclude the product launched yesterday.
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	// PropertyKeys is the union of JSON keys on this event's properties, sorted
+	// and capped. This is the part that stops an agent guessing property names.
+	PropertyKeys []string `json:"property_keys"`
 }
 
 type AgentReplay struct {
@@ -716,6 +776,22 @@ CREATE INDEX IF NOT EXISTS user_sessions_user_expires_idx
 ON user_sessions (user_id, expires_at DESC)`); err != nil {
 		return err
 	}
+	// The shared demo's per-user daily agent budget (demo_quota.go). It is its
+	// own table rather than a column on agent_runs because agent_runs has no
+	// user at all — a scheduled run is started by a clock — and because this
+	// ledger is written on a path that must stay a single conditional
+	// statement. One row per (user, UTC day); the day is part of the key so a
+	// new day starts at zero without anything having to reset it.
+	if _, err := s.pg.Exec(ctx, `
+CREATE TABLE IF NOT EXISTS demo_agent_run_quota (
+	user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	day DATE NOT NULL,
+	runs INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (user_id, day)
+)`); err != nil {
+		return err
+	}
 	if _, err := s.pg.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS projects (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -937,15 +1013,6 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 				return err
 			}
 		}
-		// #3b: on the compose quickstart, fill the default project with a couple of
-		// days of synthetic events so a first-time visitor sees populated dashboards
-		// instead of empty states. Opt-in and idempotent; a seeding hiccup must never
-		// block boot, so it is best-effort.
-		if cfg.SeedDemo {
-			if err := s.SeedDemoEvents(ctx, defaultProjectID); err != nil {
-				fmt.Printf("warn: SeedDemoEvents(%s): %v\n", defaultProjectID, err)
-			}
-		}
 	}
 
 	if err := s.migrateAlerts(ctx); err != nil {
@@ -975,6 +1042,12 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	// ClickHouse migration. A CH outage or schema conflict there returns early,
 	// and this column missing turns "analytics are down" into "nobody can log in".
 	if err := s.migrateWorkspacePlan(ctx); err != nil {
+		return err
+	}
+
+	// Last, because it reads projects/workspaces/users and writes memberships —
+	// every table it touches has to already exist.
+	if err := s.migrateDemoWorkspace(ctx, cfg); err != nil {
 		return err
 	}
 
@@ -2102,6 +2175,17 @@ func (r identityResolver) canonicalExpr(column string) (string, []any) {
 	return "dictGetOrDefault('" + dict + "', 'canonical_id', (project_id, " + column + "), " + column + ")", nil
 }
 
+// workspaceCanonicalExpr is canonicalExpr for a query that spans a whole
+// workspace, where there is no single project to resolve. It is safe because
+// canonicalExpr resolves entirely through the ClickHouse dictionary, keyed on
+// (project_id, distinct_id) — it reads only the database name. The Postgres
+// alias list identityResolver loads serves the *other* resolver methods
+// (relatedDistinctIDs, canonicalID), which a workspace-wide query does not use.
+func (s *Store) workspaceCanonicalExpr(column string) string {
+	expr, _ := identityResolver{database: s.chDatabase}.canonicalExpr(column)
+	return expr
+}
+
 // canonicalID resolves a raw distinct id to its stitched canonical id, mirroring
 // the read-path dictGetOrDefault('aliases_dict','canonical_id',(project,id), id):
 // an id that appears as an anonymous alias maps to its canonical, everything else
@@ -2144,13 +2228,28 @@ func (s *Store) EventNames(ctx context.Context, projectID string, limit int) ([]
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
+	resolver, err := s.identityResolver(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	// The catalog is read by autocomplete *and* by the first-run written opinion,
+	// which speaks in people. So it carries both numbers, and the people number
+	// is stitched (one human who logged in mid-session is one person) and
+	// human-only (a crawler is not a person).
+	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
+	args := append([]any{projectID}, canonicalArgs...)
+	args = append(args, limit)
 	rows, err := s.ch.Query(ctx, `
-SELECT event_name, any(event_type) AS event_type, count() AS cnt, max(timestamp) AS last_seen
+SELECT event_name,
+       any(event_type) AS event_type,
+       count() AS cnt,
+       uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human') AS users,
+       max(timestamp) AS last_seen
 FROM events
 WHERE project_id = ? AND event_name != ''
 GROUP BY event_name
 ORDER BY cnt DESC
-LIMIT ?`, projectID, limit)
+LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2159,7 +2258,7 @@ LIMIT ?`, projectID, limit)
 	entries := []EventCatalogEntry{}
 	for rows.Next() {
 		var e EventCatalogEntry
-		if err := rows.Scan(&e.EventName, &e.EventType, &e.Count, &e.LastSeen); err != nil {
+		if err := rows.Scan(&e.EventName, &e.EventType, &e.Count, &e.Users, &e.LastSeen); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -2300,6 +2399,13 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
 	summaryArgs := append(append([]any{}, canonicalArgs...), args...)
 
+	// DistinctUsers renders as "People" on the dashboard, so it counts humans —
+	// the same rule Persons and the funnel already apply. It is filtered inside
+	// the aggregate rather than through filter.HumansOnly because the sibling
+	// numbers on this row (EventCount, the per-type breakdowns, tokens, cost) are
+	// ingestion and spend figures: a crawler's events were still ingested and
+	// still cost money, and hiding them would make the dashboard disagree with
+	// the bill.
 	err = s.ch.QueryRow(ctx, `
 	SELECT
 		count(),
@@ -2307,7 +2413,7 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 	countIf(event_type = 'agent'),
 	countIf(event_type = 'system'),
 	uniqExactIf(session_id, session_id != ''),
-	uniqExact(`+canonicalID+`),
+	uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human'),
 	sum(toUInt64(ifNull(tokens_input, toUInt32(0)))),
 	sum(toUInt64(ifNull(tokens_output, toUInt32(0)))),
 		sum(toFloat64(ifNull(cost_usd, toFloat32(0))))
@@ -2516,7 +2622,12 @@ func (s *Store) RunInsight(ctx context.Context, projectID string, insightType st
 		result.Funnel = funnel
 		return result, err
 	case "retention":
-		retention, err := s.retention(ctx, projectID, firstNonEmpty(filter.EventName, metric, "user.pageview"), filter)
+		// The anchor is an *event name*. `metric` is one of events/users/sessions,
+		// so feeding it in here made every unfiltered retention query ask about an
+		// event literally named "events" — which nothing emits, so the curve was
+		// structurally 0% while the UI still printed "Week 0: 100%". Steps are the
+		// caller's event names, so the first one is the cohort-defining event.
+		retention, err := s.retention(ctx, projectID, firstNonEmpty(filter.EventName, firstStep(steps), "user.pageview"), filter)
 		result.Title = "Retention"
 		result.Retention = retention
 		return result, err
@@ -2929,8 +3040,11 @@ func (s *Store) exploreEvents(ctx context.Context, projectID string, filter Even
 	if err != nil {
 		return EventExplorer{}, err
 	}
-	where, args := filteredWhereWithDistinctIDs(projectID, filter, defaultTimeWindow, resolver.relatedDistinctIDs(filter.DistinctID))
-	args = append(args, filter.Limit)
+	where, whereArgs := filteredWhereWithDistinctIDs(projectID, filter, defaultTimeWindow, resolver.relatedDistinctIDs(filter.DistinctID))
+	// Copied, not appended in place: whereArgs is reused verbatim by the schema
+	// query below, and appending the row limit onto its backing array would bind
+	// that limit as a WHERE argument there.
+	args := append(append([]any{}, whereArgs...), filter.Limit)
 	rows, err := s.ch.Query(ctx, `
 SELECT
 	project_id::String, event_id::String, distinct_id, session_id, event_name,
@@ -2948,7 +3062,7 @@ LIMIT ?`, args...)
 	}
 	defer rows.Close()
 
-	explorer := EventExplorer{Events: []Event{}, Timeline: []Event{}, Generated: time.Now().UTC()}
+	explorer := EventExplorer{Schema: []EventSchemaEntry{}, Events: []Event{}, Timeline: []Event{}, Generated: time.Now().UTC()}
 	for rows.Next() {
 		event, err := scanEvent(rows)
 		if err != nil {
@@ -2959,6 +3073,12 @@ LIMIT ?`, args...)
 	if err := rows.Err(); err != nil {
 		return explorer, err
 	}
+
+	schema, err := s.eventSchema(ctx, resolver, where, whereArgs)
+	if err != nil {
+		return explorer, err
+	}
+	explorer.Schema = schema
 
 	if filter.SessionID != "" || filter.DistinctID != "" {
 		timelineFilter := filter
@@ -2994,6 +3114,57 @@ LIMIT ?`, timelineArgs...)
 		}
 	}
 	return explorer, nil
+}
+
+// eventSchemaLimit caps the catalog one explore returns. A project with more
+// distinct event names than this has a tracking-plan problem rather than a
+// schema, and the tail is noise to anything reading it.
+const eventSchemaLimit = 100
+
+// eventSchemaKeyLimit caps the property keys listed per event. The point of the
+// list is to stop a reader guessing key names, which the first two dozen do;
+// past that it is one event's payload crowding out every other event's.
+const eventSchemaKeyLimit = 25
+
+// eventSchema summarizes the same window the explore sampled: one row per event
+// name, with volume, people, span, and property keys. It runs over the caller's
+// WHERE clause so the summary describes exactly the slice the sample came from —
+// a schema for a different window would be worse than none, because it would be
+// believed.
+func (s *Store) eventSchema(ctx context.Context, resolver identityResolver, where string, whereArgs []any) ([]EventSchemaEntry, error) {
+	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
+	// ClickHouse binds positionally, so arguments follow SQL text order: the
+	// canonical expression is in the SELECT list, ahead of the WHERE clause.
+	args := append(append([]any{}, canonicalArgs...), whereArgs...)
+	args = append(args, eventSchemaLimit)
+	rows, err := s.ch.Query(ctx, `
+SELECT
+	event_name,
+	any(event_type) AS event_type,
+	count() AS events,
+	uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human') AS people,
+	min(timestamp) AS first_seen,
+	max(timestamp) AS last_seen,
+	arraySlice(arraySort(groupUniqArrayArray(JSONExtractKeys(properties))), 1, `+strconv.Itoa(eventSchemaKeyLimit)+`) AS property_keys
+FROM events
+WHERE `+where+`
+GROUP BY event_name
+ORDER BY events DESC
+LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []EventSchemaEntry{}
+	for rows.Next() {
+		var e EventSchemaEntry
+		if err := rows.Scan(&e.EventName, &e.EventType, &e.Events, &e.People, &e.FirstSeen, &e.LastSeen, &e.PropertyKeys); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) AgentReplay(ctx context.Context, projectID string, sessionID string) (AgentReplay, error) {
@@ -3058,7 +3229,14 @@ RETURNING id::text, project_id::text, natural_language, generated_sql, verified,
 	return q, err
 }
 
-func (s *Store) RunSavedQuery(ctx context.Context, projectID string, queryID string) (SavedQueryResult, error) {
+// RunSavedQuery executes a stored query and returns its rows.
+//
+// cacheResult decides whether the run also refreshes the query's memoized
+// result. It is the CALLER's decision because running a saved query is a read
+// for the person doing it and a write to the owner's row — and in the shared
+// demo those are two different people. A read-only member gets the rows and
+// leaves the owner's cache alone.
+func (s *Store) RunSavedQuery(ctx context.Context, projectID string, queryID string, cacheResult bool) (SavedQueryResult, error) {
 	var q SavedQuery
 	err := s.pg.QueryRow(ctx, `
 SELECT id::text, project_id::text, natural_language, generated_sql, verified, COALESCE(result_cache, 'null'::jsonb), created_at
@@ -3072,8 +3250,10 @@ WHERE project_id = $1 AND id = $2`, projectID, queryID).
 	if err != nil {
 		return SavedQueryResult{}, err
 	}
-	cache, _ := json.Marshal(rows)
-	_, _ = s.pg.Exec(ctx, `UPDATE saved_queries SET result_cache = $3 WHERE project_id = $1 AND id = $2`, projectID, queryID, cache)
+	if cacheResult {
+		cache, _ := json.Marshal(rows)
+		_, _ = s.pg.Exec(ctx, `UPDATE saved_queries SET result_cache = $3 WHERE project_id = $1 AND id = $2`, projectID, queryID, cache)
+	}
 	return SavedQueryResult{Query: q, Rows: rows, Generated: time.Now().UTC()}, nil
 }
 
@@ -3165,6 +3345,26 @@ ORDER BY hour ASC`, args...)
 	return points, rows.Err()
 }
 
+// funnel computes a genuinely sequential funnel: the users counted at step N are
+// the users who did steps 1..N *in order*, within the analysis window.
+//
+// It used to run one independent uniqExact per step and divide each by step 1,
+// which is not a funnel — it is a per-event unique-user bar chart with a
+// division. Nothing required a step-N user to have done step N-1, and nothing
+// required the events to happen in order, so a user who only ever did the last
+// step still counted as converted and a later step could report more users than
+// an earlier one (conversion above 100%). Every surface that says "step-by-step
+// conversion" — the Product page, run_insight/run_funnel, and the agents that
+// pick a weakest link from them — was reading that number as passage.
+//
+// ClickHouse's windowFunnel does the ordering in one pass: it returns, per user,
+// the depth of the longest prefix of the step list they completed in order inside
+// the window. Users at step N are then everyone whose depth is >= N, which is
+// monotonically non-increasing by construction.
+//
+// The timestamp is cast: the column is DateTime64(3, 'UTC') and windowFunnel
+// accepts only Date, DateTime or an unsigned number. Millisecond precision is not
+// meaningful for step ordering here, so second resolution is the right trade.
 func (s *Store) funnel(ctx context.Context, projectID string, steps []string, filter EventFilter) ([]FunnelStep, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
@@ -3172,7 +3372,6 @@ func (s *Store) funnel(ctx context.Context, projectID string, steps []string, fi
 	}
 	// A funnel measures people converting; crawler hits are not conversions.
 	filter.HumansOnly = true
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
 	cleanSteps := []string{}
 	for _, step := range steps {
 		step = strings.TrimSpace(step)
@@ -3183,16 +3382,86 @@ func (s *Store) funnel(ctx context.Context, projectID string, steps []string, fi
 	if len(cleanSteps) == 0 {
 		cleanSteps = []string{"user.pageview", "user.signup", "user.conversion"}
 	}
-	out := []FunnelStep{}
+
+	// The step list scopes the scan; the per-step EventName filter must not, or
+	// every step but one would be filtered away before windowFunnel sees it.
+	scanFilter := filter
+	scanFilter.EventName = ""
+	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
+	where, whereArgs := filteredWhereWithDistinctIDs(projectID, scanFilter, true, resolver.relatedDistinctIDs(scanFilter.DistinctID))
+
+	query, args := buildFunnelQuery(cleanSteps, funnelWindowSeconds(filter), where, whereArgs, canonicalID, canonicalArgs)
+
+	rows, err := s.ch.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// depthCounts[d] = users whose longest in-order prefix was exactly d steps.
+	depthCounts := make([]uint64, len(cleanSteps)+1)
+	for rows.Next() {
+		var level uint8
+		var people uint64
+		if err := rows.Scan(&level, &people); err != nil {
+			return nil, err
+		}
+		if int(level) < len(depthCounts) {
+			depthCounts[level] += people
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return funnelStepsFromDepths(cleanSteps, depthCounts), nil
+}
+
+// buildFunnelQuery assembles the windowFunnel query and its arguments. The two
+// have to agree positionally: ClickHouse binds ? by position, so the args are
+// appended in the order the placeholders appear in the SQL *text* — the
+// windowFunnel conditions in the SELECT, then the WHERE, then the event_name IN
+// list, then whatever the canonical-ID expression in the GROUP BY needs. Getting
+// that order wrong does not error, it silently funnels the wrong events, which is
+// why this is a separate function with a test rather than inline.
+func buildFunnelQuery(cleanSteps []string, windowSeconds int64, where string, whereArgs []any, canonicalID string, canonicalArgs []any) (string, []any) {
+	conds := make([]string, 0, len(cleanSteps))
+	args := make([]any, 0, len(cleanSteps)*2+len(whereArgs)+len(canonicalArgs))
+	for _, eventName := range cleanSteps {
+		conds = append(conds, "event_name = ?")
+		args = append(args, eventName)
+	}
+	args = append(args, whereArgs...)
+	for _, eventName := range cleanSteps {
+		args = append(args, eventName)
+	}
+	args = append(args, canonicalArgs...)
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(cleanSteps)), ", ")
+	query := `
+SELECT level, count() AS people FROM (
+	SELECT windowFunnel(` + strconv.FormatInt(windowSeconds, 10) + `)(toDateTime(timestamp), ` + strings.Join(conds, ", ") + `) AS level
+	FROM events
+	WHERE ` + where + ` AND event_name IN (` + placeholders + `)
+	GROUP BY ` + canonicalID + `
+)
+WHERE level > 0
+GROUP BY level`
+	return query, args
+}
+
+// funnelStepsFromDepths turns windowFunnel's per-user depth histogram into the
+// step rows the API returns. depthCounts[d] is the number of users whose longest
+// in-order prefix was exactly d steps, so the users who reached step N are
+// everyone at depth >= N. Summing the tail is what makes the series monotonically
+// non-increasing and conversion incapable of exceeding 100%.
+func funnelStepsFromDepths(cleanSteps []string, depthCounts []uint64) []FunnelStep {
+	out := make([]FunnelStep, 0, len(cleanSteps))
 	var firstCount uint64
 	for i, eventName := range cleanSteps {
-		stepFilter := filter
-		stepFilter.EventName = eventName
-		where, args := filteredWhereWithDistinctIDs(projectID, stepFilter, true, resolver.relatedDistinctIDs(stepFilter.DistinctID))
-		queryArgs := append(append([]any{}, canonicalArgs...), args...)
 		var count uint64
-		if err := s.ch.QueryRow(ctx, `SELECT uniqExact(`+canonicalID+`) FROM events WHERE `+where, queryArgs...).Scan(&count); err != nil {
-			return nil, err
+		for depth := i + 1; depth < len(depthCounts); depth++ {
+			count += depthCounts[depth]
 		}
 		if i == 0 {
 			firstCount = count
@@ -3203,7 +3472,30 @@ func (s *Store) funnel(ctx context.Context, projectID string, steps []string, fi
 		}
 		out = append(out, FunnelStep{Step: i + 1, EventName: eventName, Users: count, Conversion: conversion})
 	}
-	return out, nil
+	return out
+}
+
+// firstStep is the first non-blank entry of a step list, or "".
+func firstStep(steps []string) string {
+	for _, step := range steps {
+		if trimmed := strings.TrimSpace(step); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// funnelWindowSeconds is how long a person has to complete the whole sequence.
+// It is the analysis window itself: a funnel over "the last 30 days" asks who
+// converted during those 30 days, so a stricter window would silently drop real
+// conversions. Mirrors the 24h default filteredWhereWithDistinctIDs applies when
+// the caller gave no range.
+func funnelWindowSeconds(filter EventFilter) int64 {
+	from, to := filter.From, filter.To
+	if from.IsZero() || to.IsZero() || !to.After(from) {
+		return int64((24 * time.Hour).Seconds())
+	}
+	return int64(to.Sub(from).Seconds())
 }
 
 func (s *Store) retention(ctx context.Context, projectID string, firstEvent string, filter EventFilter) ([]RetentionPoint, error) {
@@ -3213,14 +3505,32 @@ func (s *Store) retention(ctx context.Context, projectID string, firstEvent stri
 	}
 	// Retention is a people metric: a returning crawler is not a retained user.
 	filter.HumansOnly = true
+	// A weekly curve needs a window that can hold at least one full week. The
+	// default analytics range is 24 hours, in which "weekly retention" is not a
+	// narrower question but an unanswerable one — every period boundary is in the
+	// future. Widen the cohort scan so the curve has room, and only when the
+	// caller's range is too short to contain a single period; a range of two
+	// weeks or more is a deliberate choice and is left exactly as given.
+	if filter.To.IsZero() {
+		filter.To = time.Now().UTC()
+	}
+	if filter.From.IsZero() || filter.To.Sub(filter.From) < 2*retentionPeriod {
+		filter.From = filter.To.Add(-time.Duration(retentionWeeks+1) * retentionPeriod)
+	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
 	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
 	canonicalEventID := strings.ReplaceAll(canonicalID, "distinct_id", "e.distinct_id")
 	firstWhere := where + " AND event_name = ?"
 	firstArgs := append(append([]any{}, args...), firstEvent)
+	// cohortStart is when the *earliest* member of this cohort was acquired. It
+	// decides which periods are old enough to have a rate, and it must come from
+	// the data, not from the window: a nine-week window over a project with two
+	// days of events still has a two-day-old cohort, and every weekly period is
+	// in the future for all of them.
 	var base uint64
+	var cohortStart time.Time
 	baseArgs := append(append([]any{}, canonicalArgs...), firstArgs...)
-	if err := s.ch.QueryRow(ctx, `SELECT uniqExact(`+canonicalID+`) FROM events WHERE `+firstWhere, baseArgs...).Scan(&base); err != nil {
+	if err := s.ch.QueryRow(ctx, `SELECT uniqExact(`+canonicalID+`), min(timestamp) FROM events WHERE `+firstWhere, baseArgs...).Scan(&base, &cohortStart); err != nil {
 		return nil, err
 	}
 	// Bracketed weekly cohort retention: week W counts cohort users active during
@@ -3228,7 +3538,8 @@ func (s *Store) retention(ctx context.Context, projectID string, firstEvent stri
 	// acquisition week (the base, 100%). A *periodic* curve — not the old rolling
 	// "returned ever after X" — is what lets the PMF verdict read a plateau: a
 	// curve that flattens to a stable floor is fit; one decaying toward zero is not.
-	points := []RetentionPoint{{Period: "Week 0", Users: base, Rate: 1}}
+	// Week 0 is the acquisition week — 100% by definition, not by measurement.
+	points := []RetentionPoint{{Period: "Week 0", Users: base, Rate: 1, Mature: true}}
 	for week := 1; week <= retentionWeeks; week++ {
 		lowerHours := week * retentionPeriodHours
 		upperHours := (week + 1) * retentionPeriodHours
@@ -3258,7 +3569,12 @@ WHERE e.project_id = ?
 		if base > 0 {
 			rate = float64(retained) / float64(base)
 		}
-		points = append(points, RetentionPoint{Period: fmt.Sprintf("Week %d", week), Users: retained, Rate: rate})
+		points = append(points, RetentionPoint{
+			Period: fmt.Sprintf("Week %d", week),
+			Users:  retained,
+			Rate:   rate,
+			Mature: retentionPeriodMature(cohortStart, filter.To, week),
+		})
 	}
 	return points, nil
 }
@@ -3269,7 +3585,25 @@ WHERE e.project_id = ?
 const (
 	retentionWeeks       = 8
 	retentionPeriodHours = 24 * 7
+	retentionPeriod      = retentionPeriodHours * time.Hour
 )
+
+// retentionPeriodMature reports whether week N has finished elapsing for anyone
+// in the cohort, given when its earliest member was acquired.
+//
+// The curve blends every cohort in the range into one series, so it uses the
+// same standard the per-cohort triangle does (web/modules/cohorts/page.tsx):
+// measure from the cohort's start. "Mature" therefore means the *earliest*
+// members have had a full week N, not that every member has — a blended curve
+// cannot promise the stronger thing without splitting into rows, which is what
+// the Cohorts page is for. What it does guarantee is the thing that was broken:
+// a period that nobody could possibly have reached is never reported as 0%.
+func retentionPeriodMature(cohortStart, to time.Time, week int) bool {
+	if cohortStart.IsZero() || to.IsZero() {
+		return false
+	}
+	return !cohortStart.Add(time.Duration(week+1) * retentionPeriod).After(to)
+}
 
 // cohortWindowWeeks is how far back Cohorts reaches to assemble cohort rows. It
 // spans the full retention curve (retentionWeeks) plus a few extra weeks so the
@@ -3423,6 +3757,35 @@ func defaultSubscriptionMapping(projectID string) SubscriptionMapping {
 		TrialProp:     "is_trial",
 		GraceDays:     1,
 	}
+}
+
+// paidEventExpr builds the "this row is a payment" predicate for person
+// flattening. It recognises the SDK convention (`revenue` carrying `amount`) and,
+// additionally, the project's own subscription events carrying the amount
+// property the mapping configures.
+//
+// Before the second half existed, paid detection recognised exactly one shape, so
+// a product whose money rides on its own subscription events had an empty Paid
+// audience while having paying subscribers — and the "Amount property" the
+// mapping UI collects (audience-manager.tsx) was stored, validated and
+// round-tripped without ever reaching a query.
+//
+// Strictly additive: it can only recognise a payer the SDK-shaped half missed,
+// never un-pay one. An amount property the product does not actually emit
+// extracts 0 and matches nothing, which is the honest answer — a booking event
+// carrying no amount is a tracking defect to report, not a number to invent.
+//
+// openExpr is the caller's already-validated "subscription opened" predicate;
+// the amount property is escaped through chStringLit like every other mapped
+// token, so none of this is a raw-SQL surface.
+func paidEventExpr(mapping SubscriptionMapping, openExpr string) string {
+	sdkShaped := "(event_name = 'revenue' AND JSONExtractFloat(properties, 'amount') > 0)"
+	amountProp := strings.TrimSpace(mapping.AmountProp)
+	if amountProp == "" || strings.TrimSpace(openExpr) == "" {
+		return sdkShaped
+	}
+	return "(" + sdkShaped + " OR (" + openExpr +
+		" AND JSONExtractFloat(properties, " + chStringLit(amountProp) + ") > 0))"
 }
 
 // statusCapable reports whether the mapping can assert active/expired status —
@@ -3817,6 +4180,7 @@ func (s *Store) Cohorts(ctx context.Context, projectID string, filter EventFilte
 	if strings.TrimSpace(mapping.TrialProp) != "" {
 		trialExpr = "toUInt8(JSONExtractBool(properties, " + chStringLit(mapping.TrialProp) + "))"
 	}
+	paidExpr := paidEventExpr(mapping, openExpr)
 	grace := fmt.Sprint(mapping.GraceDays)
 
 	query := `
@@ -3826,7 +4190,7 @@ WITH base AS (
 		timestamp,
 		(if(JSONExtractString(properties, 'email') != '', JSONExtractString(properties, 'email'), JSONExtractString(properties, '$set', 'email')) != ''
 		 OR if(JSONExtractString(properties, 'name') != '', JSONExtractString(properties, 'name'), JSONExtractString(properties, '$set', 'name')) != '') AS identified,
-		(event_name = 'revenue' AND JSONExtractFloat(properties, 'amount') > 0) AS paid_event,
+		` + paidExpr + ` AS paid_event,
 		if(event_name = 'revenue', lowerUTF8(JSONExtractString(properties, 'plan')), '') AS plan_value,
 		toUInt8(` + openExpr + `) AS is_sub_open,
 		toUInt8(event_name = ` + cancelLit + `) AS is_sub_cancel,
@@ -4423,10 +4787,19 @@ func validateReadonlySQL(sqlText string) error {
 	if !(strings.HasPrefix(upper, "SELECT") || strings.HasPrefix(upper, "WITH")) {
 		return fmt.Errorf("only SELECT queries are allowed")
 	}
-	for _, keyword := range []string{"DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "CREATE", "TRUNCATE", "SYSTEM", "GRANT", "REVOKE"} {
-		if strings.Contains(upper, keyword) {
-			return fmt.Errorf("forbidden SQL keyword: %s", keyword)
-		}
+	// Match keywords as whole tokens, over SQL whose comments and quoted spans
+	// have been blanked. A raw substring test rejects the ordinary vocabulary of
+	// commerce -- `created_at` contains CREATE, `insert_id` contains INSERT,
+	// `subscription_granted` contains GRANT -- and run_sql is the only path in
+	// the product to a revenue number, so that guard denied the money questions
+	// it was never aimed at. It even rejected the de-dup recipe the Data Analyst
+	// preset teaches for money totals (`GROUP BY insert_id`). Blanking literals
+	// first means an event *named* 'order_created' is data, not a statement.
+	// The security property is unchanged: a real DDL/DML statement still has its
+	// keyword as a bare token, and the SELECT/WITH prefix plus the single-
+	// statement rule already forbid appending one.
+	if keyword := forbiddenKeyword(maskSQLLiterals(stripSQLComments(trimmed))); keyword != "" {
+		return fmt.Errorf("forbidden SQL keyword: %s", keyword)
 	}
 	// Defense-in-depth against the table-function bypass. The primary security
 	// property is the least-privilege ClickHouse role (no table-function grants),
@@ -4479,6 +4852,66 @@ func forbiddenTableFunction(sqlText string) string {
 		}
 	}
 	return ""
+}
+
+// forbiddenKeywordPattern matches a statement keyword only as a whole token, so
+// an identifier that merely contains one (created_at, insert_id, updated_at,
+// subscription_granted) is left alone. Go's \b breaks on [0-9A-Za-z_], which is
+// exactly the SQL identifier alphabet.
+var forbiddenKeywordPattern = regexp.MustCompile(`(?i)\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|SYSTEM|GRANT|REVOKE)\b`)
+
+// forbiddenKeyword returns the first statement keyword appearing as a bare token
+// in sqlText, or "". Callers pass SQL with comments and quoted spans already
+// blanked so neither can carry a false positive.
+func forbiddenKeyword(sqlText string) string {
+	if m := forbiddenKeywordPattern.FindString(sqlText); m != "" {
+		return strings.ToUpper(m)
+	}
+	return ""
+}
+
+// maskSQLLiterals blanks the inside of quoted strings and quoted identifiers,
+// keeping the quotes and the original length so offsets and token boundaries
+// still line up. Data is not a statement: an event named 'order_created' or a
+// property named 'updated_at' must not read as DDL to the denylist. Handles the
+// two escape forms ClickHouse accepts inside a literal -- a doubled quote and a
+// backslash escape.
+func maskSQLLiterals(sqlText string) string {
+	var b strings.Builder
+	b.Grow(len(sqlText))
+	runes := []rune(sqlText)
+	for i := 0; i < len(runes); {
+		quote := runes[i]
+		if quote != '\'' && quote != '"' && quote != '`' {
+			b.WriteRune(runes[i])
+			i++
+			continue
+		}
+		b.WriteRune(quote)
+		i++
+		for i < len(runes) {
+			if runes[i] == '\\' && i+1 < len(runes) {
+				b.WriteString("  ")
+				i += 2
+				continue
+			}
+			if runes[i] == quote {
+				if i+1 < len(runes) && runes[i+1] == quote {
+					b.WriteString("  ")
+					i += 2
+					continue
+				}
+				break
+			}
+			b.WriteRune(' ')
+			i++
+		}
+		if i < len(runes) {
+			b.WriteRune(quote)
+			i++
+		}
+	}
+	return b.String()
 }
 
 func normalizeSQLValue(value any) any {

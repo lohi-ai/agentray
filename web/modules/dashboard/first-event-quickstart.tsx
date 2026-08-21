@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
 import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import { apiBase } from '@/lib/api';
-import { isSampleProject, settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
+import { settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
 import { useAuthStore } from '@/lib/app-state';
 import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
 import { Button, Segment } from '@/modules/shared/components/signal-primitives';
@@ -67,15 +67,17 @@ function appSnippet(lang: Lang, base: string, key: string): string {
   ].join('\n');
 }
 
-// FirstEventQuickstart is the activation surface: empty projects and the
-// published Demo workspace both need a path to the caller's own data.
+// FirstEventQuickstart is the activation surface for a project with nothing in
+// it yet: the key, a snippet, and a way to check whether anything arrived. It
+// used to also fire on a project literally named "Demo" — there is no such
+// project now, and the shared demo is somebody else's, never a place to paste
+// your own snippet.
 export function FirstEventQuickstart() {
   const router = useRouter();
   const { names, loading } = useEventNames();
   const { project } = useCurrentProject();
   const projectID = useAuthStore((s) => s.project?.id);
   const queryClient = useQueryClient();
-  const sample = isSampleProject(project);
 
   const [source, setSource] = useState<Source>('website');
   const [lang, setLang] = useState<Lang>('js');
@@ -94,7 +96,6 @@ export function FirstEventQuickstart() {
   if (!shouldShowFirstEventGuide({
     eventNames: names,
     catalogReady: !loading && !!project,
-    sample,
   })) return null;
 
   function copy(text: string) {
@@ -114,15 +115,11 @@ export function FirstEventQuickstart() {
         <span className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary"><Plug size={16} /></span>
         <div className="min-w-0">
           <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
-            {sample ? 'Connect your product · ~2 min' : 'Get started · ~2 min'}
+            Get started · ~2 min
           </div>
-          <div className="text-sm font-semibold">
-            {sample ? 'This funnel is a sample. Bring yours.' : 'Send your first event'}
-          </div>
+          <div className="text-sm font-semibold">Send your first event</div>
           <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">
-            {sample
-              ? 'You are looking at published demo data so you can see the product work. Connect a website, app, or warehouse to replace it with your drop.'
-              : 'No data yet. Drop a snippet on your site, in your app, or open a warehouse connector.'}
+            No data yet. Drop a snippet on your site, in your app, or open a warehouse connector.
           </div>
         </div>
       </div>
@@ -179,8 +176,7 @@ export function FirstEventQuickstart() {
         <div className="flex items-center gap-2">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
           <span className="text-[11.5px] text-[var(--color-text-disabled)]">
-            Events can take a few seconds to appear.
-            {sample ? ' Your Production project stays empty until a real event lands.' : ' This card disappears once your first event lands.'}
+            Events can take a few seconds to appear. This card disappears once your first event lands.
           </span>
         </div>
       </div>

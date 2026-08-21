@@ -15,7 +15,18 @@ type Limits struct {
 	MaxContextTokens int // soft budget; old turns are compacted above it (§5.2)
 }
 
-// DefaultLimits are conservative caps suitable for v1.
+// DefaultLimits are the caps a run gets when nobody says otherwise.
+//
+// The turn/tool numbers are measured, not guessed: at MaxTurns 12 an analytics
+// agent answering a real question ("which feature drives retention?") ran out
+// of budget on 2 of 3 first-run attempts — schema discovery, a couple of
+// exploratory queries and one correction already spend a dozen turns before the
+// answer is written. 24 turns / 40 tool calls clears that with room for a wrong
+// turn.
+//
+// The graceful wrap-up turn a ceiling now triggers is a floor, not a substitute
+// for enough budget: it buys an honest partial answer, never the answer. Size
+// the budget so the wrap-up stays the exception.
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 12, MaxToolCalls: 24, MaxToolResultLen: defaultMaxToolResultBytes, MaxContextTokens: defaultContextTokenBudget}
+	return Limits{MaxTurns: 24, MaxToolCalls: 40, MaxToolResultLen: defaultMaxToolResultBytes, MaxContextTokens: defaultContextTokenBudget}
 }

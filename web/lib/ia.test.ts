@@ -6,12 +6,11 @@ import {
   NAV_ITEMS,
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
-  firstRunHandoff,
   firstSessionNotice,
   firstValuePath,
-  isSampleProject,
   formatAgentError,
   instantReply,
+  isRunError,
   needsKeyRecovery,
   writtenOpinion,
   recoveryAction,
@@ -21,7 +20,6 @@ import {
   weakestLink,
   funnelStepNames,
   settingsTabFromQuery,
-  isFirstRun,
   matchActiveHref,
   navItemsFor,
   shouldStartDocksOpen,
@@ -30,7 +28,27 @@ import {
   shouldShowFirstEventGuide,
   signedInLandingTarget,
   formatRate,
+  projectAccess,
+  tourSteps,
+  nextTourStep,
+  tourProgress,
+  tourComplete,
+  showTour,
+  tourHandoff,
 } from './ia';
+
+// A workspace part-way through the tour: demo configured, the reader is inside
+// it, their own project exists and has nothing in it.
+const IN_DEMO = {
+  ready: true,
+  hasDemo: true,
+  inDemo: true,
+  demoName: 'Kiem Lai',
+  ownProjectName: 'My product',
+  ownProjectCount: 1,
+  ownEventNameCount: 0,
+  ownScheduled: false,
+};
 
 describe('nav grouping', () => {
   it('groups the shell by layer: Runtime → Channels → Workloads → Data → Workspace', () => {
@@ -174,14 +192,6 @@ describe('firstValuePath', () => {
     });
   });
 
-  it('keeps the connect guide on a published Demo workspace', () => {
-    expect(isSampleProject({ name: 'Demo' })).toBe(true);
-    expect(firstValuePath({
-      eventNames: ['pageview', 'signup'],
-      catalogReady: true,
-      sample: true,
-    })).toEqual({ showFirstEvent: true, showFirstAsk: false });
-  });
 });
 
 describe('firstSessionNotice', () => {
@@ -193,7 +203,7 @@ describe('firstSessionNotice', () => {
 
   it('still writes the weakest-link when there is no AI key', () => {
     const notice = firstSessionNotice({
-      eventNames: [{ event_name: 'signup', count: 12 }],
+      eventNames: [{ event_name: 'signup', count: 40, users: 12 }],
       catalogReady: true,
       hasModelKey: false,
     });
@@ -220,9 +230,9 @@ describe('firstSessionNotice', () => {
 describe('weakestLink', () => {
   it('computes the biggest drop from catalog counts', () => {
     const link = weakestLink([
-      { event_name: 'pageview', count: 1000 },
-      { event_name: 'signup', count: 80 },
-      { event_name: 'purchase', count: 10 },
+      { event_name: 'pageview', count: 6000, users: 1000 },
+      { event_name: 'signup', count: 300, users: 80 },
+      { event_name: 'purchase', count: 25, users: 10 },
     ]);
     expect(link).toEqual(expect.objectContaining({
       from: 'pageview',
@@ -246,8 +256,8 @@ describe('weakestLink', () => {
 
   it('carries plain-language stage labels alongside the raw event name', () => {
     const link = weakestLink([
-      { event_name: 'user.pageview', count: 4783 },
-      { event_name: 'subscription_activated', count: 16 },
+      { event_name: 'user.pageview', count: 28000, users: 4783 },
+      { event_name: 'subscription_activated', count: 20, users: 16 },
     ]);
     expect(link?.from).toBe('user.pageview');
     expect(link?.fromLabel).toBe('visit');
@@ -257,19 +267,66 @@ describe('weakestLink', () => {
   it('counts the untracked stages between the two it matched', () => {
     // visit -> purchase skips signup, activation and return.
     const gap = weakestLink([
-      { event_name: 'user.pageview', count: 4783 },
-      { event_name: 'subscription_activated', count: 16 },
+      { event_name: 'user.pageview', count: 28000, users: 4783 },
+      { event_name: 'subscription_activated', count: 20, users: 16 },
     ]);
     expect(gap?.stagesSkipped).toBe(3);
     const adjacent = weakestLink([
-      { event_name: 'pageview', count: 1000 },
-      { event_name: 'signup', count: 80 },
+      { event_name: 'pageview', count: 6000, users: 1000 },
+      { event_name: 'signup', count: 300, users: 80 },
     ]);
     expect(adjacent?.stagesSkipped).toBe(0);
   });
 
+  // The defect this pins: the catalog carries event volume AND people, and the
+  // written opinion speaks in people. Reading `count` printed 5,128 pageviews as
+  // "5,128 people" on a project with 835 real visitors.
+  it('counts people, not event volume', () => {
+    const link = weakestLink([
+      { event_name: 'user.pageview', count: 5128, users: 835 },
+      { event_name: 'signup', count: 620, users: 105 },
+    ]);
+    expect(link?.fromCount).toBe(835);
+    expect(link?.toCount).toBe(105);
+    expect(link?.rate).toBeCloseTo(105 / 835);
+  });
+
+  // A stage can match several events; the funnel only ever queries the busiest
+  // one. Summing across them described a step the funnel never ran, and summing
+  // uniques would double-count anyone who fired two of them.
+  it('describes the event the funnel actually queries', () => {
+    const names = [
+      { event_name: 'pageview', count: 6000, users: 1000 },
+      { event_name: 'app_open', count: 900, users: 400 },
+      { event_name: 'signup', count: 300, users: 80 },
+    ];
+    expect(funnelStepNames(names)[0]).toBe('pageview');
+    expect(weakestLink(names)?.fromCount).toBe(1000);
+  });
+
+  // The catalog gives two independent people counts. It cannot establish that
+  // the `to` people are a subset of the `from` people — only the server-side
+  // windowFunnel can. So the number is a gap, and a gap can never exceed 100%.
+  it('never reports passage above 100%', () => {
+    const link = weakestLink([
+      { event_name: 'signup', count: 2, users: 2 },
+      { event_name: 'subscription_activated', count: 4, users: 4 },
+    ]);
+    expect(link?.rate).toBeLessThanOrEqual(1);
+  });
+
+  it('degrades to no number rather than a wrong one when users is absent', () => {
+    const link = weakestLink([
+      { event_name: 'pageview', count: 6000 },
+      { event_name: 'signup', count: 300 },
+    ]);
+    expect(link?.fromCount).toBe(0);
+    expect(writtenOpinion({ eventNames: [{ event_name: 'pageview', count: 6000 }], catalogReady: true }))
+      .not.toMatch(/6,000 people/);
+  });
+
   it('treats a missing next stage as 0% conversion', () => {
-    const link = weakestLink([{ event_name: 'signup', count: 12 }]);
+    const link = weakestLink([{ event_name: 'signup', count: 40, users: 12 }]);
     expect(link).toEqual(expect.objectContaining({
       from: 'signup',
       to: 'activation',
@@ -357,7 +414,7 @@ describe('projectDetailRoot', () => {
 describe('instantReply', () => {
   it('writes the computed drop without calling a model', () => {
     const input = {
-      eventNames: [{ event_name: 'signup', count: 12 }],
+      eventNames: [{ event_name: 'signup', count: 40, users: 12 }],
       catalogReady: true,
     };
     const reply = instantReply(input, 'What should we track for activation after signup?');
@@ -382,59 +439,159 @@ describe('shouldStartDocksOpen', () => {
   });
 });
 
-describe('isFirstRun', () => {
-  it('never shows the panel while the runs query is still in flight', () => {
-    // A flash of "your data is already here" on a workspace with 200 runs is
-    // worse than a beat of nothing, so an unresolved gate reads as not-first.
-    expect(isFirstRun({ runs: [], runsReady: false })).toBe(false);
-    expect(isFirstRun({ runs: undefined, runsReady: false })).toBe(false);
+describe('projectAccess', () => {
+  it('drives affordances off the role and the demo mark, never off the name', () => {
+    // The demo is a REAL project on a real site and can be called anything —
+    // the old check was `/^demo$/i.test(project.name)`, which both missed the
+    // real one and would have locked a customer's own project called "Demo".
+    expect(projectAccess({ name: 'Demo', role: 'owner' }).canWrite).toBe(true);
+    expect(projectAccess({ name: 'Kiem Lai', role: 'viewer', is_demo: true }).canWrite).toBe(false);
   });
 
-  it('shows the panel only when the workspace has never run an agent', () => {
-    expect(isFirstRun({ runs: [], runsReady: true })).toBe(true);
-    expect(isFirstRun({ runs: [{}], runsReady: true })).toBe(false);
+  it('says why, in the reader’s words, and distinguishes the demo from a plain viewer', () => {
+    expect(projectAccess({ role: 'viewer', is_demo: true }).reason).toMatch(/shared demo/i);
+    expect(projectAccess({ role: 'viewer' }).reason).toMatch(/viewer in this workspace/i);
+    expect(projectAccess({ role: 'admin' }).reason).toBe('');
   });
 
-  it('does not key off event emptiness — the seeded Demo project always has events', () => {
-    // The gate takes runs, not eventNames. A populated Demo workspace with no
-    // run is still a first run; an empty own-project with a run is not.
-    expect(isFirstRun({ runs: [], runsReady: true })).toBe(true);
-    expect(isFirstRun({ runs: [{}, {}], runsReady: true })).toBe(false);
-  });
-
-  it('stands down inside a thread that already has turns', () => {
-    expect(isFirstRun({ runs: [], runsReady: true, turnCount: 1 })).toBe(false);
-    expect(isFirstRun({ runs: [], runsReady: true, turnCount: 0 })).toBe(true);
+  it('mirrors the API’s writing roles, and treats an unresolved project as writable', () => {
+    for (const role of ['owner', 'admin', 'member']) {
+      expect(projectAccess({ role }).canWrite).toBe(true);
+    }
+    // Nothing loaded yet: disabling every control on every page for one frame of
+    // each navigation is worse than letting the API make the real decision.
+    expect(projectAccess(null).canWrite).toBe(true);
+    expect(projectAccess({ name: 'x' }).canWrite).toBe(true);
   });
 });
 
-describe('firstRunHandoff', () => {
-  it('stays quiet until the seeded turn settles', () => {
-    expect(firstRunHandoff({ started: false, settled: false, failed: false })).toBeNull();
-    expect(firstRunHandoff({ started: true, settled: false, failed: false })).toBeNull();
+describe('tourSteps', () => {
+  it('walks demo → explore → ask → project → connect → schedule', () => {
+    expect(tourSteps(IN_DEMO).map((s) => s.id)).toEqual([
+      'demo', 'explore', 'ask', 'project', 'connect', 'schedule',
+    ]);
   });
 
-  it('withholds the handover when the run failed', () => {
-    // A failed run gets the error surface (retry + simplify), never a
-    // "your dashboard is ready" that points at nothing.
-    expect(firstRunHandoff({ started: true, settled: true, failed: true })).toBeNull();
+  it('reads as a whole three-step tour on an instance with no demo', () => {
+    // A self-hosted `docker compose up` has no demo. The tour must not be a
+    // six-step one with its first three missing.
+    const steps = tourSteps({ ...IN_DEMO, hasDemo: false, inDemo: false });
+    expect(steps.map((s) => s.id)).toEqual(['project', 'connect', 'schedule']);
+    expect(steps.map((s) => s.n)).toEqual([1, 2, 3]);
   });
 
-  it('belongs to the seeded exchange, not to every later turn', () => {
-    // `started` is session-sticky, so without the turn bound the handoff would
-    // render again under the answer to every follow-up question.
-    // One ChatMsg is one exchange (it carries both the ask and the answer), so
-    // the seeded run is turnCount 1 and the first follow-up is 2.
-    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 1 })).not.toBeNull();
-    expect(firstRunHandoff({ started: true, settled: true, failed: false, turnCount: 2 })).toBeNull();
+  it('never calls the demo the reader’s own, and never calls it a sample', () => {
+    const detail = tourSteps(IN_DEMO).map((s) => `${s.label} ${s.detail}`).join(' ');
+    expect(detail).not.toMatch(/sample/i);
+    expect(detail).toMatch(/someone else runs/i);
+    expect(detail).toMatch(/viewer/i);
   });
 
-  it('leads with the payoff, then the next commitment', () => {
-    const handoff = firstRunHandoff({ started: true, settled: true, failed: false });
-    expect(handoff?.dashboard.href).toBe('/dashboard');
-    expect(handoff?.connect.detail).toMatch(/your own app/i);
-    // The sample-data admission is in the connect callout, never omitted.
-    expect(handoff?.connect.title).toMatch(/sample data/i);
+  it('ticks connect and schedule from real workspace state, not from a flag', () => {
+    const connected = tourSteps({ ...IN_DEMO, ownEventNameCount: 3, ownScheduled: true });
+    expect(connected.find((s) => s.id === 'connect')?.done).toBe(true);
+    expect(connected.find((s) => s.id === 'connect')?.detail).toMatch(/3 event names/);
+    expect(connected.find((s) => s.id === 'schedule')?.done).toBe(true);
+  });
+
+  it('says the schedule spends the reader’s own key, so arming stays a choice', () => {
+    const step = tourSteps(IN_DEMO).find((s) => s.id === 'schedule');
+    expect(step?.done).toBe(false);
+    expect(step?.detail).toMatch(/spends your model key/i);
+    expect(step?.action.act).toBe('arm');
+  });
+});
+
+describe('tourProgress', () => {
+  it('counts only what a query can answer, so the strip can reach its total', () => {
+    // Nobody can read back which dashboards someone opened, or whether THIS
+    // visitor asked the demo anything — the demo's runs belong to every
+    // visitor. Those three steps are out of the count rather than stuck at
+    // unticked forever.
+    expect(tourProgress(tourSteps(IN_DEMO))).toEqual({ done: 1, total: 3 });
+    expect(tourProgress(tourSteps({ ...IN_DEMO, ownEventNameCount: 2 }))).toEqual({ done: 2, total: 3 });
+    expect(tourProgress(tourSteps({ ...IN_DEMO, ownProjectCount: 0 }))).toEqual({ done: 0, total: 3 });
+  });
+});
+
+describe('nextTourStep', () => {
+  it('keeps the pointer in the demo while the reader is in the demo', () => {
+    expect(nextTourStep(IN_DEMO)?.id).toBe('ask');
+  });
+
+  it('resumes on the right step once they are in their own project', () => {
+    // Second visit, own project active, nothing connected: the pointer must not
+    // send them back to someone else's site.
+    expect(nextTourStep({ ...IN_DEMO, inDemo: false })?.id).toBe('connect');
+    expect(nextTourStep({ ...IN_DEMO, inDemo: false, ownEventNameCount: 4 })?.id).toBe('schedule');
+    expect(nextTourStep({ ...IN_DEMO, inDemo: false, ownProjectCount: 0 })?.id).toBe('project');
+  });
+
+  it('starts at the connect half on an instance with no demo', () => {
+    expect(nextTourStep({ ...IN_DEMO, hasDemo: false, inDemo: false })?.id).toBe('connect');
+  });
+
+  it('has nothing left once the three observable steps are done', () => {
+    const done = { ...IN_DEMO, inDemo: false, ownEventNameCount: 5, ownScheduled: true };
+    expect(nextTourStep(done)).toBeNull();
+    expect(tourComplete(done)).toBe(true);
+    expect(showTour(done)).toBe(false);
+  });
+});
+
+describe('showTour', () => {
+  it('renders nothing until the reads behind the ticks have settled', () => {
+    // A step that flashes done and then undone is the same lie as a wrong tick.
+    expect(showTour({ ...IN_DEMO, ready: false })).toBe(false);
+    expect(showTour(IN_DEMO)).toBe(true);
+  });
+});
+
+describe('tourHandoff', () => {
+  it('stays quiet until the demo’s answer settles, and when it failed', () => {
+    expect(tourHandoff(IN_DEMO, { settled: false, failed: false })).toBeNull();
+    expect(tourHandoff(IN_DEMO, { settled: true, failed: true })).toBeNull();
+  });
+
+  it('hands the reader the next connect step after the demo answers', () => {
+    expect(tourHandoff(IN_DEMO, { settled: true, failed: false })?.id).toBe('connect');
+  });
+
+  it('is derived, so it never appears outside the demo', () => {
+    // The old handoff hung off a session-sticky flag and re-rendered under any
+    // later thread. This one cannot: it reads where the reader actually is.
+    expect(tourHandoff({ ...IN_DEMO, inDemo: false }, { settled: true, failed: false })).toBeNull();
+    expect(tourHandoff({ ...IN_DEMO, hasDemo: false }, { settled: true, failed: false })).toBeNull();
+  });
+});
+
+describe('tourSteps project step', () => {
+  it('offers the switch from the demo and says “you’re here” once they are out of it', () => {
+    const fromDemo = tourSteps(IN_DEMO).find((s) => s.id === 'project');
+    expect(fromDemo?.action.act).toBe('open-own');
+    const inOwn = tourSteps({ ...IN_DEMO, inDemo: false }).find((s) => s.id === 'project');
+    expect(inOwn?.action.act).toBeUndefined();
+    expect(inOwn?.action.label).toBe('You’re here');
+  });
+
+  it('offers creation when there is no project of their own', () => {
+    const none = tourSteps({ ...IN_DEMO, ownProjectCount: 0 }).find((s) => s.id === 'project');
+    expect(none?.action.href).toContain('projects');
+    expect(none?.done).toBe(false);
+  });
+});
+
+describe('isRunError', () => {
+  it('calls a provider transport failure what it is', () => {
+    expect(isRunError('provider chat (turn 1): 9router: unexpected response (status 429): {"error":…}')).toBe(true);
+    expect(isRunError('error: run aborted')).toBe(true);
+    expect(isRunError('')).toBe(true);
+    expect(isRunError('no workspace model key')).toBe(true);
+  });
+
+  it('leaves a real answer alone, including one that talks about errors', () => {
+    expect(isRunError('The weakest step is signup → first event: 46 of 744 get through.')).toBe(false);
+    expect(isRunError('Nothing is broken — no error events in the last 24 hours.')).toBe(false);
   });
 });
 

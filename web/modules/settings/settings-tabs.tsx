@@ -5,13 +5,15 @@ import { Plus } from 'lucide-react';
 import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
+import { VStack } from '@astryxdesign/core/VStack';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { apiBase, type Project, type WorkspaceAuditLog, type WorkspaceMember, type WorkspaceRole } from '@/lib/api';
 import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { formatCompact, formatNumber, formatRelative } from '@/lib/format';
-import { useCurrentProject, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
+import { projectAccess } from '@/lib/ia';
+import { useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { Button, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
@@ -22,6 +24,9 @@ export function WorkspaceTab() {
   const { workspaces, selectedWorkspaceID, updateWorkspace } = useCurrentProject();
   const { usage } = useWorkspaceUsage();
   const current = workspaces.find((w) => w.id === selectedWorkspaceID);
+  // Renaming a workspace is a workspace write, so the role that decides is the
+  // one held in THAT workspace — not in whichever project happens to be active.
+  const access = projectAccess(current ? { role: current.role, is_demo: current.is_demo } : null);
   const [name, setName] = useState(current?.name ?? '');
 
   return (
@@ -34,23 +39,37 @@ export function WorkspaceTab() {
             placeholder={current?.name}
             onChange={(v) => setName(v)}
             width="100%"
+            isDisabled={!access.canWrite}
           />
         </div>
-        <Button variant="primary" size="sm" onClick={() => name.trim() && void updateWorkspace(name.trim())}>Save changes</Button>
+        {access.canWrite ? null : <Text type="supporting" className="mb-2 block">{access.reason}</Text>}
+        <Button variant="primary" size="sm" disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => name.trim() && void updateWorkspace(name.trim())}>Save changes</Button>
       </Panel>
-      <Panel title="Usage">
-        <StatsStrip stats={[
-          { label: 'Projects', value: formatNumber(usage?.project_count ?? 0) },
-          { label: 'Events', value: formatCompact(usage?.event_count ?? 0) },
-          { label: 'People', value: formatCompact(usage?.distinct_users ?? 0) },
-        ]} />
+      {/* This panel reads the shared date filter; the plan meter on the Plan tab
+          reads the calendar month. Two numbers a tab apart, both once labelled
+          "Events" — so this one names its window, and points at the billed one. */}
+      <Panel title="Activity in the selected range">
+        <VStack gap={4} align="stretch">
+          <StatsStrip stats={[
+            { label: 'Projects', value: formatNumber(usage?.project_count ?? 0) },
+            { label: 'Events', value: formatCompact(usage?.event_count ?? 0) },
+            { label: 'People', value: formatCompact(usage?.distinct_users ?? 0) },
+          ]} />
+          <Text type="supporting">
+            Events counts everything ingested, crawlers included — that is what your plan meters.
+            People counts identified humans, so one person who signs in mid-visit is one person.
+            For the figure your plan ceiling is measured against, see the Plan tab.
+          </Text>
+        </VStack>
       </Panel>
     </Grid>
   );
 }
 
 export function ProjectsTab() {
-  const { projects, project, selectProject, createProject, updateProject } = useCurrentProject();
+  const { projects, project, selectProject, createProject, updateProject, workspaces, selectedWorkspaceID } = useCurrentProject();
+  const workspace = workspaces.find((w) => w.id === selectedWorkspaceID);
+  const access = projectAccess(workspace ? { role: workspace.role, is_demo: workspace.is_demo } : null);
   const [dialog, setDialog] = useState<'create' | 'rename' | null>(null);
 
   const columns = useMemo<DataColumn<Project>[]>(() => [
@@ -75,7 +94,7 @@ export function ProjectsTab() {
       sortable: false,
       align: 'end',
       renderCell: (p) => p.id === project?.id
-        ? <Button variant="ghost" size="sm" onClick={() => setDialog('rename')}>Rename</Button>
+        ? <Button variant="ghost" size="sm" disabled={!projectAccess(p).canWrite} tooltip={projectAccess(p).reason || undefined} onClick={() => setDialog('rename')}>Rename</Button>
         : <Button variant="ghost" size="sm" onClick={() => void selectProject(p.id)}>Switch</Button>,
     },
   ], [project?.id, selectProject]);
@@ -89,7 +108,7 @@ export function ProjectsTab() {
         <PromptDialog title="Rename project" label="Project name" defaultValue={project.name} submitLabel="Rename" onSubmit={(n) => void updateProject(n)} onClose={() => setDialog(null)} />
       ) : null}
       {projects.length === 0 ? (
-        <Panel title="Projects" action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setDialog('create')}>New project</Button>}>
+        <Panel title="Projects" action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDialog('create')}>New project</Button>}>
           <EmptyState title="No projects" detail="Create a project to start ingesting events." />
         </Panel>
       ) : (
@@ -97,7 +116,7 @@ export function ProjectsTab() {
           title="Projects"
           columns={columns}
           data={projects}
-          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setDialog('create')}>New project</Button>}
+          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDialog('create')}>New project</Button>}
           onRowClick={(p) => void selectProject(p.id)}
         />
       )}
@@ -107,6 +126,12 @@ export function ProjectsTab() {
 
 export function MembersTab() {
   const { members, loading, addMember, updateMemberRole, removeMember } = useWorkspaceMembers();
+  const { workspaces, selectedWorkspaceID } = useCurrentProject();
+  const workspace = workspaces.find((w) => w.id === selectedWorkspaceID);
+  const access = projectAccess(workspace ? { role: workspace.role, is_demo: workspace.is_demo } : null);
+  // Membership is owner/admin territory; the shared demo's viewers see the
+  // roster and can change none of it.
+  const canManage = access.canWrite && (workspace?.role === 'owner' || workspace?.role === 'admin');
   const [inviting, setInviting] = useState(false);
 
   const columns = useMemo<DataColumn<WorkspaceMember>[]>(() => [
@@ -131,7 +156,7 @@ export function MembersTab() {
           options={ROLES as string[]}
           value={m.role}
           onChange={(v) => void updateMemberRole(m.user_id, v as WorkspaceRole)}
-          isDisabled={m.role === 'owner'}
+          isDisabled={m.role === 'owner' || !canManage}
         />
       ),
     },
@@ -141,11 +166,11 @@ export function MembersTab() {
       hideable: false,
       sortable: false,
       align: 'end',
-      renderCell: (m) => m.role !== 'owner'
+      renderCell: (m) => m.role !== 'owner' && canManage
         ? <Button variant="ghost" size="sm" onClick={() => void removeMember(m.user_id)}><span style={{ color: 'var(--danger)' }}>Remove</span></Button>
         : null,
     },
-  ], [updateMemberRole, removeMember]);
+  ], [updateMemberRole, removeMember, canManage]);
 
   return (
     <>
@@ -160,7 +185,7 @@ export function MembersTab() {
           columns={columns}
           data={members}
           searchPlaceholder="Search members…"
-          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setInviting(true)}>Invite</Button>}
+          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!canManage} tooltip={access.reason || undefined} onClick={() => setInviting(true)}>Invite</Button>}
           emptyMessage="No members yet."
         />
       )}
@@ -170,10 +195,24 @@ export function MembersTab() {
 
 export function ApiKeysTab() {
   const { project, rotateKey } = useCurrentProject();
+  const access = useProjectAccess();
   const [revealed, setRevealed] = useState(false);
   const [rotating, setRotating] = useState(false);
+  // The API blanks the key for a membership that may not write it, so there is
+  // genuinely nothing to reveal, rotate, or paste into a page here.
   const key = project?.api_key ?? '';
   const masked = key ? `${key.slice(0, 8)}••••••••${key.slice(-4)}` : '—';
+
+  if (!access.canWrite) {
+    return (
+      <Panel title="API keys">
+        <EmptyState
+          title="This project's key isn't yours"
+          detail={`${access.reason} Your own project has its own key — switch to it and this page hands you the snippet.`}
+        />
+      </Panel>
+    );
+  }
 
   return (
     <Panel title="API keys">

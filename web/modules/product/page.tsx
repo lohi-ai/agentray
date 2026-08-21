@@ -14,7 +14,7 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
-import { funnelStepNames } from '@/lib/ia';
+import { funnelStepNames, retentionAnchorEvent } from '@/lib/ia';
 import { useEventNames, useInsight } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
@@ -46,7 +46,14 @@ export function ProductPage() {
   async function ask(mode: Mode) {
     setActive(mode);
     setRunning(true);
-    const steps = mode === 'funnel' ? funnelStepNames(eventNames) : [];
+    // Retention needs an event *name* to anchor the cohort on, and `steps` is how
+    // the API takes one. It used to send none, so the server fell back to the
+    // metric string and asked about an event called "events" — nothing emits
+    // that, so the curve was 0% forever under a hard-coded "Week 0: 100%".
+    const steps =
+      mode === 'funnel' ? funnelStepNames(eventNames)
+      : mode === 'retention' ? [retentionAnchorEvent(eventNames)]
+      : [];
     try {
       await runInsight(mode, 'events', steps);
     } finally {
@@ -176,16 +183,30 @@ function ResultBody({ insight }: { insight: InsightResult }) {
   }
 
   if (insight.retention?.length) {
+    // Week 0 is the cohort itself — 100% by definition. It belongs on the curve
+    // as the anchor, but only when there is at least one *measured* period after
+    // it; on its own it is a one-point chart of a tautology.
+    const measured = insight.retention.filter((r, i) => i > 0 && r.mature !== false);
+    const measuredRetention = measured.length > 0 ? [insight.retention[0], ...measured] : [];
     return (
       <>
         <Panel title="Retention curve">
-          <Chart spec={{
-            type: 'line',
-            x: insight.retention.map((r) => r.period),
-            series: [{ name: 'Retention %', data: insight.retention.map((r) => Math.round(r.rate * 100)) }],
-            unit: '%',
-            height: 240,
-          }} />
+          {/* Charting an immature period draws a cliff to zero that is an artefact
+              of the window, not of the product. Plot only what has elapsed. */}
+          {measuredRetention.length > 0 ? (
+            <Chart spec={{
+              type: 'line',
+              x: measuredRetention.map((r) => r.period),
+              series: [{ name: 'Retention %', data: measuredRetention.map((r) => Math.round(r.rate * 100)) }],
+              unit: '%',
+              height: 240,
+            }} />
+          ) : (
+            <Text type="supporting">
+              No period has finished elapsing yet, so there is nothing to plot. The cohort is{' '}
+              {insight.retention[0]?.users ?? 0} people — come back after a week, or widen the range.
+            </Text>
+          )}
         </Panel>
         <RetentionTable retention={insight.retention} />
       </>
@@ -208,7 +229,7 @@ type Row = Record<string, unknown>;
 // FunnelTable renders the per-step funnel breakdown with sortable columns.
 function FunnelTable({ funnel }: { funnel: FunnelStep[] }) {
   const columns = useMemo<DataColumn<FunnelStep>[]>(() => [
-    { key: 'step', header: 'Step', sortValue: (f) => f.step, renderCell: (f) => <span className="font-mono tabular-nums">{f.step + 1}</span> },
+    { key: 'step', header: 'Step', sortValue: (f) => f.step, renderCell: (f) => <span className="font-mono tabular-nums">{f.step}</span> },
     { key: 'event_name', header: 'Event', renderCell: (f) => <span className="font-mono">{f.event_name}</span> },
     { key: 'users', header: 'Users', renderCell: (f) => <span className="font-mono tabular-nums">{f.users}</span> },
     { key: 'conversion', header: 'Conv.', renderCell: (f) => <span className="font-mono tabular-nums">{formatFractionAsPercent(f.conversion)}</span> },
@@ -221,7 +242,13 @@ function RetentionTable({ retention }: { retention: RetentionPeriod[] }) {
   const columns = useMemo<DataColumn<RetentionPeriod>[]>(() => [
     { key: 'period', header: 'Period' },
     { key: 'users', header: 'Users', renderCell: (r) => <span className="font-mono tabular-nums">{r.users}</span> },
-    { key: 'rate', header: 'Rate', renderCell: (r) => <span className="font-mono tabular-nums">{(r.rate * 100).toFixed(0)}%</span> },
+    // An immature period has no rate to show. Printing "0%" there is the defect:
+    // it reads as total churn when it means the week has not happened yet.
+    { key: 'rate', header: 'Rate', renderCell: (r) => (
+      r.mature === false
+        ? <Text type="supporting">too early</Text>
+        : <span className="font-mono tabular-nums">{(r.rate * 100).toFixed(0)}%</span>
+    ) },
   ], []);
   return <DataTable title="Retention by period" columns={columns} data={retention} idKey="period" pageSize={10} />;
 }

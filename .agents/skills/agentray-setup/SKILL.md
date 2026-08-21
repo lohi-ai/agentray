@@ -17,9 +17,10 @@ names are stable) produces confident, wrong charts.
 
 - **Local/self-hosted:** `docker compose up` starts API (`:8088`), web
   (`:3200`), ClickHouse, Postgres, Redis, NATS. First boot seeds a default
-  project with key `lohi_dev_project_token` and (when `AGENTRAY_SEED_DEMO=true`)
-  ~2 days of synthetic events. Self-hosting for real: unset
-  `AGENTRAY_SEED_DEMO`.
+  project with key `lohi_dev_project_token` and no events — there is no
+  synthetic seeder. `AGENTRAY_DEMO_PROJECT_ID` shares one REAL project
+  read-only with every account; unset on compose, so a local instance has no
+  demo.
 - **Existing instance:** get the project API key from Settings → project →
   API key. One key = one project; every SDK call and MCP call is scoped by it.
 - **Headless / agent path (no web app):** the `agentray` CLI is self-serve

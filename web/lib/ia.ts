@@ -171,113 +171,313 @@ export type FirstRunInput = {
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
-  // Published sample workspace — still show connect, and label the opinion.
-  sample?: boolean;
 };
-
-export function isSampleProject(project?: { name?: string } | null): boolean {
-  return /^demo$/i.test(project?.name ?? '');
-}
 
 export type FirstValuePath = {
   showFirstEvent: boolean;
   showFirstAsk: boolean;
 };
 
-// FIRST_RUN_PROMPT is the one seeded question the first-run panel fires at the
-// already-hired agent. It is phrased as the job the product exists to do, not as
-// a demo script, so the answer the stranger watches arrive is a real one.
-export const FIRST_RUN_PROMPT = 'What is the single weakest step in my activation funnel?';
-
-export type FirstRunGate = {
-  // Agent runs for the active project. Only the count matters — a run that
-  // errored still means the user has pressed the button and seen the runtime.
-  runs: { readonly length: number } | null | undefined;
-  // false while the runs query is in flight. The panel must never flash for a
-  // workspace that has already run, so an unresolved gate reads as "not first".
-  runsReady: boolean;
-  // Turns already in the open thread. A thread mid-conversation is not a first
-  // session even when the workspace has no persisted run yet.
-  turnCount?: number;
-};
-
-// isFirstRun gates the first-session panel. It keys off *agent runs*, never off
-// event emptiness: signup seeds a populated Demo project, so an events-based
-// check would leave the panel showing forever (own project) or never (Demo).
-export function isFirstRun(gate: FirstRunGate): boolean {
-  if (!gate.runsReady) return false;
-  if ((gate.turnCount ?? 0) > 0) return false;
-  return (gate.runs?.length ?? 0) === 0;
-}
-
-export type FirstRunHandoff = {
-  dashboard: { label: string; title: string; detail: string; action: string; href: string };
-  connect: { label: string; title: string; detail: string; action: string; href: string };
-};
-
-// firstRunHandoff is the end of the first run: the payoff (the dashboard the
-// agent just read) and the next commitment (point it at your own product). Two
-// callouts, in that order — the payoff is never withheld behind the upsell.
-// Returns null until the seeded turn has actually settled, and stays null when
-// it failed: a failed run gets the error surface, not a handover.
-//
-// turnCount scopes it to the seeded exchange: it counts what the *user* asked
-// (not messages — a ChatMsg is one message, so an exchange is two), so the first
-// run is turnCount 1 and anything above that is a later question. A user who
-// steers their first run counts 2 and loses the handoff — the conservative miss:
-// showing it twice is worse than showing it once, and they have already engaged.
-// The "started" flag is session-sticky,
-// so without this bound the
-// handoff re-renders under every later answer in the session, and under any older
-// thread the user clicks into — a "your dashboard is ready" attached to a turn
-// that built nothing.
-export function firstRunHandoff(input: { started: boolean; settled: boolean; failed: boolean; turnCount?: number }): FirstRunHandoff | null {
-  if (!input.started || !input.settled || input.failed) return null;
-  if ((input.turnCount ?? 1) > 1) return null;
-  return {
-    dashboard: {
-      label: 'Your dashboard',
-      title: 'Product Overview is ready',
-      detail: 'I read the funnel and pinned what moved. Open it — you watched it get built.',
-      action: 'Open your dashboard',
-      href: '/dashboard',
-    },
-    connect: {
-      label: 'Next',
-      title: 'That was sample data. Point me at your product.',
-      detail: 'Send one event from your own app and I will do that again on numbers you care about.',
-      action: 'Connect my product',
-      href: '/settings?tab=keys',
-    },
-  };
-}
-
 // Empty catalog (zero event names, catalog has loaded) turns on the guided
-// first-event + first-ask path. A published Demo workspace keeps the connect
-// guide on so sample data never hides "bring your product."
+// first-event + first-ask path.
 export function firstValuePath(input: FirstRunInput): FirstValuePath {
   const empty = input.catalogReady && (input.eventNames?.length ?? 0) === 0;
-  const connect = empty || !!input.sample;
-  return { showFirstEvent: connect, showFirstAsk: empty };
+  return { showFirstEvent: empty, showFirstAsk: empty };
 }
 
 export function shouldShowFirstEventGuide(input: FirstRunInput): boolean {
   return firstValuePath(input).showFirstEvent;
 }
 
-type CatalogEvent = { name: string; count: number };
+// ---- who may write here ----------------------------------------------------
+//
+// The shared demo (internal/dataplane/store/demo.go) puts every signed-up
+// visitor inside a workspace somebody else owns, as a 'viewer'. The API refuses
+// their writes at one choke point (internal/app/demo_guard.go), which is the
+// correct place for the SECURITY decision and the wrong place for the UI one: a
+// button that is present, clicked, and then answered 403 has already wasted the
+// person's attention and taught them the product is broken.
+//
+// So the affordance decision is made here, from the two read-only facts the API
+// already hands back on every project — the caller's `role` and whether the
+// project lives in the demo workspace (`is_demo`). Never from the project's
+// NAME: the demo is a real project on a real site and can be called anything.
+
+// Mirror of writeRoles in internal/dataplane/store/auth.go. Anything absent —
+// 'viewer', an empty role, a role a later release adds — reads.
+const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
+
+export type ProjectLike = { role?: string; is_demo?: boolean; name?: string } | null | undefined;
+
+export type ProjectAccess = {
+  isDemo: boolean;
+  role: string;
+  canWrite: boolean;
+  // Why not, in the user's words. Empty string when they can write.
+  reason: string;
+};
+
+export function projectAccess(project: ProjectLike): ProjectAccess {
+  const role = (project?.role ?? '').trim().toLowerCase();
+  const isDemo = !!project?.is_demo;
+  // No project resolved yet, or an API old enough not to send a role: allow.
+  // The alternative is every control on every page flickering disabled on each
+  // navigation, and the API is still the one that actually decides.
+  const canWrite = !project || !role || WRITE_ROLES.has(role);
+  const reason = canWrite
+    ? ''
+    : isDemo
+      ? 'This is the shared demo — someone else’s site. Switch to your own project to change anything.'
+      : 'You’re a viewer in this workspace. An owner can give you access.';
+  return { isDemo, role, canWrite, reason };
+}
+
+// ---- the guided tour -------------------------------------------------------
+//
+// What a new account actually has on its first session:
+//
+//   * a read-only 'viewer' membership in ONE shared demo workspace, holding a
+//     real project fed by a real website that somebody else runs;
+//   * its own workspace, holding exactly one project, with nothing in it.
+//
+// The tour walks that: look around a working product, ask it something, then go
+// and make the empty one yours. It is six steps when the instance has a demo
+// and three when it does not (a self-hosted `docker compose up` has none), and
+// the three-step version has to read as a whole tour rather than as a six-step
+// one with holes in it.
+//
+// EVERY tick is derived from state the server can be asked for again — does
+// their own workspace hold a project, does that project have events, is
+// anything armed on a schedule. Nothing here reads a local flag: a checklist
+// stored in this browser lies the moment the person opens the product on their
+// laptop, and "you already did this" is the single worst thing an onboarding
+// surface can be wrong about.
+//
+// The three exploring steps are the exception, and they are marked as one. We
+// cannot see which dashboards somebody read, and the demo's agent runs are
+// project-scoped — they are every visitor's runs, not this visitor's — so there
+// is no honest per-person answer to "did you ask it something". Those steps
+// carry `observable: false`, are rendered without a checkbox, and are left out
+// of the progress count entirely. A tour that claims to know what it cannot see
+// is worse than one that admits the gap.
+
+export type TourStepId = 'demo' | 'explore' | 'ask' | 'project' | 'connect' | 'schedule';
+
+export const EXPLORE_STEPS: readonly TourStepId[] = ['demo', 'explore', 'ask'];
+export const CONNECT_STEPS: readonly TourStepId[] = ['project', 'connect', 'schedule'];
+
+// The seeded question for step 3. Phrased about *this* product, not "my" —
+// the funnel on screen belongs to the site the demo runs, and calling it the
+// visitor's is the exact lie the old synthetic Demo project told.
+export const DEMO_ASK_PROMPT = 'What is the weakest step in this product’s activation funnel?';
+// The same question once the data is theirs.
+export const OWN_ASK_PROMPT = 'What is the weakest step in my activation funnel?';
+
+// The starter chips while a visitor is reading the demo. The product's usual
+// starters are written in the first person ("my traffic", "my agents"), which
+// is wrong here: every answer would be about someone else's site. These say
+// whose product is being asked about.
+export const DEMO_STARTERS: readonly string[] = [
+  'Where is this site’s traffic coming from?',
+  'Which events stopped firing this week?',
+  'Which feature keeps people coming back?',
+  'Is anything broken right now?',
+];
+
+// The standing work step 6 arms: one run a week, Monday morning, before the
+// owner opens the tab. Weekly rather than daily because it spends their model
+// key every time it fires and a week is the cadence the answer is useful at.
+export const TOUR_SCHEDULE_CRON = '0 9 * * 1';
+export const TOUR_SCHEDULE_NAME = 'Monday morning check';
+export const TOUR_SCHEDULE_PROMPT = 'Read the last 7 days. Say what moved, what the weakest step is now, and the one thing to do about it this week.';
+
+export type TourInput = {
+  // false while the reads behind the ticks are still in flight. Nothing renders
+  // until this is true, so no step ever flashes done and then undone.
+  ready: boolean;
+  // Does this instance have a shared demo at all?
+  hasDemo: boolean;
+  // Is the project the app is pointed at right now the demo?
+  inDemo: boolean;
+  demoName: string;
+  ownProjectName: string;
+  // Projects in the workspaces the user actually owns.
+  ownProjectCount: number;
+  // Distinct event names in their own project. 0 = nothing has ever arrived.
+  ownEventNameCount: number;
+  // Anything armed on a schedule in their own project.
+  ownScheduled: boolean;
+  // The teammate that would run on that schedule, for the copy.
+  agentName?: string;
+};
+
+export type TourAction = {
+  label: string;
+  href?: string;
+  // Handled by the panel rather than by navigation: switching the active
+  // project, seeding the question, arming the schedule.
+  act?: 'open-demo' | 'open-own' | 'ask' | 'arm';
+};
+
+export type TourStep = {
+  id: TourStepId;
+  // 1-based position AS SHOWN, so the no-demo tour numbers 1-2-3.
+  n: number;
+  label: string;
+  detail: string;
+  done: boolean;
+  // false = no query can ever answer this. Rendered without a checkbox and left
+  // out of the progress count.
+  observable: boolean;
+  action: TourAction;
+  // Extra doors for a step that is about looking around rather than doing one
+  // thing.
+  links?: ReadonlyArray<{ label: string; href: string }>;
+};
+
+export function tourSteps(input: TourInput): TourStep[] {
+  const demoName = input.demoName || 'the demo';
+  const ownName = input.ownProjectName || 'your project';
+  const agent = input.agentName || 'your teammate';
+  const events = input.ownEventNameCount;
+  const steps: Array<Omit<TourStep, 'n'>> = [];
+
+  if (input.hasDemo) {
+    steps.push({
+      id: 'demo',
+      label: 'Look around a working product',
+      detail: input.inDemo
+        ? `You’re in ${demoName}. It is a real site someone else runs, wired to AgentRay, and you joined it as a viewer — you can read all of it and change none of it.`
+        : `${demoName} is a real site someone else runs, wired to AgentRay. Open it as a viewer and see the product with data already in it.`,
+      done: input.inDemo,
+      observable: false,
+      action: input.inDemo ? { label: 'You’re here' } : { label: `Open ${demoName}`, act: 'open-demo' },
+    });
+    steps.push({
+      id: 'explore',
+      label: 'See what it already knows',
+      detail: 'The dashboards are built and the teammates are hired. Open them — this is what the product looks like once your own events are arriving.',
+      done: input.inDemo,
+      observable: false,
+      action: { label: 'Open the dashboards', href: '/dashboard' },
+      links: [
+        { label: 'Dashboards', href: '/dashboard' },
+        { label: 'Agents', href: '/agents' },
+      ],
+    });
+    steps.push({
+      id: 'ask',
+      label: 'Ask it a question',
+      detail: 'Ask about the funnel and watch it read the events and answer. Questions here are capped per day — the answer is billed to whoever runs this instance, not to you.',
+      done: false,
+      observable: false,
+      action: { label: 'Ask about the weakest step', act: 'ask' },
+    });
+  }
+
+  steps.push({
+    id: 'project',
+    label: input.hasDemo ? 'Move to your own project' : 'Your project',
+    detail: input.ownProjectCount > 0
+      ? `${ownName} is yours. Everything from here happens there.`
+      : 'You have no project of your own yet. Make one and the rest of this list runs against it.',
+    done: input.ownProjectCount > 0,
+    observable: true,
+    // Already standing in it: say so rather than offering a switch that does
+    // nothing. Same rule as step 1 inside the demo.
+    action: input.ownProjectCount === 0
+      ? { label: 'Create a project', href: settingsPath('projects') }
+      : input.inDemo || !input.hasDemo
+        ? { label: `Open ${ownName}`, act: 'open-own' }
+        : { label: 'You’re here' },
+  });
+
+  steps.push({
+    id: 'connect',
+    label: 'Send your first event',
+    detail: events > 0
+      ? `${events} event ${events === 1 ? 'name' : 'names'} arriving in ${ownName}.`
+      : 'Copy the snippet into your site. Nothing to install, no build step. This ticks when the first event lands.',
+    done: events > 0,
+    observable: true,
+    action: { label: 'Get my API key', href: settingsPath('keys') },
+  });
+
+  steps.push({
+    id: 'schedule',
+    label: 'Let it work without you',
+    detail: input.ownScheduled
+      ? 'Something is armed. It runs whether or not you open this tab.'
+      : `Right now ${agent} only works when you message it. A weekly schedule means the answer is waiting on Monday. It spends your model key every time it fires, so it stays off until you turn it on.`,
+    done: input.ownScheduled,
+    observable: true,
+    action: { label: 'Put it on a Monday schedule', act: 'arm' },
+  });
+
+  return steps.map((step, i) => ({ ...step, n: i + 1 }));
+}
+
+// nextTourStep is where the pointer sits. While the user is inside the demo it
+// stays in the exploring half: sending somebody who is reading someone else's
+// site off to "connect your product" is how a tour loses people two steps in.
+// Once they are looking at their own project the exploring half is behind them
+// for good — pointing back at the demo would be a tour that never ends.
+export function nextTourStep(input: TourInput, steps: TourStep[] = tourSteps(input)): TourStep | null {
+  const half = input.hasDemo && input.inDemo ? EXPLORE_STEPS : CONNECT_STEPS;
+  return steps.find((step) => half.includes(step.id) && !step.done)
+    ?? steps.find((step) => CONNECT_STEPS.includes(step.id) && !step.done)
+    ?? null;
+}
+
+// tourProgress counts only what a query can answer. The exploring steps are
+// excluded, so the strip can actually reach its total.
+export function tourProgress(steps: TourStep[]): { done: number; total: number } {
+  const observable = steps.filter((step) => step.observable);
+  return { done: observable.filter((step) => step.done).length, total: observable.length };
+}
+
+// The tour is over when the three observable steps are done: their own project
+// exists, it has events, and something runs without them.
+export function tourComplete(input: TourInput): boolean {
+  return input.ownProjectCount > 0 && input.ownEventNameCount > 0 && input.ownScheduled;
+}
+
+export function showTour(input: TourInput): boolean {
+  return input.ready && !tourComplete(input);
+}
+
+// tourHandoff is what goes under the answer once the demo has finished
+// answering: the honest next move, which is that this was someone else's data.
+// Null until the turn has actually settled, and null when it failed — a failed
+// run gets the error surface, not a handover.
+export function tourHandoff(
+  input: TourInput,
+  turn: { settled: boolean; failed: boolean },
+): TourStep | null {
+  if (!input.ready || !input.hasDemo || !input.inDemo) return null;
+  if (!turn.settled || turn.failed) return null;
+  const steps = tourSteps(input);
+  return steps.find((step) => CONNECT_STEPS.includes(step.id) && !step.done) ?? null;
+}
+
+// count is event volume, users is distinct people. Keeping both named apart is
+// the whole point: the written opinion speaks in people, and for months it was
+// printing volume under a "people" noun because the catalog only carried one
+// number. user.pageview on a real project is 5,128 events and 835 people.
+type CatalogEvent = { name: string; count: number; users: number };
 
 function catalogEvents(names: FirstRunInput['eventNames']): CatalogEvent[] {
   if (!names) return [];
   const out: CatalogEvent[] = [];
   for (let i = 0; i < names.length; i += 1) {
     const row = (names as readonly unknown[])[i];
-    if (typeof row === 'string' && row) out.push({ name: row, count: 0 });
+    if (typeof row === 'string' && row) out.push({ name: row, count: 0, users: 0 });
     else if (row && typeof row === 'object') {
-      const rec = row as { name?: unknown; event_name?: unknown; count?: unknown };
+      const rec = row as { name?: unknown; event_name?: unknown; count?: unknown; users?: unknown };
       const name = rec.event_name ?? rec.name;
       const count = typeof rec.count === 'number' && rec.count > 0 ? rec.count : 0;
-      if (typeof name === 'string' && name) out.push({ name, count });
+      const users = typeof rec.users === 'number' && rec.users > 0 ? rec.users : 0;
+      if (typeof name === 'string' && name) out.push({ name, count, users });
     }
   }
   return out;
@@ -297,7 +497,7 @@ const FUNNEL_STAGES = [
 
 export const DEFAULT_FUNNEL_STEPS = ['user.pageview', 'user.signup', 'user.conversion'] as const;
 
-type FunnelMatch = { id: string; label: string; event: string; count: number; order: number };
+type FunnelMatch = { id: string; label: string; event: string; count: number; users: number; order: number };
 
 function stageOfName(name: string): number {
   let claimed = -1;
@@ -313,11 +513,17 @@ function matchedFunnelSteps(names: FirstRunInput['eventNames']): FunnelMatch[] {
   FUNNEL_STAGES.forEach((stage, order) => {
     const matched = events.filter((e) => stageOfName(e.name) === order);
     if (matched.length === 0) return;
+    // The catalog arrives volume-descending, so matched[0] is the busiest event
+    // for this stage — and it is the one `funnelStepNames` actually queries. The
+    // counts must therefore describe *that* event, not a sum across every event
+    // that matched the stage: summing described a step the funnel never ran, and
+    // summing `users` across events would double-count anyone in two of them.
     steps.push({
       id: stage.id,
       label: stage.label,
       event: matched[0].name,
-      count: matched.reduce((sum, e) => sum + e.count, 0),
+      count: matched[0].count,
+      users: matched[0].users,
       order,
     });
   });
@@ -332,6 +538,19 @@ export function funnelStepNames(names: FirstRunInput['eventNames']): string[] {
   return [...DEFAULT_FUNNEL_STEPS];
 }
 
+// retentionAnchorEvent is the event a retention cohort is defined by: "people who
+// first did THIS". The first matched funnel stage is the right anchor — it is the
+// entry step, so the cohort is people who arrived, not people who already
+// converted. Falls back to the busiest event in the catalog, then to the default
+// contract, so this never resolves to a name nothing emits.
+export function retentionAnchorEvent(names: FirstRunInput['eventNames']): string {
+  const steps = matchedFunnelSteps(names);
+  if (steps.length > 0) return steps[0].event;
+  const events = catalogEvents(names);
+  if (events.length > 0) return events[0].name;
+  return DEFAULT_FUNNEL_STEPS[0];
+}
+
 export type WeakestLink = {
   from: string;
   to: string;
@@ -340,8 +559,15 @@ export type WeakestLink = {
   // the headline reads with these and keeps the event name as the evidence.
   fromLabel: string;
   toLabel: string;
+  // People, not events — the number of distinct stitched, human identities that
+  // fired each stage's event.
   fromCount: number;
   toCount: number;
+  // toCount / fromCount. This is a ratio of two independently-measured people
+  // counts, NOT a measured passage rate: the catalog cannot tell us whether the
+  // `to` people are the same people as the `from` people, or whether they did
+  // the steps in that order. Only the funnel query (windowFunnel, server-side)
+  // establishes passage. Word it as a gap, never as "conversion".
   rate: number;
   missing: boolean;
   // How many funnel stages sit untracked between the two we matched. Anything
@@ -362,14 +588,14 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
     for (let i = 0; i < steps.length - 1; i += 1) {
       const from = steps[i];
       const to = steps[i + 1];
-      const rate = from.count > 0 ? to.count / from.count : 0;
+      const rate = from.users > 0 ? Math.min(to.users / from.users, 1) : 0;
       const cand: WeakestLink = {
         from: from.event,
         to: to.event,
         fromLabel: from.label,
         toLabel: to.label,
-        fromCount: from.count,
-        toCount: to.count,
+        fromCount: from.users,
+        toCount: to.users,
         rate,
         missing: false,
         stagesSkipped: to.order - from.order - 1,
@@ -387,7 +613,7 @@ export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | n
       to: next.label,
       fromLabel: steps[0].label,
       toLabel: next.label,
-      fromCount: steps[0].count,
+      fromCount: steps[0].users,
       toCount: 0,
       rate: 0,
       missing: true,
@@ -437,7 +663,7 @@ function weakestNotice(link: WeakestLink): FirstSessionNotice {
       kind: 'noticed',
       title: `Nothing is tracked between ${link.fromLabel} and ${link.toLabel}`,
       detail: fromN
-        ? `${toN} of ${fromN} reach ${link.toLabel} (${pct}), but the steps in between aren’t tracked — so I can’t tell you where the rest go.`
+        ? `${fromN} hit ${link.fromLabel} and ${toN} hit ${link.toLabel} (${pct}), but the steps in between aren’t tracked — so I can’t tell you where the rest go.`
         : `${link.fromLabel} and ${link.toLabel} are tracked; the steps in between aren’t, so the drop-off is invisible.`,
       ask: `What should we track between ${link.fromLabel} and ${link.toLabel} to see where people drop off?`,
     };
@@ -446,7 +672,7 @@ function weakestNotice(link: WeakestLink): FirstSessionNotice {
     kind: 'noticed',
     title: `${link.fromLabel} → ${link.toLabel} is the weakest step`,
     detail: fromN
-      ? `${toN} of ${fromN} (${pct}) make it from ${link.fromLabel} to ${link.toLabel}. That’s the biggest drop.`
+      ? `${fromN} hit ${link.fromLabel}, ${toN} hit ${link.toLabel} — a ${pct} gap, the widest I can see. Run the funnel to confirm they’re the same people, in that order.`
       : `The biggest drop is ${link.fromLabel} → ${link.toLabel}.`,
     ask: `What should we test this week to lift ${link.fromLabel} → ${link.toLabel}?`,
   };
@@ -511,9 +737,6 @@ export function firstSessionNotice(input: FirstRunInput): FirstSessionNotice | n
   }
   const link = weakestLink(input.eventNames);
   const notice = link ? weakestNotice(link) : namesNotice(names);
-  if (input.sample) {
-    notice.detail = `Sample workspace. ${notice.detail} Connect your website, app, or warehouse to see YOUR drop.`;
-  }
   if (input.hasModelKey === false) {
     notice.detail = `${notice.detail} Add an AI key in Settings to ask me to go deeper.`;
     notice.href = settingsPath('ai');
@@ -541,6 +764,22 @@ export function needsKeyRecovery(text: string): boolean {
   return DISABLED_ERROR.test(raw)
     || NO_KEY_ERROR.test(raw)
     || /add an ai key in settings|growth lead is paused/i.test(raw);
+}
+
+// isRunError says whether an assistant turn came back as a failure rather than
+// as an answer. The transcript keeps the text either way — that IS what
+// happened — but nothing that celebrates a result may treat it as one, the
+// tour's handoff above all: "that answer was about someone else's product" is
+// absurd printed under a provider timeout. Matched on the shapes a failed run
+// actually produces: the runtime's own `error:` prefix, the key/paused cases,
+// and the provider transport lines the runtime passes through verbatim.
+export function isRunError(text: string): boolean {
+  const raw = (text ?? '').trim();
+  if (!raw) return true;
+  if (needsKeyRecovery(raw)) return true;
+  return /^error:/i.test(raw)
+    || /^provider chat \(turn \d+\)/i.test(raw)
+    || /unexpected response \(status \d{3}\)/i.test(raw);
 }
 
 export function threadNeedsRecovery(
@@ -577,9 +816,11 @@ export function writtenOpinion(input: FirstRunInput): string {
     const pct = Math.round(link.rate * 100);
     const who = link.fromCount > 0 ? countLabel(link.fromCount) : 'people';
     return [
-      `**${link.from} → ${link.to} is the weakest step (${pct}%).**`,
+      `**${link.from} → ${link.to} is the widest gap (${pct}%).**`,
       '',
-      `${link.toCount.toLocaleString()} of ${who} make it from \`${link.from}\` to \`${link.to}\`. That’s the biggest drop I can see.`,
+      `${who} fired \`${link.from}\`; ${countLabel(link.toCount)} fired \`${link.to}\`. That’s the widest gap in this catalog.`,
+      '',
+      `I’m comparing two people counts, not tracing one cohort — open the funnel to confirm the same people did both steps in that order.`,
       '',
       `This week: one test on that step. Don’t add a new dashboard — change the product so more people who hit ${link.from} also hit ${link.to}.`,
     ].join('\n');

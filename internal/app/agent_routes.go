@@ -960,6 +960,11 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProjectID: project.ID, AgentID: c.QueryParam("agent"),
 			Message: payload.Message, History: chatHistory(payload.History),
 			SessionID: payload.SessionID,
+			// A question asked from inside the shared demo by a read-only
+			// member runs without the agent's writing tools (demo_guard.go).
+			// The guard already refused this caller's direct mutations; asking
+			// the agent to make them instead must not be the way around it.
+			ReadOnly: readOnlyCaller(c),
 		}
 
 		if wantsEventStream(c) {
@@ -967,6 +972,13 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		res, runErr := svc.Chat(c.Request().Context(), opts, nil)
 		if runErr != nil {
+			// A demo question that never reached the provider spent nothing of
+			// the instance owner's, so it must not spend the visitor's daily
+			// budget either (demo_guard.go). Zero tokens is the test: a run that
+			// failed after burning some stays spent.
+			if res.Usage.InputTokens == 0 && res.Usage.OutputTokens == 0 {
+				refundDemoRun(c)
+			}
 			return c.JSON(http.StatusBadGateway, map[string]any{"error": runErr.Error(), "run_id": res.RunID})
 		}
 		return c.JSON(http.StatusOK, map[string]any{
@@ -1065,12 +1077,21 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProjectID: project.ID, AgentID: agentID,
 			Message: message, History: history,
 			SessionID: conv.ID, ConversationID: conv.ID,
+			// Same read-only run as /chat above, for the durable-thread path.
+			ReadOnly: readOnlyCaller(c),
 		}
 		if wantsEventStream(c) {
 			return streamChat(c, svc, opts)
 		}
 		res, runErr := svc.Chat(c.Request().Context(), opts, nil)
 		if runErr != nil {
+			// A demo question that never reached the provider spent nothing of
+			// the instance owner's, so it must not spend the visitor's daily
+			// budget either (demo_guard.go). Zero tokens is the test: a run that
+			// failed after burning some stays spent.
+			if res.Usage.InputTokens == 0 && res.Usage.OutputTokens == 0 {
+				refundDemoRun(c)
+			}
 			return c.JSON(http.StatusBadGateway, map[string]any{"error": runErr.Error(), "run_id": res.RunID})
 		}
 		return c.JSON(http.StatusOK, map[string]any{
@@ -1643,6 +1664,11 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 	case <-done:
 		// Finished while the client was watching: emit the terminal frames inline.
 		if runErr != nil {
+			// Same rule as the non-streaming path: a run the provider never
+			// accepted costs the owner nothing and must cost the visitor nothing.
+			if res.Usage.InputTokens == 0 && res.Usage.OutputTokens == 0 {
+				refundDemoRun(c)
+			}
 			safeSSE("error", map[string]any{"error": runErr.Error(), "run_id": res.RunID})
 		}
 		safeSSE("done", map[string]any{

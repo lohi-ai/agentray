@@ -32,7 +32,8 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import type { Agent, AgentPlanItem, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useRouter } from 'next/navigation';
-import { FIRST_RUN_PROMPT, settingsPath, type FirstRunHandoff as FirstRunHandoffCopy, type FirstSessionNotice } from '@/lib/ia';
+import { DEMO_ASK_PROMPT, DEMO_STARTERS, OWN_ASK_PROMPT, settingsPath, type FirstSessionNotice, type TourStep } from '@/lib/ia';
+import type { TourController } from '@/modules/app/hooks/tour';
 import { startersByJob } from '@/lib/jobs';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
@@ -324,53 +325,64 @@ export function FrontDoor({
   );
 }
 
-// FirstRunPanel is the first thing a hosted stranger sees. It replaces the
-// FrontDoor chip wall for a workspace that has never run an agent.
+// TourPanel is the first thing a new account sees, and it stays until the tour
+// is actually finished.
 //
-// The thing it fixes: signup already creates a populated Demo project, a hired
-// agent, a cloned dashboard and ~2 days of events — and nothing in the UI says
-// so. This panel states that the teammate already exists, names the sample data
-// honestly *before* the run (so the payoff is never a bait-and-switch), and
-// offers exactly one primary move: watch it work.
-//
-// The starter chips are kept but demoted below — this is the opening move, not
-// a menu, and "connect my own product" is never buried for the user who wants
-// their own data first.
-export function FirstRunPanel({
+// What it replaced was written for a world that no longer exists: signup used to
+// drop a project literally named "Demo", full of invented events, into the
+// owner's own workspace, and the panel's opening line said so. There is no such
+// project now. There is a real site somebody else runs, which every account
+// joins as a read-only viewer, and an empty project of their own. The tour walks
+// that: look at a working product, ask it something, then go and make yours.
+export function TourPanel({
+  tour,
   agentName,
-  sampleProjectName,
-  onRun,
-  onPick,
   hasModelKey,
+  onAsk,
+  onPick,
 }: {
+  tour: TourController;
   agentName: string;
-  // The seeded project the run reads. Named in the copy so the user is told
-  // what they are looking at before they see a number from it.
-  sampleProjectName: string;
-  onRun: (prompt: string) => void;
-  onPick: (value: string) => void;
   // false = we know there is no workspace model key. undefined = still loading,
   // so the panel stays optimistic rather than flashing a blocker.
   hasModelKey?: boolean;
+  onAsk: (prompt: string) => void;
+  onPick: (value: string) => void;
 }) {
   const router = useRouter();
   const groups = startersByJob();
   const blocked = hasModelKey === false;
+  const { input, steps, next, progress } = tour;
+  const exploring = input.hasDemo && input.inDemo;
+
+  function run(step: TourStep) {
+    if (step.action.href) { router.push(step.action.href); return; }
+    if (step.action.act === 'open-demo') { tour.openDemo(); return; }
+    if (step.action.act === 'open-own') { tour.openOwn(); return; }
+    if (step.action.act === 'ask') { onAsk(exploring ? DEMO_ASK_PROMPT : OWN_ASK_PROMPT); return; }
+    if (step.action.act === 'arm') { tour.arm(); }
+  }
+
   return (
     <VStack gap={6} className="mx-auto w-full max-w-[760px] px-1 pt-4">
       <VStack gap={3} align="start">
-        <Badge variant="purple" label={`${agentName} · hired & ready`} />
+        <HStack gap={2} align="center" wrap="wrap">
+          {exploring ? <Badge variant="purple" label={`${input.demoName} · read-only`} /> : null}
+          <Badge variant="neutral" label={`${progress.done} of ${progress.total} set up`} />
+        </HStack>
         <VStack gap={1}>
-          <Heading level={2}>Your data is already here. Want me to read it?</Heading>
+          <Heading level={2}>{exploring ? 'You’re reading someone else’s product.' : input.hasDemo ? 'Now make it yours.' : 'Three steps to your first answer.'}</Heading>
           <Text type="supporting">
-            {`Your workspace ships with ${sampleProjectName} — a couple of days of sample product events, so I have something to read on day one. I’ll find the weakest step in it, pin what I find to a dashboard, and then you can point me at your own product.`}
+            {exploring
+              ? `${input.demoName} is a live site with real traffic. Look around it, ask it a question, then point ${agentName} at your own product.`
+              : `${agentName} answers from your events. Send some, then decide whether it should keep working when you’re not here.`}
           </Text>
         </VStack>
       </VStack>
 
       {blocked ? (
-        // The one blocker that stops the run. Events are unaffected — say so, or
-        // a new user reads "add a key" as "nothing works until you pay someone".
+        // The one blocker that stops an answer. Events are unaffected — say so,
+        // or a new user reads "add a key" as "nothing works until you pay".
         <Callout
           tone="warn"
           icon={<MessageSquare size={16} />}
@@ -381,21 +393,25 @@ export function FirstRunPanel({
         />
       ) : null}
 
-      <HStack gap={2} wrap="wrap">
-        <Button
-          variant="primary"
-          label="Find my weakest funnel step"
-          isDisabled={blocked}
-          onClick={() => onRun(FIRST_RUN_PROMPT)}
-          className="![background:var(--agent)] !text-[var(--agent-foreground)]"
-        />
-        <Button variant="secondary" label="Connect my own product instead" onClick={() => router.push(settingsPath('keys'))} />
-      </HStack>
+      <VStack gap={2} align="stretch" role="list">
+        {steps.map((step) => (
+          <TourRow
+            key={step.id}
+            step={step}
+            isNext={step.id === next?.id}
+            busy={step.action.act === 'arm' && tour.arming}
+            disabled={blocked && step.action.act === 'ask'}
+            onAct={() => run(step)}
+          />
+        ))}
+      </VStack>
 
       <VStack gap={2}>
-        <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">Or ask me something else</Text>
+        <Text type="supporting" weight="medium" className="uppercase tracking-[0.08em]">
+          {exploring ? `Or ask ${input.demoName} something else` : 'Or ask something else'}
+        </Text>
         <HStack gap={2} wrap="wrap">
-          {groups.flatMap((group) => group.prompts).map((chip) => (
+          {(exploring ? DEMO_STARTERS : groups.flatMap((group) => group.prompts)).map((chip) => (
             <Token key={chip} size="lg" label={chip} onClick={() => onPick(chip)} />
           ))}
         </HStack>
@@ -404,29 +420,87 @@ export function FirstRunPanel({
   );
 }
 
-// FirstRunHandoff closes the first run with the two callouts the design calls
-// for: the payoff (the dashboard the user just watched get built) and the next
-// commitment (bring your own product). Order matters — the payoff is never
-// withheld behind the upsell.
-export function FirstRunHandoff({ handoff }: { handoff: FirstRunHandoffCopy }) {
+// One tour row. An observable step gets a checkbox because a query can answer
+// it; a step about looking around gets its number instead. Ticking a box we
+// cannot read back is the whole failure mode this shape avoids.
+function TourRow({
+  step,
+  isNext,
+  busy,
+  disabled,
+  onAct,
+}: {
+  step: TourStep;
+  isNext: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onAct: () => void;
+}) {
+  const router = useRouter();
+  return (
+    <HStack
+      role="listitem"
+      gap={3}
+      align="start"
+      className={`rounded-[var(--radius-md)] border p-3 ${isNext ? 'border-[var(--agent)]' : 'border-transparent'}`}
+    >
+      <span
+        aria-hidden
+        className={`mt-0.5 flex size-[18px] flex-none items-center justify-center rounded-full text-[11px] leading-none ${
+          step.observable && step.done
+            ? 'bg-[var(--success)] text-[var(--color-text-inverse)]'
+            : 'border border-[var(--color-border-strong)] text-[var(--color-text-secondary)]'
+        }`}
+      >
+        {step.observable ? (step.done ? <Check size={11} /> : null) : step.n}
+      </span>
+      <VStack gap={0.5} className="min-w-0 flex-1">
+        <Text weight="semibold">{step.label}</Text>
+        <Text type="supporting">{step.detail}</Text>
+        {step.links ? (
+          <HStack gap={2} wrap="wrap" className="pt-1">
+            {step.links.map((link) => (
+              <Token key={link.href} size="sm" label={link.label} onClick={() => router.push(link.href)} />
+            ))}
+          </HStack>
+        ) : null}
+      </VStack>
+      {step.action.act || step.action.href ? (
+        <Button
+          size="sm"
+          variant={isNext ? 'primary' : 'secondary'}
+          label={busy ? 'Arming…' : step.action.label}
+          isDisabled={busy || disabled}
+          onClick={onAct}
+          className={isNext ? '![background:var(--agent)] !text-[var(--agent-foreground)]' : undefined}
+        />
+      ) : (
+        <Badge variant="neutral" label={step.action.label} />
+      )}
+    </HStack>
+  );
+}
+
+// TourNext closes the demo answer with the honest next move: what the reader
+// just watched happen was on somebody else's numbers.
+export function TourNext({ step, demoName, onAct }: { step: TourStep; demoName: string; onAct: () => void }) {
   const router = useRouter();
   return (
     <VStack gap={0} align="stretch" className="mx-auto w-full max-w-[760px] px-1 pb-2">
       <Callout
-        tone="growth"
-        icon={<LayoutDashboard size={16} />}
-        label={handoff.dashboard.label}
-        title={handoff.dashboard.title}
-        detail={handoff.dashboard.detail}
-        action={<Button variant="primary" size="sm" label={handoff.dashboard.action} onClick={() => router.push(handoff.dashboard.href)} />}
-      />
-      <Callout
         tone="agentic"
         icon={<Plug size={16} />}
-        label={handoff.connect.label}
-        title={handoff.connect.title}
-        detail={handoff.connect.detail}
-        action={<Button variant="secondary" size="sm" label={handoff.connect.action} onClick={() => router.push(handoff.connect.href)} />}
+        label="Next"
+        title={`That answer was about ${demoName}, not about you.`}
+        detail={`${step.label} — ${step.detail}`}
+        action={
+          <Button
+            variant="secondary"
+            size="sm"
+            label={step.action.label}
+            onClick={() => (step.action.href ? router.push(step.action.href) : onAct())}
+          />
+        }
       />
     </VStack>
   );

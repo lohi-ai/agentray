@@ -760,7 +760,10 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"))
+		// Running the query is a read; refreshing its stored result is a write to
+		// the owner's row, so a read-only caller (a shared-demo viewer) gets the
+		// rows without touching the cache.
+		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), !readOnlyCaller(c))
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		}

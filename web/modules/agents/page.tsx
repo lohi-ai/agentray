@@ -8,6 +8,7 @@ import { formatCompact, formatCost, formatRelative } from '@/lib/format';
 import { useAgents, useWorkspaceModels } from '@/modules/agent/hooks';
 import { settingsPath } from '@/lib/ia';
 import { useAgentMonitor } from '@/modules/agent-monitor/hooks';
+import { useProjectAccess } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PromptDialog } from '@/modules/shared/components/modal';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
@@ -40,6 +41,8 @@ export function AgentsPage() {
   const spend = agents.reduce((sum, a) => sum + a.cost_usd, 0);
   const spendUnpriced = agents.some((a) => a.cost_unpriced);
 
+  // A demo viewer reads the roster — hiring, assigning, and setup all write.
+  const access = useProjectAccess();
   const onCreate = () => setCreating(true);
 
   return (
@@ -57,7 +60,7 @@ export function AgentsPage() {
       {assigning ? (
         <AssignProductsDialog agentID={assigning.id} agentName={assigning.name} onClose={() => setAssigning(null)} />
       ) : null}
-      <Intro title="Your team" sub="Teammates who watch the product and recommend the next move." action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New agent</Button>} />
+      <Intro title="Your team" sub="Teammates who watch the product and recommend the next move." action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate} disabled={!access.canWrite} tooltip={access.reason || undefined}>New agent</Button>} />
       <div className="mb-3"><RelatedSurfacesLabel parentHref="/agents" /></div>
       <ContextChips range="Last 24 hours" />
       <StatsStrip
@@ -71,7 +74,7 @@ export function AgentsPage() {
         ]}
       />
       {agents.length === 0 && !isLoading ? (
-        <EmptyState icon={<Plus size={22} />} title="No agents yet" detail="Hire a teammate from a blank recipe. No backend code needed." action={<Button variant="outline" size="sm" onClick={onCreate}>Hire a teammate</Button>} />
+        <EmptyState icon={<Plus size={22} />} title="No agents yet" detail={access.canWrite ? 'Hire a teammate from a blank recipe. No backend code needed.' : access.reason} action={access.canWrite ? <Button variant="outline" size="sm" onClick={onCreate}>Hire a teammate</Button> : undefined} />
       ) : (
         <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
           {agents.map((row) => {
@@ -110,19 +113,23 @@ export function AgentsPage() {
                       single letter on narrower cards. */}
                   <Button variant="ghost" size="sm" isIconOnly tooltip="Set up" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${row.id}/setup`)}>Set up</Button>
                   <Button variant="ghost" size="sm" isIconOnly tooltip="Lab" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${row.id}/lab`)}>Lab</Button>
-                  <Button variant="ghost" size="sm" isIconOnly tooltip="Assign" icon={<Share2 size={15} />} onClick={() => setAssigning({ id: row.id, name: row.name })}>Assign</Button>
+                  {access.canWrite ? (
+                    <Button variant="ghost" size="sm" isIconOnly tooltip="Assign" icon={<Share2 size={15} />} onClick={() => setAssigning({ id: row.id, name: row.name })}>Assign</Button>
+                  ) : null}
                 </div>
               </div>
             );
           })}
-          <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
-            <div className="flex items-center gap-2.5">
-              <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-[13px] font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
-              <span className="text-[13.5px] font-semibold">New agent</span>
+          {access.canWrite ? (
+            <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
+              <div className="flex items-center gap-2.5">
+                <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-[13px] font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
+                <span className="text-[13.5px] font-semibold">New agent</span>
+              </div>
+              <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Hire a teammate from a template or a blank recipe. No backend code needed.</div>
+              <div className="mt-0.5 flex items-center gap-2"><Button variant="outline" size="sm" onClick={onCreate}>Create agent</Button></div>
             </div>
-            <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Hire a teammate from a template or a blank recipe. No backend code needed.</div>
-            <div className="mt-0.5 flex items-center gap-2"><Button variant="outline" size="sm" onClick={onCreate}>Create agent</Button></div>
-          </div>
+          ) : null}
         </div>
       )}
     </AppShell>

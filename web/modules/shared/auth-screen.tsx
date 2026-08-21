@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Waypoints } from 'lucide-react';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
@@ -10,12 +9,13 @@ import { VStack } from '@astryxdesign/core/Stack';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { TextInput, type TextInputProps } from '@astryxdesign/core/TextInput';
 import { validateAuthForm, type AuthField, type AuthMode } from '@/lib/auth-form';
+import { AuthValue } from '@/modules/shared/auth-value';
 
-// The first project a signup names is NOT the project they land in: CreateAccount
-// inserts Demo first so the first session opens on a populated funnel
-// (internal/dataplane/store/auth.go:136). So the field is hidden and the constant
-// is sent instead — validateAuthForm's projectName rule still passes, and
-// POST /api/auth/signup is unchanged. Project is renameable from the chrome.
+// Signup does not ask for a project name: naming a container is not a decision a
+// stranger can make before seeing anything, and it is the one field here that is
+// renameable later from the chrome. The constant is still sent so
+// validateAuthForm's projectName rule passes and POST /api/auth/signup is
+// unchanged.
 const HIDDEN_PROJECT_NAME = 'Production';
 
 // TextInput spreads unknown props straight onto the <input> (TextInput.js:146),
@@ -73,25 +73,28 @@ export function AuthScreen({
           its overflow above the top edge, where no scroll can reach it. This grows
           instead — 4rem is the py-8 the wrapper already spends. */}
       <Center axis="both" width="100%" className="min-h-[calc(100dvh-4rem)]">
-        <VStack gap={4} align="center" className="w-full max-w-[400px]">
-          <VStack gap={2} align="center">
-            <span
-              className="grid size-8 flex-none place-items-center rounded-[var(--radius-lg)]"
-              style={{ background: 'color-mix(in srgb, var(--primary) 16%, transparent)', color: 'var(--primary)' }}
-              aria-hidden
-            >
-              <Waypoints size={18} />
-            </span>
-            <Text type="body" weight="medium">AgentRay</Text>
-          </VStack>
+        {/* One column, turning into two at `lg`. It is a VStack flipped to a row
+            rather than a Grid: Grid's responsive `columns` compiles to
+            `minmax(<minWidth>px, …)`, which cannot shrink below its own minimum,
+            so any track wide enough to hold this card pushed a 390px phone into
+            horizontal scroll. AuthValue comes FIRST in the DOM on purpose:
+            stacked, the pitch has to be read before the fields, and that is also
+            the order a screen reader gets. The 400px cap below `lg` is the
+            single-column width this card has always had. */}
+        <VStack
+          gap={6}
+          align="center"
+          className="w-full max-w-[400px] lg:max-w-[900px] lg:flex-row lg:items-center lg:gap-10"
+        >
+          <AuthValue />
 
-          <Card padding={6} width="100%">
+          <Card padding={6} width="100%" maxWidth={420} className="lg:flex-none">
             <VStack gap={4} align="stretch">
               <VStack gap={1} align="start">
                 <Heading level={1}>{isSignup ? 'Create your workspace' : 'Welcome back'}</Heading>
                 <Text type="supporting">
                   {isSignup
-                    ? 'You’ll land in a live demo funnel — connect your data after.'
+                    ? 'Set up in a minute — every name here is editable later.'
                     : 'Sign in to keep going.'}
                 </Text>
               </VStack>

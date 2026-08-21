@@ -3,7 +3,7 @@
 import { Activity, ArrowUpRight, BarChart3, Check, Compass, Database, LayoutTemplate, Megaphone, Newspaper, PieChart, Rocket, Send, ShieldCheck, Sparkles, Store, TrendingUp, Wand2 } from 'lucide-react';
 import type { Agent, AgentPreset, TemplateChart } from '@/lib/api';
 import { jobForPack } from '@/lib/jobs';
-import { useMarketplace, useTemplates } from '@/modules/app/hooks';
+import { useMarketplace, useProjectAccess, useTemplates } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, EmptyState, Loading } from '@/modules/shared/components/signal-primitives';
 
@@ -122,12 +122,16 @@ function MiniChart({ chart, index }: { chart: TemplateChart; index: number }) {
 function AgentPresetCard({
   preset,
   installing,
+  blocked,
   installedAgent,
   onInstall,
   onOpen,
 }: {
   preset: AgentPreset;
   installing: boolean;
+  // Non-empty when this reader may not hire here — the shared demo hires on the
+  // instance owner's model key, so the API refuses it.
+  blocked: string;
   // Set when this project already has an agent hired from this preset
   // (Agent.preset_slug === preset.slug) — the card switches from "Install
   // agent" to "Already on your team" so hiring the same teammate twice
@@ -178,7 +182,7 @@ function AgentPresetCard({
             Open {installedAgent.name}
           </Button>
         ) : (
-          <Button variant="primary" size="sm" icon={<Sparkles size={15} />} disabled={installing} onClick={onInstall}>
+          <Button variant="primary" size="sm" icon={<Sparkles size={15} />} disabled={installing || !!blocked} tooltip={blocked || undefined} onClick={onInstall}>
             {installing ? 'Hiring…' : 'Hire'}
           </Button>
         )}
@@ -187,7 +191,7 @@ function AgentPresetCard({
   );
 }
 
-function TemplateCard({ name, isSystem, description, charts, onApply }: { name: string; isSystem: boolean; description: string; charts: TemplateChart[]; onApply: () => void }) {
+function TemplateCard({ name, isSystem, description, charts, onApply, blocked }: { name: string; isSystem: boolean; description: string; charts: TemplateChart[]; onApply: () => void; blocked: string }) {
   const preview = [...charts].sort((a, b) => a.sort_order - b.sort_order).slice(0, 4);
   return (
     <div className="rounded-xl bg-[var(--color-background-card)] p-4 group flex flex-col gap-[10px] transition-[transform,background,box-shadow] duration-[120ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] hover:-translate-y-0.5 hover:bg-[var(--color-background-muted)] hover:shadow-[0_8px_24px_-14px_rgba(0,0,0,0.75)]">
@@ -203,7 +207,7 @@ function TemplateCard({ name, isSystem, description, charts, onApply }: { name: 
       ) : null}
       <div className="mt-auto flex items-center justify-between pt-1">
         <span className="inline-flex items-center gap-[6px] text-[11.5px] text-[var(--color-text-secondary)]"><LayoutTemplate size={13} /> {charts.length} chart{charts.length === 1 ? '' : 's'}</span>
-        <Button variant="outline" size="sm" onClick={onApply}>Use template</Button>
+        <Button variant="outline" size="sm" onClick={onApply} disabled={!!blocked} tooltip={blocked || undefined}>Use template</Button>
       </div>
     </div>
   );
@@ -211,6 +215,7 @@ function TemplateCard({ name, isSystem, description, charts, onApply }: { name: 
 
 export function MarketplacePage() {
   const { presets, loading, installing, installAgent, installedByPreset, openInstalled } = useMarketplace();
+  const access = useProjectAccess();
   const { templates, applyTemplate } = useTemplates();
 
   return (
@@ -242,6 +247,7 @@ export function MarketplacePage() {
               key={p.slug}
               preset={p}
               installing={installing}
+              blocked={access.canWrite ? '' : access.reason}
               installedAgent={installedByPreset.get(p.slug)}
               onInstall={() => void installAgent(p.slug)}
               onOpen={() => {
@@ -269,6 +275,7 @@ export function MarketplacePage() {
               description={t.description}
               charts={t.charts}
               onApply={() => void applyTemplate(t.id)}
+              blocked={access.canWrite ? '' : access.reason}
             />
           ))}
         </div>

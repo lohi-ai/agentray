@@ -63,6 +63,15 @@ type BuildParams struct {
 	// Both unset keeps agentcore's default (the active rung summarizes).
 	CompactionProvider agentcore.LLMProvider
 	CompactionModel    string
+	// ReadOnly withholds every tool that CHANGES the project (or reaches off the
+	// host) for the duration of this run, leaving the analytics reads.
+	//
+	// It is set for a run started from inside the shared demo by someone whose
+	// membership there is read-only. The HTTP write guard refuses their direct
+	// mutations; without this, asking the agent to "delete the funnel dashboard"
+	// would walk straight around it, because the agent holds the authoring
+	// tools and is agreeable.
+	ReadOnly bool
 	// Sandbox is the optional isolation substrate for untrusted-code tools. When
 	// set, selectable sandbox tools such as run_shell can be built and a runtime
 	// injection guard is installed. nil — the default — leaves the analytics-only
@@ -152,6 +161,12 @@ type BuildParams struct {
 	// 0 keeps agentcore's default (20k). Must be below MaxContextTokens for the LLM
 	// summary path to engage; mainly a test/operations knob.
 	KeepRecentTokens int
+	// MaxTurns / MaxToolCalls override the hard per-run ceilings — LLM calls and
+	// tool executions. 0 keeps agentcore's defaults (24/40). An operator raises
+	// them when the workspace's data makes agents work harder for an answer than
+	// the library's measured default assumes.
+	MaxTurns     int
+	MaxToolCalls int
 	// Subagents, when non-nil, enables the built-in spawn_subagent delegation
 	// tool (ARCHITECT-AGENT-TEAM P1): the model may fork an ephemeral child that
 	// inherits this agent's tools/policy/definition, runs with isolated history,
@@ -348,6 +363,22 @@ func revisableGoal(p BuildParams) bool { return p.ReviseGoal && p.Goal != "" }
 // friends) arrive through p.Tools and are named here like any other.
 func permittedToolNames(p BuildParams) []string {
 	names := ScopeToolNames(p.Scopes)
+	if p.ReadOnly {
+		// A read-only run keeps the analytics reads and loses everything else
+		// the product grants: the authoring tools, the outbound HTTP surface,
+		// the selectable runtime tools (run_shell and friends), and delegation
+		// — a sub-agent is built from its own grants, so leaving spawn in would
+		// hand back the writes this line takes away. The loop's own plumbing
+		// (the plan, the goal gate) stays: neither touches the project.
+		names = ReadOnlyToolNames(names)
+		if p.Todo != nil {
+			names = append(names, todo.ToolName)
+		}
+		if revisableGoal(p) {
+			names = append(names, goal.ToolName)
+		}
+		return names
+	}
 	if p.HTTPTool != nil {
 		names = append(names, p.HTTPTool.Name())
 	}
@@ -446,9 +477,21 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	cfg.OutputSchema = p.OutputSchema
 	cfg.Goal = p.Goal
 	cfg.Policy = agentcore.NewAllowList(names...)
-	if p.MaxContextTokens > 0 {
+	// Any one override builds the whole struct. It is written as three independent
+	// ifs over a single copy because the shape "only MaxContextTokens builds the
+	// Limits" silently dropped a turn/tool-ceiling override — the operator set the
+	// env var, the run still stopped at 24 turns, and nothing said why.
+	if p.MaxContextTokens > 0 || p.MaxTurns > 0 || p.MaxToolCalls > 0 {
 		limits := agentcore.DefaultLimits()
-		limits.MaxContextTokens = p.MaxContextTokens
+		if p.MaxContextTokens > 0 {
+			limits.MaxContextTokens = p.MaxContextTokens
+		}
+		if p.MaxTurns > 0 {
+			limits.MaxTurns = p.MaxTurns
+		}
+		if p.MaxToolCalls > 0 {
+			limits.MaxToolCalls = p.MaxToolCalls
+		}
 		cfg.Limits = &limits
 	}
 	if p.KeepRecentTokens > 0 {

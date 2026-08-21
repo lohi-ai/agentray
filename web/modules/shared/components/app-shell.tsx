@@ -17,6 +17,7 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
+import { Eye } from 'lucide-react';
 import type { ComponentType, ReactNode, SVGProps } from 'react';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
 import { SideNav, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav';
@@ -24,7 +25,7 @@ import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
-import { useAuth, useUser } from '@/modules/app/hooks';
+import { useAuth, useProjectAccess, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
 
@@ -92,6 +93,37 @@ function SidebarFooter() {
   );
 }
 
+// DemoBar is the label that never goes away.
+//
+// A toast would be wrong here twice over: it is dismissible, so the answer to
+// "whose numbers am I looking at?" would depend on whether the reader happened
+// to be watching four seconds ago; and it is transient, so it would be gone by
+// the time they reach the dashboard the number is on. This sits above every
+// screen for as long as the demo project is the active one, and it says both
+// halves — this is somebody else's site, and you are here to read it.
+function DemoBar({ inset }: { inset: boolean }) {
+  const access = useProjectAccess();
+  const projectName = useAuthStore((s) => s.project?.name);
+  if (!access.isDemo) return null;
+  return (
+    <div
+      role="status"
+      className={`flex flex-none items-center gap-2 bg-[color-mix(in_srgb,var(--agent)_12%,transparent)] px-4 py-1.5 text-[12.5px] text-[var(--color-text-secondary)] ${
+        inset
+          ? 'mb-4 rounded-[var(--radius-md)] border border-[var(--color-border)]'
+          : 'border-b border-[var(--color-border)]'
+      }`}
+    >
+      <Eye size={14} aria-hidden className="flex-none text-agent" />
+      <span className="min-w-0">
+        <b className="font-medium text-[var(--color-text-primary)]">{projectName || 'This project'}</b>
+        {' is a live site someone else runs. '}
+        {access.canWrite ? 'You can read and change it.' : 'You’re reading it as a viewer — nothing here can be changed.'}
+      </span>
+    </div>
+  );
+}
+
 export function AppShell({ children, bleed = false }: { active?: AppSection; children: ReactNode; bleed?: boolean }) {
   const pathname = usePathname() ?? '';
   // Self-host never renders Plans: a `docker compose up` operator has no plan
@@ -134,9 +166,15 @@ export function AppShell({ children, bleed = false }: { active?: AppSection; chi
       <a href="#main-content" className="skip-to-content">Skip to content</a>
       <AstryxAppShell height="fill" contentPadding={bleed ? 0 : 6} sideNav={sideNav}>
         {bleed ? (
-          <div id="main-content" className="h-full">{children}</div>
+          <div className="flex h-full min-h-0 flex-col">
+            <DemoBar inset={false} />
+            <div id="main-content" className="min-h-0 flex-1">{children}</div>
+          </div>
         ) : (
-          <div id="main-content" className="max-w-[1320px] mx-auto">{children}</div>
+          <div id="main-content" className="mx-auto w-full max-w-[1320px]">
+            <DemoBar inset />
+            {children}
+          </div>
         )}
       </AstryxAppShell>
     </>

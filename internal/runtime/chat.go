@@ -54,6 +54,10 @@ type ChatOptions struct {
 	// client-held-history path. Distinct from SessionID (live-control key), though a
 	// caller typically sets both to the same conversation id.
 	ConversationID string
+	// ReadOnly withholds the agent's writing tools for this turn (see
+	// RunOptions.ReadOnly). The HTTP layer sets it when the turn is a demo
+	// viewer's question about someone else's project.
+	ReadOnly bool
 	// OnRunID, when set, is called with the run id as soon as the run row opens —
 	// before any token — so a streaming caller can surface it to the client (which
 	// persists it to reattach to the run after navigating away mid-stream).
@@ -113,6 +117,8 @@ type chatWork struct {
 	// Goal, when non-empty, activates the run-level goal gate for this turn
 	// (parsed from a leading "/goal <condition>" line; see parseDirective).
 	Goal string
+	// ReadOnly carries ChatOptions.ReadOnly into the run.
+	ReadOnly bool
 }
 
 // ChatService owns one conversational turn of the general agent. It holds a
@@ -201,6 +207,7 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
 		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
 		OnRunID: opts.OnRunID, OnPlan: opts.OnPlan, Goal: goal,
+		ReadOnly: opts.ReadOnly,
 	}, sink)
 	res.Route = dec.Route
 	// The gate's sentinel is a protocol between the loop and the plugin, not
@@ -435,6 +442,7 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
+		ReadOnly: req.ReadOnly,
 	}, wrapped)
 	if runErr != nil {
 		// Final is carried even on the error return: a stopped run's partial answer

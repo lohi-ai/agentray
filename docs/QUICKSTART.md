@@ -12,15 +12,17 @@ docker compose up
 ```
 
 `docker compose up` starts the API, web app, ClickHouse, Postgres, Redis, and
-NATS. On first boot it seeds a default project **and ~2 days of synthetic events**
-(`AGENTRAY_SEED_DEMO=true` in compose), so the dashboards render populated instead
-of empty. Open <http://localhost:3200>.
+NATS. On first boot it seeds a default project — and nothing else. The dashboards
+are empty until you send real events (step 2), because inventing numbers to fill
+them is how a tool teaches you to distrust it. Open <http://localhost:3200>.
 
 - Web: <http://localhost:3200>
 - API: <http://localhost:8088>
 - Default project API key: `lohi_dev_project_token`
 
-> Self-hosting for real? Unset `AGENTRAY_SEED_DEMO` so no demo data is written.
+> The hosted instance ships a demo: one real project, on a site its operator
+> runs, shared read-only with every account (`AGENTRAY_DEMO_PROJECT_ID`). Set it
+> to a project id here if you have a live site of your own to point at.
 
 Prefer your own account over the seeded default (or you're an agent working
 headless)? The CLI is self-serve:

@@ -2,8 +2,18 @@ export type Project = {
   id: string;
   workspace_id?: string;
   name: string;
+  // Blank for a membership that may not write (store/auth.go
+  // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
   api_key: string;
   created_at: string;
+  // The caller's role in the owning workspace, and whether the project lives in
+  // the shared demo workspace. Both are read-only truth from the API: without
+  // them the UI cannot tell a project the viewer owns from a live demo of
+  // someone else's site, and would offer writes the API answers 403. Drive
+  // affordances off these, never off `name`. Absent on the api-key path, which
+  // has no user to have a role.
+  role?: string;
+  is_demo?: boolean;
 };
 
 export type User = {
@@ -18,6 +28,9 @@ export type Workspace = {
   id: string;
   name: string;
   role: string;
+  // The ONE shared demo workspace every account joins as a viewer. There is at
+  // most one, and an instance with no demo configured has none.
+  is_demo?: boolean;
   // Display-only plan id (free | solo | team). Nothing in the backend enforces
   // it — it drives the plan badge, the meter's ceiling, and the upgrade moment.
   plan?: string;
@@ -185,7 +198,10 @@ export type InsightResult = {
   series: Array<{ hour: string; count: number }>;
   rows: Array<Record<string, unknown>>;
   funnel: Array<{ step: number; event_name: string; users: number; conversion: number }>;
-  retention: Array<{ period: string; users: number; rate: number }>;
+  // `mature` is false when the period's window has not finished elapsing: a 0
+  // there means "nobody could have returned yet", not "nobody returned". Never
+  // chart, average, or colour an immature point.
+  retention: Array<{ period: string; users: number; rate: number; mature: boolean }>;
   generated_at: string;
 };
 
@@ -385,12 +401,15 @@ export type EventExplorer = {
   generated_at: string;
 };
 
-// One distinct event name in the project, used to feed the event-name
-// autocomplete so people pick a known name instead of recalling it.
+// One distinct event name in the project. Feeds the event-name autocomplete, and
+// the first-run written opinion in `lib/ia.ts` — which is why it carries both
+// numbers: `count` is event volume, `users` is distinct stitched human
+// identities. Only `users` may be labelled "people".
 export type EventCatalogEntry = {
   event_name: string;
   event_type: string;
   count: number;
+  users: number;
   last_seen: string;
 };
 

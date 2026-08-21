@@ -119,18 +119,39 @@ func persons() opcore.Operation[windowInput, storage.PersonsSummary] {
 
 func exploreEvents() opcore.Operation[windowInput, storage.EventExplorer] {
 	return opcore.Operation[windowInput, storage.EventExplorer]{
-		Name:    "explore_events",
-		Summary: "Explore event-name breakdown and property coverage to find data-quality gaps.",
+		Name: "explore_events",
+		Summary: "Read the project's event catalog and a sample of raw events. " +
+			"`schema` is one row per event name over the window — event_name, event_type, events (volume), " +
+			"people (identity-stitched, crawlers excluded), first_seen/last_seen, and property_keys — so you do " +
+			"NOT need SQL to find out what is tracked, what properties exist, how much data there is, or when it " +
+			"starts and stops. Read `schema` first and query only what it cannot answer. " +
+			"`events` is a raw sample for seeing an actual payload; it is truncated, so never count from it. " +
+			"Both cover the same window (`hours`, default recent) — widen `hours` rather than concluding an event " +
+			"is missing or a product is new.",
 		Scope:   "data_quality",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in windowInput) (storage.EventExplorer, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return storage.EventExplorer{}, err
 			}
-			return d.Repo.ExploreEvents(ctx, cc.ProjectID, recentFilter(in.Hours))
+			filter := recentFilter(in.Hours)
+			// A tool result is truncated to 24KB before it reaches the model, and
+			// recentFilter's 200 raw events is several times that — so this payload
+			// always arrived cut off mid-JSON, which is why an agent would sample the
+			// events again in SQL rather than trust what it had been handed. The
+			// catalog carries the shape now, so the sample only has to show what a
+			// real payload looks like: keep it small enough that both survive whole.
+			filter.Limit = exploreSampleSize
+			return d.Repo.ExploreEvents(ctx, cc.ProjectID, filter)
 		},
 	}
 }
+
+// exploreSampleSize is how many raw events ride along with the catalog. Sized to
+// fit under the tool-result cap with the catalog intact, not to be a sample
+// anything is counted from — explore_events says so, and the numbers come from
+// the catalog or from SQL.
+const exploreSampleSize = 20
 
 type runSQLInput struct {
 	SQL string `json:"sql" desc:"a single read-only SELECT statement, ClickHouse dialect" required:"true"`

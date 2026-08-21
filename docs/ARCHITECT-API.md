@@ -48,6 +48,32 @@ GET /api/activity?project_id=xxx
 
 `projectFromRequest` accepts either `?api_key=` / `X-API-Key` header (SDK use) or a valid session cookie + `?project_id=` (dashboard use). Auth and project resolution are always the first two steps in every protected handler.
 
+### Writes: the guard in front of every handler
+
+Reads are open to any member of a project's workspace. Writes go through one
+middleware first — `demoWriteGuard` in `internal/app/demo_guard.go`, mounted in
+`app.go` beside CORS.
+
+It exists because of the shared demo (`store/demo.go`): every signed-up account
+is a `viewer` of a workspace that belongs to someone else, and `viewer` has to
+mean something. For any non-GET request the guard resolves the workspace the
+request targets — path `:workspace_id`, then `:project_id` / `?project_id=`,
+then the caller's default project, the same order the handlers use — and
+refuses unless the caller's role there may write (`storage.RoleMayWrite`:
+owner, admin, member).
+
+**It is fail-closed by default.** A route is exempt only by being named in
+`writeClasses` with a reason: session lifecycle, the caller's own account, a
+public collection endpoint, a read that carries a body, or the agent-ask
+surface (deliberately open to demo viewers, and metered against
+`AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY`). Anything unlisted — including a
+route added next year — is denied for a read-only caller. `TestTheRouteTableMatchesTheSource`
+scans this package's source and fails when a mutating route is registered that
+the guard's table does not name.
+
+On an instance with no `AGENTRAY_DEMO_PROJECT_ID` the guard returns
+immediately and the API behaves exactly as it did before it existed.
+
 ### Event ingestion
 
 ```

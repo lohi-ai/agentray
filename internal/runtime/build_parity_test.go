@@ -36,7 +36,7 @@ refresh_key:           set
 retry:                 3 attempts
 scope:                 agent-1
 skills:                0
-limits:                turns=12 tools=24 ctx=50000 result=24576
+limits:                turns=24 tools=40 ctx=50000 result=24576
 sandbox:               set
 policy:                *agentcore.AllowList
 goal:                  STATUS: DONE appears

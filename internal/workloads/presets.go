@@ -233,12 +233,24 @@ Your procedure must be self-contained. Every cycle:
    ` + "`EXPERIMENT … status=running`" + ` record (see the experiment-design
    skill for its shape). If memory is empty this is cycle 0 — establish baselines
    (step 2), ` + "`remember`" + ` them, and stop.
-2. **Measure.** Refresh acquisition, activation, retention, and the PMF verdict
-   with ` + "`run_insight`" + ` (funnel / retention) and ` + "`run_sql`" + `.
+2. **Measure.** Refresh acquisition, activation, retention, **revenue**, and the
+   PMF verdict with ` + "`run_insight`" + ` (funnel / retention) and
+   ` + "`run_sql`" + `. Money is a measured family like the others: the paid
+   funnel's steps, the count of the money event, and the value it carries.
+   **Before you state any revenue figure, prove it is measurable** — the money
+   event exists, fired more than zero times in the window, and carries an amount
+   with a unit. If it does not, stop: that *is* this cycle's weakest link and the
+   finding. File it (step 5) naming the event and the property it must carry.
+   Never substitute engagement numbers for money you could not measure — a
+   revenue query over a missing event returns 0, it does not error.
    Pin or refresh the charts on a "PMF" dashboard so the team sees the same
    picture you do (` + "`create_dashboard`" + ` / ` + "`create_chart`" + `).
 3. **Diagnose.** Compare against baseline and last cycle and name the *single*
-   weakest link. One link per cycle — be decisive, use the tie-break rules.
+   weakest link — the one with the most **money at risk**, not the biggest
+   percentage drop. Size each candidate leak in currency first (money-sized-funnel
+   skill): a 40% drop on a step nobody pays after is worth less than a 5% drop on
+   the step immediately before the money event. One link per cycle — be decisive,
+   use the tie-break rules.
 4. **Decide.**
    - If an ` + "`EXPERIMENT … status=running`" + ` record exists, **measure it
      back mechanically**: re-run its ` + "`metric`" + ` over its
@@ -346,15 +358,55 @@ activation → purchase):
 				Description: "Turn the scorecard into the single weakest link to attack this cycle, deterministically.",
 				Body: `Pick exactly one link to improve this cycle:
 
-1. For each of acquisition, activation, retention, compute the gap vs baseline
-   and vs last cycle (from memory).
-2. Rank by leverage: a leaky step early in the funnel that everyone passes
-   through beats a small late-stage gain. Retention decay outranks an
+1. For each of acquisition, activation, retention, and revenue, compute the gap
+   vs baseline and vs last cycle (from memory).
+2. **Size every gap in money before ranking it** (money-sized-funnel skill):
+   users lost at the step × the average value of a conversion. Rank by that
+   number, not by percentage. At equal money, retention decay outranks an
    acquisition dip — a leaky bucket is not fixed by pouring faster.
-3. Tie-break, in order: (a) the link that regressed most vs last cycle, (b) the
-   earliest funnel step, (c) the one with the largest absolute user count
-   affected. These rules make the choice repeatable across unattended runs.
-4. State the chosen link, its number, and why it won in one line.`,
+3. **If revenue itself is unmeasurable — no money event, zero volume over the
+   window, or one carrying no amount — it wins outright**, ahead of every sized
+   leak. An unsized funnel is a guess, and every money number the team reads is
+   silently 0.
+4. Tie-break, in order: (a) the larger money at risk, (b) the step nearer the
+   money event, (c) the link that regressed most vs last cycle, (d) the earliest
+   funnel step. These rules make the choice repeatable across unattended runs.
+5. State the chosen link, its number — in currency where the leak has one — and
+   why it won in one line.`,
+			},
+			{
+				Name:        "money-sized-funnel",
+				Description: "Convert a funnel drop into currency at risk, so leaks are ranked by money rather than by percentage.",
+				Body: `A percentage is not a priority until it is money. To size a leak:
+
+1. **Per-step counts** — ` + "`run_insight`" + ` type ` + "`funnel`" + ` (or
+   ` + "`run_sql`" + ` with ` + "`uniqExact(canonical_id)`" + ` per step) along the
+   paid path, ending at the money event. Record users entering and users passing
+   each step.
+2. **Value of one conversion — from the money event, never from a guess.**
+   ` + "`run_sql`" + ` the average amount it carries, e.g.
+   ` + "`avg(toFloat64OrNull(JSONExtractString(properties,'amount')))`" + ` (use
+   whichever of ` + "`amount`" + ` / ` + "`value`" + ` / ` + "`price`" + ` /
+   ` + "`*_cost`" + ` this product actually sends), together with its currency or
+   unit property. If the money event carries no amount, **stop**: nothing here is
+   sizeable. Report that as the finding.
+3. **Money at risk** = users lost at the step × the step→money conversion rate of
+   the users who do pass it × average value per conversion. Express it as a rate
+   ("≈X per week") so two leaks are comparable.
+4. **State it in the customer's own currency, with the unit attached** — "₫1.2M
+   per week", never a bare "1.2M".
+
+Two traps that silently produce a confident wrong number:
+
+- **Mixed currencies.** Never ` + "`sum()`" + ` an amount across rows with
+  different currency values. Group by the currency property first. If one figure
+  is required, convert at a rate you state out loud and label it a conversion.
+- **An internal token is not revenue.** Amounts denominated in a loyalty/credit/
+  points unit (LT, coins, credits) are not money until converted, and the
+  token→currency rate is commonly **non-linear across purchase tiers** — a bulk
+  tier buys the token cheaper — so ` + "`sum(tokens) × one rate`" + ` is wrong.
+  Either report the figure in tokens with the unit named, or convert per tier and
+  say which rates you used. Ask for the rate card; never invent one.`,
 			},
 			{
 				Name:        "experiment-design",
@@ -424,8 +476,11 @@ the same structure each week so a reader can diff cycle N against N−1 at a gla
 1. **Structure** — exactly these lines, in order:
    - ` + "`PMF: <verdict>`" + ` — acquisition/activation/retention one-liner with the
      headline numbers (the plateau + Sean-Ellis share if available).
-   - ` + "`Weakest link: <link> — <number> (<why it won>)`" + ` — the one link you
-     chose this cycle.
+   - ` + "`Money: <revenue this window, in the customer's currency>`" + ` — or, if
+     it is not measurable, say exactly that and which event is missing the amount.
+     Never omit this line and never fill it with an engagement number.
+   - ` + "`Weakest link: <link> — <number> (<money at risk, why it won>)`" + ` — the
+     one link you chose this cycle.
    - ` + "`Hypothesis: <one clause>`" + ` and ` + "`Action: <the recommendation you filed>`" + `.
    - ` + "`Vs last cycle: <what moved>`" + ` — reference last cycle's hypothesis
      outcome by name (this is the cycle-over-cycle thread; never omit it once you
@@ -487,8 +542,12 @@ Each run:
    and ` + "`run_sql`" + `. Diff against the remembered plan to spot what's new,
    gone, or changed.
 2. **Audit for the failure modes**, in order of blast radius:
+   - **Money blindness** — a revenue/purchase/subscription event that never
+     fires, carries no amount, or whose amount disagrees in unit or name across
+     sides. Highest priority: unlike a broken read, it never errors — every money
+     number downstream just reads zero. Run the revenue-integrity skill every run.
    - **Silent breakage** — an event whose daily volume dropped sharply or to
-     zero (a broken tag or a shipped regression). Highest priority.
+     zero (a broken tag or a shipped regression).
    - **Naming chaos** — the same concept under multiple names
      (` + "`signup`" + ` vs ` + "`sign_up`" + ` vs ` + "`SignUp`" + `), or
      mixed casing conventions across the catalog.
@@ -529,6 +588,51 @@ Each run:
 3. Flag **orphans**: events with a tiny count or whose ` + "`last_seen`" + ` is
    old — likely dead tags or typos that fired once.
 4. Return the catalog plus a short "issues" list, most impactful first.`,
+			},
+			{
+				Name:        "revenue-integrity",
+				Description: "Audit the money events: that they fire, carry an amount with a unit, and book as well as they reverse.",
+				Body: `Money defects are the worst defects in a catalog because they never throw —
+a revenue query over a missing event returns 0, and the business reads "no sales"
+instead of "no tracking". Check all six, every run:
+
+1. **Find the candidates.** ` + "`explore_events`" + `, then match both ways:
+   by **name** (revenue, purchase, order, checkout, payment, subscription,
+   donation, topup, refund) and by **payload** — any event whose properties carry
+   ` + "`amount`" + `, ` + "`value`" + `, ` + "`price`" + `, ` + "`total`" + `,
+   ` + "`*_cost`" + `, ` + "`*_lt`" + `, ` + "`*_vnd`" + `, or ` + "`currency`" + `.
+   Name-matching alone misses the ones the team named after the product.
+2. **Zero-volume money event — highest severity.** ` + "`run_sql`" + ` a count per
+   candidate over the window. ` + "`count() = 0`" + ` on a money event means every
+   revenue figure the workspace has ever shown is silently fabricated zero. File
+   it as urgent, naming the surface that should emit it.
+3. **Booking/reversal asymmetry.** A reversal that carries an amount whose
+   booking counterpart does not makes net revenue *structurally negative*:
+
+   ` + "`SELECT event_name, count() AS n, countIf(JSONExtractString(properties,'<amount_prop>') != '') AS with_amount FROM events WHERE event_name IN ('<booking>','<reversal>') GROUP BY event_name`" + `
+
+   If the booking row shows ` + "`with_amount = 0`" + ` and the reversal does not,
+   then "net = sum(booked) − sum(refunded)" can only ever return a negative
+   number — the only money the product can see is money going out. File it
+   against the **booking** event: it must carry the same amount property and unit
+   its reversal carries.
+4. **Unit mixing and casing splits.** One quantity must be one property name in
+   one unit. Compare the property keys per event
+   (` + "`JSONExtractKeys(properties)`" + `) and flag ` + "`ltCost`" + ` (client)
+   vs ` + "`lt_cost`" + ` (server) for the same field, or an amount arriving as an
+   internal token on one side and real currency on the other — a funnel query
+   spanning both sides silently misses half its rows. Require one name, one unit,
+   and an explicit currency property.
+5. **Dark middle steps.** Count every step of each documented money funnel. A
+   funnel whose ends fire but whose middle steps sit at zero has a coverage gap,
+   not a conversion problem — it cannot be diagnosed at all until those steps are
+   instrumented. Say which step is missing, not that conversion is poor.
+6. **File each one** with ` + "`submit_recommendation`" + ` (category
+   ` + "`data`" + `) naming the exact event, the exact property to add, the
+   **unit** that property must carry, and which metric is wrong today. "Add an
+   amount" is not actionable; "` + "`subscription_activated`" + ` must carry
+   ` + "`lt_cost`" + ` (integer tokens) plus ` + "`currency`" + `, so net revenue
+   stops reading negative" is.`,
 			},
 			{
 				Name:        "volume-anomaly-watch",

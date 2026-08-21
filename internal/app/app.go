@@ -129,6 +129,12 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		AllowCredentials: true,
 	}))
 
+	// The write guard (demo_guard.go): one choke point in front of every
+	// mutating route, mounted here rather than called per handler so a route
+	// added later is covered by existing. It is inert on an instance with no
+	// shared demo configured.
+	e.Use(demoWriteGuard(store, cfg.DemoAgentRunsPerUserPerDay))
+
 	// Build the agent isolation substrate once and thread it (as RunnerOptions)
 	// into both run paths — the NATS scheduler and the HTTP chat handler. Nil when
 	// disabled or Docker is unreachable, leaving agents analytics-only.
@@ -202,6 +208,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	}
 	if cfg.AgentKeepRecentTokens > 0 {
 		runnerOpts = append(runnerOpts, agentruntime.WithKeepRecentTokens(cfg.AgentKeepRecentTokens))
+	}
+	// Optional per-run ceiling overrides (operator knob); 0 keeps agentcore's
+	// measured 24/40.
+	if cfg.AgentMaxTurns > 0 {
+		runnerOpts = append(runnerOpts, agentruntime.WithMaxTurns(cfg.AgentMaxTurns))
+	}
+	if cfg.AgentMaxToolCalls > 0 {
+		runnerOpts = append(runnerOpts, agentruntime.WithMaxToolCalls(cfg.AgentMaxToolCalls))
 	}
 	// Live control registry: one process-wide instance shared by every chat run
 	// (via WithLiveRegistry) and the steer/follow-up HTTP handlers, so a sibling

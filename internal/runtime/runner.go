@@ -117,6 +117,12 @@ type Runner struct {
 	// for every run this Runner drives. 0 (the default) keeps agentcore's 20k. Must
 	// be below MaxContextTokens for the LLM summary path to engage.
 	KeepRecentTokens int
+	// MaxTurns / MaxToolCalls override the hard per-run ceilings for every run this
+	// Runner drives. 0 (the default) keeps agentcore's 24/40. An operator knob, not
+	// a test one: how much room an agent needs depends on how far its data is from
+	// the question being asked.
+	MaxTurns     int
+	MaxToolCalls int
 	// Notifier, when non-nil, backs the send_notification agent tool: it delivers a
 	// message to a saved alert channel through the platform's SSRF-guarded,
 	// secret-resolving fan-out. nil leaves the tool wired but returning a clear
@@ -273,6 +279,27 @@ func WithKeepRecentTokens(n int) RunnerOption {
 	}
 }
 
+// WithMaxTurns overrides the hard cap on LLM calls per run for every run this
+// Runner drives. A non-positive value is a no-op, keeping agentcore's default.
+func WithMaxTurns(n int) RunnerOption {
+	return func(r *Runner) {
+		if n > 0 {
+			r.MaxTurns = n
+		}
+	}
+}
+
+// WithMaxToolCalls overrides the hard cap on tool executions per run for every
+// run this Runner drives. A non-positive value is a no-op, keeping agentcore's
+// default.
+func WithMaxToolCalls(n int) RunnerOption {
+	return func(r *Runner) {
+		if n > 0 {
+			r.MaxToolCalls = n
+		}
+	}
+}
+
 // WithNotifier sets the delivery backend for the send_notification agent tool.
 // nil leaves the tool returning a "not configured" error.
 func WithNotifier(n usecase.Notifier) RunnerOption {
@@ -312,6 +339,10 @@ type RunOptions struct {
 	// run so the analyst answers with multi-turn context. Empty = a fresh run.
 	// Cross-session persistence is out of scope; the caller (client) holds these.
 	History []agentcore.Message
+	// ReadOnly strips the run down to the analytics reads (see
+	// BuildParams.ReadOnly). Set for a question asked from inside the shared
+	// demo by someone whose membership there is read-only.
+	ReadOnly bool
 	// StepGate is the optional pause-before-each-turn hook for the Lab's explain
 	// mode. Threaded straight into BuildParams; nil keeps the run continuous.
 	StepGate func(ctx context.Context, turn int) error
@@ -743,6 +774,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Sandbox:     r.Sandbox,
 		Credentials: creds,
 		Tools:       runTools,
+		ReadOnly:    opts.ReadOnly,
 		Tracer:      r.Tracer,
 		StepGate:    opts.StepGate,
 		// Durable resume: key the append-only log on the run id (the FK that the
@@ -765,11 +797,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		RefreshKey:      r.keyRefresher(opts.ProjectID),
 		PrepareNextTurn: opts.PrepareNextTurn,
 		BudgetGate:      budgetGate,
-		// Built-in run todo list (goal stability across compaction) + optional
-		// compaction-budget override. A fresh store per run scopes the plan to it.
+		// Built-in run todo list (goal stability across compaction) + the optional
+		// operator overrides for the compaction budget and the run ceilings. A fresh
+		// store per run scopes the plan to it.
 		Todo:             todo.NewStore(),
 		MaxContextTokens: r.MaxContextTokens,
 		KeepRecentTokens: r.KeepRecentTokens,
+		MaxTurns:         r.MaxTurns,
+		MaxToolCalls:     r.MaxToolCalls,
 		// Delegation: every solo agent may spawn ephemeral sub-agents (P1 of the
 		// team architecture) under the default caps — depth 1, 8 per run, 48 KB
 		// model-visible answer. Children inherit this agent's exact capabilities.

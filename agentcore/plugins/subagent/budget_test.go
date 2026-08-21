@@ -143,13 +143,15 @@ func TestSpawnBudget(t *testing.T) {
 		want         int
 		why          string
 	}{{
-		// The compatibility end: the share must reproduce the fixed default it
-		// replaced, or every existing consumer silently gets a different
-		// delegation budget than the one it was tuned against.
-		name:         "default limits are unchanged",
-		maxToolCalls: agentcore.DefaultLimits().MaxToolCalls, // 24 / 3 = 8
-		want:         8,
-		why:          "the historical fixed default",
+		// The default end: whatever the library's tool budget currently is, a
+		// third of it is what delegation gets. Both sides are computed, because
+		// pinning the number here froze the delegation budget at the tool budget
+		// of the day the case was written — raising DefaultLimits then failed a
+		// test about subagents.
+		name:         "delegation tracks the default tool budget",
+		maxToolCalls: agentcore.DefaultLimits().MaxToolCalls,
+		want:         max(agentcore.DefaultLimits().MaxToolCalls/3, 8),
+		why:          "a third of the default tool budget, floored at 8",
 	}, {
 		// The reason for the change. Before, this run delegated 8 tasks and did
 		// the other 42 inline, in its own context.

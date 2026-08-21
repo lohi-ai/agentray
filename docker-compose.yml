@@ -14,10 +14,11 @@ services:
       RATE_LIMIT_PER_MINUTE: "600"
       DEFAULT_PROJECT_NAME: "AgentRay local"
       DEFAULT_PROJECT_API_KEY: "lohi_dev_project_token"
-      # Quickstart (#3b): seed ~2 days of synthetic events into the default project
-      # on first boot so a stranger lands on populated dashboards, not empty states.
-      # Idempotent and compose-only; unset it for a clean/self-host deployment.
-      AGENTRAY_SEED_DEMO: "${AGENTRAY_SEED_DEMO:-true}"
+      # The demo is a REAL project on a site the operator runs, shared read-only
+      # with every account (see internal/dataplane/store/demo.go). Unset here on
+      # purpose: a compose instance has no such site, so it has no demo — nothing
+      # synthetic is written, and the dashboards are empty until you send events.
+      AGENTRAY_DEMO_PROJECT_ID: "${AGENTRAY_DEMO_PROJECT_ID:-}"
       AGENT_KEY_ENC_SECRET: "dev-secret-32-bytes-local-docker!"
       ALLOWED_ORIGINS: "http://localhost:3100,http://127.0.0.1:3100,http://localhost:3200,http://127.0.0.1:3200"
     depends_on:

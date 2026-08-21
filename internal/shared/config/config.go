@@ -85,7 +85,6 @@ type Config struct {
 	// (<base>/<workspaceId>/<projectId>/<agentId>/<conversationId>). Empty uses
 	// ~/.agentray/workspaces, so the file tools work with nothing configured.
 	AgentWorkspaceRoot string
-	SeedDemo           bool // AGENTRAY_SEED_DEMO: seed ~2 days of synthetic events into the default project on first boot (compose quickstart only, #3b)
 	// Hosted marks this as the managed cloud (agentray.lohi2.com) rather than a
 	// `docker compose up` instance. Off by default so a self-host operator never
 	// sees a pricing page or a usage ceiling for a plan they cannot buy — the web
@@ -122,6 +121,26 @@ type Config struct {
 	// keeps agentcore's 20k. Must be below AgentMaxContextTokens for the LLM
 	// summary path to engage; a deployment/test knob paired with the budget above.
 	AgentKeepRecentTokens int
+	// AgentMaxTurns / AgentMaxToolCalls override the hard per-run ceilings (LLM
+	// calls, tool executions). 0 — the default — keeps agentcore's 24/40. They
+	// exist because the right ceiling is a property of the deployment, not of the
+	// library: a workspace whose agents walk an unfamiliar warehouse schema needs
+	// more room than one answering off a curated mart, and hitting the ceiling
+	// costs a real answer — the run wraps up honestly instead of finishing.
+	AgentMaxTurns     int
+	AgentMaxToolCalls int
+	// The shared demo workspace — one feature, two keys.
+	//
+	// DemoProjectID is the project id of a real, read-only project every visitor
+	// is shown, so the first thing a signed-up viewer sees is live data instead of
+	// an empty state they have to fill before AgentRay means anything. Empty — the
+	// default — means this instance has no demo and the surface stays hidden.
+	DemoProjectID string
+	// DemoAgentRunsPerUserPerDay caps how many agent runs one signed-up viewer may
+	// trigger inside that demo per day. It is a spend control, not an abuse
+	// control: demo runs bill the INSTANCE owner's model key, not the viewer's, so
+	// an unbounded demo is an unbounded bill.
+	DemoAgentRunsPerUserPerDay int
 	// Hosted default model pool. When a workspace has no BYOK key, runs and the
 	// Settings "has_key" flag fall back to this so the first ask works without
 	// pasting a key. Empty API key disables the fallback (BYOK-only deploy).
@@ -163,7 +182,6 @@ func FromEnv() Config {
 		SandboxDockerBin:             os.Getenv("AGENTRAY_SANDBOX_DOCKER_BIN"),
 		AgentWorkspaceRoot:           os.Getenv("AGENTRAY_AGENT_WORKSPACE_ROOT"),
 		SandboxRequired:              envBool("AGENTRAY_SANDBOX_REQUIRED", envBool("AGENTRAY_HOSTED", false)),
-		SeedDemo:                     envBool("AGENTRAY_SEED_DEMO", false),
 		Hosted:                       envBool("AGENTRAY_HOSTED", false),
 		CredentialsEnabled:           envBool("AGENTRAY_CREDENTIALS_ENABLED", false),
 		HTTPToolEnabled:              envBool("AGENTRAY_HTTP_TOOL_ENABLED", false),
@@ -172,6 +190,10 @@ func FromEnv() Config {
 		AgentTraceFile:               os.Getenv("AGENTRAY_AGENT_TRACE_FILE"),
 		AgentMaxContextTokens:        envInt("AGENTRAY_AGENT_MAX_CONTEXT_TOKENS", 0),
 		AgentKeepRecentTokens:        envInt("AGENTRAY_AGENT_KEEP_RECENT_TOKENS", 0),
+		AgentMaxTurns:                envInt("AGENTRAY_AGENT_MAX_TURNS", 0),
+		AgentMaxToolCalls:            envInt("AGENTRAY_AGENT_MAX_TOOL_CALLS", 0),
+		DemoProjectID:                os.Getenv("AGENTRAY_DEMO_PROJECT_ID"),
+		DemoAgentRunsPerUserPerDay:   envInt("AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY", 5),
 		// Hosted model: dedicated DEFAULT_* vars, then the real-provider test
 		// endpoint so a local `make dev` that already has AGENTRAY_TEST_OPENAI_*
 		// can answer the first ask without a second paste.

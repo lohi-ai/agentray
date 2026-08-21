@@ -17,8 +17,8 @@ type Scopes struct {
 var scopeTools = map[string][]string{
 	"monitor":        {ToolActivitySummary, ToolRecentEvents},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolListDashboards, ToolCreateDashboard, ToolCreateChart},
-	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolRemember, ToolSendNotification},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart},
+	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolRemember, ToolSendNotification},
 }
 
 // readTools classifies which scope-granted tools READ project data, versus the
@@ -34,11 +34,14 @@ var readTools = map[string]bool{
 	ToolPersons:         true,
 	ToolRunSQL:          true,
 	ToolRunInsight:      true,
+	ToolRunFunnel:       true,
+	ToolRunRetention:    true,
 	ToolListDashboards:  true,
 	// test_status reads the live experiment out of the event store against a
 	// committed threshold. It is the pre-product agent's activity_summary, and
 	// leaving it unclassified would nudge the one agent that DID check.
 	ToolTestStatus: true,
+	ToolListTests:  true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.
@@ -75,6 +78,28 @@ func ScopeToolNames(s Scopes) []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// ReadOnlyToolNames narrows a granted tool list to the ones that only READ.
+//
+// It exists for the shared demo (internal/app/demo_guard.go): a visitor there
+// may ask the agent anything — that is the point of the demo — and may not
+// change the site they are asking about. Without this, "ask the agent" is a
+// way around every check the write guard makes, because the agent holds
+// create_dashboard and create_chart and does what it is asked.
+//
+// It filters through readTools, so a scope that gains a tool and does not
+// classify it as a read is withheld from a read-only run. That is the same
+// fail-closed direction the evidence guard depends on, and it means the
+// decision for a new tool is made once, in one file, beside the scope.
+func ReadOnlyToolNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if readTools[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // PolicyForScopes resolves enabled scopes into a default-deny agentcore.Policy.

@@ -90,6 +90,9 @@ func cardFromRows(content string) *agentcore.ResultCard {
 	// Single scalar result -> one stat (e.g. SELECT count() AS total).
 	if len(out.Rows) == 1 && len(out.Rows[0]) == 1 {
 		for k, v := range out.Rows[0] {
+			if !isNamedColumn(k) {
+				return nil
+			}
 			if num, ok := asNumber(v); ok {
 				return &agentcore.ResultCard{
 					Title: humanizeMetric(k), Kind: "stat",
@@ -103,7 +106,7 @@ func cardFromRows(content string) *agentcore.ResultCard {
 	// A {label column, numeric column} table -> series. Resolve the two columns
 	// from the first row; bail if it isn't exactly one label + one number.
 	labelKey, valueKey, ok := labelValueKeys(out.Rows[0])
-	if !ok {
+	if !ok || !isNamedColumn(labelKey) || !isNamedColumn(valueKey) {
 		return nil
 	}
 	points := make([]agentcore.CardPoint, 0, len(out.Rows))
@@ -187,6 +190,26 @@ func formatNumber(f float64) string {
 }
 
 // humanizeMetric turns a snake_case metric/column into a readable label.
+// isNamedColumn reports whether a result column carries a name of its own rather
+// than the raw SQL that produced it.
+//
+// The card is attached to whatever the run's LAST SQL query returned, and the
+// last query is very often a throwaway check — `SELECT count() FROM
+// external_rows`. ClickHouse names that column `count()`, and the answer about
+// retention arrived with a card headed "Count()" reading 0 stapled underneath
+// it, which is the kind of detail that decides whether a number is believed.
+//
+// An alias is the analyst saying what a column means, so requiring one is both
+// the signal that this result was meant to be shown and the source of a label a
+// reader can read. Un-aliased, it stays out of the card and the prose stands.
+func isNamedColumn(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	return !strings.ContainsAny(key, "()*")
+}
+
 func humanizeMetric(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {

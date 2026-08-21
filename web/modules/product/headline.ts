@@ -43,11 +43,26 @@ export function headlineStats(insight: InsightResult): HeadlineStat[] {
     ];
   }
   if (insight.retention?.length) {
-    const rates = insight.retention.map((r) => r.rate);
+    // Two kinds of period must stay out of these numbers. Week 0 is 100% by
+    // definition — it is the cohort, not a measurement — so averaging it in
+    // props every curve up. And an immature period is a window that has not
+    // finished elapsing; its 0% means "too early to tell", not "everyone left".
+    // Averaging both together is how a 24-hour range produced a confident
+    // "Avg retention 11%" for a question the data could not answer.
+    const measured = insight.retention.filter((r, i) => i > 0 && r.mature !== false);
+    const periods = { label: 'Measured periods', value: String(measured.length) };
+    if (measured.length === 0) {
+      return [
+        periods,
+        { label: 'Avg retention', value: 'Not enough history' },
+        { label: 'Cohort', value: formatCompact(insight.retention[0]?.users ?? 0) },
+      ];
+    }
+    const rates = measured.map((r) => r.rate);
     const avg = rates.reduce((s, r) => s + r, 0) / rates.length;
     const best = Math.max(...rates, 0);
     return [
-      { label: 'Periods', value: String(insight.retention.length) },
+      periods,
       { label: 'Avg retention', value: formatPercent(avg * 100, 0) },
       { label: 'Best period', value: formatPercent(best * 100, 0), tone: 'success' },
     ];

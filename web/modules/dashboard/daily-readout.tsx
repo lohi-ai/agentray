@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ArrowRight, Check, MessageSquare, Sparkles, TrendingUp, X } from 'lucide-react';
 import type { AgentRecommendation, AgentRun } from '@/lib/api';
 import { formatCost, formatRelative } from '@/lib/format';
-import { useDailyReadout } from '@/modules/app/hooks';
+import { useDailyReadout, useProjectAccess } from '@/modules/app/hooks';
 import { Button, Loading } from '@/modules/shared/components/signal-primitives';
 import { AgentMarkdown } from '@/modules/shared/components/agent-markdown';
 import { useStackSheet } from '@/modules/shared/components/stack-sheet';
@@ -34,6 +34,10 @@ function leadText(summary: string): string {
 }
 
 function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id: string, status: 'accepted' | 'dismissed') => void; acking: boolean }) {
+  // Accepting or dismissing writes to the project's recommendation, so a viewer
+  // reading the shared demo gets the control disabled with the reason rather
+  // than a click that comes back 403.
+  const access = useProjectAccess();
   return (
     <div className={`mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5 ${recTone(rec.category) === 'growth' ? '' : ''}`}>
       <span className={`grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] ${recTone(rec.category) === 'growth' ? 'bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary' : 'bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent'}`}><TrendingUp size={15} /></span>
@@ -48,8 +52,8 @@ function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id:
         <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{rec.rationale}</div>
       </div>
       <div className="ms-auto self-center flex gap-1.5">
-        <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" title="Accept" disabled={acking} onClick={() => onAck(rec.id, 'accepted')}><Check size={15} /></button>
-        <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" title="Dismiss" disabled={acking} onClick={() => onAck(rec.id, 'dismissed')}><X size={15} /></button>
+        <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50" title={access.canWrite ? 'Accept' : access.reason} disabled={acking || !access.canWrite} onClick={() => onAck(rec.id, 'accepted')}><Check size={15} /></button>
+        <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50" title={access.canWrite ? 'Dismiss' : access.reason} disabled={acking || !access.canWrite} onClick={() => onAck(rec.id, 'dismissed')}><X size={15} /></button>
       </div>
     </div>
   );

@@ -25,6 +25,7 @@ import {
   StatusPill,
   rowNavPlugin,
 } from '@/modules/shared/components/signal-primitives';
+import { useProjectAccess } from '@/modules/app/hooks';
 import { useOperations } from './hooks';
 import { isTeamRun, lastOutcome, operatorStatus, operatorTitle, rank, runnerLabel, startsOn } from './lib/operator';
 
@@ -86,14 +87,21 @@ function LastRun({ op }: { op: Operator }) {
 function Controls({
   op,
   busy,
+  blocked,
   onRun,
   onToggle,
 }: {
   op: Operator;
   busy: boolean;
+  // Non-empty when the reader may not change what runs here. Starting a run and
+  // pausing one are both writes, and both spend somebody else's model key.
+  blocked: string;
   onRun: () => void;
   onToggle: () => void;
 }) {
+  if (blocked) {
+    return <Text type="supporting">Read-only</Text>;
+  }
   // The legacy project schedule is listed for completeness and edited where the
   // setting actually lives — pausing it from here would change the autonomy rung
   // every unattended run in the project is gated on.
@@ -122,12 +130,14 @@ function Controls({
 function OperatorCard({
   op,
   busy,
+  blocked,
   onOpen,
   onRun,
   onToggle,
 }: {
   op: Operator;
   busy: boolean;
+  blocked: string;
   onOpen: () => void;
   onRun: () => void;
   onToggle: () => void;
@@ -155,7 +165,7 @@ function OperatorCard({
           <LastRun op={op} />
         </div>
         <HStack gap={1}>
-          <Controls op={op} busy={busy} onRun={onRun} onToggle={onToggle} />
+          <Controls op={op} busy={busy} blocked={blocked} onRun={onRun} onToggle={onToggle} />
         </HStack>
       </HStack>
     </VStack>
@@ -168,6 +178,10 @@ export function OperationsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { operators, isLoading, error, refetch, setEnabled, savingID, runNow, runningID } = useOperations();
+  // Standing work spends the project owner's model key on a timer. A reader who
+  // may not write here may not start one, pause one, or arm one.
+  const access = useProjectAccess();
+  const blocked = access.canWrite ? '' : access.reason;
 
   // Deep-linkable: /operations?status=attention is what the failure Callout in
   // Chat and the alert mail both link to.
@@ -194,7 +208,7 @@ export function OperationsPage() {
         title="Operations"
         sub="Chat is the front door. These channels start a run without a conversation — a schedule or a webhook. Slack, Discord, and Telegram are next."
         action={
-          <Button variant="primary" icon={<Zap size={15} aria-hidden />} onClick={() => router.push('/agents')}>
+          <Button variant="primary" icon={<Zap size={15} aria-hidden />} disabled={!!blocked} tooltip={blocked || undefined} onClick={() => router.push('/agents')}>
             Give a teammate a schedule
           </Button>
         }
@@ -277,12 +291,14 @@ export function OperationsPage() {
               <EmptyState
                 icon={<Clock size={18} aria-hidden />}
                 title="Nothing runs unattended yet"
-                detail="Every teammate you have hired only works when you message it. Give one a schedule or a webhook and the work happens whether or not you open this tab."
-                action={
+                detail={blocked
+                  ? 'Every teammate here only works when someone messages it. Nothing is on a timer.'
+                  : 'Every teammate you have hired only works when you message it. Give one a schedule and the answer is waiting on Monday — it spends your model key each time it fires, which is why nothing arms itself.'}
+                action={blocked ? undefined : (
                   <Button variant="agent" size="sm" onClick={() => router.push('/agents')}>
                     Give a teammate a schedule
                   </Button>
-                }
+                )}
               />
             )
           ) : (
@@ -293,6 +309,7 @@ export function OperationsPage() {
                     key={op.id}
                     op={op}
                     busy={busyID === op.id}
+                    blocked={blocked}
                     onOpen={() => open(op)}
                     onRun={() => runNow(op.id)}
                     onToggle={() => setEnabled(op, !op.enabled)}
@@ -348,6 +365,7 @@ export function OperationsPage() {
                           <Controls
                             op={row}
                             busy={busyID === row.id}
+                            blocked={blocked}
                             onRun={() => runNow(row.id)}
                             onToggle={() => setEnabled(row, !row.enabled)}
                           />

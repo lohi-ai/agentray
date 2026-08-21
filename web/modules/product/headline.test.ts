@@ -36,3 +36,65 @@ describe('Product funnel conversion', () => {
     expect(formatFractionAsPercent(1, 0)).toBe('100%');
   });
 });
+
+function retentionInsight(points: InsightResult['retention']): InsightResult {
+  return {
+    type: 'retention',
+    metric: 'users',
+    title: 'Retention',
+    series: [],
+    rows: [],
+    funnel: [],
+    retention: points,
+    generated_at: '2026-08-20T00:00:00Z',
+  };
+}
+
+describe('Product retention headline', () => {
+  // The defect: on the default 24-hour range every weekly period is in the
+  // future, so the curve was 100% then eight zeros — and this averaged all nine
+  // into a confident "Avg retention 11%, Best period 100%" for a question the
+  // data could not answer.
+  it('refuses to average periods that have not elapsed', () => {
+    const stats = headlineStats(retentionInsight([
+      { period: 'Week 0', users: 90, rate: 1, mature: true },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        period: `Week ${i + 1}`, users: 0, rate: 0, mature: false,
+      })),
+    ]));
+    expect(stats).toEqual(expect.arrayContaining([
+      { label: 'Measured periods', value: '0' },
+      { label: 'Avg retention', value: 'Not enough history' },
+      { label: 'Cohort', value: '90' },
+    ]));
+    expect(JSON.stringify(stats)).not.toMatch(/11%|100%/);
+  });
+
+  // Week 0 is the cohort, not a measurement. Averaging its definitional 100% in
+  // props every curve up by a period's worth of nothing.
+  it('excludes the definitional Week 0 from the average', () => {
+    const stats = headlineStats(retentionInsight([
+      { period: 'Week 0', users: 100, rate: 1, mature: true },
+      { period: 'Week 1', users: 20, rate: 0.2, mature: true },
+      { period: 'Week 2', users: 10, rate: 0.1, mature: true },
+    ]));
+    expect(stats).toEqual(expect.arrayContaining([
+      { label: 'Measured periods', value: '2' },
+      { label: 'Avg retention', value: '15%' },
+      expect.objectContaining({ label: 'Best period', value: '20%' }),
+    ]));
+  });
+
+  it('averages only the elapsed periods when the curve is partly mature', () => {
+    const stats = headlineStats(retentionInsight([
+      { period: 'Week 0', users: 100, rate: 1, mature: true },
+      { period: 'Week 1', users: 40, rate: 0.4, mature: true },
+      { period: 'Week 2', users: 0, rate: 0, mature: false },
+      { period: 'Week 3', users: 0, rate: 0, mature: false },
+    ]));
+    expect(stats).toEqual(expect.arrayContaining([
+      { label: 'Measured periods', value: '1' },
+      { label: 'Avg retention', value: '40%' },
+    ]));
+  });
+});

@@ -2,12 +2,12 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronDown, ChevronUp, FlaskConical, LayoutGrid, Plus, Sparkles } from 'lucide-react';
+import { ChevronDown, ChevronUp, LayoutGrid, Plus, Sparkles } from 'lucide-react';
 import { useAuthStore } from '@/lib/app-state';
 import type { Chart } from '@/lib/api';
 import { formatCompact } from '@/lib/format';
-import { firstSessionNotice, firstValuePath, isSampleProject, settingsPath } from '@/lib/ia';
-import { useActivity, useDashboards, useEventNames } from '@/modules/app/hooks';
+import { firstSessionNotice, firstValuePath, settingsPath } from '@/lib/ia';
+import { useActivity, useDashboards, useEventNames, useProjectAccess } from '@/modules/app/hooks';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -39,19 +39,19 @@ export function DashboardPage() {
   const { names: eventNames, loading: catalogLoading } = useEventNames();
   const { models, modelsLoading } = useWorkspaceModels();
   const catalogReady = !catalogLoading && !!projectID;
-  const sample = isSampleProject({ name: projectName });
-  const firstValue = firstValuePath({ eventNames, catalogReady, sample });
+  const firstValue = firstValuePath({ eventNames, catalogReady });
   const sessionNotice = firstSessionNotice({
     eventNames,
     catalogReady,
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
-    sample,
   });
-  // Provenance, not decoration: a stranger arrives here straight from watching
-  // the agent build this board, and the subtitle has to say that's what they're
-  // looking at. Falls back to the ordinary weekly-check line once it isn't news.
-  const boardSubtitle = sample
-    ? 'Built by your agent from sample data — the same charts fill with your numbers once you connect your product.'
+  // Whether this board can be edited at all. A visitor reading the shared demo
+  // owns none of these charts, and the API refuses every write to them.
+  const access = useProjectAccess();
+  // Provenance, not decoration: a stranger arrives here from the tour, and the
+  // subtitle has to say whose board they are reading.
+  const boardSubtitle = access.isDemo
+    ? `Built on ${projectName}’s own traffic. Your board looks like this once your events are arriving.`
     : 'The weekly check: what moved, and whether the last test worked.';
 
   // Only stats we actually have. A tile that renders "—" because the summary is
@@ -143,25 +143,17 @@ export function DashboardPage() {
       <Intro
         title="Dashboards"
         sub={boardSubtitle}
-        action={<><Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')}>New view</Button><Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask Growth Lead</Button><Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart}>Add chart</Button></>}
+        action={<>
+          {/* Asking stays live for a demo viewer — it is the one thing a viewer
+              is here to do, and the API allows it on purpose. Building and
+              editing do not. */}
+          <Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')} disabled={!access.canWrite} tooltip={access.reason || undefined}>New view</Button>
+          <Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask the agent</Button>
+          <Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart} disabled={!access.canWrite} tooltip={access.reason || undefined}>Add chart</Button>
+        </>}
       />
       <div className="mb-3"><RelatedSurfacesLabel parentHref="/dashboard" /></div>
       <FilterBar extra={selector} />
-
-      {/* Sample data being mistaken for real data is a trust failure, not a
-          polish issue — so this banner is permanent while the sample project is
-          active. It is the one callout in the product that never collapses and
-          carries no dismiss control. */}
-      {sample ? (
-        <Callout
-          tone="warn"
-          icon={<FlaskConical size={16} />}
-          label="Sample data"
-          title={`These numbers are from ${projectName}, not your product`}
-          detail="Every account ships with this so there is something to read on day one. Connect your own product and the same charts fill with your numbers."
-          action={<Button variant="outline" size="sm" onClick={() => router.push(settingsPath('keys'))}>Connect my product</Button>}
-        />
-      ) : null}
 
       {/* Headline numbers in one strip above the board, never scattered across
           the chart cards (DESIGN.md §Data Trust). */}
@@ -200,9 +192,9 @@ export function DashboardPage() {
               <div className="flex items-center justify-center gap-2">
                 {firstValue.showFirstAsk
                   ? <Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={() => router.push('/chat')}>Ask a first question</Button>
-                  : <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={onAddChart}>Add chart</Button>}
+                  : <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={onAddChart} disabled={!access.canWrite} tooltip={access.reason || undefined}>Add chart</Button>}
                 {firstValue.showFirstAsk
-                  ? <Button variant="outline" size="sm" icon={<Plus size={14} />} onClick={onAddChart}>Add chart</Button>
+                  ? <Button variant="outline" size="sm" icon={<Plus size={14} />} onClick={onAddChart} disabled={!access.canWrite} tooltip={access.reason || undefined}>Add chart</Button>
                   : <Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={onAskAI}>Ask AI</Button>}
               </div>
             )}
@@ -212,31 +204,38 @@ export function DashboardPage() {
         <div className="grid gap-3.5 grid-cols-3 [@media(max-width:980px)]:grid-cols-1">
           {order.map((chart, i) => (
             <div key={chart.id} className={spanClass(chart.col_span)}>
+              {/* A reader who cannot write this board gets no edit, no delete,
+                  and no reorder handle — every one of those is a 403 waiting to
+                  happen on somebody else's charts. */}
               <ChartCard
                 chart={chart}
                 summary={summary}
                 projectID={projectID}
-                onEdit={() => setEditing(chart)}
-                onDelete={() => void deleteChart(chart.id)}
-                handle={(
+                onEdit={access.canWrite ? () => setEditing(chart) : undefined}
+                onDelete={access.canWrite ? () => void deleteChart(chart.id) : undefined}
+                handle={access.canWrite ? (
                   <span className="-ms-1 me-1 inline-flex items-center">
                     <IconButton label="Move chart earlier" variant="ghost" size="sm" icon={<ChevronUp size={14} />} isDisabled={i === 0} onClick={() => moveChart(i, -1)} />
                     <IconButton label="Move chart later" variant="ghost" size="sm" icon={<ChevronDown size={14} />} isDisabled={i === order.length - 1} onClick={() => moveChart(i, 1)} />
                   </span>
-                )}
+                ) : undefined}
               />
             </div>
           ))}
           {/* Add-tile: a dashed card that aligns with the chart cards and reads as
-              an affordance — the whole tile is the click target. */}
-          <button
-            type="button"
-            onClick={onAddChart}
-            className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] transition-[background,border-color,color] duration-[var(--fast)] ease-[var(--ease)] hover:border-primary hover:bg-[var(--color-background-card)] hover:text-primary"
-          >
-            <Plus size={22} />
-            <span className="text-[13px] font-medium">Add another chart</span>
-          </button>
+              an affordance — the whole tile is the click target. Absent entirely
+              for a reader who may not write here; a disabled dashed tile would
+              just be a hole in the grid. */}
+          {access.canWrite ? (
+            <button
+              type="button"
+              onClick={onAddChart}
+              className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] transition-[background,border-color,color] duration-[var(--fast)] ease-[var(--ease)] hover:border-primary hover:bg-[var(--color-background-card)] hover:text-primary"
+            >
+              <Plus size={22} />
+              <span className="text-[13px] font-medium">Add another chart</span>
+            </button>
+          ) : null}
         </div>
       )}
     </AppShell>

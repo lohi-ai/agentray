@@ -8,10 +8,49 @@ import (
 	"time"
 )
 
-// budgetExhaustedSteer is injected as a final user turn when the budget gate
-// trips, instructing the model to wrap up. Tools are stripped for this turn so it
-// can only produce a text summary before the run stops.
-const budgetExhaustedSteer = "Your run budget for this period has been exhausted. Do not call any more tools. Summarize the progress you have made so far and any recommended next steps in a few sentences, then stop."
+// A ceiling stop is not a crash, and it must not read like one. Every bound a
+// run can hit — spend, steps, tool calls — ends the same way: one tool-free turn
+// where the model says what it found, so the caller is handed an answer instead
+// of silence. Tools are stripped for that turn, so it can only produce text.
+//
+// This used to exist for the budget gate alone, which is the ceiling a run is
+// least likely to reach. The two that actually fire in practice returned
+// whatever assistant text happened to be lying around — empty, for any run whose
+// turns were all tool calls — and the caller was told the agent had failed after
+// paying for every token it spent getting there.
+const (
+	budgetExhaustedSteer = "Your run budget for this period has been exhausted. Do not call any more tools. Summarize the progress you have made so far and any recommended next steps in a few sentences, then stop."
+	maxTurnsSteer        = "You have reached this run's step limit and cannot do any more work. Do not call any more tools. Answer the original question as well as the evidence you already have allows: state what you found, say how confident you are, and name what you would check next. If what you have is not enough to answer, say that plainly and say what is missing."
+	maxToolCallsSteer    = "You have used every tool call this run is allowed. Do not call any more tools. Answer the original question from the results you already have: state what you found, say how confident you are, and name what you would check next. If what you have is not enough to answer, say that plainly and say what is missing."
+)
+
+// finalizeSteer is the wrap-up instruction for the ceiling that tripped. The
+// reason doubles as the run's StopReason, so a caller reading the trace sees the
+// same cause the model was told about.
+func finalizeSteer(reason string) string {
+	switch reason {
+	case "max_turns":
+		return maxTurnsSteer
+	case "max_tool_calls":
+		return maxToolCallsSteer
+	default:
+		return budgetExhaustedSteer
+	}
+}
+
+// finalizeNote is the progress line a watching viewer sees when the wrap-up
+// starts. It names the ceiling, because "summarizing" on its own reads as the
+// agent choosing to stop rather than being stopped.
+func finalizeNote(reason string) string {
+	switch reason {
+	case "max_turns":
+		return "Step limit reached — writing up what I found so far."
+	case "max_tool_calls":
+		return "Tool-call limit reached — writing up what I found so far."
+	default:
+		return "Budget reached — summarizing and stopping."
+	}
+}
 
 // runLoop is the single-flight, observable entry point shared by every run
 // method. It claims the busy guard, brackets the run with agent_start/agent_end,
@@ -637,14 +676,57 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// changes apply to the next request without touching the in-flight one.
 	state := TurnState{Model: a.model, Tools: tools, System: system}
 
-	// budgetFinalizing latches once the budget gate trips: the loop injects one
-	// tool-free wrap-up turn and then stops with StopReason "budget_exhausted".
-	budgetFinalizing := false
+	// finalizing latches once any ceiling trips: the loop spends one tool-free
+	// wrap-up turn and then stops with that ceiling as the StopReason.
+	// finalizeExtra is the turn the wrap-up is allowed to borrow when the ceiling
+	// that tripped is the turn budget itself — capped at one, so a model that
+	// keeps calling tools cannot walk the loop past its bound.
+	finalizing := false
+	finalizeReason := ""
+	finalizeUntil := 0
 	// freeTurns refunds turns spent only on bookkeeping tools (see
 	// BookkeepingTool) so self-management can't starve the MaxTurns budget on a
 	// long task. The MaxToolCalls budget still backstops a runaway loop.
 	freeTurns := 0
-	for res.Turns-freeTurns < limits.MaxTurns {
+	// beginFinalize converts a ceiling into a wrap-up turn: it appends the steer
+	// that tells the model to stop calling tools and answer, and grants exactly
+	// one further turn to write that answer in. It is a no-op once a wrap-up is
+	// already under way, so two ceilings tripping in the same run inject the steer
+	// once and cannot extend each other.
+	//
+	// The grant is one turn past whatever the run has already spent, rather than a
+	// turn reserved inside MaxTurns. Reserving would cost every run its last
+	// working turn to buy an answer only the runs that overrun ever need;
+	// borrowing leaves the productive budget intact and spends the extra turn only
+	// on a run that would otherwise return nothing at all. It is bounded by turn
+	// number, not by the turn budget, because bookkeeping refunds can hold that
+	// budget still — an unbounded wrap-up would spin against a model that keeps
+	// calling tools after being handed an empty tool list.
+	beginFinalize := func(reason string) {
+		if finalizing {
+			return
+		}
+		finalizing = true
+		finalizeReason = reason
+		finalizeUntil = res.Turns + 1
+		wrap := Message{Role: RoleUser, Content: finalizeSteer(reason)}
+		res.Messages = append(res.Messages, wrap)
+		appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &wrap})
+		if sink != nil {
+			sink(StreamEvent{Type: StreamProgress, Note: finalizeNote(reason), Turn: res.Turns})
+		}
+	}
+	for {
+		// Two budgets, and only one applies at a time: a run doing work is bounded
+		// by MaxTurns, and a run writing its wrap-up is bounded by the single turn
+		// beginFinalize granted it.
+		if finalizing {
+			if res.Turns >= finalizeUntil {
+				break
+			}
+		} else if res.Turns-freeTurns >= limits.MaxTurns {
+			break
+		}
 		// Honor cancellation between turns so an aborted viewer (SSE client gone)
 		// stops the run before spending another provider call.
 		if err := ctx.Err(); err != nil {
@@ -710,14 +792,8 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// that delegates heavily blows past the cap before stopping). Latched so the
 		// wrap-up turn itself isn't re-gated. The steer message is appended like any
 		// mid-run correction; stripping tools below forces a text-only wrap-up.
-		if a.budgetGate != nil && !budgetFinalizing && a.budgetGate(ctx, addUsage(res.Usage, a.peekChildUsage())) {
-			budgetFinalizing = true
-			wrap := Message{Role: RoleUser, Content: budgetExhaustedSteer}
-			res.Messages = append(res.Messages, wrap)
-			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &wrap})
-			if sink != nil {
-				sink(StreamEvent{Type: StreamProgress, Note: "Budget reached — summarizing and stopping.", Turn: res.Turns})
-			}
+		if a.budgetGate != nil && !finalizing && a.budgetGate(ctx, addUsage(res.Usage, a.peekChildUsage())) {
+			beginFinalize("budget_exhausted")
 		}
 
 		// Apply the current turn snapshot (P7): the base-rung model, the tool set
@@ -732,7 +808,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		schemas := buildSchemas(tools)
 		// A finalizing turn advertises no tools, so the model can only write its
 		// wrap-up and then stop via the natural "no tool calls" completion below.
-		if budgetFinalizing {
+		if finalizing {
 			schemas = nil
 		}
 		if state.System != system && len(res.Messages) > 0 && res.Messages[0].Role == RoleSystem {
@@ -963,10 +1039,10 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// No tool calls -> the model produced its final answer.
 		if len(resp.Message.ToolCalls) == 0 {
 			res.Final = resp.Message.Content
-			// A budget-finalizing wrap-up turn ends the run here regardless of
-			// queued follow-ups: the ceiling is hit, so we do not restart the loop.
-			if budgetFinalizing {
-				res.StopReason = "budget_exhausted"
+			// A wrap-up turn ends the run here regardless of queued follow-ups: the
+			// ceiling is hit, so we do not restart the loop.
+			if finalizing {
+				res.StopReason = finalizeReason
 				endTurn(true)
 				appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
 				flush()
@@ -1053,11 +1129,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				recordTool(ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "tool-call budget exhausted"})
 				res.Messages = append(res.Messages, toolResult(call, "stopped: tool-call budget exhausted"))
 			}
-			res.StopReason = "max_tool_calls"
-			res.Final = lastAssistantText(res.Messages)
+			// Blocked, not finished. Returning here handed the caller whatever
+			// assistant text was lying around — nothing, for a run whose turns were
+			// all tool calls — so spend one tool-free turn on an answer instead.
+			beginFinalize("max_tool_calls")
 			endTurn(true)
 			flush()
-			return res, nil
+			continue
 		}
 
 		// tool_execution_start for each requested call, in the model's order, before
@@ -1216,13 +1294,30 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			}
 		}
 
+		// Reaching here means the turn ended in tool calls — the model was mid-work,
+		// not finished. If that was the last turn the budget allows, the run is
+		// about to end with nothing to show for every token it just spent, so trip
+		// the wrap-up and let the borrowed turn above turn the evidence into an
+		// answer. A model that finishes cleanly never reaches this line: it returns
+		// from the no-tool-calls branch well above.
+		if res.Turns-freeTurns >= limits.MaxTurns {
+			beginFinalize("max_turns")
+		}
+
 		// Turn complete (reason + act); flush the turn's buffered durable writes as
 		// one save-point, then continue to the next turn.
 		endTurn(true)
 		flush()
 	}
 
+	// Out of turns. When a wrap-up was under way, the ceiling that started it is
+	// the honest reason the run ended — reaching here at all means the model kept
+	// calling tools after being handed an empty tool list, so there is no answer
+	// to report beyond whatever text it managed.
 	res.StopReason = "max_turns"
+	if finalizing {
+		res.StopReason = finalizeReason
+	}
 	res.Final = lastAssistantText(res.Messages)
 	return res, nil
 }

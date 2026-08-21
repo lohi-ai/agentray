@@ -9,14 +9,19 @@
  *   2. Calls are awaitable and throw. A dropped pageview is fine; a dropped
  *      payment event is not. Callers can await, retry, and alert.
  *   3. Every event carries an idempotency key (`$insert_id`). Revenue webhooks
- *      (SePay, Stripe, …) retry, so the same payment can arrive several times;
- *      the key lets the store de-duplicate instead of double-counting MRR.
+ *      (SePay, Stripe, …) retry, so the same payment can arrive several times.
+ *      The key is *stored*, not enforced: no read path de-dups on it today (see
+ *      the note on `Event.InsertID` in internal/dataplane/store/store.go). It is
+ *      what makes a money total de-dupable at read time —
+ *      `argMax(amount, timestamp) … GROUP BY insert_id` before you sum, the
+ *      recipe the Data Analyst preset teaches. Send it, and write that recipe;
+ *      a plain `sum()` over a retried webhook double-counts.
  *
  * Usage:
  *   const ar = new AgentRayServerClient({ apiUrl: "https://agentray.example.com", apiKey: "..." });
  *   await ar.identify("user-123", { email: "alice@example.com", plan: "pro" });
  *   await ar.revenue("user-123", { amount: 19, currency: "USD", plan: "pro" }, {
- *     // pass the provider's event id so a webhook retry is not counted twice:
+ *     // pass the provider's event id so a retry is de-dupable at read time:
  *     idempotencyKey: webhook.id,
  *   });
  */
