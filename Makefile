@@ -82,6 +82,31 @@ test-stress: ## Run the long-run stability / compaction stress test
 
 check: vet test ## Vet + unit tests — the pre-commit gate
 
+# --- Published SDKs (sdk/) ------------------------------------------------
+# Deliberately not part of `check`: these need npm/python/swift toolchains that
+# a Go-only contributor should not have to install to commit. CI runs them on
+# every change under sdk/ (.github/workflows/sdk.yml).
+
+sdk-check: sdk-check-npm sdk-check-python sdk-check-swift ## Typecheck, test and build all four published SDKs
+
+sdk-check-npm: ## @agentray/browser + @agentray/server
+	@for pkg in browser server; do \
+	  echo "── sdk/$$pkg"; \
+	  (cd sdk/$$pkg && npm ci --silent && npm run typecheck && npm test && npm run build) || exit 1; \
+	done
+
+sdk-check-python: ## agentray (PyPI) — tests plus a wheel that actually contains the package
+	@cd sdk/python && python3 tests/test_client.py
+	@python3 -c 'import build' 2>/dev/null || { echo "sdk-check-python needs the build frontend: pip install build"; exit 1; }
+	@cd sdk/python && rm -rf dist && python3 -m build
+	@cd sdk/python && python3 -c "import glob, sys, zipfile; \
+	  names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); \
+	  missing = [n for n in ('agentray/__init__.py', 'agentray/client.py') if n not in names]; \
+	  sys.exit('wheel is missing %s — see docs/RELEASING-SDK.md' % missing) if missing else print('wheel ok: %d files' % len(names))"
+
+sdk-check-swift: ## AgentRay (SwiftPM)
+	@cd sdk/swift && swift test
+
 agent-funcs: ## List the agent test functions this Makefile targets
 	@grep -rhn '^func TestReal_\|^func TestLongRun' agentcore/*_test.go
 

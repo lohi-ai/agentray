@@ -1,8 +1,9 @@
 # AgentRay SDK
 
-Three SDK modules ship with AgentRay: two browser modules for client-side
-behaviour, and one server module for events the browser must not be trusted to
-send (payments, subscription changes, refunds).
+Four SDK surfaces ship with AgentRay: two browser modules for client-side
+behaviour, a Swift package for native Apple apps, and one server module for
+events the browser must not be trusted to send (payments, subscription changes,
+refunds).
 
 Every SDK call needs a project API key. Fastest path (no web app required):
 
@@ -60,9 +61,10 @@ SELECT sum(amount) AS revenue FROM (
 ## Browser client (`@agentray/browser`, `sdk/browser/`)
 
 Manages anonymous → identified identity and sends events from the browser.
-`npm install @agentray/browser` when the package is published; until then copy
-`sdk/browser/` into the product repo, or paste the no-npm HTML snippet from
-`web/modules/start/components/instrument-snippet.tsx`.
+
+```bash
+npm install @agentray/browser
+```
 
 ```ts
 import { init } from '@agentray/browser';
@@ -73,6 +75,19 @@ const ar = init({
   autocapture: true,
 });
 ```
+
+No bundler — a marketing site, a Framer page, a Webflow project? The same tested
+bundle ships as a `<script>` tag build that exposes `window.AgentRay`:
+
+```html
+<script src="https://unpkg.com/@agentray/browser/dist/index.global.js"></script>
+<script>
+  AgentRay.init({ host: 'https://agentray.example.com', apiKey: 'your-project-api-key', autocapture: true });
+</script>
+```
+
+Until the package is on npm, copy `sdk/browser/` into the product repo or paste
+the no-npm snippet from **Set up → 1 · Track the page**.
 
 ### Track events
 
@@ -104,7 +119,68 @@ Use `alias()` when you manage IDs yourself and want to link them explicitly.
 ar.alias('anon-uuid-from-cookie', 'user-123');
 ```
 
+### Which app an event came from
+
+Every SDK stamps a `platform` property — `web` from the browser client, `ios`
+from the Swift package, `server` from the server and Python clients. It is what
+Traffic's platform split, the per-platform funnel, and the filter bar read, so a
+product with a website *and* an app compares them instead of averaging them.
+
+It is stated rather than inferred. The server can usually guess from the user
+agent, and does for events that carry no property — but the guess is only as good
+as the string a runtime happens to send, and Node's `fetch` sends the bare word
+`node`, which places nothing. Every server-sent event was landing in **unknown**
+until the clients started saying what they are.
+
+The property is applied *after* your own, so an event cannot be mislabelled by
+passing the key yourself. Change it once at construction when the bundle is not
+what it looks like — a Capacitor build shipped inside the iOS app:
+
+```ts
+init({ host, apiKey, platform: 'ios' });          // browser client in a native shell
+new AgentRayServerClient({ apiUrl, apiKey, platform: 'ios' });   // relaying on a client's behalf
+```
+
+An unrecognised value is kept verbatim, so a CLI, a TV app, or a watch app can
+split its own traffic without waiting on a schema change.
+
 ---
+
+## iOS client (`sdk/swift/`)
+
+A Swift Package for native Apple apps. Not on a registry — add it by local path
+(`.package(path: "../agentray/sdk/swift")`), or paste the single-file version
+from the in-app **iOS app** tab if the app should carry no dependency.
+
+```swift
+import AgentRay
+
+AgentRay.start(host: "https://agentray.example.com", apiKey: "agentray_…")
+
+AgentRay.shared.screen("Library")                       // → user.pageview
+AgentRay.shared.capture("user.signup", properties: ["plan": "free"])
+AgentRay.shared.identify("user_123", traits: ["email": "alice@example.com"])
+AgentRay.shared.reset()                                 // on logout
+```
+
+Three behaviours are the reason to use this rather than calling `/capture`
+directly:
+
+- **The anonymous id persists** (`UserDefaults`). Mint a fresh one per launch and
+  your app's "people" number is really its launch count.
+- **`identify` aliases first.** It posts `/alias` linking the previous id to the
+  user before switching, so someone who read your website and then signed in on
+  the app is one person. Without it every cross-platform funnel is two halves of
+  one human.
+- **Every event carries `platform: ios`**, which is what lets Traffic, the
+  Product funnel, and the filter bar keep your app and your site apart.
+
+`screen()` sends `user.pageview` on purpose — it is the event the Traffic and
+Product surfaces already read, so app screens appear in charts the owner has
+rather than needing new ones. Delivery is batched (20 events / 3s), retries a
+5xx or network failure with backoff, re-queues rather than drops when offline
+(capped at 500 events), and flushes on `didEnterBackground` inside a short
+background task. A 4xx is never retried. Full contract: `sdk/swift/README.md`.
 
 ## Autocapture (`sdk/browser/autocapture.ts`)
 

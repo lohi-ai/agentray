@@ -84,6 +84,7 @@ export function useWebAnalytics() {
     top_paths: web.top_paths ?? [],
     referrers: web.referrers ?? [],
     traffic_by_class: web.traffic_by_class ?? [],
+    traffic_by_platform: web.traffic_by_platform ?? [],
     traffic_by_provider: web.traffic_by_provider ?? [],
     ai_top_paths: web.ai_top_paths ?? [],
     referrers_by_channel: web.referrers_by_channel ?? [],
@@ -361,6 +362,44 @@ export function useEventNames() {
     refetchOnWindowFocus: false,
   });
   return { names: query.data?.names ?? [], loading: query.isLoading };
+}
+
+// useFunnelByPlatform runs the same funnel once per platform, so a product that
+// ships more than one app can see which one leaks and where. It is the smallest
+// honest way to answer that: the blended funnel is the *average* of two curves
+// and describes neither, and until this existed the only route to the split was
+// asking the agent to write the SQL.
+//
+// Platforms come from the activity summary (computed ignoring the platform
+// filter), so this list does not collapse when a platform filter is applied.
+// Runs only when there really is more than one platform.
+export function useFunnelByPlatform(steps: string[], platforms: string[]) {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const appliedFilters = useFiltersStore((s) => s.appliedFilters);
+  const enabled = !!projectID && platforms.length > 1 && steps.length > 0;
+
+  const query = useQuery({
+    queryKey: ['funnel-by-platform', projectID, appliedFilters, steps, platforms],
+    queryFn: async () => {
+      const client = new AgentRayAPI(projectID!);
+      // One failing platform must not blank the comparison — it drops out of the
+      // table instead, the same degrade-per-slice rule the console fan-out uses.
+      const results = await Promise.all(
+        platforms.map((platform) =>
+          client
+            .insight('funnel', { ...appliedFilters, platform }, 'events', steps)
+            .then((data) => ({ platform, funnel: data.insight?.funnel ?? [] }))
+            .catch(() => null),
+        ),
+      );
+      return results.filter((r): r is { platform: string; funnel: NonNullable<typeof r>['funnel'] } => r !== null);
+    },
+    enabled,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  return { splits: query.data ?? [], loading: query.isFetching && enabled };
 }
 
 // useDailyReadout powers the agent-narrated slot on the dashboard home: the

@@ -1,0 +1,144 @@
+# Builds and tests the four published SDKs on every change to them.
+#
+# The `pack` steps are not ceremony. The Python wheel shipped for months able to
+# build, upload, and pass `twine check` while containing no package code at all —
+# a .gitignore pattern re-anchored by the build backend excluded it, and nothing
+# between `git push` and `pip install` looked inside the artefact. So each job
+# asserts on the contents of the thing that would actually be published, not just
+# that a build command exited 0.
+name: sdk
+
+on:
+  push:
+    paths: ['sdk/**', '.github/workflows/sdk.yml']
+  pull_request:
+    paths: ['sdk/**', '.github/workflows/sdk.yml']
+  workflow_dispatch:
+
+jobs:
+  npm:
+    name: ${{ matrix.pkg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [browser, server]
+    defaults:
+      run:
+        working-directory: sdk/${{ matrix.pkg }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/${{ matrix.pkg }}/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: the tarball contains the built entrypoint
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const files = require("./pack.json")[0].files.map((f) => f.path);
+            const required = ["dist/index.js", "dist/index.cjs", "dist/index.d.ts", "LICENSE", "README.md"];
+            const missing = required.filter((f) => !files.includes(f));
+            if (missing.length) {
+              console.error("missing from tarball:", missing.join(", "));
+              console.error("present:", files.join(", "));
+              process.exit(1);
+            }
+            console.log("tarball ok:", files.length, "files");
+          '
+
+  cdn-bundle:
+    name: browser <script> bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/browser/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # The <script> path is the one the copy-paste snippet uses, and it is the
+      # only build whose entrypoint is a global rather than an export — so a
+      # bundler-config change can break it while esm and cjs stay green.
+      - name: the global attaches and captures
+        run: |
+          cat > cdn-check.mjs <<'EOF'
+          import { readFileSync } from 'node:fs';
+          import { JSDOM } from 'jsdom';
+          const dom = new JSDOM('<!doctype html><body></body>', {
+            url: 'https://example.test/pricing',
+            runScripts: 'dangerously',
+          });
+          const el = dom.window.document.createElement('script');
+          el.textContent = readFileSync('dist/index.global.js', 'utf8');
+          dom.window.document.head.appendChild(el);
+          if (typeof dom.window.AgentRay?.init !== 'function') {
+            throw new Error('window.AgentRay.init is not a function');
+          }
+          const sent = [];
+          dom.window.fetch = async (url, init) => {
+            sent.push(JSON.parse(init.body));
+            return { ok: true, status: 200 };
+          };
+          const ar = dom.window.AgentRay.init({ host: 'https://a.test', apiKey: 'k' });
+          ar.capture('user.pageview', { path: '/pricing' });
+          await ar.flush();
+          const ev = sent[0].batch[0];
+          if (ev.properties.platform !== 'web') {
+            throw new Error(`expected platform web, got ${ev.properties.platform}`);
+          }
+          console.log('cdn bundle ok');
+          EOF
+          node cdn-check.mjs
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python tests/test_client.py
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: the wheel contains the package, not just metadata
+        run: |
+          python - <<'EOF'
+          import glob, zipfile, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = ["agentray/__init__.py", "agentray/client.py", "agentray/py.typed"]
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit(f"missing from {wheel}: {missing}\npresent: {names}")
+          print("wheel ok:", len(names), "files")
+          EOF
+      - name: the built wheel imports from a clean environment
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install dist/*.whl
+          /tmp/verify/bin/python -c "import agentray; assert agentray.DEFAULT_PLATFORM == 'server'; print('import ok')"
+
+  swift:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: sdk/swift
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+      - run: swift test

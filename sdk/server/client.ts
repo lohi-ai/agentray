@@ -33,7 +33,21 @@ export interface AgentRayServerConfig {
   apiKey: string;
   /** Network timeout per request in ms (default 5000). */
   timeoutMs?: number;
+  /**
+   * Value stamped on every event's `platform` property (default `"server"`).
+   *
+   * It is sent explicitly rather than left to the server's user-agent
+   * heuristic because Node's global `fetch` identifies itself only as `node`,
+   * which matches no known client — so an un-tagged revenue event lands in the
+   * "unknown" bucket and quietly pollutes every platform split the product is
+   * read from. Override when relaying events on behalf of a client whose real
+   * platform you know.
+   */
+  platform?: string;
 }
+
+/** What server-sent events report as, absent an override. */
+export const DEFAULT_PLATFORM = 'server';
 
 export interface CaptureOptions {
   /**
@@ -72,11 +86,13 @@ export class AgentRayServerClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
+  private readonly platform: string;
 
   constructor(config: AgentRayServerConfig) {
     this.apiUrl = config.apiUrl.replace(/\/$/, '');
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? 5000;
+    this.platform = config.platform ?? DEFAULT_PLATFORM;
   }
 
   /** Send a single server-side event. Resolves on success, throws on failure. */
@@ -91,7 +107,13 @@ export class AgentRayServerClient {
       event,
       distinct_id: distinctId,
       session_id: options.sessionId,
-      properties: { ...properties, $insert_id: options.idempotencyKey ?? generateId() },
+      // platform after the caller's keys, so an event cannot be mislabelled by
+      // accident; $insert_id likewise, since it is ours to guarantee.
+      properties: {
+        ...properties,
+        platform: this.platform,
+        $insert_id: options.idempotencyKey ?? generateId(),
+      },
       timestamp: options.timestamp ?? new Date().toISOString(),
     });
   }
@@ -145,7 +167,11 @@ export class AgentRayServerClient {
         event: e.event,
         distinct_id: e.distinctId,
         session_id: e.options?.sessionId,
-        properties: { ...(e.properties ?? {}), $insert_id: e.options?.idempotencyKey ?? generateId() },
+        properties: {
+          ...(e.properties ?? {}),
+          platform: this.platform,
+          $insert_id: e.options?.idempotencyKey ?? generateId(),
+        },
         timestamp: e.options?.timestamp ?? new Date().toISOString(),
       })),
     });

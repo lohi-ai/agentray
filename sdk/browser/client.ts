@@ -17,6 +17,8 @@
  *   4. `reset()` generates a fresh anonymous ID (call on logout).
  */
 
+import { DEFAULT_PLATFORM, withPlatform } from './platform';
+
 const ANON_ID_KEY = 'agentray_anon_id';
 
 function getOrCreateAnonId(): string {
@@ -45,17 +47,25 @@ export interface AgentRayConfig {
   apiUrl: string;
   /** Project API key. */
   apiKey: string;
+  /**
+   * Value stamped on every event's `platform` property (default `"web"`).
+   * Override only when this bundle is not the website — e.g. a Capacitor build
+   * running inside the iOS app, which should report `"ios"`.
+   */
+  platform?: string;
 }
 
 export class AgentRayClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
+  private readonly platform: string;
   private distinctId: string;
   private anonId: string | null;
 
   constructor(config: AgentRayConfig) {
     this.apiUrl = config.apiUrl.replace(/\/$/, '');
     this.apiKey = config.apiKey;
+    this.platform = config.platform ?? DEFAULT_PLATFORM;
     const anon = getOrCreateAnonId();
     this.anonId = anon;
     this.distinctId = anon;
@@ -69,7 +79,7 @@ export class AgentRayClient {
       api_key: this.apiKey,
       event,
       distinct_id: this.distinctId,
-      properties,
+      properties: withPlatform(properties, this.platform),
       timestamp: new Date().toISOString(),
     });
   }

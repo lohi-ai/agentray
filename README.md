@@ -120,7 +120,18 @@ Dashboards tab gives a readable answer before any custom chart is built.
 yet**. Do not `npm install` / `pip install` them — those names 404. Until they
 ship, paste the no-npm snippet below (it sends `user.pageview`, which lights
 Traffic and the Product funnel), or copy `sdk/browser/` / `sdk/server/` /
-`sdk/python/` into the product repo. Same hedge as `docs/SDK.md`.
+`sdk/python/` into the product repo. Same hedge as `docs/SDK.md`. `sdk/swift/` is
+a real Swift Package — add it by local path (SPM has no registry step to wait
+on).
+
+All four are packaged and gated for release — `make sdk-check` runs their tests,
+builds, and asserts the published artefact actually contains the code. What is
+left is claiming the `@agentray` npm scope and the `agentray` PyPI name; see
+[docs/RELEASING-SDK.md](docs/RELEASING-SDK.md).
+
+**Every SDK stamps a `platform` property** (`web` / `ios` / `server`), which is
+what Traffic's platform split and the per-platform funnel read. See
+["Which app did this come from?"](#which-app-did-this-come-from) below.
 
 **Browser — no npm.** Paste before `</body>` (Framer, Carrd, Webflow, or a
 plain HTML file). Source of truth:
@@ -168,6 +179,25 @@ click capture with an explicit label, `data-track-ignore` mutes a subtree, and
 `data-track-view="label"` fires `element_viewed` once when the element becomes at
 least half visible. See `sdk/browser/README.md`.
 
+**iOS / Apple — `sdk/swift/`.** A Swift Package (SPM). Not on a registry yet:
+add it by path, or paste the single-file version from the in-app **iOS app** tab
+(Dashboards → Send your first event, or Set up). It exists because a native app
+sends the same events through the same key as your website, and three things
+must be true for the two to stay comparable: a device id that survives launches,
+an `identify` that aliases the anonymous history so one human is not two people,
+and a `platform: ios` tag on every event so Traffic and the Product funnel can
+separate the audiences. See `sdk/swift/README.md`.
+
+```swift
+import AgentRay
+
+AgentRay.start(host: "https://agentray.example.com", apiKey: "agentray_…")
+AgentRay.shared.screen("Library")               // sends user.pageview
+AgentRay.shared.capture("user.signup", properties: ["plan": "free"])
+AgentRay.shared.identify("user_123", traits: ["email": "alice@example.com"])
+AgentRay.shared.reset()                          // on logout
+```
+
 **Python — `sdk/python/`.** Copy the package in; `pip install agentray` is not
 published. Non-blocking server-side capture with a background batch thread;
 PostHog-compatible payloads:
@@ -189,8 +219,26 @@ const ar = new AgentRayServerClient({ apiUrl: process.env.AGENTRAY_URL!, apiKey:
 await ar.revenue('user-123', { amount: 19, currency: 'USD' }, { idempotencyKey: webhook.id });
 ```
 
-All three SDKs speak the same `capture` / `batch` / `identify` payload, so a
+Every SDK speaks the same `capture` / `batch` / `identify` payload, so a
 PostHog integration migrates by changing only the host.
+
+### Which app did this come from?
+
+Every event carries a `platform` — `web`, `ios`, `android`, or `server`. Each
+SDK states its own, and an explicit `platform` (or PostHog-style `$platform` /
+`$os`) property always wins. Only when nothing says does the user agent decide,
+so events sent before any of this classify too. Safari on an iPhone is `web`, a
+URLSession call from your app is `ios`: the split is by *app*, not by device.
+
+Inference is the fallback, never the contract — a runtime's user agent is not a
+stable interface. Node's global `fetch` sends the bare word `node`, so every
+server-sent event, revenue included, was landing in "unknown" until the clients
+started declaring themselves.
+
+Traffic carries a **By platform** panel (click a row to scope the page),
+Product's funnel repeats itself per platform, and the filter bar grows a
+**Platform** facet the moment a second one starts sending. In SQL it is a plain
+column: `WHERE platform = 'ios'`.
 
 ## CLI
 

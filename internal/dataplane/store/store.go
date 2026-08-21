@@ -192,6 +192,12 @@ type Event struct {
 	ReferrerHost    string     `json:"referrer_host,omitempty"`
 	ReferrerChannel string     `json:"referrer_channel,omitempty"`
 	UserAgent       string     `json:"user_agent,omitempty"`
+	// Platform is which app the event came from — web / ios / android / server.
+	// A product that ships a site and a native app sends both through one project
+	// key, so without this column every visitor, funnel and retention number is
+	// two audiences added together. Empty means undetermined; it is rendered as
+	// "unknown" rather than folded into web.
+	Platform string `json:"platform,omitempty"`
 	// InsertID is the caller-supplied idempotency key ($insert_id). It is captured
 	// and stored so a future read-time de-dup (argMax(...) GROUP BY insert_id) can be
 	// layered on if a money path ever needs one. NOTE: no read path de-dups on it
@@ -240,6 +246,11 @@ type ActivitySummary struct {
 	GeneratedAt     time.Time         `json:"generated_at"`
 	EventsByType    map[string]uint64 `json:"events_by_type"`
 	EmptySinceHours int               `json:"empty_since_hours"`
+	// Platforms is every app that sent an event in this window ('unknown' for
+	// rows that carry no platform). It is deliberately computed *ignoring* the
+	// platform filter, so the facet it feeds still lists the other apps once one
+	// is selected — a filter you cannot switch back out of is a trap.
+	Platforms []string `json:"platforms"`
 }
 
 type EventCount struct {
@@ -294,6 +305,11 @@ type EventFilter struct {
 	// is not mistaken for a user. Leave it off for operational/event-volume and
 	// agent-cost metrics, which legitimately include non-human rows.
 	HumansOnly bool `json:"humans_only"`
+	// Platform scopes every metric to one app (web / ios / android / server, or
+	// 'unknown' for rows that predate the column or came from a client that says
+	// nothing). This is what lets one project answer "does the iOS app convert
+	// worse than the site" without a hand-written query.
+	Platform string `json:"platform"`
 }
 
 type InsightResult struct {
@@ -405,6 +421,17 @@ type TrafficProvider struct {
 	Pageviews uint64 `json:"pageviews"`
 }
 
+// PlatformSplit is one app's share of the audience. Visitors is the count that
+// answers "how many people", Pageviews the count that answers "how much did they
+// look at" — kept separate because a single "count" behind a Visitors header is
+// exactly the ambiguity this split exists to remove.
+type PlatformSplit struct {
+	Platform  string `json:"platform"`
+	Visitors  uint64 `json:"visitors"`
+	Pageviews uint64 `json:"pageviews"`
+	Events    uint64 `json:"events"`
+}
+
 type GuestUser struct {
 	Guests uint64 `json:"guests"`
 	Users  uint64 `json:"users"`
@@ -420,6 +447,7 @@ type WebAnalytics struct {
 	TopPaths           []PathCount       `json:"top_paths"`
 	Referrers          []PathCount       `json:"referrers"`
 	TrafficByClass     []TrafficClass    `json:"traffic_by_class"`
+	TrafficByPlatform  []PlatformSplit   `json:"traffic_by_platform"`
 	TrafficByProvider  []TrafficProvider `json:"traffic_by_provider"`
 	AITopPaths         []PathCount       `json:"ai_top_paths"`
 	ReferrersByChannel []PathCount       `json:"referrers_by_channel"`
@@ -1115,6 +1143,12 @@ TTL toDateTime(timestamp) + INTERVAL 1 YEAR`); err != nil {
 		return err
 	}
 	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS insert_id Nullable(String)`); err != nil {
+		return err
+	}
+	// platform is derived at ingest (explicit property, else user agent). Additive
+	// and defaulted, so rows written before it existed read back as '' (unknown)
+	// without a rewrite.
+	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS platform LowCardinality(String) DEFAULT ''`); err != nil {
 		return err
 	}
 	// is_unplanned tags events whose name was absent from the project's established
@@ -1995,7 +2029,7 @@ INSERT INTO events (
 	properties, agent_id, tool_name, tool_input, tool_output, tokens_input,
 	tokens_output, cost_usd, latency_ms, model_name, is_error, error_message,
 	timestamp, visitor_class, bot_name, referrer_host, referrer_channel, user_agent,
-	insert_id, is_unplanned
+	insert_id, is_unplanned, platform
 )`)
 	if err != nil {
 		return err
@@ -2036,6 +2070,7 @@ INSERT INTO events (
 			nullableString(event.UserAgent),
 			nullableString(event.InsertID),
 			boolToUInt8(event.IsUnplanned),
+			event.Platform,
 		); err != nil {
 			return err
 		}
@@ -2384,6 +2419,32 @@ LIMIT ?`, args...)
 	return sessions, rows.Err()
 }
 
+// distinctPlatforms lists the apps that sent events in the window, busiest
+// first. Bounded by the column's cardinality (LowCardinality, a handful of
+// values), so no LIMIT is needed for it to stay cheap.
+func (s *Store) distinctPlatforms(ctx context.Context, where string, args []any) ([]string, error) {
+	rows, err := s.ch.Query(ctx, `
+SELECT if(ifNull(platform, '') = '', 'unknown', platform) AS platform, count() AS events
+FROM events
+WHERE `+where+`
+GROUP BY platform
+ORDER BY events DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var platform string
+		var events uint64
+		if err := rows.Scan(&platform, &events); err != nil {
+			return nil, err
+		}
+		result = append(result, platform)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter EventFilter) (ActivitySummary, error) {
 	summary := ActivitySummary{
 		ProjectID:       projectID,
@@ -2436,6 +2497,15 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 	summary.EventsByType["user"] = summary.UserEvents
 	summary.EventsByType["agent"] = summary.AgentEvents
 	summary.EventsByType["system"] = summary.SystemEvents
+
+	unscoped := filter
+	unscoped.Platform = ""
+	platformWhere, platformArgs := filteredWhereWithDistinctIDs(projectID, unscoped, true, resolver.relatedDistinctIDs(unscoped.DistinctID))
+	platforms, err := s.distinctPlatforms(ctx, platformWhere, platformArgs)
+	if err != nil {
+		return summary, err
+	}
+	summary.Platforms = platforms
 
 	eventCounts, err := s.eventCounts(ctx, where, args)
 	if err != nil {
@@ -2703,6 +2773,12 @@ WHERE `+where, webArgs...).Scan(&web.Visitors, &web.Pageviews, &web.Sessions, &w
 	}
 	web.TrafficByClass = trafficByClass
 
+	trafficByPlatform, err := s.trafficByPlatform(ctx, resolver, where, args)
+	if err != nil {
+		return web, err
+	}
+	web.TrafficByPlatform = trafficByPlatform
+
 	trafficByProvider, err := s.trafficByProvider(ctx, resolver, where, args)
 	if err != nil {
 		return web, err
@@ -2745,6 +2821,40 @@ ORDER BY count DESC`, args...)
 	for rows.Next() {
 		var item TrafficClass
 		if err := rows.Scan(&item.Class, &item.Count); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// trafficByPlatform splits the audience by which app the events came from. It
+// counts people by canonical id, so one human who uses the site and the app is
+// one visitor on each platform and not two humans overall — the same identity
+// resolution every other people metric uses.
+func (s *Store) trafficByPlatform(ctx context.Context, resolver identityResolver, where string, args []any) ([]PlatformSplit, error) {
+	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
+	// Positional binding: the canonical-id expression sits in the SELECT, ahead of
+	// the WHERE, so its args go first — same order as trafficByProvider.
+	queryArgs := append(append([]any{}, canonicalArgs...), args...)
+	rows, err := s.ch.Query(ctx, `
+SELECT
+	if(ifNull(platform, '') = '', 'unknown', platform) AS platform,
+	uniqExact(`+canonicalID+`) AS visitors,
+	countIf(event_name = 'user.pageview') AS pageviews,
+	count() AS events
+FROM events
+WHERE `+where+`
+GROUP BY platform
+ORDER BY visitors DESC, events DESC`, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []PlatformSplit{}
+	for rows.Next() {
+		var item PlatformSplit
+		if err := rows.Scan(&item.Platform, &item.Visitors, &item.Pageviews, &item.Events); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -4521,6 +4631,12 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 	if filter.HumansOnly {
 		clauses = append(clauses, "ifNull(visitor_class, 'human') = 'human'")
 	}
+	if clause, arg, ok := platformClause(filter.Platform); ok {
+		clauses = append(clauses, clause)
+		if arg != nil {
+			args = append(args, arg)
+		}
+	}
 	if filter.Search != "" {
 		clauses = append(clauses, "(positionCaseInsensitive(event_name, ?) > 0 OR positionCaseInsensitive(distinct_id, ?) > 0 OR positionCaseInsensitive(session_id, ?) > 0 OR positionCaseInsensitive(properties, ?) > 0)")
 		args = append(args, filter.Search, filter.Search, filter.Search, filter.Search)
@@ -4580,12 +4696,38 @@ func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTime
 	if filter.HumansOnly {
 		clauses = append(clauses, "ifNull(visitor_class, 'human') = 'human'")
 	}
+	if clause, arg, ok := platformClause(filter.Platform); ok {
+		clauses = append(clauses, clause)
+		if arg != nil {
+			args = append(args, arg)
+		}
+	}
 	if filter.Search != "" {
 		clauses = append(clauses, "(event_name ILIKE ? OR properties ILIKE ? OR distinct_id ILIKE ?)")
 		search := "%" + filter.Search + "%"
 		args = append(args, search, search, search)
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// PlatformUnknown is the filter value that selects rows whose platform could not
+// be determined — events captured before the column existed, or from a client
+// that sends neither the property nor a recognisable user agent. It is a filter
+// token only; the stored value for those rows is ”.
+const PlatformUnknown = "unknown"
+
+// platformClause turns a platform filter into SQL. 'unknown' matches the empty
+// stored value, anything else matches exactly, and an empty filter adds nothing.
+func platformClause(platform string) (string, any, bool) {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	switch platform {
+	case "":
+		return "", nil, false
+	case PlatformUnknown:
+		return "ifNull(platform, '') = ''", nil, true
+	default:
+		return "ifNull(platform, '') = ?", platform, true
+	}
 }
 
 func placeholders(count int) string {

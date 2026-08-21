@@ -9,11 +9,39 @@ description = "AgentRay Python SDK — capture, identify, and flush product/agen
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
+authors = [{ name = "LoHi" }]
 keywords = ["analytics", "product-analytics", "agentray", "posthog-compatible"]
 dependencies = ["urllib3>=1.26"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
 
 [project.urls]
 Homepage = "https://agentray.lohi2.com"
+Source = "https://github.com/lohi-ai/agentray/tree/main/sdk/python"
+Issues = "https://github.com/lohi-ai/agentray/issues"
+
+[tool.hatch.build]
+# Select files explicitly instead of from git.
+#
+# The repo-root .gitignore carries `/agentray` — the compiled Go binary that
+# lands next to it. Git anchors that to the repo root, so the Python package is
+# correctly tracked. Hatchling, though, re-anchors the same pattern to *this*
+# directory, where `/agentray` matches the package itself: with VCS ignores on,
+# `python -m build` cheerfully produces a wheel containing metadata, a licence,
+# and no code. It fails at `import agentray`, not at build or upload, so the
+# first person to notice would be whoever ran `pip install agentray`.
+ignore-vcs = true
+exclude = ["dist", "*.egg-info", "__pycache__", ".pytest_cache", ".venv"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agentray"]
+
+[tool.hatch.build.targets.sdist]
+include = ["agentray", "tests", "README.md", "LICENSE", "pyproject.toml"]

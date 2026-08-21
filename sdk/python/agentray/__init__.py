@@ -15,7 +15,7 @@ Events are buffered and delivered by a background thread in batches to
 ``POST /batch``; ``flush()`` blocks until the buffer drains.
 """
 
-from .client import Client
+from .client import Client, DEFAULT_PLATFORM
 
-__all__ = ["Client"]
+__all__ = ["Client", "DEFAULT_PLATFORM"]
 __version__ = "0.1.0"

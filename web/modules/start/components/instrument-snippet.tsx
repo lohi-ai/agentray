@@ -17,9 +17,9 @@ import { Button } from '@/modules/shared/components/signal-primitives';
 // the validate job's threshold is set against, under exactly the names Product
 // Scout's tracking plan names.
 export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: string }) {
-  const [tab, setTab] = useState<'track' | 'waitlist'>('track');
+  const [tab, setTab] = useState<'track' | 'ios' | 'waitlist'>('track');
   const key = apiKey || 'YOUR_PROJECT_API_KEY';
-  const code = tab === 'track' ? trackSnippet(host, key) : waitlistSnippet(host, key);
+  const code = tab === 'track' ? trackSnippet(host, key) : tab === 'ios' ? swiftSnippet(host, key) : waitlistSnippet(host, key);
 
   return (
     <div className="flex flex-col gap-3">
@@ -27,8 +27,11 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
         <TabButton active={tab === 'track'} onClick={() => setTab('track')}>
           1 · Track the page
         </TabButton>
+        <TabButton active={tab === 'ios'} onClick={() => setTab('ios')}>
+          2 · iOS app
+        </TabButton>
         <TabButton active={tab === 'waitlist'} onClick={() => setTab('waitlist')}>
-          2 · Collect emails
+          3 · Collect emails
         </TabButton>
       </div>
       <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
@@ -37,6 +40,12 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
             Paste this before <code>&lt;/body&gt;</code> on your landing page. It sends{' '}
             <code>user.pageview</code> and a click event — no build step, no npm. Works on Framer, Carrd, Webflow, or a
             plain HTML file.
+          </>
+        ) : tab === 'ios' ? (
+          <>
+            One Swift file, no package. Screens land as <code>user.pageview</code> so the same charts read them, every
+            event carries <code>platform: ios</code> so your app stays separable from your site, and{' '}
+            <code>identify</code> links a person&apos;s app and web history instead of counting them twice.
           </>
         ) : (
           <>
@@ -47,6 +56,12 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
         )}
       </p>
       <CodeBlock code={code} />
+      {tab === 'ios' ? (
+        <p className="text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
+          Prefer a package? <code>sdk/swift</code> in the repo is the same contract with batching, offline retry, and a
+          flush when the app backgrounds — add it with Swift Package Manager instead of pasting this.
+        </p>
+      ) : null}
       {tab === 'waitlist' ? (
         <p className="text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
           The consent checkbox is required — the request is refused without it. Addresses are yours: export or delete
@@ -134,6 +149,85 @@ function trackSnippet(host: string, key: string) {
   }, true);
 })();
 </script>`;
+}
+
+// The iOS tracker. Exported because the dashboard's first-event card offers the
+// same snippet under its own "iOS app" source — one Swift contract, not two.
+//
+// The three things a native app needs and a cURL example does not teach: an id
+// that survives a relaunch (UserDefaults, not a fresh UUID per launch), an alias
+// on login so the person who used the website and then the app is one person,
+// and a platform tag so both audiences stay separable afterwards.
+export function swiftSnippet(host: string, key: string) {
+  return `import Foundation
+
+// AgentRay — drop this file into your app. No package, no build step.
+enum AgentRay {
+    static let host = ${JSON.stringify(host)}
+    static let apiKey = ${JSON.stringify(key)}
+
+    // One stable id per install, so a screen view and a signup are the same
+    // person. Survives relaunches; replaced by your user id at identify().
+    private static let anonKey = "agentray_anon_id"
+    private static let idKey = "agentray_distinct_id"
+
+    private static var anonID: String {
+        if let id = UserDefaults.standard.string(forKey: anonKey) { return id }
+        let id = "a-" + UUID().uuidString.lowercased()
+        UserDefaults.standard.set(id, forKey: anonKey)
+        return id
+    }
+
+    private static var distinctID: String {
+        UserDefaults.standard.string(forKey: idKey) ?? anonID
+    }
+
+    static func capture(_ event: String, _ properties: [String: Any] = [:]) {
+        var props = properties
+        props["platform"] = "ios"   // keeps your app separable from your website
+        post("/capture", ["api_key": apiKey, "event": event,
+                          "distinct_id": distinctID, "properties": props])
+    }
+
+    /// Call from .onAppear. Screens land as user.pageview — the event the
+    /// Traffic and Product charts already read.
+    static func screen(_ name: String) {
+        capture("user.pageview", ["screen": name, "path": "/" + name])
+    }
+
+    /// Call on login. Links everything this install did anonymously to the user,
+    /// so someone who used your site and then your app is one person, not two.
+    static func identify(_ userID: String, traits: [String: Any] = [:]) {
+        let previous = distinctID
+        UserDefaults.standard.set(userID, forKey: idKey)
+        if previous != userID {
+            post("/alias", ["api_key": apiKey, "anonymous_id": previous, "distinct_id": userID])
+        }
+        post("/identify", ["api_key": apiKey, "distinct_id": userID, "$set": traits])
+    }
+
+    /// Call on logout, so the next person on this device starts fresh.
+    static func reset() {
+        UserDefaults.standard.removeObject(forKey: idKey)
+        UserDefaults.standard.removeObject(forKey: anonKey)
+    }
+
+    private static func post(_ path: String, _ body: [String: Any]) {
+        guard let url = URL(string: host + path),
+              let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        URLSession.shared.dataTask(with: request).resume()
+    }
+}
+
+// Usage
+//   .onAppear { AgentRay.screen("Home") }
+//   AgentRay.capture("user.signup", ["plan": "free"])
+//   AgentRay.identify("user_123", traits: ["email": "alice@example.com"])
+`;
 }
 
 // The waitlist. Posts to AgentRay directly — the owner needs no backend, which

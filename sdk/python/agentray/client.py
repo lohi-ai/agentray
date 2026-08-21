@@ -22,6 +22,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: What server-sent events report as, absent an override. Sent explicitly rather
+#: than left to the server's user-agent heuristic: urllib3 happens to be
+#: recognisable today, but relying on that makes every platform split in the
+#: product depend on a substring in a dependency's version string.
+DEFAULT_PLATFORM = "server"
+
+
 class Client:
     """Thread-safe AgentRay event client.
 
@@ -31,6 +38,9 @@ class Client:
         flush_at: Flush when this many events are buffered.
         flush_interval: Max seconds a buffered event waits before delivery.
         max_retries: Delivery attempts per batch before the batch is dropped.
+        platform: Value stamped on every event's ``platform`` property. Override
+            when relaying events on behalf of a client whose real platform you
+            know — otherwise they are attributed to this server.
     """
 
     def __init__(
@@ -40,9 +50,11 @@ class Client:
         flush_at: int = 20,
         flush_interval: float = 3.0,
         max_retries: int = 3,
+        platform: str = DEFAULT_PLATFORM,
     ) -> None:
         self._host = host.rstrip("/")
         self._api_key = api_key
+        self._platform = platform
         self._flush_at = max(1, flush_at)
         self._flush_interval = flush_interval
         self._max_retries = max(1, max_retries)
@@ -64,11 +76,13 @@ class Client:
         properties: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Queue an event for delivery. Never blocks on the network."""
+        # platform last, so a caller cannot mislabel which surface an event came
+        # from by passing the key themselves.
         self._queue.put(
             {
                 "event": event,
                 "distinct_id": distinct_id,
-                "properties": properties or {},
+                "properties": {**(properties or {}), "platform": self._platform},
                 "timestamp": _now_iso(),
             }
         )

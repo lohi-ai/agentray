@@ -10,6 +10,16 @@ flush on page unload.
 npm install @agentray/browser
 ```
 
+No bundler? The same bundle loads from a `<script>` tag and exposes
+`window.AgentRay`:
+
+```html
+<script src="https://unpkg.com/@agentray/browser/dist/index.global.js"></script>
+<script>
+  AgentRay.init({ host: 'https://agentray.example.com', apiKey: 'phc_your_project_key', autocapture: true });
+</script>
+```
+
 ## Quick start
 
 ```ts
@@ -35,7 +45,7 @@ ar.reset();
 
 | Method | Purpose |
 | --- | --- |
-| `init(opts)` | Create the client. `opts`: `host`, `apiKey`, optional `autocapture`, `batching`. |
+| `init(opts)` | Create the client. `opts`: `host`, `apiKey`, optional `autocapture`, `batching`, `platform`. |
 | `capture(event, props?)` | Queue an event (flushed in batches). |
 | `identify(userId, traits?)` | Switch to an identified user; aliases the anonymous history. |
 | `alias(anon, canonical)` | Manually link two IDs (advanced). |
@@ -52,9 +62,32 @@ Events are buffered and sent to `POST /batch` when the buffer reaches
 the buffer is flushed via `navigator.sendBeacon` so the tail of a session is not
 lost when the tab closes.
 
-## Build
+## Build & test
 
 ```bash
-npm run build      # tsup → dist/ (ESM + CJS + d.ts)
 npm run typecheck
+npm test           # vitest, jsdom
+npm run build      # tsup → dist/ (ESM + CJS + <script> global + d.ts)
 ```
+
+## Which app an event came from
+
+Every event carries `platform: "web"`. That property is what lets Traffic's
+platform split, the per-platform funnel, and the filter bar tell your website's
+audience from your app's, in a product that has both — instead of reporting one
+blended number that describes neither.
+
+It is stated rather than left to a user-agent guess on the server: the guess is
+right for a plain tab and wrong the moment the bundle runs somewhere else — an
+Electron renderer, a prerender bot, a jsdom test — where it lands in "unknown".
+
+Set it once when this bundle genuinely is not the website. A Capacitor or Cordova
+build shipped inside the iOS app should say so, or its users are counted as web
+traffic:
+
+```ts
+init({ host, apiKey, platform: 'ios' });
+```
+
+Per-call properties cannot override it — the platform is applied after your own
+keys, so a stray `platform` in a `capture()` call can't mislabel a surface.

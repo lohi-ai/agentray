@@ -144,6 +144,10 @@ export type ActivitySummary = {
   recent_events: Event[];
   recent_sessions: Session[];
   events_by_type: Record<string, number>;
+  /** Every app that sent an event in this window ('unknown' where the platform
+   *  could not be determined). Computed ignoring the platform filter, so the
+   *  facet can always switch back. */
+  platforms: string[];
   generated_at: string;
 };
 
@@ -188,6 +192,11 @@ export type Filters = {
   model_name: string;
   search: string;
   error_only: boolean;
+  /** Which app the events came from — 'web' | 'ios' | 'android' | 'server' |
+   *  'unknown', or '' for every platform. A product that ships a site and a
+   *  native app has two audiences behind one project key; this is what tells
+   *  them apart. */
+  platform: string;
   limit: number;
 };
 
@@ -260,6 +269,16 @@ export type TrafficProvider = {
   pageviews: number;
 };
 
+/** One app's share of the audience. `visitors` answers "how many people",
+ *  `pageviews` "how much did they look at" — kept apart so neither is rendered
+ *  under the other's label. */
+export type PlatformSplit = {
+  platform: string;
+  visitors: number;
+  pageviews: number;
+  events: number;
+};
+
 export type GuestUser = {
   guests: number;
   users: number;
@@ -275,6 +294,7 @@ export type WebAnalytics = {
   top_paths: Array<{ value: string; count: number }>;
   referrers: Array<{ value: string; count: number }>;
   traffic_by_class: TrafficClass[];
+  traffic_by_platform: PlatformSplit[];
   traffic_by_provider: TrafficProvider[];
   ai_top_paths: Array<{ value: string; count: number }>;
   referrers_by_channel: Array<{ value: string; count: number }>;
@@ -2589,6 +2609,7 @@ export const defaultFilters: Filters = {
   model_name: '',
   search: '',
   error_only: false,
+  platform: '',
   limit: 100,
 };
 
@@ -2599,7 +2620,7 @@ function filterParams(filters: Filters): Record<string, string> {
   };
   if (filters.from) params.from = new Date(filters.from).toISOString();
   if (filters.to) params.to = new Date(filters.to).toISOString();
-  for (const key of ['event_type', 'event_name', 'distinct_id', 'session_id', 'agent_id', 'model_name', 'search'] as const) {
+  for (const key of ['event_type', 'event_name', 'distinct_id', 'session_id', 'agent_id', 'model_name', 'search', 'platform'] as const) {
     if (filters[key]) params[key] = filters[key];
   }
   if (filters.error_only) params.error_only = 'true';

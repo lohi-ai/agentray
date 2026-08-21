@@ -15,7 +15,8 @@ import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
 import { funnelStepNames, retentionAnchorEvent } from '@/lib/ia';
-import { useEventNames, useInsight } from '@/modules/app/hooks';
+import { useActivity, useEventNames, useFunnelByPlatform, useInsight } from '@/modules/app/hooks';
+import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
@@ -38,10 +39,21 @@ export function ProductPage() {
   const router = useRouter();
   const { insight, runInsight } = useInsight();
   const { names: eventNames, loading: namesLoading } = useEventNames();
+  const { summary } = useActivity();
   const emptyCatalog = !namesLoading && eventNames.length === 0;
   const [active, setActive] = useState<Mode | null>(null);
   const [running, setRunning] = useState(false);
   const didAuto = useRef(false);
+
+  // The same steps the funnel question runs, split per app. A product with one
+  // platform gets nothing extra; one with a site and a native app gets the two
+  // curves the blended funnel was averaging.
+  const platforms = useMemo(() => summary?.platforms ?? [], [summary?.platforms]);
+  const funnelSteps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames)), [emptyCatalog, eventNames]);
+  const { splits: platformFunnels, loading: splitsLoading } = useFunnelByPlatform(
+    active === 'funnel' ? funnelSteps : [],
+    platforms,
+  );
 
   async function ask(mode: Mode) {
     setActive(mode);
@@ -106,7 +118,12 @@ export function ProductPage() {
       {running ? (
         <Loading label="Running insight…" />
       ) : insight && active ? (
-        <ResultView insight={insight} />
+        <>
+          <ResultView insight={insight} />
+          {active === 'funnel' ? (
+            <PlatformFunnels splits={platformFunnels} loading={splitsLoading} />
+          ) : null}
+        </>
       ) : (
         <EmptyState
           icon={<Sparkles size={22} style={{ color: 'var(--agent)' }} />}
@@ -120,6 +137,68 @@ export function ProductPage() {
     </AppShell>
   );
 }
+
+// PlatformFunnels puts each app's funnel beside the others. The blended funnel
+// above it is the average of these curves and describes none of them — a site
+// that converts at 25% and an app that converts at 50% report "one third" and
+// send you to fix the wrong one.
+//
+// Rows are the steps of the funnel that ran; each platform contributes a people
+// count and its conversion from the first step. A platform whose insight failed
+// is absent rather than shown as zero.
+function PlatformFunnels({
+  splits,
+  loading,
+}: {
+  splits: Array<{ platform: string; funnel: FunnelStep[] }>;
+  loading: boolean;
+}) {
+  const usable = splits.filter((s) => s.funnel.length > 0);
+  const columns = useMemo<DataColumn<PlatformFunnelRow>[]>(() => {
+    if (usable.length === 0) return [];
+    return [
+      { key: 'event_name', header: 'Step', renderCell: (r) => <span className="font-mono">{r.event_name}</span> },
+      ...usable.map((split) => ({
+        key: split.platform,
+        header: platformLabel(split.platform),
+        renderCell: (r: PlatformFunnelRow) => {
+          const cell = r.byPlatform[split.platform];
+          if (!cell) return <Text type="supporting">—</Text>;
+          return (
+            <span className="font-mono tabular-nums">
+              {cell.users}
+              <span className="ms-1.5 text-[var(--color-text-secondary)]">{formatFractionAsPercent(cell.conversion)}</span>
+            </span>
+          );
+        },
+      })),
+    ];
+  }, [usable]);
+
+  if (loading) return <Loading label="Comparing platforms…" />;
+  if (usable.length < 2) return null;
+
+  // Steps come from the longest funnel returned, so a platform missing a step
+  // shows an em dash there instead of shortening the table for everyone.
+  const longest = usable.reduce((best, s) => (s.funnel.length > best.funnel.length ? s : best), usable[0]);
+  const rows: PlatformFunnelRow[] = longest.funnel.map((step, index) => ({
+    step: step.step,
+    event_name: step.event_name,
+    byPlatform: Object.fromEntries(
+      usable
+        .map((s) => [s.platform, s.funnel[index]] as const)
+        .filter(([, cell]) => !!cell && cell.event_name === step.event_name),
+    ),
+  }));
+
+  return <DataTable title="Same funnel, per platform" columns={columns} data={rows} idKey="step" pageSize={10} />;
+}
+
+type PlatformFunnelRow = {
+  step: number;
+  event_name: string;
+  byPlatform: Record<string, FunnelStep | undefined>;
+};
 
 // ResultView is the single composed result block: a headline stat strip, then a
 // chart, then the supporting table — the same rhythm for every insight type.

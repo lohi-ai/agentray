@@ -10,7 +10,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from agentray import Client  # noqa: E402
+from agentray import Client, DEFAULT_PLATFORM  # noqa: E402
 
 
 class _FakeResp:
@@ -84,6 +84,37 @@ def test_shutdown_flushes_remaining():
     c.capture("evt", distinct_id="u")
     c.shutdown()  # must drain the buffer before the worker exits
     assert len(rec.batches) == 1
+
+
+def test_events_are_tagged_as_server():
+    rec = _Recorder()
+    c = _new_client(rec, flush_at=1, flush_interval=60)
+    c.capture("order_paid", distinct_id="u", properties={"amount": 19})
+    c.flush(timeout=2)
+    props = rec.batches[0][2]["batch"][0]["properties"]
+    # Left to inference, this depends on a substring in urllib3's version string
+    # surviving forever; stated outright, the platform split stays correct.
+    assert props["platform"] == DEFAULT_PLATFORM == "server"
+    assert props["amount"] == 19
+    c.shutdown()
+
+
+def test_caller_cannot_mislabel_the_platform():
+    rec = _Recorder()
+    c = _new_client(rec, flush_at=1, flush_interval=60)
+    c.capture("evt", distinct_id="u", properties={"platform": "web"})
+    c.flush(timeout=2)
+    assert rec.batches[0][2]["batch"][0]["properties"]["platform"] == "server"
+    c.shutdown()
+
+
+def test_platform_override_for_a_relay():
+    rec = _Recorder()
+    c = _new_client(rec, flush_at=1, flush_interval=60, platform="ios")
+    c.capture("evt", distinct_id="u")
+    c.flush(timeout=2)
+    assert rec.batches[0][2]["batch"][0]["properties"]["platform"] == "ios"
+    c.shutdown()
 
 
 def test_4xx_not_retried():

@@ -1127,6 +1127,7 @@ func filterFromRequest(c echo.Context) storage.EventFilter {
 		AgentID:    strings.TrimSpace(c.QueryParam("agent_id")),
 		ModelName:  strings.TrimSpace(c.QueryParam("model_name")),
 		Search:     strings.TrimSpace(c.QueryParam("search")),
+		Platform:   strings.TrimSpace(c.QueryParam("platform")),
 		ErrorOnly:  c.QueryParam("error_only") == "true" || c.QueryParam("error_only") == "1",
 		Limit:      intParam(c, "limit", 100, 1, 500),
 	}

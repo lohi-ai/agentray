@@ -7,5 +7,5 @@
  *   await ar.revenue('user-123', { amount: 19, currency: 'USD' }, { idempotencyKey: webhook.id });
  */
 
-export { AgentRayServerClient } from './client';
+export { AgentRayServerClient, DEFAULT_PLATFORM } from './client';
 export type { AgentRayServerConfig, CaptureOptions, RevenueEvent } from './client';

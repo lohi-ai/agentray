@@ -80,3 +80,19 @@ Analyst agents read MRR/LTV/conversion from it without extra configuration.
 npm run build      # tsup → dist/ (ESM + CJS + d.ts)
 npm run typecheck
 ```
+
+## Which app an event came from
+
+Every event carries `platform: "server"`, which keeps backend-sent events —
+payments above all — out of the "unknown" bucket in Traffic's platform split and
+the per-platform funnel.
+
+It has to be stated. Node's global `fetch` identifies itself as the bare word
+`node`, which matches no client the server can recognise, so an untagged revenue
+event is attributed to nothing at exactly the point money is counted.
+
+When you are relaying on a client's behalf and know its real platform, say so:
+
+```ts
+new AgentRayServerClient({ apiUrl, apiKey, platform: 'ios' });
+```

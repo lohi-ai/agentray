@@ -187,6 +187,7 @@ func (h Handler) toEvent(c echo.Context, payload capturePayload, inheritedAPIKey
 		ReferrerHost:    refHost,
 		ReferrerChannel: refChannel,
 		UserAgent:       ua,
+		Platform:        classifyPlatform(props, ua),
 		InsertID:        stringProp(props, "$insert_id"),
 		IsUnplanned:     h.catalog.isUnplanned(c.Request().Context(), project.ID, payload.Event),
 	}, nil

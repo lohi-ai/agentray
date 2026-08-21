@@ -3,20 +3,27 @@
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
+import { Apple, Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
 import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import { apiBase } from '@/lib/api';
 import { settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
 import { useAuthStore } from '@/lib/app-state';
 import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
 import { Button, Segment } from '@/modules/shared/components/signal-primitives';
-import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
+import { InstrumentSnippet, swiftSnippet } from '@/modules/start/components/instrument-snippet';
 
-type Source = 'website' | 'app' | 'warehouse';
+type Source = 'website' | 'ios' | 'app' | 'warehouse';
 type Lang = 'curl' | 'js' | 'python';
 
+// iOS is its own source, not a language under "App / API". A native app is a
+// different audience arriving through the same key — it needs a device id that
+// survives launches, an alias on login so its users are not counted twice
+// against the website's, and a platform tag — none of which a cURL example
+// teaches. Leaving it out is what made "I have a web app and an iOS app" a
+// hand-rolled integration.
 const SOURCES: Array<{ value: Source; label: string }> = [
   { value: 'website', label: 'Website' },
+  { value: 'ios', label: 'iOS app' },
   { value: 'app', label: 'App / API' },
   { value: 'warehouse', label: 'Warehouse' },
 ];
@@ -91,7 +98,7 @@ export function FirstEventQuickstart() {
   );
   // The website snippet is a <script> tag, so it highlights as HTML; the app
   // snippets follow the picked language.
-  const codeLang = source === 'website' ? 'html' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
+  const codeLang = source === 'website' ? 'html' : source === 'ios' ? 'swift' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
 
   if (!shouldShowFirstEventGuide({
     eventNames: names,
@@ -119,7 +126,7 @@ export function FirstEventQuickstart() {
           </div>
           <div className="text-sm font-semibold">Send your first event</div>
           <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">
-            No data yet. Drop a snippet on your site, in your app, or open a warehouse connector.
+            No data yet. Drop a snippet on your site, in your iOS app, in your backend, or open a warehouse connector.
           </div>
         </div>
       </div>
@@ -159,6 +166,11 @@ export function FirstEventQuickstart() {
                   <Smartphone size={14} className="text-[var(--color-text-secondary)]" />
                   <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
                 </div>
+              ) : source === 'ios' ? (
+                <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
+                  <Apple size={14} /> Drop this in one Swift file. It tags every event <code className="font-mono">platform: ios</code>, so
+                  your app and your site stay separable.
+                </p>
               ) : (
                 <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
                   <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">user.pageview</code>.
@@ -167,7 +179,7 @@ export function FirstEventQuickstart() {
               {source === 'website' ? (
                 <InstrumentSnippet apiKey={key} host={base} />
               ) : (
-                <CodeBlock code={code} language={codeLang} size="sm" width="100%" container="section" />
+                <CodeBlock code={source === 'ios' ? swiftSnippet(base, key) : code} language={codeLang} size="sm" width="100%" container="section" />
               )}
             </>
           )}

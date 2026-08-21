@@ -89,6 +89,21 @@ Client(host="http://localhost:8088", api_key="lohi_dev_project_token").capture(
     "user.signup", distinct_id="you", properties={"plan": "free"})
 ```
 
+Have an iOS app too? `sdk/swift/` is a Swift Package — add it by path
+(`.package(path: "…/agentray/sdk/swift")`), or paste the one-file version from
+**Set up → 2 · iOS app**:
+
+```swift
+AgentRay.start(host: "http://localhost:8088", apiKey: "lohi_dev_project_token")
+AgentRay.shared.screen("Home")                                  // → user.pageview
+AgentRay.shared.identify("user_123", traits: ["email": "you@example.com"])
+```
+
+Every event it sends carries `platform: ios`, and `identify` aliases the
+install's anonymous history to the user — so the same human on your site and in
+your app is one person, and Traffic's **By platform** panel and Product's
+per-platform funnel can still tell the two audiences apart.
+
 ## 3. Get your first agent answer (≈3 min)
 
 A new workspace is seeded with a **Growth Lead** agent. Open the **Chat** tab and

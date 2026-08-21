@@ -128,7 +128,7 @@ func exploreEvents() opcore.Operation[windowInput, storage.EventExplorer] {
 			"`events` is a raw sample for seeing an actual payload; it is truncated, so never count from it. " +
 			"Both cover the same window (`hours`, default recent) — widen `hours` rather than concluding an event " +
 			"is missing or a product is new.",
-		Scope:   "data_quality",
+		Scope: "data_quality",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in windowInput) (storage.EventExplorer, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -172,6 +172,10 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"Use raw `distinct_id` only for exact-match filters on a specific id. " +
 			"For any user/acquisition/retention metric, exclude crawlers with " +
 			"WHERE ifNull(visitor_class, 'human') = 'human' — search-bot and ai-platform rows are not people. " +
+			"A project may ship more than one app: the `platform` column says which one an event came from " +
+			"('web', 'ios', 'android', 'server'; '' when undetermined). Split by it before comparing " +
+			"platforms — do NOT read platform out of properties, and never state a product-wide rate as if " +
+			"it described one app when more than one platform is present. " +
 			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"JSONExtractString(data, 'column') (JSONExtractInt/Float for numbers); row_key is the source row's " +

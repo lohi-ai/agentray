@@ -19,3 +19,13 @@ bench/solutions/
 
 # Stray vitest cache at the repo root (the web app has its own node_modules)
 /node_modules
+
+# SDK build artefacts and installs. Lockfiles ARE committed — CI publishes from
+# them, and an SDK that resolves a different dependency tree than the one its
+# tests ran against is not the artefact that was verified.
+sdk/*/node_modules
+sdk/*/dist
+sdk/python/dist
+sdk/python/*.egg-info
+__pycache__/
+sdk/swift/.build

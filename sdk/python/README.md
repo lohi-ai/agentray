@@ -32,3 +32,18 @@ transient 5xx/network errors with backoff. 4xx responses are not retried.
 Point an existing `posthog.capture(distinct_id, event, properties)` integration
 at AgentRay by swapping the client; the wire payload (`distinct_id` + `event` +
 `properties`, `$identify`/`$set` for person traits) is the same.
+
+## Which app an event came from
+
+Every event carries `platform: "server"`, so backend-sent events stay separable
+from your website's and your app's in Traffic's platform split and the
+per-platform funnel rather than collapsing into "unknown".
+
+Relaying events for a client whose real platform you know? Say so once:
+
+```python
+Client(host=..., api_key=..., platform="ios")
+```
+
+A `platform` key passed to `capture()` does not override it — the value is
+applied after your properties, so a surface cannot be mislabelled by accident.

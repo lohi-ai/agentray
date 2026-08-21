@@ -8,7 +8,8 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { defaultFilters, type Filters } from '@/lib/api';
 import { useAuthStore, useFiltersStore } from '@/lib/app-state';
 import { formatDate } from '@/lib/format';
-import { useFilters } from '@/modules/app/hooks';
+import { platformLabel } from '@/lib/platform';
+import { useActivity, useFilters } from '@/modules/app/hooks';
 
 // RANGE_PRESETS are the windows offered by the range dropdown, in hours. They
 // match rangeLabel's phrasing so the trigger reads back exactly what was picked.
@@ -25,6 +26,7 @@ const CUSTOM = '__custom__';
 // EVENT_TYPES is the default facet for the event_type filter. Pages may pass a
 // data-derived list via `eventTypes`; '' is rendered as "All types".
 const EVENT_TYPES = ['agent', 'web', 'product'];
+
 
 // chip is the shared read-only pill (project, custom-range summary).
 function Chip({ children }: { children: ReactNode }) {
@@ -50,6 +52,14 @@ export function FilterBar({
   const project = useAuthStore((s) => s.project);
   const applied = useFiltersStore((s) => s.appliedFilters);
   const { refresh } = useFilters();
+  const { summary } = useActivity();
+
+  // The platform facet is data-driven and self-hiding: a product that only ships
+  // a website has one platform and does not need a control that can only ever
+  // say "web". It appears by itself the day a second app starts sending — and
+  // stays visible while a filter is applied, so it can always be cleared.
+  const platforms = summary?.platforms ?? [];
+  const showPlatform = platforms.length > 1 || !!applied.platform;
   const [calendarOpen, setCalendarOpen] = useState(false);
 
   const hasCustom = !!applied.from && !!applied.to;
@@ -64,6 +74,7 @@ export function FilterBar({
     !!applied.event_type ||
     applied.error_only ||
     !!applied.event_name ||
+    !!applied.platform ||
     !!applied.search;
 
   // Astryx Calendar uses ISO date strings (YYYY-MM-DD); the filter store keeps
@@ -140,6 +151,21 @@ export function FilterBar({
           value={applied.event_type || 'all'}
           onChange={(v) => apply({ event_type: v === 'all' ? '' : v })}
           options={[{ value: 'all', label: 'All types' }, ...eventTypes.map((t) => ({ value: t, label: t }))]}
+        />
+      ) : null}
+
+      {showPlatform ? (
+        <Selector
+          label="Platform"
+          isLabelHidden
+          size="sm"
+          placeholder="All platforms"
+          value={applied.platform || 'all'}
+          onChange={(v) => apply({ platform: v === 'all' ? '' : v })}
+          options={[
+            { value: 'all', label: 'All platforms' },
+            ...platforms.map((p) => ({ value: p, label: platformLabel(p) })),
+          ]}
         />
       ) : null}
 
