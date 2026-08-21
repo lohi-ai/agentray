@@ -9,6 +9,7 @@ import { defaultFilters, type Filters } from '@/lib/api';
 import { useAuthStore, useFiltersStore } from '@/lib/app-state';
 import { formatDate } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
+import { useFilterUrlSync } from '@/lib/use-filter-url-sync';
 import { useActivity, useFilters } from '@/modules/app/hooks';
 
 // RANGE_PRESETS are the windows offered by the range dropdown, in hours. They
@@ -49,6 +50,11 @@ export function FilterBar({
   showEventType?: boolean;
   showErrors?: boolean;
 }) {
+  // Keeps the address bar and the controls in step, so a filtered view is a
+  // link someone can send. Mounted here rather than per page: FilterBar is the
+  // only thing every filtered surface has in common.
+  useFilterUrlSync();
+
   const project = useAuthStore((s) => s.project);
   const applied = useFiltersStore((s) => s.appliedFilters);
   const { refresh } = useFilters();
