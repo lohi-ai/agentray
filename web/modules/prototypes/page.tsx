@@ -6,15 +6,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import type { MeasuredTest } from '@/lib/api';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import {
-  Button,
-  Callout,
-  EmptyState,
-  Intro,
-  Loading,
-  Panel,
-  StatsStrip,
-} from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { PrototypeCard } from './components/prototype-card';
 import { usePrototypes } from './hooks';
 import { chatHref, groupTests, stateOf } from './lib/prototype';
@@ -46,16 +38,16 @@ export function PrototypesPage() {
   };
 
   return (
-    <AppShell active="prototypes">
-      <Intro
-        title="Prototypes"
-        sub="Market the idea before you build it. Paste the snippet on the page, collect the waitlist, and keep the number you agreed to."
-        action={
+    <AppShell
+      active="prototypes"
+      title="Prototypes"
+      sub="Market the idea before you build it. Paste the snippet on the page, collect the waitlist, and keep the number you agreed to."
+      actions={
           <Button variant="agent" icon={<Beaker size={15} aria-hidden />} onClick={() => router.push(chatHref(DESIGN_PROMPT))}>
             Talk to Marketing Lead
           </Button>
         }
-      />
+    >
       <StatsStrip
         stats={[
           { label: 'Waiting on you', value: String(waiting.length), tone: waiting.length ? 'agent' : undefined },

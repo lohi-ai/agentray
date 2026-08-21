@@ -207,7 +207,7 @@ export function DataTable<T extends Record<string, unknown>>({
 
       {hasHeader ? (
         <div className="flex flex-wrap items-center gap-2.5">
-          {title ? <h3 className="text-[13.5px] font-semibold text-[var(--color-text-primary)]">{title}</h3> : null}
+          {title ? <h3 className="text-base font-semibold text-[var(--color-text-primary)]">{title}</h3> : null}
           <div className="ml-auto flex items-center gap-2">
             {searchPlaceholder ? (
               <div className="w-48">

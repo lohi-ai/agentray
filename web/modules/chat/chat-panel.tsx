@@ -101,12 +101,12 @@ function PlanPane({ plan, goal }: { plan: AgentPlanItem[]; goal: string }) {
 }
 
 function RecsPane({ recs, onAck }: { recs: AgentRecommendation[]; onAck: (id: string, status: 'accepted' | 'dismissed') => void }) {
-  if (recs.length === 0) return <div className="px-1 py-1.5 pt-3 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">No open recommendations</div>;
+  if (recs.length === 0) return <div className="px-1 py-1.5 pt-3 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">No open recommendations</div>;
   return (
     <div>
       {recs.map((r) => (
         <Card key={r.id} padding={3} className="mb-2">
-          <Text weight="semibold" className="mb-[3px] block text-[13px]">{r.title}</Text>
+          <Text weight="semibold" className="mb-[3px] block text-sm">{r.title}</Text>
           <Text type="supporting" className="mb-2.5 block leading-[1.45]">{r.rationale}</Text>
           <div className="flex gap-2">
             <Button variant="primary" size="sm" label="Act" onClick={() => onAck(r.id, 'accepted')} />
@@ -149,7 +149,7 @@ function ActivityPane({ runs }: { runs: AgentRun[] }) {
           key={run.id}
           startContent={activityDot(run.status)}
           label={run.summary || `${run.trigger} run`}
-          endContent={<span className="font-mono text-[11px] text-[var(--color-text-disabled)]">{run.finished_at ? formatRelative(run.finished_at) : 'now'}</span>}
+          endContent={<span className="font-mono text-2xs text-[var(--color-text-disabled)]">{run.finished_at ? formatRelative(run.finished_at) : 'now'}</span>}
         />
       ))}
     </List>
@@ -174,7 +174,7 @@ function RunsPane({ runs }: { runs: AgentRun[] }) {
           }
           endContent={
             <span
-              className="font-mono tabular-nums text-[11px]"
+              className="font-mono tabular-nums text-2xs"
               style={{
                 color: run.status === 'running' ? 'var(--agent)'
                   : isFailedRun(run.status) ? 'var(--danger)'

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { jobById, type JobId } from '@/lib/jobs';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Intro, Loading } from '@/modules/shared/components/signal-primitives';
+import { Loading } from '@/modules/shared/components/signal-primitives';
 import { JobPicker } from './components/job-picker';
 import { JobPlan } from './components/job-plan';
 import { useJobBoard } from './hooks';
@@ -34,11 +34,10 @@ export function StartPage() {
   };
 
   return (
-    <AppShell>
-      <Intro
-        title="Where is your product right now?"
-        sub="Pick the job. AgentRay hires the teammate, wires the channel, and points it at the evidence."
-      />
+    <AppShell
+      title="Where is your product right now?"
+      sub="Pick the job. AgentRay hires the teammate, wires the channel, and points it at the evidence."
+    >
       {board.job ? (
         <>
           <JobPicker active={board.job.id} state={board.state} onPick={pick} />

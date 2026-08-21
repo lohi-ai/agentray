@@ -11,7 +11,8 @@ import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCap
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Loading, Panel, Segment } from '@/modules/shared/components/signal-primitives';
+import { PageTabs } from '@/modules/shared/components/page-shell';
+import { Button, EmptyState, Loading, Panel, Segment } from '@/modules/shared/components/signal-primitives';
 
 // The per-agent setup surface (DESIGN: AgentGarden — zero backend code per agent).
 // Every section here drives an API that already existed but had no UI: the agent's
@@ -26,10 +27,10 @@ import { Button, EmptyState, Intro, Loading, Panel, Segment } from '@/modules/sh
 // webhook URL) — since Astryx TextArea/TextInput can't set a monospace control font
 // through their typed props (same exception class as the SQL editor).
 const inputCls =
-  'h-9 w-full rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] px-3 text-[13px] text-[var(--color-text-primary)] outline-none focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]';
-const labelCls = 'mb-1.5 block text-[12.5px] text-[var(--color-text-secondary)]';
+  'h-9 w-full rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] px-3 text-sm text-[var(--color-text-primary)] outline-none focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]';
+const labelCls = 'mb-1.5 block text-sm text-[var(--color-text-secondary)]';
 const textareaCls =
-  'min-h-[180px] w-full rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] p-3 font-mono text-[12.5px] leading-[1.6] text-[var(--color-text-primary)] outline-none focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]';
+  'min-h-[180px] w-full rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] p-3 font-mono text-sm leading-[1.6] text-[var(--color-text-primary)] outline-none focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]';
 
 // Toggle is a plain on/off switch styled like the rest of the surface, used for
 // tools and permissions so the page reads as a list of capabilities a teammate
@@ -82,17 +83,17 @@ function PersonaTab({ agentID }: { agentID: string }) {
   return (
     <div className="flex flex-col gap-[14px]">
       <Panel title="Describe the teammate" action={<Button variant="agent" size="sm" icon={<Sparkles size={14} />} onClick={() => void onDraft()} disabled={definitionDraftPending || !idea.trim()}>{definitionDraftPending ? 'Drafting…' : 'Draft with AI'}</Button>}>
-        <p className="mb-2 max-w-[620px] text-[12px] text-[var(--color-text-secondary)]">In one line, say what this agent is for. We&apos;ll draft a starting persona and instructions you can edit below.</p>
+        <p className="mb-2 max-w-[620px] text-xs text-[var(--color-text-secondary)]">In one line, say what this agent is for. We&apos;ll draft a starting persona and instructions you can edit below.</p>
         <TextInput label="What is this agent for?" isLabelHidden value={idea} placeholder="e.g. A growth analyst who watches signups and flags drops" onChange={(v) => setIdea(v)} width="100%" />
       </Panel>
 
       <Panel title="Personality & role">
-        <p className="mb-2 max-w-[620px] text-[12px] text-[var(--color-text-secondary)]">Who the agent is and how it should talk — its voice, priorities, and what it cares about.</p>
+        <p className="mb-2 max-w-[620px] text-xs text-[var(--color-text-secondary)]">Who the agent is and how it should talk — its voice, priorities, and what it cares about.</p>
         <TextArea label="Personality & role" isLabelHidden rows={9} width="100%" value={soul ?? ''} onChange={(v) => setSoul(v)} placeholder="You are a friendly growth analyst…" />
       </Panel>
 
       <Panel title="Working instructions">
-        <p className="mb-2 max-w-[620px] text-[12px] text-[var(--color-text-secondary)]">How it should do the work — steps to follow, things to always check, and what to avoid.</p>
+        <p className="mb-2 max-w-[620px] text-xs text-[var(--color-text-secondary)]">How it should do the work — steps to follow, things to always check, and what to avoid.</p>
         <TextArea label="Working instructions" isLabelHidden rows={9} width="100%" value={agents ?? ''} onChange={(v) => setAgents(v)} placeholder="When asked about a metric, always…" />
       </Panel>
 
@@ -117,7 +118,7 @@ function WorkspaceFolderPanel({ agent }: { agent: Agent }) {
 
   return (
     <Panel title="Workspace folder">
-      <p className="max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+      <p className="max-w-[600px] text-xs text-[var(--color-text-secondary)]">
         Where this agent&apos;s files live. Every tool below shares it, which is what lets the agent write a
         script and then run it. Leave it blank and each conversation gets its own private folder under
         <code className="mx-1 font-mono">~/.agentray/workspaces</code>; set it to point the agent at a folder you
@@ -160,7 +161,7 @@ function ToolsTab({ agent }: { agent: Agent }) {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Turn on only what this teammate needs. Each tool is a thing the agent can do on your behalf — keeping the list tight keeps it predictable.</p>
+      <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">Turn on only what this teammate needs. Each tool is a thing the agent can do on your behalf — keeping the list tight keeps it predictable.</p>
       <WorkspaceFolderPanel agent={agent} />
       {catalog.map((tool) => {
         const sel = selByName.get(tool.name);
@@ -172,7 +173,7 @@ function ToolsTab({ agent }: { agent: Agent }) {
               else void setTool(tool.name, true, JSON.parse(tool.configurable ? configFor(tool.name) : '{}'));
             }} />
           }>
-            <p className="max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{tool.description}</p>
+            <p className="max-w-[600px] text-xs text-[var(--color-text-secondary)]">{tool.description}</p>
             {tool.configurable ? (
               <div className="mt-3">
                 <label className={labelCls}>Settings <span className="text-[var(--color-text-disabled)]">(JSON — e.g. allowed hosts)</span></label>
@@ -212,7 +213,7 @@ function TeammatesTab({ agentID }: { agentID: string }) {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">
+      <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">
         Let this agent hand tasks to other agents. A teammate does the delegated task with its <em>own</em> persona, tools, and permissions, then reports back only its final answer. This agent can always delegate to a copy of itself — no setting needed.
       </p>
       {candidates.map((a) => {
@@ -224,7 +225,7 @@ function TeammatesTab({ agentID }: { agentID: string }) {
               else void setDelegate(a.id, true);
             }} />
           }>
-            <p className="max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+            <p className="max-w-[600px] text-xs text-[var(--color-text-secondary)]">
               {a.enabled ? <>Allow handing tasks to <span className="font-medium text-[var(--color-text-primary)]">{a.name}</span> ({a.slug}).</> : 'This agent is currently disabled and cannot receive tasks.'}
             </p>
           </Panel>
@@ -264,10 +265,10 @@ function PermissionsTab({ agentID }: { agentID: string }) {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Decide what this teammate is trusted to do. Everything is off until you allow it.</p>
+      <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">Decide what this teammate is trusted to do. Everything is off until you allow it.</p>
       {SCOPES.map((s) => (
         <Panel key={s.id} title={s.label} action={<Toggle on={!!scopes[s.id]} onClick={() => setDraft((d) => ({ ...(d ?? {}), [s.id]: !(d?.[s.id]) }))} />}>
-          <p className="max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{s.detail}</p>
+          <p className="max-w-[600px] text-xs text-[var(--color-text-secondary)]">{s.detail}</p>
         </Panel>
       ))}
       <div><Button variant="primary" size="sm" onClick={() => void onSave()} disabled={saving}>{saving ? 'Saving…' : 'Save permissions'}</Button></div>
@@ -326,21 +327,21 @@ function AutonomySection() {
 
   return (
     <Panel title="Autonomy">
-      <p className="mb-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+      <p className="mb-2.5 max-w-[600px] text-xs text-[var(--color-text-secondary)]">
         How much agents in this project may do when no one is watching. This applies to every agent in the
         project and is enforced by the platform — below “Auto”, the Fetch / HTTP publishing tools are removed
         from every unattended run, whatever the agent&apos;s instructions say.
       </p>
       {!known ? (
-        <p className="mb-2 max-w-[600px] text-[12px] font-medium" style={{ color: 'var(--color-warning)' }}>
+        <p className="mb-2 max-w-[600px] text-xs font-medium" style={{ color: 'var(--color-warning)' }}>
           The stored autonomy value “{stored}” is not recognized, so agents run at Suggest (the strictest
           rung). Save to normalize it.
         </p>
       ) : null}
       <Segment options={AUTONOMY_OPTIONS} value={selected} onChange={setValue} />
-      <p className="mt-2.5 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{rung.detail}</p>
+      <p className="mt-2.5 max-w-[600px] text-xs text-[var(--color-text-secondary)]">{rung.detail}</p>
       {selected === 'auto' ? (
-        <p className="mt-2 max-w-[600px] text-[12px] font-medium" style={{ color: 'var(--color-warning)' }}>
+        <p className="mt-2 max-w-[600px] text-xs font-medium" style={{ color: 'var(--color-warning)' }}>
           Only turn this on when you trust the agents and their allowed hosts more than a per-post review.
           Nobody approves a post beforehand, and the audit trail is filed by the agent itself — it is a duty
           in its instructions, not something the platform can guarantee.
@@ -388,7 +389,7 @@ function BudgetSection({ agentID }: { agentID: string }) {
 
   return (
     <Panel title="Daily budget">
-      <p className="mb-3 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">
+      <p className="mb-3 max-w-[600px] text-xs text-[var(--color-text-secondary)]">
         Cap what this teammate can spend per day. When the cap is reached it finishes its current
         thought and stops until tomorrow. Leave blank to inherit the workspace default (or run uncapped).
       </p>
@@ -428,7 +429,7 @@ function BudgetSection({ agentID }: { agentID: string }) {
 // BudgetMeter renders the spend-vs-cap bar for the resolved daily budget.
 function BudgetMeter({ status }: { status: BudgetStatus | null }) {
   if (!status || !status.has_budget || status.budget.max_cost_usd <= 0) {
-    return <p className="text-[12px] text-[var(--color-text-disabled)]">No spend cap — this agent runs uncapped.</p>;
+    return <p className="text-xs text-[var(--color-text-disabled)]">No spend cap — this agent runs uncapped.</p>;
   }
   const cap = status.budget.max_cost_usd;
   const spent = status.spend.cost_usd;
@@ -436,7 +437,7 @@ function BudgetMeter({ status }: { status: BudgetStatus | null }) {
   const tone = status.exceeded ? 'var(--color-danger)' : pct >= 80 ? 'var(--color-warning)' : 'var(--agent)';
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[12px]">
+      <div className="mb-1 flex items-center justify-between text-xs">
         <span className="text-[var(--color-text-secondary)]">
           ${spent.toFixed(2)} of ${cap.toFixed(2)} today
           {status.budget.is_workspace_default ? ' (workspace default)' : ''}
@@ -471,11 +472,11 @@ function ModelTab({ agentID }: { agentID: string }) {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Match the brainpower to the job. Use a lighter, cheaper model for quick steps and a stronger one where depth matters — a simple way to control cost. The actual models behind each tier are set in <button className="underline hover:text-[var(--color-text-primary)]" onClick={() => router.push('/settings')}>workspace settings</button>.</p>
+      <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">Match the brainpower to the job. Use a lighter, cheaper model for quick steps and a stronger one where depth matters — a simple way to control cost. The actual models behind each tier are set in <button className="underline hover:text-[var(--color-text-primary)]" onClick={() => router.push('/settings')}>workspace settings</button>.</p>
       <BudgetSection agentID={agentID} />
       {AGENT_TASK_KINDS.map((kind) => (
         <Panel key={kind} title={TASK_LABELS[kind].label}>
-          <p className="mb-3 max-w-[600px] text-[12px] text-[var(--color-text-secondary)]">{TASK_LABELS[kind].detail}</p>
+          <p className="mb-3 max-w-[600px] text-xs text-[var(--color-text-secondary)]">{TASK_LABELS[kind].detail}</p>
           <Selector
             label="Model tier"
             isLabelHidden
@@ -563,7 +564,7 @@ function TriggerRow({ trigger, secretNames, onSave, onDelete }: {
           <div>
             <label className={labelCls}>Webhook URL <span className="text-[var(--color-text-disabled)]">(POST here to fire — keep it secret)</span></label>
             <div className="flex items-center gap-2">
-              <input className={`${inputCls} font-mono text-[12px]`} readOnly value={hookURL(trigger.webhook_token)} onFocus={(e) => e.currentTarget.select()} />
+              <input className={`${inputCls} font-mono text-xs`} readOnly value={hookURL(trigger.webhook_token)} onFocus={(e) => e.currentTarget.select()} />
               <Button variant="outline" size="sm" icon={<Copy size={13} />} onClick={() => void copy()}>Copy</Button>
             </div>
           </div>
@@ -609,7 +610,7 @@ function TriggersTab({ agentID }: { agentID: string }) {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[12.5px] text-[var(--color-text-secondary)]">Let this teammate start work on its own — on a schedule, or whenever another system calls in. Without a trigger it only runs when someone messages it in chat.</p>
+      <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">Let this teammate start work on its own — on a schedule, or whenever another system calls in. Without a trigger it only runs when someone messages it in chat.</p>
 
       <Panel title="Add a trigger">
         <div className="flex flex-col gap-3">
@@ -627,7 +628,7 @@ function TriggersTab({ agentID }: { agentID: string }) {
               <input className={`${inputCls} max-w-[320px] font-mono`} value={cron} placeholder="0 9 * * 1" onChange={(e) => setCron(e.target.value)} />
             </div>
           ) : (
-            <p className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]"><Webhook size={13} /> We&apos;ll generate a secret URL once you add this — you POST to it to fire the agent.</p>
+            <p className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]"><Webhook size={13} /> We&apos;ll generate a secret URL once you add this — you POST to it to fire the agent.</p>
           )}
           <div>
             <label className={labelCls}>Prompt</label>
@@ -666,19 +667,25 @@ export function AgentSetupPage() {
   const [tab, setTab] = useState<string>('persona');
 
   if (isLoading && !agent) {
-    return <AppShell active="agents"><Intro title="Agent setup" sub="Configure your teammate." /><Loading label="Loading agent…" /></AppShell>;
+    return <AppShell active="agents" title="Agent setup" sub="Configure your teammate."><Loading label="Loading agent…" /></AppShell>;
   }
   if (!agent) {
-    return <AppShell active="agents"><Intro title="Agent setup" sub="Configure your teammate." /><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents')}>Back to agents</Button>} /></AppShell>;
+    return <AppShell active="agents" title="Agent setup" sub="Configure your teammate."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents')}>Back to agents</Button>} /></AppShell>;
   }
 
   return (
-    <AppShell active="agents">
-      <Intro
-        title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents')}><ArrowLeft size={15} /></button>{agent.name}</span>}
-        sub="Set up how this teammate thinks, what it can use, and what it's trusted to do."
-      />
-      <div className="mb-3.5"><Segment options={TABS.map((t) => ({ value: t.value, label: t.label }))} value={tab} onChange={setTab} /></div>
+    <AppShell
+      active="agents"
+      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents')}><ArrowLeft size={15} /></button>{agent.name}</span>}
+      sub="Set up how this teammate thinks, what it can use, and what it's trusted to do."
+      tabs={
+        <PageTabs
+          tabs={TABS.map((t) => ({ id: t.value, label: <><t.icon size={15} aria-hidden />{t.label}</> }))}
+          value={tab}
+          onChange={setTab}
+        />
+      }
+    >
       {tab === 'persona' ? <PersonaTab agentID={agentID} /> : null}
       {tab === 'tools' ? <ToolsTab agent={agent} /> : null}
       {tab === 'teammates' ? <TeammatesTab agentID={agentID} /> : null}

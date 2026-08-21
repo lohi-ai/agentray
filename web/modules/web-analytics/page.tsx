@@ -9,7 +9,7 @@ import { useFiltersStore } from '@/lib/app-state';
 import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { BarRows, Button, Callout, Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { BarRows, Button, Callout, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 export function WebAnalyticsPage() {
   const router = useRouter();
@@ -19,8 +19,7 @@ export function WebAnalyticsPage() {
 
   if (!web) {
     return (
-      <AppShell active="traffic">
-        <Intro title="Traffic" sub="Where visitors come from and which sources are worth more." />
+      <AppShell active="traffic" title="Traffic" sub="Where visitors come from and which sources are worth more.">
         <Loading label="Loading traffic…" />
       </AppShell>
     );
@@ -32,8 +31,12 @@ export function WebAnalyticsPage() {
   const topSource = web.referrers_by_channel[0] || web.referrers[0];
 
   return (
-    <AppShell active="traffic">
-      <Intro title="Traffic" sub="Where visitors come from and which sources are worth more." action={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask about traffic</Button>} />
+    <AppShell
+      active="traffic"
+      title="Traffic"
+      sub="Where visitors come from and which sources are worth more."
+      actions={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask about traffic</Button>}
+    >
       <FilterBar showEventType={false} showErrors={false} />
       <StatsStrip
         stats={[

@@ -10,11 +10,10 @@ import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/
 import { platformLabel } from '@/lib/platform';
 import { useActivity, useFilters, useLiveEvents } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { EventNameSelect } from '@/modules/shared/components/event-name-picker';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { Button, Intro, Loading, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, Loading, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 
 // isAnonymousDistinctId flags the nil UUID an event carries when no person has
 // been identified yet. Deliberately strict: only an all-zero UUID means "nobody".
@@ -92,7 +91,7 @@ export function EventsPage() {
           {e.is_unplanned ? (
             <span
               title="Not in this project's established tracking plan — likely a typo or newly-shipped, un-documented event."
-              className="inline-flex items-center rounded-md bg-[color:color-mix(in_srgb,var(--color-warning)_16%,transparent)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[color:var(--color-warning)]"
+              className="inline-flex items-center rounded-md bg-[color:color-mix(in_srgb,var(--color-warning)_16%,transparent)] px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide text-[color:var(--color-warning)]"
             >
               unplanned
             </span>
@@ -198,7 +197,7 @@ export function EventsPage() {
     <span className="inline-flex items-center gap-2">
       <StatusPill status={live ? 'working' : 'paused'} label={live ? 'Live' : 'Paused'} grow={false} />
       {updatedAt ? (
-        <span className="text-[11px] text-[var(--color-text-secondary)]">
+        <span className="text-2xs text-[var(--color-text-secondary)]">
           {fetching && live ? 'updating…' : `updated ${formatRelative(new Date(updatedAt).toISOString())}`}
         </span>
       ) : null}
@@ -207,8 +206,7 @@ export function EventsPage() {
 
   if (loading && !explorer) {
     return (
-      <AppShell active="traffic">
-        <Intro title="Events" sub="Every signal you sent — people, sessions, and agent work." action={header} />
+      <AppShell active="traffic" title="Events" sub="Every signal you sent — people, sessions, and agent work." actions={header}>
         <FilterBar extra={liveStatus} />
         <Loading label="Loading events…" />
       </AppShell>
@@ -231,9 +229,7 @@ export function EventsPage() {
   );
 
   return (
-    <AppShell active="traffic">
-      <Intro title="Events" sub="Every signal you sent — people, sessions, and agent work." action={header} />
-      <div className="mb-3"><RelatedSurfacesLabel parentHref="/events" /></div>
+    <AppShell active="traffic" title="Events" sub="Every signal you sent — people, sessions, and agent work." actions={header}>
       <FilterBar extra={filterExtra} />
       <StatsStrip stats={[
         { label: 'Events', value: formatCompact(events.length) },

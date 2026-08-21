@@ -9,8 +9,7 @@ import { Chart } from '@/modules/shared/components/charts';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
-import { Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 // personLabel is the display identity used in the table and for global search:
 // a real name/email when we have it, otherwise the truncated distinct id.
@@ -40,13 +39,13 @@ function TraitChips({ traits }: { traits?: Record<string, unknown> }) {
         <span
           key={k}
           title={`${k}: ${traitText(v)}`}
-          className="inline-flex max-w-[220px] items-center gap-1 rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)]"
+          className="inline-flex max-w-[220px] items-center gap-1 rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-2xs text-[var(--color-text-secondary)]"
         >
           <span className="shrink-0 whitespace-nowrap font-medium text-[var(--color-text-primary)]">{k}</span>
           <span className="min-w-0 truncate">{traitText(v)}</span>
         </span>
       ))}
-      {rest > 0 ? <span className="text-[11px] text-[var(--color-text-secondary)]">+{rest}</span> : null}
+      {rest > 0 ? <span className="text-2xs text-[var(--color-text-secondary)]">+{rest}</span> : null}
     </span>
   );
 }
@@ -87,7 +86,7 @@ export function PersonsPage() {
             {p.platforms.map((platform) => (
               <span
                 key={platform}
-                className="inline-flex items-center rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)]"
+                className="inline-flex items-center rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-2xs text-[var(--color-text-secondary)]"
               >
                 {platformLabel(platform)}
               </span>
@@ -121,9 +120,7 @@ export function PersonsPage() {
 
   if (!persons) {
     return (
-      <AppShell active="traffic">
-        <Intro title="People" sub="Who is behind the events — identified and anonymous." />
-        <div className="mb-3"><RelatedSurfacesLabel parentHref="/persons" /></div>
+      <AppShell active="traffic" title="People" sub="Who is behind the events — identified and anonymous.">
         <Loading label="Loading people…" />
       </AppShell>
     );
@@ -132,9 +129,7 @@ export function PersonsPage() {
   const identifiedShare = persons.total ? (persons.identified / persons.total) * 100 : 0;
 
   return (
-    <AppShell active="traffic">
-      <Intro title="People" sub="Who is behind the events — identified and anonymous." />
-      <div className="mb-3"><RelatedSurfacesLabel parentHref="/persons" /></div>
+    <AppShell active="traffic" title="People" sub="Who is behind the events — identified and anonymous.">
       <FilterBar showEventType={false} showErrors={false} />
       <StatsStrip stats={[
         { label: 'People', value: formatNumber(persons.total) },
@@ -145,7 +140,7 @@ export function PersonsPage() {
       <div className="mb-4">
         <Panel title="Active people">
           {persons.active_timeline.length === 0 ? (
-            <div className="flex h-[140px] items-center justify-center text-[13px] text-[var(--color-text-secondary)]">
+            <div className="flex h-[140px] items-center justify-center text-sm text-[var(--color-text-secondary)]">
               No active people yet
             </div>
           ) : (

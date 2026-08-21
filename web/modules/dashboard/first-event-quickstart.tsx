@@ -121,11 +121,11 @@ export function FirstEventQuickstart() {
       <div className="flex items-start gap-[13px] border-b border-[var(--color-border)] px-4 py-3.5">
         <span className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary"><Plug size={16} /></span>
         <div className="min-w-0">
-          <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+          <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
             Get started · ~2 min
           </div>
           <div className="text-sm font-semibold">Send your first event</div>
-          <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">
+          <div className="text-sm leading-[1.5] text-[var(--color-text-secondary)]">
             No data yet. Drop a snippet on your site, in your iOS app, in your backend, or open a warehouse connector.
           </div>
         </div>
@@ -133,11 +133,11 @@ export function FirstEventQuickstart() {
 
       <div className="flex flex-col gap-3.5 p-4">
         <div>
-          <div className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium"><KeyRound size={14} className="text-[var(--color-text-secondary)]" /> Your project API key</div>
-          <div className="flex max-w-[560px] items-center gap-[10px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-[12.5px]">
+          <div className="mb-1.5 flex items-center gap-1.5 text-sm font-medium"><KeyRound size={14} className="text-[var(--color-text-secondary)]" /> Your project API key</div>
+          <div className="flex max-w-[560px] items-center gap-[10px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-sm">
             <span className="min-w-0 flex-1 truncate font-mono tabular-nums">{key || '—'}</span>
             <button
-              className="inline-flex flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-[11.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
+              className="inline-flex flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
               onClick={() => copy(key)}
               disabled={!key}
             >
@@ -148,12 +148,12 @@ export function FirstEventQuickstart() {
 
         <div>
           <div className="mb-1.5 flex flex-wrap items-center gap-2">
-            <span className="text-[12.5px] font-medium">Source</span>
+            <span className="text-sm font-medium">Source</span>
             <span className="ms-auto"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} /></span>
           </div>
 
           {source === 'warehouse' ? (
-            <div className="rounded-md bg-[var(--color-background-muted)] px-3.5 py-3 text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+            <div className="rounded-md bg-[var(--color-background-muted)] px-3.5 py-3 text-sm leading-[1.55] text-[var(--color-text-secondary)]">
               <p className="mb-2 flex items-center gap-1.5 text-[var(--color-text-primary)]">
                 <Warehouse size={14} /> Pull events from Postgres or an existing warehouse.
               </p>
@@ -167,12 +167,12 @@ export function FirstEventQuickstart() {
                   <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
                 </div>
               ) : source === 'ios' ? (
-                <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
+                <p className="mb-2 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
                   <Apple size={14} /> Drop this in one Swift file. It tags every event <code className="font-mono">platform: ios</code>, so
                   your app and your site stay separable.
                 </p>
               ) : (
-                <p className="mb-2 flex items-center gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
+                <p className="mb-2 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
                   <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">user.pageview</code>.
                 </p>
               )}
@@ -187,7 +187,7 @@ export function FirstEventQuickstart() {
 
         <div className="flex items-center gap-2">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
-          <span className="text-[11.5px] text-[var(--color-text-disabled)]">
+          <span className="text-xs text-[var(--color-text-disabled)]">
             Events can take a few seconds to appear. This card disappears once your first event lands.
           </span>
         </div>

@@ -14,17 +14,7 @@ import type { Operator } from '@/lib/api';
 import { formatCost, formatRelative } from '@/lib/format';
 import { FUTURE_CHANNELS } from '@/lib/ia';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import {
-  Button,
-  Callout,
-  EmptyState,
-  Intro,
-  Loading,
-  Panel,
-  StatsStrip,
-  StatusPill,
-  rowNavPlugin,
-} from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, EmptyState, Loading, Panel, StatsStrip, StatusPill, rowNavPlugin } from '@/modules/shared/components/signal-primitives';
 import { useProjectAccess } from '@/modules/app/hooks';
 import { useOperations } from './hooks';
 import { isTeamRun, lastOutcome, operatorStatus, operatorTitle, rank, runnerLabel, startsOn } from './lib/operator';
@@ -64,7 +54,7 @@ function StartsOn({ op }: { op: Operator }) {
   return (
     <HStack gap={1.5} align="center" className="text-[var(--color-text-secondary)]">
       {triggerIcon(op.kind)}
-      <span className={op.kind === 'webhook' ? 'font-mono text-[12px]' : undefined}>{startsOn(op)}</span>
+      <span className={op.kind === 'webhook' ? 'font-mono text-xs' : undefined}>{startsOn(op)}</span>
     </HStack>
   );
 }
@@ -203,16 +193,16 @@ export function OperationsPage() {
   const open = (op: Operator) => router.push(`/operations/${encodeURIComponent(op.id)}`);
 
   return (
-    <AppShell active="operations">
-      <Intro
-        title="Operations"
-        sub="Chat is the front door. These channels start a run without a conversation — a schedule or a webhook. Slack, Discord, and Telegram are next."
-        action={
+    <AppShell
+      active="operations"
+      title="Operations"
+      sub="Chat is the front door. These channels start a run without a conversation — a schedule or a webhook. Slack, Discord, and Telegram are next."
+      actions={
           <Button variant="primary" icon={<Zap size={15} aria-hidden />} disabled={!!blocked} tooltip={blocked || undefined} onClick={() => router.push('/agents')}>
             Give a teammate a schedule
           </Button>
         }
-      />
+    >
       <StatsStrip
         stats={[
           { label: 'Armed', value: String(armed), tone: armed ? 'success' : undefined },

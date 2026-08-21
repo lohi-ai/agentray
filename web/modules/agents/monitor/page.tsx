@@ -7,7 +7,7 @@ import type { AgentMonitorRow } from '@/lib/api';
 import { formatCompact, formatCost, formatRelative } from '@/lib/format';
 import { useAgentMonitor } from '@/modules/agent-monitor/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, Callout, Intro, Loading, Panel, StatsStrip, StatusPill, rowNavPlugin } from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, Loading, Panel, StatsStrip, StatusPill, rowNavPlugin } from '@/modules/shared/components/signal-primitives';
 
 function statusOf(row: AgentMonitorRow): { status: string; label: string } {
   if (!row.enabled) return { status: 'paused', label: 'Paused' };
@@ -38,8 +38,12 @@ export function AgentsMonitorPage() {
   const sorted = [...agents].sort((a, b) => rank(a) - rank(b));
 
   return (
-    <AppShell active="monitor">
-      <Intro title="Agent health" sub="Know what's safe, active, or needs review." action={<Button variant="primary" icon={<Radio size={15} />} onClick={() => router.push('/chat')}>Open live monitor</Button>} />
+    <AppShell
+      active="monitor"
+      title="Agent health"
+      sub="Know what's safe, active, or needs review."
+      actions={<Button variant="primary" icon={<Radio size={15} />} onClick={() => router.push('/chat')}>Open live monitor</Button>}
+    >
       <StatsStrip
         stats={[
           { label: 'Healthy', value: String(healthy), tone: healthy ? 'success' : undefined },
@@ -61,7 +65,7 @@ export function AgentsMonitorPage() {
         />
       ) : null}
       {isLoading && agents.length === 0 ? <Loading label="Loading fleet…" /> : (
-        <Panel title="Fleet" action={<span className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">failures &amp; active first</span>}>
+        <Panel title="Fleet" action={<span className="text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">failures &amp; active first</span>}>
           {/* Astryx migration: the fleet table now renders through the data-driven
               Astryx <Table> (compact density, themed cells). The whole row stays
               clickable via onRowClick; StatusPill, danger tint, and end-aligned

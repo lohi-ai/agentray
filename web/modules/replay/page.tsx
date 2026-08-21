@@ -7,7 +7,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
 import { useReplay } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 export function ReplayPage() {
   const { replay, loadReplay } = useReplay();
@@ -48,8 +48,12 @@ export function ReplayPage() {
   );
 
   return (
-    <AppShell active="monitor">
-      <Intro title="Session replay" sub="What happened in one session, in order." action={<>{input}<Button variant="primary" icon={<Play size={15} />} onClick={() => void load()}>Replay</Button></>} />
+    <AppShell
+      active="monitor"
+      title="Session replay"
+      sub="What happened in one session, in order."
+      actions={<>{input}<Button variant="primary" icon={<Play size={15} />} onClick={() => void load()}>Replay</Button></>}
+    >
       {loading ? <Panel title="Loading…"><span /></Panel> : !replay ? (
         <EmptyState title="No session loaded" detail="Paste a session ID, or open a session from People or Events." />
       ) : (

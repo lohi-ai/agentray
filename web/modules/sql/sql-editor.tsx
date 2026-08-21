@@ -34,7 +34,7 @@ const highlight = HighlightStyle.define([
 
 const theme = EditorView.theme(
   {
-    '&': { backgroundColor: 'transparent', color: 'var(--color-text-primary)', fontSize: '12.5px' },
+    '&': { backgroundColor: 'transparent', color: 'var(--color-text-primary)', fontSize: 'var(--fs-sm)' },
     '.cm-content': { fontFamily: 'var(--font-mono)', padding: '10px 0', caretColor: 'var(--primary)' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },
     '&.cm-focused': { outline: 'none' },
@@ -109,7 +109,7 @@ export function SqlEditor({
       basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true, autocompletion: true, indentOnInput: true, bracketMatching: true }}
       theme="none"
       minHeight="120px"
-      style={{ fontSize: '12.5px' }}
+      style={{ fontSize: 'var(--fs-sm)' }}
     />
   );
 }

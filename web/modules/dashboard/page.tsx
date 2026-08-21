@@ -11,10 +11,9 @@ import { useActivity, useDashboards, useEventNames, useProjectAccess } from '@/m
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { PromptDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Intro, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { Selector } from '@astryxdesign/core/Selector';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { ChartCard } from './chart-card';
@@ -122,7 +121,19 @@ export function DashboardPage() {
   ) : null;
 
   return (
-    <AppShell active="dashboards">
+    <AppShell
+      active="dashboards"
+      title="Dashboards"
+      sub={boardSubtitle}
+      actions={<>
+        {/* Asking stays live for a demo viewer — it is the one thing a viewer
+            is here to do, and the API allows it on purpose. Building and
+            editing do not. */}
+        <Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')} disabled={!access.canWrite} tooltip={access.reason || undefined}>New view</Button>
+        <Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask the agent</Button>
+        <Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart} disabled={!access.canWrite} tooltip={access.reason || undefined}>Add chart</Button>
+      </>}
+    >
       {dialog === 'view' ? (
         <PromptDialog
           title="New view"
@@ -140,19 +151,6 @@ export function DashboardPage() {
           onClose={() => setEditing(null)}
         />
       ) : null}
-      <Intro
-        title="Dashboards"
-        sub={boardSubtitle}
-        action={<>
-          {/* Asking stays live for a demo viewer — it is the one thing a viewer
-              is here to do, and the API allows it on purpose. Building and
-              editing do not. */}
-          <Button variant="outline" icon={<LayoutGrid size={15} />} onClick={() => setDialog('view')} disabled={!access.canWrite} tooltip={access.reason || undefined}>New view</Button>
-          <Button variant="agent" icon={<Sparkles size={15} />} onClick={onAskAI}>Ask the agent</Button>
-          <Button variant="primary" icon={<Plus size={15} />} onClick={onAddChart} disabled={!access.canWrite} tooltip={access.reason || undefined}>Add chart</Button>
-        </>}
-      />
-      <div className="mb-3"><RelatedSurfacesLabel parentHref="/dashboard" /></div>
       <FilterBar extra={selector} />
 
       {/* Headline numbers in one strip above the board, never scattered across
@@ -233,7 +231,7 @@ export function DashboardPage() {
               className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] transition-[background,border-color,color] duration-[var(--fast)] ease-[var(--ease)] hover:border-primary hover:bg-[var(--color-background-card)] hover:text-primary"
             >
               <Plus size={22} />
-              <span className="text-[13px] font-medium">Add another chart</span>
+              <span className="text-sm font-medium">Add another chart</span>
             </button>
           ) : null}
         </div>

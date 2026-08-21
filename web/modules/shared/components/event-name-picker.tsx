@@ -102,7 +102,7 @@ export function EventNameCombobox({
       <span className="inline-flex h-8 w-full items-center gap-2 rounded-sm border border-[var(--color-border)] bg-[var(--color-background-muted)] px-3 text-[var(--color-text-secondary)] focus-within:border-primary">
         <Search size={14} className="flex-none" />
         <input
-          className="min-w-0 flex-1 border-none bg-transparent text-[12.5px] text-[var(--color-text-primary)] outline-none"
+          className="min-w-0 flex-1 border-none bg-transparent text-sm text-[var(--color-text-primary)] outline-none"
           value={draft}
           placeholder={placeholder}
           onChange={(e) => { setDraft(e.target.value); setOpen(true); setActive(0); if (allowFreeText) onChange(e.target.value); }}
@@ -130,11 +130,11 @@ export function EventNameCombobox({
                 key={m.event_name}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => commit(m.event_name)}
-                className={`flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px] ${i === active ? 'bg-[var(--color-background-surface)]' : ''} ${m.event_name === value ? 'text-primary' : 'text-[var(--color-text-primary)]'}`}
+                className={`flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-sm ${i === active ? 'bg-[var(--color-background-surface)]' : ''} ${m.event_name === value ? 'text-primary' : 'text-[var(--color-text-primary)]'}`}
               >
                 <span className="min-w-0 flex-1 truncate font-mono">{m.event_name}</span>
-                {m.event_type ? <span className="flex-none text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{m.event_type}</span> : null}
-                <span className="flex-none font-mono tabular-nums text-[11px] text-[var(--color-text-secondary)]">{formatCompact(m.count)}</span>
+                {m.event_type ? <span className="flex-none text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{m.event_type}</span> : null}
+                <span className="flex-none font-mono tabular-nums text-2xs text-[var(--color-text-secondary)]">{formatCompact(m.count)}</span>
               </button>
             ))
           )}
@@ -177,8 +177,8 @@ export function EventNameSelect({
     return (
       <span className="flex w-full items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-mono">{option.label}</span>
-        {entry?.event_type ? <span className="flex-none text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{entry.event_type}</span> : null}
-        {entry ? <span className="flex-none font-mono tabular-nums text-[11px] text-[var(--color-text-secondary)]">{formatCompact(entry.count)}</span> : null}
+        {entry?.event_type ? <span className="flex-none text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{entry.event_type}</span> : null}
+        {entry ? <span className="flex-none font-mono tabular-nums text-2xs text-[var(--color-text-secondary)]">{formatCompact(entry.count)}</span> : null}
       </span>
     );
   }
@@ -216,8 +216,8 @@ export function EventCatalog({ onPick, selected, title = 'Event names', max = 20
     <div className="rounded-xl bg-[var(--color-background-card)] p-3">
       <div className="mb-2 flex items-center gap-2">
         <List size={14} className="text-[var(--color-text-secondary)]" />
-        <span className="text-[12.5px] font-semibold">{title}</span>
-        <span className="text-[11px] text-[var(--color-text-secondary)]">{names.length}</span>
+        <span className="text-sm font-semibold">{title}</span>
+        <span className="text-2xs text-[var(--color-text-secondary)]">{names.length}</span>
         <TextInput label="Filter event names" isLabelHidden size="sm" startIcon={Search} value={q} placeholder="Filter…" onChange={(v) => setQ(v)} width={150} className="ms-auto" />
       </div>
       <div className="flex max-h-[420px] flex-col gap-0.5 overflow-auto">
@@ -231,12 +231,12 @@ export function EventCatalog({ onPick, selected, title = 'Event names', max = 20
               type="button"
               key={m.event_name}
               onClick={() => onPick(m.event_name)}
-              className={`flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[var(--color-background-surface)] ${m.event_name === selected ? 'bg-[var(--color-background-surface)] text-primary' : 'text-[var(--color-text-primary)]'}`}
+              className={`flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors hover:bg-[var(--color-background-surface)] ${m.event_name === selected ? 'bg-[var(--color-background-surface)] text-primary' : 'text-[var(--color-text-primary)]'}`}
               title={`Last seen ${formatRelative(m.last_seen)}`}
             >
               <span className="min-w-0 flex-1 truncate font-mono">{m.event_name}</span>
-              {m.event_type ? <span className="flex-none text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{m.event_type}</span> : null}
-              <span className="flex-none font-mono tabular-nums text-[11px] text-[var(--color-text-secondary)]">{formatCompact(m.count)}</span>
+              {m.event_type ? <span className="flex-none text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{m.event_type}</span> : null}
+              <span className="flex-none font-mono tabular-nums text-2xs text-[var(--color-text-secondary)]">{formatCompact(m.count)}</span>
             </button>
           ))
         )}

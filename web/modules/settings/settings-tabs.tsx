@@ -219,7 +219,7 @@ export function ApiKeysTab() {
       {rotating ? (
         <ConfirmDialog title="Rotate API key?" detail="The old key is revoked immediately. Update any running agents or integrations first." confirmLabel="Rotate key" danger onConfirm={() => void rotateKey()} onClose={() => setRotating(false)} />
       ) : null}
-      <HStack align="center" gap={2} className="max-w-[560px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-[12.5px]">
+      <HStack align="center" gap={2} className="max-w-[560px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-sm">
         <StatusDot variant="success" label="Key active" isPulsing />
         <span className="font-mono tabular-nums">{revealed ? key : masked}</span>
         <span className="text-[var(--color-text-disabled)] ms-auto">{project ? `created ${formatRelative(project.created_at)}` : ''}</span>

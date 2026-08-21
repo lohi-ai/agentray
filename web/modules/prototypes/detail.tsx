@@ -13,15 +13,7 @@ import { formatRelative } from '@/lib/format';
 import { conversionReadout } from '@/modules/start/validation-readout';
 import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import {
-  Button,
-  Callout,
-  Intro,
-  Loading,
-  Panel,
-  StatsStrip,
-  StatusPill,
-} from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { usePrototype } from './hooks';
 import { chatHref, isRecorded, progressPct, stateOf, STATE_LABEL, STATE_PILL, STATE_TONE } from './lib/prototype';
 
@@ -30,7 +22,7 @@ import { chatHref, isRecorded, progressPct, stateOf, STATE_LABEL, STATE_PILL, ST
 // quotes from `test_status`; this page never re-scores a count itself.
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
 
 export function PrototypeDetailPage() {
   const params = useParams<{ prototypeId: string }>();
@@ -50,8 +42,7 @@ export function PrototypeDetailPage() {
 
   if (error || !test) {
     return (
-      <AppShell active="prototypes">
-        <Intro title="Prototype" sub="One falsifiable bet on one idea." />
+      <AppShell active="prototypes" title="Prototype" sub="One falsifiable bet on one idea.">
         <Callout
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
@@ -76,25 +67,25 @@ export function PrototypeDetailPage() {
   const recorded = isRecorded(test);
 
   return (
-    <AppShell active="prototypes">
-      <Intro
-        title={
+    <AppShell
+      active="prototypes"
+      title={
           <HStack gap={2} align="center">
             <span>Prototype</span>
             <StatusPill status={STATE_PILL[state]} label={STATE_LABEL[state]} grow={false} />
           </HStack>
         }
-        sub={
+      sub={
           test.committed_at
             ? `Committed ${formatRelative(test.committed_at)} · ${test.window_days}-day window`
             : `Proposed ${formatRelative(test.created_at)} · nothing is counted yet`
         }
-        action={
+      actions={
           <Button variant="ghost" size="sm" icon={<ArrowLeft size={13} aria-hidden />} onClick={() => router.push('/prototypes')}>
             Prototypes
           </Button>
         }
-      />
+    >
 
       <Panel title="The bet">
         <VStack gap={3} align="stretch">

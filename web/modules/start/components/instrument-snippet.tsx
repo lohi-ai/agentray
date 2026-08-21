@@ -34,7 +34,7 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
           3 · Collect emails
         </TabButton>
       </div>
-      <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+      <p className="text-sm leading-[1.55] text-[var(--color-text-secondary)]">
         {tab === 'track' ? (
           <>
             Paste this before <code>&lt;/body&gt;</code> on your landing page. It sends{' '}
@@ -57,13 +57,13 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
       </p>
       <CodeBlock code={code} />
       {tab === 'ios' ? (
-        <p className="text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
+        <p className="text-xs leading-[1.5] text-[var(--color-text-secondary)]">
           Prefer a package? The <code>AgentRay</code> Swift package is the same contract with batching, offline retry,
           and a flush when the app backgrounds — add it with Swift Package Manager instead of pasting this.
         </p>
       ) : null}
       {tab === 'waitlist' ? (
-        <p className="text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
+        <p className="text-xs leading-[1.5] text-[var(--color-text-secondary)]">
           The consent checkbox is required — the request is refused without it. Addresses are yours: export or delete
           them any time, and every submitter gets an unsubscribe link back.
         </p>
@@ -81,10 +81,10 @@ export function InstrumentSnippet({ apiKey, host }: { apiKey: string; host: stri
 function PackagesNote() {
   return (
     <details className="rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-2">
-      <summary className="cursor-pointer text-[12.5px] text-[var(--color-text-secondary)]">
+      <summary className="cursor-pointer text-sm text-[var(--color-text-secondary)]">
         Have a build step? Install the SDK instead
       </summary>
-      <ul className="mt-2 flex flex-col gap-1.5 text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
+      <ul className="mt-2 flex flex-col gap-1.5 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
         {PACKAGES.map((pkg) => (
           <li key={pkg.install} className="flex flex-wrap items-baseline gap-x-2">
             <code>{pkg.install}</code>
@@ -92,7 +92,7 @@ function PackagesNote() {
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">
+      <p className="mt-2 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
         Each one batches, retries a failed flush, and stamps <code>platform</code> for you — so the split on Traffic and
         People is right without you sending the property by hand.
       </p>
@@ -112,7 +112,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       onClick={onClick}
       aria-pressed={active}
-      className={`min-h-9 rounded-[var(--radius-md)] border px-2.5 text-[12.5px] ${
+      className={`min-h-9 rounded-[var(--radius-md)] border px-2.5 text-sm ${
         active
           ? 'border-[var(--agent)] text-[var(--color-text-primary)]'
           : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'
@@ -137,7 +137,7 @@ function CodeBlock({ code }: { code: string }) {
   };
   return (
     <div className="relative">
-      <pre className="max-h-[320px] overflow-auto rounded-[var(--radius-md)] bg-[var(--color-background-muted)] p-3 text-[11.5px] leading-[1.6]">
+      <pre className="max-h-[320px] overflow-auto rounded-[var(--radius-md)] bg-[var(--color-background-muted)] p-3 text-xs leading-[1.6]">
         <code className="font-mono">{code}</code>
       </pre>
       <span className="absolute end-2 top-2">

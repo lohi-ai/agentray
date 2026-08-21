@@ -9,7 +9,7 @@ import { chapterAt, clampOffset, groupBySession } from '@/modules/agent-monitor/
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
 import type { AgentLLMCall, RunChapter } from '@/lib/api';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { StepInspector } from '../../lab/step-inspector';
 import { StepRail } from '../../lab/step-rail';
 
@@ -67,20 +67,20 @@ function ChapterList({
             }`}
           >
             <div className="flex items-baseline gap-2">
-              <span className="flex-none font-mono tabular-nums text-[11px] text-[var(--color-text-disabled)]">
+              <span className="flex-none font-mono tabular-nums text-2xs text-[var(--color-text-disabled)]">
                 {String(c.index + 1).padStart(2, '0')}
               </span>
-              <span className="flex-1 text-[12.5px] leading-[1.45] text-[var(--color-text-primary)]">{c.title}</span>
+              <span className="flex-1 text-sm leading-[1.45] text-[var(--color-text-primary)]">{c.title}</span>
               {/* A chapter that ends on a compaction was closed by one; the last
                   chapter of a run was not, and saying so is more useful than
                   leaving the reader to infer it from a missing icon. */}
               {c.summary ? (
                 <Scissors size={12} className="flex-none text-[var(--color-text-disabled)]" />
               ) : (
-                <span className="flex-none text-[10.5px] uppercase tracking-[0.04em] text-[var(--color-text-disabled)]">open end</span>
+                <span className="flex-none text-2xs uppercase tracking-[0.04em] text-[var(--color-text-disabled)]">open end</span>
               )}
             </div>
-            <div className="flex flex-wrap gap-3 ps-[26px] text-[11px] text-[var(--color-text-secondary)]">
+            <div className="flex flex-wrap gap-3 ps-[26px] text-2xs text-[var(--color-text-secondary)]">
               <span className="font-mono tabular-nums">turns {c.first_turn}–{c.last_turn}</span>
               <span className="font-mono tabular-nums">{c.steps} steps</span>
               <span className="font-mono tabular-nums">{c.tool_calls} tool calls</span>
@@ -112,7 +112,7 @@ function DelegationSummary({ calls }: { calls: AgentLLMCall[] }) {
   return (
     <div className="flex flex-col gap-1">
       {sessions.map((s) => (
-        <div key={s.key} className="flex items-baseline gap-2 text-[11.5px]" style={{ paddingInlineStart: s.depth * 16 }}>
+        <div key={s.key} className="flex items-baseline gap-2 text-xs" style={{ paddingInlineStart: s.depth * 16 }}>
           {s.depth > 0 ? <CornerDownRight size={12} className="flex-none text-[var(--color-text-disabled)]" /> : null}
           <span className="flex-1 truncate font-mono tabular-nums text-[var(--color-text-primary)]">{s.key}</span>
           <span className="flex-none font-mono tabular-nums text-[var(--color-text-secondary)]">{s.calls} calls</span>
@@ -166,8 +166,7 @@ export function AgentRunPage() {
 
   if (isLoading && !run) {
     return (
-      <AppShell active="monitor">
-        <Intro title="Run" sub="What the agent did, chapter by chapter." />
+      <AppShell active="monitor" title="Run" sub="What the agent did, chapter by chapter.">
         <Loading label="Loading run…" />
       </AppShell>
     );
@@ -176,22 +175,22 @@ export function AgentRunPage() {
   const windowEnd = windowOffset + steps.length;
 
   return (
-    <AppShell active="monitor">
-      <Intro
-        title={
+    <AppShell
+      active="monitor"
+      title={
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
             {back}
             {run?.summary || `Run ${runID.slice(0, 12)}`}
           </span>
         }
-        sub="What the agent did, chapter by chapter."
-        action={
+      sub="What the agent did, chapter by chapter."
+      actions={
           <>
             {run ? <StatusPill status={run.status === 'failed' ? 'attention' : run.status === 'running' ? 'working' : 'healthy'} label={run.status} grow={false} /> : null}
             <Button variant="outline" icon={<BookOpen size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button>
           </>
         }
-      />
+    >
 
       <StatsStrip
         stats={[
@@ -217,7 +216,7 @@ export function AgentRunPage() {
           one paragraph that makes the steps below make sense. */}
       {currentChapter?.summary ? (
         <Panel title={`Checkpoint — end of chapter ${currentChapter.index + 1}`}>
-          <p className="m-0 whitespace-pre-wrap break-words text-[12.5px] leading-[1.55] text-[var(--color-text-primary)]">
+          <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">
             {currentChapter.summary}
           </p>
         </Panel>
@@ -247,7 +246,7 @@ export function AgentRunPage() {
       <Panel title="Who did the work">
         <DelegationSummary calls={llmCalls} />
         {run?.finished_at ? (
-          <p className="m-0 mt-2.5 text-[11px] text-[var(--color-text-disabled)]">
+          <p className="m-0 mt-2.5 text-2xs text-[var(--color-text-disabled)]">
             Finished {formatRelative(run.finished_at)} · triggered by {run.trigger}
           </p>
         ) : null}

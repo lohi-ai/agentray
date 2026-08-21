@@ -112,13 +112,13 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
         </TabButton>
         <TabButton active={tab === 'subscription'} onClick={() => setTab('subscription')}>
           Subscription setup
-          {!subsReady ? <span className="ml-1.5 text-[10px] text-[var(--color-text-disabled)]">·  not set</span> : null}
+          {!subsReady ? <span className="ml-1.5 text-2xs text-[var(--color-text-disabled)]">·  not set</span> : null}
         </TabButton>
       </div>
 
       {tab === 'audiences' ? (
         <>
-          <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--color-text-secondary)]">
+          <p className="mb-3 text-sm leading-relaxed text-[var(--color-text-secondary)]">
             Define groups beyond the built-ins (Everyone, Users, Guests, Paid, Premium). Static groups match all-time
             event history; subscription groups read point-in-time status and need the{' '}
             <button type="button" className="text-[var(--color-primary)] underline" onClick={() => setTab('subscription')}>
@@ -130,9 +130,9 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
           {/* Existing custom audiences */}
           <div className="mb-4 flex flex-col gap-1.5">
             {loading ? (
-              <p className="text-[12.5px] text-[var(--color-text-disabled)]">Loading…</p>
+              <p className="text-sm text-[var(--color-text-disabled)]">Loading…</p>
             ) : audiences.length === 0 ? (
-              <p className="rounded-md bg-[var(--color-background-muted)] px-3 py-2.5 text-[12.5px] text-[var(--color-text-secondary)]">
+              <p className="rounded-md bg-[var(--color-background-muted)] px-3 py-2.5 text-sm text-[var(--color-text-secondary)]">
                 No custom audiences yet. Add one below — it appears in the segment toggle for everyone on this project.
               </p>
             ) : (
@@ -142,8 +142,8 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
                   className="flex items-center justify-between gap-3 rounded-md bg-[var(--color-background-muted)] px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <div className="truncate text-[13px] font-medium text-[var(--color-text-primary)]">{a.label}</div>
-                    <div className="truncate text-[11.5px] text-[var(--color-text-secondary)]">{describeRule(a)}</div>
+                    <div className="truncate text-sm font-medium text-[var(--color-text-primary)]">{a.label}</div>
+                    <div className="truncate text-xs text-[var(--color-text-secondary)]">{describeRule(a)}</div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <Button variant="ghost" size="sm" icon={<Pencil size={13} />} onClick={() => startEdit(a)}>
@@ -160,7 +160,7 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
 
           {/* Draft form */}
           <div className="rounded-lg border border-[var(--color-border)] p-3">
-            <div className="mb-2.5 text-[12px] font-medium text-[var(--color-text-secondary)]">
+            <div className="mb-2.5 text-xs font-medium text-[var(--color-text-secondary)]">
               {editing ? 'Edit audience' : 'New audience'}
             </div>
             <div className="flex flex-col gap-3">
@@ -188,13 +188,13 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
                 />
               ) : null}
               {SUBSCRIPTION_KINDS.includes(draft.kind) ? (
-                <p className="text-[11.5px] leading-relaxed text-[var(--color-text-secondary)]">
+                <p className="text-xs leading-relaxed text-[var(--color-text-secondary)]">
                   Point-in-time: evaluated per cohort week from your subscription mapping, so this draws a real
                   subscription-retention curve rather than “ever paid”.
                 </p>
               ) : null}
             </div>
-            {error ? <p className="mt-2 text-[12px] text-[var(--danger)]">{error}</p> : null}
+            {error ? <p className="mt-2 text-xs text-[var(--danger)]">{error}</p> : null}
             <div className="mt-3 flex items-center justify-end gap-2">
               {editing ? (
                 <Button variant="ghost" size="sm" onClick={reset}>
@@ -219,7 +219,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       type="button"
       onClick={onClick}
-      className={`-mb-px border-b-2 px-3 py-1.5 text-[12.5px] font-medium transition-colors ${
+      className={`-mb-px border-b-2 px-3 py-1.5 text-sm font-medium transition-colors ${
         active
           ? 'border-[var(--color-primary)] text-[var(--color-text-primary)]'
           : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -291,7 +291,7 @@ function SubscriptionSetup({ mapping }: { mapping: SubscriptionMapping | null })
 
   return (
     <div>
-      <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--color-text-secondary)]">
+      <p className="mb-3 text-sm leading-relaxed text-[var(--color-text-secondary)]">
         Map your subscription lifecycle so cohorts can tell <em>active</em> from <em>churned</em> per week. Names must
         be event/property names already in your stream. A <strong>period-end property</strong> (the ISO timestamp a
         paid period runs until) is what makes status point-in-time — without it, only the static Paid/Plan groups work.
@@ -308,14 +308,14 @@ function SubscriptionSetup({ mapping }: { mapping: SubscriptionMapping | null })
       </div>
 
       {!statusCapable ? (
-        <p className="mt-2.5 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-[11.5px] text-[var(--color-text-secondary)]">
+        <p className="mt-2.5 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
           Set both a start event and a period-end property to unlock the Active / Trialing / Churned subscription
           audiences.
         </p>
       ) : null}
-      {error ? <p className="mt-2 text-[12px] text-[var(--danger)]">{error}</p> : null}
+      {error ? <p className="mt-2 text-xs text-[var(--danger)]">{error}</p> : null}
       <div className="mt-3 flex items-center justify-end gap-2">
-        {saved ? <span className="text-[12px] text-[var(--color-primary)]">Saved</span> : null}
+        {saved ? <span className="text-xs text-[var(--color-primary)]">Saved</span> : null}
         <Button variant="primary" size="sm" disabled={busy} onClick={submit}>
           Save mapping
         </Button>

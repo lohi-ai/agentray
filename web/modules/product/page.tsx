@@ -21,8 +21,7 @@ import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
-import { Button, EmptyState, Intro, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { headlineStats } from './headline';
 
 type Mode = 'trend' | 'funnel' | 'retention' | 'table';
@@ -107,9 +106,12 @@ export function ProductPage() {
   }, [applied]);
 
   return (
-    <AppShell active="product">
-      <Intro title="Product" sub="Answer behavior questions without writing SQL first." action={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>} />
-      <div className="mb-3"><RelatedSurfacesLabel parentHref="/product" /></div>
+    <AppShell
+      active="product"
+      title="Product"
+      sub="Answer behavior questions without writing SQL first."
+      actions={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>}
+    >
       <FilterBar showEventType={false} showErrors={false} />
 
       {/* Astryx migration: the question picker is now an Astryx <Card> wrapping a

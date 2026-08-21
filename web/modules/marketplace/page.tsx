@@ -113,7 +113,7 @@ function MiniChart({ chart, index }: { chart: TemplateChart; index: number }) {
 
   return (
     <div className="flex min-w-0 flex-col gap-[5px]">
-      <span className="flex items-center gap-[5px] overflow-hidden text-[10.5px] whitespace-nowrap text-ellipsis text-[var(--color-text-secondary)]"><Icon size={11} /> {chart.name || 'Chart'}</span>
+      <span className="flex items-center gap-[5px] overflow-hidden text-2xs whitespace-nowrap text-ellipsis text-[var(--color-text-secondary)]"><Icon size={11} /> {chart.name || 'Chart'}</span>
       {body}
     </div>
   );
@@ -149,7 +149,7 @@ function AgentPresetCard({
           <div className="flex items-center gap-[7px]">
             <h3 className="m-0 text-sm font-semibold">{preset.name}</h3>
             {installedAgent ? (
-              <span className="inline-flex items-center gap-1 rounded-[20px] px-[7px] py-[2px] text-[10.5px] font-semibold bg-[color-mix(in_srgb,var(--success)_16%,transparent)] text-success">
+              <span className="inline-flex items-center gap-1 rounded-[20px] px-[7px] py-[2px] text-2xs font-semibold bg-[color-mix(in_srgb,var(--success)_16%,transparent)] text-success">
                 <Check size={10} /> On your team
               </span>
             ) : null}
@@ -158,18 +158,18 @@ function AgentPresetCard({
               category it is filed under — "Prove the idea" says more to an owner
               than "validate". Falls back to the category for a pack no job
               claims yet. */}
-          <span className="text-[11px] capitalize text-[var(--color-text-secondary)]">{jobForPack(preset.slug)?.label ?? preset.category}</span>
+          <span className="text-2xs capitalize text-[var(--color-text-secondary)]">{jobForPack(preset.slug)?.label ?? preset.category}</span>
         </div>
       </div>
-      <p className="m-0 text-[13px] leading-[1.45] font-medium text-[var(--color-text-primary)]">{preset.tagline}</p>
-      <p className="m-0 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{preset.description}</p>
+      <p className="m-0 text-sm leading-[1.45] font-medium text-[var(--color-text-primary)]">{preset.tagline}</p>
+      <p className="m-0 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{preset.description}</p>
       {preset.skills.length ? (
         <div className="flex flex-wrap gap-[6px]">
           {preset.skills.map((s) => (
             <span
               key={s.name}
               title={s.description}
-              className="inline-flex items-center gap-1 rounded-[20px] px-[9px] py-[3px] text-[11px] font-medium bg-[color-mix(in_srgb,var(--agent)_12%,var(--surface-3))] text-[color-mix(in_srgb,var(--agent)_55%,var(--foreground))]"
+              className="inline-flex items-center gap-1 rounded-[20px] px-[9px] py-[3px] text-2xs font-medium bg-[color-mix(in_srgb,var(--agent)_12%,var(--surface-3))] text-[color-mix(in_srgb,var(--agent)_55%,var(--foreground))]"
             >
               <Wand2 size={11} /> {s.name}
             </span>
@@ -196,17 +196,17 @@ function TemplateCard({ name, isSystem, description, charts, onApply, blocked }:
   return (
     <div className="rounded-xl bg-[var(--color-background-card)] p-4 group flex flex-col gap-[10px] transition-[transform,background,box-shadow] duration-[120ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] hover:-translate-y-0.5 hover:bg-[var(--color-background-muted)] hover:shadow-[0_8px_24px_-14px_rgba(0,0,0,0.75)]">
       <div className="flex items-center mb-3">
-        <h3 className="m-0 text-[13px] font-semibold">{name}</h3>
-        {isSystem ? <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] ms-auto">system</span> : null}
+        <h3 className="m-0 text-sm font-semibold">{name}</h3>
+        {isSystem ? <span className="text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] ms-auto">system</span> : null}
       </div>
-      {description ? <p className="m-0 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{description}</p> : null}
+      {description ? <p className="m-0 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{description}</p> : null}
       {preview.length ? (
         <div className="grid grid-cols-2 gap-2 rounded-lg bg-[var(--color-background-muted)] p-[10px] group-hover:bg-[color-mix(in_srgb,var(--surface-1)_70%,var(--background))]">
           {preview.map((c, i) => <MiniChart key={c.id || i} chart={c} index={i} />)}
         </div>
       ) : null}
       <div className="mt-auto flex items-center justify-between pt-1">
-        <span className="inline-flex items-center gap-[6px] text-[11.5px] text-[var(--color-text-secondary)]"><LayoutTemplate size={13} /> {charts.length} chart{charts.length === 1 ? '' : 's'}</span>
+        <span className="inline-flex items-center gap-[6px] text-xs text-[var(--color-text-secondary)]"><LayoutTemplate size={13} /> {charts.length} chart{charts.length === 1 ? '' : 's'}</span>
         <Button variant="outline" size="sm" onClick={onApply} disabled={!!blocked} tooltip={blocked || undefined}>Use template</Button>
       </div>
     </div>
@@ -227,14 +227,14 @@ export function MarketplacePage() {
             'radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--agent) 18%, transparent), transparent 60%), radial-gradient(120% 140% at 100% 0%, color-mix(in srgb, var(--primary) 16%, transparent), transparent 58%)',
         }}
       >
-        <span className="mb-3 inline-flex items-center gap-[7px] rounded-[20px] px-[10px] py-1 text-[11.5px] font-semibold bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Store size={13} /> Hire a teammate</span>
+        <span className="mb-3 inline-flex items-center gap-[7px] rounded-[20px] px-[10px] py-1 text-xs font-semibold bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Store size={13} /> Hire a teammate</span>
         <h1 className="m-0 text-[22px] font-[650] tracking-[-0.02em]">Add a specialist in one click</h1>
-        <p className="mt-[6px] mb-0 max-w-[560px] text-[13px] leading-[1.55] text-[var(--color-text-secondary)]">Growth, marketing, data, and operations teammates you can talk to — plus dashboard starters you can pin this week.</p>
+        <p className="mt-[6px] mb-0 max-w-[560px] text-sm leading-[1.55] text-[var(--color-text-secondary)]">Growth, marketing, data, and operations teammates you can talk to — plus dashboard starters you can pin this week.</p>
       </div>
 
       <div className="mt-[26px] mb-3 flex items-baseline gap-[9px]">
         <h2 className="m-0 text-sm font-[650]">Foundation agents</h2>
-        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] text-[11px]">{presets.length || ''}</span>
+        <span className="text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] text-2xs">{presets.length || ''}</span>
       </div>
       {loading && presets.length === 0 ? (
         <Loading label="Loading agents…" />
@@ -261,7 +261,7 @@ export function MarketplacePage() {
 
       <div className="mt-[26px] mb-3 flex items-baseline gap-[9px]">
         <h2 className="m-0 text-sm font-[650]">Dashboard templates</h2>
-        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] text-[11px]">{templates.length || ''}</span>
+        <span className="text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)] text-2xs">{templates.length || ''}</span>
       </div>
       {templates.length === 0 ? (
         <EmptyState icon={<LayoutTemplate size={22} />} title="No templates available" detail="System templates will appear here once published." />

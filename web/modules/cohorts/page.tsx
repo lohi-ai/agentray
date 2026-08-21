@@ -7,7 +7,7 @@ import { formatCompact, formatDate, formatPercent } from '@/lib/format';
 import { useCohorts } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { Button, EmptyState, Intro, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { AudienceManager } from './audience-manager';
 
 const WEEK_MS = 7 * 24 * 3600 * 1000;
@@ -61,11 +61,11 @@ export function CohortsPage() {
   const week4 = cohorts ? avgRate(cohorts.rows, 4) : null;
 
   return (
-    <AppShell active="traffic">
-      <Intro
-        title="Cohort analysis"
-        sub="How weekly acquisition cohorts retain — split by users and guests."
-        action={(
+    <AppShell
+      active="traffic"
+      title="Cohort analysis"
+      sub="How weekly acquisition cohorts retain — split by users and guests."
+      actions={(
           <div className="flex items-center gap-2">
             <Segment options={audiences.map((a) => ({ value: a.key, label: a.label }))} value={segment} onChange={setSegment} />
             <Button variant="outline" size="sm" icon={<SlidersHorizontal size={14} />} onClick={() => setManaging(true)}>
@@ -73,7 +73,7 @@ export function CohortsPage() {
             </Button>
           </div>
         )}
-      />
+    >
       {managing ? <AudienceManager onClose={() => setManaging(false)} /> : null}
       <FilterBar showErrors={false} />
       <StatsStrip stats={[
@@ -93,7 +93,7 @@ export function CohortsPage() {
           />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full border-separate border-spacing-1 text-[12.5px]">
+            <table className="w-full border-separate border-spacing-1 text-sm">
               <thead>
                 <tr>
                   <th className="sticky left-0 z-10 bg-[var(--color-background-card)] px-2 py-1.5 text-start font-medium text-[var(--color-text-secondary)]">Cohort</th>

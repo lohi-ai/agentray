@@ -8,7 +8,7 @@ import type { TeamCard } from '@/lib/api';
 import { useAgents } from '@/modules/agent/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Intro, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { useTeam } from './hooks';
 
 const columnLabel = (status: string) => status.charAt(0).toUpperCase() + status.slice(1);
@@ -45,7 +45,17 @@ export function TeamPage() {
   };
 
   return (
-    <AppShell active="agents">
+    <AppShell
+      active="agents"
+      title={
+        <span className="flex items-center gap-2.5">
+          <Button variant="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={() => router.push('/teams')}>Teams</Button>
+          {team?.name ?? '…'}
+        </span>
+      }
+      sub="The lead — and only the lead — gets the orchestrator skill and works this board through its teammates."
+      actions={<Button variant="primary" icon={<Plus size={15} />} onClick={() => setAddingCard(true)}>New card</Button>}
+    >
       {addingCard ? (
         <PromptDialog
           title="New card"
@@ -66,16 +76,6 @@ export function TeamPage() {
           onClose={() => setDeletingCard(null)}
         />
       ) : null}
-      <Intro
-        title={
-          <span className="flex items-center gap-2.5">
-            <Button variant="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={() => router.push('/teams')}>Teams</Button>
-            {team?.name ?? '…'}
-          </span>
-        }
-        sub="The lead — and only the lead — gets the orchestrator skill and works this board through its teammates."
-        action={<Button variant="primary" icon={<Plus size={15} />} onClick={() => setAddingCard(true)}>New card</Button>}
-      />
       {isLoading && !team ? <Loading label="Loading team…" /> : null}
 
       <div className="mb-4">
@@ -106,18 +106,18 @@ export function TeamPage() {
           }
         >
           {members.length === 0 ? (
-            <div className="py-2 text-[12.5px] text-[var(--color-text-secondary)]">No members yet — add at least two agents, then pick a lead.</div>
+            <div className="py-2 text-sm text-[var(--color-text-secondary)]">No members yet — add at least two agents, then pick a lead.</div>
           ) : (
             <div className="flex flex-col">
               {members.map((m) => (
                 <div key={m.agent_id} className="flex items-center gap-2.5 border-b border-[color-mix(in_srgb,var(--border)_55%,transparent)] py-2 last:border-b-0">
-                  <span className="grid h-[26px] w-[26px] place-items-center rounded-lg bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-[12px] font-bold text-agent">
+                  <span className="grid h-[26px] w-[26px] place-items-center rounded-lg bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-xs font-bold text-agent">
                     {(m.name || '?').charAt(0).toUpperCase()}
                   </span>
-                  <span className="text-[13px] font-medium">{m.name}</span>
+                  <span className="text-sm font-medium">{m.name}</span>
                   {m.is_lead ? <StatusPill status="working" label="Lead" grow={false} /> : null}
                   {!m.enabled ? <StatusPill status="paused" label="Disabled" grow={false} /> : null}
-                  {m.role ? <span className="text-[11.5px] text-[var(--color-text-secondary)]">{m.role}</span> : null}
+                  {m.role ? <span className="text-xs text-[var(--color-text-secondary)]">{m.role}</span> : null}
                   <span className="flex-1" />
                   {!m.is_lead ? (
                     <Button variant="ghost" size="sm" icon={<Crown size={14} />} onClick={() => void updateTeam({ lead_agent_id: m.agent_id })}>Make lead</Button>
@@ -135,9 +135,9 @@ export function TeamPage() {
           const column = cards.filter((c) => c.status === status);
           return (
             <div key={status} className="flex min-h-[180px] flex-col gap-2.5 rounded-xl bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-3">
-              <div className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
                 {columnLabel(status)}
-                <span className="font-mono text-[11px] tabular-nums">{column.length}</span>
+                <span className="font-mono text-2xs tabular-nums">{column.length}</span>
                 <span className="flex-1" />
                 {status === 'backlog' ? (
                   <Button variant="ghost" size="sm" icon={<Plus size={14} />} onClick={() => setAddingCard(true)}>Add</Button>
@@ -145,8 +145,8 @@ export function TeamPage() {
               </div>
               {column.map((card) => (
                 <div key={card.id} className="flex flex-col gap-2 rounded-lg bg-[var(--color-background-card)] p-3">
-                  <div className="text-[13px] font-medium leading-snug">{card.title}</div>
-                  {card.body ? <div className="text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">{card.body}</div> : null}
+                  <div className="text-sm font-medium leading-snug">{card.title}</div>
+                  {card.body ? <div className="text-xs leading-[1.5] text-[var(--color-text-secondary)]">{card.body}</div> : null}
                   <Selector
                     label="Assignee"
                     isLabelHidden
@@ -163,7 +163,7 @@ export function TeamPage() {
                   </div>
                 </div>
               ))}
-              {column.length === 0 ? <div className="py-3 text-center text-[11.5px] text-[var(--color-text-secondary)]">Empty</div> : null}
+              {column.length === 0 ? <div className="py-3 text-center text-xs text-[var(--color-text-secondary)]">Empty</div> : null}
             </div>
           );
         })}

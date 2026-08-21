@@ -101,7 +101,7 @@ export function JobPlan({
               <Link
                 key={surface.href}
                 href={surface.href}
-                className="rounded-[var(--radius-md)] border border-[var(--color-border)] px-2.5 py-1.5 text-[12.5px] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+                className="rounded-[var(--radius-md)] border border-[var(--color-border)] px-2.5 py-1.5 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
               >
                 {surface.label}
               </Link>
@@ -139,7 +139,7 @@ function NextTime({ job, state }: { job: JobDef; state: JobState }) {
   if (!edge) return null;
   return (
     <Panel title="Doing this again">
-      <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+      <p className="text-sm leading-[1.55] text-[var(--color-text-secondary)]">
         <span className="font-[600] text-[var(--color-text-primary)]">{edge.title}</span> {edge.detail}
       </p>
       <div className="mt-3">
@@ -184,8 +184,8 @@ function StepRow({
         {step.done ? <Check size={11} /> : null}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-[13px] font-[600] text-[var(--color-text-primary)]">{step.label}</span>
-        <span className="mt-0.5 block text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{step.detail}</span>
+        <span className="block text-sm font-[600] text-[var(--color-text-primary)]">{step.label}</span>
+        <span className="mt-0.5 block text-sm leading-[1.5] text-[var(--color-text-secondary)]">{step.detail}</span>
       </span>
       {step.done ? null : (
         // Only the hire step is blocked by an in-flight install — disabling the
@@ -212,7 +212,7 @@ function PromptList({ job, agentID }: { job: JobDef; agentID: string }) {
         <Link
           key={prompt}
           href={href(prompt)}
-          className="group flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] hover:border-[var(--agent)]"
+          className="group flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-text-primary)] hover:border-[var(--agent)]"
         >
           <span className="flex min-w-0 items-center gap-2">
             <MessageSquare size={14} className="flex-none text-[var(--color-text-secondary)]" />
@@ -234,7 +234,7 @@ function HowItWorks({ job, presets }: { job: JobDef; presets: readonly AgentPres
   const layers = jobLayers(job);
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+      <p className="text-sm leading-[1.55] text-[var(--color-text-secondary)]">
         <span className="font-[600] text-[var(--color-text-primary)]">{preset?.name ?? jobPackName(slug)}</span>
         {preset?.tagline ? ` — ${preset.tagline}` : ''}
       </p>
@@ -248,8 +248,8 @@ function HowItWorks({ job, presets }: { job: JobDef; presets: readonly AgentPres
               {index + 1}
             </span>
             <span className="min-w-0">
-              <span className="block text-[12.5px] font-[600] text-[var(--color-text-primary)]">{layer.label}</span>
-              <span className="block text-[12px] leading-[1.5] text-[var(--color-text-secondary)]">{layer.detail}</span>
+              <span className="block text-sm font-[600] text-[var(--color-text-primary)]">{layer.label}</span>
+              <span className="block text-xs leading-[1.5] text-[var(--color-text-secondary)]">{layer.detail}</span>
             </span>
           </li>
         ))}

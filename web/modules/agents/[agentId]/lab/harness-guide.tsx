@@ -44,7 +44,7 @@ export function ConceptCaption({ concept }: { concept: HarnessConcept }) {
   const c = HARNESS_CONCEPTS[concept];
   const Icon = c.icon;
   return (
-    <div className="flex items-start gap-[7px] mb-[9px] rounded-sm bg-[color-mix(in_srgb,var(--agent)_8%,transparent)] px-[9px] py-[7px] text-[11.5px] leading-[1.5] text-[var(--color-text-secondary)]">
+    <div className="flex items-start gap-[7px] mb-[9px] rounded-sm bg-[color-mix(in_srgb,var(--agent)_8%,transparent)] px-[9px] py-[7px] text-xs leading-[1.5] text-[var(--color-text-secondary)]">
       <Icon size={13} className="mt-px shrink-0 text-agent" />
       <span>{c.short}</span>
     </div>
@@ -58,7 +58,7 @@ export function HarnessGuide() {
   return (
     <div className="rounded-xl bg-[var(--color-background-card)] p-4">
       <button className="flex w-full items-center gap-2 border-0 bg-transparent p-0 text-[var(--color-text-secondary)] cursor-pointer" onClick={() => setOpen((v) => !v)}>
-        <h3 className="m-0 text-[13.5px] text-[var(--color-text-primary)]">How an agent harness runs</h3>
+        <h3 className="m-0 text-base text-[var(--color-text-primary)]">How an agent harness runs</h3>
         <span className="ms-auto" />
         <ChevronDown size={16} style={{ transform: open ? 'rotate(180deg)' : undefined, transition: 'transform .15s' }} />
       </button>
@@ -69,12 +69,12 @@ export function HarnessGuide() {
             const Icon = c.icon;
             return (
               <div className="rounded-lg border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--surface-1)_60%,transparent)] px-3 py-[11px]" key={key}>
-                <div className="flex items-center gap-[7px] text-[12.5px] text-[var(--color-text-primary)]">
-                  <span className="font-mono tabular-nums inline-flex h-[17px] w-[17px] items-center justify-center rounded-md bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-[10px] text-agent">{i + 1}</span>
+                <div className="flex items-center gap-[7px] text-sm text-[var(--color-text-primary)]">
+                  <span className="font-mono tabular-nums inline-flex h-[17px] w-[17px] items-center justify-center rounded-md bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-2xs text-agent">{i + 1}</span>
                   <Icon size={14} className="text-agent" />
                   <b>{c.label}</b>
                 </div>
-                <p className="mt-[7px] mb-0 text-[11.5px] leading-[1.5] text-[var(--color-text-secondary)]">{c.short}</p>
+                <p className="mt-[7px] mb-0 text-xs leading-[1.5] text-[var(--color-text-secondary)]">{c.short}</p>
               </div>
             );
           })}

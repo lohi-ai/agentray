@@ -12,7 +12,8 @@ import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useExplainRun, useLabCases } from '@/modules/agent-lab/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Panel, Segment, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { PageTabs } from '@/modules/shared/components/page-shell';
+import { Button, EmptyState, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { HarnessGuide } from './harness-guide';
 import { StepInspector } from './step-inspector';
 import { StepRail } from './step-rail';
@@ -22,7 +23,7 @@ const VERDICT: Record<LabTestResult['status'], string> = { pass: 'healthy', fail
 // DiffView colorizes a unified-style line diff: +added / -removed / context.
 function DiffView({ diff }: { diff: string }) {
   return (
-    <pre className="m-0 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-sm bg-[var(--color-background-card)] px-2.5 py-2 font-mono text-[11.5px] leading-[1.55] text-[var(--color-text-primary)] flex flex-col">
+    <pre className="m-0 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-sm bg-[var(--color-background-card)] px-2.5 py-2 font-mono text-xs leading-[1.55] text-[var(--color-text-primary)] flex flex-col">
       {diff.split('\n').map((line, i) => {
         const cls = line.startsWith('+')
           ? 'bg-[color-mix(in_srgb,var(--success)_16%,transparent)] text-success'
@@ -99,18 +100,19 @@ export function AgentLabPage() {
   const testStep = testSteps[testSelected];
 
   return (
-    <AppShell active="monitor">
-      <Intro
-        title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push(`/agents/${agentID}/monitor`)}><ArrowLeft size={15} /></button>Agent lab</span>}
-        sub="Learn how this agent's harness runs — context, tools, messages, memory, loop — and test it step by step."
-        action={
-          <>
-            <Button variant="outline" icon={<Save size={15} />} onClick={() => input.trim() ? save.mutate({ name: input.slice(0, 48), input, expected }) : undefined}>Save case</Button>
-            <Segment options={['Explain', 'Test']} value={mode} onChange={(o) => setMode(o as 'Explain' | 'Test')} />
-          </>
-        }
-      />
-
+    <AppShell
+      active="monitor"
+      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push(`/agents/${agentID}/monitor`)}><ArrowLeft size={15} /></button>Agent lab</span>}
+      sub="Learn how this agent's harness runs — context, tools, messages, memory, loop — and test it step by step."
+      actions={<Button variant="outline" icon={<Save size={15} />} onClick={() => input.trim() ? save.mutate({ name: input.slice(0, 48), input, expected }) : undefined}>Save case</Button>}
+      tabs={
+        <PageTabs
+          tabs={[{ id: 'Explain', label: 'Explain' }, { id: 'Test', label: 'Test' }] as const}
+          value={mode}
+          onChange={setMode}
+        />
+      }
+    >
       <HarnessGuide />
 
       <Panel title="Prompt" action={mode === 'Explain'
@@ -118,12 +120,12 @@ export function AgentLabPage() {
         : <Button variant="primary" icon={<Play size={15} />} disabled={runDisabled || test.isPending} onClick={() => test.mutate()}>{test.isPending ? 'Running…' : 'Run test'}</Button>}>
         <div className={mode === 'Test' ? 'grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1' : undefined}>
           <div>
-            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Input</div>
+            <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Input</div>
             <TextArea label="Input" isLabelHidden rows={4} width="100%" value={input} placeholder="Ask the agent something…" onChange={(v) => setInput(v)} />
           </div>
           {mode === 'Test' ? (
             <div>
-              <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected (what a good answer should contain)</div>
+              <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected (what a good answer should contain)</div>
               <TextArea label="Expected answer" isLabelHidden rows={4} width="100%" value={expected} placeholder="A correct answer mentions…" onChange={(v) => setExpected(v)} />
             </div>
           ) : null}
@@ -159,10 +161,10 @@ export function AgentLabPage() {
             {explainStep ? <Panel title={`Step ${explain.current + 1} of ${explain.steps.length}`}><StepInspector step={explainStep} /></Panel> : null}
             {explain.phase === 'done' && explain.final ? (
               <Panel title="Final answer" action={<StatusPill status={VERDICT[(explain.status as LabTestResult['status']) ?? 'pass'] ?? 'healthy'} label={explain.status || 'done'} grow={false} />}>
-                <p className="m-0 whitespace-pre-wrap break-words text-[12.5px] leading-[1.55] text-[var(--color-text-primary)]">{explain.final}</p>
+                <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">{explain.final}</p>
               </Panel>
             ) : null}
-            {explain.error ? <Panel title="Error"><p className="m-0 whitespace-pre-wrap break-words text-[12.5px] leading-[1.55] text-danger">{explain.error}</p></Panel> : null}
+            {explain.error ? <Panel title="Error"><p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-danger">{explain.error}</p></Panel> : null}
           </>
         )
       ) : null}
@@ -180,21 +182,21 @@ export function AgentLabPage() {
               ) : null}
               <div className="grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1">
                 <div>
-                  <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected</div>
-                  <p className="m-0 whitespace-pre-wrap break-words text-[12.5px] leading-[1.55] text-[var(--color-text-primary)]">{result.expected || '—'}</p>
+                  <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected</div>
+                  <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">{result.expected || '—'}</p>
                 </div>
                 <div>
-                  <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Actual answer</div>
-                  <p className="m-0 whitespace-pre-wrap break-words text-[12.5px] leading-[1.55] text-[var(--color-text-primary)]">{result.actual || '—'}</p>
+                  <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Actual answer</div>
+                  <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">{result.actual || '—'}</p>
                 </div>
               </div>
               {result.diff ? (
                 <>
-                  <div className="mt-[14px] mb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Diff — expected vs actual</div>
+                  <div className="mt-[14px] mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Diff — expected vs actual</div>
                   <DiffView diff={result.diff} />
                 </>
               ) : null}
-              <div className="mt-3 flex gap-3 text-[11.5px] text-[var(--color-text-secondary)] [&_b]:font-medium [&_b]:text-[var(--color-text-primary)]">
+              <div className="mt-3 flex gap-3 text-xs text-[var(--color-text-secondary)] [&_b]:font-medium [&_b]:text-[var(--color-text-primary)]">
                 <span><b className="font-mono tabular-nums">{testSteps.length}</b> steps</span>
                 <span><b className="font-mono tabular-nums">{formatCompact(testSteps.reduce((s, st) => s + st.tokens_in + st.tokens_out, 0))}</b> tok</span>
                 <span><b className="font-mono tabular-nums">{formatCost(testSteps.reduce((s, st) => s + st.cost_usd, 0))}</b></span>
@@ -251,10 +253,10 @@ export function AgentLabPage() {
           ) : (
             <>
               {replay.total > replay.steps.length ? (
-                <p className="m-0 mb-2.5 text-[11.5px] text-[var(--color-text-secondary)]">
+                <p className="m-0 mb-2.5 text-xs text-[var(--color-text-secondary)]">
                   Showing the first {replay.steps.length} of {replay.total} steps.{' '}
                   <button
-                    className="border-0 bg-transparent p-0 text-[11.5px] text-agent cursor-pointer"
+                    className="border-0 bg-transparent p-0 text-xs text-agent cursor-pointer"
                     onClick={() => router.push(`/agents/${agentID}/runs/${replay.runID}`)}
                   >
                     Open the full run

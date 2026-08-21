@@ -14,7 +14,7 @@ import { PLANS, formatEvents, formatPrice, planByID, usageMeter, type Plan } fro
 import { useUpgradeRequest, useWorkspacePlan } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PlanMeter } from '@/modules/shared/components/plan-meter';
-import { Button, Intro } from '@/modules/shared/components/signal-primitives';
+import { Button } from '@/modules/shared/components/signal-primitives';
 import { UpgradeSheet } from '@/modules/settings/upgrade-sheet';
 
 // Solo is pre-selected — not because it is the most expensive thing we can
@@ -102,8 +102,7 @@ export function PricingPage() {
   // or a typed URL, since navItemsFor already drops the nav item.
   if (!hosted) {
     return (
-      <AppShell active="settings">
-        <Intro title="Plans" sub="This instance is self-hosted." />
+      <AppShell active="settings" title="Plans" sub="This instance is self-hosted.">
         <Card padding={5}>
           <VStack gap={3} align="start">
             <Badge variant="green" label="Self-hosted · unlimited · MIT" />
@@ -119,13 +118,12 @@ export function PricingPage() {
   }
 
   return (
-    <AppShell active="settings">
+    <AppShell
+      active="settings"
+      title="Plans"
+      sub="Meter the events. Never the questions — you bring your own AI key, so asking is always unlimited."
+    >
       {picked ? <UpgradeSheet plan={picked} onClose={() => setPicked(null)} /> : null}
-
-      <Intro
-        title="Plans"
-        sub="Meter the events. Never the questions — you bring your own AI key, so asking is always unlimited."
-      />
 
       {/* Where you actually are, before the ladder. A pricing page that opens
           with tiers makes the reader guess which one is theirs. */}

@@ -11,8 +11,7 @@ import { useAgentMonitor } from '@/modules/agent-monitor/hooks';
 import { useProjectAccess } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PromptDialog } from '@/modules/shared/components/modal';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
-import { Button, ContextChips, EmptyState, Intro, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, ContextChips, EmptyState, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { AssignProductsDialog } from './assign-products-dialog';
 
 // agentStatus derives the prototype's four health states from the run rollup.
@@ -46,7 +45,12 @@ export function AgentsPage() {
   const onCreate = () => setCreating(true);
 
   return (
-    <AppShell active="agents">
+    <AppShell
+      active="agents"
+      title="Your team"
+      sub="Teammates who watch the product and recommend the next move."
+      actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate} disabled={!access.canWrite} tooltip={access.reason || undefined}>New agent</Button>}
+    >
       {creating ? (
         <PromptDialog
           title="New agent"
@@ -60,8 +64,6 @@ export function AgentsPage() {
       {assigning ? (
         <AssignProductsDialog agentID={assigning.id} agentName={assigning.name} onClose={() => setAssigning(null)} />
       ) : null}
-      <Intro title="Your team" sub="Teammates who watch the product and recommend the next move." action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate} disabled={!access.canWrite} tooltip={access.reason || undefined}>New agent</Button>} />
-      <div className="mb-3"><RelatedSurfacesLabel parentHref="/agents" /></div>
       <ContextChips range="Last 24 hours" />
       <StatsStrip
         stats={[
@@ -85,12 +87,12 @@ export function AgentsPage() {
                 key={row.id}
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-[13px] font-bold text-agent">{(row.name || '?').charAt(0).toUpperCase()}</span>
-                  <span className="text-[13.5px] font-semibold">{row.name}</span>
+                  <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-sm font-bold text-agent">{(row.name || '?').charAt(0).toUpperCase()}</span>
+                  <span className="text-base font-semibold">{row.name}</span>
                   <StatusPill status={status} label={label} />
                 </div>
-                <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{row.is_default ? 'Default project analyst — routes and answers questions across your data.' : `Autonomy: ${row.autonomy || 'manual'}.`}</div>
-                <div className="flex gap-3.5 pt-0.5 text-[11.5px] text-[var(--color-text-secondary)]">
+                <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{row.is_default ? 'Default project analyst — routes and answers questions across your data.' : `Autonomy: ${row.autonomy || 'manual'}.`}</div>
+                <div className="flex gap-3.5 pt-0.5 text-xs text-[var(--color-text-secondary)]">
                   <span>last run <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatRelative(row.last_run_at)}</b></span>
                   <span>runs <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{row.run_count}</b></span>
                   <span>cost <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatCost(row.cost_usd, row.cost_unpriced)}</b></span>
@@ -123,10 +125,10 @@ export function AgentsPage() {
           {access.canWrite ? (
             <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
               <div className="flex items-center gap-2.5">
-                <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-[13px] font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
-                <span className="text-[13.5px] font-semibold">New agent</span>
+                <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-sm font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
+                <span className="text-base font-semibold">New agent</span>
               </div>
-              <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Hire a teammate from a template or a blank recipe. No backend code needed.</div>
+              <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">Hire a teammate from a template or a blank recipe. No backend code needed.</div>
               <div className="mt-0.5 flex items-center gap-2"><Button variant="outline" size="sm" onClick={onCreate}>Create agent</Button></div>
             </div>
           ) : null}

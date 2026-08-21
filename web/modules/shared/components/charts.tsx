@@ -82,7 +82,7 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     trigger: spec.type === 'pie' ? 'item' : 'axis',
     backgroundColor: surface,
     borderColor: gridColor,
-    textStyle: { color: text, fontSize: 12 },
+    textStyle: { color: text, fontSize: 13 },
     valueFormatter: (v: number) => `${typeof v === 'number' ? v.toLocaleString() : v}${unitFmt}`,
   } as echarts.EChartsCoreOption['tooltip'];
 
@@ -90,10 +90,10 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     return {
       color: colors,
       tooltip,
-      legend: { bottom: 0, textStyle: { color: axisColor, fontSize: 11 }, icon: 'circle' },
+      legend: { bottom: 0, textStyle: { color: axisColor, fontSize: 12 }, icon: 'circle' },
       series: [{
         type: 'pie', radius: ['52%', '74%'], center: ['50%', '44%'],
-        data: spec.slices ?? [], label: { color: text, fontSize: 11 },
+        data: spec.slices ?? [], label: { color: text, fontSize: 12 },
         itemStyle: { borderColor: surface, borderWidth: 2 },
       }],
     };
@@ -103,13 +103,13 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     color: colors,
     tooltip,
     grid: { left: 8, right: 14, top: 16, bottom: 4, containLabel: true },
-    legend: spec.series.length > 1 ? { top: 0, right: 0, textStyle: { color: axisColor, fontSize: 11 }, icon: 'roundRect' } : undefined,
+    legend: spec.series.length > 1 ? { top: 0, right: 0, textStyle: { color: axisColor, fontSize: 12 }, icon: 'roundRect' } : undefined,
     xAxis: {
       type: 'category', data: spec.x ?? spec.series[0]?.data.map((_, i) => i + 1),
       boundaryGap: spec.type === 'bar',
       axisLine: { lineStyle: { color: gridColor } },
       axisLabel: {
-        color: axisColor, fontSize: 11, hideOverlap: true,
+        color: axisColor, fontSize: 12, hideOverlap: true,
         formatter: (value: string) => formatAxisTick(value, spec.x),
       },
       axisTick: { show: false },
@@ -120,7 +120,7 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
       minInterval: spec.integerY ? 1 : undefined,
       splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
       axisLabel: {
-        color: axisColor, fontSize: 11,
+        color: axisColor, fontSize: 12,
         formatter: spec.integerY ? (v: number) => String(Math.round(v)) : undefined,
       },
     },
@@ -189,7 +189,7 @@ export function Sparkline({ values, color = '#46B7E8', height = 180, fill = true
 }
 
 export function AreaChart() {
-  return <><svg className="block w-full h-[180px]" viewBox="0 0 600 180" preserveAspectRatio="none"><defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#46B7E8" stopOpacity="0.32" /><stop offset="100%" stopColor="#46B7E8" stopOpacity="0" /></linearGradient></defs><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44 L600,180 L0,180 Z" fill="url(#g1)" /><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44" fill="none" stroke="#46B7E8" strokeWidth="2" /></svg><div className="mt-[10px] text-[var(--color-text-secondary)] text-[11.5px]"><span><i className="inline-block w-[9px] h-[9px] mr-[5px] rounded-[3px] align-[-1px]" style={{ background: 'var(--data)' }} />Sessions</span></div></>;
+  return <><svg className="block w-full h-[180px]" viewBox="0 0 600 180" preserveAspectRatio="none"><defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#46B7E8" stopOpacity="0.32" /><stop offset="100%" stopColor="#46B7E8" stopOpacity="0" /></linearGradient></defs><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44 L600,180 L0,180 Z" fill="url(#g1)" /><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44" fill="none" stroke="#46B7E8" strokeWidth="2" /></svg><div className="mt-[10px] text-[var(--color-text-secondary)] text-xs"><span><i className="inline-block w-[9px] h-[9px] mr-[5px] rounded-[3px] align-[-1px]" style={{ background: 'var(--data)' }} />Sessions</span></div></>;
 }
 
 export function RetentionChart() {

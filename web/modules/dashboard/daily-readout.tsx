@@ -42,14 +42,14 @@ function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id:
     <div className={`mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5 ${recTone(rec.category) === 'growth' ? '' : ''}`}>
       <span className={`grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] ${recTone(rec.category) === 'growth' ? 'bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary' : 'bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent'}`}><TrendingUp size={15} /></span>
       <div style={{ minWidth: 0 }}>
-        <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+        <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
           {rec.category || 'recommendation'} · impact {Math.round(rec.impact_score)}
           {/* A finding the agent keeps re-deriving is a standing problem, not
               news. Saying so is more useful than printing the same card twice. */}
           {rec.seen_count > 1 ? ` · raised ${rec.seen_count} times` : ''}
         </div>
         <div className="mb-0.5 text-sm font-semibold">{rec.title}</div>
-        <div className="text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{rec.rationale}</div>
+        <div className="text-sm leading-[1.5] text-[var(--color-text-secondary)]">{rec.rationale}</div>
       </div>
       <div className="ms-auto self-center flex gap-1.5">
         <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50" title={access.canWrite ? 'Accept' : access.reason} disabled={acking || !access.canWrite} onClick={() => onAck(rec.id, 'accepted')}><Check size={15} /></button>
@@ -70,7 +70,7 @@ function RunNarration({ run }: { run: AgentRun }) {
       title: 'Daily readout',
       content: (
         <div style={{ padding: '16px 18px' }}>
-          <div className="mb-[10px] text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+          <div className="mb-[10px] text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
             {when} · {run.token_input + run.token_output} tokens · {formatCost(run.cost_usd, run.cost_unpriced)}
           </div>
           <AgentMarkdown text={run.summary} />
@@ -83,10 +83,10 @@ function RunNarration({ run }: { run: AgentRun }) {
     <div className="mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5">
       <span className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Sparkles size={15} /></span>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div className="mb-0.5 text-[11px] uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Latest readout · {when}</div>
-        <div className="mt-0.5 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{lead}</div>
+        <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Latest readout · {when}</div>
+        <div className="mt-0.5 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{lead}</div>
         <button
-          className="mt-2 inline-flex items-center gap-1 border-0 bg-transparent p-0 cursor-pointer text-agent text-[12.5px] font-semibold hover:underline"
+          className="mt-2 inline-flex items-center gap-1 border-0 bg-transparent p-0 cursor-pointer text-agent text-sm font-semibold hover:underline"
           onClick={openFull}
         >
           Read full readout <ArrowRight size={13} />
@@ -121,10 +121,10 @@ export function DailyReadout() {
     return (
       <div className="mb-4 rounded-xl bg-[var(--color-background-card)] p-4">
         <div className="mb-3 flex items-center">
-          <h3 className="m-0 text-[13px] font-semibold">Daily readout</h3>
+          <h3 className="m-0 text-sm font-semibold">Daily readout</h3>
           <div className="ms-auto">{ask}</div>
         </div>
-        <p style={{ color: 'var(--color-text-secondary)', fontSize: 12.5, margin: 0 }}>
+        <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--fs-sm)', margin: 0 }}>
           Your agent hasn&apos;t produced a readout yet. Ask it about your product and it&apos;ll start
           narrating what it finds and recommending what to do next.
         </p>
@@ -135,7 +135,7 @@ export function DailyReadout() {
   return (
     <div className="mb-4 rounded-xl bg-[var(--color-background-card)] p-4">
       <div className="mb-3 flex items-center">
-        <h3 className="m-0 text-[13px] font-semibold">Daily readout</h3>
+        <h3 className="m-0 text-sm font-semibold">Daily readout</h3>
         <div className="ms-auto">{ask}</div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

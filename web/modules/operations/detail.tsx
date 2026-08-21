@@ -12,15 +12,7 @@ import { apiBase, type AgentRun, type Operator } from '@/lib/api';
 import { formatCost, formatRelative } from '@/lib/format';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import {
-  Button,
-  Callout,
-  EmptyState,
-  Intro,
-  Loading,
-  Panel,
-  StatusPill,
-} from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { useOperator } from './hooks';
 import { cronToWords } from './lib/cron-words';
 import { isEditableHere, isTeamRun, lastOutcome, operatorStatus, operatorTitle, runnerLabel } from './lib/operator';
@@ -30,8 +22,8 @@ import { isEditableHere, isTeamRun, lastOutcome, operatorStatus, operatorTitle, 
 // route the setup tab uses; nothing here is a second source of truth.
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
-const labelCls = 'text-[12px] font-medium text-[var(--color-text-secondary)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
+const labelCls = 'text-xs font-medium text-[var(--color-text-secondary)]';
 
 const hookURL = (token: string) => `${apiBase()}/api/agent/hook/${token}`;
 
@@ -151,7 +143,7 @@ function OperatorForm({
               <HStack gap={2} align="center">
                 <input
                   id="op-hook"
-                  className={`${inputCls} font-mono text-[12px]`}
+                  className={`${inputCls} font-mono text-xs`}
                   readOnly
                   value={hookURL(op.webhook_token)}
                   onFocus={(e) => e.currentTarget.select()}
@@ -209,8 +201,7 @@ export function OperationDetailPage() {
 
   if (error || !operator) {
     return (
-      <AppShell active="operations">
-        <Intro title="Operator" sub="One standing unit of unattended work." />
+      <AppShell active="operations" title="Operator" sub="One standing unit of unattended work.">
         <Callout
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
@@ -232,16 +223,16 @@ export function OperationDetailPage() {
   const isWebhook = operator.kind === 'webhook';
 
   return (
-    <AppShell active="operations">
-      <Intro
-        title={
+    <AppShell
+      active="operations"
+      title={
           <HStack gap={2} align="center">
             <span>{operatorTitle(operator)}</span>
             <StatusPill status={status} label={label} grow={false} />
           </HStack>
         }
-        sub={outcome.text === 'Never run' ? 'It has not run yet.' : `Last run: ${outcome.text}`}
-        action={
+      sub={outcome.text === 'Never run' ? 'It has not run yet.' : `Last run: ${outcome.text}`}
+      actions={
           <HStack gap={1}>
             <Button variant="ghost" size="sm" icon={<ArrowLeft size={13} aria-hidden />} onClick={() => router.push('/operations')}>
               Operations
@@ -251,7 +242,7 @@ export function OperationDetailPage() {
             </Button>
           </HStack>
         }
-      />
+    >
 
       {!operator.agent_enabled ? (
         <Callout

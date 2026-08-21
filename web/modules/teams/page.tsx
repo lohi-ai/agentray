@@ -6,7 +6,7 @@ import { Crown, Plus, Trash2, UsersRound } from 'lucide-react';
 import { useTeams } from './hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Intro, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 // TeamsPage lists the project's agent teams. A team groups existing agents
 // around a shared kanban board; the picked lead gets the orchestrator skill at
@@ -24,7 +24,12 @@ export function TeamsPage() {
   const onCreate = () => setCreating(true);
 
   return (
-    <AppShell active="agents">
+    <AppShell
+      active="agents"
+      title="Agent teams"
+      sub="Group agents around a board, pick a lead, and let it orchestrate the work."
+      actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New team</Button>}
+    >
       {creating ? (
         <PromptDialog
           title="New team"
@@ -45,11 +50,6 @@ export function TeamsPage() {
           onClose={() => setDeleting(null)}
         />
       ) : null}
-      <Intro
-        title="Agent teams"
-        sub="Group agents around a board, pick a lead, and let it orchestrate the work."
-        action={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New team</Button>}
-      />
       <StatsStrip
         stats={[
           { label: 'Teams', value: String(teams.length) },
@@ -74,16 +74,16 @@ export function TeamsPage() {
               onClick={() => router.push(`/teams/${team.id}`)}
             >
               <div className="flex items-center gap-2.5">
-                <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-[13px] font-bold text-agent">
+                <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-sm font-bold text-agent">
                   {(team.name || '?').charAt(0).toUpperCase()}
                 </span>
-                <span className="text-[13.5px] font-semibold">{team.name}</span>
+                <span className="text-base font-semibold">{team.name}</span>
                 {team.lead_agent_id ? <Crown size={14} className="text-agent" aria-label="Lead picked" /> : null}
               </div>
-              <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">
+              <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">
                 {team.lead_agent_id ? 'Lead picked — the lead orchestrates this board.' : 'No lead yet — pick one so the board gets worked.'}
               </div>
-              <div className="flex gap-3.5 pt-0.5 text-[11.5px] text-[var(--color-text-secondary)]">
+              <div className="flex gap-3.5 pt-0.5 text-xs text-[var(--color-text-secondary)]">
                 <span>members <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{team.member_count}</b></span>
                 <span>cards <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{team.card_count}</b></span>
               </div>
@@ -95,10 +95,10 @@ export function TeamsPage() {
           ))}
           <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
             <div className="flex items-center gap-2.5">
-              <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-[13px] font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
-              <span className="text-[13.5px] font-semibold">New team</span>
+              <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-sm font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
+              <span className="text-base font-semibold">New team</span>
             </div>
-            <div className="min-h-9 text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">Group existing agents around a kanban board and pick a lead to orchestrate.</div>
+            <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">Group existing agents around a kanban board and pick a lead to orchestrate.</div>
             <div className="mt-0.5 flex items-center gap-2"><Button variant="outline" size="sm" onClick={onCreate}>Create team</Button></div>
           </div>
         </div>

@@ -68,7 +68,7 @@ export function PromptDialog({
       footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" onClick={submit}>{submitLabel}</Button></>}
     >
       <div className="max-w-[440px]" style={{ marginBottom: options ? 14 : 0 }}>
-        {label ? <label className="mb-1.5 block text-[12.5px]">{label}</label> : null}
+        {label ? <label className="mb-1.5 block text-sm">{label}</label> : null}
         <TextInput
           ref={inputRef}
           label={label ?? title}
@@ -82,7 +82,7 @@ export function PromptDialog({
       </div>
       {options ? (
         <div className="max-w-[440px]">
-          {selectLabel ? <label className="mb-1.5 block text-[12.5px]">{selectLabel}</label> : null}
+          {selectLabel ? <label className="mb-1.5 block text-sm">{selectLabel}</label> : null}
           <Selector
             label={selectLabel ?? 'Choice'}
             isLabelHidden
@@ -95,7 +95,7 @@ export function PromptDialog({
       ) : null}
       {showEventName ? (
         <div className="mt-3.5 max-w-[440px]">
-          <label className="mb-1.5 block text-[12.5px]">{eventNameLabel}</label>
+          <label className="mb-1.5 block text-sm">{eventNameLabel}</label>
           <EventNameCombobox value={eventName} onChange={setEventName} placeholder="Pick an event to chart…" />
         </div>
       ) : null}
@@ -111,7 +111,7 @@ export function ConfirmDialog({ title, detail, confirmLabel = 'Confirm', danger 
       onClose={onClose}
       footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant={danger ? 'agent' : 'primary'} size="sm" onClick={() => { onConfirm(); onClose(); }}><span style={danger ? { color: 'var(--danger)' } : undefined}>{confirmLabel}</span></Button></>}
     >
-      {detail ? <p style={{ margin: 0, fontSize: 12.5, color: 'var(--muted-foreground)', lineHeight: 1.5 }}>{detail}</p> : null}
+      {detail ? <p style={{ margin: 0, fontSize: 'var(--fs-sm)', color: 'var(--muted-foreground)', lineHeight: 1.5 }}>{detail}</p> : null}
     </Modal>
   );
 }

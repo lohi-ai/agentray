@@ -30,7 +30,7 @@ const METRIC_KINDS: Array<{ value: Chart['kind']; label: string }> = [
 ];
 const SQL_KINDS = METRIC_KINDS.filter((k) => k.value !== 'stat');
 
-const FIELD_LABEL = 'mb-1.5 block text-[12.5px] text-[var(--color-text-secondary)]';
+const FIELD_LABEL = 'mb-1.5 block text-sm text-[var(--color-text-secondary)]';
 
 // ChartEditor is the create/edit surface for a dashboard chart. It shows a live
 // preview built from the same ChartCard used on the board, so what you see while
@@ -158,13 +158,13 @@ export function ChartEditor({ chart, onSubmit, onClose }: {
                     exception class as the SQL page's editor — Astryx TextArea can't
                     set a monospace control font through its typed props. */}
                 <textarea
-                  className="min-h-[120px] w-full resize-y rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] px-3 py-2 font-mono text-[12px] leading-[1.5] text-[var(--color-text-primary)] outline-0 focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]"
+                  className="min-h-[120px] w-full resize-y rounded-md border border-[var(--color-border-emphasized)] bg-[var(--color-background-muted)] px-3 py-2 font-mono text-xs leading-[1.5] text-[var(--color-text-primary)] outline-0 focus:border-primary focus:shadow-[0_0_0_3px_var(--ring)]"
                   value={sql}
                   placeholder={"select day, count(*) as n\nfrom events\nwhere timestamp >= '{{from}}'\ngroup by day order by day"}
                   onChange={(e) => setSql(e.target.value)}
                   spellCheck={false}
                 />
-                <p className="mt-1.5 text-[11px] text-[var(--color-text-secondary)]">Use <code className="font-mono">{'{{from}}'}</code>, <code className="font-mono">{'{{to}}'}</code>, or <code className="font-mono">{'{{hours}}'}</code> to honour the dashboard time range.</p>
+                <p className="mt-1.5 text-2xs text-[var(--color-text-secondary)]">Use <code className="font-mono">{'{{from}}'}</code>, <code className="font-mono">{'{{to}}'}</code>, or <code className="font-mono">{'{{hours}}'}</code> to honour the dashboard time range.</p>
               </div>
               <div className="grid grid-cols-2 gap-2.5">
                 <div>

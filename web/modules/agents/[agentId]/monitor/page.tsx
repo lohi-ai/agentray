@@ -7,7 +7,7 @@ import type { AgentRun } from '@/lib/api';
 import { formatCompact, formatCost, formatLatency, formatRelative } from '@/lib/format';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Loading, Panel, rowNavPlugin, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, rowNavPlugin, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 
 function runLatency(run: AgentRun): string {
   if (!run.finished_at) return '—';
@@ -21,21 +21,21 @@ export function AgentMonitorPage() {
   const { agent, runs, isLoading } = useAgentMonitorDetail(agentID);
 
   if (isLoading && !agent) {
-    return <AppShell active="monitor"><Intro title="Agent" sub="Per-agent health and recent runs." /><Loading label="Loading agent…" /></AppShell>;
+    return <AppShell active="monitor" title="Agent" sub="Per-agent health and recent runs."><Loading label="Loading agent…" /></AppShell>;
   }
   if (!agent) {
-    return <AppShell active="monitor"><Intro title="Agent" sub="Per-agent health and recent runs." /><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents/monitor')}>Back to fleet</Button>} /></AppShell>;
+    return <AppShell active="monitor" title="Agent" sub="Per-agent health and recent runs."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents/monitor')}>Back to fleet</Button>} /></AppShell>;
   }
 
   const status = !agent.enabled ? { s: 'paused', l: 'Paused' } : agent.error_count > 0 ? { s: 'attention', l: 'Attention' } : agent.running_count > 0 ? { s: 'working', l: 'Working' } : { s: 'healthy', l: 'Healthy' };
 
   return (
-    <AppShell active="monitor">
-      <Intro
-        title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents/monitor')}><ArrowLeft size={15} /></button>{agent.name}</span>}
-        sub="Per-agent health and recent runs."
-        action={<><StatusPill status={status.s} label={status.l} grow={false} /><Button variant="outline" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${agentID}/setup`)}>Set up</Button><Button variant="agent" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button></>}
-      />
+    <AppShell
+      active="monitor"
+      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents/monitor')}><ArrowLeft size={15} /></button>{agent.name}</span>}
+      sub="Per-agent health and recent runs."
+      actions={<><StatusPill status={status.s} label={status.l} grow={false} /><Button variant="outline" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${agentID}/setup`)}>Set up</Button><Button variant="agent" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button></>}
+    >
       <StatsStrip stats={[
         { label: 'Runs (24h)', value: formatCompact(agent.run_count) },
         { label: 'Running now', value: String(agent.running_count), tone: agent.running_count ? 'agent' : undefined },
@@ -45,7 +45,7 @@ export function AgentMonitorPage() {
         { label: 'Last run', value: agent.last_run_at ? formatRelative(agent.last_run_at) : '—' },
       ]} />
       <Panel title="Recent runs">
-        {runs.length === 0 ? <p style={{ color: 'var(--muted-foreground)', fontSize: 12.5, margin: 0 }}>No runs recorded yet.</p> : (
+        {runs.length === 0 ? <p style={{ color: 'var(--muted-foreground)', fontSize: 'var(--fs-sm)', margin: 0 }}>No runs recorded yet.</p> : (
           /* Astryx migration: recent runs render through the data-driven Astryx
              Table (compact density, themed cells); failed-status danger tint and
              end-aligned monospace numerics preserved via renderCell. */

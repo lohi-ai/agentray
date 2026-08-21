@@ -62,11 +62,11 @@ export function IdeaTest({
 
   return (
     <Panel title="The test">
-      <p className="mb-3 text-[13px] leading-[1.55] text-[var(--color-text-primary)]">{test.hypothesis}</p>
+      <p className="mb-3 text-sm leading-[1.55] text-[var(--color-text-primary)]">{test.hypothesis}</p>
 
       {proposed ? (
         <div className="rounded-[var(--radius-md)] border border-[var(--agent)] p-3">
-          <p className="text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]">
+          <p className="text-sm leading-[1.55] text-[var(--color-text-secondary)]">
             Your teammate proposes:{' '}
             <b className="text-[var(--color-text-primary)]">
               {test.target_count} people fire <code>{test.metric_event}</code> within {test.window_days} days
@@ -178,7 +178,7 @@ function Verdict({
 function Line({ tone, children }: { tone: string; children: React.ReactNode }) {
   return (
     <p
-      className="mt-3 border-s-2 ps-3 text-[12.5px] leading-[1.55] text-[var(--color-text-secondary)]"
+      className="mt-3 border-s-2 ps-3 text-sm leading-[1.55] text-[var(--color-text-secondary)]"
       style={{ borderInlineStartColor: tone }}
     >
       {children}
@@ -188,7 +188,7 @@ function Line({ tone, children }: { tone: string; children: React.ReactNode }) {
 
 function WaitlistLine({ count }: { count: number }) {
   return (
-    <p className="mt-3 text-[12.5px] text-[var(--color-text-secondary)]">
+    <p className="mt-3 text-sm text-[var(--color-text-secondary)]">
       {count} {count === 1 ? 'person has' : 'people have'} joined the waitlist already — that is a costly signal, and it
       is the number a test should be judged on.
     </p>

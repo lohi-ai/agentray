@@ -154,7 +154,7 @@ function PanelHeader({
       {onBack && (
         <IconButton variant="ghost" size="sm" label="Back" tooltip="Back" icon={<ChevronLeft size={16} />} onClick={onBack} />
       )}
-      <Text weight="semibold" className="min-w-0 flex-1 truncate text-[15px] text-[var(--color-text-primary)]">{title}</Text>
+      <Text weight="semibold" className="min-w-0 flex-1 truncate text-lg text-[var(--color-text-primary)]">{title}</Text>
       {extra && <div className="flex shrink-0 items-center gap-2">{extra}</div>}
       {onSetWidthStep && (
         <div className="flex shrink-0 items-center">
@@ -232,7 +232,7 @@ function PanelCard({
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden py-2">
           {typeof entry.title === 'string' && (
             <span
-              className="select-none text-[11px] font-medium text-[var(--color-text-disabled)] transition-colors group-hover:text-[var(--color-text-secondary)]"
+              className="select-none text-2xs font-medium text-[var(--color-text-disabled)] transition-colors group-hover:text-[var(--color-text-secondary)]"
               style={{
                 writingMode: 'vertical-rl',
                 textOrientation: 'mixed',

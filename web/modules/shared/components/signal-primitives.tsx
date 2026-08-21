@@ -59,22 +59,6 @@ export function Button({ children, variant, size, icon, onClick, disabled, isIco
   );
 }
 
-// Astryx migration: the page header is now an Astryx <HStack> (title block start,
-// action end) wrapping a <VStack> of an Astryx <Heading> + supporting <Text>. The
-// title uses level 2 (font-size-xl ≈ the prototype's 19px) and stays a flex row so
-// an inline icon can sit beside the text.
-export function Intro({ title, sub, action }: { title: ReactNode; sub: string; action?: ReactNode }) {
-  return (
-    <HStack align="start" justify="between" gap={4} className="mb-[18px]">
-      <VStack gap={0.5}>
-        <Heading level={2} className="flex items-center gap-2 tracking-[-0.02em]">{title}</Heading>
-        <Text type="supporting">{sub}</Text>
-      </VStack>
-      {action}
-    </HStack>
-  );
-}
-
 // Astryx migration: the context chips are now Astryx <Badge>s (neutral/muted pill)
 // in a wrapping <HStack>. The label keeps a secondary caption + emphasized value.
 export function ContextChips({ range, extra }: { range: string; extra?: ReactNode }) {
@@ -120,7 +104,7 @@ const DOT_TONE: Record<string, string> = { working: 'bg-agent text-agent', healt
 
 export function StatusPill({ status, label, grow = true }: { status: string; label: string; grow?: boolean }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-[20px] bg-[var(--color-background-muted)] px-[9px] py-[3px] text-[11.5px] ${PILL_TONE[status] ?? ''} ${grow ? 'ms-auto' : ''}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-[20px] bg-[var(--color-background-muted)] px-[9px] py-[3px] text-xs ${PILL_TONE[status] ?? ''} ${grow ? 'ms-auto' : ''}`}>
       <span className={`relative inline-block h-2 w-2 flex-none rounded-full ${DOT_TONE[status] ?? ''} ${status !== 'paused' && status !== 'idle' ? "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" : ''}`} />
       {label}
     </span>
@@ -196,7 +180,7 @@ export function EmptyState({ icon, title, detail, action }: { icon?: ReactNode; 
 // inline --data bar + monospace count; count column is end-aligned.
 export function BarRows({ rows, valueHead = 'Source', countHead = 'Count', mono = false, empty = 'No data yet' }: { rows: Array<{ value: string; count: number }>; valueHead?: string; countHead?: string; mono?: boolean; empty?: string }) {
   const max = rows.reduce((m, r) => Math.max(m, r.count), 0) || 1;
-  if (rows.length === 0) return <p style={{ color: 'var(--color-text-secondary)', fontSize: 12.5, margin: 0 }}>{empty}</p>;
+  if (rows.length === 0) return <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--fs-sm)', margin: 0 }}>{empty}</p>;
   const columns = [
     {
       key: 'value',

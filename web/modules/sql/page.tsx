@@ -11,7 +11,7 @@ import type { SavedQuery } from '@/lib/api';
 import { useSavedQueries, useSQL } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { EventCatalog } from '@/modules/shared/components/event-name-picker';
-import { Button, EmptyState, Intro, Panel } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Panel } from '@/modules/shared/components/signal-primitives';
 import { SqlEditor } from './sql-editor';
 import { SchemaReference } from './schema-reference';
 
@@ -125,7 +125,7 @@ export function SQLPage() {
   // Results meta line: "N rows · 0.18s" (elapsed only for editor runs, not cached
   // saved-query results) plus a truncation note when we cap the table at 100 rows.
   const resultsMeta = (
-    <span className="text-[11.5px] text-[var(--color-text-secondary)]">
+    <span className="text-xs text-[var(--color-text-secondary)]">
       {hasRows ? (
         <>
           {rows.length.toLocaleString('en-US')} {rows.length === 1 ? 'row' : 'rows'}
@@ -149,8 +149,12 @@ export function SQLPage() {
   );
 
   return (
-    <AppShell active="dashboards">
-      <Intro title="SQL" sub="Query the event store directly — or describe what you want and let the agent write it." action={<><Button variant="outline" icon={<Columns3 size={15} />} onClick={() => setShowReference((v) => !v)}>{showReference ? 'Hide reference' : 'Schema & names'}</Button><Button variant="outline" icon={<Save size={15} />} onClick={() => sql.trim() && void createSavedQuery(sql.slice(0, 60), sql, true)}>Save</Button><Button variant="primary" icon={<Play size={15} />} onClick={runQuery}>Run</Button></>} />
+    <AppShell
+      active="dashboards"
+      title="SQL"
+      sub="Query the event store directly — or describe what you want and let the agent write it."
+      actions={<><Button variant="outline" icon={<Columns3 size={15} />} onClick={() => setShowReference((v) => !v)}>{showReference ? 'Hide reference' : 'Schema & names'}</Button><Button variant="outline" icon={<Save size={15} />} onClick={() => sql.trim() && void createSavedQuery(sql.slice(0, 60), sql, true)}>Save</Button><Button variant="primary" icon={<Play size={15} />} onClick={runQuery}>Run</Button></>}
+    >
 
       {/* Hand-off to the agent chat — describe the question, the agent writes & runs the SQL. */}
       <HStack align="center" gap={2} className="mb-3 rounded-xl bg-[color-mix(in_srgb,var(--agent)_8%,var(--surface-1))] p-2.5">
@@ -175,7 +179,7 @@ export function SQLPage() {
             <SqlEditor value={sql} onChange={setSql} onRun={runQuery} />
           </div>
           <div className="mt-2 flex items-center justify-between border-t border-[color-mix(in_srgb,var(--border)_60%,transparent)] pt-2">
-            <span className="text-[11px] text-[var(--color-text-secondary)]">⌘↵ to run · Tab to indent</span>
+            <span className="text-2xs text-[var(--color-text-secondary)]">⌘↵ to run · Tab to indent</span>
             <Button variant="ghost" size="sm" icon={<Sparkles size={14} />} disabled={!sql.trim()} onClick={explain}>Explain this query</Button>
           </div>
         </div>

@@ -447,7 +447,7 @@ function TourRow({
     >
       <span
         aria-hidden
-        className={`mt-0.5 flex size-[18px] flex-none items-center justify-center rounded-full text-[11px] leading-none ${
+        className={`mt-0.5 flex size-[18px] flex-none items-center justify-center rounded-full text-2xs leading-none ${
           step.observable && step.done
             ? 'bg-[var(--success)] text-[var(--color-text-inverse)]'
             : 'border border-[var(--color-border-strong)] text-[var(--color-text-secondary)]'

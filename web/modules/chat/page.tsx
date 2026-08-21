@@ -20,7 +20,6 @@ import { firstSessionNotice, firstValuePath, formatAgentError, instantReply, isR
 import { useWorkspaceModels } from '@/modules/agent/hooks';
 import { useEventNames, useTour } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { RelatedSurfacesLabel } from '@/modules/shared/components/related-surfaces';
 import { useStackSheet, type StackSheetPanel } from '@/modules/shared/components/stack-sheet';
 import { ThreadsRail, FrontDoor, TourPanel, TourNext, Conversation, ContextMeter, AgentMenu, type ChatMsg } from './chat-parts';
 import { Composer } from './composer';
@@ -891,39 +890,43 @@ export function ChatPage() {
 
   return (
     <CommandNames.Provider value={commandNames}>
-    <AppShell active="chat" bleed>
-      <div className="flex h-full flex-col">
-        <HStack justify="between" align="center" className="h-12 flex-none border-b border-[var(--color-border)] bg-[var(--color-background-card)] px-4">
-          <HStack align="center" gap={2}>
-            <Text weight="semibold">Chat</Text>
-            <Badge variant="neutral" label={<>Project <b className="font-medium text-[var(--color-text-primary)]">{projectName || '—'}</b></>} />
-            {messages.length > 0 && !compactHeader ? <Badge variant="neutral" label="Watching the run" /> : null}
-          </HStack>
-          <HStack align="center" gap={2}>
-            <Button label="Set up" size="sm" variant="ghost" onClick={() => router.push('/start')} />
-            <Button label="New chat" size="sm" variant="secondary" icon={<Plus size={14} />} isIconOnly={narrow} onClick={onNew} />
-            <ToggleButton
-              label="Threads"
-              size="sm"
-              icon={<PanelLeft size={14} />}
-              isPressed={narrow ? threadsSheetOpen : threadsOn}
-              onPressedChange={(v) => (narrow ? (v ? push(threadsPanel()) : closeById(THREADS_SHEET)) : setThreadsOn(v))}
-            />
-            <ToggleButton
-              label="Panel"
-              size="sm"
-              icon={<PanelRight size={14} />}
-              isPressed={narrow ? panelSheetOpen : panelOn}
-              onPressedChange={(v) => (narrow ? (v ? push(workPanel()) : closeById(PANEL_SHEET)) : setPanelOn(v))}
-            />
-          </HStack>
+    <AppShell
+      active="chat"
+      bleed
+      // Chat's "related" surface is Set up, and that is already a header
+      // button here — listing it again in an aside would be the same link twice.
+      hideRelated
+      title={
+        <HStack align="center" gap={2}>
+          <span>Chat</span>
+          <Badge variant="neutral" label={<>Project <b className="font-medium text-[var(--color-text-primary)]">{projectName || '—'}</b></>} />
+          {messages.length > 0 && !compactHeader ? <Badge variant="neutral" label="Watching the run" /> : null}
         </HStack>
-        <div className="flex-none border-b border-[var(--color-border)] bg-[var(--color-background-card)] px-4 py-1">
-          <RelatedSurfacesLabel parentHref="/chat" />
-        </div>
-
+      }
+      actions={
+        <>
+          <Button label="Set up" size="sm" variant="ghost" onClick={() => router.push('/start')} />
+          <Button label="New chat" size="sm" variant="secondary" icon={<Plus size={14} />} isIconOnly={narrow} onClick={onNew} />
+          <ToggleButton
+            label="Threads"
+            size="sm"
+            icon={<PanelLeft size={14} />}
+            isPressed={narrow ? threadsSheetOpen : threadsOn}
+            onPressedChange={(v) => (narrow ? (v ? push(threadsPanel()) : closeById(THREADS_SHEET)) : setThreadsOn(v))}
+          />
+          <ToggleButton
+            label="Panel"
+            size="sm"
+            icon={<PanelRight size={14} />}
+            isPressed={narrow ? panelSheetOpen : panelOn}
+            onPressedChange={(v) => (narrow ? (v ? push(workPanel()) : closeById(PANEL_SHEET)) : setPanelOn(v))}
+          />
+        </>
+      }
+    >
+      <div className="grid h-full min-h-0">
         <div
-          className="grid min-h-0 flex-1"
+          className="grid min-h-0"
           style={{ gridTemplateColumns: `${railCol} minmax(0, 1fr) ${panelCol}` }}
         >
           {!narrow && threadsOn ? <ThreadsRail threads={threads} activeID={activeID} onNew={onNew} onSelect={onSelect} onDelete={removeThread} /> : null}

@@ -61,12 +61,12 @@ function JobCard({
     >
       <span className="mb-2 flex items-center gap-2 text-[var(--agent)]">
         <Icon size={16} />
-        <span className="text-[12.5px] font-[600] uppercase tracking-[0.06em]">{job.label}</span>
+        <span className="text-sm font-[600] uppercase tracking-[0.06em]">{job.label}</span>
       </span>
-      <span className="block text-[14px] font-[600] text-[var(--color-text-primary)]">{job.situation}</span>
-      <span className="mt-1 block text-[12.5px] leading-[1.5] text-[var(--color-text-secondary)]">{job.outcome}</span>
+      <span className="block text-base font-[600] text-[var(--color-text-primary)]">{job.situation}</span>
+      <span className="mt-1 block text-sm leading-[1.5] text-[var(--color-text-secondary)]">{job.outcome}</span>
       {progress ? (
-        <span className="mt-3 block text-[12px] text-[var(--color-text-secondary)]">
+        <span className="mt-3 block text-xs text-[var(--color-text-secondary)]">
           {progress.done === progress.total
             ? 'Set up and running'
             : `${progress.done} of ${progress.total} set up`}

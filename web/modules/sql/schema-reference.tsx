@@ -20,8 +20,8 @@ export function SchemaReference({ onPick }: { onPick: (column: string) => void }
     <div className="rounded-xl bg-[var(--color-background-card)] p-3">
       <div className="mb-2 flex items-center gap-2">
         <Columns3 size={14} className="text-[var(--color-text-secondary)]" />
-        <span className="text-[12.5px] font-semibold">{EVENTS_TABLE}</span>
-        <span className="text-[11px] text-[var(--color-text-secondary)]">{EVENTS_COLUMNS.length} cols</span>
+        <span className="text-sm font-semibold">{EVENTS_TABLE}</span>
+        <span className="text-2xs text-[var(--color-text-secondary)]">{EVENTS_COLUMNS.length} cols</span>
         <TextInput label="Filter columns" isLabelHidden size="sm" startIcon={Search} value={q} placeholder="Filter…" onChange={(v) => setQ(v)} width={130} className="ms-auto" />
       </div>
       <div className="flex max-h-[420px] flex-col gap-0.5 overflow-auto">
@@ -37,10 +37,10 @@ export function SchemaReference({ onPick }: { onPick: (column: string) => void }
               title={c.note}
             >
               <span className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-[var(--color-text-primary)]">{c.name}</span>
-                <span className="flex-none font-mono text-[10.5px] text-[var(--color-text-secondary)]">{c.type}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-sm text-[var(--color-text-primary)]">{c.name}</span>
+                <span className="flex-none font-mono text-2xs text-[var(--color-text-secondary)]">{c.type}</span>
               </span>
-              {c.note ? <span className="truncate text-[11px] text-[var(--color-text-secondary)]">{c.note}</span> : null}
+              {c.note ? <span className="truncate text-2xs text-[var(--color-text-secondary)]">{c.note}</span> : null}
             </button>
           ))
         )}

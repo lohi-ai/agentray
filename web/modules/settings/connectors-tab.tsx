@@ -422,7 +422,7 @@ function DraftReviewDialog({ draft, onApprove, onClose }: {
           <Text type="supporting" style={{ color: 'var(--danger)' }}>{draft.warnings.join(' · ')}</Text>
         ) : null}
         {draft.syncs.map((s, i) => (
-          <div key={`${s.source_table}-${i}`} className="flex items-center gap-3 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-[12.5px]">
+          <div key={`${s.source_table}-${i}`} className="flex items-center gap-3 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-sm">
             <div className="min-w-0 flex-1">
               <div className="font-mono">{s.source_table} <span className="text-[var(--color-text-secondary)]">key {s.key_column} · cursor {s.cursor_column || 'full re-sync'} · {s.schedule_cron || 'manual'}</span></div>
               {s.reason ? <div className="text-[var(--color-text-secondary)]">{s.reason}</div> : null}

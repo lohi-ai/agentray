@@ -19,9 +19,9 @@ import {
 } from '@/lib/api';
 import { useAlertChannels, useAlertRules } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
-import { Button, EmptyState, Intro, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 
-const labelCls = 'mb-1 block text-[12px] font-medium text-[var(--color-text-secondary)]';
+const labelCls = 'mb-1 block text-xs font-medium text-[var(--color-text-secondary)]';
 
 const SOURCE_LABEL: Record<AlertSourceKind, string> = {
   insight: 'Insight / chart',
@@ -81,26 +81,25 @@ export function AlertsPage() {
       channels: d.channels.includes(id) ? d.channels.filter((c) => c !== id) : [...d.channels, id],
     }));
   return (
-    <AppShell>
-      <Intro
-        title="Alerts"
-        sub="Notify a channel when a metric breaks its threshold or drifts into anomaly."
-        action={(
+    <AppShell
+      title="Alerts"
+      sub="Notify a channel when a metric breaks its threshold or drifts into anomaly."
+      actions={(
           <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => setCreating((v) => !v)}>
             {creating ? 'Cancel' : 'New alert'}
           </Button>
         )}
-      />
+    >
 
       <Panel title="Notification channels">
         {channels.length === 0 ? (
-          <p className="mb-3 text-[12px] text-[var(--color-text-secondary)]">
+          <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
             Add a Slack incoming-webhook URL so a firing alert can leave the app.
           </p>
         ) : (
           <div className="mb-3 flex flex-col gap-1.5">
             {channels.map((c) => (
-              <p key={c.id} className="text-[12.5px]">{c.name} <span className="text-[var(--color-text-secondary)]">({c.kind})</span></p>
+              <p key={c.id} className="text-sm">{c.name} <span className="text-[var(--color-text-secondary)]">({c.kind})</span></p>
             ))}
           </div>
         )}
@@ -198,7 +197,7 @@ export function AlertsPage() {
           <div className="mt-4">
             <label className={labelCls}>Notify channels</label>
             {channels.length === 0 ? (
-              <p className="text-[12px] text-[var(--color-text-disabled)]">
+              <p className="text-xs text-[var(--color-text-disabled)]">
                 No channels yet — add a Slack webhook above, then tick it here.
               </p>
             ) : (
@@ -283,12 +282,12 @@ function AlertRuleRow({
           <span className="truncate font-medium">{rule.name}</span>
           <StatusPill status={firing ? 'attention' : rule.enabled ? 'healthy' : 'paused'} label={firing ? 'Firing' : rule.enabled ? 'OK' : 'Paused'} grow={false} />
         </div>
-        <p className="mt-0.5 truncate text-[12px] text-[var(--color-text-secondary)]">
+        <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
           {SOURCE_LABEL[rule.source_kind]} · {rule.source_ref} {OP_LABEL[rule.condition.op]} {rule.condition.value} · every {rule.schedule_cron} · → {targets}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Link href={`/chat?q=${why}`} className="text-[12px] text-[var(--color-primary)] hover:underline">
+        <Link href={`/chat?q=${why}`} className="text-xs text-[var(--color-primary)] hover:underline">
           Why did this fire?
         </Link>
         <CheckboxInput label="Enabled" isLabelHidden value={rule.enabled} onChange={(v: boolean) => onToggle(v)} />

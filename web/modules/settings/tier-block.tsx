@@ -66,11 +66,11 @@ export function TierBlock({
   return (
     <div className="border-t border-[var(--color-border)] pt-4 first:border-t-0 first:pt-0">
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <span className="text-[13px] text-[var(--color-text-primary)]">{tier.title}</span>
-        {tier.required ? <span className="text-[11.5px] text-[var(--color-text-secondary)]">Required</span> : null}
+        <span className="text-sm text-[var(--color-text-primary)]">{tier.title}</span>
+        {tier.required ? <span className="text-xs text-[var(--color-text-secondary)]">Required</span> : null}
       </div>
-      <p className="mb-1 max-w-[560px] text-[12.5px] text-[var(--color-text-primary)]">{tier.does}</p>
-      <p className="mb-3 max-w-[560px] text-[12px] text-[var(--color-text-secondary)]">{tier.note}</p>
+      <p className="mb-1 max-w-[560px] text-sm text-[var(--color-text-primary)]">{tier.does}</p>
+      <p className="mb-3 max-w-[560px] text-xs text-[var(--color-text-secondary)]">{tier.note}</p>
 
       {onInheritChange ? (
         <div className="mb-2">
@@ -101,8 +101,8 @@ export function TierBlock({
             emptySearchResultsText="No model matches that."
             renderItem={(item: ModelPickerItem) => (
               <span className="flex w-full items-baseline justify-between gap-3">
-                <span className="text-[13px]">{item.label}</span>
-                <span className="text-[11.5px] text-[var(--color-text-secondary)]">{item.auxiliaryData.provider}</span>
+                <span className="text-sm">{item.label}</span>
+                <span className="text-xs text-[var(--color-text-secondary)]">{item.auxiliaryData.provider}</span>
               </span>
             )}
           />
@@ -142,13 +142,13 @@ function ContextWindowField({
   return (
     <div className="mt-3">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-[12px] text-[var(--color-text-secondary)]">Conversation size limit</span>
-        <span className="text-[12.5px] text-[var(--color-text-primary)]">
+        <span className="text-xs text-[var(--color-text-secondary)]">Conversation size limit</span>
+        <span className="text-sm text-[var(--color-text-primary)]">
           {effective > 0 ? `${formatTokens(effective)} tokens` : 'Not known for this model'}
         </span>
         <button
           type="button"
-          className="text-[12px] text-[var(--color-text-secondary)] underline underline-offset-2 hover:text-[var(--color-text-primary)]"
+          className="text-xs text-[var(--color-text-secondary)] underline underline-offset-2 hover:text-[var(--color-text-primary)]"
           onClick={() => onChange(manual ? 0 : detected || 128000)}
         >
           {manual ? 'Use the detected size' : 'Set it myself'}
@@ -168,7 +168,7 @@ function ContextWindowField({
           />
         </div>
       ) : (
-        <p className="mt-1 max-w-[560px] text-[11.5px] text-[var(--color-text-secondary)]">
+        <p className="mt-1 max-w-[560px] text-xs text-[var(--color-text-secondary)]">
           {effective > 0
             ? 'Taken from the model. The agent summarizes older messages before reaching it.'
             : 'The agent will fall back to the workspace default. Set it yourself if this endpoint holds less.'}

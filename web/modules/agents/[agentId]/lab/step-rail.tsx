@@ -18,7 +18,7 @@ export function StepRail({ steps, selected, onSelect }: { steps: LabStep[]; sele
       {steps.map((s, i) => (
         <button
           key={i}
-          className={`inline-flex h-[30px] items-center gap-1.5 rounded-[20px] border px-2.5 text-[11.5px] cursor-pointer ${
+          className={`inline-flex h-[30px] items-center gap-1.5 rounded-[20px] border px-2.5 text-xs cursor-pointer ${
             s.error
               ? 'border-danger text-danger bg-[var(--color-background-muted)]'
               : i === selected

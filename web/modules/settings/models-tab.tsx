@@ -247,7 +247,7 @@ export function ModelsTab() {
 
   return (
     <div className="flex flex-col gap-[14px]">
-      <p className="max-w-[640px] text-[13px] text-[var(--color-text-primary)]">
+      <p className="max-w-[640px] text-sm text-[var(--color-text-primary)]">
         {hasProviders
           ? 'Your agents think with the keys below. Choose which model handles which kind of work.'
           : models.hosted_default
@@ -295,19 +295,19 @@ export function ModelsTab() {
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[13px] text-[var(--color-text-primary)]">
+                        <span className="text-sm text-[var(--color-text-primary)]">
                           {p.name || vendorLabel(p.vendor)}
                         </span>
                         <StatusPill grow={false} status={badge.status} label={badge.label} />
                       </div>
-                      <div className="mt-0.5 text-[12px] text-[var(--color-text-secondary)]">
+                      <div className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
                         {vendorLabel(p.vendor)}
                         {p.base_url ? ` · ${p.base_url}` : ''}
                         {' · '}
                         {p.has_key ? 'key saved' : 'no key yet'}
                       </div>
                       {failure ? (
-                        <div role="alert" className="mt-2 flex items-start gap-1.5 text-[12px] text-danger">
+                        <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
                           <AlertTriangle size={13} className="mt-0.5 flex-none" />
                           <span>{failure}</span>
                         </div>
@@ -336,7 +336,7 @@ export function ModelsTab() {
             independently, so this also covers "the last provider was just
             deleted", where there is no row to attach it to at all. */}
         {orphanErrors.length ? (
-          <div role="alert" className="mt-2 flex items-start gap-1.5 text-[12px] text-danger">
+          <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
             <AlertTriangle size={13} className="mt-0.5 flex-none" />
             <span>{orphanErrors.join(' · ')}</span>
           </div>
@@ -345,7 +345,7 @@ export function ModelsTab() {
 
       {/* ---- Step 2 ---- */}
       <Panel title="2 · Which model does what">
-        <p className="mb-4 max-w-[600px] text-[12.5px] text-[var(--color-text-secondary)]">
+        <p className="mb-4 max-w-[600px] text-sm text-[var(--color-text-secondary)]">
           Match the brainpower to the job. A lighter model is fine for quick steps — save the strongest one for where
           depth matters. This is the simplest way to control cost.
         </p>
@@ -400,12 +400,12 @@ export function ModelsTab() {
           {/* The check runs for up to a minute and the toast is gone in four
               seconds, so the outcome lives here until the next check. */}
           {testing ? (
-            <div className="rounded-md border border-[var(--color-border)] p-3 text-[12.5px] text-[var(--color-text-secondary)]">
+            <div className="rounded-md border border-[var(--color-border)] p-3 text-sm text-[var(--color-text-secondary)]">
               Checking your models… you can stay on this page.
             </div>
           ) : testState ? (
             <div className="rounded-md border border-[var(--color-border)] p-3">
-              <div className="mb-2 text-[12px] text-[var(--color-text-secondary)]">
+              <div className="mb-2 text-xs text-[var(--color-text-secondary)]">
                 {testState.ok ? 'Everything answered.' : 'Some models did not answer.'}
               </div>
               <div className="flex flex-col gap-1.5">
@@ -413,7 +413,7 @@ export function ModelsTab() {
                   const result = testState.tiers[tier.key];
                   const model = testState.models[tier.key];
                   return (
-                    <div key={tier.key} className="flex flex-wrap items-baseline gap-2 text-[12.5px]">
+                    <div key={tier.key} className="flex flex-wrap items-baseline gap-2 text-sm">
                       {!result ? (
                         <Check size={14} className="flex-none text-[var(--color-text-disabled)]" />
                       ) : result.ok ? (
@@ -437,7 +437,7 @@ export function ModelsTab() {
         </div>
       ) : null}
 
-      <p className="max-w-[640px] text-[12px] text-[var(--color-text-secondary)]">
+      <p className="max-w-[640px] text-xs text-[var(--color-text-secondary)]">
         Only workspace owners and admins can change these.
       </p>
 
