@@ -38,9 +38,9 @@ export default function OpengraphImage() {
               height: 56,
               borderRadius: 14,
               // The in-app wordmark tile: --primary at 16%. color-mix is a
-              // stylesheet function and satori has no stylesheet, so the same
-              // colour is written as an alpha hex.
-              background: '#22c78629',
+              // stylesheet function and satori has no stylesheet, so the tint
+              // is the token colour plus an alpha byte (0x29 ≈ 16%).
+              background: `${BRAND_COLORS.primary}29`,
             }}
           >
             {/* satori rasterises a plain <img>; next/image has no meaning here. */}

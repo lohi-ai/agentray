@@ -1,8 +1,16 @@
+import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { signedInLandingTarget } from '@/lib/ia';
-import { SESSION_COOKIE } from '@/modules/shared/session-cookie';
+import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { SignedInRedirect } from '@/modules/shared/signed-in-redirect';
+
+// The one indexable URL on the instance — see app/layout.tsx, which noindexes
+// everything by default because everything else is a session check.
+export const metadata: Metadata = {
+  alternates: { canonical: '/' },
+  robots: { index: true, follow: true },
+};
 
 // Conversation is the front door for a signed-in session. Saved views stay at
 // /dashboard; a signed-in session should land in chat so the first action is
@@ -14,8 +22,8 @@ import { SignedInRedirect } from '@/modules/shared/signed-in-redirect';
 // conditional on the session cookie: a visitor without one gets `/` itself,
 // where AuthGate (app/layout.tsx) renders the door as server HTML.
 //
-// `children` is `null` for that visitor: AuthGate never renders children when
-// there is no session, so there is nothing for this page to contribute.
+// Nothing this page returns reaches a signed-out visitor: AuthGate does not
+// render children without a session, so the door is the whole page for them.
 export default async function Home() {
   const hasSession = (await cookies()).has(SESSION_COOKIE);
   if (hasSession) redirect(signedInLandingTarget());

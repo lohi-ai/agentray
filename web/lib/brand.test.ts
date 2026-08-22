@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CLAIMS,
   CRAWLER_DISALLOW,
@@ -87,5 +87,54 @@ describe('softwareApplicationJsonLd', () => {
   it('advertises no price', () => {
     expect(jsonLd).not.toHaveProperty('offers');
     expect(JSON.stringify(jsonLd)).not.toMatch(/price/i);
+  });
+});
+
+describe('siteOrigin', () => {
+  // metadataBase, canonical, robots.txt and sitemap.xml all resolve against
+  // this, and every one of them fails silently when it is wrong — a canonical
+  // pointing at localhost is not an error, it is just never indexed.
+  async function originWith(env: Record<string, string | undefined>) {
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    for (const [key, value] of Object.entries(env)) if (value === undefined) delete process.env[key];
+    vi.resetModules();
+    try {
+      const { siteOrigin } = await import('./brand');
+      return siteOrigin();
+    } finally {
+      process.env = saved;
+    }
+  }
+
+  it('prefers the explicit site URL', async () => {
+    await expect(
+      originWith({
+        NEXT_PUBLIC_AGENTRAY_SITE_URL: 'https://ray.example.com/',
+        NEXT_PUBLIC_AGENTRAY_API_URL: 'https://api.example.com',
+      }),
+    ).resolves.toBe('https://ray.example.com');
+  });
+
+  // The deployed shape: one hostname, web and API behind the same Caddy site
+  // (infra/gce/caddy/Caddyfile), so the API URL is the site origin.
+  it('falls back to the API URL when web and API share a hostname', async () => {
+    await expect(
+      originWith({
+        NEXT_PUBLIC_AGENTRAY_SITE_URL: undefined,
+        NEXT_PUBLIC_AGENTRAY_API_URL: 'https://agentray.lohi2.com',
+      }),
+    ).resolves.toBe('https://agentray.lohi2.com');
+  });
+
+  // Local dev splits them — :3200 and :8088 — so the API URL is the one origin
+  // the fallback must not copy.
+  it('never adopts a localhost API URL as the site origin', async () => {
+    await expect(
+      originWith({
+        NEXT_PUBLIC_AGENTRAY_SITE_URL: undefined,
+        NEXT_PUBLIC_AGENTRAY_API_URL: 'http://localhost:8088',
+      }),
+    ).resolves.toBe('http://localhost:3200');
   });
 });

@@ -24,7 +24,7 @@ import { AppProvider } from '@/modules/app/providers';
 import { ThemeRoot } from '@/modules/app/theme-root';
 import { AuthGate } from '@/modules/shared/auth-gate';
 import { StackSheetProvider } from '@/modules/shared/components/stack-sheet';
-import { SESSION_COOKIE } from '@/modules/shared/session-cookie';
+import { SESSION_COOKIE } from '@/lib/session-cookie';
 
 const inter = Inter({ subsets: ['latin', 'vietnamese'], variable: '--font-inter', display: 'swap' });
 const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono', display: 'swap' });
@@ -43,7 +43,6 @@ export const metadata: Metadata = {
   title: { default: TITLE_DEFAULT, template: TITLE_TEMPLATE },
   description: META_DESCRIPTION,
   applicationName: BRAND_NAME,
-  alternates: { canonical: '/' },
   openGraph: {
     type: 'website',
     siteName: BRAND_NAME,
@@ -56,9 +55,12 @@ export const metadata: Metadata = {
     title: TITLE_DEFAULT,
     description: META_DESCRIPTION,
   },
-  // Only `/` has content; app/robots.ts disallows the gated routes, and this
-  // says the same thing to a crawler that reached one anyway.
-  robots: { index: true, follow: true },
+  // noindex is the default because every route except `/` is behind AuthGate
+  // and has nothing on it for a crawler. app/page.tsx opts `/` back in, and
+  // app/robots.ts says the same thing one layer out — a URL reached from a
+  // direct link never sees robots.txt, and a URL blocked by robots.txt never
+  // sees this tag, so both are needed to cover both paths.
+  robots: { index: false, follow: false },
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
