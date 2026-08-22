@@ -1,6 +1,6 @@
 'use client';
 
-import { ListChecks, MessageSquareText, Target, Waypoints } from 'lucide-react';
+import { Brain, Crosshair, FlaskConical, Waypoints } from 'lucide-react';
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Card } from '@astryxdesign/core/Card';
 import { ChatMessage, ChatMessageBubble, ChatToolCalls } from '@astryxdesign/core/Chat';
@@ -8,6 +8,7 @@ import { Markdown } from '@astryxdesign/core/Markdown';
 import { HStack, VStack } from '@astryxdesign/core/Stack';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { Text } from '@astryxdesign/core/Text';
+import { BRAND_NAME, CLAIMS, HEADLINE, SUBHEAD } from '@/lib/brand';
 
 // AuthValue is the companion column on the signed-out door. The auth Card is a
 // form and stays one; this is the only thing on the page that tells a stranger
@@ -20,6 +21,14 @@ import { Text } from '@astryxdesign/core/Text';
 // (AGENTRAY_DEMO_PROJECT_ID, internal/dataplane/store/demo.go) and is absent by
 // default, so "you'll land in a live funnel" is not a promise this page can keep.
 
+// The words come from lib/brand.ts, not from here. This column used to lead
+// with "Ask which step is losing people." — a *seeing* headline, on a product
+// whose own opening line is "every analytics tool can tell you what happened".
+// The promise position now carries what happens without you; seeing survives
+// one level down, in the mock, where it is evidence rather than the pitch. That
+// demotion is the whole change. See lib/brand.ts for the ban list and why
+// nothing on this page ever explains the name.
+
 // No Heading in this column, deliberately. The page's h1 lives inside the auth
 // card ("Create your workspace" / "Welcome back") and this column renders
 // *before* it in the DOM on both layouts, so a Heading here would either
@@ -27,23 +36,14 @@ import { Text } from '@astryxdesign/core/Text';
 // headline type (astryx docs typography) and carries the size without the
 // document-outline claim.
 
-const CLAIMS = [
-  {
-    icon: MessageSquareText,
-    title: 'Ask in plain language.',
-    detail: 'Ask “which feature drives retention?” — it writes the SQL and runs it.',
-  },
-  {
-    icon: ListChecks,
-    title: 'It shows its work.',
-    detail: 'Every query streams as it runs, so you see what it looked at.',
-  },
-  {
-    icon: Target,
-    title: 'It argues against busywork.',
-    detail: 'A real answer ends: “Don’t add a new dashboard — change the product.”',
-  },
-] as const;
+// Icons follow the claims: a crosshair names one thing, a flask designs a test,
+// a brain carries last cycle in. They are aria-hidden — the claim text carries
+// the meaning.
+const CLAIM_ICONS = {
+  names: Crosshair,
+  designs: FlaskConical,
+  remembers: Brain,
+} as const;
 
 export function AuthValue() {
   return (
@@ -60,42 +60,46 @@ export function AuthValue() {
         >
           <Waypoints size={18} />
         </span>
-        <Text type="body" weight="medium">AgentRay</Text>
+        <Text type="body" weight="medium">{BRAND_NAME}</Text>
       </HStack>
 
       <VStack gap={3} align="start">
         <Text type="display-3" as="p" textWrap="balance">
-          Ask which step is losing people.
+          {HEADLINE}
         </Text>
         <Text type="supporting">
-          A product analyst that reads your event data. Ask in the chat and it answers with the
-          query it ran, the number it found, and what it would change.
+          {SUBHEAD}
         </Text>
       </VStack>
 
       <VStack gap={3} align="stretch" className="lg:gap-4">
-        {CLAIMS.map(({ icon: Icon, title, detail }) => (
-          <HStack key={title} gap={3} align="start">
-            <span
-              className="grid size-6 flex-none place-items-center rounded-[var(--radius-md)]"
-              style={{ background: 'color-mix(in srgb, var(--primary) 12%, transparent)', color: 'var(--primary)' }}
-              aria-hidden
-            >
-              <Icon size={14} />
-            </span>
-            <VStack gap={0.5} align="start">
-              <Text type="body" weight="medium">{title}</Text>
-              <Text type="supporting">{detail}</Text>
-            </VStack>
-          </HStack>
-        ))}
+        {CLAIMS.map(({ id, title, detail }) => {
+          const Icon = CLAIM_ICONS[id];
+          return (
+            <HStack key={id} gap={3} align="start">
+              <span
+                className="grid size-6 flex-none place-items-center rounded-[var(--radius-md)]"
+                style={{ background: 'color-mix(in srgb, var(--primary) 12%, transparent)', color: 'var(--primary)' }}
+                aria-hidden
+              >
+                <Icon size={14} />
+              </span>
+              <VStack gap={0.5} align="start">
+                <Text type="body" weight="medium">{title}</Text>
+                <Text type="supporting">{detail}</Text>
+              </VStack>
+            </HStack>
+          );
+        })}
       </VStack>
 
-      {/* The mock is the fourth claim — that the agent names what it cannot see —
-          shown rather than stated, so no bullet above repeats it. Hidden below
-          `lg`: on a phone this column sits ABOVE the form, and the whole point of
-          putting it there is defeated if the email field lands a screen and a
-          half down. */}
+      {/* The mock is where seeing is allowed to be the point: it shows the query
+          it ran and the number it found, which is what earns every claim above
+          it. It also carries the one sentence no claim needs to state — "don't
+          add a new dashboard — change the product" — demonstrated instead of
+          boasted. Hidden below `lg`: on a phone this column sits ABOVE the form,
+          and the whole point of putting it there is defeated if the email field
+          lands a screen and a half down. */}
       <AnswerPreview />
     </VStack>
   );
@@ -153,15 +157,20 @@ function AnswerPreview() {
 }
 
 // Shape and wording follow `writtenOpinion` (web/lib/ia.ts): the widest gap as a
-// percentage, the two people counts it compared, then the caveat that names what
-// the comparison does NOT prove. The event names are the product's own funnel
-// vocabulary — `DEFAULT_FUNNEL_STEPS` and the `FUNNEL_STAGES` matchers in the
-// same file. Labelled "Example" on the page because it is one: it is what an
-// answer looks like, not a number from this instance.
+// percentage, the two people counts it compared, the caveat that names what the
+// comparison does NOT prove, and — restored here — the closing instruction it
+// actually emits. That last paragraph used to be truncated away, which dropped
+// the single most differentiated sentence the product ships and left the mock
+// ending on a hedge. The event names are the product's own funnel vocabulary —
+// `DEFAULT_FUNNEL_STEPS` and the `FUNNEL_STAGES` matchers in the same file.
+// Labelled "Example" on the page because it is one: it is what an answer looks
+// like, not a number from this instance.
 const ANSWER = [
   '**activation → user.conversion is the widest gap (25%).**',
   '',
   '28 people fired `activation`; 7 people fired `user.conversion`. That’s the widest gap in your catalog.',
   '',
   'I’m comparing two people counts, not tracing one cohort — open the funnel to confirm the same people did both steps in that order.',
+  '',
+  'This week: one test on that step. Don’t add a new dashboard — change the product so more people who hit `activation` also hit `user.conversion`.',
 ].join('\n');

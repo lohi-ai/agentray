@@ -29,11 +29,17 @@ function autoComplete(value: string): Partial<TextInputProps> {
 
 export function AuthScreen({
   loading,
+  pending = false,
   error,
   onSubmit,
   onModeChange,
 }: {
   loading: boolean;
+  // The session check has not answered yet. The door still renders — it is the
+  // only crawlable content this app has, and a spinner in its place is what
+  // made every SEO string on the site decorative (see auth-gate.tsx). Only
+  // submitting is held back, so nobody can start a signup that races `me()`.
+  pending?: boolean;
   error: string;
   onSubmit: (input: { mode: AuthMode; email: string; name: string; password: string; workspaceName: string; projectName: string }) => Promise<void>;
   onModeChange?: () => void;
@@ -52,8 +58,9 @@ export function AuthScreen({
   // popped keyboard halves an already-tall card.
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (pending) return;
     if (window.matchMedia?.('(pointer: fine)').matches) emailRef.current?.focus();
-  }, []);
+  }, [pending]);
 
   function fieldStatus(field: AuthField) {
     return issue?.field === field ? { type: 'error' as const, message: issue.message } : undefined;
@@ -182,6 +189,7 @@ export function AuthScreen({
                         : isSignup ? 'Create workspace' : 'Log in'
                     }
                     isLoading={loading}
+                    isDisabled={pending}
                     className="w-full min-h-11"
                   />
                 </VStack>

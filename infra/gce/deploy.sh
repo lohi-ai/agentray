@@ -50,6 +50,11 @@ case "$ENV" in
   dev)  WEB_API_URL="https://agentray-dev.lohi2.com" ;;
   prod) WEB_API_URL="https://agentray.lohi2.com" ;;
 esac
+# Web and the API share one hostname here (one Caddy site, two upstreams), so
+# the site origin is the same string. It is threaded separately because
+# metadataBase/canonical/robots/sitemap ask a different question than "where do
+# I call the API" — see web/lib/brand.ts.
+WEB_SITE_URL="$WEB_API_URL"
 
 GCE_DIR="$(cd "$(dirname "$0")" && pwd)"        # agentray/infra/gce
 SERVICE_ROOT="$(cd "${GCE_DIR}/../.." && pwd)"  # agentray/
@@ -86,7 +91,7 @@ if [ "$SKIP_BUILD" = false ]; then
   gcloud builds submit "$SERVICE_ROOT" \
     --project "$PROJECT_ID" \
     --config "${SERVICE_ROOT}/infra/cloudbuild.yaml" \
-    --substitutions "_API_IMAGE=${API_IMAGE},_WEB_IMAGE=${WEB_IMAGE},_TAG=${TAG},_WEB_API_URL=${WEB_API_URL}" \
+    --substitutions "_API_IMAGE=${API_IMAGE},_WEB_IMAGE=${WEB_IMAGE},_TAG=${TAG},_WEB_API_URL=${WEB_API_URL},_WEB_SITE_URL=${WEB_SITE_URL}" \
     --timeout 30m --quiet
   echo "==> Re-tag :latest-${ENV}"
   gcloud container images add-tag --quiet "${API_IMAGE}:${TAG}" "${API_IMAGE}:latest-${ENV}"

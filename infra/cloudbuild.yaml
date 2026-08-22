@@ -18,6 +18,7 @@ steps:
       - '--context=dir:///workspace/web'
       - '--dockerfile=/workspace/web/Dockerfile'
       - '--build-arg=NEXT_PUBLIC_AGENTRAY_API_URL=${_WEB_API_URL}'
+      - '--build-arg=NEXT_PUBLIC_AGENTRAY_SITE_URL=${_WEB_SITE_URL}'
     timeout: '600s'
 options:
   machineType: 'E2_MEDIUM'
@@ -26,3 +27,7 @@ substitutions:
   _WEB_IMAGE: 'asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web'
   _TAG: 'latest'
   _WEB_API_URL: 'https://agentray-dev.lohi2.com'
+  # Same hostname as the API on both targets — web and the API sit behind one
+  # Caddy site. Named separately anyway so a split-origin instance can set it
+  # without lying about where the API is.
+  _WEB_SITE_URL: 'https://agentray-dev.lohi2.com'
