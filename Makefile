@@ -112,6 +112,8 @@ sdk-check-npm: ## @agentray/browser + @agentray/server — build, then verify th
 	@cd sdk/browser && node ../scripts/verify-cdn-bundle.mjs
 
 sdk-check-python: ## agentray (PyPI) — tests plus a wheel that actually contains the package
+	@python3 -c 'import urllib3' 2>/dev/null \
+	  || { echo "sdk-check-python needs the SDK's own dependency: pip install -e sdk/python"; exit 1; }
 	@cd sdk/python && python3 tests/test_client.py
 	@python3 -c 'import build' 2>/dev/null || { echo "sdk-check-python needs the build frontend: pip install build"; exit 1; }
 	@cd sdk/python && rm -rf dist && python3 -m build

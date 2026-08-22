@@ -76,6 +76,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+      # The client imports urllib3 — the package's own declared dependency. Install
+      # from pyproject rather than naming it here, so the two cannot drift.
+      - run: pip install -e .
       - run: python tests/test_client.py
       - run: pip install build twine
       - run: python -m build

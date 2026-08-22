@@ -36,6 +36,12 @@ Tags are `<browser|server|python|swift>-v<semver>`. A bare `v0.2.0` is a *produc
 tag and is deliberately not matched by the release workflow — with four
 independently versioned packages it would be ambiguous.
 
+**Push release tags one at a time.** GitHub creates no workflow runs at all when
+more than three tags arrive in a single push — no error, no run, the tags simply
+land and nothing happens. All four v0.1.0 tags were pushed together on
+2026-08-23 and published nothing; the recovery is the manual trigger below, with
+*dry run* unchecked, which is why that input exists.
+
 `sdk/scripts/resolve-tag.mjs` is the single parser for those tags, and it refuses
 a tag whose version disagrees with the manifest it claims to release. It runs in
 three places: when you cut the tag, on every PR that touches `sdk/`
@@ -59,6 +65,14 @@ back.
 
 To exercise all of that without publishing anything, run the workflow manually:
 **Actions → sdk-release → Run workflow**, give it a tag, leave *dry run* checked.
+
+The same manual trigger, with *dry run* **unchecked**, is how you publish a tag
+that is already pushed — after a run failed on something outside the artefact, or
+after a batched tag push created no runs at all:
+
+```bash
+gh workflow run sdk-release.yml --ref browser-v0.1.0 -f tag=browser-v0.1.0 -f dry_run=false
+```
 
 ## Secrets, and what is missing without them
 

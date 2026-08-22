@@ -160,7 +160,8 @@ jobs:
             ASSETS+=("agentray-browser-${{ needs.meta.outputs.version }}.min.js")
           fi
 
-          NOTES=$(cat <<EOF
+          NOTES_FILE="${RUNNER_TEMP:-/tmp}/release-notes.md"
+          cat > "$NOTES_FILE" <<EOF
           \`${{ needs.meta.outputs.name }}\` ${{ needs.meta.outputs.version }} — built from \`${{ needs.meta.outputs.dir }}\` at \`${{ github.sha }}\`.
 
           **Install from this release** (no registry account needed):
@@ -175,11 +176,10 @@ jobs:
           npm install ${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }}
           \`\`\`
           EOF
-          )
 
           gh release create "$TAG" "${ASSETS[@]}" \
             --title "${{ needs.meta.outputs.name }} ${{ needs.meta.outputs.version }}" \
-            --notes "$NOTES" \
+            --notes-file "$NOTES_FILE" \
             ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
             || gh release upload "$TAG" "${ASSETS[@]}" --clobber
 
@@ -219,6 +219,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+      # The client imports urllib3 — the package's own declared dependency. Install
+      # from pyproject rather than naming it here, so the two cannot drift.
+      - run: pip install -e .
       - run: python tests/test_client.py
       - run: pip install build twine
       - run: python -m build
@@ -236,7 +239,8 @@ jobs:
         run: |
           WHEEL=$(ls dist/*.whl)
           SDIST=$(ls dist/*.tar.gz)
-          NOTES=$(cat <<EOF
+          NOTES_FILE="${RUNNER_TEMP:-/tmp}/release-notes.md"
+          cat > "$NOTES_FILE" <<EOF
           \`agentray\` ${{ needs.meta.outputs.version }} — built from \`sdk/python\` at \`${{ github.sha }}\`.
 
           **Install from this release** (no registry account needed):
@@ -251,10 +255,9 @@ jobs:
           pip install agentray==${{ needs.meta.outputs.version }}
           \`\`\`
           EOF
-          )
           gh release create "$TAG" "$WHEEL" "$SDIST" \
             --title "agentray ${{ needs.meta.outputs.version }} (Python)" \
-            --notes "$NOTES" \
+            --notes-file "$NOTES_FILE" \
             ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
             || gh release upload "$TAG" "$WHEEL" "$SDIST" --clobber
 
@@ -326,7 +329,8 @@ jobs:
       - name: GitHub Release
         if: needs.meta.outputs.dry_run != 'true'
         run: |
-          NOTES=$(cat <<EOF
+          NOTES_FILE="${RUNNER_TEMP:-/tmp}/release-notes.md"
+          cat > "$NOTES_FILE" <<EOF
           \`AgentRay\` $VERSION (Swift) — built from \`sdk/swift\` at \`${{ github.sha }}\`.
 
           **Install with SwiftPM** (resolved from the published mirror):
@@ -338,10 +342,9 @@ jobs:
           The mirror's root is the Swift package; this repository keeps the
           source at \`sdk/swift/\`. Issues and pull requests belong here.
           EOF
-          )
           gh release create "$TAG" "/tmp/agentray-swift-$VERSION.tar.gz" \
             --title "AgentRay $VERSION (Swift)" \
-            --notes "$NOTES" \
+            --notes-file "$NOTES_FILE" \
             ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
             || gh release upload "$TAG" "/tmp/agentray-swift-$VERSION.tar.gz" --clobber
 

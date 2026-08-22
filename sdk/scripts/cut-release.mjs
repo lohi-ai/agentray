@@ -101,6 +101,9 @@ tagged ${tag}. Nothing is published yet.
 
   git push origin main ${tag}
 
+Push release tags ONE AT A TIME. GitHub creates no workflow runs when more than
+three tags arrive in a single push — the tags land and nothing happens.
+
 That tag push runs .github/workflows/sdk-release.yml: it rebuilds and re-verifies
 the tagged tree, creates the GitHub Release with the artefact attached, and then
 publishes to the registry if the token for it is configured.
