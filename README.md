@@ -160,8 +160,14 @@ plain HTML file). Source of truth:
 </script>
 ```
 
-With a build step, copy `sdk/browser/` and `import { init } from './sdk/browser'`
-(or `@agentray/browser` **once that package is published**):
+With a build step, install the published tarball from the latest
+[`browser-v*` release](https://github.com/lohi-ai/agentray/releases?q=browser) — `npm install @agentray/browser` once
+the npm scope is claimed:
+
+```bash
+npm install https://github.com/lohi-ai/agentray/releases/download/browser-v0.1.0/agentray-browser-0.1.0.tgz
+```
+
 
 ```ts
 import { init } from '@agentray/browser';
@@ -179,8 +185,10 @@ click capture with an explicit label, `data-track-ignore` mutes a subtree, and
 `data-track-view="label"` fires `element_viewed` once when the element becomes at
 least half visible. See `sdk/browser/README.md`.
 
-**iOS / Apple — `sdk/swift/`.** A Swift Package (SPM). Not on a registry yet:
-add it by path, or paste the single-file version from the in-app **iOS app** tab
+**iOS / Apple — `sdk/swift/`.** A Swift Package (SPM), published to the
+`lohi-ai/agentray-swift` mirror because SwiftPM resolves from a repository root:
+`.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")`.
+Or add it by path, or paste the single-file version from the in-app **iOS app** tab
 (Dashboards → Send your first event, or Set up). It exists because a native app
 sends the same events through the same key as your website, and three things
 must be true for the two to stay comparable: a device id that survives launches,
@@ -198,8 +206,8 @@ AgentRay.shared.identify("user_123", traits: ["email": "alice@example.com"])
 AgentRay.shared.reset()                          // on logout
 ```
 
-**Python — `sdk/python/`.** Copy the package in; `pip install agentray` is not
-published. Non-blocking server-side capture with a background batch thread;
+**Python — `sdk/python/`.** `pip install https://github.com/lohi-ai/agentray/releases/download/python-v0.1.0/agentray-0.1.0-py3-none-any.whl`
+(`pip install agentray` once the PyPI name is claimed). Non-blocking server-side capture with a background batch thread;
 PostHog-compatible payloads:
 
 ```python
@@ -209,8 +217,8 @@ ar.capture("order_paid", distinct_id="user-123", properties={"amount": 29})
 ar.flush()
 ```
 
-**Node/Bun server — `sdk/server/`.** Copy in; `@agentray/server` is not
-published. Awaitable, idempotent capture for events the browser must not be
+**Node/Bun server — `sdk/server/`.** `npm install https://github.com/lohi-ai/agentray/releases/download/server-v0.1.0/agentray-server-0.1.0.tgz`
+(`@agentray/server` once the npm scope is claimed). Awaitable, idempotent capture for events the browser must not be
 trusted to send — payments, subscriptions, refunds:
 
 ```ts

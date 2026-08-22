@@ -1,0 +1,377 @@
+# Publishes one SDK, from one tag.
+#
+# GitHub is the primary package host: every release lands as a GitHub Release
+# with the real artefact attached, which is installable immediately and needs no
+# registry account, no scope claim, and no auth. Registry publication (npm,
+# PyPI) is a second step on the same tag, and it is *skipped, not failed*, when
+# the corresponding secret is absent — so this pipeline is live today and starts
+# publishing to npm the moment `@agentray` is claimed and NPM_TOKEN is set.
+#
+# The four SDKs version independently, so the tag names the package:
+#
+#   browser-v0.2.0   @agentray/browser  -> GitHub Release + npm
+#   server-v0.2.0    @agentray/server   -> GitHub Release + npm
+#   python-v0.2.0    agentray           -> GitHub Release + PyPI
+#   swift-v0.2.0     AgentRay           -> GitHub Release + lohi-ai/agentray-swift mirror
+#
+# A bare `v0.2.0` is a product tag and is deliberately not matched here.
+name: sdk-release
+
+on:
+  push:
+    tags:
+      - 'browser-v*'
+      - 'server-v*'
+      - 'python-v*'
+      - 'swift-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build, e.g. browser-v0.1.0'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build and verify everything, publish nothing'
+        type: boolean
+        default: true
+
+# One release per tag at a time. Never cancel in progress: a half-published
+# release is worse than a slow one.
+concurrency:
+  group: sdk-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+  id-token: write   # npm provenance / PyPI trusted publishing
+
+jobs:
+  meta:
+    name: resolve ${{ github.event.inputs.tag || github.ref_name }}
+    runs-on: ubuntu-latest
+    outputs:
+      pkg: ${{ steps.r.outputs.pkg }}
+      dir: ${{ steps.r.outputs.dir }}
+      name: ${{ steps.r.outputs.name }}
+      version: ${{ steps.r.outputs.version }}
+      tag: ${{ steps.r.outputs.tag }}
+      prerelease: ${{ steps.r.outputs.prerelease }}
+      npm_tag: ${{ steps.r.outputs.npmTag }}
+      ref: ${{ steps.r.outputs.ref }}
+      dry_run: ${{ steps.r.outputs.dryRun }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Fails the whole release if the tag is malformed, names no known package,
+      # or claims a version the checked-out manifest does not.
+      - id: r
+        run: |
+          # pipefail matters here: without it a failing resolve-tag would exit 0
+          # through tee, and the release would proceed on an empty resolved.json.
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          node sdk/scripts/resolve-tag.mjs "$TAG" | tee resolved.json
+          node -e '
+            const o = require("./resolved.json");
+            const out = require("fs");
+            for (const [k, v] of Object.entries(o)) out.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
+            out.appendFileSync(process.env.GITHUB_OUTPUT, `ref=${o.tag}\n`);
+            out.appendFileSync(process.env.GITHUB_OUTPUT, `dryRun=${process.env.DRY_RUN === "true"}\n`);
+          '
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+      - name: summary
+        run: |
+          echo "### ${{ steps.r.outputs.name }} ${{ steps.r.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| tag | \`${{ steps.r.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| source | \`${{ steps.r.outputs.dir }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| prerelease | ${{ steps.r.outputs.prerelease }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| dry run | ${{ steps.r.outputs.dryRun }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------- npm ----
+  npm:
+    name: ${{ needs.meta.outputs.name }} ${{ needs.meta.outputs.version }}
+    needs: meta
+    if: needs.meta.outputs.pkg == 'browser' || needs.meta.outputs.pkg == 'server'
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ needs.meta.outputs.dir }}/package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      # The release gate is the PR gate, run again against the exact tagged tree.
+      - run: npm ci
+        working-directory: ${{ needs.meta.outputs.dir }}
+      - run: npm run typecheck
+        working-directory: ${{ needs.meta.outputs.dir }}
+      - run: npm test
+        working-directory: ${{ needs.meta.outputs.dir }}
+      - run: npm run build
+        working-directory: ${{ needs.meta.outputs.dir }}
+      - name: the tarball contains the built entrypoints
+        run: node ../scripts/verify-npm-tarball.mjs
+        working-directory: ${{ needs.meta.outputs.dir }}
+      - name: the global attaches and captures
+        if: needs.meta.outputs.pkg == 'browser'
+        run: node ../scripts/verify-cdn-bundle.mjs
+        working-directory: ${{ needs.meta.outputs.dir }}
+
+      - name: pack
+        id: pack
+        working-directory: ${{ needs.meta.outputs.dir }}
+        run: |
+          TARBALL=$(npm pack --json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].filename")
+          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          ls -la "$TARBALL"
+
+      # Installing the packed tarball into an empty project is the closest thing
+      # to being the first user. It catches a broken `exports` map or a missing
+      # type declaration that every in-repo test happily walks around.
+      - name: the tarball installs and imports from an empty project
+        working-directory: ${{ needs.meta.outputs.dir }}
+        run: node ../scripts/verify-consumer-install.mjs "${{ steps.pack.outputs.tarball }}"
+
+      - name: GitHub Release
+        if: needs.meta.outputs.dry_run != 'true'
+        working-directory: ${{ needs.meta.outputs.dir }}
+        run: |
+          ASSETS=("${{ steps.pack.outputs.tarball }}")
+          # The <script> bundle is a first-class install path, so it ships as its
+          # own asset rather than only inside the tarball.
+          if [ "${{ needs.meta.outputs.pkg }}" = "browser" ]; then
+            cp dist/index.global.js "agentray-browser-${{ needs.meta.outputs.version }}.min.js"
+            ASSETS+=("agentray-browser-${{ needs.meta.outputs.version }}.min.js")
+          fi
+
+          NOTES=$(cat <<EOF
+          \`${{ needs.meta.outputs.name }}\` ${{ needs.meta.outputs.version }} — built from \`${{ needs.meta.outputs.dir }}\` at \`${{ github.sha }}\`.
+
+          **Install from this release** (no registry account needed):
+
+          \`\`\`bash
+          npm install https://github.com/${{ github.repository }}/releases/download/$TAG/${{ steps.pack.outputs.tarball }}
+          \`\`\`
+
+          **Install from npm** (once \`@agentray\` is published):
+
+          \`\`\`bash
+          npm install ${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }}
+          \`\`\`
+          EOF
+          )
+
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "${{ needs.meta.outputs.name }} ${{ needs.meta.outputs.version }}" \
+            --notes "$NOTES" \
+            ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            || gh release upload "$TAG" "${ASSETS[@]}" --clobber
+
+      # Skipped, not failed, while the scope is unclaimed. The GitHub Release
+      # above is the shipping artefact until NPM_TOKEN exists.
+      - name: npm publish
+        if: needs.meta.outputs.dry_run != 'true' && env.NPM_TOKEN != ''
+        working-directory: ${{ needs.meta.outputs.dir }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --provenance --access public --tag "${{ needs.meta.outputs.npm_tag }}"
+
+      - name: npm publish skipped
+        if: needs.meta.outputs.dry_run != 'true' && env.NPM_TOKEN == ''
+        run: |
+          echo "::notice::NPM_TOKEN is not set — published to GitHub Releases only."
+          echo "Claim the \`@agentray\` npm scope, add NPM_TOKEN to repository secrets, and re-run this workflow with the same tag." >> $GITHUB_STEP_SUMMARY
+
+  # ------------------------------------------------------------- python ----
+  python:
+    name: agentray ${{ needs.meta.outputs.version }} (PyPI)
+    needs: meta
+    if: needs.meta.outputs.pkg == 'python'
+    runs-on: ubuntu-latest
+    env:
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python tests/test_client.py
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: the wheel contains the package, not just metadata
+        run: python ../scripts/verify-python-wheel.py
+      - name: the built wheel imports from a clean environment
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install dist/*.whl
+          /tmp/verify/bin/python -c "import agentray; assert agentray.DEFAULT_PLATFORM == 'server'; print('import ok')"
+
+      - name: GitHub Release
+        if: needs.meta.outputs.dry_run != 'true'
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          SDIST=$(ls dist/*.tar.gz)
+          NOTES=$(cat <<EOF
+          \`agentray\` ${{ needs.meta.outputs.version }} — built from \`sdk/python\` at \`${{ github.sha }}\`.
+
+          **Install from this release** (no registry account needed):
+
+          \`\`\`bash
+          pip install https://github.com/${{ github.repository }}/releases/download/$TAG/$(basename "$WHEEL")
+          \`\`\`
+
+          **Install from PyPI** (once \`agentray\` is published):
+
+          \`\`\`bash
+          pip install agentray==${{ needs.meta.outputs.version }}
+          \`\`\`
+          EOF
+          )
+          gh release create "$TAG" "$WHEEL" "$SDIST" \
+            --title "agentray ${{ needs.meta.outputs.version }} (Python)" \
+            --notes "$NOTES" \
+            ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            || gh release upload "$TAG" "$WHEEL" "$SDIST" --clobber
+
+      - name: PyPI publish
+        if: needs.meta.outputs.dry_run != 'true' && env.PYPI_TOKEN != ''
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
+
+      - name: PyPI publish skipped
+        if: needs.meta.outputs.dry_run != 'true' && env.PYPI_TOKEN == ''
+        run: |
+          echo "::notice::PYPI_TOKEN is not set — published to GitHub Releases only."
+          echo "Claim \`agentray\` on PyPI, add a project-scoped PYPI_TOKEN to repository secrets, and re-run this workflow with the same tag." >> $GITHUB_STEP_SUMMARY
+
+  # -------------------------------------------------------------- swift ----
+  #
+  # SwiftPM resolves a package from `Package.swift` at a repository *root*, and
+  # ours lives at sdk/swift/ in a repo that is mostly Go and Next.js. So the
+  # release publishes a mirror repository whose root IS the Swift package, and
+  # tags it there. Consumers get the ordinary `.package(url:)` install; this repo
+  # keeps its layout.
+  swift:
+    name: AgentRay ${{ needs.meta.outputs.version }} (SwiftPM)
+    needs: meta
+    if: needs.meta.outputs.pkg == 'swift'
+    runs-on: macos-latest
+    env:
+      MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+      MIRROR_REPO: lohi-ai/agentray-swift
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+      - run: swift build
+        working-directory: sdk/swift
+      - run: swift test
+        working-directory: sdk/swift
+
+      - name: stage the mirror tree
+        run: |
+          rm -rf /tmp/stage && mkdir -p /tmp/stage
+          rsync -a --exclude '.build' --exclude '.git' sdk/swift/ /tmp/stage/
+          test -f /tmp/stage/Package.swift
+          test -d /tmp/stage/Sources/AgentRay
+          cat >> /tmp/stage/README.md <<EOF
+
+          ---
+
+          This repository is a published mirror of \`sdk/swift/\` in
+          [${{ github.repository }}](https://github.com/${{ github.repository }}),
+          so that SwiftPM can resolve the package from a repository root.
+          It is generated by CI — open issues and pull requests against the
+          source repository, not here.
+          EOF
+
+      # The package must resolve the way a consumer resolves it: from a root
+      # Package.swift, in isolation, with nothing else in the tree.
+      - name: the staged root builds as a standalone package
+        run: cd /tmp/stage && swift build && swift test
+
+      - name: source tarball
+        run: tar -czf "/tmp/agentray-swift-$VERSION.tar.gz" -C /tmp/stage .
+
+      - name: GitHub Release
+        if: needs.meta.outputs.dry_run != 'true'
+        run: |
+          NOTES=$(cat <<EOF
+          \`AgentRay\` $VERSION (Swift) — built from \`sdk/swift\` at \`${{ github.sha }}\`.
+
+          **Install with SwiftPM** (resolved from the published mirror):
+
+          \`\`\`swift
+          .package(url: "https://github.com/$MIRROR_REPO.git", from: "$VERSION")
+          \`\`\`
+
+          The mirror's root is the Swift package; this repository keeps the
+          source at \`sdk/swift/\`. Issues and pull requests belong here.
+          EOF
+          )
+          gh release create "$TAG" "/tmp/agentray-swift-$VERSION.tar.gz" \
+            --title "AgentRay $VERSION (Swift)" \
+            --notes "$NOTES" \
+            ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            || gh release upload "$TAG" "/tmp/agentray-swift-$VERSION.tar.gz" --clobber
+
+      - name: push the SwiftPM mirror
+        if: needs.meta.outputs.dry_run != 'true' && env.MIRROR_TOKEN != ''
+        run: |
+          set -e
+          REMOTE="https://x-access-token:$MIRROR_TOKEN@github.com/$MIRROR_REPO.git"
+          if ! git clone "$REMOTE" /tmp/mirror 2>/dev/null; then
+            echo "::error::cannot clone $MIRROR_REPO — create it (public, empty) and give SWIFT_MIRROR_TOKEN write access"
+            exit 1
+          fi
+
+          # Replace the tracked contents wholesale, but keep the history: a
+          # consumer who resolved an earlier tag must keep resolving it.
+          cd /tmp/mirror
+          git rm -rq . 2>/dev/null || true
+          rsync -a --exclude '.git' /tmp/stage/ .
+          git add -A
+          git -c user.name='agentray-release' -c user.email='release@lohi2.com' \
+            commit -m "AgentRay $VERSION (from ${{ github.repository }}@${{ github.sha }})" \
+            --allow-empty
+          # SwiftPM accepts a bare semver tag; keep it unprefixed so `from:` is
+          # unambiguous.
+          git tag -a "$VERSION" -m "AgentRay $VERSION"
+          git push origin HEAD:main
+          git push origin "$VERSION"
+
+      - name: mirror push skipped
+        if: needs.meta.outputs.dry_run != 'true' && env.MIRROR_TOKEN == ''
+        run: |
+          echo "::notice::SWIFT_MIRROR_TOKEN is not set — released the source tarball only, no SwiftPM mirror."
+          echo "Create \`$MIRROR_REPO\` and add SWIFT_MIRROR_TOKEN (a PAT with write access to it) to repository secrets, then re-run this workflow with the same tag." >> $GITHUB_STEP_SUMMARY

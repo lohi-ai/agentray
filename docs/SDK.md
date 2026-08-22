@@ -22,8 +22,11 @@ The sanctioned path for **revenue truth**. The browser cannot be trusted to
 report money, so payment/subscription/refund events come from your backend.
 
 ```bash
+# Published to GitHub Releases first; pick a version from https://github.com/lohi-ai/agentray/releases?q=server
+npm install https://github.com/lohi-ai/agentray/releases/download/server-v0.1.0/agentray-server-0.1.0.tgz
+
+# Once the @agentray npm scope is claimed, prefer:
 npm install @agentray/server     # or: bun add @agentray/server
-# vendored alternative: copy sdk/server/ into your repo and import ./client
 ```
 
 ```ts
@@ -63,6 +66,10 @@ SELECT sum(amount) AS revenue FROM (
 Manages anonymous → identified identity and sends events from the browser.
 
 ```bash
+# Published to GitHub Releases first; pick a version from https://github.com/lohi-ai/agentray/releases?q=browser
+npm install https://github.com/lohi-ai/agentray/releases/download/browser-v0.1.0/agentray-browser-0.1.0.tgz
+
+# Once the @agentray npm scope is claimed, prefer:
 npm install @agentray/browser
 ```
 
@@ -80,14 +87,17 @@ No bundler — a marketing site, a Framer page, a Webflow project? The same test
 bundle ships as a `<script>` tag build that exposes `window.AgentRay`:
 
 ```html
-<script src="https://unpkg.com/@agentray/browser/dist/index.global.js"></script>
+<script src="https://unpkg.com/@agentray/browser@0/dist/index.global.js"></script>
 <script>
   AgentRay.init({ host: 'https://agentray.example.com', apiKey: 'your-project-api-key', autocapture: true });
 </script>
 ```
 
-Until the package is on npm, copy `sdk/browser/` into the product repo or paste
-the no-npm snippet from **Set up → 1 · Track the page**.
+Pin the major version in that URL — an analytics tag that silently upgrades on
+someone else's marketing site is a liability. Until the package is on npm and
+served by unpkg, download `agentray-browser-<version>.min.js` from the release
+and serve it yourself, or paste the no-npm snippet from
+**Set up → 1 · Track the page**.
 
 ### Track events
 
@@ -148,9 +158,16 @@ split its own traffic without waiting on a schema change.
 
 ## iOS client (`sdk/swift/`)
 
-A Swift Package for native Apple apps. Not on a registry — add it by local path
-(`.package(path: "../agentray/sdk/swift")`), or paste the single-file version
-from the in-app **iOS app** tab if the app should carry no dependency.
+A Swift Package for native Apple apps. SwiftPM resolves from a repository root,
+so releases are published to a generated mirror whose root is this package:
+
+```swift
+.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")
+```
+
+To build against an unreleased change, add it by local path instead
+(`.package(path: "../agentray/sdk/swift")`); to carry no dependency at all, paste
+the single-file version from the in-app **iOS app** tab.
 
 ```swift
 import AgentRay

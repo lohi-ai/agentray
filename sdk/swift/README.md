@@ -11,15 +11,24 @@ averaging them.
 
 ## Install
 
-Swift Package Manager — point it at this directory (the package is not published
-to a registry yet):
+Swift Package Manager resolves a package from a `Package.swift` at a repository
+root, and this one lives at `sdk/swift/` in a repo that is mostly Go and
+Next.js. So each release is published to a generated mirror whose root *is* this
+package:
+
+```swift
+.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")
+```
+
+or in Xcode: **File → Add Package Dependencies…** and paste that URL.
+
+The mirror is CI output — the source is here, and so are issues and pull
+requests. To build against an unreleased change, point at this directory
+instead:
 
 ```swift
 .package(path: "../agentray/sdk/swift")
 ```
-
-or in Xcode: **File → Add Package Dependencies → Add Local…** and pick
-`sdk/swift`.
 
 No package at all? The in-app snippet at **Dashboards → Send your first event →
 iOS app** (also **Set up → 2 · iOS app**) is one file you can paste, with the

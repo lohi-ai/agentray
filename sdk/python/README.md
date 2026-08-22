@@ -5,6 +5,19 @@ payloads, background batching, non-blocking capture.
 
 ## Install
 
+Releases are published to GitHub first — the wheel below is the exact artefact
+CI built, tested and imported from a clean virtualenv before publishing:
+
+```bash
+pip install https://github.com/lohi-ai/agentray/releases/download/python-v0.1.0/agentray-0.1.0-py3-none-any.whl
+```
+
+Pick the version you want from [Releases](https://github.com/lohi-ai/agentray/releases?q=python); the tags are
+`python-v<semver>`.
+
+Once `agentray` is published on PyPI, the shorter form works and is the one to
+prefer:
+
 ```bash
 pip install agentray
 ```

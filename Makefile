@@ -41,6 +41,7 @@ LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a;
 .DEFAULT_GOAL := help
 
 .PHONY: help dev web build cli install-cli vet test test-agents test-stress check agent-funcs \
+        sdk-check sdk-check-npm sdk-check-python sdk-check-swift sdk-release sdk-resolve-tag \
         sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell \
         sandbox-check sandbox-setup test-sandbox
 
@@ -85,27 +86,57 @@ check: vet test ## Vet + unit tests — the pre-commit gate
 # --- Published SDKs (sdk/) ------------------------------------------------
 # Deliberately not part of `check`: these need npm/python/swift toolchains that
 # a Go-only contributor should not have to install to commit. CI runs them on
-# every change under sdk/ (.github/workflows/sdk.yml).
+# every change under sdk/ (.github/workflows/sdk.yml), and the release workflow
+# runs them again on the tagged tree before it publishes anything.
+#
+# The artefact assertions live in sdk/scripts/ so that all three callers — this
+# Makefile, the PR gate, and the release gate — check the same things. Building
+# is not the same as shipping something installable: see docs/RELEASING-SDK.md
+# for the wheel that was published empty for months and passed every check that
+# did not look inside it.
 
 sdk-check: sdk-check-npm sdk-check-python sdk-check-swift ## Typecheck, test and build all four published SDKs
 
-sdk-check-npm: ## @agentray/browser + @agentray/server
+sdk-check-npm: ## @agentray/browser + @agentray/server — build, then verify the publishable tarball
 	@for pkg in browser server; do \
 	  echo "── sdk/$$pkg"; \
-	  (cd sdk/$$pkg && npm ci --silent && npm run typecheck && npm test && npm run build) || exit 1; \
+	  (cd sdk/$$pkg \
+	    && npm ci --silent \
+	    && npm run typecheck \
+	    && npm test \
+	    && npm run build \
+	    && node ../scripts/verify-npm-tarball.mjs \
+	    && node ../scripts/verify-consumer-install.mjs "$$(npm pack --silent)" \
+	    && rm -f ./*.tgz) || exit 1; \
 	done
+	@cd sdk/browser && node ../scripts/verify-cdn-bundle.mjs
 
 sdk-check-python: ## agentray (PyPI) — tests plus a wheel that actually contains the package
 	@cd sdk/python && python3 tests/test_client.py
 	@python3 -c 'import build' 2>/dev/null || { echo "sdk-check-python needs the build frontend: pip install build"; exit 1; }
 	@cd sdk/python && rm -rf dist && python3 -m build
-	@cd sdk/python && python3 -c "import glob, sys, zipfile; \
-	  names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); \
-	  missing = [n for n in ('agentray/__init__.py', 'agentray/client.py') if n not in names]; \
-	  sys.exit('wheel is missing %s — see docs/RELEASING-SDK.md' % missing) if missing else print('wheel ok: %d files' % len(names))"
+	@cd sdk/python && python3 ../scripts/verify-python-wheel.py
 
 sdk-check-swift: ## AgentRay (SwiftPM)
 	@cd sdk/swift && swift test
+
+# --- Cutting an SDK release ----------------------------------------------
+# GitHub Releases are the primary package host: the tag push builds the artefact,
+# attaches it to a Release, and only then publishes to npm/PyPI — and skips that
+# second step silently while the registry token is absent. Full runbook in
+# docs/RELEASING-SDK.md.
+SDK_BUMP ?= patch
+# browser and server share one check target; python and swift have their own.
+SDK_SUITE = $(if $(filter $(SDK_PKG),browser server),npm,$(SDK_PKG))
+
+sdk-release: ## Bump + tag one SDK: make sdk-release SDK_PKG=browser SDK_BUMP=minor
+	@test -n "$(filter $(SDK_PKG),browser server python swift)" \
+	  || { echo "set SDK_PKG=browser|server|python|swift (got '$(SDK_PKG)')"; exit 1; }
+	@$(MAKE) sdk-check-$(SDK_SUITE)
+	@node sdk/scripts/cut-release.mjs "$(SDK_PKG)" "$(SDK_BUMP)"
+
+sdk-resolve-tag: ## Show what a release tag would build: make sdk-resolve-tag TAG=browser-v0.2.0
+	@node sdk/scripts/resolve-tag.mjs "$(TAG)"
 
 agent-funcs: ## List the agent test functions this Makefile targets
 	@grep -rhn '^func TestReal_\|^func TestLongRun' agentcore/*_test.go

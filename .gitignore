@@ -25,6 +25,7 @@ bench/solutions/
 # tests ran against is not the artefact that was verified.
 sdk/*/node_modules
 sdk/*/dist
+sdk/*/*.tgz
 sdk/python/dist
 sdk/python/*.egg-info
 __pycache__/

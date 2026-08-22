@@ -72,9 +72,16 @@ Instrument a real app instead. Event names that match `user.pageview` /
 </script>
 ```
 
-With a build step, copy `sdk/browser/` or `sdk/python/` into the product repo
-(`npm install @agentray/browser` / `pip install agentray` once those packages
-are published):
+With a build step, install the published artefact — releases go to GitHub first,
+so this works with no registry account (https://github.com/lohi-ai/agentray/releases):
+
+```bash
+npm install https://github.com/lohi-ai/agentray/releases/download/browser-v0.1.0/agentray-browser-0.1.0.tgz
+pip  install https://github.com/lohi-ai/agentray/releases/download/python-v0.1.0/agentray-0.1.0-py3-none-any.whl
+```
+
+`npm install @agentray/browser` / `pip install agentray` work once those names
+are claimed on their registries.
 
 ```ts
 import { init } from '@agentray/browser';
@@ -83,14 +90,15 @@ ar.capture('user.pageview', { path: location.pathname });
 ```
 
 ```python
-# copy sdk/python/ — pip install agentray is not published
 from agentray import Client
 Client(host="http://localhost:8088", api_key="lohi_dev_project_token").capture(
     "user.signup", distinct_id="you", properties={"plan": "free"})
 ```
 
-Have an iOS app too? `sdk/swift/` is a Swift Package — add it by path
-(`.package(path: "…/agentray/sdk/swift")`), or paste the one-file version from
+Have an iOS app too? `sdk/swift/` is a Swift Package, published to the
+`lohi-ai/agentray-swift` mirror — add
+`.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")`,
+or by path for an unreleased change, or paste the one-file version from
 **Set up → 2 · iOS app**:
 
 ```swift

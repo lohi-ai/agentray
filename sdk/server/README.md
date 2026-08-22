@@ -7,6 +7,19 @@ client. Works on Node ≥ 18 and Bun (global `fetch`); zero dependencies.
 
 ## Install
 
+Releases are published to GitHub first — the tarball below is the exact artefact
+CI built, tested and installed into a clean project before publishing:
+
+```bash
+npm install https://github.com/lohi-ai/agentray/releases/download/server-v0.1.0/agentray-server-0.1.0.tgz
+```
+
+Pick the version you want from [Releases](https://github.com/lohi-ai/agentray/releases?q=server); the tags are
+`server-v<semver>`.
+
+Once the `@agentray` npm scope is published, the shorter form works and is the
+one to prefer:
+
 ```bash
 npm install @agentray/server     # or: bun add @agentray/server
 ```

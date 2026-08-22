@@ -86,9 +86,12 @@ function PackagesNote() {
       </summary>
       <ul className="mt-2 flex flex-col gap-2 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
         {PACKAGES.map((pkg) => (
-          <li key={pkg.install} className="flex flex-wrap items-baseline gap-x-2">
-            <code>{pkg.install}</code>
-            <span>{pkg.blurb}</span>
+          <li key={pkg.install} className="flex flex-col gap-1">
+            <code className="break-all">{pkg.install}</code>
+            <span>
+              {pkg.blurb}
+              {pkg.short ? <> — becomes <code>{pkg.short}</code> once it is on the registry</> : null}
+            </span>
           </li>
         ))}
       </ul>
@@ -100,11 +103,34 @@ function PackagesNote() {
   );
 }
 
-const PACKAGES: Array<{ install: string; blurb: string }> = [
-  { install: 'npm i @agentray/browser', blurb: 'websites and SPAs — pageviews, autocapture, identify' },
-  { install: 'npm i @agentray/server', blurb: 'Node, Deno, Bun — backend and webhook events' },
-  { install: 'pip install agentray', blurb: 'Python services and jobs' },
-  { install: 'https://github.com/lohi-ai/agentray (SwiftPM)', blurb: 'iOS and macOS apps' },
+// The SDKs are published to GitHub Releases first, so `install` is a command
+// that works today with no registry account. `short` is the name the same
+// package takes once its registry entry exists — it is shown as the preferred
+// form, but it is not what this list tells someone to run, because a copied
+// command that resolves to nothing is worse than a longer one that works.
+// See docs/RELEASING-SDK.md.
+const SDK_RELEASES = 'https://github.com/lohi-ai/agentray/releases/download';
+
+const PACKAGES: Array<{ install: string; short?: string; blurb: string }> = [
+  {
+    install: `npm i ${SDK_RELEASES}/browser-v0.1.0/agentray-browser-0.1.0.tgz`,
+    short: '@agentray/browser',
+    blurb: 'websites and SPAs — pageviews, autocapture, identify',
+  },
+  {
+    install: `npm i ${SDK_RELEASES}/server-v0.1.0/agentray-server-0.1.0.tgz`,
+    short: '@agentray/server',
+    blurb: 'Node, Deno, Bun — backend and webhook events',
+  },
+  {
+    install: `pip install ${SDK_RELEASES}/python-v0.1.0/agentray-0.1.0-py3-none-any.whl`,
+    short: 'agentray',
+    blurb: 'Python services and jobs',
+  },
+  {
+    install: 'https://github.com/lohi-ai/agentray-swift.git (SwiftPM)',
+    blurb: 'iOS and macOS apps',
+  },
 ];
 
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {

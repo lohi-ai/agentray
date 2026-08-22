@@ -6,19 +6,36 @@ flush on page unload.
 
 ## Install
 
+Releases are published to GitHub first — the tarball below is the exact artefact
+CI built, tested and installed into a clean project before publishing:
+
+```bash
+npm install https://github.com/lohi-ai/agentray/releases/download/browser-v0.1.0/agentray-browser-0.1.0.tgz
+```
+
+Pick the version you want from [Releases](https://github.com/lohi-ai/agentray/releases?q=browser); the tags are
+`browser-v<semver>`.
+
+Once the `@agentray` npm scope is published, the shorter form works and is the
+one to prefer:
+
 ```bash
 npm install @agentray/browser
 ```
 
 No bundler? The same bundle loads from a `<script>` tag and exposes
-`window.AgentRay`:
+`window.AgentRay`. Download `agentray-browser-<version>.min.js` from the release
+and serve it yourself, or once the package is on npm, from unpkg:
 
 ```html
-<script src="https://unpkg.com/@agentray/browser/dist/index.global.js"></script>
+<script src="https://unpkg.com/@agentray/browser@0/dist/index.global.js"></script>
 <script>
   AgentRay.init({ host: 'https://agentray.example.com', apiKey: 'phc_your_project_key', autocapture: true });
 </script>
 ```
+
+Pin the major version in that URL. An analytics tag that silently upgrades on
+someone else's marketing site is a liability.
 
 ## Quick start
 
