@@ -82,7 +82,12 @@ gh workflow run sdk-release.yml --ref browser-v0.1.0 -f tag=browser-v0.1.0 -f dr
 | `PYPI_TOKEN` | `twine upload` of the wheel + sdist | GitHub Release only; the job logs a notice |
 | `SWIFT_MIRROR_TOKEN` | pushing the `lohi-ai/agentray-swift` mirror + its tag | source tarball on the Release only, no SwiftPM install |
 
-None of them exist yet. Three one-time account steps unblock them:
+Re-running a tag is safe: each publish step checks whether that exact version is
+already out (`npm view`, `twine --skip-existing`, a tag lookup on the mirror) and
+no-ops if it is. A published SwiftPM tag is never moved — resolving a version
+pins it to a commit, so re-pointing one breaks whoever already resolved it.
+
+Three one-time account steps unblock the rest:
 
 1. **Claim the `@agentray` npm scope** (it is unclaimed as of 2026-08-22), then
    add an automation token as `NPM_TOKEN`. Both packages already set
@@ -92,9 +97,11 @@ None of them exist yet. Three one-time account steps unblock them:
    as `PYPI_TOKEN`. PyPI trusted publishing (OIDC) avoids the long-lived token
    entirely and is the better option if you are willing to configure it on the
    PyPI side; the workflow already requests `id-token: write`.
-3. **Create `lohi-ai/agentray-swift`** — public, empty, no README — and add a PAT
-   with write access to it as `SWIFT_MIRROR_TOKEN`. `GITHUB_TOKEN` cannot be
-   used: it is scoped to this repository only.
+3. `lohi-ai/agentray-swift` **exists and publishes 0.1.0** — pushed on 2026-08-23
+   by running the workflow's own steps by hand, because CI had no token. Add a
+   PAT with write access to that repo as `SWIFT_MIRROR_TOKEN`, or every later
+   Swift release ships the tarball and no SwiftPM version. `GITHUB_TOKEN` cannot
+   be used — it is scoped to this repository only.
 
 Note that GitHub *Packages* (`npm.pkg.github.com`) is **not** the GitHub host
 here, and cannot be. Its npm registry requires the package scope to equal the

@@ -191,7 +191,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm publish --provenance --access public --tag "${{ needs.meta.outputs.npm_tag }}"
+          set -euo pipefail
+          # Re-running a tag is the documented recovery once a token is added
+          # (docs/RELEASING-SDK.md), so this has to be idempotent. npm refuses to
+          # republish a version, which would turn a no-op re-run into a red build.
+          if npm view "${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }}" version >/dev/null 2>&1; then
+            echo "::notice::${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }} is already on npm — nothing to publish"
+          else
+            npm publish --provenance --access public --tag "${{ needs.meta.outputs.npm_tag }}"
+          fi
 
       - name: npm publish skipped
         if: needs.meta.outputs.dry_run != 'true' && env.NPM_TOKEN == ''
@@ -266,7 +274,10 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: twine upload dist/*
+        # --skip-existing for the same reason as the npm check above: a re-run of
+        # an already-published version is a no-op, not a failure. It only skips
+        # on "file already exists" — every other upload error still fails.
+        run: twine upload --skip-existing dist/*
 
       - name: PyPI publish skipped
         if: needs.meta.outputs.dry_run != 'true' && env.PYPI_TOKEN == ''
@@ -351,16 +362,28 @@ jobs:
       - name: push the SwiftPM mirror
         if: needs.meta.outputs.dry_run != 'true' && env.MIRROR_TOKEN != ''
         run: |
-          set -e
+          set -euo pipefail
           REMOTE="https://x-access-token:$MIRROR_TOKEN@github.com/$MIRROR_REPO.git"
-          if ! git clone "$REMOTE" /tmp/mirror 2>/dev/null; then
-            echo "::error::cannot clone $MIRROR_REPO — create it (public, empty) and give SWIFT_MIRROR_TOKEN write access"
+          # stderr is not swallowed: "repository not found" and "bad credentials"
+          # are the two likely failures here and they need different fixes.
+          if ! git clone "$REMOTE" /tmp/mirror; then
+            echo "::error::cannot clone $MIRROR_REPO — create it (public, empty) and give SWIFT_MIRROR_TOKEN write access to it"
             exit 1
+          fi
+          cd /tmp/mirror
+
+          # A version already on the mirror is left exactly as it is. SwiftPM
+          # resolves a version to a commit and caches it, so moving a published
+          # tag breaks everyone who already resolved it — and re-running a tag is
+          # the documented recovery, so arriving here twice is expected, not an
+          # error.
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q .; then
+            echo "::notice::$MIRROR_REPO already publishes $VERSION — leaving that tag untouched"
+            exit 0
           fi
 
           # Replace the tracked contents wholesale, but keep the history: a
           # consumer who resolved an earlier tag must keep resolving it.
-          cd /tmp/mirror
           git rm -rq . 2>/dev/null || true
           rsync -a --exclude '.git' /tmp/stage/ .
           git add -A
