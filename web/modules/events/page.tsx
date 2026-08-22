@@ -85,13 +85,13 @@ export function EventsPage() {
       key: 'event_name',
       header: 'Event',
       renderCell: (e) => (
-        <span className="inline-flex items-center gap-1.5">
+        <span className="inline-flex items-center gap-2">
           {e.event_name}
           {e.tool_name ? <span className="text-[var(--color-text-secondary)]"> · {e.tool_name}</span> : null}
           {e.is_unplanned ? (
             <span
               title="Not in this project's established tracking plan — likely a typo or newly-shipped, un-documented event."
-              className="inline-flex items-center rounded-md bg-[color:color-mix(in_srgb,var(--color-warning)_16%,transparent)] px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide text-[color:var(--color-warning)]"
+              className="inline-flex items-center rounded-md bg-[color:color-mix(in_srgb,var(--color-warning)_16%,transparent)] px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-[color:var(--color-warning)]"
             >
               unplanned
             </span>
@@ -223,7 +223,7 @@ export function EventsPage() {
     <span className="inline-flex items-center gap-2">
       {liveStatus}
       {appliedEventName ? (
-        <span className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--color-background-muted)] px-2.5 text-xs text-[var(--color-text-secondary)]"><span>Event</span> <b className="font-medium text-[var(--color-text-primary)]">{appliedEventName}</b></span>
+        <span className="inline-flex h-8 items-center gap-2 rounded-md bg-[var(--color-background-muted)] px-3 text-xs text-[var(--color-text-secondary)]"><span>Event</span> <b className="font-medium text-[var(--color-text-primary)]">{appliedEventName}</b></span>
       ) : null}
     </span>
   );

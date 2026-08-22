@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { Check, ShieldCheck } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Card } from '@astryxdesign/core/Card';
-import { Grid } from '@astryxdesign/core/Grid';
 import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
@@ -16,6 +15,7 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { PlanMeter } from '@/modules/shared/components/plan-meter';
 import { Button } from '@/modules/shared/components/signal-primitives';
 import { UpgradeSheet } from '@/modules/settings/upgrade-sheet';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 // Solo is pre-selected — not because it is the most expensive thing we can
 // sell, but because it is the one a single founder actually needs. A pricing
@@ -35,7 +35,7 @@ function TierCard({
 }) {
   return (
     <Card
-      padding={5}
+      padding={4}
       className={`h-full ${recommended ? 'ring-1 ring-[var(--primary)]' : ''}`}
     >
       <VStack gap={4} align="stretch" className="h-full">
@@ -45,7 +45,7 @@ function TierCard({
             {recommended ? <Badge variant="green" label="Most founders" /> : null}
             {current ? <Badge variant="neutral" label="Your plan" /> : null}
           </HStack>
-          <HStack gap={1.5} align="center">
+          <HStack gap={2} align="center">
             <Text weight="semibold" hasTabularNumbers className="text-[length:var(--font-size-2xl)] leading-none tracking-[-0.02em]">
               {formatPrice(plan, 'en')}
             </Text>
@@ -60,18 +60,18 @@ function TierCard({
           <Text type="supporting">{plan.tagline}</Text>
         </VStack>
 
-        <VStack gap={1.5} align="start" className="flex-1">
-          <HStack gap={1.5} align="center">
+        <VStack gap={2} align="start" className="flex-1">
+          <HStack gap={2} align="center">
             <Check size={14} className="text-success" aria-hidden />
             <Text type="supporting" weight="medium">{formatEvents(plan.eventsPerMonth)} events / month</Text>
           </HStack>
           {plan.features.map((feature) => (
-            <HStack key={feature} gap={1.5} align="center">
+            <HStack key={feature} gap={2} align="center">
               <Check size={14} className="text-success" aria-hidden />
               <Text type="supporting">{feature}</Text>
             </HStack>
           ))}
-          <HStack gap={1.5} align="center">
+          <HStack gap={2} align="center">
             <Check size={14} className="text-success" aria-hidden />
             <Text type="supporting">{plan.support} support</Text>
           </HStack>
@@ -103,7 +103,7 @@ export function PricingPage() {
   if (!hosted) {
     return (
       <AppShell active="settings" title="Plans" sub="This instance is self-hosted.">
-        <Card padding={5}>
+        <Card padding={4}>
           <VStack gap={3} align="start">
             <Badge variant="green" label="Self-hosted · unlimited · MIT" />
             <Text type="supporting">
@@ -128,7 +128,7 @@ export function PricingPage() {
       {/* Where you actually are, before the ladder. A pricing page that opens
           with tiers makes the reader guess which one is theirs. */}
       {!failed && !loading ? (
-        <Card padding={4} className="mb-5">
+        <Card padding={4}>
           <VStack gap={3} align="stretch">
             <HStack gap={2} align="center" wrap="wrap">
               <Text weight="medium">You are on {current.name}</Text>
@@ -139,7 +139,7 @@ export function PricingPage() {
         </Card>
       ) : null}
 
-      <Grid columns={{ minWidth: 280, max: 3 }} gap={4}>
+      <AutoGrid min={280} max={3} gap={4}>
         {PLANS.map((plan) => (
           <TierCard
             key={plan.id}
@@ -149,10 +149,10 @@ export function PricingPage() {
             onPick={() => setPicked(plan.id)}
           />
         ))}
-      </Grid>
+      </AutoGrid>
 
       {request ? (
-        <Text type="supporting" className="mt-4 block">
+        <Text type="supporting" className="block">
           {`You already asked about ${planByID(request.plan).name}. We will come back to you at ${request.email}.`}
         </Text>
       ) : null}
@@ -160,7 +160,7 @@ export function PricingPage() {
       {/* The honest answer to "why trust a solo builder with my data" — and the
           reason the hosted plans can afford to be this cheap. It stays on the
           hosted page, not only the self-host one. */}
-      <Card padding={4} className="mt-6">
+      <Card padding={4} className="mt-2">
         <HStack gap={3} align="center" wrap="wrap">
           <ShieldCheck size={18} className="text-success" aria-hidden />
           <VStack gap={0.5} align="start" className="flex-1 min-w-[240px]">
@@ -174,7 +174,7 @@ export function PricingPage() {
         </HStack>
       </Card>
 
-      <Text type="supporting" className="mt-4 block">
+      <Text type="supporting" className="block">
         Prices in USD. We are not taking cards yet — picking a plan puts you on the list and changes
         nothing about your account today.
       </Text>

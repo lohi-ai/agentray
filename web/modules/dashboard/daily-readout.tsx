@@ -39,7 +39,7 @@ function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id:
   // than a click that comes back 403.
   const access = useProjectAccess();
   return (
-    <div className={`mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5 ${recTone(rec.category) === 'growth' ? '' : ''}`}>
+    <div className={`flex items-start gap-3 rounded-xl bg-[var(--color-background-card)] px-4 py-4 ${recTone(rec.category) === 'growth' ? '' : ''}`}>
       <span className={`grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] ${recTone(rec.category) === 'growth' ? 'bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] text-primary' : 'bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent'}`}><TrendingUp size={15} /></span>
       <div style={{ minWidth: 0 }}>
         <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
@@ -51,7 +51,7 @@ function RecCard({ rec, onAck, acking }: { rec: AgentRecommendation; onAck: (id:
         <div className="mb-0.5 text-sm font-semibold">{rec.title}</div>
         <div className="text-sm leading-[1.5] text-[var(--color-text-secondary)]">{rec.rationale}</div>
       </div>
-      <div className="ms-auto self-center flex gap-1.5">
+      <div className="ms-auto self-center flex gap-2">
         <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50" title={access.canWrite ? 'Accept' : access.reason} disabled={acking || !access.canWrite} onClick={() => onAck(rec.id, 'accepted')}><Check size={15} /></button>
         <button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50" title={access.canWrite ? 'Dismiss' : access.reason} disabled={acking || !access.canWrite} onClick={() => onAck(rec.id, 'dismissed')}><X size={15} /></button>
       </div>
@@ -69,8 +69,8 @@ function RunNarration({ run }: { run: AgentRun }) {
       id: `readout-${run.id}`,
       title: 'Daily readout',
       content: (
-        <div style={{ padding: '16px 18px' }}>
-          <div className="mb-[10px] text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
+        <div style={{ padding: '16px' }}>
+          <div className="mb-3 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
             {when} · {run.token_input + run.token_output} tokens · {formatCost(run.cost_usd, run.cost_unpriced)}
           </div>
           <AgentMarkdown text={run.summary} />
@@ -80,7 +80,7 @@ function RunNarration({ run }: { run: AgentRun }) {
   };
 
   return (
-    <div className="mb-4 flex items-start gap-[13px] rounded-xl bg-[var(--color-background-card)] px-4 py-3.5">
+    <div className="flex items-start gap-3 rounded-xl bg-[var(--color-background-card)] px-4 py-4">
       <span className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-[color-mix(in_srgb,var(--agent)_16%,transparent)] text-agent"><Sparkles size={15} /></span>
       <div style={{ minWidth: 0, flex: 1 }}>
         <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Latest readout · {when}</div>
@@ -111,7 +111,7 @@ export function DailyReadout() {
 
   if (loading) {
     return (
-      <div className="mb-4 rounded-xl bg-[var(--color-background-card)] p-4">
+      <div className="rounded-xl bg-[var(--color-background-card)] p-4">
         <Loading label="Loading the agent's readout…" />
       </div>
     );
@@ -119,7 +119,7 @@ export function DailyReadout() {
 
   if (!latestRun && recommendations.length === 0) {
     return (
-      <div className="mb-4 rounded-xl bg-[var(--color-background-card)] p-4">
+      <div className="rounded-xl bg-[var(--color-background-card)] p-4">
         <div className="mb-3 flex items-center">
           <h3 className="m-0 text-sm font-semibold">Daily readout</h3>
           <div className="ms-auto">{ask}</div>
@@ -133,12 +133,12 @@ export function DailyReadout() {
   }
 
   return (
-    <div className="mb-4 rounded-xl bg-[var(--color-background-card)] p-4">
+    <div className="rounded-xl bg-[var(--color-background-card)] p-4">
       <div className="mb-3 flex items-center">
         <h3 className="m-0 text-sm font-semibold">Daily readout</h3>
         <div className="ms-auto">{ask}</div>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {latestRun?.summary ? <RunNarration run={latestRun} /> : null}
         {recommendations.slice(0, 3).map((rec) => (
           <RecCard key={rec.id} rec={rec} onAck={ackRec} acking={acking} />

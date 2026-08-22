@@ -61,6 +61,10 @@
   --text-base: var(--fs-md);
   --text-md: var(--fs-md);
   --text-lg: var(--fs-lg);
+  /* Tailwind's spacing unit, pinned to the same 4px grid Astryx's --spacing-N
+     uses. Pinned in px rather than left at the 0.25rem default so a root
+     font-size change re-scales type without silently re-scaling every gutter. */
+  --spacing: 4px;
 }
 
 :root {
@@ -98,13 +102,36 @@
   --fast: 120ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
+  /* ---- Spacing scale -----------------------------------------------------
+     Every gap, pad and margin in the app is one of these six steps. They are
+     the same 4px grid as Tailwind's numeric utilities (--spacing above) and
+     Astryx's --spacing-N, so `gap-4`, `<VStack gap={4}>` and
+     `var(--space-4)` are all 16px — three syntaxes, one ruler.
+
+     This replaces a prototype-inherited rhythm of 5/7/9/11/13/14/15/18px
+     one-offs, which is why nothing here is off-grid. --space-2 is the inside
+     of a control, --space-3 the inside of a small card, --space-4 the app
+     gutter, --space-6 the seam between sections of a page. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
   /* ---- Layout grid -------------------------------------------------------
      One number drives every gutter in the shell. The app frame is a two-track
      grid (`auto minmax(0,1fr)` — sidebar, page) and every page inside it is a
      row grid (`auto auto minmax(0,1fr)` — header, tabs, body) whose body is a
      two-track grid (`minmax(0,1fr) auto` — content, aside). Changing --pad
-     re-spaces all of them at once; nothing in a page hardcodes a gutter. */
-  --pad: 8px;
+     re-spaces all of them at once; nothing in a page hardcodes a gutter.
+
+     16px, not the 8px this started at: at 8 the page read as one undivided
+     sheet — the title sat as close to the window edge as it did to the tab
+     strip, and a card's own 16px padding was twice the gutter separating it
+     from its neighbour, so the frame looked tighter than the things inside
+     it. 16 makes the page margin the largest step on screen again. */
+  --pad: var(--space-4);
   /* Matches Astryx SideNav's own 260px root width — a narrower track would
      clip it, since SideNav sets its width itself. */
   --sidebar-w: 260px;
@@ -313,7 +340,7 @@ table {
 }
 
 th {
-  padding: 0 12px 9px;
+  padding: 0 var(--space-3) var(--space-2);
   color: var(--color-text-secondary);
   font-size: var(--fs-2xs);
   font-weight: 500;
@@ -323,7 +350,7 @@ th {
 }
 
 td {
-  padding: 10px 12px;
+  padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--color-border);
 }
 

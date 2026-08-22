@@ -25,11 +25,11 @@ export function AssignProductsDialog({ agentID, agentName, onClose }: { agentID:
       {loading ? (
         <p style={{ fontSize: 'var(--fs-sm)', color: 'var(--muted-foreground)' }}>Loading assignments…</p>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {projects.map((p) => {
             const granted = grantedProjectIDs.has(p.id);
             return (
-              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 'var(--radius)' }}>
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius)' }}>
                 <span style={{ flex: 1, fontSize: 'var(--fs-sm)' }}>{p.name}</span>
                 <Button
                   variant={granted ? 'outline' : 'primary'}

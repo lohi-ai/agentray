@@ -66,14 +66,14 @@ export function TeamsPage() {
           action={<Button variant="outline" size="sm" onClick={onCreate}>Create team</Button>}
         />
       ) : (
-        <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
+        <div className="grid grid-cols-3 gap-4 max-[980px]:grid-cols-1">
           {teams.map((team) => (
             <div
               key={team.id}
-              className="relative flex cursor-pointer flex-col gap-[11px] overflow-hidden rounded-xl bg-[var(--color-background-card)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.7)]"
+              className="relative flex cursor-pointer flex-col gap-3 overflow-hidden rounded-xl bg-[var(--color-background-card)] p-4 transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.7)]"
               onClick={() => router.push(`/teams/${team.id}`)}
             >
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-3">
                 <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-sm font-bold text-agent">
                   {(team.name || '?').charAt(0).toUpperCase()}
                 </span>
@@ -83,7 +83,7 @@ export function TeamsPage() {
               <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">
                 {team.lead_agent_id ? 'Lead picked — the lead orchestrates this board.' : 'No lead yet — pick one so the board gets worked.'}
               </div>
-              <div className="flex gap-3.5 pt-0.5 text-xs text-[var(--color-text-secondary)]">
+              <div className="flex gap-4 pt-0.5 text-xs text-[var(--color-text-secondary)]">
                 <span>members <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{team.member_count}</b></span>
                 <span>cards <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{team.card_count}</b></span>
               </div>
@@ -93,8 +93,8 @@ export function TeamsPage() {
               </div>
             </div>
           ))}
-          <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
-            <div className="flex items-center gap-2.5">
+          <div className="relative flex flex-col gap-3 overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-4 transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
+            <div className="flex items-center gap-3">
               <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-sm font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
               <span className="text-base font-semibold">New team</span>
             </div>

@@ -3,7 +3,6 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Bell, Plus, Trash2 } from 'lucide-react';
-import { Grid } from '@astryxdesign/core/Grid';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
@@ -20,6 +19,7 @@ import {
 import { useAlertChannels, useAlertRules } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 const labelCls = 'mb-1 block text-xs font-medium text-[var(--color-text-secondary)]';
 
@@ -97,13 +97,13 @@ export function AlertsPage() {
             Add a Slack incoming-webhook URL so a firing alert can leave the app.
           </p>
         ) : (
-          <div className="mb-3 flex flex-col gap-1.5">
+          <div className="mb-3 flex flex-col gap-2">
             {channels.map((c) => (
               <p key={c.id} className="text-sm">{c.name} <span className="text-[var(--color-text-secondary)]">({c.kind})</span></p>
             ))}
           </div>
         )}
-        <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
+        <AutoGrid min={280} max={2} gap={3}>
           <div>
             <label className={labelCls}>Name</label>
             <TextInput label="Channel name" isLabelHidden value={hookName} placeholder="Slack" onChange={setHookName} width="100%" />
@@ -112,7 +112,7 @@ export function AlertsPage() {
             <label className={labelCls}>Slack webhook URL</label>
             <TextInput label="Webhook URL" isLabelHidden value={hookURL} placeholder="https://hooks.slack.com/services/…" onChange={setHookURL} width="100%" />
           </div>
-        </Grid>
+        </AutoGrid>
         <div className="mt-3">
           <Button variant="outline" size="sm" onClick={() => void addChannel()} disabled={!canAddChannel || createChannel.isPending}>
             {createChannel.isPending ? 'Adding…' : 'Add Slack webhook'}
@@ -122,7 +122,7 @@ export function AlertsPage() {
 
       {creating ? (
         <Panel title="New alert rule">
-          <Grid columns={{ minWidth: 340, max: 2 }} gap={3}>
+          <AutoGrid min={340} max={2} gap={3}>
             <div>
               <label className={labelCls}>Name</label>
               <TextInput
@@ -192,7 +192,7 @@ export function AlertsPage() {
                 width="100%"
               />
             </div>
-          </Grid>
+          </AutoGrid>
 
           <div className="mt-4">
             <label className={labelCls}>Notify channels</label>
@@ -201,7 +201,7 @@ export function AlertsPage() {
                 No channels yet — add a Slack webhook above, then tick it here.
               </p>
             ) : (
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-2">
                 {channels.map((c) => (
                   <CheckboxInput
                     key={c.id}

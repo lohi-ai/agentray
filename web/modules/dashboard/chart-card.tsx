@@ -64,7 +64,7 @@ function SeriesChart({ values, labels, type }: { values: number[]; labels?: (str
   return (
     <div>
       <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168 }} />
-      <div className="mt-1.5">
+      <div className="mt-2">
         <Text type="supporting">
           latest <span className="font-mono tabular-nums font-semibold text-primary">{formatCompact(latest)}</span>
         </Text>

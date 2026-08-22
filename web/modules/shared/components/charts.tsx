@@ -189,7 +189,7 @@ export function Sparkline({ values, color = '#46B7E8', height = 180, fill = true
 }
 
 export function AreaChart() {
-  return <><svg className="block w-full h-[180px]" viewBox="0 0 600 180" preserveAspectRatio="none"><defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#46B7E8" stopOpacity="0.32" /><stop offset="100%" stopColor="#46B7E8" stopOpacity="0" /></linearGradient></defs><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44 L600,180 L0,180 Z" fill="url(#g1)" /><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44" fill="none" stroke="#46B7E8" strokeWidth="2" /></svg><div className="mt-[10px] text-[var(--color-text-secondary)] text-xs"><span><i className="inline-block w-[9px] h-[9px] mr-[5px] rounded-[3px] align-[-1px]" style={{ background: 'var(--data)' }} />Sessions</span></div></>;
+  return <><svg className="block w-full h-[180px]" viewBox="0 0 600 180" preserveAspectRatio="none"><defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#46B7E8" stopOpacity="0.32" /><stop offset="100%" stopColor="#46B7E8" stopOpacity="0" /></linearGradient></defs><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44 L600,180 L0,180 Z" fill="url(#g1)" /><path d="M0,120 L60,100 L120,108 L180,72 L240,84 L300,52 L360,60 L420,40 L480,56 L540,30 L600,44" fill="none" stroke="#46B7E8" strokeWidth="2" /></svg><div className="mt-3 text-[var(--color-text-secondary)] text-xs"><span><i className="inline-block w-[9px] h-[9px] mr-1 rounded-[3px] align-[-1px]" style={{ background: 'var(--data)' }} />Sessions</span></div></>;
 }
 
 export function RetentionChart() {

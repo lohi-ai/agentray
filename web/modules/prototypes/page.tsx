@@ -96,7 +96,7 @@ export function PrototypesPage() {
       ) : null}
 
       {truncated ? (
-        <Text type="supporting" className="mb-3 block">
+        <Text type="supporting" className="block">
           Showing the {tests.length} most recent of {total} prototypes — proposals and running tests first.
         </Text>
       ) : null}

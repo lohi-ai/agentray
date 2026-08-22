@@ -33,7 +33,7 @@ export function SchemaReference({ onPick }: { onPick: (column: string) => void }
               type="button"
               key={c.name}
               onClick={() => onPick(c.name)}
-              className="flex flex-col gap-0.5 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-background-surface)]"
+              className="flex flex-col gap-0.5 rounded-sm px-2 py-2 text-left transition-colors hover:bg-[var(--color-background-surface)]"
               title={c.note}
             >
               <span className="flex items-center gap-2">

@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { CircleDot, Clock, Play, Radio, TriangleAlert, Users, Webhook, Zap } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Card } from '@astryxdesign/core/Card';
-import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Table } from '@astryxdesign/core/Table';
 import { Text } from '@astryxdesign/core/Text';
@@ -18,6 +17,7 @@ import { Button, Callout, EmptyState, Loading, Panel, StatsStrip, StatusPill, ro
 import { useProjectAccess } from '@/modules/app/hooks';
 import { useOperations } from './hooks';
 import { isTeamRun, lastOutcome, operatorStatus, operatorTitle, rank, runnerLabel, startsOn } from './lib/operator';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 // /operations — channels that start a run without a conversation.
 //
@@ -52,7 +52,7 @@ function RunnerBadge({ op }: { op: Operator }) {
 
 function StartsOn({ op }: { op: Operator }) {
   return (
-    <HStack gap={1.5} align="center" className="text-[var(--color-text-secondary)]">
+    <HStack gap={2} align="center" className="text-[var(--color-text-secondary)]">
       {triggerIcon(op.kind)}
       <span className={op.kind === 'webhook' ? 'font-mono text-xs' : undefined}>{startsOn(op)}</span>
     </HStack>
@@ -371,7 +371,7 @@ export function OperationsPage() {
       )}
       <div className="h-4" />
       <Panel title="Coming">
-        <Grid columns={{ minWidth: 180, max: 3 }} gap={3}>
+        <AutoGrid min={180} max={3} gap={3}>
           {FUTURE_CHANNELS.map((ch) => (
             <Card key={ch.kind} padding={3}>
               <VStack gap={1}>
@@ -383,7 +383,7 @@ export function OperationsPage() {
               </VStack>
             </Card>
           ))}
-        </Grid>
+        </AutoGrid>
       </Panel>
     </AppShell>
   );

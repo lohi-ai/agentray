@@ -32,7 +32,7 @@ export function AgentMonitorPage() {
   return (
     <AppShell
       active="monitor"
-      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents/monitor')}><ArrowLeft size={15} /></button>{agent.name}</span>}
+      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents/monitor')}><ArrowLeft size={15} /></button>{agent.name}</span>}
       sub="Per-agent health and recent runs."
       actions={<><StatusPill status={status.s} label={status.l} grow={false} /><Button variant="outline" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${agentID}/setup`)}>Set up</Button><Button variant="agent" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button></>}
     >

@@ -19,7 +19,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (!authChecked) {
     return (
-      <div className="flex min-h-dvh flex-col items-center justify-center gap-3.5">
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4">
         <span className="[animation:pulse_2s_var(--ease)_infinite]">
           <NavIcon icon={<Waypoints size={18} />} />
         </span>

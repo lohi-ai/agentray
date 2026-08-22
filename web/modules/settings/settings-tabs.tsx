@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from 'react';
 import { Plus } from 'lucide-react';
-import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
@@ -17,6 +16,7 @@ import { useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspac
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { Button, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 const ROLES: WorkspaceRole[] = ['owner', 'admin', 'member'];
 
@@ -30,7 +30,7 @@ export function WorkspaceTab() {
   const [name, setName] = useState(current?.name ?? '');
 
   return (
-    <Grid columns={{ minWidth: 440, max: 2 }} gap={4}>
+    <AutoGrid min={440} max={2} gap={4}>
       <Panel title="Workspace">
         <div className="mb-4 max-w-[440px]">
           <TextInput
@@ -62,7 +62,7 @@ export function WorkspaceTab() {
           </Text>
         </VStack>
       </Panel>
-    </Grid>
+    </AutoGrid>
   );
 }
 
@@ -219,14 +219,14 @@ export function ApiKeysTab() {
       {rotating ? (
         <ConfirmDialog title="Rotate API key?" detail="The old key is revoked immediately. Update any running agents or integrations first." confirmLabel="Rotate key" danger onConfirm={() => void rotateKey()} onClose={() => setRotating(false)} />
       ) : null}
-      <HStack align="center" gap={2} className="max-w-[560px] rounded-md bg-[var(--color-background-muted)] px-3 py-[10px] text-sm">
+      <HStack align="center" gap={2} className="max-w-[560px] rounded-md bg-[var(--color-background-muted)] px-3 py-3 text-sm">
         <StatusDot variant="success" label="Key active" isPulsing />
         <span className="font-mono tabular-nums">{revealed ? key : masked}</span>
         <span className="text-[var(--color-text-disabled)] ms-auto">{project ? `created ${formatRelative(project.created_at)}` : ''}</span>
         <Button variant="ghost" size="sm" onClick={() => setRevealed((v) => !v)}>{revealed ? 'Hide' : 'Reveal'}</Button>
         <Button variant="ghost" size="sm" onClick={() => setRotating(true)}><span style={{ color: 'var(--danger)' }}>Rotate</span></Button>
       </HStack>
-      <Text type="supporting" className="mt-2.5 block max-w-[480px]">Rotating a key immediately revokes the old one. Update any running agents or integrations first.</Text>
+      <Text type="supporting" className="mt-3 block max-w-[480px]">Rotating a key immediately revokes the old one. Update any running agents or integrations first.</Text>
       {/* The key on its own is not an on-ramp. Until this existed the only
           documented install was `npm install @agentray/browser`, which is
           useless to an owner whose prototype is a Framer page — so the key sat

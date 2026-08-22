@@ -48,7 +48,7 @@ export function TeamPage() {
     <AppShell
       active="agents"
       title={
-        <span className="flex items-center gap-2.5">
+        <span className="flex items-center gap-3">
           <Button variant="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={() => router.push('/teams')}>Teams</Button>
           {team?.name ?? '…'}
         </span>
@@ -110,7 +110,7 @@ export function TeamPage() {
           ) : (
             <div className="flex flex-col">
               {members.map((m) => (
-                <div key={m.agent_id} className="flex items-center gap-2.5 border-b border-[color-mix(in_srgb,var(--border)_55%,transparent)] py-2 last:border-b-0">
+                <div key={m.agent_id} className="flex items-center gap-3 border-b border-[color-mix(in_srgb,var(--border)_55%,transparent)] py-2 last:border-b-0">
                   <span className="grid h-[26px] w-[26px] place-items-center rounded-lg bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-xs font-bold text-agent">
                     {(m.name || '?').charAt(0).toUpperCase()}
                   </span>
@@ -130,11 +130,11 @@ export function TeamPage() {
         </Panel>
       </div>
 
-      <div className="grid grid-cols-4 gap-3.5 max-[1100px]:grid-cols-2 max-[640px]:grid-cols-1">
+      <div className="grid grid-cols-4 gap-4 max-[1100px]:grid-cols-2 max-[640px]:grid-cols-1">
         {statuses.map((status) => {
           const column = cards.filter((c) => c.status === status);
           return (
-            <div key={status} className="flex min-h-[180px] flex-col gap-2.5 rounded-xl bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-3">
+            <div key={status} className="flex min-h-[180px] flex-col gap-3 rounded-xl bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-3">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
                 {columnLabel(status)}
                 <span className="font-mono text-2xs tabular-nums">{column.length}</span>

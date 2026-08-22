@@ -60,7 +60,7 @@ function ChapterList({
           <button
             key={c.index}
             onClick={() => onSelect(c)}
-            className={`flex w-full flex-col items-stretch gap-1 rounded-md border px-3 py-2.5 text-left cursor-pointer ${
+            className={`flex w-full flex-col items-stretch gap-1 rounded-md border px-3 py-3 text-left cursor-pointer ${
               isSelected
                 ? 'border-agent bg-[color-mix(in_srgb,var(--agent)_10%,var(--surface-2))]'
                 : 'border-[var(--color-border)] bg-[var(--color-background-muted)]'
@@ -80,7 +80,7 @@ function ChapterList({
                 <span className="flex-none text-2xs uppercase tracking-[0.04em] text-[var(--color-text-disabled)]">open end</span>
               )}
             </div>
-            <div className="flex flex-wrap gap-3 ps-[26px] text-2xs text-[var(--color-text-secondary)]">
+            <div className="flex flex-wrap gap-3 ps-6 text-2xs text-[var(--color-text-secondary)]">
               <span className="font-mono tabular-nums">turns {c.first_turn}–{c.last_turn}</span>
               <span className="font-mono tabular-nums">{c.steps} steps</span>
               <span className="font-mono tabular-nums">{c.tool_calls} tool calls</span>
@@ -178,7 +178,7 @@ export function AgentRunPage() {
     <AppShell
       active="monitor"
       title={
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}>
             {back}
             {run?.summary || `Run ${runID.slice(0, 12)}`}
           </span>
@@ -246,7 +246,7 @@ export function AgentRunPage() {
       <Panel title="Who did the work">
         <DelegationSummary calls={llmCalls} />
         {run?.finished_at ? (
-          <p className="m-0 mt-2.5 text-2xs text-[var(--color-text-disabled)]">
+          <p className="m-0 mt-3 text-2xs text-[var(--color-text-disabled)]">
             Finished {formatRelative(run.finished_at)} · triggered by {run.trigger}
           </p>
         ) : null}

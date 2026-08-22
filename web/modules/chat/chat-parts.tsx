@@ -808,7 +808,7 @@ export function PlanList({ items, compact }: { items: AgentPlanItem[]; compact?:
         const now = it.status === 'in_progress';
         return (
           <HStack key={`${i}-${it.content}`} gap={2} align="start" className="min-w-0">
-            <span className="mt-[3px] flex-none">
+            <span className="mt-1 flex-none">
               {done ? (
                 <Check size={13} className="text-[var(--color-text-success,var(--color-text-secondary))]" />
               ) : now ? (
@@ -882,7 +882,7 @@ function GoalNote({ goal }: { goal: string }) {
     <div className="w-full min-w-0 px-1 py-2">
       <Card className="!p-3">
         <HStack gap={2} align="start" className="min-w-0">
-          <Flag size={14} className="mt-[2px] flex-none text-[var(--color-text-secondary)]" />
+          <Flag size={14} className="mt-0.5 flex-none text-[var(--color-text-secondary)]" />
           <VStack gap={0} align="stretch" className="min-w-0">
             <Text type="supporting" weight="medium">Working until this is true</Text>
             <Text className="min-w-0 break-words">{goal}</Text>
@@ -1177,7 +1177,7 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
 function ResultCard({ card }: { card: AgentResultCard }) {
   return (
     <Card padding={4} className="relative overflow-hidden [&::before]:absolute [&::before]:left-0 [&::before]:top-0 [&::before]:h-0.5 [&::before]:w-full [&::before]:animate-[sweep_320ms_var(--ease)_forwards] [&::before]:bg-primary [&::before]:content-['']">
-      <div className="mb-2.5 flex items-baseline justify-between gap-3"><Text type="supporting">{card.title}</Text></div>
+      <div className="mb-3 flex items-baseline justify-between gap-3"><Text type="supporting">{card.title}</Text></div>
       {card.kind === 'series' && card.points?.length ? (
         <Chart spec={{ type: 'area', x: card.points.map((p) => p.label ?? ''), series: [{ data: card.points.map((p) => p.value) }], unit: card.unit, height: 130 }} />
       ) : (

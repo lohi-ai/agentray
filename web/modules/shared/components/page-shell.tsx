@@ -40,7 +40,8 @@ export type PageShellProps = {
   aside?: ReactNode;
   /**
    * Hand the content row to the child untouched: no padding, no scroll
-   * container. For screens that own their own scrolling (chat).
+   * container, no vertical rhythm. For screens that own their own scrolling
+   * (chat).
    */
   bleed?: boolean;
   children: ReactNode;
@@ -93,10 +94,22 @@ export function PageShell({ banner, title, sub, actions, tabs, aside, bleed = fa
       {tabs ? <div className="min-w-0">{tabs}</div> : null}
 
       <div className="grid min-h-0 min-w-0" style={body}>
+        {/* The content column, not the blocks in it, owns the vertical rhythm.
+            Every top-level block used to carry its own trailing margin — the
+            filter bar an mb-4, the stat strip an mb-4, a callout another — so
+            the gap between two blocks depended on which of them came first,
+            and a page that stacked two marginless panels got none at all.
+            One `gap` here means every page breathes on the same step and a
+            block can be moved or dropped without re-tuning its neighbours. */}
         {bleed ? (
           <div id="main-content" className="min-h-0 min-w-0 overflow-hidden">{children}</div>
         ) : (
-          <div id="main-content" className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">{children}</div>
+          <div
+            id="main-content"
+            className="flex min-h-0 min-w-0 flex-col gap-[var(--pad)] overflow-y-auto overflow-x-hidden"
+          >
+            {children}
+          </div>
         )}
         {aside ? (
           <aside
@@ -134,7 +147,7 @@ export function PageTabs<T extends string>({
             type="button"
             aria-selected={selected}
             onClick={() => onChange(tab.id)}
-            className={`relative inline-flex min-h-10 flex-none items-center gap-1.5 whitespace-nowrap px-3 text-sm transition-colors ${
+            className={`relative inline-flex min-h-10 flex-none items-center gap-2 whitespace-nowrap px-3 text-sm transition-colors ${
               selected
                 ? "text-[var(--color-text-primary)] after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-full after:bg-primary after:content-['']"
                 : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -149,12 +162,54 @@ export function PageTabs<T extends string>({
   );
 }
 
+// AutoGrid is the responsive card grid: as many `min`-wide tracks as fit, at
+// most `max` of them, on the shared spacing scale.
+//
+// It exists because Astryx's <Grid columns={{minWidth}}> emits
+// `minmax(<min>px, …)` with no floor, so a 440px-minimum grid inside a 382px
+// phone column lays out a 440px track and the card is clipped by the page's
+// overflow-x — content simply disappears, with no scrollbar to reveal it.
+// `min(100%, <min>px)` lets the track shrink to the container, which is what
+// every caller meant. The `max` cap uses the same track-max arithmetic Astryx
+// does, so column counts are unchanged.
+export function AutoGrid({
+  min,
+  max,
+  gap = 4,
+  className,
+  children,
+}: {
+  /** Ideal minimum track width in px — the wrap threshold. */
+  min: number;
+  /** Cap on the number of columns. Omit for as many as fit. */
+  max?: number;
+  /** Spacing step (×4px). */
+  gap?: number;
+  className?: string;
+  children: ReactNode;
+}) {
+  const g = `${gap * 4}px`;
+  const trackMax = max ? `calc((100% - ${max - 1} * ${g}) / ${max})` : '1fr';
+  return (
+    <div
+      className={className}
+      style={{
+        display: 'grid',
+        gap: g,
+        gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${min}px), ${trackMax}))`,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 // AsideSection is the unit the right column is built from: a small caps label
 // over its content. Keeps every aside on the same rhythm without each page
 // inventing a heading style.
 export function AsideSection({ title, children }: { title?: ReactNode; children: ReactNode }) {
   return (
-    <section className="mb-[calc(var(--pad)*2)] last:mb-0">
+    <section className="mb-[var(--space-6)] last:mb-0">
       {title ? (
         <h2 className="m-0 mb-2 text-2xs font-medium uppercase tracking-[0.07em] text-[var(--color-text-secondary)]">
           {title}

@@ -84,7 +84,7 @@ function PackagesNote() {
       <summary className="cursor-pointer text-sm text-[var(--color-text-secondary)]">
         Have a build step? Install the SDK instead
       </summary>
-      <ul className="mt-2 flex flex-col gap-1.5 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
+      <ul className="mt-2 flex flex-col gap-2 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
         {PACKAGES.map((pkg) => (
           <li key={pkg.install} className="flex flex-wrap items-baseline gap-x-2">
             <code>{pkg.install}</code>
@@ -112,7 +112,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       onClick={onClick}
       aria-pressed={active}
-      className={`min-h-9 rounded-[var(--radius-md)] border px-2.5 text-sm ${
+      className={`min-h-9 rounded-[var(--radius-md)] border px-3 text-sm ${
         active
           ? 'border-[var(--agent)] text-[var(--color-text-primary)]'
           : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'

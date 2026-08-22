@@ -246,7 +246,7 @@ export function ModelsTab() {
   const hasProviders = configured.length > 0;
 
   return (
-    <div className="flex flex-col gap-[14px]">
+    <div className="flex flex-col gap-4">
       <p className="max-w-[640px] text-sm text-[var(--color-text-primary)]">
         {hasProviders
           ? 'Your agents think with the keys below. Choose which model handles which kind of work.'
@@ -307,7 +307,7 @@ export function ModelsTab() {
                         {p.has_key ? 'key saved' : 'no key yet'}
                       </div>
                       {failure ? (
-                        <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
+                        <div role="alert" className="mt-2 flex items-start gap-2 text-xs text-danger">
                           <AlertTriangle size={13} className="mt-0.5 flex-none" />
                           <span>{failure}</span>
                         </div>
@@ -336,7 +336,7 @@ export function ModelsTab() {
             independently, so this also covers "the last provider was just
             deleted", where there is no row to attach it to at all. */}
         {orphanErrors.length ? (
-          <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
+          <div role="alert" className="mt-2 flex items-start gap-2 text-xs text-danger">
             <AlertTriangle size={13} className="mt-0.5 flex-none" />
             <span>{orphanErrors.join(' · ')}</span>
           </div>
@@ -408,7 +408,7 @@ export function ModelsTab() {
               <div className="mb-2 text-xs text-[var(--color-text-secondary)]">
                 {testState.ok ? 'Everything answered.' : 'Some models did not answer.'}
               </div>
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-2">
                 {TIERS.map((tier) => {
                   const result = testState.tiers[tier.key];
                   const model = testState.models[tier.key];

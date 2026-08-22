@@ -78,26 +78,26 @@ export function AgentsPage() {
       {agents.length === 0 && !isLoading ? (
         <EmptyState icon={<Plus size={22} />} title="No agents yet" detail={access.canWrite ? 'Hire a teammate from a blank recipe. No backend code needed.' : access.reason} action={access.canWrite ? <Button variant="outline" size="sm" onClick={onCreate}>Hire a teammate</Button> : undefined} />
       ) : (
-        <div className="grid grid-cols-3 gap-3.5 max-[980px]:grid-cols-1">
+        <div className="grid grid-cols-3 gap-4 max-[980px]:grid-cols-1">
           {agents.map((row) => {
             const { status, label } = agentStatus(row, needsKey);
             return (
               <div
-                className={`relative flex flex-col gap-[11px] overflow-hidden rounded-xl bg-[var(--color-background-card)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.7)] hover:[&_.av-agent]:shadow-[0_0_0_4px_color-mix(in_srgb,var(--agent)_12%,transparent)] ${status === 'paused' ? 'opacity-[0.62]' : ''}`}
+                className={`relative flex flex-col gap-3 overflow-hidden rounded-xl bg-[var(--color-background-card)] p-4 transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(0,0,0,0.7)] hover:[&_.av-agent]:shadow-[0_0_0_4px_color-mix(in_srgb,var(--agent)_12%,transparent)] ${status === 'paused' ? 'opacity-[0.62]' : ''}`}
                 key={row.id}
               >
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-3">
                   <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-sm font-bold text-agent">{(row.name || '?').charAt(0).toUpperCase()}</span>
                   <span className="text-base font-semibold">{row.name}</span>
                   <StatusPill status={status} label={label} />
                 </div>
                 <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{row.is_default ? 'Default project analyst — routes and answers questions across your data.' : `Autonomy: ${row.autonomy || 'manual'}.`}</div>
-                <div className="flex gap-3.5 pt-0.5 text-xs text-[var(--color-text-secondary)]">
+                <div className="flex gap-4 pt-0.5 text-xs text-[var(--color-text-secondary)]">
                   <span>last run <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatRelative(row.last_run_at)}</b></span>
                   <span>runs <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{row.run_count}</b></span>
                   <span>cost <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatCost(row.cost_usd, row.cost_unpriced)}</b></span>
                 </div>
-                <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5">
+                <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-2">
                   <div className="min-w-0 flex-1">
                     {needsKey ? (
                       <Button variant="agent" size="sm" icon={<Wrench size={15} />} onClick={() => router.push(settingsPath('ai'))}>Add AI key</Button>
@@ -123,8 +123,8 @@ export function AgentsPage() {
             );
           })}
           {access.canWrite ? (
-            <div className="relative flex flex-col gap-[11px] overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-[15px] transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
-              <div className="flex items-center gap-2.5">
+            <div className="relative flex flex-col gap-3 overflow-hidden rounded-xl border border-dashed border-[color-mix(in_srgb,var(--border)_70%,transparent)] bg-[color-mix(in_srgb,var(--surface-2)_55%,transparent)] p-4 transition-[transform,background,box-shadow] duration-[var(--fast)] ease-[var(--ease)] hover:border-[color-mix(in_srgb,var(--agent)_45%,var(--border))] hover:bg-[var(--color-background-muted)]">
+              <div className="flex items-center gap-3">
                 <span className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-[var(--color-background-surface)] text-sm font-bold text-[var(--color-text-secondary)]"><Plus size={16} /></span>
                 <span className="text-base font-semibold">New agent</span>
               </div>

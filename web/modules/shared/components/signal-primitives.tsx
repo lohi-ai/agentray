@@ -6,7 +6,6 @@ import { Badge } from '@astryxdesign/core/Badge';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button as AstryxButton } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
-import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { VStack } from '@astryxdesign/core/VStack';
 import { Heading } from '@astryxdesign/core/Heading';
@@ -17,6 +16,7 @@ import { Spinner } from '@astryxdesign/core/Spinner';
 import { Table } from '@astryxdesign/core/Table';
 import type { TablePlugin } from '@astryxdesign/core/Table';
 import { useAuthStore } from '@/lib/app-state';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 export type Tone = 'agent' | 'warning' | 'success' | 'danger';
 
@@ -64,7 +64,7 @@ export function Button({ children, variant, size, icon, onClick, disabled, isIco
 export function ContextChips({ range, extra }: { range: string; extra?: ReactNode }) {
   const project = useAuthStore((s) => s.project);
   return (
-    <HStack gap={2} className="my-0.5 mb-4 flex-wrap">
+    <HStack gap={2} className="flex-wrap">
       <Badge variant="neutral" label={<span>Project <b className="font-medium text-[var(--color-text-primary)]">{project?.name || '—'}</b></span>} />
       <Badge variant="neutral" label={<span>Range <b className="font-medium text-[var(--color-text-primary)]">{range}</b></span>} />
       {extra}
@@ -80,10 +80,10 @@ export function ContextChips({ range, extra }: { range: string; extra?: ReactNod
 // success/danger brand tokens, which stay constant across light/dark by design.
 export function StatsStrip({ stats }: { stats: Array<{ label: string; value: string; tone?: Tone; delta?: string; deltaTone?: 'up' | 'down' }> }) {
   return (
-    <Card padding={1} className="mb-4">
-      <Grid columns={{ minWidth: 140, max: 6 }} gap={0}>
+    <Card padding={1}>
+      <AutoGrid min={140} max={6} gap={0}>
         {stats.map((stat) => (
-          <VStack key={stat.label} gap={1} className="px-4 py-[13px]">
+          <VStack key={stat.label} gap={1} className="px-4 py-3">
             <Text type="supporting" maxLines={1}>{stat.label}</Text>
             <Text weight="semibold" hasTabularNumbers className="text-[length:var(--font-size-xl)] leading-tight tracking-[-0.02em]" style={stat.tone ? { color: `var(--${stat.tone})` } : undefined}>{stat.value}</Text>
             {stat.delta ? (
@@ -94,7 +94,7 @@ export function StatsStrip({ stats }: { stats: Array<{ label: string; value: str
             ) : null}
           </VStack>
         ))}
-      </Grid>
+      </AutoGrid>
     </Card>
   );
 }
@@ -104,7 +104,7 @@ const DOT_TONE: Record<string, string> = { working: 'bg-agent text-agent', healt
 
 export function StatusPill({ status, label, grow = true }: { status: string; label: string; grow?: boolean }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-[20px] bg-[var(--color-background-muted)] px-[9px] py-[3px] text-xs ${PILL_TONE[status] ?? ''} ${grow ? 'ms-auto' : ''}`}>
+    <span className={`inline-flex items-center gap-2 rounded-[20px] bg-[var(--color-background-muted)] px-2 py-1 text-xs ${PILL_TONE[status] ?? ''} ${grow ? 'ms-auto' : ''}`}>
       <span className={`relative inline-block h-2 w-2 flex-none rounded-full ${DOT_TONE[status] ?? ''} ${status !== 'paused' && status !== 'idle' ? "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" : ''}`} />
       {label}
     </span>
@@ -120,7 +120,6 @@ const CALLOUT_STATUS = { growth: 'success', agentic: 'info', warn: 'warning' } a
 export function Callout({ tone, icon, label, title, detail, action }: { tone: 'growth' | 'agentic' | 'warn'; icon: ReactNode; label: string; title: string; detail: string; action?: ReactNode }) {
   return (
     <Banner
-      className="mb-4"
       status={CALLOUT_STATUS[tone]}
       icon={icon}
       title={<><Text type="supporting" className="me-2 uppercase tracking-[0.06em]">{label}</Text>{title}</>}

@@ -171,7 +171,7 @@ function AddConnectorDialog({ kinds, onSubmit, onClose }: {
       onClose={onClose}
       footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" onClick={submit}>Add connector</Button></>}
     >
-      <div className="flex flex-col gap-3.5 max-w-[440px]">
+      <div className="flex flex-col gap-4 max-w-[440px]">
         <TextInput label="Name" value={name} placeholder="e.g. Production DB" onChange={setName} width="100%" />
         <Selector label="Kind" size="sm" options={kinds} value={kind} onChange={setKind} />
         <TextInput
@@ -319,7 +319,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       <Panel
         title={`Table syncs — ${connector.name}`}
         action={
-          <span className="flex gap-1.5">
+          <span className="flex gap-2">
             <Button variant="ghost" size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting(true)}>
               {draftLoading ? 'Drafting…' : 'AI draft'}
             </Button>
@@ -386,7 +386,7 @@ function AddSyncDialog({ connectorID, onSubmit, onClose }: {
       ) : error ? (
         <Text type="supporting" style={{ color: 'var(--danger)' }}>Schema discovery failed: {error}</Text>
       ) : (
-        <div className="flex flex-col gap-3.5 max-w-[440px]">
+        <div className="flex flex-col gap-4 max-w-[440px]">
           <Selector label="Source table" size="sm" options={tables.map((t) => t.name)} value={tableName} onChange={pickTable} placeholder="Pick a table…" />
           {tableName ? (
             <>

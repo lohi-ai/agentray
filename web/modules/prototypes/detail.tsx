@@ -22,7 +22,7 @@ import { chatHref, isRecorded, progressPct, stateOf, STATE_LABEL, STATE_PILL, ST
 // quotes from `test_status`; this page never re-scores a count itself.
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
 
 export function PrototypeDetailPage() {
   const params = useParams<{ prototypeId: string }>();

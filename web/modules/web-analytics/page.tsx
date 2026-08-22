@@ -57,12 +57,12 @@ export function WebAnalyticsPage() {
           detail={`AI and answer-engine traffic is ${formatPercent(aiShare)} of classified visits. Bounce rate is ${formatPercent(web.bounce_rate * 100)} across ${formatNumber(web.sessions)} sessions.`}
         />
       ) : null}
-      <div className="flex flex-col gap-[14px]">
-        <div className="grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1">
+      <div className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-4 max-[980px]:grid-cols-1">
           <Panel title="Top sources"><BarRows rows={(web.referrers_by_channel.length ? web.referrers_by_channel : web.referrers).slice(0, 6)} valueHead="Source" countHead="Visits" /></Panel>
           <Panel title="Top pages"><BarRows rows={web.top_paths.slice(0, 6)} valueHead="Path" countHead="Views" mono /></Panel>
         </div>
-        <div className="grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1">
+        <div className="grid grid-cols-2 gap-4 max-[980px]:grid-cols-1">
           {/* countHead is "Pageviews": traffic_by_class counts user.pageview rows,
               not people. It used to say "Visitors" while the stat strip above it
               said something different for the same window — two numbers, one

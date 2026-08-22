@@ -94,7 +94,7 @@ export function ProviderForm({
   };
 
   return (
-    <div className="flex flex-col gap-3.5 px-[18px] py-4">
+    <div className="flex flex-col gap-4 px-5 py-4">
       <Selector
         label="Who is the provider?"
         size="sm"

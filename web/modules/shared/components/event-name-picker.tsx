@@ -118,9 +118,9 @@ export function EventNameCombobox({
       {open ? (
         <div className="absolute z-30 mt-1 max-h-[280px] w-full min-w-[240px] overflow-auto rounded-md border border-[var(--color-border)] bg-[var(--color-background-card)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.35)]">
           {loading ? (
-            <div className="px-2.5 py-2 text-xs text-[var(--color-text-secondary)]">Loading event names…</div>
+            <div className="px-3 py-2 text-xs text-[var(--color-text-secondary)]">Loading event names…</div>
           ) : matches.length === 0 ? (
-            <div className="px-2.5 py-2 text-xs text-[var(--color-text-secondary)]">
+            <div className="px-3 py-2 text-xs text-[var(--color-text-secondary)]">
               {names.length === 0 ? 'No events captured yet.' : 'No event name matches.'}
             </div>
           ) : (
@@ -130,7 +130,7 @@ export function EventNameCombobox({
                 key={m.event_name}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => commit(m.event_name)}
-                className={`flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-sm ${i === active ? 'bg-[var(--color-background-surface)]' : ''} ${m.event_name === value ? 'text-primary' : 'text-[var(--color-text-primary)]'}`}
+                className={`flex w-full items-center gap-2 rounded-sm px-3 py-2 text-left text-sm ${i === active ? 'bg-[var(--color-background-surface)]' : ''} ${m.event_name === value ? 'text-primary' : 'text-[var(--color-text-primary)]'}`}
               >
                 <span className="min-w-0 flex-1 truncate font-mono">{m.event_name}</span>
                 {m.event_type ? <span className="flex-none text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">{m.event_type}</span> : null}
@@ -231,7 +231,7 @@ export function EventCatalog({ onPick, selected, title = 'Event names', max = 20
               type="button"
               key={m.event_name}
               onClick={() => onPick(m.event_name)}
-              className={`flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors hover:bg-[var(--color-background-surface)] ${m.event_name === selected ? 'bg-[var(--color-background-surface)] text-primary' : 'text-[var(--color-text-primary)]'}`}
+              className={`flex items-center gap-2 rounded-sm px-2 py-2 text-left text-sm transition-colors hover:bg-[var(--color-background-surface)] ${m.event_name === selected ? 'bg-[var(--color-background-surface)] text-primary' : 'text-[var(--color-text-primary)]'}`}
               title={`Last seen ${formatRelative(m.last_seen)}`}
             >
               <span className="min-w-0 flex-1 truncate font-mono">{m.event_name}</span>

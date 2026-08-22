@@ -44,7 +44,7 @@ export function ConceptCaption({ concept }: { concept: HarnessConcept }) {
   const c = HARNESS_CONCEPTS[concept];
   const Icon = c.icon;
   return (
-    <div className="flex items-start gap-[7px] mb-[9px] rounded-sm bg-[color-mix(in_srgb,var(--agent)_8%,transparent)] px-[9px] py-[7px] text-xs leading-[1.5] text-[var(--color-text-secondary)]">
+    <div className="flex items-start gap-2 mb-2 rounded-sm bg-[color-mix(in_srgb,var(--agent)_8%,transparent)] px-2 py-2 text-xs leading-[1.5] text-[var(--color-text-secondary)]">
       <Icon size={13} className="mt-px shrink-0 text-agent" />
       <span>{c.short}</span>
     </div>
@@ -63,18 +63,18 @@ export function HarnessGuide() {
         <ChevronDown size={16} style={{ transform: open ? 'rotate(180deg)' : undefined, transition: 'transform .15s' }} />
       </button>
       {open ? (
-        <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-2.5">
+        <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
           {(Object.keys(HARNESS_CONCEPTS) as HarnessConcept[]).map((key, i) => {
             const c = HARNESS_CONCEPTS[key];
             const Icon = c.icon;
             return (
-              <div className="rounded-lg border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--surface-1)_60%,transparent)] px-3 py-[11px]" key={key}>
-                <div className="flex items-center gap-[7px] text-sm text-[var(--color-text-primary)]">
+              <div className="rounded-lg border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--surface-1)_60%,transparent)] px-3 py-3" key={key}>
+                <div className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
                   <span className="font-mono tabular-nums inline-flex h-[17px] w-[17px] items-center justify-center rounded-md bg-[color-mix(in_srgb,var(--agent)_18%,transparent)] text-2xs text-agent">{i + 1}</span>
                   <Icon size={14} className="text-agent" />
                   <b>{c.label}</b>
                 </div>
-                <p className="mt-[7px] mb-0 text-xs leading-[1.5] text-[var(--color-text-secondary)]">{c.short}</p>
+                <p className="mt-2 mb-0 text-xs leading-[1.5] text-[var(--color-text-secondary)]">{c.short}</p>
               </div>
             );
           })}

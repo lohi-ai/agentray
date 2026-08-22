@@ -68,7 +68,7 @@ function SidebarFooter() {
 
   return (
     <div className="flex flex-col gap-2 px-1 pb-1">
-      <div className="flex items-center gap-1.5 px-1 py-0.5 text-[var(--color-text-secondary)] text-xs">
+      <div className="flex items-center gap-2 px-1 py-0.5 text-[var(--color-text-secondary)] text-xs">
         <Languages size={15} />
         <span>Language</span>
         <span className="flex-1" />
@@ -111,7 +111,7 @@ function DemoBar() {
   return (
     <div
       role="status"
-      className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--agent)_12%,transparent)] px-3 py-1.5 text-sm text-[var(--color-text-secondary)]"
+      className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--agent)_12%,transparent)] px-3 py-2 text-sm text-[var(--color-text-secondary)]"
     >
       <Eye size={14} aria-hidden className="flex-none text-agent" />
       <span className="min-w-0">

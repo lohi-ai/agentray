@@ -31,7 +31,7 @@ const EVENT_TYPES = ['agent', 'web', 'product'];
 
 // chip is the shared read-only pill (project, custom-range summary).
 function Chip({ children }: { children: ReactNode }) {
-  return <span className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--color-background-muted)] px-2.5 text-xs text-[var(--color-text-secondary)]">{children}</span>;
+  return <span className="inline-flex h-8 items-center gap-2 rounded-md bg-[var(--color-background-muted)] px-3 text-xs text-[var(--color-text-secondary)]">{children}</span>;
 }
 
 // FilterBar is the single, interactive filter surface shared across the
@@ -114,7 +114,7 @@ export function FilterBar({
     : 'Custom range…';
 
   return (
-    <div className="my-0.5 mb-4 flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <Chip><span>Project</span> <b className="font-medium text-[var(--color-text-primary)]">{project?.name || '—'}</b></Chip>
 
       {/* Time range: presets + a custom-range option that opens the calendar. */}
@@ -177,7 +177,7 @@ export function FilterBar({
 
       {showErrors ? (
         <button
-          className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${applied.error_only ? 'border-transparent bg-[color-mix(in_srgb,var(--danger)_16%,transparent)] text-danger' : 'border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-background-surface)]'}`}
+          className={`inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors ${applied.error_only ? 'border-transparent bg-[color-mix(in_srgb,var(--danger)_16%,transparent)] text-danger' : 'border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-background-surface)]'}`}
           aria-pressed={applied.error_only}
           onClick={() => apply({ error_only: !applied.error_only })}
         >
@@ -189,7 +189,7 @@ export function FilterBar({
 
       {dirty ? (
         <button
-          className="ms-auto inline-flex h-8 items-center gap-1.5 rounded-md border border-transparent bg-transparent px-2.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
+          className="ms-auto inline-flex h-8 items-center gap-2 rounded-md border border-transparent bg-transparent px-3 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
           onClick={() => void refresh({ ...defaultFilters })}
           title="Clear all filters"
         >

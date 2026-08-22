@@ -160,7 +160,7 @@ export function DashboardPage() {
       <FirstEventQuickstart />
 
       {sessionNotice?.kind === 'noticed' ? (
-        <div className="mb-4">
+        <div>
           <Callout
             tone="growth"
             icon={<Sparkles size={16} />}
@@ -199,7 +199,7 @@ export function DashboardPage() {
           />
         </div>
       ) : (
-        <div className="grid gap-3.5 grid-cols-3 [@media(max-width:980px)]:grid-cols-1">
+        <div className="grid gap-4 grid-cols-3 [@media(max-width:980px)]:grid-cols-1">
           {order.map((chart, i) => (
             <div key={chart.id} className={spanClass(chart.col_span)}>
               {/* A reader who cannot write this board gets no edit, no delete,

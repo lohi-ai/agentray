@@ -149,7 +149,7 @@ function PanelHeader({
     <HStack
       align="center"
       gap={1}
-      className={`shrink-0 border-b border-[var(--color-border)] px-3 py-2.5 ${className ?? ''}`}
+      className={`shrink-0 border-b border-[var(--color-border)] px-3 py-3 ${className ?? ''}`}
     >
       {onBack && (
         <IconButton variant="ghost" size="sm" label="Back" tooltip="Back" icon={<ChevronLeft size={16} />} onClick={onBack} />

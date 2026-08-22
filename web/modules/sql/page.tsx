@@ -157,7 +157,7 @@ export function SQLPage() {
     >
 
       {/* Hand-off to the agent chat — describe the question, the agent writes & runs the SQL. */}
-      <HStack align="center" gap={2} className="mb-3 rounded-xl bg-[color-mix(in_srgb,var(--agent)_8%,var(--surface-1))] p-2.5">
+      <HStack align="center" gap={2} className="rounded-xl bg-[color-mix(in_srgb,var(--agent)_8%,var(--surface-1))] p-3">
         <TextInput
           label="Ask the agent"
           isLabelHidden
@@ -173,7 +173,7 @@ export function SQLPage() {
         <Button variant="agent" size="sm" icon={<Wand2 size={15} />} disabled={!ask.trim()} onClick={askAI}>Ask the agent</Button>
       </HStack>
 
-      <div className={showReference ? 'mb-4 grid grid-cols-[minmax(0,1fr)_280px] gap-3 max-[900px]:grid-cols-1' : 'mb-4'}>
+      <div className={showReference ? 'grid grid-cols-[minmax(0,1fr)_280px] gap-3 max-[900px]:grid-cols-1' : undefined}>
         <div className="rounded-xl bg-[var(--color-background-card)] p-3">
           <div className="overflow-hidden rounded-md border border-[color-mix(in_srgb,var(--border)_60%,transparent)]">
             <SqlEditor value={sql} onChange={setSql} onRun={runQuery} />
@@ -192,10 +192,10 @@ export function SQLPage() {
       </div>
 
       {error ? (
-        <Banner className="mb-4" status="error" title="Query failed" description={error} isDismissable onDismiss={clearError} />
+        <Banner status="error" title="Query failed" description={error} isDismissable onDismiss={clearError} />
       ) : null}
 
-      <div className="flex flex-col gap-[14px]">
+      <div className="flex flex-col gap-4">
         <Panel title={running ? 'Running…' : 'Results'} action={resultsActions}><RowsTable rows={rows} /></Panel>
         {savedQueries.length ? (
           <Panel title="Saved queries">

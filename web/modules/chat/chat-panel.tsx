@@ -40,7 +40,7 @@ export function WorkPanel({
   const open = recommendations.filter((r) => r.status === 'open');
   const body = (
     <>
-      <div className="px-3 pt-2.5">
+      <div className="px-3 pt-3">
         <TabList value={tab} onChange={(v) => onTab(v as PanelTab)} size="sm" layout="fill">
           <Tab value="plan" label="Plan" endContent={plan.length ? <Badge variant="blue" label={plan.filter((i) => i.status !== 'completed').length} /> : undefined} />
           <Tab value="recs" label="Recommendations" endContent={open.length ? <Badge variant="purple" label={open.length} /> : undefined} />
@@ -74,7 +74,7 @@ function PlanPane({ plan, goal }: { plan: AgentPlanItem[]; goal: string }) {
       {goal ? (
         <Card padding={3}>
           <div className="flex items-start gap-2">
-            <Flag size={13} className="mt-[3px] flex-none text-[var(--color-text-secondary)]" />
+            <Flag size={13} className="mt-1 flex-none text-[var(--color-text-secondary)]" />
             <div className="min-w-0">
               <Text type="supporting" weight="medium" className="block">Working until this is true</Text>
               <Text className="block break-words">{goal}</Text>
@@ -101,13 +101,13 @@ function PlanPane({ plan, goal }: { plan: AgentPlanItem[]; goal: string }) {
 }
 
 function RecsPane({ recs, onAck }: { recs: AgentRecommendation[]; onAck: (id: string, status: 'accepted' | 'dismissed') => void }) {
-  if (recs.length === 0) return <div className="px-1 py-1.5 pt-3 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">No open recommendations</div>;
+  if (recs.length === 0) return <div className="px-1 py-2 pt-3 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">No open recommendations</div>;
   return (
     <div>
       {recs.map((r) => (
         <Card key={r.id} padding={3} className="mb-2">
-          <Text weight="semibold" className="mb-[3px] block text-sm">{r.title}</Text>
-          <Text type="supporting" className="mb-2.5 block leading-[1.45]">{r.rationale}</Text>
+          <Text weight="semibold" className="mb-1 block text-sm">{r.title}</Text>
+          <Text type="supporting" className="mb-3 block leading-[1.45]">{r.rationale}</Text>
           <div className="flex gap-2">
             <Button variant="primary" size="sm" label="Act" onClick={() => onAck(r.id, 'accepted')} />
             <Button variant="ghost" size="sm" label="Skip" onClick={() => onAck(r.id, 'dismissed')} />
@@ -129,7 +129,7 @@ const isStoppedRun = (status: AgentRun['status']) => status === 'stopped';
 // StatusDot's variant enum can't express (no purple). Same exception as StatusPill.
 function activityDot(status: AgentRun['status']) {
   const tone = status === 'running' ? 'bg-warning' : isFailedRun(status) ? 'bg-danger' : isStoppedRun(status) ? '' : 'bg-success';
-  return <span className={`mt-[5px] h-1.5 w-1.5 flex-none rounded-full bg-faint ${tone}`} />;
+  return <span className={`mt-1 h-1.5 w-1.5 flex-none rounded-full bg-faint ${tone}`} />;
 }
 function runDot(status: AgentRun['status']) {
   const pulse = "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']";

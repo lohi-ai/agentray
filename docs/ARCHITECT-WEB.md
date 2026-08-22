@@ -131,6 +131,39 @@ All visual work follows `DESIGN.md` at the repo root. Key rules:
 - Reference CSS tokens from `globals.css` — never hardcode hex/radius/font
 - Status labels: "Healthy", "Needs attention", "Working now", "Set up next" — not jargon
 
+### Layout & spacing
+
+Two components own every page's shape; a page supplies content and props, never
+a frame of its own.
+
+| | grid | what it is |
+|---|---|---|
+| `AppShell` | `grid-template-columns: auto minmax(0,1fr)` | `[sidebar][page]` |
+| `PageShell` | rows, from the filled slots | `[banner][title + actions][tabs][[content][aside]]` |
+| — body row | `grid-template-columns: minmax(0,1fr) auto` | `[content][aside]` |
+
+- Page headers are `AppShell` props (`title`, `sub`, `actions`, `tabs`, `aside`),
+  not markup a page renders. There is one tab strip, `PageTabs`.
+- **The content column owns the vertical rhythm** — it is a flex column with a
+  `--pad` gap, so a top-level block must not carry its own `mb-*`. A block that
+  spaces itself makes the gap between two blocks depend on which one comes
+  first, and gives two marginless neighbours no gap at all.
+- **Spacing is the 4px grid — 4, 8, 12, 16, 20, 24 — with one 2px sub-step for
+  inline icon/text gaps.** Tailwind's `--spacing`, Astryx's `--spacing-N` and
+  the `--space-N` tokens are all pinned to it, so `gap-4`, `<VStack gap={4}>`
+  and `var(--space-4)` are the same 16px. No arbitrary `gap-[14px]`, no
+  `py-1.5`, no `padding: 10`.
+- `--pad` (16px) is the app gutter: page padding, the gap between rows of the
+  page grid, the gap between blocks in the content column, the seam beside the
+  aside. Nothing else hardcodes a gutter — changing `--pad` re-spaces the app.
+- Responsive card grids use `AutoGrid`, not Astryx's `<Grid columns={{minWidth}}>`
+  — the latter emits `minmax(<min>px, …)` with no floor, so a grid whose minimum
+  exceeds a phone's column width lays out past the page and gets clipped.
+- Type is five steps off a 16px body (`--fs-2xs` … `--fs-lg`), and Tailwind's
+  `text-*` names point at them, so `text-sm` and `--fs-sm` are one number.
+  ECharts is the one exception: it renders to canvas and needs a numeric px
+  `fontSize`, not a token.
+
 ## Public Module API
 
 Each `modules/<name>/index.tsx` exports only what `app/` pages need:

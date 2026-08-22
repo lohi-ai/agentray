@@ -24,7 +24,7 @@ export function JobPicker({
   onPick: (id: JobId) => void;
 }) {
   return (
-    <div className="mb-5 grid gap-3 md:grid-cols-3">
+    <div className="grid gap-3 md:grid-cols-3">
       {JOBS.map((job) => (
         <JobCard key={job.id} job={job} active={job.id === active} state={state} onPick={onPick} />
       ))}

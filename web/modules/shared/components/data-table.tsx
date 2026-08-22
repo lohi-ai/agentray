@@ -203,10 +203,10 @@ export function DataTable<T extends Record<string, unknown>>({
     // which jams the labels against the card edge. The Table doesn't forward a
     // className to <table>, so even out the header's vertical padding from the
     // wrapper (`!` beats StyleX's atomic classes) — header now matches body rhythm.
-    <div className="flex w-full flex-col gap-3 [&_thead_th]:!pt-2.5 [&_thead_th]:!pb-2.5">
+    <div className="flex w-full flex-col gap-3 [&_thead_th]:!pt-3 [&_thead_th]:!pb-3">
 
       {hasHeader ? (
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-3">
           {title ? <h3 className="text-base font-semibold text-[var(--color-text-primary)]">{title}</h3> : null}
           <div className="ml-auto flex items-center gap-2">
             {searchPlaceholder ? (

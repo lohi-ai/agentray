@@ -101,7 +101,7 @@ export function JobPlan({
               <Link
                 key={surface.href}
                 href={surface.href}
-                className="rounded-[var(--radius-md)] border border-[var(--color-border)] px-2.5 py-1.5 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+                className="rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
               >
                 {surface.label}
               </Link>
@@ -207,7 +207,7 @@ function PromptList({ job, agentID }: { job: JobDef; agentID: string }) {
   const href = (prompt: string) =>
     `/chat?${new URLSearchParams(agentID ? { agent: agentID, q: prompt } : { q: prompt }).toString()}`;
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-2">
       {job.prompts.map((prompt) => (
         <Link
           key={prompt}
@@ -238,12 +238,12 @@ function HowItWorks({ job, presets }: { job: JobDef; presets: readonly AgentPres
         <span className="font-[600] text-[var(--color-text-primary)]">{preset?.name ?? jobPackName(slug)}</span>
         {preset?.tagline ? ` — ${preset.tagline}` : ''}
       </p>
-      <ol className="flex flex-col gap-2.5">
+      <ol className="flex flex-col gap-3">
         {layers.map((layer, index) => (
-          <li key={layer.id} className="flex gap-2.5">
+          <li key={layer.id} className="flex gap-3">
             <span
               aria-hidden
-              className="mt-[3px] size-[15px] flex-none rounded-full border border-[var(--color-border-strong)] text-center text-[9px] leading-[13px] text-[var(--color-text-secondary)]"
+              className="mt-1 size-[15px] flex-none rounded-full border border-[var(--color-border-strong)] text-center text-[9px] leading-[13px] text-[var(--color-text-secondary)]"
             >
               {index + 1}
             </span>

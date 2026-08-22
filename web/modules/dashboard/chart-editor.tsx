@@ -30,7 +30,7 @@ const METRIC_KINDS: Array<{ value: Chart['kind']; label: string }> = [
 ];
 const SQL_KINDS = METRIC_KINDS.filter((k) => k.value !== 'stat');
 
-const FIELD_LABEL = 'mb-1.5 block text-sm text-[var(--color-text-secondary)]';
+const FIELD_LABEL = 'mb-2 block text-sm text-[var(--color-text-secondary)]';
 
 // ChartEditor is the create/edit surface for a dashboard chart. It shows a live
 // preview built from the same ChartCard used on the board, so what you see while
@@ -112,7 +112,7 @@ export function ChartEditor({ chart, onSubmit, onClose }: {
     >
       <div className="grid grid-cols-[1fr_320px] gap-5 max-[680px]:grid-cols-1">
         {/* Form */}
-        <div className="flex flex-col gap-3.5">
+        <div className="flex flex-col gap-4">
           <div>
             <label className={FIELD_LABEL}>Chart name</label>
             <TextInput label="Chart name" isLabelHidden value={name} placeholder="e.g. Daily signups" onChange={(v) => setName(v)} hasAutoFocus width="100%" />
@@ -164,9 +164,9 @@ export function ChartEditor({ chart, onSubmit, onClose }: {
                   onChange={(e) => setSql(e.target.value)}
                   spellCheck={false}
                 />
-                <p className="mt-1.5 text-2xs text-[var(--color-text-secondary)]">Use <code className="font-mono">{'{{from}}'}</code>, <code className="font-mono">{'{{to}}'}</code>, or <code className="font-mono">{'{{hours}}'}</code> to honour the dashboard time range.</p>
+                <p className="mt-2 text-2xs text-[var(--color-text-secondary)]">Use <code className="font-mono">{'{{from}}'}</code>, <code className="font-mono">{'{{to}}'}</code>, or <code className="font-mono">{'{{hours}}'}</code> to honour the dashboard time range.</p>
               </div>
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={FIELD_LABEL}>X field <span className="text-[var(--color-text-disabled)]">(optional)</span></label>
                   <TextInput label="X field" isLabelHidden value={xField} placeholder="auto" onChange={(v) => setXField(v)} width="100%" />

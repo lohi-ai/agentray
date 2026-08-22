@@ -96,10 +96,10 @@ export function CohortsPage() {
             <table className="w-full border-separate border-spacing-1 text-sm">
               <thead>
                 <tr>
-                  <th className="sticky left-0 z-10 bg-[var(--color-background-card)] px-2 py-1.5 text-start font-medium text-[var(--color-text-secondary)]">Cohort</th>
-                  <th className="px-2 py-1.5 text-end font-medium text-[var(--color-text-secondary)]">Size</th>
+                  <th className="sticky left-0 z-10 bg-[var(--color-background-card)] px-2 py-2 text-start font-medium text-[var(--color-text-secondary)]">Cohort</th>
+                  <th className="px-2 py-2 text-end font-medium text-[var(--color-text-secondary)]">Size</th>
                   {columns.map((p) => (
-                    <th key={p} className="px-2 py-1.5 text-center font-medium text-[var(--color-text-secondary)]">{`W${p}`}</th>
+                    <th key={p} className="px-2 py-2 text-center font-medium text-[var(--color-text-secondary)]">{`W${p}`}</th>
                   ))}
                 </tr>
               </thead>
@@ -108,18 +108,18 @@ export function CohortsPage() {
                   const byPeriod = new Map(row.cells.map((c) => [c.period, c]));
                   return (
                     <tr key={row.cohort}>
-                      <td className="sticky left-0 z-10 whitespace-nowrap bg-[var(--color-background-card)] px-2 py-1.5 font-medium">
+                      <td className="sticky left-0 z-10 whitespace-nowrap bg-[var(--color-background-card)] px-2 py-2 font-medium">
                         {formatDate(row.cohort_start, { month: 'short', year: undefined })}
                       </td>
-                      <td className="px-2 py-1.5 text-end font-mono tabular-nums text-[var(--color-text-secondary)]">{formatCompact(row.size)}</td>
+                      <td className="px-2 py-2 text-end font-mono tabular-nums text-[var(--color-text-secondary)]">{formatCompact(row.size)}</td>
                       {columns.map((p) => {
                         const cell = byPeriod.get(p);
-                        if (!cell) return <td key={p} className="px-2 py-1.5 text-center text-[var(--color-text-disabled)]">·</td>;
+                        if (!cell) return <td key={p} className="px-2 py-2 text-center text-[var(--color-text-disabled)]">·</td>;
                         const strong = cell.rate >= 0.5;
                         return (
                           <td
                             key={p}
-                            className="rounded-md px-2 py-1.5 text-center font-mono tabular-nums"
+                            className="rounded-md px-2 py-2 text-center font-mono tabular-nums"
                             style={{
                               backgroundColor: retentionTone(cell.rate),
                               color: strong ? 'var(--color-primary-foreground)' : 'var(--color-text-primary)',

@@ -39,7 +39,7 @@ function TraitChips({ traits }: { traits?: Record<string, unknown> }) {
         <span
           key={k}
           title={`${k}: ${traitText(v)}`}
-          className="inline-flex max-w-[220px] items-center gap-1 rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-2xs text-[var(--color-text-secondary)]"
+          className="inline-flex max-w-[220px] items-center gap-1 rounded-md bg-[var(--color-background-muted)] px-2 py-0.5 text-2xs text-[var(--color-text-secondary)]"
         >
           <span className="shrink-0 whitespace-nowrap font-medium text-[var(--color-text-primary)]">{k}</span>
           <span className="min-w-0 truncate">{traitText(v)}</span>
@@ -86,7 +86,7 @@ export function PersonsPage() {
             {p.platforms.map((platform) => (
               <span
                 key={platform}
-                className="inline-flex items-center rounded-md bg-[var(--color-background-muted)] px-1.5 py-0.5 text-2xs text-[var(--color-text-secondary)]"
+                className="inline-flex items-center rounded-md bg-[var(--color-background-muted)] px-2 py-0.5 text-2xs text-[var(--color-text-secondary)]"
               >
                 {platformLabel(platform)}
               </span>
@@ -137,7 +137,7 @@ export function PersonsPage() {
         { label: 'Anonymous', value: formatNumber(persons.anonymous) },
         { label: 'Identified %', value: formatPercent(identifiedShare) },
       ]} />
-      <div className="mb-4">
+      <div>
         <Panel title="Active people">
           {persons.active_timeline.length === 0 ? (
             <div className="flex h-[140px] items-center justify-center text-sm text-[var(--color-text-secondary)]">

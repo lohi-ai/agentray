@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, ShieldCheck } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
-import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
@@ -13,6 +12,7 @@ import { MeterPending, MeterUnavailable, PlanMeter } from '@/modules/shared/comp
 import { Button, Callout, Panel } from '@/modules/shared/components/signal-primitives';
 import { nextPlan, planByID, usageMeter } from '@/lib/plans';
 import { UpgradeSheet } from './upgrade-sheet';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 // PlanTab answers two questions and no more: what am I on, and how much of it
 // have I used this month. There is no persistent upgrade bar anywhere in the
@@ -30,7 +30,7 @@ export function PlanTab() {
   // against a number it cannot buy past would be a lie about its own limits.
   if (!hosted) {
     return (
-      <Grid columns={{ minWidth: 300, max: 2 }} gap={4}>
+      <AutoGrid min={300} max={2} gap={4}>
         <Panel title="Plan">
           <VStack gap={3} align="start">
             <Badge variant="green" label="Self-hosted · unlimited" />
@@ -38,13 +38,13 @@ export function PlanTab() {
               You are running AgentRay on your own infrastructure under the MIT licence. There is no
               usage ceiling, no plan, and nothing to buy — your limits are your own machines.
             </Text>
-            <HStack gap={1.5} align="center">
+            <HStack gap={2} align="center">
               <ShieldCheck size={15} className="text-success" aria-hidden />
               <Text type="supporting">Your events never leave your infrastructure.</Text>
             </HStack>
           </VStack>
         </Panel>
-      </Grid>
+      </AutoGrid>
     );
   }
 
@@ -70,7 +70,7 @@ export function PlanTab() {
         />
       ) : null}
 
-      <Grid columns={{ minWidth: 300, max: 2 }} gap={4}>
+      <AutoGrid min={300} max={2} gap={4}>
         <Panel
           title="Plan"
           action={<Button variant="outline" size="sm" onClick={() => router.push('/pricing')}>Compare plans</Button>}
@@ -82,7 +82,7 @@ export function PlanTab() {
             </HStack>
             <VStack gap={1} align="start">
               {plan.features.map((feature) => (
-                <HStack key={feature} gap={1.5} align="center">
+                <HStack key={feature} gap={2} align="center">
                   <Check size={14} className="text-success" aria-hidden />
                   <Text type="supporting">{feature}</Text>
                 </HStack>
@@ -116,7 +116,7 @@ export function PlanTab() {
             </VStack>
           )}
         </Panel>
-      </Grid>
+      </AutoGrid>
     </>
   );
 }

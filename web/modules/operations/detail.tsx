@@ -22,7 +22,7 @@ import { isEditableHere, isTeamRun, lastOutcome, operatorStatus, operatorTitle, 
 // route the setup tab uses; nothing here is a second source of truth.
 
 const inputCls =
-  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
+  'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]';
 const labelCls = 'text-xs font-medium text-[var(--color-text-secondary)]';
 
 const hookURL = (token: string) => `${apiBase()}/api/agent/hook/${token}`;

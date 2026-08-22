@@ -112,7 +112,7 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
         </TabButton>
         <TabButton active={tab === 'subscription'} onClick={() => setTab('subscription')}>
           Subscription setup
-          {!subsReady ? <span className="ml-1.5 text-2xs text-[var(--color-text-disabled)]">·  not set</span> : null}
+          {!subsReady ? <span className="ml-2 text-2xs text-[var(--color-text-disabled)]">·  not set</span> : null}
         </TabButton>
       </div>
 
@@ -128,11 +128,11 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
           </p>
 
           {/* Existing custom audiences */}
-          <div className="mb-4 flex flex-col gap-1.5">
+          <div className="mb-4 flex flex-col gap-2">
             {loading ? (
               <p className="text-sm text-[var(--color-text-disabled)]">Loading…</p>
             ) : audiences.length === 0 ? (
-              <p className="rounded-md bg-[var(--color-background-muted)] px-3 py-2.5 text-sm text-[var(--color-text-secondary)]">
+              <p className="rounded-md bg-[var(--color-background-muted)] px-3 py-3 text-sm text-[var(--color-text-secondary)]">
                 No custom audiences yet. Add one below — it appears in the segment toggle for everyone on this project.
               </p>
             ) : (
@@ -160,7 +160,7 @@ export function AudienceManager({ onClose }: { onClose: () => void }) {
 
           {/* Draft form */}
           <div className="rounded-lg border border-[var(--color-border)] p-3">
-            <div className="mb-2.5 text-xs font-medium text-[var(--color-text-secondary)]">
+            <div className="mb-3 text-xs font-medium text-[var(--color-text-secondary)]">
               {editing ? 'Edit audience' : 'New audience'}
             </div>
             <div className="flex flex-col gap-3">
@@ -219,7 +219,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       type="button"
       onClick={onClick}
-      className={`-mb-px border-b-2 px-3 py-1.5 text-sm font-medium transition-colors ${
+      className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
         active
           ? 'border-[var(--color-primary)] text-[var(--color-text-primary)]'
           : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -308,7 +308,7 @@ function SubscriptionSetup({ mapping }: { mapping: SubscriptionMapping | null })
       </div>
 
       {!statusCapable ? (
-        <p className="mt-2.5 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+        <p className="mt-3 rounded-md bg-[var(--color-background-muted)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
           Set both a start event and a period-end property to unlock the Active / Trialing / Churned subscription
           audiences.
         </p>

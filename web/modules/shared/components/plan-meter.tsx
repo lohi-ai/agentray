@@ -17,7 +17,7 @@ export function PlanMeter({ meter, label }: { meter: UsageMeter; label: string }
   const pct = Math.round(meter.ratio * 100);
   const tone = meter.overCeiling ? 'var(--danger)' : meter.nearCeiling ? 'var(--warning)' : 'var(--primary)';
   return (
-    <VStack gap={1.5} align="stretch">
+    <VStack gap={2} align="stretch">
       <HStack justify="between" align="center" gap={3}>
         <Text type="supporting">{label}</Text>
         {/* The compact label is the readable one; the exact count rides the
@@ -49,7 +49,7 @@ export function PlanMeter({ meter, label }: { meter: UsageMeter; label: string }
 // failed fetch would be a lie about the user's own account.
 export function MeterUnavailable({ label }: { label: string }) {
   return (
-    <VStack gap={1.5} align="stretch">
+    <VStack gap={2} align="stretch">
       <Text type="supporting">{label}</Text>
       <Text type="supporting">Usage unavailable — retrying.</Text>
     </VStack>
@@ -62,7 +62,7 @@ export function MeterUnavailable({ label }: { label: string }) {
 // the number lands — a dashed track and an em dash where the count will be.
 export function MeterPending({ label }: { label: string }) {
   return (
-    <VStack gap={1.5} align="stretch">
+    <VStack gap={2} align="stretch">
       <HStack justify="between" align="center" gap={3}>
         <Text type="supporting">{label}</Text>
         <Text type="supporting" hasTabularNumbers aria-live="polite">— / —</Text>

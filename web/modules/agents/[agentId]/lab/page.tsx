@@ -23,7 +23,7 @@ const VERDICT: Record<LabTestResult['status'], string> = { pass: 'healthy', fail
 // DiffView colorizes a unified-style line diff: +added / -removed / context.
 function DiffView({ diff }: { diff: string }) {
   return (
-    <pre className="m-0 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-sm bg-[var(--color-background-card)] px-2.5 py-2 font-mono text-xs leading-[1.55] text-[var(--color-text-primary)] flex flex-col">
+    <pre className="m-0 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-sm bg-[var(--color-background-card)] px-3 py-2 font-mono text-xs leading-[1.55] text-[var(--color-text-primary)] flex flex-col">
       {diff.split('\n').map((line, i) => {
         const cls = line.startsWith('+')
           ? 'bg-[color-mix(in_srgb,var(--success)_16%,transparent)] text-success'
@@ -102,7 +102,7 @@ export function AgentLabPage() {
   return (
     <AppShell
       active="monitor"
-      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push(`/agents/${agentID}/monitor`)}><ArrowLeft size={15} /></button>Agent lab</span>}
+      title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push(`/agents/${agentID}/monitor`)}><ArrowLeft size={15} /></button>Agent lab</span>}
       sub="Learn how this agent's harness runs — context, tools, messages, memory, loop — and test it step by step."
       actions={<Button variant="outline" icon={<Save size={15} />} onClick={() => input.trim() ? save.mutate({ name: input.slice(0, 48), input, expected }) : undefined}>Save case</Button>}
       tabs={
@@ -118,14 +118,14 @@ export function AgentLabPage() {
       <Panel title="Prompt" action={mode === 'Explain'
         ? <Button variant="agent" icon={<Play size={15} />} disabled={runDisabled} onClick={() => explain.start(input)}>{isExplaining ? 'Restart run' : 'Start explain run'}</Button>
         : <Button variant="primary" icon={<Play size={15} />} disabled={runDisabled || test.isPending} onClick={() => test.mutate()}>{test.isPending ? 'Running…' : 'Run test'}</Button>}>
-        <div className={mode === 'Test' ? 'grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1' : undefined}>
+        <div className={mode === 'Test' ? 'grid grid-cols-2 gap-4 max-[980px]:grid-cols-1' : undefined}>
           <div>
-            <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Input</div>
+            <div className="mb-2 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Input</div>
             <TextArea label="Input" isLabelHidden rows={4} width="100%" value={input} placeholder="Ask the agent something…" onChange={(v) => setInput(v)} />
           </div>
           {mode === 'Test' ? (
             <div>
-              <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected (what a good answer should contain)</div>
+              <div className="mb-2 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected (what a good answer should contain)</div>
               <TextArea label="Expected answer" isLabelHidden rows={4} width="100%" value={expected} placeholder="A correct answer mentions…" onChange={(v) => setExpected(v)} />
             </div>
           ) : null}
@@ -152,7 +152,7 @@ export function AgentLabPage() {
             >
               <StepRail steps={explain.steps} selected={explain.current} onSelect={explain.setCurrent} />
               {explain.phase === 'paused' ? (
-                <div className="mt-2.5 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-card py-1.5 pl-3 pr-1.5">
+                <div className="mt-3 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-card py-2 pl-3 pr-2">
                   <TextInput label="Steer the run" isLabelHidden size="sm" className="flex-1" width="100%" value={steer} placeholder="Steer the run — inject a message before the next turn…" onChange={(v) => setSteer(v)} onEnter={sendSteer} />
                   <Button variant="ghost" size="sm" icon={<Send size={14} />} disabled={!steer.trim()} onClick={sendSteer}>Inject</Button>
                 </div>
@@ -180,19 +180,19 @@ export function AgentLabPage() {
               {result.verdict === 'judge' ? (
                 <p className="m-0 mb-2 text-xs leading-[1.5] text-[var(--color-text-secondary)]">Graded by rubric judge against your criteria (not exact text match){result.rationale ? <> — <i>{result.rationale}</i></> : null}.</p>
               ) : null}
-              <div className="grid grid-cols-2 gap-[14px] max-[980px]:grid-cols-1">
+              <div className="grid grid-cols-2 gap-4 max-[980px]:grid-cols-1">
                 <div>
-                  <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected</div>
+                  <div className="mb-2 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Expected</div>
                   <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">{result.expected || '—'}</p>
                 </div>
                 <div>
-                  <div className="mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Actual answer</div>
+                  <div className="mb-2 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Actual answer</div>
                   <p className="m-0 whitespace-pre-wrap break-words text-sm leading-[1.55] text-[var(--color-text-primary)]">{result.actual || '—'}</p>
                 </div>
               </div>
               {result.diff ? (
                 <>
-                  <div className="mt-[14px] mb-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Diff — expected vs actual</div>
+                  <div className="mt-4 mb-2 text-2xs font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">Diff — expected vs actual</div>
                   <DiffView diff={result.diff} />
                 </>
               ) : null}
@@ -253,7 +253,7 @@ export function AgentLabPage() {
           ) : (
             <>
               {replay.total > replay.steps.length ? (
-                <p className="m-0 mb-2.5 text-xs text-[var(--color-text-secondary)]">
+                <p className="m-0 mb-3 text-xs text-[var(--color-text-secondary)]">
                   Showing the first {replay.steps.length} of {replay.total} steps.{' '}
                   <button
                     className="border-0 bg-transparent p-0 text-xs text-agent cursor-pointer"

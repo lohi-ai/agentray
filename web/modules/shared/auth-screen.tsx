@@ -88,7 +88,7 @@ export function AuthScreen({
         >
           <AuthValue />
 
-          <Card padding={6} width="100%" maxWidth={420} className="lg:flex-none">
+          <Card padding={4} width="100%" maxWidth={420} className="lg:flex-none">
             <VStack gap={4} align="stretch">
               <VStack gap={1} align="start">
                 <Heading level={1}>{isSignup ? 'Create your workspace' : 'Welcome back'}</Heading>

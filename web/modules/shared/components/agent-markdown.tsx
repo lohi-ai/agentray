@@ -19,7 +19,7 @@ function ChartFence({ source }: { source: string }) {
     spec = null;
   }
   if (!spec || (!spec.series && !spec.slices)) {
-    return <pre className="m-0 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-background-card)] px-3 py-2.5 text-xs"><code>{source}</code></pre>;
+    return <pre className="m-0 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-background-card)] px-3 py-3 text-xs"><code>{source}</code></pre>;
   }
   return <div className="py-2"><Chart spec={spec} /></div>;
 }
@@ -32,7 +32,7 @@ function ChartFence({ source }: { source: string }) {
 // `.md` rules in globals.css. Shared by chat and the dashboard daily readout.
 export function AgentMarkdown({ text }: { text: string }) {
   return (
-    <div className="[&>*]:m-0 [&>*+*]:mt-2 [&>:first-child]:mt-0 [&_strong]:font-[650] [&_h1]:mt-[14px] [&_h1]:text-lg [&_h1]:font-[650] [&_h1]:leading-[1.4] [&_h2]:mt-3 [&_h2]:text-sm [&_h2]:font-[650] [&_h2]:leading-[1.4] [&_h2]:text-[var(--color-text-primary)] [&_h3]:mt-[10px] [&_h3]:text-base [&_h3]:font-[650] [&_h3]:leading-[1.4] [&_h3]:text-[var(--color-text-secondary)] [&_h4]:mt-[10px] [&_h4]:text-base [&_h4]:font-[650] [&_h4]:leading-[1.4] [&_h4]:text-[var(--color-text-secondary)] [&_h5]:mt-[10px] [&_h5]:text-base [&_h5]:font-[650] [&_h5]:leading-[1.4] [&_h5]:text-[var(--color-text-secondary)] [&_h6]:mt-[10px] [&_h6]:text-base [&_h6]:font-[650] [&_h6]:leading-[1.4] [&_h6]:text-[var(--color-text-secondary)] [&_a]:text-primary [&_a]:underline [&_ul]:m-0 [&_ul]:flex [&_ul]:flex-col [&_ul]:gap-[3px] [&_ul]:pl-5 [&_ol]:m-0 [&_ol]:flex [&_ol]:flex-col [&_ol]:gap-[3px] [&_ol]:pl-5 [&_li]:pl-0.5 [&_ul_li]:list-disc [&_ol_li]:list-decimal">
+    <div className="[&>*]:m-0 [&>*+*]:mt-2 [&>:first-child]:mt-0 [&_strong]:font-[650] [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-[650] [&_h1]:leading-[1.4] [&_h2]:mt-3 [&_h2]:text-sm [&_h2]:font-[650] [&_h2]:leading-[1.4] [&_h2]:text-[var(--color-text-primary)] [&_h3]:mt-3 [&_h3]:text-base [&_h3]:font-[650] [&_h3]:leading-[1.4] [&_h3]:text-[var(--color-text-secondary)] [&_h4]:mt-3 [&_h4]:text-base [&_h4]:font-[650] [&_h4]:leading-[1.4] [&_h4]:text-[var(--color-text-secondary)] [&_h5]:mt-3 [&_h5]:text-base [&_h5]:font-[650] [&_h5]:leading-[1.4] [&_h5]:text-[var(--color-text-secondary)] [&_h6]:mt-3 [&_h6]:text-base [&_h6]:font-[650] [&_h6]:leading-[1.4] [&_h6]:text-[var(--color-text-secondary)] [&_a]:text-primary [&_a]:underline [&_ul]:m-0 [&_ul]:flex [&_ul]:flex-col [&_ul]:gap-1 [&_ul]:pl-5 [&_ol]:m-0 [&_ol]:flex [&_ol]:flex-col [&_ol]:gap-1 [&_ol]:pl-5 [&_li]:pl-0.5 [&_ul_li]:list-disc [&_ol_li]:list-decimal">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkPlainMath]}
         components={{
@@ -50,8 +50,8 @@ export function AgentMarkdown({ text }: { text: string }) {
             // language class or a trailing newline; everything else is inline.
             const isBlock = !!className || raw.includes('\n');
             if (lang === 'chart') return <ChartFence source={body} />;
-            if (!isBlock) return <code className="rounded-[5px] border border-[var(--color-border)] bg-[var(--color-background-card)] px-[5px] py-px text-xs">{children}</code>;
-            return <pre className="m-0 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-background-card)] px-3 py-2.5 text-xs"><code className={className}>{body}</code></pre>;
+            if (!isBlock) return <code className="rounded-[5px] border border-[var(--color-border)] bg-[var(--color-background-card)] px-1 py-px text-xs">{children}</code>;
+            return <pre className="m-0 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-background-card)] px-3 py-3 text-xs"><code className={className}>{body}</code></pre>;
           },
           // Astryx migration: a GFM pipe table now renders through Astryx's
           // composable Table primitives (TableHeader/Body/Row/HeaderCell/Cell) in

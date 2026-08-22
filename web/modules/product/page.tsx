@@ -7,7 +7,6 @@ import type { ReactNode } from 'react';
 import type { InsightResult } from '@/lib/api';
 import { formatFractionAsPercent } from '@/lib/format';
 import { Card } from '@astryxdesign/core/Card';
-import { Grid } from '@astryxdesign/core/Grid';
 import { HStack } from '@astryxdesign/core/HStack';
 import { VStack } from '@astryxdesign/core/VStack';
 import { Heading } from '@astryxdesign/core/Heading';
@@ -23,6 +22,7 @@ import { DataTable, type DataColumn } from '@/modules/shared/components/data-tab
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { Button, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { headlineStats } from './headline';
+import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 type Mode = 'trend' | 'funnel' | 'retention' | 'table';
 
@@ -118,9 +118,9 @@ export function ProductPage() {
           responsive <Grid> of <SelectableCard>s — native controlled selection
           (accent inset border on the active question), keyboard + a11y, and the
           running state mapped to isDisabled. The icon keeps its agent-purple tint. */}
-      <Card padding={4} className="mb-4">
+      <Card padding={4}>
         <Text type="supporting" className="mb-3 block font-medium uppercase tracking-[0.08em]">Ask about your product</Text>
-        <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
+        <AutoGrid min={280} max={2} gap={3}>
           {QUESTIONS.map((q) => (
             <SelectableCard
               key={q.mode}
@@ -140,7 +140,7 @@ export function ProductPage() {
               </HStack>
             </SelectableCard>
           ))}
-        </Grid>
+        </AutoGrid>
       </Card>
 
       {running ? (
@@ -195,7 +195,7 @@ function PlatformFunnels({
           return (
             <span className="font-mono tabular-nums">
               {cell.users}
-              <span className="ms-1.5 text-[var(--color-text-secondary)]">{formatFractionAsPercent(cell.conversion)}</span>
+              <span className="ms-2 text-[var(--color-text-secondary)]">{formatFractionAsPercent(cell.conversion)}</span>
             </span>
           );
         },
@@ -240,7 +240,7 @@ function ResultView({ insight }: { insight: InsightResult }) {
 
   return (
     <>
-      <HStack align="end" justify="between" gap={3} className="mb-[14px]">
+      <HStack align="end" justify="between" gap={3}>
         <VStack gap={0.5}>
           <Text type="supporting" className="font-medium uppercase tracking-[0.08em]">Result</Text>
           <Heading level={3} className="tracking-[-0.01em]">{insight.title || 'Insight'}</Heading>
