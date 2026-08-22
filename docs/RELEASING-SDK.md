@@ -1,14 +1,18 @@
 # Releasing the SDKs
 
-Four packages ship from `sdk/`. They version independently — a fix to the Swift
-client is not a reason to bump the browser one.
+Three packages ship from this repository. They version independently — a fix to
+the server client is not a reason to bump the browser one.
 
 | Package | Source | Primary host | Registry |
 | --- | --- | --- | --- |
 | `@agentray/browser` | `sdk/browser/` | GitHub Release (`.tgz` + `.min.js`) | npm |
 | `@agentray/server` | `sdk/server/` | GitHub Release (`.tgz`) | npm |
 | `agentray` (Python) | `sdk/python/` | GitHub Release (wheel + sdist) | PyPI |
-| `AgentRay` (Swift) | `sdk/swift/` | `lohi-ai/agentray-swift` mirror | — (SwiftPM reads git tags) |
+
+**The Swift SDK is released elsewhere.** It is its own repository,
+[lohi-ai/agentray-swift](https://github.com/lohi-ai/agentray-swift), carried here
+as a submodule at `sdk/swift/`, and it builds, tests and releases itself. Nothing
+in this runbook applies to it — see [Swift](#swift) at the bottom.
 
 **GitHub is the primary host.** Every release lands as a GitHub Release with the
 real artefact attached, which anyone can install with no registry account, no
@@ -32,7 +36,7 @@ is what publishes. When you are ready:
 git push origin main browser-v0.2.0
 ```
 
-Tags are `<browser|server|python|swift>-v<semver>`. A bare `v0.2.0` is a *product*
+Tags are `<browser|server|python>-v<semver>`. A bare `v0.2.0` is a *product*
 tag and is deliberately not matched by the release workflow — with four
 independently versioned packages it would be ambiguous.
 
@@ -80,14 +84,13 @@ gh workflow run sdk-release.yml --ref browser-v0.1.0 -f tag=browser-v0.1.0 -f dr
 | --- | --- | --- |
 | `NPM_TOKEN` | `npm publish --provenance` for both npm packages | GitHub Release only; the job logs a notice |
 | `PYPI_TOKEN` | `twine upload` of the wheel + sdist | GitHub Release only; the job logs a notice |
-| `SWIFT_MIRROR_TOKEN` | pushing the `lohi-ai/agentray-swift` mirror + its tag | source tarball on the Release only, no SwiftPM install |
 
 Re-running a tag is safe: each publish step checks whether that exact version is
-already out (`npm view`, `twine --skip-existing`, a tag lookup on the mirror) and
-no-ops if it is. A published SwiftPM tag is never moved — resolving a version
-pins it to a commit, so re-pointing one breaks whoever already resolved it.
+already out (`npm view`, `twine --skip-existing`) and no-ops if it is. Never
+move a tag that has already published — a registry does not let you take a
+version back, and a resolved SwiftPM version pins to a commit.
 
-Three one-time account steps unblock the rest:
+Two one-time account steps unblock both:
 
 1. **Claim the `@agentray` npm scope** (it is unclaimed as of 2026-08-22), then
    add an automation token as `NPM_TOKEN`. Both packages already set
@@ -97,11 +100,13 @@ Three one-time account steps unblock the rest:
    as `PYPI_TOKEN`. PyPI trusted publishing (OIDC) avoids the long-lived token
    entirely and is the better option if you are willing to configure it on the
    PyPI side; the workflow already requests `id-token: write`.
-3. `lohi-ai/agentray-swift` **exists and publishes 0.1.0** — pushed on 2026-08-23
-   by running the workflow's own steps by hand, because CI had no token. Add a
-   PAT with write access to that repo as `SWIFT_MIRROR_TOKEN`, or every later
-   Swift release ships the tarball and no SwiftPM version. `GITHUB_TOKEN` cannot
-   be used — it is scoped to this repository only.
+
+There is deliberately no third secret. The Swift SDK used to be pushed from here
+into `lohi-ai/agentray-swift`, which needed a credential with write access to
+another repository — deploy keys are disabled org-wide, `GITHUB_TOKEN` cannot
+reach another repo, and a PAT broad enough to push there is broad enough to push
+anywhere the account can. Moving that CI into the repo it writes to removed the
+credential instead of managing it.
 
 Note that GitHub *Packages* (`npm.pkg.github.com`) is **not** the GitHub host
 here, and cannot be. Its npm registry requires the package scope to equal the
@@ -131,6 +136,7 @@ the PR gate and the release gate check the same things:
 | `verify-cdn-bundle.mjs` | `dist/index.global.js` attaches `window.AgentRay` and gets an event to the wire |
 | `verify-python-wheel.py` | the wheel contains the package, not just metadata |
 | `resolve-tag.mjs` | the tag names a real package at the version the tree claims |
+| `check-workflow-shell.py` | every workflow `run` block parses under bash 3.2, the macOS runner's shell |
 
 **Look inside the wheel before uploading**, every time. This is not a formality.
 The Python package built, passed `twine check`, and contained no code at all
@@ -153,6 +159,38 @@ marketing site is a liability.
 
 Until then the release attaches `agentray-browser-<version>.min.js` as its own
 asset, so the bundle is at least downloadable and self-hostable.
+
+## Swift
+
+`sdk/swift/` is a submodule of
+[lohi-ai/agentray-swift](https://github.com/lohi-ai/agentray-swift). That repo is
+the source of record; this one pins a commit of it.
+
+SwiftPM reads `Package.swift` from a repository **root** and clones the whole
+repository to do it. Pointed at this monorepo it fails outright —
+`the package manifest at '/Package.swift' cannot be accessed` — and it reads this
+repo's product tags (`v0.1.0` … `v0.2.0`) as AgentRay versions, so `from: "0.1.0"`
+would resolve a commit containing no Swift package at all. Hence a separate repo,
+and hence its CI lives there, where the built-in `GITHUB_TOKEN` can write.
+
+To change the Swift client:
+
+```bash
+git submodule update --init sdk/swift     # if the directory is empty
+cd sdk/swift
+# edit, then commit and push in the submodule — its CI builds and tests it
+cd ../.. && git add sdk/swift && git commit -m 'bump swift SDK'
+```
+
+To release it, tag **bare semver** in that repository — not `swift-v0.2.0`, which
+SwiftPM would not read as a version:
+
+```bash
+cd sdk/swift && git tag 0.2.0 && git push origin 0.2.0
+```
+
+Its `release.yml` then rebuilds the tagged tree, resolves the new tag by URL the
+way a consumer would, and creates the GitHub Release.
 
 ## Version policy
 

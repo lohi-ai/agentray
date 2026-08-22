@@ -17,12 +17,14 @@ const PACKAGES = {
   browser: { dir: 'sdk/browser', kind: 'npm' },
   server: { dir: 'sdk/server', kind: 'npm' },
   python: { dir: 'sdk/python', kind: 'pypi' },
-  swift: { dir: 'sdk/swift', kind: 'swiftpm' },
+  // The Swift SDK lives in lohi-ai/agentray-swift and is released by tagging
+  // bare semver there; sdk/swift here is a submodule of it.
 };
 
 const [pkg, bump] = process.argv.slice(2);
 if (!PACKAGES[pkg] || !bump) {
-  console.error('usage: cut-release.mjs <browser|server|python|swift> <patch|minor|major|x.y.z>');
+  console.error('usage: cut-release.mjs <browser|server|python> <patch|minor|major|x.y.z>');
+  console.error('(swift releases from lohi-ai/agentray-swift: git tag 0.2.0 && git push origin 0.2.0)');
   process.exit(2);
 }
 
@@ -35,22 +37,10 @@ if (sh('git', ['status', '--porcelain'])) {
 }
 
 // --- current version -------------------------------------------------------
-const manifest = kind === 'npm' ? `${dir}/package.json` : kind === 'pypi' ? `${dir}/pyproject.toml` : null;
-let current;
-if (kind === 'npm') {
-  current = JSON.parse(readFileSync(manifest, 'utf8')).version;
-} else if (kind === 'pypi') {
-  current = /^\s*version\s*=\s*["']([^"']+)["']/m.exec(readFileSync(manifest, 'utf8'))[1];
-} else {
-  // SwiftPM has no version in the manifest — git tags are the version list.
-  const tags = sh('git', ['tag', '--list', 'swift-v*']).split('\n').filter(Boolean);
-  current = tags.map((t) => t.replace('swift-v', '')).sort(cmpSemver).pop() ?? '0.0.0';
-}
-
-function cmpSemver(a, b) {
-  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
-  return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
-}
+const manifest = kind === 'npm' ? `${dir}/package.json` : `${dir}/pyproject.toml`;
+const current = kind === 'npm'
+  ? JSON.parse(readFileSync(manifest, 'utf8')).version
+  : /^\s*version\s*=\s*["']([^"']+)["']/m.exec(readFileSync(manifest, 'utf8'))[1];
 
 // --- next version ----------------------------------------------------------
 let next;
@@ -80,12 +70,12 @@ if (kind === 'npm') {
   // Keep the lockfile's own version field in step; npm rewrites it on install
   // anyway, and a lockfile that disagrees with its manifest is noise in a diff.
   execFileSync('npm', ['install', '--package-lock-only', '--no-audit', '--no-fund'], { cwd: dir, stdio: 'inherit' });
-} else if (kind === 'pypi') {
+} else {
   const raw = readFileSync(manifest, 'utf8');
   writeFileSync(manifest, raw.replace(/^(\s*version\s*=\s*)["'][^"']+["']/m, `$1"${next}"`));
 }
 
-const changed = kind === 'swiftpm' ? [] : sh('git', ['diff', '--name-only']).split('\n').filter(Boolean);
+const changed = sh('git', ['diff', '--name-only']).split('\n').filter(Boolean);
 if (changed.length) {
   execFileSync('git', ['add', ...changed], { stdio: 'inherit' });
   execFileSync('git', ['commit', '-m', `release: ${pkg} SDK ${next}`], { stdio: 'inherit' });

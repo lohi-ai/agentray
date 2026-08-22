@@ -116,17 +116,21 @@ Dashboards tab gives a readable answer before any custom chart is built.
 
 ## SDKs
 
-`@agentray/browser`, `@agentray/server`, and PyPI `agentray` are **not published
-yet**. Do not `npm install` / `pip install` them — those names 404. Until they
-ship, paste the no-npm snippet below (it sends `user.pageview`, which lights
-Traffic and the Product funnel), or copy `sdk/browser/` / `sdk/server/` /
-`sdk/python/` into the product repo. Same hedge as `docs/SDK.md`. `sdk/swift/` is
-a real Swift Package — add it by local path (SPM has no registry step to wait
-on).
+Four clients, all at **v0.1.0**, all installable today from GitHub Releases —
+no registry account, no auth. `npm install @agentray/browser` and
+`pip install agentray` still 404: the `@agentray` npm scope and the `agentray`
+PyPI name are unclaimed, so the release attaches the real tarball and wheel
+instead. Install those by URL (each section below shows how), or paste the no-npm
+snippet, or copy the source into the product repo.
 
-All four are packaged and gated for release — `make sdk-check` runs their tests,
-builds, and asserts the published artefact actually contains the code. What is
-left is claiming the `@agentray` npm scope and the `agentray` PyPI name; see
+Swift is the exception, and deliberately so: SwiftPM resolves `Package.swift`
+from a repository *root*, so the Swift SDK is its own repository,
+[lohi-ai/agentray-swift](https://github.com/lohi-ai/agentray-swift), carried here
+as a submodule at `sdk/swift/`. Run `git submodule update --init sdk/swift` to
+get it; it builds, tests and releases itself.
+
+`make sdk-check` runs every client's tests and builds, and asserts the published
+artefact actually contains the code. Cutting a release:
 [docs/RELEASING-SDK.md](docs/RELEASING-SDK.md).
 
 **Every SDK stamps a `platform` property** (`web` / `ios` / `server`), which is
@@ -185,8 +189,8 @@ click capture with an explicit label, `data-track-ignore` mutes a subtree, and
 `data-track-view="label"` fires `element_viewed` once when the element becomes at
 least half visible. See `sdk/browser/README.md`.
 
-**iOS / Apple — `sdk/swift/`.** A Swift Package (SPM), published to the
-`lohi-ai/agentray-swift` mirror because SwiftPM resolves from a repository root:
+**iOS / Apple — `sdk/swift/`.** A Swift Package (SPM), living in its own
+repository so SwiftPM can resolve it:
 `.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")`.
 Or add it by path, or paste the single-file version from the in-app **iOS app** tab
 (Dashboards → Send your first event, or Set up). It exists because a native app

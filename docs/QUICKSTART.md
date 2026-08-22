@@ -95,11 +95,11 @@ Client(host="http://localhost:8088", api_key="lohi_dev_project_token").capture(
     "user.signup", distinct_id="you", properties={"plan": "free"})
 ```
 
-Have an iOS app too? `sdk/swift/` is a Swift Package, published to the
-`lohi-ai/agentray-swift` mirror — add
+Have an iOS app too? The Swift Package lives in its own repository (SwiftPM
+resolves from a repository root) — add
 `.package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")`,
-or by path for an unreleased change, or paste the one-file version from
-**Set up → 2 · iOS app**:
+or by path via the `sdk/swift/` submodule for an unreleased change, or paste the
+one-file version from **Set up → 2 · iOS app**:
 
 ```swift
 AgentRay.start(host: "http://localhost:8088", apiKey: "lohi_dev_project_token")

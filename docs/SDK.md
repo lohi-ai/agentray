@@ -158,8 +158,11 @@ split its own traffic without waiting on a schema change.
 
 ## iOS client (`sdk/swift/`)
 
-A Swift Package for native Apple apps. SwiftPM resolves from a repository root,
-so releases are published to a generated mirror whose root is this package:
+A Swift Package for native Apple apps. SwiftPM resolves `Package.swift` from a
+repository **root** and reads versions from that repository's git tags, so this
+package is its own repository —
+[lohi-ai/agentray-swift](https://github.com/lohi-ai/agentray-swift) — and
+`sdk/swift/` here is a submodule of it (`git submodule update --init sdk/swift`):
 
 ```swift
 .package(url: "https://github.com/lohi-ai/agentray-swift.git", from: "0.1.0")

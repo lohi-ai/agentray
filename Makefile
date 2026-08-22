@@ -95,7 +95,7 @@ check: vet test ## Vet + unit tests — the pre-commit gate
 # for the wheel that was published empty for months and passed every check that
 # did not look inside it.
 
-sdk-check: sdk-check-npm sdk-check-python sdk-check-swift ## Typecheck, test and build all four published SDKs
+sdk-check: sdk-check-npm sdk-check-python sdk-check-swift ## Typecheck, test and build the published SDKs
 
 sdk-check-npm: ## @agentray/browser + @agentray/server — build, then verify the publishable tarball
 	@for pkg in browser server; do \
@@ -119,7 +119,12 @@ sdk-check-python: ## agentray (PyPI) — tests plus a wheel that actually contai
 	@cd sdk/python && rm -rf dist && python3 -m build
 	@cd sdk/python && python3 ../scripts/verify-python-wheel.py
 
-sdk-check-swift: ## AgentRay (SwiftPM)
+# sdk/swift is a submodule of lohi-ai/agentray-swift, which runs this same check
+# in its own CI and cuts its own releases. It is here so a change can be made and
+# tested from the monorepo; commit it in the submodule, then bump the pointer.
+sdk-check-swift: ## AgentRay (SwiftPM) — submodule: lohi-ai/agentray-swift
+	@test -f sdk/swift/Package.swift \
+	  || { echo "sdk/swift is empty — run: git submodule update --init sdk/swift"; exit 1; }
 	@cd sdk/swift && swift test
 
 # --- Cutting an SDK release ----------------------------------------------
@@ -127,13 +132,15 @@ sdk-check-swift: ## AgentRay (SwiftPM)
 # attaches it to a Release, and only then publishes to npm/PyPI — and skips that
 # second step silently while the registry token is absent. Full runbook in
 # docs/RELEASING-SDK.md.
+#
+# Swift is not here: tag bare semver in lohi-ai/agentray-swift and push it.
 SDK_BUMP ?= patch
-# browser and server share one check target; python and swift have their own.
+# browser and server share one check target; python has its own.
 SDK_SUITE = $(if $(filter $(SDK_PKG),browser server),npm,$(SDK_PKG))
 
 sdk-release: ## Bump + tag one SDK: make sdk-release SDK_PKG=browser SDK_BUMP=minor
-	@test -n "$(filter $(SDK_PKG),browser server python swift)" \
-	  || { echo "set SDK_PKG=browser|server|python|swift (got '$(SDK_PKG)')"; exit 1; }
+	@test -n "$(filter $(SDK_PKG),browser server python)" \
+	  || { echo "set SDK_PKG=browser|server|python (got '$(SDK_PKG)'); swift releases from lohi-ai/agentray-swift"; exit 1; }
 	@$(MAKE) sdk-check-$(SDK_SUITE)
 	@node sdk/scripts/cut-release.mjs "$(SDK_PKG)" "$(SDK_BUMP)"
 

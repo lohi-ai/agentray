@@ -1,4 +1,7 @@
-# Builds and tests the four published SDKs on every change to them.
+# Builds and tests the published SDKs on every change to them.
+#
+# Three of them, not four: sdk/swift is a submodule of lohi-ai/agentray-swift,
+# which builds, tests and releases itself. Nothing here checks it out.
 #
 # The `verify-*` steps are not ceremony. The Python wheel shipped for months
 # able to build, upload, and pass `twine check` while containing no package code
@@ -91,16 +94,6 @@ jobs:
           /tmp/verify/bin/pip install dist/*.whl
           /tmp/verify/bin/python -c "import agentray; assert agentray.DEFAULT_PLATFORM == 'server'; print('import ok')"
 
-  swift:
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: sdk/swift
-    steps:
-      - uses: actions/checkout@v4
-      - run: swift build
-      - run: swift test
-
   # GitHub's macOS runners still ship bash 3.2, which parses some constructs
   # differently from the bash 5 on the Linux runners — a heredoc inside a command
   # substitution most notably. That difference took down the first Swift release
@@ -128,11 +121,10 @@ jobs:
           node-version: 20
       - name: the current manifests would release cleanly
         run: |
-          for pkg in browser server python swift; do
+          for pkg in browser server python; do
             case $pkg in
               browser|server) v=$(node -p "require('./sdk/$pkg/package.json').version") ;;
               python)  v=$(grep -m1 '^version' sdk/python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/') ;;
-              swift)   v=0.0.0 ;;  # SwiftPM versions from the tag; nothing to cross-check
             esac
             node sdk/scripts/resolve-tag.mjs "$pkg-v$v"
           done

@@ -29,4 +29,3 @@ sdk/*/*.tgz
 sdk/python/dist
 sdk/python/*.egg-info
 __pycache__/
-sdk/swift/.build

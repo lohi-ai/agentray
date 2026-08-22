@@ -1,0 +1,3 @@
+[submodule "sdk/swift"]
+	path = sdk/swift
+	url = https://github.com/lohi-ai/agentray-swift.git
