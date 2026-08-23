@@ -5,7 +5,7 @@
 // instead of being redrawn as a pile of divs that drifts from the app.
 //
 // Path data is verbatim lucide-react 1.18.0 (icons/waypoints.mjs), the same
-// glyph modules/shared/auth-value.tsx renders. Kept in sync by hand with
+// glyph modules/landing/landing.tsx renders. Kept in sync by hand with
 // app/icon.svg, which is a static file and cannot import this.
 
 // Compiled values of `--primary` / `--background` / `--foreground` /

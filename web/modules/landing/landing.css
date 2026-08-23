@@ -1,0 +1,402 @@
+/* Landing-only styles. Everything here is scoped under `.lp-root` and nothing
+   in this file is reachable from the authenticated app.
+   ---------------------------------------------------------------------------
+   Why a stylesheet at all, on a codebase whose rule is "component props first,
+   then Tailwind utilities backed by tokens":
+
+   1. Fluid display type. The app scale (`--fs-2xs` … `--fs-lg`) stops at 18px
+      because it is a *cockpit* scale — DESIGN.md explicitly bans giant hero
+      type inside the product. A marketing headline has no step in it, and one
+      cannot be added to :root without offering it to every authenticated
+      screen. The four steps below are landing-scoped for exactly that reason.
+   2. Scroll-driven animation. `animation-timeline` has no utility class and no
+      component prop, and expressing the choreography inline would put the
+      @supports/prefers-reduced-motion gate out of reach.
+   3. The sticky scrollytelling grid, which is a layout no Astryx component
+      provides.
+
+   Nothing here introduces a colour, radius or spacing value: every declaration
+   references a token already defined in app/globals.css. */
+
+.lp-root {
+  /* Four fluid display steps. LANDING-SCOPED — do not promote these to :root
+     in globals.css; the cockpit must not gain a 84px type step. */
+  --lp-d1: clamp(2.5rem, 1.35rem + 4.8vw, 5.25rem);
+  --lp-d2: clamp(1.9rem, 1.15rem + 3.1vw, 3.5rem);
+  --lp-d3: clamp(1.5rem, 1.1rem + 1.7vw, 2.25rem);
+  --lp-lead: clamp(1.0625rem, 1rem + 0.5vw, 1.375rem);
+
+  /* Apple's restraint is mostly whitespace: one idea per screenful, separated
+     by a gap larger than anything inside it. */
+  --lp-bleed: clamp(20px, 4vw, 56px);
+  --lp-gap: clamp(88px, 11vh, 168px);
+  --lp-max: 1180px;
+  --lp-bar: 56px;
+}
+
+/* The sticky bar is --lp-bar tall; every anchor target clears it, or a jump to
+   #get-started lands with the heading under the bar. */
+.lp-root [id] {
+  scroll-margin-top: calc(var(--lp-bar) + var(--space-5));
+}
+
+/* ------------------------------------------------------------------ type */
+
+.lp-d1 {
+  font-size: var(--lp-d1);
+  font-weight: 600;
+  line-height: 1.04;
+  letter-spacing: -0.03em;
+}
+.lp-d2 {
+  font-size: var(--lp-d2);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+.lp-d3 {
+  font-size: var(--lp-d3);
+  font-weight: 600;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+}
+.lp-lead {
+  font-size: var(--lp-lead);
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- layout */
+
+.lp-wrap {
+  width: 100%;
+  max-width: var(--lp-max);
+  margin-inline: auto;
+  padding-inline: var(--lp-bleed);
+}
+.lp-section {
+  padding-block: var(--lp-gap);
+}
+
+/* -------------------------------------------------------------- 0 · bar */
+
+.lp-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  border-bottom: 1px solid transparent;
+}
+.lp-bar-inner {
+  min-height: var(--lp-bar);
+  padding-block: var(--space-2);
+}
+/* Below 640 the hero's own primary CTA is already on screen, so the bar keeps
+   one action rather than wrapping to two rows on a 390px phone. */
+@media (max-width: 639px) {
+  .lp-bar-signup {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------- 1 · hero */
+
+.lp-hero {
+  padding-top: clamp(48px, 9vh, 108px);
+  padding-bottom: var(--lp-gap);
+  text-align: center;
+}
+.lp-hero-lead {
+  max-width: 62ch;
+  margin-inline: auto;
+}
+@media (max-width: 479px) {
+  .lp-hero-cta {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .lp-hero-cta > * {
+    width: 100%;
+  }
+}
+
+/* --------------------------------------------------------- 2 · contrast */
+
+.lp-contrast {
+  min-height: 80vh;
+  display: grid;
+  align-content: center;
+  padding-block: var(--space-6);
+}
+.lp-contrast-line {
+  max-width: 22ch;
+}
+@media (min-width: 900px) {
+  .lp-contrast-line {
+    max-width: 18ch;
+  }
+}
+
+/* ------------------------------------------------------------- 3 · loop */
+
+.lp-loop-grid {
+  display: grid;
+  gap: var(--space-6);
+}
+.lp-steps {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(40px, 6vh, 72px);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lp-step-inner {
+  display: flex;
+  gap: var(--space-4);
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+}
+.lp-rail {
+  display: none;
+}
+.lp-sticky {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .lp-loop-grid {
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    gap: clamp(32px, 5vw, 72px);
+    align-items: start;
+  }
+  .lp-steps {
+    display: block;
+  }
+  /* NOTE: inactive steps are NOT dimmed with opacity. The reference style fades
+     out-of-focus copy; at any opacity low enough to read as "off",
+     --muted-foreground body text drops under the 4.5:1 minimum. The narrative
+     is carried by the rail tick and the step index instead. */
+  .lp-step {
+    min-height: 78vh;
+    display: flex;
+    align-items: center;
+  }
+  .lp-rail {
+    display: flex;
+    flex: none;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--surface-4);
+    transition: background-color var(--duration-medium, 410ms) var(--ease);
+  }
+  .lp-step[data-active='true'] .lp-rail {
+    background: var(--primary);
+  }
+  .lp-step-visual {
+    display: none;
+  }
+  .lp-sticky {
+    display: grid;
+    align-content: center;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+  }
+  .lp-panel {
+    display: none;
+  }
+  .lp-panel[data-active='true'] {
+    display: block;
+  }
+}
+
+/* --------------------------------------------------------- 4 · two-up row */
+
+.lp-split {
+  display: grid;
+  gap: clamp(24px, 4vw, 56px);
+  align-items: center;
+}
+@media (min-width: 900px) {
+  .lp-split {
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  }
+}
+
+/* ------------------------------------------------------- product stages */
+
+/* NEW: LandingStage. Astryx Card cannot bleed a surface to its own edge, and
+   every section frames a product surface the same way. */
+.lp-stage {
+  text-align: start; /* the hero centres its copy; a stage never inherits that */
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+.lp-stage-bar {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.lp-stage-body {
+  padding: var(--space-4);
+}
+.lp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.lp-zebra > * {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+}
+.lp-zebra > *:nth-child(odd) {
+  background: var(--surface-2);
+}
+
+.lp-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.lp-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--data);
+}
+.lp-bar-fill[data-weakest='true'] {
+  background: var(--danger);
+}
+.lp-gap-note {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.lp-brief-row {
+  padding-block: var(--space-3);
+}
+.lp-brief-row + .lp-brief-row {
+  border-top: 1px solid var(--border);
+}
+.lp-memo {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  border: 1px solid transparent;
+}
+.lp-memo[data-current='true'] {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+.lp-tile {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--surface-3);
+  color: var(--muted-foreground);
+  width: 28px;
+  height: 28px;
+}
+.lp-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: var(--primary);
+}
+.lp-cmd {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  max-width: 420px;
+}
+
+/* ------------------------------------------------------ scroll-driven motion
+   Every animated element's UNANIMATED state is its FINAL state, and the whole
+   block is gated on @supports + prefers-reduced-motion. Safari and Firefox,
+   which do not ship scroll timelines yet, and anyone who asked the OS for less
+   motion, get a complete readable page with no JS fallback and no layout
+   thrash. Step activation is NOT here — it is an IntersectionObserver
+   (scroll-steps.tsx), so the narrative itself works in every browser. */
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .lp-rise {
+      animation: lp-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 5% entry 72%;
+    }
+    /* The hero's product surface rises into place as the page settles. One
+       transform — no parallax, no gradient, no glow. */
+    .lp-settle {
+      animation: lp-settle linear both;
+      animation-timeline: view();
+      animation-range: entry 8% cover 26%;
+    }
+    .lp-line-a {
+      animation: lp-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 12% cover 24%;
+    }
+    .lp-line-b {
+      animation: lp-rise linear both;
+      animation-timeline: view();
+      animation-range: cover 22% cover 44%;
+    }
+  }
+}
+
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .lp-bar {
+      animation: lp-bar linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 120px;
+    }
+  }
+}
+
+@keyframes lp-rise {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes lp-settle {
+  from {
+    opacity: 0.5;
+    transform: translateY(56px) scale(0.945);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes lp-bar {
+  from {
+    background-color: transparent;
+    border-bottom-color: transparent;
+  }
+  to {
+    background-color: var(--background);
+    border-bottom-color: var(--border);
+  }
+}
