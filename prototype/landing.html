@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentRay — landing prototype (design-ui)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ============================================================================
+   THROWAWAY PROTOTYPE — not production code. Token values below are copied
+   verbatim from agentray/web/app/globals.css (:root). Component styles imitate
+   @astryxdesign/core Card / Button / Text / Chat as they render under the
+   AgentRay dark bridge. `implement` rebuilds all of this with the real
+   components; this file exists so a human can judge the look and the scroll
+   choreography before that happens.
+   ========================================================================== */
+
+:root {
+  /* ---- copied from globals.css :root — do not edit here ------------------ */
+  --background: #0A0E12;
+  --surface-1: #11161F;
+  --surface-2: #161C26;
+  --surface-3: #1E2733;
+  --surface-4: #28323F;
+  --foreground: #E9EEF4;
+  --muted-foreground: #8C97A8;
+  --faint: #5C6678;
+  --border: #222C38;
+  --input: #2C3645;
+  --primary: #22c786;
+  --primary-hover: #3fe0a0;
+  --primary-foreground: #04221a;
+  --agent: #8a7cff;
+  --data: #46b7e8;
+  --success: #3fcb7a;
+  --warning: #e8a93b;
+  --danger: #f0626b;
+  --ring: color-mix(in srgb, var(--primary) 60%, transparent);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --space-1: 4px; --space-2: 8px; --space-3: 12px;
+  --space-4: 16px; --space-5: 20px; --space-6: 24px;
+  --fs-2xs: 12px; --fs-xs: 13px; --fs-sm: 14px; --fs-md: 16px; --fs-lg: 18px;
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  /* ---- NEW, landing-scoped only (see spec §NEW) --------------------------
+     The app scale tops out at 18px because it is a cockpit scale; a marketing
+     headline has no step in it. These four steps exist for this page only and
+     never enter globals.css. Fluid so one rule covers 390px → 1920px. */
+  --landing-d1: clamp(2.5rem, 1.35rem + 4.8vw, 5.25rem);   /* 40 → 84 */
+  --landing-d2: clamp(1.9rem, 1.15rem + 3.1vw, 3.5rem);    /* 30 → 56 */
+  --landing-d3: clamp(1.5rem, 1.1rem + 1.7vw, 2.25rem);    /* 24 → 36 */
+  --landing-lead: clamp(1.0625rem, 1rem + 0.5vw, 1.375rem);/* 17 → 22 */
+
+  /* Section rhythm. Apple's restraint is mostly whitespace: one idea per
+     screenful, separated by a gap larger than anything inside it. */
+  --landing-bleed: clamp(20px, 4vw, 56px);
+  --landing-gap: clamp(88px, 11vh, 168px);
+  --landing-max: 1180px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; border-color: var(--border); }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+:where(a) { color: inherit; }
+:where(button, a, input):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---- type imitations (Astryx Text/Heading under the dark bridge) --------- */
+.t-display-1 { font-size: var(--landing-d1); font-weight: 600; line-height: 1.04; letter-spacing: -0.03em; text-wrap: balance; margin: 0; }
+.t-display-2 { font-size: var(--landing-d2); font-weight: 600; line-height: 1.1;  letter-spacing: -0.025em; text-wrap: balance; margin: 0; }
+.t-display-3 { font-size: var(--landing-d3); font-weight: 600; line-height: 1.18; letter-spacing: -0.02em; text-wrap: balance; margin: 0; }
+.t-lead { font-size: var(--landing-lead); line-height: 1.5; color: var(--muted-foreground); text-wrap: pretty; margin: 0; }
+.t-body { font-size: var(--fs-md); margin: 0; }
+.t-supporting { font-size: var(--fs-sm); color: var(--muted-foreground); margin: 0; }
+.t-label { font-size: var(--fs-2xs); font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); margin: 0; }
+.t-mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
+code { font-family: var(--font-mono); font-size: 0.92em; background: var(--surface-3); padding: 1px 5px; border-radius: var(--radius-sm); }
+
+/* ---- Button (imitates Astryx Button, size lg = 44px min) ---------------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  min-height: 44px; padding: 0 var(--space-5);
+  border-radius: var(--radius-md); border: 1px solid transparent;
+  font: inherit; font-size: var(--fs-sm); font-weight: 600;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+  transition: background-color 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+.btn-primary { background: var(--primary); color: var(--primary-foreground); }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-outline { background: transparent; color: var(--foreground); border-color: var(--input); }
+.btn-outline:hover { background: var(--surface-2); }
+.btn-ghost { background: transparent; color: var(--muted-foreground); }
+.btn-ghost:hover { color: var(--foreground); background: var(--surface-2); }
+.btn-block { width: 100%; }
+
+/* ---- Card / Section frames --------------------------------------------- */
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-xl); }
+.card-muted { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+
+/* NEW: LandingStage — the framed holder every product surface sits in.
+   Astryx Card cannot bleed a surface to its own edge; every section needs the
+   same frame, so it is one component, not a per-section style. */
+.stage {
+  text-align: start;  /* the hero centers its copy; product surfaces never inherit that */
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  box-shadow: 0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset;
+}
+.stage-bar {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.stage-body { padding: var(--space-4); }
+.dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+
+/* ---- layout ------------------------------------------------------------- */
+.wrap { max-width: var(--landing-max); margin-inline: auto; padding-inline: var(--landing-bleed); }
+.section { padding-block: var(--landing-gap); }
+.stack { display: flex; flex-direction: column; }
+.gap-2 { gap: var(--space-2); } .gap-3 { gap: var(--space-3); }
+.gap-4 { gap: var(--space-4); } .gap-6 { gap: var(--space-6); }
+.row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+
+/* ============================ 0 · top bar ================================ */
+.skip {
+  position: absolute; inset-inline-start: -9999px; top: 0; z-index: 100;
+  padding: var(--space-4) var(--space-6); border-radius: var(--radius-md);
+  background: var(--primary); color: var(--primary-foreground);
+  font-size: var(--fs-sm); font-weight: 600; text-decoration: none;
+}
+.skip:focus-visible { inset-inline-start: var(--space-4); top: var(--space-4); }
+
+/* Sticky bar is 56px; every anchor target clears it (ux-check nav #2). */
+:target, [id] { scroll-margin-top: 76px; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  border-bottom: 1px solid transparent;
+  background: color-mix(in srgb, var(--background) 0%, transparent);
+}
+.topbar-inner {
+  max-width: var(--landing-max); margin-inline: auto;
+  padding: var(--space-2) var(--landing-bleed);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  min-height: 56px;
+}
+.mark {
+  display: inline-grid; place-items: center; width: 32px; height: 32px; flex: none;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: var(--primary);
+}
+.brand { display: flex; align-items: center; gap: var(--space-2); font-weight: 600; font-size: var(--fs-sm); text-decoration: none; }
+.topbar nav { flex-wrap: nowrap; }
+/* Below 640 the hero's own primary CTA is already on screen — the bar keeps one
+   action rather than wrapping to two rows. */
+@media (max-width: 639px) { .topbar .btn-primary { display: none; } }
+
+/* ============================ 1 · hero =================================== */
+.hero { padding-top: clamp(48px, 9vh, 108px); padding-bottom: var(--landing-gap); text-align: center; }
+.hero .t-lead { max-width: 62ch; margin-inline: auto; }
+.hero-cta { justify-content: center; margin-top: var(--space-2); }
+@media (max-width: 479px) { .hero-cta { flex-direction: column; align-items: stretch; } .hero-cta .btn { width: 100%; } }
+.hero-stage-wrap { margin-top: clamp(40px, 7vh, 76px); }
+.hero-note { margin-top: var(--space-4); }
+
+/* ============================ 2 · contrast =============================== */
+.contrast { min-height: 80vh; display: grid; align-content: center; padding-block: var(--space-6); }
+.contrast p { max-width: 22ch; }
+.contrast .dim { color: var(--muted-foreground); }
+
+/* ============================ 3 · the loop =============================== */
+.loop-head { margin-bottom: clamp(32px, 5vh, 64px); }
+.loop-grid { display: grid; gap: var(--space-6); }
+.steps { display: flex; flex-direction: column; gap: clamp(40px, 6vh, 72px); }
+.step { display: flex; }
+.step-inner { display: flex; gap: var(--space-4); align-items: stretch; width: 100%; min-width: 0; }
+.step-rail { display: none; }
+.step-body { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.step-idx { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted-foreground); letter-spacing: 0.08em; transition: color 410ms var(--ease); }
+.step-visual { margin-top: var(--space-2); }
+.loop-sticky { display: none; }
+
+/* ============================ 4 · claims ================================= */
+.claim { display: grid; gap: clamp(24px, 4vw, 56px); align-items: center; }
+.claim + .claim { margin-top: var(--landing-gap); }
+
+.brief-row { display: grid; gap: 2px; padding: var(--space-3) 0; }
+.brief-row + .brief-row { border-top: 1px solid var(--border); }
+
+.channel-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3); border-radius: var(--radius-md);
+}
+.channel-row + .channel-row { margin-top: var(--space-2); }
+.channel-row:nth-child(odd) { background: var(--surface-2); }
+.channel-icon {
+  display: grid; place-items: center; width: 28px; height: 28px; flex: none;
+  border-radius: var(--radius-md); background: var(--surface-3); color: var(--muted-foreground);
+}
+.gap-1 { gap: var(--space-1); }
+
+/* ============================ 5 · self host ============================== */
+.oss-grid { display: grid; gap: var(--space-4); margin-top: clamp(28px, 4vh, 48px); }
+.oss-card { padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-2); }
+.cmd {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--foreground);
+}
+.cmd .prompt { color: var(--primary); }
+
+/* ============================ 6 · get started ============================ */
+.door { display: grid; gap: clamp(32px, 5vw, 64px); align-items: center; }
+.auth-card { padding: var(--space-5); max-width: 420px; width: 100%; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: var(--fs-sm); font-weight: 500; }
+.field input {
+  min-height: 44px; padding: 0 var(--space-3);
+  background: var(--surface-2); color: var(--foreground);
+  border: 1px solid var(--input); border-radius: var(--radius-md);
+  font: inherit; font-size: var(--fs-sm);
+}
+.field input::placeholder { color: var(--faint); }
+.field input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; border-color: var(--primary); }
+.field[data-status="error"] input { border-color: var(--danger); }
+.field .err { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--danger); }
+.field .req { color: var(--muted-foreground); font-weight: 400; }
+.pw { position: relative; display: flex; }
+.pw input { flex: 1; padding-inline-end: 48px; }
+.pw button {
+  position: absolute; inset-inline-end: 2px; top: 2px; bottom: 2px; width: 44px;
+  display: grid; place-items: center; background: transparent; border: 0;
+  color: var(--muted-foreground); cursor: pointer; border-radius: var(--radius-sm);
+}
+.pw button:hover { color: var(--foreground); }
+
+/* Prototype-only appendix: the states a reviewer cannot reach by scrolling. */
+.states { border-top: 1px dashed var(--input); }
+.states-grid { display: grid; gap: var(--space-4); margin-top: var(--space-4); }
+@media (min-width: 900px) { .states-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.state-card { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+.splash { display: grid; place-items: center; gap: var(--space-3); padding: var(--space-6) 0; }
+.btn[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
+.spin { width: 14px; height: 14px; border-radius: 999px; border: 2px solid currentColor; border-top-color: transparent; animation: spin 700ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+.banner {
+  display: flex; gap: var(--space-2); padding: var(--space-3);
+  border-radius: var(--radius-md); font-size: var(--fs-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--foreground);
+}
+footer { border-top: 1px solid var(--border); padding-block: var(--space-6); }
+
+/* ---- product-surface imitations (real screens, redrawn) ----------------- */
+.ev-row {
+  display: grid; grid-template-columns: 1fr auto; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-md);
+  align-items: center;
+}
+.ev-row + .ev-row { margin-top: 2px; }
+.ev-row:nth-child(odd) { background: var(--surface-2); }
+.ev-name { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--foreground); }
+.ev-count { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+
+.fn-step { display: flex; flex-direction: column; gap: 6px; }
+.fn-step + .fn-step { margin-top: var(--space-3); }
+.fn-meta { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-3); }
+.fn-bar { height: 10px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.fn-fill { height: 100%; border-radius: 999px; background: var(--data); }
+.fn-step[data-weak="true"] .fn-fill { background: var(--danger); }
+.fn-gap {
+  margin-top: var(--space-3); padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+}
+
+.tool-call {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md); font-size: var(--fs-xs); color: var(--muted-foreground);
+}
+.tool-call .name { color: var(--foreground); font-weight: 500; }
+.chat { display: flex; gap: var(--space-3); align-items: flex-start; }
+.avatar {
+  position: relative; width: 28px; height: 28px; flex: none;
+  display: grid; place-items: center; border-radius: 999px;
+  background: color-mix(in srgb, var(--agent) 20%, transparent);
+  color: var(--agent); font-size: var(--fs-2xs); font-weight: 600;
+}
+.avatar .status {
+  position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px;
+  border-radius: 999px; background: var(--success); border: 2px solid var(--surface-1);
+}
+.bubble { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.bubble p { margin: 0 0 var(--space-3); font-size: var(--fs-sm); line-height: 1.6; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble strong { color: var(--foreground); }
+.who { font-size: var(--fs-xs); font-weight: 600; color: var(--muted-foreground); }
+
+.memo { display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3); border-radius: var(--radius-md); background: var(--surface-2); }
+.memo .when { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--faint); white-space: nowrap; }
+.memo + .memo { margin-top: var(--space-2); }
+.memo[data-now="true"] { background: color-mix(in srgb, var(--primary) 10%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent); }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; font-size: var(--fs-2xs); font-weight: 500;
+  background: var(--surface-3); color: var(--muted-foreground);
+}
+.pill[data-tone="success"] { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.pill[data-tone="agent"] { background: color-mix(in srgb, var(--agent) 14%, transparent); color: color-mix(in srgb, var(--agent) 70%, #fff); }
+
+/* ===================== responsive: mobile-first up ======================= */
+@media (min-width: 900px) {
+  .loop-grid { grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); gap: clamp(32px, 5vw, 72px); align-items: start; }
+  .steps { display: block; }
+  /* NOTE: the inactive steps are NOT dimmed with opacity. Apple's grammar
+     fades the out-of-focus copy; at any opacity low enough to read as "off",
+     --muted-foreground body text drops under 4.5:1 (ux-check a11y #36), so the
+     narrative is carried by the rail tick and the step index instead. This is
+     the one place the checklist overrides the reference style. */
+  .step {
+    min-height: 78vh; display: flex; align-items: center;
+  }
+  .step-rail { display: flex; flex-direction: column; align-items: center; flex: none; }
+  .step-rail .tick { width: 2px; height: 100%; min-height: 40px; border-radius: 999px; background: var(--surface-4); transition: background-color 410ms var(--ease); }
+  .step[data-active="true"] .step-rail .tick { background: var(--primary); }
+  .step[data-active="true"] .step-idx { color: var(--primary); }
+  .step-visual { display: none; }
+  .loop-sticky {
+    display: block; position: sticky; top: 0;
+    height: 100vh; display: grid; align-content: center;
+  }
+  .loop-panel { display: none; }
+  .loop-panel[data-active="true"] { display: block; }
+  .claim { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); }
+  .claim[data-flip="true"] .claim-text { order: 2; }
+  .oss-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .door { grid-template-columns: minmax(0, 1fr) auto; }
+  .contrast p { max-width: 18ch; }
+}
+@media (min-width: 640px) and (max-width: 899px) {
+  .oss-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ===================== scroll-driven motion ==============================
+   Every animated element's UNANIMATED state is its FINAL state, and the whole
+   block is gated on @supports + prefers-reduced-motion. Safari/Firefox today,
+   and anyone who asked the OS for less motion, get a fully readable static
+   page with zero JS fallback. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .rise {
+      animation: rise linear both;
+      animation-timeline: view();
+      animation-range: entry 5% entry 72%;
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(26px); }
+      to   { opacity: 1; transform: none; }
+    }
+    /* The hero product stage rises INTO place as the page settles — one
+       transform, no parallax, no gradient mesh. */
+    .settle {
+      animation: settle linear both;
+      animation-timeline: view();
+      animation-range: entry 8% cover 26%;
+    }
+    @keyframes settle {
+      from { opacity: 0.5; transform: translateY(56px) scale(0.945); }
+      to   { opacity: 1; transform: none; }
+    }
+    /* Contrast lines arrive one after the other across the same screenful. */
+    .line-a { animation: fade linear both; animation-timeline: view(); animation-range: entry 12% cover 24%; }
+    .line-b { animation: fade linear both; animation-timeline: view(); animation-range: cover 22% cover 44%; }
+    @keyframes fade {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: none; }
+    }
+  }
+}
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .topbar {
+      animation: topbar linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 120px;
+    }
+    @keyframes topbar {
+      from { background-color: color-mix(in srgb, var(--background) 0%, transparent); border-bottom-color: transparent; }
+      to   { background-color: var(--background); border-bottom-color: var(--border); }
+    }
+  }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#top">Skip to content</a>
+
+<!-- ============================ 0 · top bar ============================== -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#top">
+      <span class="mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.5" r="2.5"/><circle cx="4.5" cy="19.5" r="2.5"/><circle cx="19.5" cy="19.5" r="2.5"/><path d="M12 7v3a4 4 0 0 1-4 4H6.5"/><path d="M12 7v3a4 4 0 0 0 4 4h1.5"/></svg>
+      </span>
+      AgentRay
+    </a>
+    <nav class="row" style="gap: var(--space-1)" aria-label="Account">
+      <a class="btn btn-ghost" href="#get-started" data-mode="login">Log in</a>
+      <a class="btn btn-primary" href="#get-started" data-mode="signup">Create workspace</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============================ 1 · hero =============================== -->
+  <section class="hero wrap">
+    <div class="stack gap-6">
+      <h1 class="t-display-1">Your growth loop, running without you.</h1>
+      <p class="t-lead">AgentRay reads your product data, names the step costing you the most, designs the smallest test that would move it, and brings the result back next cycle.</p>
+      <div class="row hero-cta">
+        <a class="btn btn-primary" href="#get-started">Create your workspace</a>
+        <a class="btn btn-outline" href="#the-loop">Watch the loop run</a>
+      </div>
+    </div>
+
+    <!-- Product stage: the shipped answer surface, not a drawing of one. -->
+    <div class="hero-stage-wrap settle">
+      <div class="stage" aria-hidden="true">
+        <div class="stage-bar">
+          <span class="dot" style="background: var(--success)"></span>
+          <span class="t-supporting">Growth Lead · working now</span>
+          <span class="pill" style="margin-inline-start:auto">Example</span>
+        </div>
+        <div class="stage-body">
+          <div class="chat">
+            <span class="avatar">GL<span class="status"></span></span>
+            <div class="bubble">
+              <span class="who">Growth Lead</span>
+              <div class="tool-call">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+                <span class="name">Queried data</span>
+                <span>· run_sql · people per step</span>
+                <span style="margin-inline-start:auto">1.2s</span>
+              </div>
+              <div>
+                <p><strong>activation → user.conversion is the widest gap (25%).</strong></p>
+                <p>28 people fired <code>activation</code>; 7 people fired <code>user.conversion</code>. That’s the widest gap in your catalog.</p>
+                <p>I’m comparing two people counts, not tracing one cohort — open the funnel to confirm the same people did both steps in that order.</p>
+                <p>This week: one test on that step. Don’t add a new dashboard — change the product so more people who hit <code>activation</code> also hit <code>user.conversion</code>.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="t-supporting hero-note">Example of an answer — not data from this instance.</p>
+    </div>
+  </section>
+
+  <!-- ============================ 2 · contrast =========================== -->
+  <section class="contrast wrap" aria-labelledby="contrast-h">
+    <div class="stack gap-4">
+      <h2 id="contrast-h" class="t-display-2 line-a dim">Every analytics tool can tell you what happened.</h2>
+      <p class="t-display-2 line-b">AgentRay ships the rest of the loop as the product.</p>
+    </div>
+  </section>
+
+  <!-- ============================ 3 · the loop =========================== -->
+  <section class="section" id="the-loop" aria-labelledby="loop-h">
+    <div class="wrap">
+      <div class="stack gap-3 loop-head rise">
+        <p class="t-label">The loop</p>
+        <h2 id="loop-h" class="t-display-3">Measure, diagnose, test, learn — shipped as the product.</h2>
+      </div>
+
+      <div class="loop-grid">
+        <!-- Steps: real content, in DOM order, readable with no JS and no sticky. -->
+        <ol class="steps" id="steps" style="list-style:none;margin:0;padding:0">
+
+          <li class="step" data-step="0" data-active="true">
+            <div class="step-inner">
+              <span class="step-rail" aria-hidden="true"><span class="tick"></span></span>
+            <div class="step-body">
+              <span class="step-idx">01 / MEASURE</span>
+              <h3 class="t-display-3">It reads your product data.</h3>
+              <p class="t-lead">The events you already send. The same store that powers your charts is the one the agent reads.</p>
+              <div class="step-visual" data-visual="0"></div>
+            </div>
+            </div>
+          </li>
+
+          <li class="step" data-step="1">
+            <div class="step-inner">
+              <span class="step-rail" aria-hidden="true"><span class="tick"></span></span>
+            <div class="step-body">
+              <span class="step-idx">02 / DIAGNOSE</span>
+              <h3 class="t-display-3">It names one step, not ten charts.</h3>
+              <p class="t-lead">You get “activation → conversion is your widest gap”, not a board to interpret.</p>
+              <div class="step-visual" data-visual="1"></div>
+            </div>
+            </div>
+          </li>
+
+          <li class="step" data-step="2">
+            <div class="step-inner">
+              <span class="step-rail" aria-hidden="true"><span class="tick"></span></span>
+            <div class="step-body">
+              <span class="step-idx">03 / TEST</span>
+              <h3 class="t-display-3">It designs the test.</h3>
+              <p class="t-lead">The smallest experiment that would move that step, and what to measure.</p>
+              <div class="step-visual" data-visual="2"></div>
+            </div>
+            </div>
+          </li>
+
+          <li class="step" data-step="3">
+            <div class="step-inner">
+              <span class="step-rail" aria-hidden="true"><span class="tick"></span></span>
+            <div class="step-body">
+              <span class="step-idx">04 / LEARN</span>
+              <h3 class="t-display-3">It remembers what you learned.</h3>
+              <p class="t-lead">Last cycle’s result is in next cycle’s reasoning. A dashboard starts over every time.</p>
+              <div class="step-visual" data-visual="3"></div>
+            </div>
+            </div>
+          </li>
+        </ol>
+
+        <!-- Sticky product stage: ≥900px only, decorative, swaps per active step. -->
+        <div class="loop-sticky" aria-hidden="true">
+          <div class="loop-panel" data-panel="0"></div>
+          <div class="loop-panel" data-panel="1"></div>
+          <div class="loop-panel" data-panel="2"></div>
+          <div class="loop-panel" data-panel="3"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 4 · runs without a conversation ================ -->
+  <section class="section wrap" aria-labelledby="channels-h">
+    <div class="claim">
+      <div class="claim-text stack gap-3 rise">
+        <p class="t-label">Without you</p>
+        <h2 id="channels-h" class="t-display-2">Nobody has to open the chat.</h2>
+        <p class="t-lead">A schedule or a webhook starts the same run a conversation would. The loop keeps its cycle whether or not anyone asks.</p>
+      </div>
+      <div class="stage rise" aria-hidden="true">
+        <div class="stage-bar">
+          <span class="dot" style="background: var(--success)"></span>
+          <span class="t-supporting">Channels · what starts a run</span>
+          <span class="pill" style="margin-inline-start:auto">Example</span>
+        </div>
+        <div class="stage-body" data-channels></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 5 · self host ========================== -->
+  <section class="section wrap" aria-labelledby="oss-h">
+    <div class="stack gap-4 rise">
+      <p class="t-label">Open source</p>
+      <h2 id="oss-h" class="t-display-2">Run the whole thing on your own box.</h2>
+      <div class="cmd" style="max-width: 420px"><span class="prompt" aria-hidden="true">$</span> docker compose up</div>
+    </div>
+    <div class="oss-grid rise">
+      <div class="card oss-card">
+        <h3 class="t-body" style="font-weight:600">A complete analytics base</h3>
+        <p class="t-supporting">Go ingestion, event storage in ClickHouse, PostgreSQL metadata. The charts are not a separate product.</p>
+      </div>
+      <div class="card oss-card">
+        <h3 class="t-body" style="font-weight:600">PostHog-compatible events</h3>
+        <p class="t-supporting">Existing instrumentation migrates by changing only the host.</p>
+      </div>
+      <div class="card oss-card">
+        <h3 class="t-body" style="font-weight:600">MCP server and agent skills</h3>
+        <p class="t-supporting">Claude Code or Codex works your real event data — one-off questions, or a scheduled loop.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 6 · get started ======================== -->
+  <section class="section wrap" id="get-started" aria-labelledby="door-heading">
+    <div class="door">
+      <div class="stack gap-4">
+        <h2 id="door-heading" class="t-display-2">Point it at your events.<br />Read what it says on Monday.</h2>
+        <p class="t-lead">The event model is PostHog-compatible, so instrumentation you already ship migrates by changing only the host.</p>
+      </div>
+
+      <div class="card auth-card">
+        <div class="stack gap-4">
+          <div class="stack gap-2">
+            <h3 class="t-display-3" style="font-size: var(--fs-lg)">Create your workspace</h3>
+            <p class="t-supporting">Set up in a minute — every name here is editable later.</p>
+          </div>
+
+          <!-- error state, shown here so the reviewer can judge it in place -->
+          <div class="banner" role="alert">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none;margin-top:2px"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5h.01"/></svg>
+            <span>Could not reach the API at http://localhost:8088.</span>
+          </div>
+
+          <form class="stack gap-3" onsubmit="return false">
+            <div class="field">
+              <label for="p-email">Email <span class="req">(required)</span></label>
+              <input id="p-email" type="email" placeholder="you@company.com" autocomplete="username" required />
+            </div>
+            <div class="field" data-status="error">
+              <label for="p-name">Full name <span class="req">(required)</span></label>
+              <input id="p-name" placeholder="Ada Lovelace" autocomplete="name" aria-describedby="p-name-err" aria-invalid="true" required />
+              <span class="err" id="p-name-err" role="alert">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5h.01"/></svg>
+                Enter your name.
+              </span>
+            </div>
+            <div class="field">
+              <label for="p-pass">Password <span class="req">(required)</span></label>
+              <div class="pw">
+                <input id="p-pass" type="password" placeholder="At least 8 characters" autocomplete="new-password" required />
+                <button type="button" id="p-pw-toggle" aria-label="Show password" aria-pressed="false">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="p-ws">Workspace name <span class="req">(required)</span></label>
+              <input id="p-ws" placeholder="Acme Inc." autocomplete="organization" required />
+            </div>
+            <button class="btn btn-primary btn-block" type="submit">Create workspace</button>
+          </form>
+
+          <div class="stack gap-2" style="align-items:center">
+            <span class="t-supporting">Already have an account?</span>
+            <button class="btn btn-ghost" type="button">Log in</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- ===================== prototype-only: other states ================== -->
+  <section class="section wrap states" aria-labelledby="states-h">
+    <div class="stack gap-2">
+      <p class="t-label">Prototype appendix — not part of the page</p>
+      <h2 id="states-h" class="t-display-3">States a reviewer cannot reach by scrolling</h2>
+      <p class="t-supporting">These already exist in <code>auth-gate.tsx</code> / <code>auth-screen.tsx</code> and must survive the redesign unchanged.</p>
+    </div>
+    <div class="states-grid">
+      <div class="card state-card">
+        <span class="t-label">Returning visitor, session not yet resolved</span>
+        <div class="splash">
+          <span class="mark" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.5" r="2.5"/><circle cx="4.5" cy="19.5" r="2.5"/><circle cx="19.5" cy="19.5" r="2.5"/><path d="M12 7v3a4 4 0 0 1-4 4H6.5"/><path d="M12 7v3a4 4 0 0 0 4 4h1.5"/></svg></span>
+          <span class="t-supporting">Checking your workspace session…</span>
+        </div>
+        <p class="t-supporting">The cookie says a session exists, so the landing page would be a flash of the wrong screen. Unchanged.</p>
+      </div>
+      <div class="card state-card">
+        <span class="t-label">Submitting</span>
+        <button class="btn btn-primary btn-block" type="button" aria-disabled="true"><span class="spin" aria-hidden="true"></span> Creating workspace…</button>
+        <p class="t-supporting">Also the <code>pending</code> state: the button is disabled until <code>me()</code> answers, so nobody starts a signup that races the session check.</p>
+      </div>
+      <div class="card state-card">
+        <span class="t-label">Log in mode</span>
+        <div class="stack gap-3">
+          <div class="field"><label for="s-email">Email <span class="req">(required)</span></label><input id="s-email" type="email" placeholder="you@company.com" /></div>
+          <div class="field"><label for="s-pass">Password <span class="req">(required)</span></label><input id="s-pass" type="password" placeholder="Your password" /></div>
+          <button class="btn btn-primary btn-block" type="button">Log in</button>
+        </div>
+        <p class="t-supporting">Two fields, no workspace name. The top bar’s “Log in” opens the form here.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <div class="row" style="justify-content: space-between">
+    <span class="t-supporting">AgentRay — open source, self-hostable.</span>
+    <a class="t-supporting" href="https://github.com/lohi-ai/agentray">github.com/lohi-ai/agentray</a>
+  </div>
+</footer>
+
+<script>
+/* ---------------------------------------------------------------------------
+   Two behaviors only. Everything else is CSS.
+   1. Product surfaces are built from one data array so the mobile (inline) and
+      desktop (sticky) renderings can never drift. In React this is one STEPS
+      constant mapped twice.
+   2. Step activation is IntersectionObserver — not a scroll timeline — so it
+      works in every browser, including the ones with no scroll-driven CSS.
+   --------------------------------------------------------------------------- */
+
+const svg = (d, extra = '') =>
+  `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+
+function stageEvents() {
+  const rows = [
+    ['session_start', '1,204'],
+    ['pageview', '3,918'],
+    ['signup', '41'],
+    ['activation', '28'],
+    ['prototype.waitlist', '19'],
+    ['user.conversion', '7'],
+  ];
+  return `
+    <div class="stage">
+      <div class="stage-bar">
+        <span class="dot" style="background: var(--data)"></span>
+        <span class="t-supporting">Event catalog · last 7 days</span>
+        <span class="pill" style="margin-inline-start:auto">Example</span>
+      </div>
+      <div class="stage-body">
+        ${rows.map(([n, c]) => `<div class="ev-row"><span class="ev-name">${n}</span><span class="ev-count">${c}</span></div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function funnelBody() {
+  const steps = [
+    ['session_start', 1204, 100, false],
+    ['signup', 41, 34, false],
+    ['activation', 28, 23, false],
+    ['user.conversion', 7, 6, true],
+  ];
+  return `
+    ${steps.map(([n, c, w, weak]) => `
+      <div class="fn-step" data-weak="${weak}">
+        <div class="fn-meta">
+          <span class="ev-name">${n}</span>
+          <span class="ev-count">${c.toLocaleString()} people</span>
+        </div>
+        <div class="fn-bar"><div class="fn-fill" style="width:${w}%"></div></div>
+      </div>`).join('')}
+    <div class="fn-gap">
+      <p class="t-supporting" style="color: var(--foreground); font-weight:600">activation → user.conversion — the widest gap, 25%.</p>
+      <p class="t-supporting">28 people in, 7 out. Every other step keeps more than it loses.</p>
+    </div>`;
+}
+
+function stageFunnel() {
+  return `
+    <div class="stage">
+      <div class="stage-bar">
+        <span class="dot" style="background: var(--danger)"></span>
+        <span class="t-supporting">Funnel · last 7 days</span>
+        <span class="pill" style="margin-inline-start:auto">Example</span>
+      </div>
+      <div class="stage-body">${funnelBody()}</div>
+    </div>`;
+}
+
+function briefBody() {
+  const rows = [
+    ['Change', 'Move the value moment ahead of the paywall for new signups.'],
+    ['Step it should move', '<code>activation → user.conversion</code>'],
+    ['How we’ll know', '<code>user.conversion</code> per person who fired <code>activation</code>'],
+    ['Run for', 'One cycle — 7 days, or 200 people through the step.'],
+  ];
+  return `
+    <dl style="margin:0">
+      ${rows.map(([k, v]) => `
+        <div class="brief-row">
+          <dt class="t-label" style="margin:0">${k}</dt>
+          <dd class="t-supporting" style="margin:0; color: var(--foreground)">${v}</dd>
+        </div>`).join('')}
+    </dl>
+    <p class="t-supporting" style="margin-top: var(--space-3)">One test, not a backlog. Anything larger is a plan, not an experiment.</p>`;
+}
+
+function stageAnswer() {
+  return `
+    <div class="stage">
+      <div class="stage-bar">
+        <span class="dot" style="background: var(--agent)"></span>
+        <span class="t-supporting">Growth Lead · this week’s test</span>
+        <span class="pill" style="margin-inline-start:auto">Example</span>
+      </div>
+      <div class="stage-body">${briefBody()}</div>
+    </div>`;
+}
+
+function channelsBody() {
+  const rows = [
+    ['calendar', 'Every Monday, 09:00', 'Run the growth loop and post the result.', 'Healthy', 'success'],
+    ['calendar', 'First of the month', 'Re-check the funnel after last month’s test.', 'Healthy', 'success'],
+    ['webhook', 'POST /hooks/deploy', 'Starts a run when a release ships.', 'Healthy', 'success'],
+    ['chat', 'Chat', 'The other channel — when you do want to ask.', 'Open', ''],
+  ];
+  const icons = {
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 11h18"/>',
+    webhook: '<path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/>',
+    chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  };
+  return rows.map(([icon, title, detail, status, tone]) => `
+    <div class="channel-row">
+      <span class="channel-icon">${svg(icons[icon])}</span>
+      <div class="stack gap-1" style="min-width:0">
+        <span class="t-supporting" style="color: var(--foreground); font-weight:500">${title}</span>
+        <span class="t-supporting">${detail}</span>
+      </div>
+      <span class="pill"${tone ? ` data-tone="${tone}"` : ''} style="margin-inline-start:auto">${status}</span>
+    </div>`).join('');
+}
+
+function memoryBody() {
+  const memos = [
+    ['Cycle 1', 'Named <code>activation → user.conversion</code> as the widest gap (25%).', false],
+    ['Cycle 2', 'Test shipped: value moment moved ahead of the paywall. Conversion 6% → 11%.', false],
+    ['Cycle 3', 'Carrying that forward: the paywall is no longer the weakest link. Next widest gap is <code>signup → activation</code>.', true],
+  ];
+  return memos.map(([when, text, now]) => `
+    <div class="memo" data-now="${now}">
+      <span class="when">${when}</span>
+      <div class="stack gap-2" style="min-width:0">
+        <p class="t-supporting" style="color: var(--foreground)">${text}</p>
+        ${now ? '<span class="pill" data-tone="agent" style="align-self:flex-start">Reasoning now</span>' : '<span class="pill" data-tone="success" style="align-self:flex-start">Learned</span>'}
+      </div>
+    </div>`).join('');
+}
+
+function stageMemory() {
+  return `
+    <div class="stage">
+      <div class="stage-bar">
+        <span class="dot" style="background: var(--primary)"></span>
+        <span class="t-supporting">Growth Lead · what it carries in</span>
+        <span class="pill" style="margin-inline-start:auto">Example</span>
+      </div>
+      <div class="stage-body">${memoryBody()}</div>
+    </div>`;
+}
+
+const STAGES = [stageEvents, stageFunnel, stageAnswer, stageMemory];
+
+// One source, two renderings — mobile inline and desktop sticky.
+STAGES.forEach((make, i) => {
+  const html = make();
+  document.querySelector(`[data-visual="${i}"]`).innerHTML = html;
+  document.querySelector(`[data-panel="${i}"]`).innerHTML = html;
+});
+document.querySelector('[data-panel="0"]').dataset.active = 'true';
+
+// Section 4's surface.
+document.querySelector('[data-channels]').innerHTML = channelsBody();
+
+// Step activation. Fires on the step crossing the vertical middle of the
+// viewport; the sticky panel is swapped, never animated, so a reduced-motion
+// user sees the same information with no transition.
+const steps = [...document.querySelectorAll('.step')];
+const panels = [...document.querySelectorAll('.loop-panel')];
+const io = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const i = Number(e.target.dataset.step);
+      steps.forEach((s, n) => (s.dataset.active = String(n === i)));
+      panels.forEach((p, n) => (p.dataset.active = String(n === i)));
+    }
+  },
+  { rootMargin: '-48% 0px -48% 0px', threshold: 0 },
+);
+steps.forEach((s) => io.observe(s));
+
+// Password visibility (ux-check forms #60).
+const pw = document.getElementById('p-pass');
+const pwBtn = document.getElementById('p-pw-toggle');
+pwBtn.addEventListener('click', () => {
+  const shown = pw.type === 'text';
+  pw.type = shown ? 'password' : 'text';
+  pwBtn.setAttribute('aria-pressed', String(!shown));
+  pwBtn.setAttribute('aria-label', shown ? 'Show password' : 'Hide password');
+});
+
+// The top-bar buttons name the mode the form should open in.
+document.querySelectorAll('[data-mode]').forEach((el) =>
+  el.addEventListener('click', () => console.log('open form in mode:', el.dataset.mode)),
+);
+</script>
+</body>
+</html>
