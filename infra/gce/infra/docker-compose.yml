@@ -6,12 +6,26 @@
 # CLICKHOUSE_PASSWORD comes from secret.env (written by ../fetch-secrets.sh).
 # Note: the CLICKHOUSE_* env vars only take effect on first volume init;
 # deploy.sh ensures the per-env database exists on every roll.
+#
+# LOG ROTATION IS PER-SERVICE HERE ON PURPOSE. /etc/docker/daemon.json sets the
+# same caps as a daemon default, but the daemon only reads it at start and
+# dockerd is never restarted on this box (that would drop every container), so
+# the default does not reach anything already running. These three are the
+# longest-lived containers on the VM — a deploy never recreates them — which
+# makes them the ones most able to fill the 30 GB root volume unnoticed. The
+# cap has to be declared here, and it only binds once the container is
+# recreated.
 
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.12-alpine
     container_name: agentray-clickhouse
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     env_file:
       - secret.env
     environment:
@@ -36,6 +50,11 @@ services:
     image: redis:7-alpine
     container_name: agentray-redis
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # Only holds rate-limit counters — small and safe to evict.
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     mem_limit: 128m
@@ -51,6 +70,11 @@ services:
     image: nats:2-alpine
     container_name: agentray-nats
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # -js enables JetStream; -sd persists the durable event stream across restarts
     # so a broker bounce never drops queued events.
     command: ["-js", "-sd", "/data"]

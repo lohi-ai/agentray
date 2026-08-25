@@ -13,6 +13,11 @@ x-agentray-api: &agentray-api-svc
     - app.env
     - secret.env
   mem_limit: 384m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
   networks:
     - edge
   healthcheck:
@@ -26,6 +31,11 @@ x-agentray-web: &agentray-web-svc
   image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web:${AGENTRAY_TAG:-latest-prod}
   restart: unless-stopped
   mem_limit: 384m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
   networks:
     - edge
 
