@@ -30,7 +30,8 @@ project
        ├─ tools: enabled tool names + per-tool config
        ├─ secrets: write-only encrypted values referenced as {{cred:NAME}}
        ├─ triggers: chat / manual / schedule / webhook
-       ├─ task tiers: triage / run / compaction / reflection → workspace model tier
+       ├─ task tiers: triage / run / compaction / reflection / advisor → workspace model tier
+       ├─ advisor: on/off + what the reviewer should watch for (reviewer-only)
        └─ runs, memory, traces
 ```
 
@@ -187,6 +188,60 @@ self-serving narrowing is visible afterwards with its own justification attached
 The user's pinned requirement is never touched; only what finishing means
 changes. Mechanism: `GoalReviser`, drained by the loop once per turn — the plugin
 offers a value, the loop writes the log and rebuilds the system prompt.
+
+### Advisor (review-on-stop)
+
+The goal gate asks "is the run finished?" The advisor asks a different question
+— "is what it finished any good?" — and it is the one question a rule cannot
+answer, so it is answered by a second model.
+
+When an agent has the advisor switched on, a reviewer reads the run at the
+moment it tries to end: the task, a bounded window of the transcript with tool
+intent intact, the tool trace, and the answer about to go out. It returns notes
+or, far more often, nothing. A `concern` or `blocker` re-opens the run with the
+advisories injected, so the agent must deal with them before the answer is
+accepted; a `nit` is recorded on the run and the answer ships, because at a
+finish there is no next step boundary for an aside to ride and a whole extra
+turn costs more than a nit is worth. On the second round the reviewer is shown
+its own prior notes and asked whether they were dealt with.
+
+It is bounded on every axis that could hurt: 2 rounds per run (enforced against
+`StopInfo.Attempt`, a count the loop keeps, not the reviewer), 3 notes per
+round, a clamped note length, a bounded transcript window, and — the one that
+matters most in practice — an emission guard that drops content-free filler and
+deduplicates by escalation rank. That guard is not defensive programming; it is
+the difference between a usable feature and an unusable one. oh-my-pi, whose
+advisor this is ported from, recorded a session with 309 advise calls over 92
+unique notes, 114 of them the word "Stop." A reviewer model's default failure is
+not missing problems, it is finding something to say, so silence has to be made
+cheap in code and not merely requested in a prompt.
+
+Every failure path accepts the finish. A provider outage, a timeout, or a model
+that answers in prose leaves the run exactly as it would have been with the
+advisor off — a second opinion must never be the reason a run cannot end.
+
+Mechanism: `agentcore/plugins/advisor` is a `StopInterceptor` that calls a
+`Reviewer` func, so the plugin never learns a model is involved;
+`internal/runtime/advisor.go` supplies one as a single tool-less call at the
+agent's `advisor` task tier (default `pro`), shaped like `reflect.go` for the
+same reason — a pass that reviews the run must not be able to change it. The
+plugin needs no kernel change: `StopInfo` carries no history, so the extension
+also implements `RunObserver` and keeps the last `PhaseRequest` snapshot, which
+is exactly the context the answer came out of.
+
+The reviewer gets no tools in this first pass. omp grants `read`/`grep`/`glob`;
+the agentray analog is a nested run with its own scope gating, credentials and
+budget — a second governed agent, not a config change — and it buys less here,
+because an analytics agent's evidence (the SQL, the rows) is already in the
+transcript the reviewer reads.
+
+Operator surface: per agent, `Setup → Model → Check the work` — an on/off switch
+plus "what should the reviewer watch for". Those instructions reach the reviewer
+**only**, never the agent under review, which is the whole point: guidance
+useful when checking work is usually too picky to put in front of someone doing
+it. (It is the analog of omp's `WATCHDOG.md`.) Notes persist on the run in
+`agent_runs.advisor_notes_json`, each flagged with whether it was delivered to
+the agent or merely recorded.
 
 ## Tools and secrets
 

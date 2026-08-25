@@ -6,8 +6,8 @@ import { ArrowLeft, Clock, Copy, Cpu, ShieldCheck, Sparkles, Trash2, UserCog, Us
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { Selector } from '@astryxdesign/core/Selector';
-import { type Agent, AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
-import { useAgent, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgents, useAgentTaskTiers } from '@/modules/agent/hooks';
+import { type Agent, type AgentAdvisor, AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
+import { useAgent, useAgentAdvisor, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgents, useAgentTaskTiers } from '@/modules/agent/hooks';
 import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -363,6 +363,7 @@ const TASK_LABELS: Record<AgentTaskKind, { label: string; detail: string }> = {
   run: { label: 'Doing the work', detail: 'The main analysis and answers.' },
   compaction: { label: 'Summarizing history', detail: 'Compressing long conversations to save cost.' },
   reflection: { label: 'Learning & review', detail: 'Reflecting on past runs to improve.' },
+  advisor: { label: 'Checking the work', detail: 'The second opinion that reviews an answer before it goes out. Reviewing is the harder half of the job — it reads the whole run cold — so this is worth the strongest tier.' },
 };
 const TIER_LABELS: Record<ModelTier, string> = { lite: 'Lite (fastest, cheapest)', flash: 'Default (balanced)', pro: 'Pro (deepest)' };
 
@@ -451,6 +452,68 @@ function BudgetMeter({ status }: { status: BudgetStatus | null }) {
   );
 }
 
+// --- Advisor: the reviewer that checks an answer before the run finishes.
+//
+// Off by default and deliberately explicit about the trade: it is a second
+// model call on the strongest tier, so the operator should be able to see what
+// they are buying before they switch it on. "Watch for" is the half people get
+// wrong — it reaches the reviewer only, so guidance too picky to put in front of
+// the agent doing the work belongs here.
+function AdvisorSection({ agentID }: { agentID: string }) {
+  const { advisor, advisorLoading, saveAdvisor } = useAgentAdvisor(agentID);
+  const [instructions, setInstructions] = useState<string | null>(null);
+  const [seeded, setSeeded] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+
+  if (advisor && advisor !== seeded) {
+    setSeeded(advisor);
+    setInstructions(advisor.instructions);
+  }
+  if (advisorLoading && instructions === null) return <Panel title="Check the work"><Loading label="Loading advisor…" /></Panel>;
+
+  const enabled = advisor?.enabled ?? false;
+  const save = async (patch: Partial<AgentAdvisor>) => {
+    setSaving(true);
+    try { await saveAdvisor(patch); } finally { setSaving(false); }
+  };
+
+  return (
+    <Panel title="Check the work">
+      <p className="mb-3 max-w-[600px] text-xs text-[var(--color-text-secondary)]">
+        Before the agent hands you an answer, a second model reads what it actually did. If something looks wrong it sends the agent back to fix it; smaller notes are just recorded on the run. Most runs pass without a word. This costs an extra model call per run, on the tier set below.
+      </p>
+      <div className="mb-4 flex items-center gap-3">
+        <Button
+          variant={enabled ? 'primary' : 'outline'}
+          size="sm"
+          disabled={saving}
+          onClick={() => void save({ enabled: !enabled })}
+        >
+          {enabled ? 'On — turn off' : 'Off — turn on'}
+        </Button>
+        <span className="text-xs text-[var(--color-text-secondary)]">
+          {enabled ? 'Answers are reviewed before you see them.' : 'Answers go out as the agent wrote them.'}
+        </span>
+      </div>
+      <label className={labelCls}>What should the reviewer watch for? <span className="text-[var(--color-text-disabled)]">(optional)</span></label>
+      <textarea
+        className="mt-1 h-28 w-full max-w-[600px] rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background)] p-2 text-sm"
+        placeholder="Traps in this project a reviewer should know about — e.g. distrust any revenue figure that isn&apos;t grouped by currency."
+        value={instructions ?? ''}
+        onChange={(e) => setInstructions(e.target.value)}
+      />
+      <p className="mt-1 max-w-[600px] text-xs text-[var(--color-text-secondary)]">
+        Only the reviewer sees this — the agent doing the work never does. That is the point: notes useful when checking work are usually too picky to put in front of someone doing it.
+      </p>
+      <div className="mt-3">
+        <Button variant="outline" size="sm" disabled={saving} onClick={() => void save({ instructions: instructions ?? '' })}>
+          {saving ? 'Saving…' : 'Save what to watch for'}
+        </Button>
+      </div>
+    </Panel>
+  );
+}
+
 function ModelTab({ agentID }: { agentID: string }) {
   const router = useRouter();
   const { taskTiers, taskTiersLoading, saveTaskTiers } = useAgentTaskTiers(agentID);
@@ -474,6 +537,7 @@ function ModelTab({ agentID }: { agentID: string }) {
     <div className="flex flex-col gap-4">
       <p className="max-w-[640px] text-sm text-[var(--color-text-secondary)]">Match the brainpower to the job. Use a lighter, cheaper model for quick steps and a stronger one where depth matters — a simple way to control cost. The actual models behind each tier are set in <button className="underline hover:text-[var(--color-text-primary)]" onClick={() => router.push('/settings')}>workspace settings</button>.</p>
       <BudgetSection agentID={agentID} />
+      <AdvisorSection agentID={agentID} />
       {AGENT_TASK_KINDS.map((kind) => (
         <Panel key={kind} title={TASK_LABELS[kind].label}>
           <p className="mb-3 max-w-[600px] text-xs text-[var(--color-text-secondary)]">{TASK_LABELS[kind].detail}</p>

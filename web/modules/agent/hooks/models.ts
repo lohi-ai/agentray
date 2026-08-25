@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, type AgentScopes, type AgentTaskTiers, type WorkspaceModelTiersInput, type WorkspaceProviderInput } from '@/lib/api';
+import { type AgentAdvisor, AgentRayAPI, type AgentScopes, type AgentTaskTiers, type WorkspaceModelTiersInput, type WorkspaceProviderInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 export function useWorkspaceModels() {
@@ -161,6 +161,40 @@ export function useAgentTaskTiers(agentID = '') {
     taskTiers: tiersQuery.data?.tiers,
     taskTiersLoading: tiersQuery.isLoading,
     saveTaskTiers: (tiers: AgentTaskTiers) => saveTiers.mutateAsync(tiers),
+  };
+}
+
+// useAgentAdvisor reads and writes the per-agent reviewer switch. The save takes
+// a partial so a caller changing only the instructions cannot silently turn the
+// reviewer off — `enabled: false` must be something the operator meant.
+export function useAgentAdvisor(agentID = '') {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const setMessage = useUIStore((s) => s.setMessage);
+  const setError = useUIStore((s) => s.setError);
+  const queryClient = useQueryClient();
+  const client = () => new AgentRayAPI(projectID!);
+
+  const advisorQuery = useQuery({
+    queryKey: ['agent-advisor', projectID, agentID],
+    queryFn: () => client().agentAdvisor(agentID),
+    enabled: !!projectID,
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const save = useMutation({
+    mutationFn: (patch: Partial<AgentAdvisor>) => client().updateAgentAdvisor(patch, agentID),
+    onSuccess: () => {
+      setMessage('Advisor saved');
+      queryClient.invalidateQueries({ queryKey: ['agent-advisor', projectID, agentID] });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  return {
+    advisor: advisorQuery.data?.advisor,
+    advisorLoading: advisorQuery.isLoading,
+    saveAdvisor: (patch: Partial<AgentAdvisor>) => save.mutateAsync(patch),
   };
 }
 

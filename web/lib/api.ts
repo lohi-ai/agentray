@@ -791,14 +791,34 @@ export type AgentBudgetInput = {
   max_runs: number;
 };
 
-// AGENT_TASK_KINDS are the 4 LLM call sites whose tier each agent maps. The map
+// AGENT_TASK_KINDS are the 5 LLM call sites whose tier each agent maps. The map
 // value is a workspace tier name ('lite' | 'flash' | 'pro').
-export const AGENT_TASK_KINDS = ['triage', 'run', 'compaction', 'reflection'] as const;
+export const AGENT_TASK_KINDS = ['triage', 'run', 'compaction', 'reflection', 'advisor'] as const;
 export type AgentTaskKind = (typeof AGENT_TASK_KINDS)[number];
 
 // AgentTaskTiers maps each task kind to the workspace tier it runs on. A partial
-// map still resolves all 4 (the server merges over the default).
+// map still resolves every kind (the server merges over the default).
 export type AgentTaskTiers = Partial<Record<AgentTaskKind, ModelTier>>;
+
+// AgentAdvisor is the per-agent reviewer switch: whether a second model checks
+// this agent's answer before a run finishes, and the review priorities it holds
+// the agent to. `instructions` reaches the REVIEWER only, never the agent — it
+// is guidance useful to someone checking the work and usually too noisy to put
+// in front of the agent doing it.
+export type AgentAdvisor = {
+  scope_id?: string;
+  enabled: boolean;
+  instructions: string;
+};
+
+// AgentAdvisorNote is one note the reviewer left on a run. `delivered` is the
+// distinction that matters to an operator: a nit was recorded and the answer
+// shipped, while a concern or blocker was put in front of the agent to resolve.
+export type AgentAdvisorNote = {
+  text: string;
+  severity: 'nit' | 'concern' | 'blocker';
+  delivered: boolean;
+};
 
 // AgentConfigTestResult is the per-tier connectivity check returned by
 // testWorkspaceModels: only configured tiers appear in `tiers`.
@@ -2013,8 +2033,8 @@ export class AgentRayAPI {
   }
 
   // Per-agent task→tier map: which workspace tier each task kind (triage/run/
-  // compaction/reflection) draws from. `agentID` selects the agent (empty = the
-  // project's default agent).
+  // compaction/reflection/advisor) draws from. `agentID` selects the agent
+  // (empty = the project's default agent).
   agentTaskTiers(agentID = '') {
     return this.get<{ tiers: AgentTaskTiers }>(`/api/agent/task-tiers${agentQuery(agentID)}`);
   }
@@ -2023,6 +2043,19 @@ export class AgentRayAPI {
     return this.request<{ tiers: AgentTaskTiers }>(this.withProject(`/api/agent/task-tiers${agentQuery(agentID)}`), {
       method: 'PUT',
       body: JSON.stringify({ tiers }),
+    });
+  }
+
+  // Per-agent advisor settings. The PUT takes a partial: an omitted field is
+  // left alone, so saving instructions cannot silently switch the reviewer off.
+  agentAdvisor(agentID = '') {
+    return this.get<{ advisor: AgentAdvisor }>(`/api/agent/advisor${agentQuery(agentID)}`);
+  }
+
+  updateAgentAdvisor(patch: Partial<AgentAdvisor>, agentID = '') {
+    return this.request<{ advisor: AgentAdvisor }>(this.withProject(`/api/agent/advisor${agentQuery(agentID)}`), {
+      method: 'PUT',
+      body: JSON.stringify(patch),
     });
   }
 

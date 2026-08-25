@@ -90,12 +90,22 @@ These compose independently and default closed where possible:
 | HTTP tool guard | Allows controlled egress only to configured hosts; blocks SSRF and redirects. | `sandbox/http_tool.go` |
 | MCP client boundary | Remote tools come from servers the tenant operates, reached over Streamable HTTP only (no stdio — nothing tenant-named is ever spawned on the host). Connections use the same SSRF-guarded client; server auth headers resolve `{{cred:NAME}}` host-side at build time, never through the tool loop; every `mcp__` tool counts as external-write for the unattended-publish rail. | `internal/shared/mcpclient`, `agentruntime.ToolMCP` |
 | Evidence guard (verify-on-stop) | A figure-shaped final answer produced with zero executed read tools re-opens the run once: verify with a granted data tool, cite earlier-turn tool results as the figures' provenance, or restate the figures as not read from project data. Delegation counts (`spawn_subagent` is evidence — the child ran the read tools); list numbering and dates don't count as figures. Policy-only, capped at one nudge, skipped for agents with no read tools. | `finishguard.Guard`, `agentruntime/evidence_guard.go` |
+| Advisor (review-on-stop) | Opt-in per agent: a reviewer model reads the finished run at the moment it tries to end and may leave notes. A `concern` or `blocker` re-opens the run so the agent must resolve it before the answer is accepted; a `nit` is recorded on the run and the answer ships. Runs **after** the goal gate and the evidence guard — the first stop interceptor to re-open wins, so the checks that cost no tokens speak first. Every failure path (provider error, timeout, unparseable output) accepts the finish: the advisor is a second opinion, never a dependency. Bounded at 2 rounds and 3 notes per round; notes are clamped, escaped, deduped by escalation rank, and content-free filler is dropped before anything reaches the agent. Default off. | `agentcore/plugins/advisor`, `agentruntime/advisor.go`, `agent_advisor` |
 
 Important properties:
 
 - policy is default-deny;
 - unknown credentials fail closed;
 - secret values are write-only from APIs and never logged as tool traces;
+- the advisor is a **reviewer, not an approver**: it cannot allow, deny, or
+  execute anything, holds no tools, and its only output is advisory text
+  rendered with `guidance="weigh, don't blindly obey"`. It is also an
+  injection surface worth naming — it reads a transcript that may contain
+  attacker-controlled text and its note becomes a user message in the agent's
+  conversation — so notes are length-clamped, XML-escaped, and their severity
+  is enum-constrained before rendering. Enabling it can also send the run's
+  transcript to whatever provider backs the advisor tier, which may not be the
+  one the run itself used;
 - sandbox has no host env, no network by default, non-root, read-only root, resource
   caps, and timeout kill;
 - `http_request` is per-agent allowlisted and re-checks resolved IPs to block
