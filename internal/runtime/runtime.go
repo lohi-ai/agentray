@@ -198,9 +198,10 @@ type BuildParams struct {
 	// agent with no advisor, and costs nothing.
 	Advisor advisor.Reviewer
 	// AdvisorNotes receives every note the advisor raised, including the nits
-	// that never reach the model. It is how the run record shows what the
-	// reviewer said; nil discards them.
-	AdvisorNotes func(context.Context, []advisor.Note)
+	// that never reach the model, plus whether that review was actually put in
+	// front of the agent. It is how the run record shows what the reviewer
+	// said; nil discards them.
+	AdvisorNotes func(ctx context.Context, notes []advisor.Note, delivered bool)
 	// Goal, when non-empty, activates agentcore's run-level goal gate (Claude
 	// Code /goal analog): the completion contract lands in the system prompt
 	// and a finish without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens

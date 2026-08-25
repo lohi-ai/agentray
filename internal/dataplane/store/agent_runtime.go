@@ -55,10 +55,11 @@ type AgentRun struct {
 type AgentAdvisorNote struct {
 	Text     string `json:"text"`
 	Severity string `json:"severity"` // nit | concern | blocker
-	// Delivered records whether this note re-opened the run. A nit is recorded
-	// and the answer ships; a concern or blocker was put in front of the agent
-	// to resolve. Without this the operator cannot tell "the reviewer mentioned
-	// it" from "the agent was made to answer for it".
+	// Delivered records whether this note re-opened the run. It is a property
+	// of the REVIEW, not of the note's severity: the advisor injects a review
+	// whole, so a nit raised alongside a blocker was delivered too, while the
+	// same nit raised on its own was not. Without this the operator cannot tell
+	// "the reviewer mentioned it" from "the agent was made to answer for it".
 	Delivered bool `json:"delivered"`
 }
 

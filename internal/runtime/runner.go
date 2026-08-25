@@ -736,7 +736,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// settings read that fails leaves it off — a reviewer is a second opinion,
 	// and no part of it may be a reason a run cannot start.
 	var advisorReviewer advisor.Reviewer
-	var advisorNotes func(context.Context, []advisor.Note)
+	var advisorNotes func(context.Context, []advisor.Note, bool)
 	if adv, err := r.Store.AdvisorForRun(ctx, scopeID); err == nil && adv.Enabled {
 		// Its own tier, resolved like every other task kind. Defaults to pro:
 		// see storage.DefaultTaskTiers.

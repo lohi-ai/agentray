@@ -75,7 +75,7 @@ func TestNitDoesNotReopenTheRunButIsReported(t *testing.T) {
 		Reviewer: func(context.Context, advisor.Review) ([]advisor.Note, error) {
 			return []advisor.Note{{Text: "the second query could reuse the first CTE", Severity: advisor.SeverityNit}}, nil
 		},
-		OnNotes: func(_ context.Context, n []advisor.Note) { reported = append(reported, n...) },
+		OnNotes: func(_ context.Context, n []advisor.Note, _ bool) { reported = append(reported, n...) },
 	}, agentcore.AssistantText("done"))
 
 	res, err := agent.Prompt(context.Background(), "go")
@@ -90,6 +90,46 @@ func TestNitDoesNotReopenTheRunButIsReported(t *testing.T) {
 	}
 	if len(reported) != 1 || reported[0].Severity != advisor.SeverityNit {
 		t.Fatalf("OnNotes got %+v, want the one nit", reported)
+	}
+}
+
+// A review is injected whole. So the delivered flag OnNotes reports is a
+// property of the review, not of each note's severity — and a host that infers
+// it from severity writes down that the agent never saw a note it read.
+func TestANitRidingWithABlockerIsReportedAsDelivered(t *testing.T) {
+	type record struct {
+		notes     []advisor.Note
+		delivered bool
+	}
+	var got []record
+	round := 0
+	agent, _ := build(t, advisor.Plugin{
+		Reviewer: func(context.Context, advisor.Review) ([]advisor.Note, error) {
+			round++
+			if round > 1 {
+				return nil, nil
+			}
+			return []advisor.Note{
+				{Text: "the total double-counts refunded orders", Severity: advisor.SeverityBlocker},
+				{Text: "the second query could reuse the first CTE", Severity: advisor.SeverityNit},
+			}, nil
+		},
+		OnNotes: func(_ context.Context, n []advisor.Note, delivered bool) {
+			got = append(got, record{notes: n, delivered: delivered})
+		},
+	}, agentcore.AssistantText("first"), agentcore.AssistantText("second"))
+
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("OnNotes called %d times, want 1", len(got))
+	}
+	if !got[0].delivered {
+		t.Error("a review containing a blocker re-opened the run, so every note in it reached the agent — delivered must say so")
+	}
+	if len(got[0].notes) != 2 {
+		t.Fatalf("OnNotes got %d notes, want both — the nit rode along in the same injection", len(got[0].notes))
 	}
 }
 

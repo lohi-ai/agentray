@@ -131,9 +131,11 @@ type Plugin struct {
 	// DefaultMaxNotesPerReview.
 	MaxNotesPerReview int
 	// OnNotes, when set, receives every note the guard accepted — including
-	// nits, which never reach the model. It is how the host surfaces advisor
-	// output on the run record; it must not block.
-	OnNotes func(ctx context.Context, notes []Note)
+	// the nits the agent never sees — so the host can record what the reviewer
+	// said. delivered reports whether these notes were actually put in front of
+	// the agent: a review is injected whole or not at all, so a nit riding
+	// alongside a blocker IS delivered, and severity alone cannot tell you that.
+	OnNotes func(ctx context.Context, notes []Note, delivered bool)
 }
 
 // Of wraps a reviewer with the default bounds.
@@ -180,7 +182,7 @@ func (p Plugin) BeginRun(context.Context, agentcore.RunInfo) (agentcore.Extensio
 type advisorRun struct {
 	reviewer  Reviewer
 	rounds    int
-	onNotes   func(context.Context, []Note)
+	onNotes   func(context.Context, []Note, bool)
 	guard     *EmissionGuard
 	messages  []agentcore.Message
 	delivered []Note
@@ -248,8 +250,12 @@ func (a *advisorRun) TurnStopping(ctx context.Context, info agentcore.StopInfo) 
 	if len(accepted) == 0 {
 		return agentcore.StopDecision{}
 	}
+	// interrupting decides the whole review, not each note: the injection below
+	// carries every accepted note, so a nit beside a blocker reaches the agent
+	// too. Report that, rather than letting the host infer delivery from
+	// severity and record a note the agent read as one it never saw.
 	if a.onNotes != nil {
-		a.onNotes(ctx, accepted)
+		a.onNotes(ctx, accepted, interrupting)
 	}
 	// Nits alone do not buy a turn. They are already recorded through OnNotes,
 	// which is the whole delivery a nit gets.

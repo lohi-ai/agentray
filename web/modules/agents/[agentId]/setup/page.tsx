@@ -462,11 +462,17 @@ function BudgetMeter({ status }: { status: BudgetStatus | null }) {
 function AdvisorSection({ agentID }: { agentID: string }) {
   const { advisor, advisorLoading, saveAdvisor } = useAgentAdvisor(agentID);
   const [instructions, setInstructions] = useState<string | null>(null);
-  const [seeded, setSeeded] = useState<unknown>(null);
+  const [seededFor, setSeededFor] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  if (advisor && advisor !== seeded) {
-    setSeeded(advisor);
+  // Seed the textarea once per agent, keyed on the agent — NOT on the query
+  // object, which is a new identity after every refetch. Keying on identity
+  // meant that typing into this box and then hitting the on/off button threw
+  // the typing away: the toggle's save invalidates the query, the refetch
+  // hands back an equal-but-new object, and the re-seed overwrites the draft
+  // with the server copy that never saw it.
+  if (advisor && seededFor !== agentID) {
+    setSeededFor(agentID);
     setInstructions(advisor.instructions);
   }
   if (advisorLoading && instructions === null) return <Panel title="Check the work"><Loading label="Loading advisor…" /></Panel>;

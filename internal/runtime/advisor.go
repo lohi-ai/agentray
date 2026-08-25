@@ -355,8 +355,8 @@ func renderAdvisorMessage(m agentcore.Message) string {
 //
 // Best-effort. A review that cannot be written down must not fail the run it
 // reviewed, and must not block the loop that is trying to finish.
-func (r *Runner) advisorNoteRecorder(runID string) func(context.Context, []advisor.Note) {
-	return func(ctx context.Context, notes []advisor.Note) {
+func (r *Runner) advisorNoteRecorder(runID string) func(context.Context, []advisor.Note, bool) {
+	return func(ctx context.Context, notes []advisor.Note, delivered bool) {
 		if r.Store == nil || len(notes) == 0 {
 			return
 		}
@@ -365,7 +365,7 @@ func (r *Runner) advisorNoteRecorder(runID string) func(context.Context, []advis
 			rows = append(rows, storage.AgentAdvisorNote{
 				Text:      n.Text,
 				Severity:  string(n.Severity),
-				Delivered: n.Severity.Interrupting(),
+				Delivered: delivered,
 			})
 		}
 		_ = r.Store.RecordAgentRunAdvisorNotes(ctx, runID, rows)
