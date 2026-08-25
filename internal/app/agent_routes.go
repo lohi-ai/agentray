@@ -231,6 +231,53 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.JSON(http.StatusOK, map[string]any{"tiers": tiers})
 	})
 
+	// --- per-agent advisor (the reviewer that checks the answer before a run
+	// finishes). Read is member-level like the tier map beside it; the write is
+	// owner/admin, enforced in the store. ---
+	e.GET("/api/agent/advisor", func(c echo.Context) error {
+		ctx, project, err := authProject(c, store)
+		if err != nil {
+			return err
+		}
+		adv, err := store.GetAgentAdvisor(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return c.JSON(http.StatusOK, map[string]any{"advisor": adv})
+	})
+
+	e.PUT("/api/agent/advisor", func(c echo.Context) error {
+		ctx, project, err := authProject(c, store)
+		if err != nil {
+			return err
+		}
+		// Enabled is a pointer so an absent field means "leave it alone": a
+		// client saving only the instructions must not silently switch the
+		// reviewer off, and Go's zero value for bool is exactly that switch.
+		var payload struct {
+			Enabled      *bool   `json:"enabled"`
+			Instructions *string `json:"instructions"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		current, err := store.GetAgentAdvisor(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		if payload.Enabled != nil {
+			current.Enabled = *payload.Enabled
+		}
+		if payload.Instructions != nil {
+			current.Instructions = *payload.Instructions
+		}
+		adv, err := store.UpsertAgentAdvisor(c.Request().Context(), ctx.User.ID, project.ID, c.QueryParam("agent"), current)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+		}
+		return c.JSON(http.StatusOK, map[string]any{"advisor": adv})
+	})
+
 	// --- definition (SOUL + AGENTS) ---
 	e.GET("/api/agent/definition", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)

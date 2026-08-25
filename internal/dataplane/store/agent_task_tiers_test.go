@@ -4,13 +4,14 @@ import "testing"
 
 func TestDefaultTaskTiers(t *testing.T) {
 	// The default map must reproduce today's behavior: triage/compaction on the
-	// cheap rung, the loop on flash, reflection on pro.
+	// cheap rung, the loop on flash, reflection and the advisor on pro.
 	d := DefaultTaskTiers()
 	want := map[string]string{
 		TaskTriage:     "lite",
 		TaskRun:        "flash",
 		TaskCompaction: "lite",
 		TaskReflection: "pro",
+		TaskAdvisor:    "pro",
 	}
 	for k, v := range want {
 		if d[k] != v {
@@ -28,8 +29,13 @@ func TestAgentTaskTiersMerge(t *testing.T) {
 	if got[TaskCompaction] != "lite" {
 		t.Errorf("compaction = %q, want lite (default)", got[TaskCompaction])
 	}
-	if len(got) != 4 {
-		t.Errorf("merged map has %d kinds, want 4", len(got))
+	// Every kind resolves, including one added after this row was written —
+	// which is the property that lets a task kind be added without a backfill.
+	if len(got) != len(taskTierKinds) {
+		t.Errorf("merged map has %d kinds, want %d", len(got), len(taskTierKinds))
+	}
+	if got[TaskAdvisor] != "pro" {
+		t.Errorf("advisor = %q, want pro (default for a kind the stored row predates)", got[TaskAdvisor])
 	}
 }
 

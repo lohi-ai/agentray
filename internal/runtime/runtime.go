@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
@@ -191,6 +192,15 @@ type BuildParams struct {
 	// with a bounded synthetic follow-up. The runner wires the evidence guard
 	// here (see evidence_guard.go); nil accepts every finish.
 	FinishGuard finishguard.Guard
+	// Advisor, when set, is the reviewer consulted after the finish guard: a
+	// second model reads the finished work and may re-open the run with notes
+	// the agent has to resolve (see advisor.go). nil — the default — is an
+	// agent with no advisor, and costs nothing.
+	Advisor advisor.Reviewer
+	// AdvisorNotes receives every note the advisor raised, including the nits
+	// that never reach the model. It is how the run record shows what the
+	// reviewer said; nil discards them.
+	AdvisorNotes func(context.Context, []advisor.Note)
 	// Goal, when non-empty, activates agentcore's run-level goal gate (Claude
 	// Code /goal analog): the completion contract lands in the system prompt
 	// and a finish without a STATUS: DONE / STATUS: BLOCKED sentinel re-opens
@@ -531,6 +541,15 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	}
 	if p.FinishGuard != nil {
 		list = append(list, finishguard.Of(p.FinishGuard))
+	}
+	// The advisor comes last of the three stop interceptors, and the order is
+	// the contract: the first one to re-open the run wins, so the cheap
+	// deterministic checks get to speak first. An unmet goal makes any review
+	// of that answer moot, and an unbacked figure is already caught by a rule
+	// that costs no tokens — paying for a pro-tier review to rediscover either
+	// is waste. What is left for the advisor is the class neither rule can see.
+	if p.Advisor != nil {
+		list = append(list, advisor.Plugin{Reviewer: p.Advisor, OnNotes: p.AdvisorNotes})
 	}
 	if p.Subagents != nil {
 		sa := *p.Subagents

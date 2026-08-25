@@ -220,6 +220,9 @@ var mutatingRoutes = [][2]string{
 	{http.MethodDelete, "/api/workspace/providers/:id"},
 	{http.MethodPut, "/api/agent/capabilities"},
 	{http.MethodPut, "/api/agent/task-tiers"},
+	// Turning the advisor on or off changes what the agent is allowed to hand
+	// over, so it stays guarded — a demo viewer must not switch a reviewer off.
+	{http.MethodPut, "/api/agent/advisor"},
 	{http.MethodPut, "/api/agent/definition"},
 	{http.MethodPost, "/api/agent/definition/generate"},
 	{http.MethodPost, "/api/agent/skills"},

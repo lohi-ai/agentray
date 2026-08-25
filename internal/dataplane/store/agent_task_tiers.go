@@ -9,15 +9,17 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Task kinds — the 4 real LLM call sites where a tier choice takes effect. See
+// Task kinds — the 5 real LLM call sites where a tier choice takes effect. See
 // internal/runtime: triage is the orchestrator front-desk classifier, run is
-// the loop's primary reasoning turns, compaction is the in-loop summary call, and
-// reflection is the post-run reflect pass.
+// the loop's primary reasoning turns, compaction is the in-loop summary call,
+// reflection is the post-run reflect pass, and advisor is the reviewer that
+// checks the answer before the run is allowed to finish.
 const (
 	TaskTriage     = "triage"
 	TaskRun        = "run"
 	TaskCompaction = "compaction"
 	TaskReflection = "reflection"
+	TaskAdvisor    = "advisor"
 )
 
 // AgentTaskTiers maps each task kind to one of the workspace model tiers
@@ -27,20 +29,28 @@ type AgentTaskTiers map[string]string
 
 // DefaultTaskTiers reproduces today's behavior (with compaction nudged down to
 // lite, a deliberate cost improvement over borrowing the run's flash rung).
+//
+// The advisor defaults to pro because reviewing is the harder half of the job:
+// it reads a whole run cold and has to be right about what is wrong with it,
+// while the run itself had the context built up turn by turn. A reviewer weaker
+// than the agent it reviews spends tokens to produce noise the agent then has
+// to argue with. It costs nothing by default — the advisor is off unless the
+// operator turns it on (see agent_advisor).
 func DefaultTaskTiers() AgentTaskTiers {
 	return AgentTaskTiers{
 		TaskTriage:     "lite",
 		TaskRun:        "flash",
 		TaskCompaction: "lite",
 		TaskReflection: "pro",
+		TaskAdvisor:    "pro",
 	}
 }
 
-var taskTierKinds = map[string]bool{TaskTriage: true, TaskRun: true, TaskCompaction: true, TaskReflection: true}
+var taskTierKinds = map[string]bool{TaskTriage: true, TaskRun: true, TaskCompaction: true, TaskReflection: true, TaskAdvisor: true}
 var taskTierValues = map[string]bool{"lite": true, "flash": true, "pro": true}
 
 // merge overlays the stored map over the defaults so a partial or absent row
-// still resolves all four kinds.
+// still resolves every kind — including one added after the row was written.
 func (m AgentTaskTiers) merge() AgentTaskTiers {
 	out := DefaultTaskTiers()
 	for k, v := range m {
@@ -126,7 +136,7 @@ ON CONFLICT (scope_id) DO UPDATE SET tiers = EXCLUDED.tiers, updated_at = now()`
 }
 
 // TaskTiersForRun resolves the merged task→tier map for a run (system path, no
-// requesting user). A partial or absent row still resolves all four kinds.
+// requesting user). A partial or absent row still resolves every kind.
 func (s *Store) TaskTiersForRun(ctx context.Context, scopeID string) (AgentTaskTiers, error) {
 	stored, err := s.readAgentTaskTiers(ctx, scopeID)
 	if err != nil {

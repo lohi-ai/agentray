@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
@@ -730,6 +731,26 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 
+	// The advisor: a reviewer that reads the finished work before the run is
+	// allowed to end. Off unless the operator turned it on for this agent, and a
+	// settings read that fails leaves it off — a reviewer is a second opinion,
+	// and no part of it may be a reason a run cannot start.
+	var advisorReviewer advisor.Reviewer
+	var advisorNotes func(context.Context, []advisor.Note)
+	if adv, err := r.Store.AdvisorForRun(ctx, scopeID); err == nil && adv.Enabled {
+		// Its own tier, resolved like every other task kind. Defaults to pro:
+		// see storage.DefaultTaskTiers.
+		advTC := tierSet.resolve(TierFromName(taskMap[storage.TaskAdvisor]))
+		advisorReviewer = r.advisorReviewer(advisorInput{
+			Provider:     advTC.Provider,
+			Model:        advTC.Model,
+			BaseURL:      advTC.BaseURL,
+			APIKey:       advTC.APIKey,
+			Instructions: adv.Instructions,
+		})
+		advisorNotes = r.advisorNoteRecorder(runID)
+	}
+
 	mem := NewPgMemory(r.Store, cfg.RedactPII)
 	if emb := newEmbedder(primary.Provider, primary.BaseURL, primary.APIKey); emb != nil {
 		mem.Embedder = emb
@@ -762,21 +783,25 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		// The run's resolved tools go in alongside the scopes because a pack may
 		// grant an evidence tool (web_fetch) that no scope names.
 		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes), runToolNames(runTools)),
-		Goal:        opts.Goal,
-		Soul:        def.SoulMD,
-		Agents:      def.AgentsMD,
-		Skills:      skills,
-		SkillLoader: r.skillLoader(scopeID),
-		Data:        r.Store,
-		Memory:      mem,
-		Notifier:    r.Notifier,
-		RunID:       runID,
-		Sandbox:     r.Sandbox,
-		Credentials: creds,
-		Tools:       runTools,
-		ReadOnly:    opts.ReadOnly,
-		Tracer:      r.Tracer,
-		StepGate:    opts.StepGate,
+		// Consulted after the two rule-based gates above; nil when this agent's
+		// advisor is off, which makes the composition identical to before.
+		Advisor:      advisorReviewer,
+		AdvisorNotes: advisorNotes,
+		Goal:         opts.Goal,
+		Soul:         def.SoulMD,
+		Agents:       def.AgentsMD,
+		Skills:       skills,
+		SkillLoader:  r.skillLoader(scopeID),
+		Data:         r.Store,
+		Memory:       mem,
+		Notifier:     r.Notifier,
+		RunID:        runID,
+		Sandbox:      r.Sandbox,
+		Credentials:  creds,
+		Tools:        runTools,
+		ReadOnly:     opts.ReadOnly,
+		Tracer:       r.Tracer,
+		StepGate:     opts.StepGate,
 		// Durable resume: key the append-only log on the run id (the FK that the
 		// resume endpoint and the trace both use) — unless this run continues an
 		// earlier run's session, in which case the ORIGINAL log keeps growing

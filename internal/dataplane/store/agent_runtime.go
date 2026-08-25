@@ -42,6 +42,24 @@ type AgentRun struct {
 	Summary      string     `json:"summary"`
 	StartedAt    time.Time  `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	// AdvisorNotes is what the reviewer said about this run, in the order it
+	// said it. Empty for a run with no advisor — and for one the advisor read
+	// and had nothing to say about, which is the expected outcome.
+	AdvisorNotes []AgentAdvisorNote `json:"advisor_notes,omitempty"`
+}
+
+// AgentAdvisorNote is one persisted advisor note. It mirrors
+// agentcore/plugins/advisor.Note; the duplication is the module boundary —
+// agentcore imports no storage, and a wire/DB shape must be free to outlive a
+// refactor of the plugin's in-memory type.
+type AgentAdvisorNote struct {
+	Text     string `json:"text"`
+	Severity string `json:"severity"` // nit | concern | blocker
+	// Delivered records whether this note re-opened the run. A nit is recorded
+	// and the answer ships; a concern or blocker was put in front of the agent
+	// to resolve. Without this the operator cannot tell "the reviewer mentioned
+	// it" from "the agent was made to answer for it".
+	Delivered bool `json:"delivered"`
 }
 
 // AgentToolCall is one persisted tool execution (§9 agent_tool_calls).
@@ -120,6 +138,29 @@ WHERE id = $1`, runID, status, summary, tokenIn, tokenOut, costUSD, costUnpriced
 	return err
 }
 
+// RecordAgentRunAdvisorNotes persists what the advisor said about a run.
+//
+// Written when the notes are raised rather than folded into FinishAgentRun,
+// because the interesting case is the run that does NOT finish cleanly: a
+// blocker raised on a run that then hit its turn cap is exactly the record
+// worth keeping, and a writer that only runs on a clean finish loses it.
+// Best-effort by design — a review that cannot be persisted must not fail the
+// run it reviewed.
+func (s *Store) RecordAgentRunAdvisorNotes(ctx context.Context, runID string, notes []AgentAdvisorNote) error {
+	if len(notes) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(notes)
+	if err != nil {
+		return err
+	}
+	// Append rather than replace: the advisor speaks once per review round, and
+	// round two must not erase round one.
+	_, err = s.pg.Exec(ctx, `
+UPDATE agent_runs SET advisor_notes_json = advisor_notes_json || $2::jsonb WHERE id = $1`, runID, string(payload))
+	return err
+}
+
 // RecordAgentToolCall persists one tool-call trace projection.
 func (s *Store) RecordAgentToolCall(ctx context.Context, runID string, tc AgentToolCall) error {
 	args := tc.ArgsJSON
@@ -167,12 +208,18 @@ func (s *Store) GetAgentRun(ctx context.Context, userID, projectID, runID string
 		return AgentRun{}, nil, err
 	}
 	var r AgentRun
+	var advisorRaw string
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at, advisor_notes_json::text
 FROM agent_runs WHERE id = $1 AND project_id = $2`, runID, project.ID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt, &advisorRaw)
 	if err != nil {
 		return AgentRun{}, nil, err
+	}
+	// A row written before the column existed reads as '[]'; an unparseable
+	// payload is dropped rather than failing the whole run detail.
+	if advisorRaw != "" && advisorRaw != "[]" {
+		_ = json.Unmarshal([]byte(advisorRaw), &r.AdvisorNotes)
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, run_id::text, tool, args_json::text, allowed, result_meta, duration_ms, created_at

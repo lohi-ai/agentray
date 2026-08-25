@@ -516,6 +516,27 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		// Partial: most agents have no preset_slug, so the index only carries the
 		// rows the check actually queries.
 		`CREATE INDEX IF NOT EXISTS agents_project_preset_idx ON agents (project_id, preset_slug) WHERE preset_slug <> ''`,
+		// What the advisor said about this run — every note it raised, including
+		// the nits that never reached the model and so appear nowhere else. A
+		// constant default is metadata-only on Postgres 11+, so this does not
+		// rewrite agent_runs (same reasoning as agent_llm_calls.tool_gates_json).
+		// Empty = the run predates the column, or had no advisor.
+		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS advisor_notes_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		// Per-agent advisor settings: whether a reviewer model checks this
+		// agent's answers before a run finishes, and the review priorities it
+		// should hold the agent to. Deliberately NOT folded into
+		// agent_task_tiers: "is the advisor on" and "which tier does it draw
+		// from" are different questions, and overloading a tier value with an
+		// off switch loses the ability to say "on, but cheaper". Absent row =
+		// off, which is the default for every existing agent, so no backfill.
+		// Keyed by scope_id = agent id (default agent's id == project_id), the
+		// same key agent_capabilities and agent_task_tiers use.
+		`CREATE TABLE IF NOT EXISTS agent_advisor (
+	scope_id UUID PRIMARY KEY,
+	enabled BOOLEAN NOT NULL DEFAULT false,
+	instructions TEXT NOT NULL DEFAULT '',
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
