@@ -213,7 +213,7 @@ verbatim is discarded — say something new, escalate, or return {"notes":[]}.
 			case !t.Allowed:
 				fmt.Fprintf(&b, "- %s: BLOCKED (%s)\n", t.Tool, t.Reason)
 			case t.Error != "":
-				fmt.Fprintf(&b, "- %s: ERROR %s\n", t.Tool, truncate(t.Error, 200))
+				fmt.Fprintf(&b, "- %s: ERROR %s\n", t.Tool, clip(t.Error, 200))
 			default:
 				fmt.Fprintf(&b, "- %s: ok\n", t.Tool)
 			}
@@ -227,7 +227,7 @@ verbatim is discarded — say something new, escalate, or return {"notes":[]}.
 		}
 	}
 
-	fmt.Fprintf(&b, "\n\n## The answer under review (turn %d)\n\n%s\n", rev.Turns, truncate(rev.Final, 20_000))
+	fmt.Fprintf(&b, "\n\n## The answer under review (turn %d)\n\n%s\n", rev.Turns, clip(rev.Final, 20_000))
 	b.WriteString("\nReturn JSON only.")
 	return b.String()
 }
@@ -276,12 +276,34 @@ func renderAdvisorTranscript(msgs []agentcore.Message, budget int) string {
 	if head == 0 && tail == len(blocks) {
 		// One block larger than the whole budget: show its head rather than
 		// eliding the entire transcript.
-		return truncate(blocks[0], budget) + "\n\n[… truncated]"
+		return clip(blocks[0], budget) + "\n\n[… truncated]"
 	}
 	out := append([]string{}, blocks[:head]...)
-	out = append(out, fmt.Sprintf("[… %d steps elided — this is a window on the run, not the whole of it …]", tail-head))
+	// Only claim an elision when there was one. A "0 steps elided" marker is a
+	// lie in the reviewer's prompt, and the marker exists precisely to be
+	// truthful about what the window left out.
+	if tail > head {
+		out = append(out, fmt.Sprintf("[… %d steps elided — this is a window on the run, not the whole of it …]", tail-head))
+	}
 	out = append(out, blocks[tail:]...)
 	return strings.Join(out, "\n\n")
+}
+
+// clip truncates to at most max BYTES without splitting a multi-byte rune.
+//
+// The shared truncate() cuts on a byte index, which for this prompt is a real
+// problem rather than a tidiness one: the transcripts are Vietnamese, so a cut
+// lands mid-rune routinely, and the replacement characters that survive into
+// the request are noise the reviewer has to read past on every long run.
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut]
 }
 
 // renderAdvisorMessage renders one message with its tool intent, which is the
@@ -301,16 +323,16 @@ func renderAdvisorMessage(m agentcore.Message) string {
 			// it as something the human asked for.
 			label = "system-injected"
 		}
-		return "### " + label + "\n" + truncate(m.Content, 8000)
+		return "### " + label + "\n" + clip(m.Content, 8000)
 	case agentcore.RoleAssistant:
 		var b strings.Builder
 		b.WriteString("### agent\n")
 		if s := strings.TrimSpace(m.Content); s != "" {
-			b.WriteString(truncate(s, 8000))
+			b.WriteString(clip(s, 8000))
 			b.WriteString("\n")
 		}
 		for _, tc := range m.ToolCalls {
-			fmt.Fprintf(&b, "→ calls %s(%s)\n", tc.Name, truncate(tc.Arguments, 2000))
+			fmt.Fprintf(&b, "→ calls %s(%s)\n", tc.Name, clip(tc.Arguments, 2000))
 		}
 		return strings.TrimRight(b.String(), "\n")
 	case agentcore.RoleTool:
@@ -318,7 +340,7 @@ func renderAdvisorMessage(m agentcore.Message) string {
 		if name == "" {
 			name = "tool"
 		}
-		return fmt.Sprintf("### %s result\n%s", name, truncate(m.Content, 4000))
+		return fmt.Sprintf("### %s result\n%s", name, clip(m.Content, 4000))
 	default:
 		return ""
 	}

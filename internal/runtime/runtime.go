@@ -533,9 +533,9 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	//
 	// A revisable gate swaps that entry rather than adding one: two goal plugins
 	// would both claim the durable goal seam. Replace moves the entry to the end
-	// of the list as it stands, which is still ahead of the finish guard appended
-	// just below — the only other stop interceptor in the composition, and the
-	// one the ordering contract is about.
+	// of the list as it stands, which is still ahead of the finish guard and the
+	// advisor appended just below — the other two stop interceptors in the
+	// composition, and the ones the ordering contract is about.
 	if revisableGoal(p) {
 		list = preset.Replace(list, goal.Plugin{Goal: p.Goal, Revisable: true})
 	}
