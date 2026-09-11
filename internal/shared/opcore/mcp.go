@@ -21,10 +21,11 @@ import (
 // SDK — the surface is small, depends only on encoding/json + Echo, and stays
 // inside opcore's no-storage wall like the other adapters.
 //
-// Auth is the same ProjectResolver the REST adapter uses: the resolved project id
-// scopes every CallContext. An MCP client authenticates per request by carrying
-// the project's API key (X-API-Key header or ?api_key=), so no OAuth dance is
-// required for self-hosted use.
+// Auth resolves a Principal per request (session cookie, scoped management
+// credential, or — on unsplit projects — the legacy project key). tools/list
+// advertises only what the principal may call, and tools/call re-authorizes
+// the named operation, so a hidden tool cannot be invoked by name. Capture
+// credentials are denied entirely.
 
 const mcpProtocolVersion = "2025-06-18"
 
@@ -79,12 +80,12 @@ type mcpContent struct {
 // MountMCP registers the JSON-RPC endpoint at the group root (e.g. POST /mcp).
 // deps is the same dependency bundle the REST and in-process adapters use, so an
 // external MCP client runs the identical usecase code as the in-house agent.
-func MountMCP(g *echo.Group, r *Registry, deps any, resolve ProjectResolver) {
+func MountMCP(g *echo.Group, r *Registry, deps any, resolve PrincipalResolver) {
 	g.POST("", func(c echo.Context) error { return handleMCP(c, r, deps, resolve) })
 	g.POST("/", func(c echo.Context) error { return handleMCP(c, r, deps, resolve) })
 }
 
-func handleMCP(c echo.Context, r *Registry, deps any, resolve ProjectResolver) error {
+func handleMCP(c echo.Context, r *Registry, deps any, resolve PrincipalResolver) error {
 	body, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		return c.JSON(http.StatusOK, rpcError(nil, -32700, "parse error: unreadable body"))
@@ -124,7 +125,7 @@ func handleMCP(c echo.Context, r *Registry, deps any, resolve ProjectResolver) e
 
 // dispatch routes one JSON-RPC message. The bool is false for notifications
 // (id absent), which must not produce a response.
-func dispatch(c echo.Context, r *Registry, deps any, resolve ProjectResolver, req jsonRPCRequest) (jsonRPCResponse, bool) {
+func dispatch(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, req jsonRPCRequest) (jsonRPCResponse, bool) {
 	isNotification := len(req.ID) == 0
 	switch req.Method {
 	case "initialize":
@@ -134,7 +135,14 @@ func dispatch(c echo.Context, r *Registry, deps any, resolve ProjectResolver, re
 	case "ping":
 		return ok(req.ID, map[string]any{}), !isNotification
 	case "tools/list":
-		return ok(req.ID, map[string]any{"tools": listTools(r)}), !isNotification
+		if isNotification {
+			return jsonRPCResponse{}, false
+		}
+		principal, err := resolve(c)
+		if err != nil {
+			return rpcError(req.ID, -32001, "authentication failed: "+httpErrMessage(err)), true
+		}
+		return ok(req.ID, map[string]any{"tools": listTools(r.AllowedSpecs(principal))}), !isNotification
 	case "tools/call":
 		if isNotification {
 			return jsonRPCResponse{}, false
@@ -167,8 +175,7 @@ func initializeResult(params json.RawMessage) map[string]any {
 	}
 }
 
-func listTools(r *Registry) []mcpTool {
-	specs := r.Specs()
+func listTools(specs []Spec) []mcpTool {
 	tools := make([]mcpTool, 0, len(specs))
 	for _, s := range specs {
 		tools = append(tools, mcpTool{
@@ -180,7 +187,7 @@ func listTools(r *Registry) []mcpTool {
 	return tools
 }
 
-func callTool(c echo.Context, r *Registry, deps any, resolve ProjectResolver, req jsonRPCRequest) jsonRPCResponse {
+func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, req jsonRPCRequest) jsonRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -193,18 +200,23 @@ func callTool(c echo.Context, r *Registry, deps any, resolve ProjectResolver, re
 		return rpcError(req.ID, -32602, "unknown tool: "+params.Name)
 	}
 
-	projectID, err := resolve(c)
+	principal, err := resolve(c)
 	if err != nil {
 		// Auth failures are reported as a tool error (isError) rather than a
 		// protocol error, so the model sees the reason and can surface it.
 		return ok(req.ID, errorResult("authentication failed: "+httpErrMessage(err)))
+	}
+	// tools/call re-authorizes by name: a principal cannot invoke an operation
+	// tools/list never advertised to it.
+	if !r.Authorize(principal, params.Name) {
+		return ok(req.ID, errorResult("credential may not invoke "+params.Name))
 	}
 
 	args := string(params.Arguments)
 	if args == "" {
 		args = "{}"
 	}
-	cc := CallContext{ProjectID: projectID, Deps: deps}
+	cc := CallContext{ProjectID: principal.ProjectID, Deps: deps, Principal: principal}
 	out, err := spec.OpInvoke(c.Request().Context(), cc, args)
 	if err != nil {
 		return ok(req.ID, errorResult(err.Error()))
@@ -212,7 +224,7 @@ func callTool(c echo.Context, r *Registry, deps any, resolve ProjectResolver, re
 
 	result := mcpToolResult{
 		Content: []mcpContent{{Type: "text", Text: out}},
-		Meta:    map[string]any{"project_id": projectID},
+		Meta:    map[string]any{"project_id": principal.ProjectID},
 	}
 	// When the handler returned a JSON object, expose it as structuredContent so a
 	// client can render it natively; leave it off for scalars/arrays the spec says

@@ -24,6 +24,7 @@ func echoOp() Operation[echoIn, echoOut] {
 	return Operation[echoIn, echoOut]{
 		Name:    "echo",
 		Summary: "Echo the input text back. Use to verify the MCP connection.",
+		Access:  AccessAnalyticsRead,
 		Handler: func(_ context.Context, cc CallContext, in echoIn) (echoOut, error) {
 			return echoOut{Echoed: in.Text, ProjectID: cc.ProjectID}, nil
 		},
@@ -31,17 +32,33 @@ func echoOp() Operation[echoIn, echoOut] {
 }
 
 // mcpServer wires a one-operation registry behind MountMCP, resolving every
-// request to a fixed project unless the header says "deny".
+// request to a fixed project unless the header says "deny". The resolved
+// principal is a session member (analytics read granted) unless X-Kind asks
+// for a different credential kind.
 func mcpServer(t *testing.T) *echo.Echo {
 	t.Helper()
 	reg := NewRegistry()
 	Register(reg, echoOp())
+	reg.SetLegacyAllowlist([]string{"echo"})
 	e := echo.New()
-	MountMCP(e.Group("/mcp"), reg, struct{}{}, func(c echo.Context) (string, error) {
+	MountMCP(e.Group("/mcp"), reg, struct{}{}, func(c echo.Context) (Principal, error) {
 		if c.Request().Header.Get("X-Deny") != "" {
-			return "", echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
+			return Principal{}, echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
 		}
-		return "proj-1", nil
+		p := Principal{ProjectID: "proj-1", Kind: CredSession, Role: "member",
+			Grants: []Access{AccessAnalyticsRead, AccessDashboardsWrite}}
+		switch CredentialKind(c.Request().Header.Get("X-Kind")) {
+		case CredCapture:
+			p.Kind = CredCapture
+			p.Grants = nil
+		case CredLegacy:
+			p.Kind = CredLegacy
+			p.Grants = nil
+		case CredManagement:
+			p.Kind = CredManagement
+			p.Grants = []Access{AccessAnalyticsRead}
+		}
+		return p, nil
 	})
 	return e
 }

@@ -44,7 +44,34 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, listTests())
 	opcore.Register(r, remember())
 	opcore.Register(r, sendNotification())
+	r.SetLegacyAllowlist(legacyOperationAllowlist)
 	return r
+}
+
+// legacyOperationAllowlist is the Option A contract: the exact set of
+// operations a pre-split project key could invoke when the credential split
+// shipped, plus verify_sdk — the one approved grandfathered addition (it is a
+// bounded recent-event read, a subset of what the key already reached through
+// recent_events). Every operation registered after this list was frozen is
+// denied to legacy keys by construction: the list is a constant, not a
+// snapshot of the registry, so adding an operation never expands it.
+//
+// Existing grants this preserves (all 17 pre-split operations):
+//
+//	analytics reads — activity_summary, recent_events, persons,
+//	  explore_events, run_sql, run_insight, run_funnel, run_retention,
+//	  list_dashboards, test_status, list_tests
+//	dashboard writes — create_dashboard, create_chart
+//	growth writes — submit_recommendation, propose_test, remember,
+//	  send_notification
+//	grandfathered — verify_sdk
+var legacyOperationAllowlist = []string{
+	"activity_summary", "recent_events", "persons", "explore_events",
+	"run_sql", "run_insight", "run_funnel", "run_retention",
+	"list_dashboards", "create_dashboard", "create_chart",
+	"submit_recommendation", "propose_test", "test_status", "list_tests",
+	"remember", "send_notification",
+	"verify_sdk",
 }
 
 // --- Read operations (monitor / data_quality) ---
@@ -58,6 +85,7 @@ func activitySummary() opcore.Operation[windowInput, storage.ActivitySummary] {
 		Name:    "activity_summary",
 		Summary: "Summarize event volume, errors, latency and cost over a recent window.",
 		Scope:   "monitor",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in windowInput) (storage.ActivitySummary, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -81,6 +109,7 @@ func recentEvents() opcore.Operation[recentEventsInput, recentEventsOutput] {
 		Name:    "recent_events",
 		Summary: "List the most recent raw events for the project.",
 		Scope:   "monitor",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in recentEventsInput) (recentEventsOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -107,6 +136,7 @@ func persons() opcore.Operation[windowInput, storage.PersonsSummary] {
 		Name:    "persons",
 		Summary: "Summarize persons (identified + anonymous) over a recent window.",
 		Scope:   "data_quality",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in windowInput) (storage.PersonsSummary, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -128,7 +158,8 @@ func exploreEvents() opcore.Operation[windowInput, storage.EventExplorer] {
 			"`events` is a raw sample for seeing an actual payload; it is truncated, so never count from it. " +
 			"Both cover the same window (`hours`, default recent) — widen `hours` rather than concluding an event " +
 			"is missing or a product is new.",
-		Scope: "data_quality",
+		Scope:  "data_quality",
+		Access: opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in windowInput) (storage.EventExplorer, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -183,7 +214,8 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"To combine the two tables, put events on the FROM side and join external_rows onto it " +
 			"(FROM events e JOIN external_rows x ON ...): events may appear exactly once and only after FROM, " +
 			"external_rows only after FROM or JOIN — comma joins, quoted table names, and JOIN events are rejected.",
-		Scope: "data_quality",
+		Scope:  "data_quality",
+		Access: opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runSQLInput) (runSQLOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -224,6 +256,7 @@ func runInsight() opcore.Operation[runInsightInput, storage.InsightResult] {
 		Name:    "run_insight",
 		Summary: "Run an insight (timeseries | funnel | retention) and return its computed series/rows.",
 		Scope:   "analyze_build",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runInsightInput) (storage.InsightResult, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -251,6 +284,7 @@ func runFunnel() opcore.Operation[runFunnelInput, storage.InsightResult] {
 		Name:    "run_funnel",
 		Summary: "Compute step-by-step conversion through an ordered list of events over a recent window.",
 		Scope:   "analyze_build",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runFunnelInput) (storage.InsightResult, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -272,6 +306,7 @@ func runRetention() opcore.Operation[runRetentionInput, storage.InsightResult] {
 		Name:    "run_retention",
 		Summary: "Compute cohort retention for a returning event over a recent window.",
 		Scope:   "analyze_build",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runRetentionInput) (storage.InsightResult, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -295,6 +330,7 @@ func listDashboards() opcore.Operation[noInput, listDashboardsOutput] {
 		Name:    "list_dashboards",
 		Summary: "List the project's existing dashboards (id + name) to pin charts to.",
 		Scope:   "analyze_build",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, _ noInput) (listDashboardsOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -316,9 +352,11 @@ type createDashboardInput struct {
 
 func createDashboard() opcore.Operation[createDashboardInput, storage.Dashboard] {
 	return opcore.Operation[createDashboardInput, storage.Dashboard]{
-		Name:    "create_dashboard",
-		Summary: "Create a new dashboard to group charts. Returns the new dashboard id.",
-		Scope:   "analyze_build",
+		Name:           "create_dashboard",
+		Summary:        "Create a new dashboard to group charts. Returns the new dashboard id.",
+		Scope:          "analyze_build",
+		Access:         opcore.AccessDashboardsWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in createDashboardInput) (storage.Dashboard, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -342,9 +380,11 @@ type createChartInput struct {
 
 func createChart() opcore.Operation[createChartInput, storage.Chart] {
 	return opcore.Operation[createChartInput, storage.Chart]{
-		Name:    "create_chart",
-		Summary: "Create a chart on a dashboard. Provide either metric/event_name for a built-in chart or a SELECT sql for a custom one.",
-		Scope:   "analyze_build",
+		Name:           "create_chart",
+		Summary:        "Create a chart on a dashboard. Provide either metric/event_name for a built-in chart or a SELECT sql for a custom one.",
+		Scope:          "analyze_build",
+		Access:         opcore.AccessDashboardsWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in createChartInput) (storage.Chart, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -378,9 +418,11 @@ type sendNotificationOutput struct {
 // secret-resolving); a build without a Notifier wired returns a clear error.
 func sendNotification() opcore.Operation[sendNotificationInput, sendNotificationOutput] {
 	return opcore.Operation[sendNotificationInput, sendNotificationOutput]{
-		Name:    "send_notification",
-		Summary: "Send a message to a configured alert channel (Slack/webhook/email) by name. Use to escalate something a human should see.",
-		Scope:   "growth_suggest",
+		Name:           "send_notification",
+		Summary:        "Send a message to a configured alert channel (Slack/webhook/email) by name. Use to escalate something a human should see.",
+		Scope:          "growth_suggest",
+		Access:         opcore.AccessGrowthWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in sendNotificationInput) (sendNotificationOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -422,10 +464,12 @@ type submitRecOutput struct {
 
 func submitRecommendation() opcore.Operation[submitRecInput, submitRecOutput] {
 	return opcore.Operation[submitRecInput, submitRecOutput]{
-		Name:     "submit_recommendation",
-		Summary:  "Submit a final marketing/sales/growth recommendation with supporting evidence. Ends a scheduled/manual run.",
-		Scope:    "growth_suggest",
-		Terminal: true,
+		Name:           "submit_recommendation",
+		Summary:        "Submit a final marketing/sales/growth recommendation with supporting evidence. Ends a scheduled/manual run.",
+		Scope:          "growth_suggest",
+		Access:         opcore.AccessGrowthWrite,
+		MinSessionRole: "member",
+		Terminal:       true,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in submitRecInput) (submitRecOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -462,9 +506,11 @@ type rememberOutput struct {
 
 func remember() opcore.Operation[rememberInput, rememberOutput] {
 	return opcore.Operation[rememberInput, rememberOutput]{
-		Name:    "remember",
-		Summary: "Persist a durable fact/learning/outcome to long-term memory for future runs.",
-		Scope:   "growth_suggest",
+		Name:           "remember",
+		Summary:        "Persist a durable fact/learning/outcome to long-term memory for future runs.",
+		Scope:          "growth_suggest",
+		Access:         opcore.AccessGrowthWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in rememberInput) (rememberOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {

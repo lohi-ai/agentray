@@ -12,9 +12,9 @@ import (
 // These endpoints run the exact same usecase handlers the agent's in-process
 // tools and the client CLI run — one definition, three adapters. They are
 // additive: the existing analytics routes remain the web client's contract and
-// migrate onto /api/op incrementally. Auth reuses projectFromRequest (session
-// cookie or X-API-Key), so the operation surface inherits the same access checks
-// as the rest of the API.
+// migrate onto /api/op incrementally. Auth resolves a Principal (management
+// credential, legacy/capture project key, or session) and every call is
+// authorized against the operation's access class before the handler runs.
 func registerOpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier) {
 	reg := usecase.Registry()
 	deps := &usecase.Deps{
@@ -23,11 +23,7 @@ func registerOpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notif
 		Notifier: notifier,
 	}
 	group := e.Group("/api/op")
-	opcore.MountHTTP(group, reg, deps, func(c echo.Context) (string, error) {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return "", err
-		}
-		return project.ID, nil
+	opcore.MountHTTP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {
+		return principalFromRequest(c, store)
 	})
 }

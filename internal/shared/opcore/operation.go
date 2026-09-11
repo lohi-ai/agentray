@@ -32,6 +32,9 @@ type CallContext struct {
 	ScopeID   string // agent scope; empty for web/CLI/MCP callers, which act as the project
 	RunID     string
 	Deps      any
+	// Principal is the resolved caller on network adapters (MCP/REST). Zero on
+	// the in-process tool adapter, which is authorized by agent policy instead.
+	Principal Principal
 }
 
 // MemoryScope is the scope key a handler must file agent-private state under —
@@ -53,11 +56,20 @@ func (c CallContext) MemoryScope() string {
 // result value (JSON-marshalled on the way out). The handler is pure usecase: it
 // reads infra through cc.Deps and never imports a pool or a queue.
 type Operation[I any, O any] struct {
-	Name     string // stable id the model/CLI calls, e.g. "run_sql"
-	Summary  string // one-line description shown to the model and in CLI help
-	Scope    string // permission-scope key (agentruntime policy); "" = unrestricted
-	Terminal bool   // tool adapter: end the agent run after this call succeeds
-	Handler  func(ctx context.Context, cc CallContext, in I) (O, error)
+	Name    string // stable id the model/CLI calls, e.g. "run_sql"
+	Summary string // one-line description shown to the model and in CLI help
+	Scope   string // permission-scope key (agentruntime policy); "" = unrestricted
+	// Access is the credential authorization class for network adapters
+	// (MCP/REST/CLI). "" denies every remote caller — fail closed — while the
+	// in-process agent policy still governs tool exposure.
+	Access Access
+	// MinSessionRole additionally gates SESSION principals by workspace role:
+	// "" any member (incl. viewer), "member" member-or-above, "admin"
+	// owner/admin only. Key principals ignore it — their Grants decide — so a
+	// sources:read management key can probe while a member session cannot.
+	MinSessionRole string
+	Terminal       bool // tool adapter: end the agent run after this call succeeds
+	Handler        func(ctx context.Context, cc CallContext, in I) (O, error)
 }
 
 // Spec is the type-erased view of an Operation that the registry and the three
@@ -66,6 +78,8 @@ type Spec interface {
 	OpName() string
 	OpSummary() string
 	OpScope() string
+	OpAccess() Access
+	OpMinSessionRole() string
 	OpTerminal() bool
 	OpSchema() map[string]any
 	OpInvoke(ctx context.Context, cc CallContext, rawArgs string) (string, error)
@@ -74,6 +88,8 @@ type Spec interface {
 func (o Operation[I, O]) OpName() string           { return o.Name }
 func (o Operation[I, O]) OpSummary() string        { return o.Summary }
 func (o Operation[I, O]) OpScope() string          { return o.Scope }
+func (o Operation[I, O]) OpAccess() Access         { return o.Access }
+func (o Operation[I, O]) OpMinSessionRole() string { return o.MinSessionRole }
 func (o Operation[I, O]) OpTerminal() bool         { return o.Terminal }
 func (o Operation[I, O]) OpSchema() map[string]any { return schemaOf[I]() }
 

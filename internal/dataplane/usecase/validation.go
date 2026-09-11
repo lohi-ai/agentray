@@ -42,9 +42,11 @@ type proposeTestOutput struct {
 // is what makes the number a commitment rather than a suggestion.
 func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 	return opcore.Operation[proposeTestInput, proposeTestOutput]{
-		Name:    "propose_test",
-		Summary: "Propose a validation test: the success event, how many distinct people must fire it, and by when. The owner commits to it before the data arrives.",
-		Scope:   "growth_suggest",
+		Name:           "propose_test",
+		Summary:        "Propose a validation test: the success event, how many distinct people must fire it, and by when. The owner commits to it before the data arrives.",
+		Scope:          "growth_suggest",
+		Access:         opcore.AccessGrowthWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in proposeTestInput) (proposeTestOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -116,6 +118,7 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 		Name:    "test_status",
 		Summary: "Read one validation test — by id, or the project's active one — and how it is doing against the threshold agreed in advance.",
 		Scope:   "growth_suggest",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in testStatusInput) (testStatusOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -250,6 +253,7 @@ func listTests() opcore.Operation[listTestsInput, listTestsOutput] {
 		Name:    "list_tests",
 		Summary: "List the project's validation tests (prototypes) — open ones first — with the id each one is read by.",
 		Scope:   "growth_suggest",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, _ listTestsInput) (listTestsOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
