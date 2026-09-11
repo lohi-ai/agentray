@@ -6,6 +6,9 @@ package opcore
 type Registry struct {
 	order []string
 	specs map[string]Spec
+	// legacyAllowlist is the frozen set of operation names a CredLegacy
+	// principal may invoke (see auth.go). Set once via SetLegacyAllowlist.
+	legacyAllowlist []string
 }
 
 // NewRegistry returns an empty registry.

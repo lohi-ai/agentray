@@ -259,6 +259,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerMcpRoutes(e, store, alertDeliverer)
 	registerOverviewRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)
+	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
 	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler}, nil
