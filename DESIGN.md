@@ -300,8 +300,6 @@ Organize the signed-in chrome around owner tasks, not backend layers. Group head
 
 Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state. Every previously shipped URL stays reachable — old deep links resolve to their new parent via aliases.
 
-Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state.
-
 ## Screen Canon
 
 ### `/chat`

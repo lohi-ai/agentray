@@ -73,4 +73,5 @@ const (
 	ToolListTests        = "list_tests"
 	ToolRemember         = "remember"
 	ToolSendNotification = "send_notification"
+	ToolOverview         = "overview"
 )
