@@ -44,6 +44,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, listTests())
 	opcore.Register(r, remember())
 	opcore.Register(r, sendNotification())
+	opcore.Register(r, overview())
 	return r
 }
 

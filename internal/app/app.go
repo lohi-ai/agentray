@@ -257,6 +257,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer)
 	registerMcpRoutes(e, store, alertDeliverer)
+	registerOverviewRoutes(e, store, alertDeliverer)
 	registerConnectorRoutes(e, store, connectorEngine)
 	registerTeamRoutes(e, store)
 
