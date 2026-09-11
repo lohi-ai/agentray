@@ -1062,6 +1062,10 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateSourceCredentials(ctx); err != nil {
+		return err
+	}
+
 	if err := s.migrateCredentials(ctx); err != nil {
 		return err
 	}

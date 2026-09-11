@@ -14,11 +14,11 @@ import (
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
-// Source lifecycle operations (redesign slice 2): test/preview probes, pause,
-// run, status, cancel — one contract shared by MCP, REST /api/op, and
-// in-process agents. create_source/update_source are deliberately absent:
-// the credential-reference contract is a gated human decision (see the
-// ticket's permission matrix), so no operation accepts secret material.
+// Source lifecycle operations (redesign slice 2): test/preview probes,
+// create/update, pause, run, status, cancel — one contract shared by MCP,
+// REST /api/op, and in-process agents. Approved credential model: write-only
+// reusable credential IDs — operations take a credential_id, never secret
+// material; secrets enter only through the session-only credential routes.
 //
 // Authorization is the operation's Access class + MinSessionRole; the store
 // methods here are project-scoped because the principal already proved
@@ -356,6 +356,70 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 }
 
 // --- cancel_source_run ---
+
+// --- create_source ---
+
+type createSourceInput struct {
+	Name           string `json:"name" required:"true" desc:"source name"`
+	Kind           string `json:"kind" required:"true" desc:"connector kind, e.g. postgres"`
+	CredentialID   string `json:"credential_id" required:"true" desc:"a live source credential of this project — never the secret itself"`
+	IdempotencyKey string `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
+}
+
+func createSource() opcore.Operation[createSourceInput, storage.DataConnector] {
+	return opcore.Operation[createSourceInput, storage.DataConnector]{
+		Name:           "create_source",
+		Summary:        "Create a data source referencing a stored credential by ID. The credential's secret is never accepted or returned here — store it first via the session credential endpoint.",
+		Access:         opcore.AccessSourcesManage,
+		Scope:          "analyze_build",
+		MinSessionRole: "admin",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in createSourceInput) (storage.DataConnector, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			return d.Repo.CreateDataConnectorIdempotent(ctx, cc.ProjectID, in.Name, in.Kind, strings.TrimSpace(in.CredentialID), strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}
+
+// --- update_source ---
+
+type updateSourceInput struct {
+	ConnectorID    string  `json:"connector_id" required:"true" desc:"source to update"`
+	Name           *string `json:"name" desc:"new name — omit to keep current"`
+	CredentialID   *string `json:"credential_id" desc:"rotate to this credential ID — omit to keep current"`
+	Revision       int64   `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict"`
+	IdempotencyKey string  `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
+}
+
+func updateSource() opcore.Operation[updateSourceInput, storage.DataConnector] {
+	return opcore.Operation[updateSourceInput, storage.DataConnector]{
+		Name:           "update_source",
+		Summary:        "Update a source's name or rotate its credential reference. Requires the current revision; omitting credential_id preserves the existing credential.",
+		Access:         opcore.AccessSourcesManage,
+		Scope:          "analyze_build",
+		MinSessionRole: "admin",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in updateSourceInput) (storage.DataConnector, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.DataConnector{}, fmt.Errorf("revision must be the source's current revision (> 0)")
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			return d.Repo.UpdateDataConnectorIdempotent(ctx, cc.ProjectID, in.ConnectorID, in.Name, in.CredentialID, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}
 
 type cancelSourceRunInput struct {
 	RunID string `json:"run_id" required:"true" desc:"run to cancel — queued runs end immediately, running runs stop at the next batch boundary"`

@@ -49,6 +49,8 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, archiveDashboard())
 	opcore.Register(r, testSource())
 	opcore.Register(r, previewSource())
+	opcore.Register(r, createSource())
+	opcore.Register(r, updateSource())
 	opcore.Register(r, pauseSource())
 	opcore.Register(r, runSource())
 	opcore.Register(r, sourceStatus())

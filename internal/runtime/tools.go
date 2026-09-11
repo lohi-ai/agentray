@@ -68,6 +68,8 @@ type DataSource interface {
 	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
+	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -100,4 +102,6 @@ const (
 	ToolRunSource        = "run_source"
 	ToolSourceStatus     = "source_status"
 	ToolCancelSourceRun  = "cancel_source_run"
+	ToolCreateSource     = "create_source"
+	ToolUpdateSource     = "update_source"
 )

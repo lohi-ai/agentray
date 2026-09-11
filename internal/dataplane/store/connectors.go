@@ -196,12 +196,19 @@ func (s *Store) DeleteDataConnector(ctx context.Context, userID, projectID, conn
 // test-connection, schema discovery). Caller must have authorized the user —
 // this is the internal trust-boundary read, mirroring AgentSecretsForRun.
 func (s *Store) ConnectorDSNForRun(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error) {
-	var ciphertext string
+	var ciphertext, credentialID string
 	err = s.pg.QueryRow(ctx, `
-SELECT kind, dsn_ciphertext FROM data_connectors WHERE project_id = $1 AND id = $2`,
-		projectID, connectorID).Scan(&kind, &ciphertext)
+SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, '') FROM data_connectors WHERE project_id = $1 AND id = $2`,
+		projectID, connectorID).Scan(&kind, &ciphertext, &credentialID)
 	if err != nil {
 		return "", "", err
+	}
+	if credentialID != "" {
+		dsn, err = s.sourceCredentialDSN(ctx, s.pg, projectID, credentialID)
+		if err != nil {
+			return "", "", err
+		}
+		return kind, dsn, nil
 	}
 	dsn, err = decryptAgentKey(ciphertext)
 	if err != nil {
@@ -413,17 +420,25 @@ SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_c
 // Internal run path — authorization happens at the API edge.
 func (s *Store) ConnectorSyncJob(ctx context.Context, syncID string) (connector.SyncJob, error) {
 	var job connector.SyncJob
-	var ciphertext string
+	var ciphertext, credentialID string
 	err := s.pg.QueryRow(ctx, `
 SELECT cs.id::text, cs.project_id::text, cs.connector_id::text, dc.kind, dc.dsn_ciphertext,
+	COALESCE(dc.credential_id::text, ''),
 	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor, cs.cursor_key
 FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id = cs.connector_id
 WHERE cs.id = $1`, syncID).
-		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext,
+		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext, &credentialID,
 			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor, &job.CursorKey)
 	if err != nil {
 		return connector.SyncJob{}, err
+	}
+	if credentialID != "" {
+		job.DSN, err = s.sourceCredentialDSN(ctx, s.pg, job.ProjectID, credentialID)
+		if err != nil {
+			return connector.SyncJob{}, err
+		}
+		return job, nil
 	}
 	job.DSN, err = decryptAgentKey(ciphertext)
 	if err != nil {

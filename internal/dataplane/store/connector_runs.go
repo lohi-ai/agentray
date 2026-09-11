@@ -300,13 +300,22 @@ WHERE (status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < $1))
 
 // ConnectorDSNForProject resolves kind + decrypted DSN for a project-scoped
 // connector. The DSN stays inside the process — callers probe, never return it.
+// Credential-referenced connectors resolve through source_credentials (live,
+// same-project); legacy inline ciphertext still decrypts.
 func (s *Store) ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error) {
-	var ciphertext string
+	var ciphertext, credentialID string
 	err = s.pg.QueryRow(ctx,
-		`SELECT kind, dsn_ciphertext FROM data_connectors WHERE id = $1 AND project_id = $2`,
-		connectorID, projectID).Scan(&kind, &ciphertext)
+		`SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, '') FROM data_connectors WHERE id = $1 AND project_id = $2`,
+		connectorID, projectID).Scan(&kind, &ciphertext, &credentialID)
 	if err != nil {
 		return "", "", err
+	}
+	if credentialID != "" {
+		dsn, err = s.sourceCredentialDSN(ctx, s.pg, projectID, credentialID)
+		if err != nil {
+			return "", "", err
+		}
+		return kind, dsn, nil
 	}
 	dsn, err = decryptAgentKey(ciphertext)
 	if err != nil {
