@@ -134,6 +134,7 @@ export function OverviewPage() {
             {showPlatform ? (
               <Selector
                 size="sm"
+                label="Platform"
                 value={platform || 'all'}
                 onChange={(v) => setPlatform(v === 'all' ? '' : String(v))}
                 options={[
