@@ -157,10 +157,16 @@ const maxHeartbeatFailures = 3
 const heartbeatCallTimeout = 15 * time.Second
 
 // maxPendingRuns bounds goroutines parked on the run semaphore. Runs beyond
-// it stay queued rows with no worker — reconcile fences them stale and a
-// later enqueue re-queues them, so admission is bounded rather than the
-// goroutine count growing without limit.
+// it are refused BEFORE a durable row exists — a queued row with no worker
+// would be silently abandoned until reconcile fails it, which is not
+// backpressure. Refusal is typed (ErrEngineBusy) and retryable.
 const maxPendingRuns = maxConcurrentRuns
+
+// ErrEngineBusy rejects an enqueue when every worker slot and every pending
+// slot is taken. It is typed and retryable: no run row is created, so a
+// retry with the same idempotency key is a fresh claim, not a replay of an
+// abandoned one.
+var ErrEngineBusy = errors.New("connector engine at capacity — retry shortly")
 
 func NewEngine(store Store) *Engine {
 	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
@@ -203,21 +209,30 @@ func (e *Engine) Wait() { e.wg.Wait() }
 // a duplicate idempotency key replays the original run, an already-active
 // sync returns its live run. Either way the caller gets the run row back.
 func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error) {
-	run, enqueued, err = e.store.EnqueueConnectorRun(ctx, projectID, syncID, idemKey)
-	if err != nil || !enqueued {
-		return run, enqueued, err
-	}
-	// Bounded admission: at most maxPendingRuns goroutines may park on the
-	// semaphore. A run refused a worker stays a queued row — reconcile fences
-	// it stale after runLeaseStaleAfter and a later enqueue re-queues it, so
-	// the row is never lost and the goroutine count stays bounded.
+	// Admission BEFORE the durable row: a run this process cannot serve must
+	// never be recorded — an orphaned queued row would be fenced stale and a
+	// same-key retry would replay the failure instead of running.
 	e.mu.Lock()
 	if e.pending >= maxPendingRuns {
 		e.mu.Unlock()
-		return run, true, nil
+		return Run{}, false, ErrEngineBusy
 	}
 	e.pending++
 	e.mu.Unlock()
+	run, enqueued, err = e.store.EnqueueConnectorRun(ctx, projectID, syncID, idemKey)
+	if err != nil {
+		e.mu.Lock()
+		e.pending--
+		e.mu.Unlock()
+		return run, enqueued, err
+	}
+	if !enqueued {
+		// Replay or observed-active: no worker needed, release the slot.
+		e.mu.Lock()
+		e.pending--
+		e.mu.Unlock()
+		return run, enqueued, err
+	}
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()

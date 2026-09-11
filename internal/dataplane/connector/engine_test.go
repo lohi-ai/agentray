@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -121,13 +122,21 @@ func (f *fakeStore) InsertExternalRows(ctx context.Context, projectID, connector
 func (f *fakeStore) EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (Run, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Idempotent replay: same (sync, key) returns the original run.
+	if idemKey != "" {
+		for _, r := range f.runs {
+			if r.SyncID == syncID && r.IdempotencyKey == idemKey {
+				return *r, false, nil
+			}
+		}
+	}
 	for _, r := range f.runs {
 		if r.SyncID == syncID && (r.Status == "queued" || r.Status == "running") {
 			return *r, false, nil
 		}
 	}
 	f.runSeq++
-	r := &Run{ID: fmt.Sprintf("run-%d", f.runSeq), ProjectID: projectID, SyncID: syncID, Status: "queued", QueuedAt: time.Now()}
+	r := &Run{ID: fmt.Sprintf("run-%d", f.runSeq), ProjectID: projectID, SyncID: syncID, Status: "queued", IdempotencyKey: idemKey, QueuedAt: time.Now()}
 	f.runs[r.ID] = r
 	return *r, true, nil
 }
@@ -504,5 +513,57 @@ func TestRunSyncHungHeartbeatFencesRun(t *testing.T) {
 	}
 	if len(store.finished) != 1 || !store.cancelled[0] {
 		t.Fatalf("finished=%d cancelled=%v, want one cancelled run", len(store.finished), store.cancelled)
+	}
+}
+
+// Overload regression: with every worker slot held, a fifth enqueue is
+// explicitly rejected (ErrEngineBusy) and leaves NO orphan row; after
+// capacity frees, the same request — including a same-key retry — executes
+// exactly once.
+func TestEnqueueBusyRejectsThenExecutesOnce(t *testing.T) {
+	block := make(chan struct{})
+	src := &fakeSource{blockCh: block}
+	useFakeSource(src, nil)
+	store := newFakeStore(incrementalJob())
+	engine := NewEngine(store)
+
+	// Fill all four slots with runs that block in PullRows.
+	for i := 0; i < maxConcurrentRuns; i++ {
+		syncID := fmt.Sprintf("s%d", i+1)
+		if _, enqueued, err := engine.EnqueueRun(context.Background(), "p1", syncID, ""); err != nil || !enqueued {
+			t.Fatalf("enqueue %s: %v enqueued=%v", syncID, err, enqueued)
+		}
+	}
+	// Fifth request: typed rejection, no row created.
+	if _, _, err := engine.EnqueueRun(context.Background(), "p1", "s5", "k5"); !errors.Is(err, ErrEngineBusy) {
+		t.Fatalf("fifth enqueue err = %v, want ErrEngineBusy", err)
+	}
+	store.mu.Lock()
+	orphan := store.runs["s5-row"] != nil
+	rowCount := len(store.runs)
+	store.mu.Unlock()
+	if orphan || rowCount != maxConcurrentRuns {
+		t.Fatalf("orphan row created: runs=%d", rowCount)
+	}
+	// Same-key retry while still busy: still rejected, still no row.
+	if _, _, err := engine.EnqueueRun(context.Background(), "p1", "s5", "k5"); !errors.Is(err, ErrEngineBusy) {
+		t.Fatalf("busy retry err = %v, want ErrEngineBusy", err)
+	}
+	// Release capacity; the fifth request now runs exactly once.
+	close(block)
+	engine.Wait()
+	run, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s5", "k5")
+	if err != nil || !enqueued {
+		t.Fatalf("post-capacity enqueue: %v enqueued=%v", err, enqueued)
+	}
+	engine.Wait()
+	// Same-key retry after completion replays the run, never re-executes.
+	replay, again, err := engine.EnqueueRun(context.Background(), "p1", "s5", "k5")
+	if err != nil || again || replay.ID != run.ID {
+		t.Fatalf("replay: id=%s again=%v err=%v", replay.ID, again, err)
+	}
+	engine.Wait()
+	if got := len(store.finished); got != maxConcurrentRuns+1 {
+		t.Fatalf("finished %d runs, want %d", got, maxConcurrentRuns+1)
 	}
 }

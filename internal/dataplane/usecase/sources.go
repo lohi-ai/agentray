@@ -296,6 +296,9 @@ func runSource() opcore.Operation[runSourceInput, runSourceOutput] {
 				if errors.Is(err, storage.ErrSyncPaused) {
 					return runSourceOutput{}, fmt.Errorf("sync is paused — resume it before running")
 				}
+				if errors.Is(err, connector.ErrEngineBusy) {
+					return runSourceOutput{}, fmt.Errorf("engine at capacity — retry shortly")
+				}
 				return runSourceOutput{}, err
 			}
 			return runSourceOutput{Run: run, Enqueued: enqueued}, nil
