@@ -15,9 +15,9 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard},
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolRemember, ToolSendNotification},
 }
 
@@ -42,6 +42,7 @@ var readTools = map[string]bool{
 	// leaving it unclassified would nudge the one agent that DID check.
 	ToolTestStatus: true,
 	ToolListTests:  true,
+	ToolVerifySDK:  true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.

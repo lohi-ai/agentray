@@ -45,6 +45,17 @@ type DataSource interface {
 	// Notification channel resolution (send_notification, growth_suggest).
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
+
+	// Lifecycle (slice 2): revision-checked dashboard writes, soft archive,
+	// atomic idempotent writes (claim+mutation+receipt in one tx), identity
+	// linkage, and the bounded event read verify_sdk uses.
+	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
+	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64) (storage.Dashboard, error)
+	ArchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (storage.Dashboard, error)
+	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
+	RecentEventsForVerification(ctx context.Context, projectID string, limit int) ([]storage.Event, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -68,4 +79,7 @@ const (
 	ToolListTests        = "list_tests"
 	ToolRemember         = "remember"
 	ToolSendNotification = "send_notification"
+	ToolVerifySDK        = "verify_sdk"
+	ToolUpdateDashboard  = "update_dashboard"
+	ToolArchiveDashboard = "archive_dashboard"
 )

@@ -34,8 +34,8 @@ type AgentBudget struct {
 
 // BudgetSpend is the metered usage for one agent within the current period.
 type BudgetSpend struct {
-	Period  string    `json:"period"`
-	CostUSD float64   `json:"cost_usd"`
+	Period  string  `json:"period"`
+	CostUSD float64 `json:"cost_usd"`
 	// CostUnpriced is true when CostUSD undercounts real spend — at least one
 	// LLM call in the period billed a model with no price-table entry.
 	CostUnpriced bool      `json:"cost_unpriced"`
