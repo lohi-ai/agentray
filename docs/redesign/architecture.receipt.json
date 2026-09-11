@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/long/workspace/lohi/kiem-lai/agentray/docs/redesign/architecture.json",
+  "output": "/Users/long/workspace/lohi/kiem-lai/agentray/docs/redesign/architecture.html",
+  "specification": {
+    "sha256": "a71b3f3e26131f923674d3cc6141518ab97b29cb43dbb9ba675a6e2bbc0d8a43",
+    "bytes": 3834
+  },
+  "artifact": {
+    "sha256": "73e00291ea110fae62783515a7cc458545812898b1d30f32d35ee71525f2b641",
+    "bytes": 814473
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  },
+  "browser_evidence": "passed",
+  "visual_review": "passed",
+  "correction_rounds": 1,
+  "visual_review_scope": "Inspected default READ/Still screenshots at 1440x900 light and 2048x1320 dark. Routes, labels, cards and desktop balance are clear. Automated containment passed at all four required desktop sizes; light/dark endpoint captures completed."
+}

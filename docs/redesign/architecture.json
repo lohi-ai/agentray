@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {"title": "AgentRay · Proposed Architecture", "locale": "en", "quality_profile": "showcase", "viewBox": [1320, 740]},
+  "components": [
+    {"id":"product-ui","type":"frontend","label":"Product workspace","sublabel":"Overview · dashboards · plans","pos":[270,60],"size":[240,80]},
+    {"id":"external-clients","type":"external","label":"External agents","sublabel":"Codex · omp · Claude Code","pos":[620,60],"size":[240,80],"tag":"FIRST PRIORITY"},
+    {"id":"garden-client","type":"backend","label":"Agent Garden","sublabel":"Optional built-in runtime","pos":[970,60],"size":[240,80],"tag":"LATER"},
+    {"id":"web-apps","type":"external","label":"Web / app SDKs","sublabel":"Activity · identity · sessions","pos":[30,320],"size":[200,80]},
+    {"id":"durable-ingest","type":"messagebus","label":"Durable ingestion","sublabel":"Capture API → JetStream","pos":[300,320],"size":[230,80]},
+    {"id":"shared-operations","type":"backend","label":"Shared operations","sublabel":"Metrics · artifacts · pipelines","pos":[620,290],"size":[240,100],"tag":"AUTH + PROJECT SCOPES"},
+    {"id":"control-data","type":"database","label":"PostgreSQL","sublabel":"Config · identities · plans","pos":[1000,300],"size":[240,80]},
+    {"id":"business-sources","type":"external","label":"Business records","sublabel":"Accounts · orders · billing","pos":[30,560],"size":[200,80]},
+    {"id":"sync-engine","type":"backend","label":"Connector engine","sublabel":"Snapshot · incremental sync","pos":[300,560],"size":[230,80]},
+    {"id":"analytics-worker","type":"database","label":"Analytics worker + store","sublabel":"DuckDB candidate; CH fallback","pos":[620,540],"size":[240,100],"tag":"BENCHMARK GATE"},
+    {"id":"future-actions","type":"external","label":"Execution integrations","sublabel":"Content · CRM · sales · chat","pos":[1000,560],"size":[240,80],"tag":"FUTURE"}
+  ],
+  "connections": [
+    {"id":"ui-api","from":"product-ui","to":"shared-operations","label":"REST", "fromSide":"bottom","toSide":"top"},
+    {"id":"external-mcp","from":"external-clients","to":"shared-operations","label":"MCP", "fromSide":"bottom","toSide":"top","variant":"emphasis","labelDy":75},
+    {"id":"garden-tools","from":"garden-client","to":"shared-operations","label":"Tools", "fromSide":"bottom","toSide":"top","variant":"dashed"},
+    {"id":"sdk-capture","from":"web-apps","to":"durable-ingest","label":"HTTPS","variant":"emphasis"},
+    {"id":"event-batches","from":"durable-ingest","to":"analytics-worker","label":"Batches","fromSide":"bottom","toSide":"top"},
+    {"id":"source-pull","from":"business-sources","to":"sync-engine","label":"Pull"},
+    {"id":"entity-sync","from":"sync-engine","to":"analytics-worker","label":"Upsert"},
+    {"id":"metric-queries","from":"shared-operations","to":"analytics-worker","label":"Query / jobs","fromSide":"bottom","toSide":"top","variant":"emphasis","labelDy":75},
+    {"id":"metadata-access","from":"shared-operations","to":"control-data","label":"Read / write"},
+    {"id":"future-execution","from":"shared-operations","to":"future-actions","label":"Scoped actions","fromSide":"right","toSide":"top","variant":"dashed"}
+  ],
+  "cards": [
+    {"dot":"cyan","title":"Data → understanding → decisions","items":["Events and synced entities share metric definitions.","SDK setup → default overview → evidence-backed plans."]},
+    {"dot":"emerald","title":"One capability layer, every agent","items":["REST, MCP and Garden reuse operations and permissions.","Separate public capture keys from private agent access."]},
+    {"dot":"amber","title":"Proposed storage, conditional rollout","items":["DuckDB: one owning process; bounded query admission.","Measure cost, parity and recovery before replacing ClickHouse."]}
+  ]
+}
