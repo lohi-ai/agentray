@@ -347,7 +347,7 @@ func listDashboards() opcore.Operation[noInput, listDashboardsOutput] {
 			if err != nil {
 				return listDashboardsOutput{}, err
 			}
-			boards, err := d.Repo.ListDashboards(ctx, cc.ProjectID)
+			boards, err := d.Repo.ListDashboardsFiltered(ctx, cc.ProjectID, false)
 			if err != nil {
 				return listDashboardsOutput{}, err
 			}

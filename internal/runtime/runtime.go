@@ -45,7 +45,11 @@ type BuildParams struct {
 	Data        DataSource
 	Memory      agentcore.MemoryStore // optional
 	Notifier    usecase.Notifier      // optional; backs send_notification
-	RunID       string                // links submitted recommendations to this run
+	// SourceRunner backs run_source/cancel_source_run for in-process agents —
+	// the same engine MCP and /api/op share. nil leaves those tools reporting
+	// unavailable.
+	SourceRunner usecase.SourceRunner
+	RunID        string // links submitted recommendations to this run
 	// Trigger is the run trigger (chat | scheduled | manual). On a chat trigger
 	// submit_recommendation no longer ends the run, so the model still produces a
 	// textual reply for the user instead of terminating silently.
@@ -599,7 +603,7 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 		ProjectID: p.ProjectID,
 		ScopeID:   scopeID,
 		RunID:     p.RunID,
-		Deps:      &usecase.Deps{Repo: p.Data, Memory: p.Memory, Notifier: p.Notifier},
+		Deps:      &usecase.Deps{Repo: p.Data, Memory: p.Memory, Notifier: p.Notifier, Runner: p.SourceRunner},
 	}
 	tools := opcore.Tools(reg, cc)
 	terminal := opcore.TerminalNames(reg)

@@ -29,7 +29,7 @@ type Repo interface {
 	ExploreEvents(ctx context.Context, projectID string, filter storage.EventFilter) (storage.EventExplorer, error)
 	RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error)
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
-	ListDashboards(ctx context.Context, projectID string) ([]storage.Dashboard, error)
+	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
@@ -47,7 +47,6 @@ type Repo interface {
 	// Lifecycle operations (slice 2): revision-checked dashboard writes, soft
 	// archive, atomic idempotent writes (claim+mutation+receipt in one tx),
 	// identity linkage, and the bounded event read verify_sdk uses.
-	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
 	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64) (storage.Dashboard, error)
 	ArchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (storage.Dashboard, error)
 	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)

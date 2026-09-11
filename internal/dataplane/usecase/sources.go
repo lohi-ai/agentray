@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -101,6 +102,10 @@ func testSource() opcore.Operation[testSourceInput, testSourceOutput] {
 
 const previewRowLimit = 25
 
+// previewByteCap bounds the serialized payload: a few large text/JSON/bytea
+// values must not turn a bounded probe into an unbounded MCP/HTTP response.
+const previewByteCap = 256 << 10
+
 type previewSourceInput struct {
 	ConnectorID  string `json:"connector_id" required:"true" desc:"connector to preview"`
 	SourceTable  string `json:"source_table" required:"true" desc:"table to preview"`
@@ -191,7 +196,14 @@ func previewSource() opcore.Operation[previewSourceInput, previewSourceOutput] {
 				out.Error = err.Error()
 				return out, nil
 			}
+			encoded := 0
 			for _, r := range pull.Rows {
+				rowBytes, _ := json.Marshal(r.Data)
+				if encoded+len(rowBytes) > previewByteCap {
+					out.Warnings = append(out.Warnings, fmt.Sprintf("preview truncated at %d bytes — %d of %d pulled rows shown", previewByteCap, len(out.Rows), len(pull.Rows)))
+					break
+				}
+				encoded += len(rowBytes)
 				out.Rows = append(out.Rows, r.Data)
 			}
 			if pull.HasMore {

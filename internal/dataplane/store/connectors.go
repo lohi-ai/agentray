@@ -56,7 +56,7 @@ type ConnectorSync struct {
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
 	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
-	created_at, updated_at`
+	revision, created_at, updated_at`
 
 func (s *Store) migrateConnectors(ctx context.Context) error {
 	stmts := []string{
@@ -306,7 +306,7 @@ UPDATE connector_syncs SET
 	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, schedule_cron = $6, enabled = $7,
 	cursor = CASE WHEN source_table = $3::text AND cursor_column = $5::text THEN cursor ELSE '' END,
 	cursor_key = CASE WHEN source_table = $3::text AND cursor_column = $5::text AND key_column = $4::text THEN cursor_key ELSE '' END,
-	updated_at = now()
+	revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
 		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled).
@@ -391,7 +391,7 @@ func connectorKindKnown(kind string) bool {
 func syncScanDest(cs *ConnectorSync) []any {
 	return []any{&cs.ID, &cs.ConnectorID, &cs.ProjectID, &cs.SourceTable, &cs.KeyColumn,
 		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
-		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.CreatedAt, &cs.UpdatedAt}
+		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.Revision, &cs.CreatedAt, &cs.UpdatedAt}
 }
 
 // --- engine surface (connector.Store) ---
@@ -400,7 +400,7 @@ func syncScanDest(cs *ConnectorSync) []any {
 // the engine's minute tick.
 func (s *Store) ListEnabledConnectorSyncs(ctx context.Context) ([]connector.ScheduledSync, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_cron != ''`)
+SELECT id::text, project_id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_cron != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +408,7 @@ SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_c
 	out := make([]connector.ScheduledSync, 0)
 	for rows.Next() {
 		var ss connector.ScheduledSync
-		if err := rows.Scan(&ss.ID, &ss.Cron); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.ProjectID, &ss.Cron); err != nil {
 			return nil, err
 		}
 		out = append(out, ss)

@@ -27,7 +27,6 @@ type DataSource interface {
 
 	// Insight + authoring (P1, analyze_build).
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
-	ListDashboards(ctx context.Context, projectID string) ([]storage.Dashboard, error)
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 

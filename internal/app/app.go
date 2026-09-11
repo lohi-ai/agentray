@@ -242,6 +242,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
 	connectorEngine := connector.NewEngine(store)
+	// In-process agents get the same source-runner surface MCP and /api/op
+	// expose — one engine, three adapters.
+	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)

@@ -65,6 +65,17 @@ func (s *Store) migrateConnectorRuns(ctx context.Context) error {
 	ON connector_runs (sync_id, idempotency_key) WHERE idempotency_key <> ''`,
 		`CREATE INDEX IF NOT EXISTS connector_runs_project_idx
 	ON connector_runs (project_id, queued_at DESC)`,
+		// Key aliases: when an enqueue with a fresh key collides with an
+		// already-active run, the key is durably bound to that run so a later
+		// retry still resolves to it instead of starting a second sync.
+		`CREATE TABLE IF NOT EXISTS connector_run_keys (
+	project_id UUID NOT NULL,
+	sync_id UUID NOT NULL,
+	idempotency_key VARCHAR(128) NOT NULL,
+	run_id UUID NOT NULL REFERENCES connector_runs(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (project_id, sync_id, idempotency_key)
+)`,
 		// Sync rows gain a revision for the same optimistic-concurrency
 		// contract dashboards have (pause/update carry the expected revision).
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1`,
@@ -99,16 +110,27 @@ RETURNING `+connectorRunColumns, projectID, syncID, idemKey).
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ConnectorRun{}, false, err
 	}
-	// No row inserted: idempotency replay, an active run, a paused sync, or a
-	// missing sync — in that order of precedence. Every fallback is scoped to
-	// THIS project: a foreign sync id must never return another tenant's run
-	// metadata, and a read error fails closed rather than falling through.
+	// No row inserted: idempotency replay (direct key or alias), an active
+	// run, a paused sync, or a missing sync — in that order of precedence.
+	// Every fallback is scoped to THIS project: a foreign sync id must never
+	// return another tenant's run metadata, and a read error fails closed.
 	if idemKey != "" {
 		var existing ConnectorRun
 		if qerr := s.pg.QueryRow(ctx,
 			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND idempotency_key = $3`,
 			syncID, projectID, idemKey).Scan(connectorRunScanDest(&existing)...); qerr == nil {
 			return existing, false, nil
+		} else if !errors.Is(qerr, pgx.ErrNoRows) {
+			return ConnectorRun{}, false, qerr
+		}
+		// Alias: this key was bound to a run that already existed.
+		var aliased ConnectorRun
+		if qerr := s.pg.QueryRow(ctx,
+			`SELECT `+connectorRunColumns+` FROM connector_runs r
+JOIN connector_run_keys k ON k.run_id = r.id
+WHERE k.sync_id = $1 AND k.project_id = $2 AND k.idempotency_key = $3`,
+			syncID, projectID, idemKey).Scan(connectorRunScanDest(&aliased)...); qerr == nil {
+			return aliased, false, nil
 		} else if !errors.Is(qerr, pgx.ErrNoRows) {
 			return ConnectorRun{}, false, qerr
 		}
@@ -131,6 +153,15 @@ RETURNING `+connectorRunColumns, projectID, syncID, idemKey).
 			return ConnectorRun{}, false, ErrSyncPaused
 		}
 		return ConnectorRun{}, false, fmt.Errorf("run conflict but no active run found: %w", qerr)
+	}
+	// Bind the caller's key to the active run so a retry after it finishes
+	// resolves to this run instead of starting a second sync.
+	if idemKey != "" {
+		if _, aerr := s.pg.Exec(ctx, `
+INSERT INTO connector_run_keys (project_id, sync_id, idempotency_key, run_id)
+VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, projectID, syncID, idemKey, active.ID); aerr != nil {
+			return ConnectorRun{}, false, aerr
+		}
 	}
 	return active, false, nil
 }
@@ -188,7 +219,8 @@ func (s *Store) FinishConnectorRun(ctx context.Context, runID, syncID, owner str
 	defer tx.Rollback(ctx)
 	tag, err := tx.Exec(ctx, `
 UPDATE connector_runs
-SET status = $2, rows = $3, cursor = $4, cursor_key = $5, error = $6, finished_at = now()
+SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE $2 END,
+    rows = $3, cursor = $4, cursor_key = $5, error = $6, finished_at = now()
 WHERE id = $1 AND status = 'running' AND owner = $7`, runID, status, result.Rows, result.Cursor, result.CursorKey, errText, owner)
 	if err != nil {
 		return err
@@ -196,8 +228,14 @@ WHERE id = $1 AND status = 'running' AND owner = $7`, runID, status, result.Rows
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("run %s is not running under this owner — finished, cancelled, or fenced", runID)
 	}
+	// The run row's final status (which may have become 'cancelled' inside the
+	// update above when a cancel raced the finish) drives the sync's last_*.
+	var finalStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM connector_runs WHERE id = $1`, runID).Scan(&finalStatus); err != nil {
+		return err
+	}
 	legacyStatus := "ok"
-	if status != "succeeded" {
+	if finalStatus != "succeeded" {
 		legacyStatus = "error"
 	}
 	if _, err := tx.Exec(ctx, `
@@ -347,7 +385,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 // ListConnectorSyncsForProject lists one connector's syncs, project-scoped.
 func (s *Store) ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]ConnectorSync, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT `+connectorSyncColumns+`, revision
+SELECT `+connectorSyncColumns+`
 FROM connector_syncs WHERE project_id = $1 AND connector_id = $2 ORDER BY created_at`, projectID, connectorID)
 	if err != nil {
 		return nil, err
@@ -356,7 +394,7 @@ FROM connector_syncs WHERE project_id = $1 AND connector_id = $2 ORDER BY create
 	out := []ConnectorSync{}
 	for rows.Next() {
 		var cs ConnectorSync
-		dest := append(syncScanDest(&cs), &cs.Revision)
+		dest := syncScanDest(&cs)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
@@ -368,9 +406,9 @@ FROM connector_syncs WHERE project_id = $1 AND connector_id = $2 ORDER BY create
 // ConnectorSyncForProject reads one sync, project-scoped.
 func (s *Store) ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (ConnectorSync, error) {
 	var cs ConnectorSync
-	dest := append(syncScanDest(&cs), &cs.Revision)
+	dest := syncScanDest(&cs)
 	err := s.pg.QueryRow(ctx,
-		`SELECT `+connectorSyncColumns+`, revision FROM connector_syncs WHERE id = $1 AND project_id = $2`,
+		`SELECT `+connectorSyncColumns+` FROM connector_syncs WHERE id = $1 AND project_id = $2`,
 		syncID, projectID).Scan(dest...)
 	return cs, err
 }
