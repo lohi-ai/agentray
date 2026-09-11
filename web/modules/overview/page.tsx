@@ -60,19 +60,18 @@ function trendMeaning(res: OverviewResult): 'data' | 'receipt_only' | 'empty' {
   return 'empty';
 }
 
-// freshnessLabel ages from the absolute last_event_at at render time, not the
-// cached age_seconds — a cached snapshot would say "Live" forever on an open
-// page. `now` is injectable so staleness is testable.
+// freshnessLabel prints the absolute last-event timestamp with explicit as-of
+// wording — never "Live" or a relative age. A relative label needs a re-render
+// to stay honest, and an untouched tab does not re-render: "Live" would sit on
+// screen forever. The absolute stamp is true whenever it is read. `now` is
+// injectable so staleness is testable.
 export function freshnessLabel(res: OverviewResult, now = Date.now()): { text: string; stale: boolean } {
   const ds = res.data_status;
   if (ds.state === 'no_events' || !ds.last_event_at) return { text: 'No events received yet', stale: true };
   const age = Math.max(0, (now - new Date(ds.last_event_at).getTime()) / 1000);
-  const text =
-    age < 120 ? 'Live — last event just now'
-    : age < 3600 ? `Last event ${Math.round(age / 60)} min ago`
-    : age < 86400 ? `Last event ${Math.round(age / 3600)} h ago`
-    : `Last event ${Math.round(age / 86400)} d ago`;
-  return { text, stale: age >= 86400 };
+  const at = new Date(ds.last_event_at);
+  const stamp = at.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  return { text: `Last event ${stamp}`, stale: age >= 86400 };
 }
 
 export function OverviewPage() {

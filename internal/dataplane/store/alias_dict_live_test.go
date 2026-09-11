@@ -71,16 +71,20 @@ LAYOUT(COMPLEX_KEY_HASHED()) LIFETIME(MIN 30 MAX 60)`); err != nil {
 	// before the writes and removes only this fixture's records — including
 	// the user/workspace/project seedConvProject creates — on every path.
 	uid, pid := seedConvProject(t, s)
-	var wsID string
-	if err := pg.QueryRow(ctx, `SELECT workspace_id::text FROM projects WHERE id = $1`, pid).Scan(&wsID); err != nil {
-		t.Fatalf("workspace lookup: %v", err)
-	}
+	// Cleanup is registered immediately after the seed — before the workspace
+	// lookup and the alias insert — so a failure at any later step still
+	// removes the fixture. wsID is resolved lazily inside the deferred func so
+	// a lookup failure cannot skip cleanup.
 	defer func() {
+		var wsID string
+		_ = pg.QueryRow(ctx, `SELECT workspace_id::text FROM projects WHERE id = $1`, pid).Scan(&wsID)
 		_, _ = pg.Exec(ctx, `DELETE FROM aliases WHERE project_id = $1`, pid)
 		_ = ch.Exec(ctx, `ALTER TABLE aliases DELETE WHERE project_id = ? SETTINGS mutations_sync = 2`, pid)
 		_, _ = pg.Exec(ctx, `DELETE FROM projects WHERE id = $1`, pid)
-		_, _ = pg.Exec(ctx, `DELETE FROM workspace_members WHERE workspace_id = $1`, wsID)
-		_, _ = pg.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, wsID)
+		if wsID != "" {
+			_, _ = pg.Exec(ctx, `DELETE FROM workspace_members WHERE workspace_id = $1`, wsID)
+			_, _ = pg.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, wsID)
+		}
 		_, _ = pg.Exec(ctx, `DELETE FROM users WHERE id = $1`, uid)
 	}()
 	seedAnon := "seed-anon-" + time.Now().Format("150405.000000")
