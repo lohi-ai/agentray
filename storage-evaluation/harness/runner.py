@@ -99,6 +99,7 @@ def _run_shape(engine, shape_id, days):
 
 def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             caps: dict, deadline_s: float) -> dict:
+    t_start = time.monotonic()
     corpus_dir = corpus_mod.generate(scale, seed, caps["ingest_rows"])
     oracle = load_json(corpus_dir / "oracle.json")
     deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
@@ -109,8 +110,6 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         "readers": readers, "days": days, "status": "MEASURED",
         "checks": {}, "shapes": {}, "ingest": {}, "resources": {},
     }
-    t_start = time.monotonic()
-
     def remaining():
         left = deadline_s - (time.monotonic() - t_start)
         if left <= 0:
@@ -197,9 +196,12 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             t0 = time.monotonic()
             ing = eng.ingest(corpus_dir)
             ingest_end = t0 + ing["ack_s"]
-            visible_at = None
+            # ingest() already returns the post-insert total; only poll when
+            # it hasn't caught up yet.
+            visible_at = ing["ack_s"] if ing.get("total", 0) >= (
+                oracle["total_rows"] + oracle["ingest_rows"]) else None
             expected_total = oracle["total_rows"] + oracle["ingest_rows"]
-            while time.monotonic() - t0 < 60:
+            while visible_at is None and time.monotonic() - t0 < 60:
                 if eng.count() >= expected_total:
                     visible_at = time.monotonic() - t0
                     break

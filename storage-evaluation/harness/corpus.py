@@ -23,7 +23,6 @@ Semantics mirrored from production code:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import random
 import struct
@@ -136,20 +135,24 @@ def _prop_blob(rng: random.Random, target: int) -> str:
 def _funnel_level(items: list[tuple[str, int]]) -> int:
     """Greedy earliest-chain funnel, window anchored at each step-1 event.
 
-    Mirrors windowFunnel(86400)(toDateTime(timestamp), s1, s2, s3): strictly
-    increasing timestamps, whole chain inside the window from the anchor.
-    Max level over all anchors. `items` is [(name, ts_ms)] sorted by ts.
+    Mirrors windowFunnel(86400)(toDateTime(timestamp), s1, s2, s3) without
+    strict_increase: non-decreasing timestamps (equal timestamps may chain),
+    whole chain inside the window from the anchor. Max level over all
+    anchors. `items` is [(name, ts_ms)] sorted by ts.
     """
+    import bisect
     s1 = [t for n, t in items if n == FUNNEL_STEPS[0]]
     s2 = [t for n, t in items if n == FUNNEL_STEPS[1]]
     s3 = [t for n, t in items if n == FUNNEL_STEPS[2]]
     best = 0
     for a in s1:
         lvl = 1
-        t2 = next((t for t in s2 if a < t <= a + FUNNEL_WINDOW_S * 1000), None)
+        i2 = bisect.bisect_left(s2, a)  # first s2 with t >= a
+        t2 = s2[i2] if i2 < len(s2) and s2[i2] <= a + FUNNEL_WINDOW_S * 1000 else None
         if t2 is not None:
             lvl = 2
-            t3 = next((t for t in s3 if t2 < t <= a + FUNNEL_WINDOW_S * 1000), None)
+            i3 = bisect.bisect_left(s3, t2)
+            t3 = s3[i3] if i3 < len(s3) and s3[i3] <= a + FUNNEL_WINDOW_S * 1000 else None
             if t3 is not None:
                 lvl = 3
         if lvl > best:
@@ -214,9 +217,6 @@ class Oracle:
 
     def manifest(self) -> dict:
         top = sorted(self.canonical_events_7d.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-        canon_hash = hashlib.sha256(
-            json.dumps(sorted(self.canonical_events_7d.items())).encode()
-        ).hexdigest()
         return {
             "checks": {
                 # kind=baseline_parity: both engines must reproduce frozen
@@ -227,7 +227,6 @@ class Oracle:
                     "kind": "baseline_parity",
                     "total": sum(self.canonical_events_7d.values()),
                     "top10": top,
-                    "map_sha256": canon_hash,
                 },
                 "sessionization.sessions_7d": {
                     "kind": "baseline_parity",

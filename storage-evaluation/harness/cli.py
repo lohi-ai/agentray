@@ -6,6 +6,7 @@ are siblings on storage-eval-net.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -104,9 +105,9 @@ def cmd_smoke(args):
     caps = CAPS["smoke"]
     legs = [
         {"engine": "clickhouse", "scale": caps["scale"], "seed": args.seed,
-         "readers": 1, "days": 7},
+         "readers": caps["readers"][0], "days": caps["days"][0]},
         {"engine": "duckdb", "scale": caps["scale"], "seed": args.seed,
-         "readers": 1, "days": 7},
+         "readers": caps["readers"][0], "days": caps["days"][0]},
     ]
     return _run_legs(legs, caps, "smoke")
 
@@ -136,7 +137,6 @@ def _publish_durable():
     storage-evaluation/results/ directory — the reviewable deliverable,
     not just the gitignored work/ scratch."""
     import shutil
-    import subprocess
     dest = Path(__file__).resolve().parent.parent / "results"
     dest.mkdir(exist_ok=True)
     meta = {
@@ -159,12 +159,8 @@ def _publish_durable():
         oj = cd / "oracle.json"
         if oj.exists():
             meta["legs"][-1]["corpus_rows"] = report.load_json(oj).get("total_rows")
-    try:
-        meta["commit"] = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-            cwd=Path(__file__).resolve().parent.parent).stdout.strip()
-    except Exception:
-        pass
+    # The slim driver image has no git; the eval wrapper passes the commit in.
+    meta["commit"] = os.environ.get("EVAL_COMMIT") or None
     if (WORK / "report.md").exists():
         shutil.copy2(WORK / "report.md", dest / "report.md")
     dump_json(dest / "run-metadata.json", meta)

@@ -93,6 +93,10 @@ class ClickHouseEngine(Engine):
     def start(self, caps: dict):
         stop_container(CH_NAME)
         data = WORK / "ch-data"
+        # Fresh data dir per leg: a reused dir would double-load the corpus.
+        if data.exists():
+            import shutil
+            shutil.rmtree(data)
         data.mkdir(parents=True, exist_ok=True)
         data.chmod(0o777)  # container runs as uid 101 (clickhouse)
         client().containers.run(
@@ -261,6 +265,9 @@ class DuckDBEngine(Engine):
     def start(self, caps: dict):
         stop_container(DUCK_NAME)
         data = WORK / "duck-data"
+        if data.exists():
+            import shutil
+            shutil.rmtree(data)
         data.mkdir(parents=True, exist_ok=True)
         client().containers.run(
             DRIVER_IMAGE,

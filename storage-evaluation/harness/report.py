@@ -12,7 +12,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .util import RESULTS, UNRUN_GATES, WORK, corpus_dir, dump_json, load_json
+from .util import (
+    RESULTS, UNRUN_GATES, WORK, corpus_dir, dump_json, free_gib, load_json,
+)
 
 
 def _fmt_ms(v):
@@ -70,12 +72,10 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     L.append("")
     L.append("| check | engine | status | expected | actual |")
     L.append("|---|---|---|---|---|")
-    seen = set()
     for leg in legs:
         for cid, res in leg.get("checks", {}).items():
             if res.get("kind") != "baseline_parity":
                 continue
-            seen.add(cid)
             exp = res.get("expected")
             act = res.get("actual")
             L.append(f"| {cid} | {leg['engine']} | {res['status']} | "
@@ -98,6 +98,15 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
             if res["status"] == "DIVERGENT":
                 note = f"expected {res.get('expected')}, got {res.get('actual')}. {note}"
             L.append(f"| {cid} | {leg['engine']} | {res['status']} | {note} |")
+            if res["status"] not in ("PASS", "DIVERGENT", "NOT RUN", "ERROR"):
+                problems.append(f"semantic gate {cid}/{leg['engine']} unlabeled")
+    # --require-labeled-gates: every manifest check must appear per leg.
+    for leg in legs:
+        spec_checks = manifests.get((leg.get("scale"), leg.get("seed")), {}).get(
+            "checks", {})
+        for cid in spec_checks:
+            if cid not in leg.get("checks", {}):
+                problems.append(f"missing check {cid} in {leg['engine']} leg")
     L.append("")
 
     # --- latency / resources -------------------------------------------------
@@ -139,13 +148,16 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     L.append("| gate | status | why |")
     L.append("|---|---|---|")
     ran_scales = {(l["scale"], l["engine"]) for l in legs if l["status"] == "MEASURED"}
+    free = free_gib(WORK)
+    matrix_reason = (
+        f"free disk {free:.1f} GiB below the 40 GiB preflight"
+        if free < 40 else "not requested in this run")
     for scale in (1_000_000, 10_000_000):
         for eng in ("clickhouse", "duckdb"):
             if (scale, eng) in ran_scales:
                 L.append(f"| matrix {scale} {eng} | MEASURED | |")
             else:
-                L.append(f"| matrix {scale} {eng} | NOT RUN | "
-                         "free disk below the 40 GiB preflight |")
+                L.append(f"| matrix {scale} {eng} | NOT RUN | {matrix_reason} |")
     for gid, label, why in UNRUN_GATES:
         L.append(f"| {label} | NOT RUN | {why} |")
     L.append("")

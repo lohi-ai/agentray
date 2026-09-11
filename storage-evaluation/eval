@@ -28,5 +28,6 @@ exec docker run --rm -i \
   -v "$HERE:$HERE" \
   -e EVAL_HOST_DIR="$HERE" \
   -e EVAL_DRIVER_IMAGE="$IMAGE" \
+  -e EVAL_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)" \
   -w "$HERE" \
   "$IMAGE" python -m harness.cli "$@"

@@ -5,8 +5,9 @@ sends raw SQL to it (strategy.md: arbitrary SQL stays out of the writer
 process). ClickHouse is a server, so the same IDs map to CH SQL sent over
 HTTP by the driver.
 
-{W7} / {W30} / {W90} / {WND} placeholders are SQL timestamp literals for the
-window start; {END} is the corpus end. {DELETED_KEYS} is a quoted CSV list.
+{W7} is the frozen 7-day check window; {WIN} is the leg's day window;
+{MATURE14} is corpus_end - 14d; {END} is the corpus end.
+{DELETED_KEYS} is a quoted CSV list.
 """
 from __future__ import annotations
 
@@ -58,7 +59,7 @@ _FUNNEL_DUCK = f"""WITH ev AS (
       (SELECT min(timestamp) FROM ev e2
         WHERE e2.canonical_id = a.canonical_id
           AND e2.event_name = '{FUNNEL_STEPS[1]}'
-          AND e2.timestamp > a.t1
+          AND e2.timestamp >= a.t1
           AND e2.timestamp <= a.t1 + INTERVAL '86400 seconds') AS t2
     FROM anchors a),
   lvl AS (
@@ -67,7 +68,7 @@ _FUNNEL_DUCK = f"""WITH ev AS (
           WHEN (SELECT min(e3.timestamp) FROM ev e3
                  WHERE e3.canonical_id = chains.canonical_id
                    AND e3.event_name = '{FUNNEL_STEPS[2]}'
-                   AND e3.timestamp > chains.t2
+                   AND e3.timestamp >= chains.t2
                    AND e3.timestamp <= chains.t1 + INTERVAL '86400 seconds')
                    IS NOT NULL THEN 3 ELSE 2 END) AS level
     FROM chains GROUP BY canonical_id)
@@ -130,25 +131,26 @@ _ENTITY_JOIN_DUCK = """SELECT count(*) AS n,
   WHERE e.event_name = 'order.paid' AND e.timestamp >= {WIN}"""
 
 # --- oracle check queries ----------------------------------------------------
-# id -> {"ch": sql, "duck": sql}. {WIN} renders to the 7-day window start for
-# checks (the approved smoke window).
+# id -> {"ch": sql, "duck": sql}. Checks always render the frozen 7-day
+# window ({W7}) regardless of the leg's days — the oracle manifest froze
+# those expectations.
 
 CHECKS = {
     "identity.canonical_events_7d": {
         "ch": """SELECT canonical_id, count() AS c FROM v_events
-                 WHERE timestamp >= {WIN} GROUP BY canonical_id
+                 WHERE timestamp >= {W7} GROUP BY canonical_id
                  ORDER BY c DESC, canonical_id LIMIT 10""",
         "duck": """SELECT canonical_id, count(*) AS c FROM v_events
-                   WHERE timestamp >= {WIN} GROUP BY canonical_id
+                   WHERE timestamp >= {W7} GROUP BY canonical_id
                    ORDER BY c DESC, canonical_id LIMIT 10""",
     },
     "identity.canonical_total_7d": {
-        "ch": "SELECT count() AS c FROM v_events WHERE timestamp >= {WIN}",
-        "duck": "SELECT count(*) AS c FROM v_events WHERE timestamp >= {WIN}",
+        "ch": "SELECT count() AS c FROM v_events WHERE timestamp >= {W7}",
+        "duck": "SELECT count(*) AS c FROM v_events WHERE timestamp >= {W7}",
     },
     "sessionization.sessions_7d": {
-        "ch": "SELECT uniqExact(session_id) AS c FROM events WHERE timestamp >= {WIN}",
-        "duck": "SELECT count(DISTINCT session_id) AS c FROM events WHERE timestamp >= {WIN}",
+        "ch": "SELECT uniqExact(session_id) AS c FROM events WHERE timestamp >= {W7}",
+        "duck": "SELECT count(DISTINCT session_id) AS c FROM events WHERE timestamp >= {W7}",
     },
     "sessionization.gap_violations": {
         "ch": """SELECT count() AS c FROM (
@@ -167,15 +169,15 @@ CHECKS = {
                    WHERE gap_ms >= 1800000""",
     },
     "dedup.raw_vs_distinct_7d": {
-        "ch": "SELECT count() AS raw, uniqExact(event_id) AS distinct_ids FROM events WHERE timestamp >= {WIN}",
-        "duck": "SELECT count(*) AS raw, count(DISTINCT event_id) AS distinct_ids FROM events WHERE timestamp >= {WIN}",
+        "ch": "SELECT count() AS raw, uniqExact(event_id) AS distinct_ids FROM events WHERE timestamp >= {W7}",
+        "duck": "SELECT count(*) AS raw, count(DISTINCT event_id) AS distinct_ids FROM events WHERE timestamp >= {W7}",
     },
     "late_events.bucket_7d": {
         "ch": """SELECT count() AS c FROM events
-                 WHERE timestamp >= {WIN}
+                 WHERE timestamp >= {W7}
                    AND inserted_at > timestamp + INTERVAL 1 HOUR""",
         "duck": """SELECT count(*) AS c FROM events
-                   WHERE timestamp >= {WIN}
+                   WHERE timestamp >= {W7}
                      AND inserted_at > timestamp + INTERVAL '1 hour'""",
     },
     "funnel.signup_window_7d": {
@@ -237,8 +239,6 @@ def render(sql: str, days: int = 7, deleted_keys: list[str] | None = None) -> st
     out = sql.replace("{END}", f"'{ts(CORPUS_END)}'")
     out = out.replace("{MATURE14}", f"'{ts(CORPUS_END - timedelta(days=14))}'")
     out = out.replace("{W7}", f"'{ts(window_start(7))}'")
-    out = out.replace("{W30}", f"'{ts(window_start(30))}'")
-    out = out.replace("{W90}", f"'{ts(window_start(90))}'")
     out = out.replace("{WIN}", f"'{ts(window_start(days))}'")
     keys = ", ".join("'" + k + "'" for k in (deleted_keys or [])) or "''"
     out = out.replace("{DELETED_KEYS}", keys)

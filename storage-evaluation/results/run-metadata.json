@@ -1,5 +1,6 @@
 {
   "clickhouse_image": "clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621",
+  "commit": "5453f81f6ea2c6ae49c48c8b4f2fd6c05bb36cb5",
   "duckdb": "1.5.5",
   "generated_by": "storage-evaluation harness",
   "legs": [

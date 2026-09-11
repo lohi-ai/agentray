@@ -19,7 +19,19 @@ import duckdb
 from . import queries
 
 DB_PATH = Path("/data/eval.duckdb")
-LOCK = threading.Lock()  # one writer; readers serialize on the GIL anyway
+# One shared connection is the honest model of DuckDB's single owning
+# process: every op — reads included — serializes on this lock because the
+# Python client does not support concurrent execute on one connection.
+# Concurrency pressure is still exercised (threads queue on the lock); the
+# report must not read serialized reads as parallel throughput.
+LOCK = threading.Lock()
+
+# Corpus tables the worker may load — the only files it will ever read.
+CORPUS_TABLES = {
+    "events": "events.parquet",
+    "aliases": "aliases.parquet",
+    "external_rows": "external_rows.parquet",
+}
 
 CON = None
 
@@ -68,9 +80,26 @@ def _init_schema():
 
 
 def _load_parquet(table: str, path: Path):
+    # Path is validated against the corpus dir before reaching here; the
+    # table name comes only from CORPUS_TABLES.
     _con().execute(
-        f"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{path}')"
+        "INSERT INTO " + table + " BY NAME SELECT * FROM read_parquet(?)",
+        [str(path)],
     )
+
+
+def _corpus_path(raw: str, fname: str) -> Path:
+    """Resolve a driver-supplied corpus dir to a file inside it, rejecting
+    anything that escapes the directory."""
+    base = Path(raw).resolve()
+    p = (base / fname).resolve()
+    if p.parent != base or p.name != fname:
+        raise ValueError(f"corpus path escapes base: {raw}")
+    return p
+
+
+def _count() -> int:
+    return _con().execute("SELECT count(*) FROM events").fetchone()[0]
 
 
 def _handle(op: dict) -> dict:
@@ -80,18 +109,14 @@ def _handle(op: dict) -> dict:
         return {"ok": True, "duckdb": duckdb.__version__}
     if kind == "load":
         corpus = Path(op["corpus"])
-        for table, fname in [
-            ("events", "events.parquet"),
-            ("aliases", "aliases.parquet"),
-            ("external_rows", "external_rows.parquet"),
-        ]:
-            _load_parquet(table, corpus / fname)
+        for table, fname in CORPUS_TABLES.items():
+            _load_parquet(table, _corpus_path(str(corpus), fname))
         return {"ok": True}
     if kind == "ingest":
         with LOCK:
-            _load_parquet("events", Path(op["corpus"]) / "ingest_batch.parquet")
-        n = _con().execute("SELECT count(*) FROM events").fetchone()[0]
-        return {"ok": True, "total": n}
+            _load_parquet("events",
+                          _corpus_path(str(op["corpus"]), "ingest_batch.parquet"))
+        return {"ok": True, "total": _count()}
     if kind == "query":
         # Structured IDs only — the driver cannot send raw SQL to the writer.
         qid = op["id"]
@@ -100,13 +125,13 @@ def _handle(op: dict) -> dict:
             return {"ok": False, "error": f"unknown query id {qid}"}
         sql = queries.render(spec["duck"], days=op.get("days", 7),
                              deleted_keys=op.get("deleted_keys"))
-        cur = _con().execute(sql)
-        cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        with LOCK:
+            cur = _con().execute(sql)
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         return {"ok": True, "rows": rows}
     if kind == "count":
-        n = _con().execute("SELECT count(*) FROM events").fetchone()[0]
-        return {"ok": True, "total": n}
+        return {"ok": True, "total": _count()}
     if kind == "shutdown":
         threading.Thread(target=_shutdown, daemon=True).start()
         return {"ok": True}

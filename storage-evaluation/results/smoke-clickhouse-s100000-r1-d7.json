@@ -194,30 +194,30 @@
   "days": 7,
   "engine": "clickhouse",
   "ingest": {
-    "ack_s": 1.07,
+    "ack_s": 0.11,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
-        -0.01,
-        0.395
+        -0.0,
+        0.035
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 1.16
+    "visibility_lag_s": 0.11
   },
-  "load_s": 14.14,
+  "load_s": 4.61,
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 26.9,
-    "cpu_pct_peak": 50.9,
-    "disk_after_load_bytes": 12748078,
-    "disk_before_bytes": 528830,
-    "disk_final_bytes": 15181932,
-    "mem_idle_bytes": 278867968,
-    "mem_peak_bytes": 765812736,
-    "samples": 18
+    "cpu_pct_mean": 22.1,
+    "cpu_pct_peak": 42.9,
+    "disk_after_load_bytes": 12377474,
+    "disk_before_bytes": 529506,
+    "disk_final_bytes": 13696923,
+    "mem_idle_bytes": 216883200,
+    "mem_peak_bytes": 639172608,
+    "samples": 5
   },
   "scale": 100000,
   "seed": 20260912,
@@ -225,74 +225,74 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 341.6,
-        "p95_ms": 341.6,
-        "p99_ms": 341.6
+        "p50_ms": 14.9,
+        "p95_ms": 14.9,
+        "p99_ms": 14.9
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 1282.6,
-        "p95_ms": 1282.6,
-        "p99_ms": 1282.6
+        "p50_ms": 17.3,
+        "p95_ms": 17.3,
+        "p99_ms": 17.3
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 362.4,
-        "p95_ms": 362.4,
-        "p99_ms": 362.4
+        "p50_ms": 20.5,
+        "p95_ms": 20.5,
+        "p99_ms": 20.5
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 1513.5,
-        "p95_ms": 1513.5,
-        "p99_ms": 1513.5
+        "p50_ms": 37.6,
+        "p95_ms": 37.6,
+        "p99_ms": 37.6
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 146.5,
-        "p95_ms": 146.5,
-        "p99_ms": 146.5
+        "p50_ms": 15.0,
+        "p95_ms": 15.0,
+        "p99_ms": 15.0
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 462.5,
-        "p95_ms": 462.5,
-        "p99_ms": 462.5
+        "p50_ms": 23.0,
+        "p95_ms": 23.0,
+        "p99_ms": 23.0
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 528.7,
-        "p95_ms": 528.7,
-        "p99_ms": 528.7
+        "p50_ms": 20.8,
+        "p95_ms": 20.8,
+        "p99_ms": 20.8
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 1421.8,
-        "p95_ms": 1421.8,
-        "p99_ms": 1421.8
+        "p50_ms": 19.8,
+        "p95_ms": 19.8,
+        "p99_ms": 19.8
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 671.3,
-        "p95_ms": 671.3,
-        "p99_ms": 671.3
+        "p50_ms": 99.9,
+        "p95_ms": 99.9,
+        "p99_ms": 99.9
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 6765.5,
-        "p95_ms": 6765.5,
-        "p99_ms": 6765.5
+        "p50_ms": 68.4,
+        "p95_ms": 68.4,
+        "p99_ms": 68.4
       }
     }
   },
   "status": "MEASURED",
-  "wall_s": 66.6
+  "wall_s": 17.9
 }
