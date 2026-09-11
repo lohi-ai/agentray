@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# storage-evaluation driver entrypoint.
+# Runs the harness driver in a resource-capped container (512 MiB, 1 CPU).
+# The driver orchestrates sibling engine containers through the mounted
+# Docker socket; $HERE is mounted at its host-absolute path so bind-mount
+# sources the driver passes to the daemon resolve on the host.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Image tag carries a build fingerprint so a requirements/Dockerfile change
+# rebuilds instead of silently reusing a stale mutable tag.
+FINGERPRINT="$(shasum -a 256 "$HERE/Dockerfile" "$HERE/requirements.txt" | shasum -a 256 | cut -c1-12)"
+IMAGE="storage-eval-driver:py3.13-$FINGERPRINT"
+NET="storage-eval-net"
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "building $IMAGE ..." >&2
+  docker build -t "$IMAGE" "$HERE" >&2
+fi
+docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
+mkdir -p "$HERE/work"
+
+exec docker run --rm -i \
+  --name storage-eval-driver \
+  --memory 512m --cpus 1 \
+  --network "$NET" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$HERE:$HERE" \
+  -e EVAL_HOST_DIR="$HERE" \
+  -e EVAL_DRIVER_IMAGE="$IMAGE" \
+  -w "$HERE" \
+  "$IMAGE" python -m harness.cli "$@"

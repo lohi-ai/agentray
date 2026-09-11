@@ -1,0 +1,321 @@
+"""Run one engine leg: load corpus, oracle checks, cold/warm query shapes,
+ingest-during-reads, resource sampling. Writes work/results/<run>.json.
+"""
+from __future__ import annotations
+
+import json
+import statistics
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from . import corpus as corpus_mod
+from . import engines, queries
+from .util import WORK, dir_bytes, load_json
+
+
+class Deadline(Exception):
+    pass
+
+
+class Sampler(threading.Thread):
+    """Polls docker stats for the engine container; records idle/peak.
+
+    memory_stats.usage is total container memory usage (cgroup), not
+    process RSS — field names say so.
+    """
+
+    def __init__(self, container_name: str, interval=1.0):
+        super().__init__(daemon=True)
+        self.container_name = container_name
+        self.interval = interval
+        self.samples = []
+        self._stop_event = threading.Event()
+
+    def run(self):
+        cli = engines.client()
+        try:
+            c = cli.containers.get(self.container_name)
+        except Exception:
+            return
+        while not self._stop_event.is_set():
+            try:
+                s = c.stats(stream=False)
+                mem = s["memory_stats"].get("usage", 0)
+                cpu_delta = (
+                    s["cpu_stats"]["cpu_usage"]["total_usage"]
+                    - s["precpu_stats"]["cpu_usage"]["total_usage"]
+                )
+                sys_delta = (
+                    s["cpu_stats"].get("system_cpu_usage", 0)
+                    - s["precpu_stats"].get("system_cpu_usage", 0)
+                )
+                ncpu = len(s["cpu_stats"]["cpu_usage"].get("percpu_usage") or [1])
+                cpu_pct = (cpu_delta / sys_delta * ncpu * 100.0) if sys_delta > 0 else 0.0
+                self.samples.append({"t": time.time(), "mem": mem, "cpu_pct": cpu_pct})
+            except Exception:
+                pass
+            self._stop_event.wait(self.interval)
+
+    def stop(self):
+        self._stop_event.set()
+
+    def summary(self) -> dict:
+        if not self.samples:
+            return {}
+        mem = [s["mem"] for s in self.samples]
+        cpu = [s["cpu_pct"] for s in self.samples]
+        return {
+            "mem_idle_bytes": mem[0],
+            "mem_peak_bytes": max(mem),
+            "cpu_pct_peak": round(max(cpu), 1),
+            "cpu_pct_mean": round(statistics.mean(cpu), 1),
+            "samples": len(self.samples),
+        }
+
+
+def _pct(values, p):
+    if not values:
+        return None
+    values = sorted(values)
+    k = min(len(values) - 1, int(len(values) * p))
+    return round(values[k] * 1000, 1)  # ms
+
+
+def _run_shape(engine, shape_id, days):
+    t0 = time.monotonic()
+    engine.run_shape(shape_id, days)
+    return time.monotonic() - t0
+
+
+def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
+            caps: dict, deadline_s: float) -> dict:
+    corpus_dir = corpus_mod.generate(scale, seed, caps["ingest_rows"])
+    oracle = load_json(corpus_dir / "oracle.json")
+    deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
+
+    eng = {"clickhouse": engines.ClickHouseEngine, "duckdb": engines.DuckDBEngine}[engine_name]()
+    leg = {
+        "engine": engine_name, "scale": scale, "seed": seed,
+        "readers": readers, "days": days, "status": "MEASURED",
+        "checks": {}, "shapes": {}, "ingest": {}, "resources": {},
+    }
+    t_start = time.monotonic()
+
+    def remaining():
+        left = deadline_s - (time.monotonic() - t_start)
+        if left <= 0:
+            raise Deadline(f"wall cap {deadline_s}s exceeded")
+        return left
+
+    def check_workdir():
+        used = dir_bytes(WORK) / 1024**3
+        if used > caps["workdir_gib"]:
+            raise Deadline(
+                f"workdir {used:.1f} GiB exceeded cap {caps['workdir_gib']} GiB")
+
+    # Watchdog: the deadline is also enforced mid-call — a hung HTTP request
+    # must not outlive the wall cap. On expiry the engine container is
+    # force-stopped, which unblocks in-flight requests with an error.
+    watchdog = threading.Timer(deadline_s, lambda: engines.stop_container(
+        eng.container_name))
+    watchdog.daemon = True
+
+    sampler = Sampler(eng.container_name)
+    try:
+        watchdog.start()
+        eng.start(caps)
+        sampler.start()
+        time.sleep(3)  # idle baseline sample
+        leg["resources"]["disk_before_bytes"] = eng.disk()
+
+        t0 = time.monotonic()
+        eng.load(corpus_dir)
+        leg["load_s"] = round(time.monotonic() - t0, 2)
+        leg["resources"]["disk_after_load_bytes"] = eng.disk()
+        remaining()
+        check_workdir()
+
+        # Oracle checks — exact comparison against the manifest.
+        for cid, spec in oracle["checks"].items():
+            if spec.get("status") == "NOT RUN":
+                leg["checks"][cid] = {"kind": spec["kind"], "status": "NOT RUN",
+                                      "note": spec.get("note", "")}
+                continue
+            try:
+                rows = eng.run_check(cid, days, deleted_keys)
+                extra = None
+                if cid == "identity.canonical_events_7d":
+                    extra = eng.run_check("identity.canonical_total_7d", days,
+                                          deleted_keys)
+                leg["checks"][cid] = _grade(cid, spec, rows, extra)
+            except Exception as e:
+                leg["checks"][cid] = {"kind": spec["kind"], "status": "ERROR",
+                                      "error": str(e)[:300]}
+            remaining()
+
+        # First timed pass then repeat passes. The first pass is not a true
+        # cold read — oracle checks already touched the data — so the labels
+        # say what was measured, not what was hoped.
+        for phase in ("first", "repeat"):
+            lat = {sid: [] for sid in queries.LOAD_SHAPES}
+            passes = 1 if phase == "first" else 2
+            for _ in range(passes):
+                with ThreadPoolExecutor(max_workers=readers) as pool:
+                    futs = []
+                    for r in range(readers):
+                        for sid in queries.LOAD_SHAPES:
+                            futs.append((sid, pool.submit(_run_shape, eng, sid, days)))
+                    for sid, f in futs:
+                        lat[sid].append(f.result())
+                remaining()
+            for sid, vals in lat.items():
+                d = leg["shapes"].setdefault(sid, {})
+                d[phase] = {
+                    "p50_ms": _pct(vals, 0.50), "p95_ms": _pct(vals, 0.95),
+                    "p99_ms": _pct(vals, 0.99), "n": len(vals),
+                }
+
+        # Ingest leg: batch lands while readers run; overlap is recorded
+        # with timestamps, not assumed.
+        with ThreadPoolExecutor(max_workers=readers) as pool:
+            def timed_read():
+                s = time.monotonic()
+                _run_shape(eng, "overview", days)
+                return s, time.monotonic()
+            futs = [pool.submit(timed_read) for _ in range(readers)]
+            t0 = time.monotonic()
+            ing = eng.ingest(corpus_dir)
+            visible_at = None
+            expected_total = oracle["total_rows"] + oracle["ingest_rows"]
+            while time.monotonic() - t0 < 60:
+                if eng.count() >= expected_total:
+                    visible_at = time.monotonic() - t0
+                    break
+                time.sleep(0.5)
+            spans = [f.result() for f in futs]
+        overlap = sum(1 for s, e in spans if s < t0 + ing["ack_s"])
+        leg["ingest"] = {
+            "rows": oracle["ingest_rows"], "ack_s": round(ing["ack_s"], 2),
+            "visibility_lag_s": (round(visible_at, 2) if visible_at is not None else ">60"),
+            "expected_total": expected_total, "final_total": eng.count(),
+            "readers_overlapping_ingest": overlap,
+        }
+        leg["resources"]["disk_final_bytes"] = eng.disk()
+        check_workdir()
+        leg["status"] = "MEASURED"
+    except Deadline as e:
+        leg["status"] = "ABORTED"
+        leg["abort_reason"] = str(e)
+    except Exception as e:
+        leg["status"] = "ERROR"
+        leg["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        watchdog.cancel()
+        sampler.stop()
+        if sampler.is_alive() or sampler.ident is not None:
+            sampler.join(timeout=5)
+        leg["resources"].update(sampler.summary())
+        try:
+            eng.stop()
+        except Exception:
+            pass
+    leg["wall_s"] = round(time.monotonic() - t_start, 1)
+    return leg
+
+
+def _grade(cid: str, spec: dict, rows: list, extra_rows: list | None = None) -> dict:
+    """Compare engine rows to the manifest expectation. Exact match only.
+
+    Missing, empty, null, or truncated engine output is ERROR — never a
+    pass. PASS always records the compared expected/actual values.
+    """
+    kind = spec["kind"]
+    out = {"kind": kind, "status": "PASS", "expected": None, "actual": None}
+
+    def err(msg):
+        out["status"] = "ERROR"
+        out["error"] = msg
+        return out
+
+    def fail(exp, act):
+        out["status"] = "DIVERGENT"
+        out["expected"], out["actual"] = exp, act
+        return out
+
+    def ok(exp, act):
+        out["expected"], out["actual"] = exp, act
+        return out
+
+    if not isinstance(rows, list) or not rows:
+        return err("engine returned no rows")
+
+    def scalar(row, key):
+        if not isinstance(row, dict) or key not in row or row[key] is None:
+            raise KeyError(key)
+        return row[key]
+
+    try:
+        if cid == "identity.canonical_events_7d":
+            top = [[r["canonical_id"], int(r["c"])] for r in rows]
+            if not extra_rows:
+                return err("missing canonical total sub-query")
+            total = int(scalar(extra_rows[0], "c"))
+            exp = {"top10": [list(t) for t in spec["top10"]], "total": spec["total"]}
+            act = {"top10": top, "total": total}
+            return ok(exp, act) if act == exp else fail(exp, act)
+        if cid == "sessionization.sessions_7d":
+            act = int(scalar(rows[0], "c"))
+            return ok(spec["distinct_sessions"], act) if act == spec["distinct_sessions"] \
+                else fail(spec["distinct_sessions"], act)
+        if cid == "sessionization.gap_violations":
+            act = int(scalar(rows[0], "c"))
+            return ok(spec["count"], act) if act == spec["count"] \
+                else fail(spec["count"], act)
+        if cid == "dedup.raw_vs_distinct_7d":
+            raw = int(scalar(rows[0], "raw"))
+            dist = int(scalar(rows[0], "distinct_ids"))
+            exp = [spec["raw"], spec["distinct_event_ids"]]
+            return ok(exp, [raw, dist]) if [raw, dist] == exp else fail(exp, [raw, dist])
+        if cid == "late_events.bucket_7d":
+            act = int(scalar(rows[0], "c"))
+            return ok(spec["late_gt_1h"], act) if act == spec["late_gt_1h"] \
+                else fail(spec["late_gt_1h"], act)
+        if cid == "funnel.signup_window_7d":
+            hist = [0, 0, 0, 0]
+            for r in rows:
+                lvl = int(scalar(r, "level"))
+                cnt = int(scalar(r, "c"))
+                if lvl < 4:
+                    hist[lvl] = cnt
+            # oracle histogram counts level-0 users too; engines only return >0
+            exp = spec["level_histogram"]
+            return ok(exp[1:], hist[1:]) if hist[1:] == exp[1:] else fail(exp[1:], hist[1:])
+        if cid == "retention.week1_mature":
+            base = int(scalar(rows[0], "base"))
+            w1 = int(scalar(rows[0], "w1"))
+            exp = [spec["base"], spec["week1_users"]]
+            return ok(exp, [base, w1]) if [base, w1] == exp else fail(exp, [base, w1])
+        if cid == "entity.current_rows":
+            act = int(scalar(rows[0], "c"))
+            return ok(spec["count"], act) if act == spec["count"] \
+                else fail(spec["count"], act)
+        if cid in ("entity.deleted_still_visible", "entity.tombstone_delete"):
+            act = int(scalar(rows[0], "c"))
+            return ok(spec["expected_visible"], act) if act == spec["expected_visible"] \
+                else fail(spec["expected_visible"], act)
+        if cid == "entity_join.order_paid_7d":
+            act = int(scalar(rows[0], "amount_cents") or 0)
+            return ok(spec["amount_cents"], act) if act == spec["amount_cents"] \
+                else fail(spec["amount_cents"], act)
+        if cid == "currency.cost_7d":
+            act = float(scalar(rows[0], "s"))
+            exp = float(spec["sum_usd"])
+            # Float32 stored values summed in float64: exact match expected,
+            # 1e-6 relative slack for engine summation-order differences.
+            good = abs(act - exp) <= max(1e-6 * abs(exp), 1e-9)
+            return ok(exp, act) if good else fail(exp, act)
+        return err(f"unhandled check id {cid}")
+    except (KeyError, TypeError, IndexError, ValueError) as e:
+        return err(f"malformed engine output: {e}; rows={str(rows)[:200]}")
