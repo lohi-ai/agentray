@@ -71,28 +71,26 @@ func verifySDK() opcore.Operation[verifySDKInput, verifySDKOutput] {
 				hours = 2
 			}
 			const searchLimit = 50
-			events, err := d.Repo.RecentEventsForVerification(ctx, cc.ProjectID, searchLimit)
+			// Arrival semantics: the read filters and orders on inserted_at —
+			// when the pipeline accepted the event — so a delayed/offline
+			// event with a stale occurred timestamp still verifies.
+			since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+			events, err := d.Repo.RecentEventsForVerification(ctx, cc.ProjectID, searchLimit, since)
 			if err != nil {
 				return verifySDKOutput{}, err
 			}
 			want := strings.TrimSpace(in.EventName)
 			out := verifySDKOutput{Warnings: []string{}, Searched: len(events)}
-			cutoffTime := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 			for _, ev := range events {
-				if ev.Timestamp.Before(cutoffTime) {
-					continue
-				}
 				if want != "" && ev.EventName != want {
 					continue
 				}
 				out.Found = true
 				out.EventName = ev.EventName
-				// received_at is when the pipeline accepted the event
-				// (inserted_at), not the client-supplied occurred timestamp.
 				if ev.InsertedAt != nil {
 					out.ReceivedAt = ev.InsertedAt.UTC().Format(time.RFC3339)
 				} else {
-					out.ReceivedAt = ev.Timestamp.UTC().Format(time.RFC3339)
+					out.Warnings = append(out.Warnings, "event has no receipt timestamp — received_at unavailable")
 				}
 				out.Platform = ev.Platform // persisted column, not a properties guess
 				linked, lerr := d.Repo.DistinctIDLinked(ctx, cc.ProjectID, ev.DistinctID)
@@ -105,14 +103,14 @@ func verifySDK() opcore.Operation[verifySDKInput, verifySDKOutput] {
 					out.Warnings = append(out.Warnings, "event has no platform — check the SDK's platform field")
 				}
 				if !out.IdentityLinked {
-					out.Warnings = append(out.Warnings, "no identify/alias link for this distinct id — call identify() to attach it to a user")
+					out.Warnings = append(out.Warnings, "no identify/alias link found for this distinct id — if this event should belong to a known user, call identify()")
 				}
 				return out, nil
 			}
 			if want != "" {
-				out.Warnings = append(out.Warnings, fmt.Sprintf("no event named %q in the last %dh (searched %d most recent events) — check the event name and that capture is reaching this project", want, hours, len(events)))
+				out.Warnings = append(out.Warnings, fmt.Sprintf("no event named %q arrived in the last %dh (searched %d most recent arrivals) — check the event name and that capture is reaching this project", want, hours, len(events)))
 			} else {
-				out.Warnings = append(out.Warnings, fmt.Sprintf("no events in the last %dh (searched %d most recent events) — check the SDK key and capture endpoint", hours, len(events)))
+				out.Warnings = append(out.Warnings, fmt.Sprintf("no events arrived in the last %dh (searched %d most recent arrivals) — check the SDK key and capture endpoint", hours, len(events)))
 			}
 			return out, nil
 		},
@@ -122,11 +120,11 @@ func verifySDK() opcore.Operation[verifySDKInput, verifySDKOutput] {
 // --- update_dashboard ---
 
 type updateDashboardInput struct {
-	DashboardID    string `json:"dashboard_id" required:"true" desc:"dashboard to update"`
-	Name           string `json:"name" desc:"new name (optional)"`
-	Description    string `json:"description" desc:"new description (optional)"`
-	Revision       int64  `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict"`
-	IdempotencyKey string `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
+	DashboardID    string  `json:"dashboard_id" required:"true" desc:"dashboard to update"`
+	Name           *string `json:"name" desc:"new name — omit to keep current; empty resets to Untitled"`
+	Description    *string `json:"description" desc:"new description — omit to keep current; empty clears"`
+	Revision       int64   `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict"`
+	IdempotencyKey string  `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
 }
 
 func updateDashboard() opcore.Operation[updateDashboardInput, storage.Dashboard] {
@@ -140,6 +138,9 @@ func updateDashboard() opcore.Operation[updateDashboardInput, storage.Dashboard]
 			d, err := depsFrom(cc)
 			if err != nil {
 				return storage.Dashboard{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.Dashboard{}, fmt.Errorf("revision must be the dashboard's current revision (> 0)")
 			}
 			hash, err := requestHash(in)
 			if err != nil {
@@ -169,6 +170,9 @@ func archiveDashboard() opcore.Operation[archiveDashboardInput, storage.Dashboar
 			d, err := depsFrom(cc)
 			if err != nil {
 				return storage.Dashboard{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.Dashboard{}, fmt.Errorf("revision must be the dashboard's current revision (> 0)")
 			}
 			hash, err := requestHash(in)
 			if err != nil {

@@ -15,12 +15,13 @@ import (
 // migrate onto /api/op incrementally. Auth resolves a Principal (management
 // credential, legacy/capture project key, or session) and every call is
 // authorized against the operation's access class before the handler runs.
-func registerOpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier) {
+func registerOpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier, runner usecase.SourceRunner) {
 	reg := usecase.Registry()
 	deps := &usecase.Deps{
 		Repo:     store,
 		Memory:   agentruntime.NewPgMemory(store, false),
 		Notifier: notifier,
+		Runner:   runner,
 	}
 	group := e.Group("/api/op")
 	opcore.MountHTTP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {

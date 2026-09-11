@@ -7,6 +7,7 @@ package agentruntime
 
 import (
 	"context"
+	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -50,12 +51,22 @@ type DataSource interface {
 	// atomic idempotent writes (claim+mutation+receipt in one tx), identity
 	// linkage, and the bounded event read verify_sdk uses.
 	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
-	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64) (storage.Dashboard, error)
+	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64) (storage.Dashboard, error)
 	ArchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (storage.Dashboard, error)
-	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
-	RecentEventsForVerification(ctx context.Context, projectID string, limit int) ([]storage.Event, error)
+	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
+
+	// Source lifecycle (slice 2): project-scoped connector probes and the
+	// persistent run contract.
+	ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error)
+	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
+	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)
+	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
+	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -82,4 +93,10 @@ const (
 	ToolVerifySDK        = "verify_sdk"
 	ToolUpdateDashboard  = "update_dashboard"
 	ToolArchiveDashboard = "archive_dashboard"
+	ToolTestSource       = "test_source"
+	ToolPreviewSource    = "preview_source"
+	ToolPauseSource      = "pause_source"
+	ToolRunSource        = "run_source"
+	ToolSourceStatus     = "source_status"
+	ToolCancelSourceRun  = "cancel_source_run"
 )

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -76,19 +77,23 @@ func (s *Store) ListDashboardsFiltered(ctx context.Context, projectID string, in
 	return dashboards, rows.Err()
 }
 
-// updateDashboardRevision applies a name/description update only when the
-// row's revision still equals expectedRevision — the optimistic-concurrency
-// check that makes a concurrent pair yield exactly one success. The revision
-// increments once per applied update. Runs on any pgQuerier so the idempotent
-// claim wrapper can execute it inside the claim transaction.
-func updateDashboardRevision(ctx context.Context, q pgQuerier, projectID, dashboardID, name, description string, expectedRevision int64) (Dashboard, error) {
-	if name == "" {
-		name = "Untitled dashboard"
-	}
+// updateDashboardRevision applies a partial name/description update only when
+// the row's revision still equals expectedRevision — the optimistic-
+// concurrency check that makes a concurrent pair yield exactly one success.
+// nil name/description leave the column untouched; an explicit "" clears the
+// description, while an empty name falls back to "Untitled dashboard" (a
+// dashboard is never nameless). The revision increments once per applied
+// update. Runs on any pgQuerier so the idempotent claim wrapper can execute
+// it inside the claim transaction.
+func updateDashboardRevision(ctx context.Context, q pgQuerier, projectID, dashboardID string, name, description *string, expectedRevision int64) (Dashboard, error) {
 	var d Dashboard
 	err := q.QueryRow(ctx, `
 UPDATE dashboards
-SET name = $3, description = $4, revision = revision + 1, updated_at = now()
+SET name = CASE WHEN $3::text IS NULL THEN name
+                WHEN $3 = '' THEN 'Untitled dashboard'
+                ELSE $3 END,
+    description = COALESCE($4::text, description),
+    revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2 AND revision = $5 AND archived_at IS NULL
 RETURNING `+dashboardColumns, projectID, dashboardID, name, description, expectedRevision).
 		Scan(dashboardScanDest(&d)...)
@@ -111,7 +116,7 @@ RETURNING `+dashboardColumns, projectID, dashboardID, name, description, expecte
 
 // UpdateDashboardRevision is the non-transactional edge for callers that do
 // not need an idempotency receipt.
-func (s *Store) UpdateDashboardRevision(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64) (Dashboard, error) {
+func (s *Store) UpdateDashboardRevision(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64) (Dashboard, error) {
 	return updateDashboardRevision(ctx, s.pg, projectID, dashboardID, name, description, expectedRevision)
 }
 
@@ -181,10 +186,12 @@ RETURNING request_hash`, projectID, operation, key, requestHash).Scan(&claimed)
 		// Another transaction holds or held this key. Its row is committed by
 		// the time our INSERT unblocks, so the receipt is either complete or
 		// the winner rolled back (row gone — but then our insert would have
-		// succeeded). Read what won.
+		// succeeded). Read what won THROUGH THE SAME TX — under READ COMMITTED
+		// the next statement sees the winner's commit, and using the pool here
+		// would deadlock at MaxConns=1 (this tx still holds its connection).
 		var storedHash string
 		var stored []byte
-		if qerr := s.pg.QueryRow(ctx, `
+		if qerr := tx.QueryRow(ctx, `
 SELECT request_hash, result FROM idempotency_keys
 WHERE project_id = $1 AND operation = $2 AND idempotency_key = $3`,
 			projectID, operation, key).Scan(&storedHash, &stored); qerr != nil {
@@ -220,7 +227,7 @@ WHERE project_id = $1 AND operation = $2 AND idempotency_key = $3 AND request_ha
 
 // UpdateDashboardIdempotent is updateDashboardRevision under an idempotency
 // claim: one transaction claims the key, mutates, and records the receipt.
-func (s *Store) UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID, name, description string, expectedRevision int64, idemKey, requestHash string) (Dashboard, error) {
+func (s *Store) UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (Dashboard, error) {
 	raw, err := s.runIdempotent(ctx, projectID, "update_dashboard", idemKey, requestHash,
 		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
 			d, err := updateDashboardRevision(ctx, q, projectID, dashboardID, name, description, expectedRevision)
@@ -262,21 +269,52 @@ func (s *Store) ArchiveDashboardIdempotent(ctx context.Context, projectID, dashb
 // DistinctIDLinked reports whether an explicit identify/alias link exists for
 // the distinct id — the honest answer to "is this event's actor identified",
 // since SDK anonymous id shapes vary and cannot be sniffed by prefix.
+// Both directions count: the id may appear as the anonymous side (identify()
+// linked it forward) or as the canonical side (the SDK sends the canonical id
+// directly after linking).
 func (s *Store) DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error) {
 	var linked bool
 	err := s.pg.QueryRow(ctx, `
-SELECT EXISTS(SELECT 1 FROM aliases WHERE project_id = $1 AND anonymous_id = $2)`,
+SELECT EXISTS(SELECT 1 FROM aliases WHERE project_id = $1 AND (anonymous_id = $2 OR canonical_id = $2))`,
 		projectID, distinctID).Scan(&linked)
 	return linked, err
 }
 
-// RecentEventsForVerification is the bounded event read verify_sdk rides on —
-// the same RecentEvents path the analytics surface uses, scoped to the
-// project, capped small. Declared separately so the operation's contract is
-// visible in one place.
-func (s *Store) RecentEventsForVerification(ctx context.Context, projectID string, limit int) ([]Event, error) {
+// RecentEventsForVerification is the bounded event read verify_sdk rides on.
+// Verification asks "did my event ARRIVE", so it filters and orders on
+// inserted_at (receipt time), not the client-supplied occurred timestamp —
+// an offline device can deliver an event whose timestamp is days old.
+func (s *Store) RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]Event, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
 	}
-	return s.RecentEvents(ctx, projectID, limit)
+	rows, err := s.ch.Query(ctx, `
+SELECT
+	project_id::String, event_id::String, distinct_id, session_id, event_name,
+	event_type, properties, is_error, timestamp, inserted_at, platform
+FROM events
+WHERE project_id = ? AND inserted_at >= ?
+ORDER BY inserted_at DESC
+LIMIT ?`, projectID, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []Event{}
+	for rows.Next() {
+		var event Event
+		var isError uint8
+		var inserted time.Time
+		if err := rows.Scan(
+			&event.ProjectID, &event.EventID, &event.DistinctID, &event.SessionID,
+			&event.EventName, &event.EventType, &event.Properties, &isError,
+			&event.Timestamp, &inserted, &event.Platform,
+		); err != nil {
+			return nil, err
+		}
+		event.IsError = isError == 1
+		event.InsertedAt = &inserted
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }

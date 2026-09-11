@@ -47,8 +47,11 @@ type ConnectorSync struct {
 	LastError    string     `json:"last_error"`
 	LastRows     int        `json:"last_rows"`
 	TotalRows    int64      `json:"total_rows"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// Revision is the optimistic-concurrency counter pause/update carry —
+	// same contract as dashboards.
+	Revision  int64     `json:"revision"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
@@ -427,27 +430,6 @@ WHERE cs.id = $1`, syncID).
 		return connector.SyncJob{}, err
 	}
 	return job, nil
-}
-
-// FinishConnectorSync persists one run's outcome. The error text is truncated
-// defensively; sources are responsible for never leaking credentials into it.
-func (s *Store) FinishConnectorSync(ctx context.Context, syncID string, result connector.SyncResult) error {
-	status := "ok"
-	errText := result.Err
-	if errText != "" {
-		status = "error"
-		if len(errText) > 500 {
-			errText = errText[:500]
-		}
-	}
-	_, err := s.pg.Exec(ctx, `
-UPDATE connector_syncs SET
-	cursor = CASE WHEN $2 THEN $3 ELSE cursor END,
-	cursor_key = CASE WHEN $2 THEN $4 ELSE cursor_key END,
-	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7::int,
-	total_rows = total_rows + $7::bigint, updated_at = now()
-WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, status, errText, result.Rows)
-	return err
 }
 
 // InsertExternalRows lands one batch in the ClickHouse external_rows table.

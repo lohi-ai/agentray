@@ -3,11 +3,13 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/shared/cronx"
 )
 
@@ -27,8 +29,9 @@ const syncRunTimeout = 10 * time.Minute
 // ScheduledSync is the engine's view of one enabled sync config: enough to
 // decide "due now" without loading the connector or its credentials.
 type ScheduledSync struct {
-	ID   string
-	Cron string
+	ID        string
+	ProjectID string
+	Cron      string
 }
 
 // SyncJob is everything one sync run needs, resolved by the store (including
@@ -79,23 +82,72 @@ type Store interface {
 	ListEnabledConnectorSyncs(ctx context.Context) ([]ScheduledSync, error)
 	ConnectorSyncJob(ctx context.Context, syncID string) (SyncJob, error)
 	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
-	FinishConnectorSync(ctx context.Context, syncID string, result SyncResult) error
+	EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error)
+	ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error)
+	HeartbeatConnectorRun(ctx context.Context, runID string) (cancelRequested bool, stillRunning bool, err error)
+	FinishConnectorRun(ctx context.Context, runID, syncID, owner string, result SyncResult, cancelled bool) error
+	ReconcileConnectorRuns(ctx context.Context, staleBefore time.Time) (int, error)
+}
+
+// Run is one durable sync-run record — the client-visible contract for
+// run_source/source_status/cancel_source_run. storage owns the row; the type
+// lives here so the engine's Store interface does not import its own
+// implementation package.
+type Run struct {
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"project_id"`
+	SyncID          string     `json:"sync_id"`
+	ConnectorID     string     `json:"connector_id"`
+	Status          string     `json:"status"` // queued | running | succeeded | failed | cancelled
+	IdempotencyKey  string     `json:"idempotency_key,omitempty"`
+	CancelRequested bool       `json:"cancel_requested"`
+	Rows            int        `json:"rows"`
+	Cursor          string     `json:"cursor,omitempty"`
+	CursorKey       string     `json:"cursor_key,omitempty"`
+	Error           string     `json:"error,omitempty"`
+	QueuedAt        time.Time  `json:"queued_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // Engine schedules and executes connector syncs. It rides the agent
-// scheduler's minute tick; runs are serialized behind a mutex so overlapping
-// ticks (or a tick racing a manual "run now") never double-pull one sync.
+// scheduler's minute tick. The durable connector_runs row is the client
+// contract: enqueue is idempotent and at most one run per sync is active
+// (DB unique index), so overlapping ticks or a tick racing a manual run can
+// never double-pull. The in-memory maps only carry per-process execution
+// state — the cancel func and the worker semaphore.
 type Engine struct {
 	store Store
 	mu    sync.Mutex
-	// running guards per-sync overlap when RunSync is called concurrently.
-	running map[string]bool
-	// wg tracks tick-spawned runs so shutdown (and tests) can wait for them.
+	// id identifies this process's runs — the lease owner Reconcile uses to
+	// tell a dead process's rows from a live one's.
+	id string
+	// cancels maps an active run id to its context cancel — cancel_source_run
+	// sets the DB flag AND calls this so a running pull stops promptly.
+	cancels map[string]context.CancelFunc
+	// sem bounds concurrent runs in this process.
+	sem chan struct{}
+	// heartbeatEvery is the lease/cancel poll interval; tests shrink it.
+	heartbeatEvery time.Duration
+	// wg tracks spawned runs so shutdown (and tests) can wait for them.
 	wg sync.WaitGroup
 }
 
+// maxConcurrentRuns bounds simultaneous syncs in one process.
+const maxConcurrentRuns = 4
+
+// runLeaseStaleAfter is how old a running row's heartbeat (or a queued row's
+// age) must be before reconcile fences it — comfortably above the heartbeat
+// interval so a live worker is never fenced by a peer's boot or tick.
+const runLeaseStaleAfter = 2 * time.Minute
+
+// maxHeartbeatFailures bounds consecutive heartbeat errors before the run is
+// cancelled: a worker that can no longer prove its lease must not keep
+// landing rows — a peer may have fenced it and freed the active guard.
+const maxHeartbeatFailures = 3
+
 func NewEngine(store Store) *Engine {
-	return &Engine{store: store, running: map[string]bool{}}
+	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second}
 }
 
 // Tick starts every due sync for this minute. Called from the scheduler's
@@ -104,6 +156,14 @@ func NewEngine(store Store) *Engine {
 // the tick. Failures are recorded on the sync row; the per-sync claim keeps a
 // still-running sync from being started again by a later tick.
 func (e *Engine) Tick(ctx context.Context, now time.Time) {
+	// Periodic recovery: a run orphaned by a process that died and restarted
+	// inside the stale window keeps a fresh-looking heartbeat at startup —
+	// only a later pass fences it once the lease actually expires.
+	if n, err := e.store.ReconcileConnectorRuns(ctx, now.Add(-runLeaseStaleAfter)); err != nil {
+		log.Printf("connector: reconcile runs: %v", err)
+	} else if n > 0 {
+		log.Printf("connector: fenced %d orphaned runs", n)
+	}
 	syncs, err := e.store.ListEnabledConnectorSyncs(ctx)
 	if err != nil {
 		log.Printf("connector: list syncs: %v", err)
@@ -113,50 +173,121 @@ func (e *Engine) Tick(ctx context.Context, now time.Time) {
 		if s.Cron == "" || !cronx.Matches(s.Cron, now) {
 			continue
 		}
-		id := s.ID
-		e.wg.Add(1)
-		go func() {
-			defer e.wg.Done()
-			if err := e.RunSync(ctx, id); err != nil {
-				log.Printf("connector: sync %s: %v", id, err)
-			}
-		}()
+		if _, _, err := e.EnqueueRun(ctx, s.ProjectID, s.ID, ""); err != nil {
+			log.Printf("connector: enqueue sync %s: %v", s.ID, err)
+		}
 	}
 }
 
 // Wait blocks until every tick-spawned run has finished.
 func (e *Engine) Wait() { e.wg.Wait() }
 
-// RunSync executes one sync run end to end: open the source, pull incremental
-// batches, land them in ClickHouse, persist cursor + status. The whole run is
-// bounded by syncRunTimeout so a hung source cannot pin the goroutine. The
-// returned error is also persisted on the sync row (sanitized upstream), so
-// callers may ignore it for fire-and-forget scheduling.
-func (e *Engine) RunSync(ctx context.Context, syncID string) error {
-	if !e.claim(syncID) {
-		return fmt.Errorf("sync %s is already running", syncID)
+// EnqueueRun records a queued run and dispatches a worker. The store decides
+// whether this call created the run (enqueued) or observed an existing one —
+// a duplicate idempotency key replays the original run, an already-active
+// sync returns its live run. Either way the caller gets the run row back.
+func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error) {
+	run, enqueued, err = e.store.EnqueueConnectorRun(ctx, projectID, syncID, idemKey)
+	if err != nil || !enqueued {
+		return run, enqueued, err
 	}
-	defer e.release(syncID)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.sem <- struct{}{}
+		defer func() { <-e.sem }()
+		e.executeRun(run.ID, run.SyncID)
+	}()
+	return run, true, nil
+}
 
-	ctx, cancel := context.WithTimeout(ctx, syncRunTimeout)
-	defer cancel()
+// CancelRun asks a run to stop: the DB flag is the cross-process contract;
+// the in-memory cancel makes it prompt when the worker lives here.
+func (e *Engine) CancelRun(runID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if cancel, ok := e.cancels[runID]; ok {
+		cancel()
+	}
+}
 
-	job, err := e.store.ConnectorSyncJob(ctx, syncID)
+// executeRun claims and runs one queued run end to end: open the source, pull
+// incremental batches, land them in ClickHouse, persist cursor + status on
+// both the run row and the sync's last_* columns. The whole run is bounded by
+// syncRunTimeout; the finish write rides an independent bounded context so a
+// timed-out run still records its outcome.
+func (e *Engine) executeRun(runID, syncID string) {
+	ctx := context.Background()
+	_, claimed, err := e.store.ClaimConnectorRun(ctx, runID, e.id)
 	if err != nil {
-		return err
+		log.Printf("connector: claim run %s: %v", runID, err)
+		return
 	}
-	result := e.pullAndLand(ctx, job)
-	// Persist the outcome even when the run itself timed out: the status write
-	// must not ride the (possibly expired) run context.
-	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	if !claimed {
+		return // cancelled while queued, or claimed elsewhere
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, syncRunTimeout)
+	e.mu.Lock()
+	e.cancels[runID] = cancel
+	e.mu.Unlock()
+
+	// The heartbeat does two jobs in one write: it keeps the lease fresh so a
+	// peer process's boot reconcile cannot fence this live run, and it reads
+	// back cancel_requested so a cancel issued against another process still
+	// lands here.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		tick := time.NewTicker(e.heartbeatEvery)
+		defer tick.Stop()
+		failures := 0
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-tick.C:
+				cancelRequested, stillRunning, herr := e.store.HeartbeatConnectorRun(runCtx, runID)
+				if herr != nil {
+					failures++
+					if failures >= maxHeartbeatFailures {
+						// Lease unprovable — stop before a peer's reconcile
+						// frees the guard and a second writer lands rows.
+						cancel()
+						return
+					}
+					continue
+				}
+				failures = 0
+				if cancelRequested || !stillRunning {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	defer func() {
+		cancel()
+		<-heartbeatDone
+		e.mu.Lock()
+		delete(e.cancels, runID)
+		e.mu.Unlock()
+	}()
+
+	job, err := e.store.ConnectorSyncJob(runCtx, syncID)
+	var result SyncResult
+	if err != nil {
+		result = SyncResult{Err: err.Error()}
+	} else {
+		result = e.pullAndLand(runCtx, job)
+	}
+	cancelled := errors.Is(runCtx.Err(), context.Canceled)
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(runCtx), 30*time.Second)
 	defer finishCancel()
-	if err := e.store.FinishConnectorSync(finishCtx, syncID, result); err != nil {
-		return err
+	if err := e.store.FinishConnectorRun(finishCtx, runID, syncID, e.id, result, cancelled); err != nil {
+		log.Printf("connector: finish run %s: %v", runID, err)
 	}
-	if result.Err != "" {
-		return fmt.Errorf("%s", result.Err)
-	}
-	return nil
 }
 
 // pullAndLand does the fallible middle of a run and always returns a
@@ -235,20 +366,4 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 		return result(fmt.Sprintf("table exceeds the %d-row snapshot limit; configure a cursor column for incremental sync", maxBatchesPerRun*pullBatchSize))
 	}
 	return result("")
-}
-
-func (e *Engine) claim(syncID string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.running[syncID] {
-		return false
-	}
-	e.running[syncID] = true
-	return true
-}
-
-func (e *Engine) release(syncID string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.running, syncID)
 }

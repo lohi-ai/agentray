@@ -159,8 +159,9 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	// Run one sync now (owner/admin). Synchronous: the response carries the
-	// outcome the run also persisted on the sync row.
+	// Run one sync now (owner/admin). Enqueues a persistent run row and
+	// returns it — the same contract the run_source operation uses, so REST
+	// and MCP callers observe identical status/cancel semantics.
 	e.POST("/api/connector-syncs/:sync_id/run", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
@@ -181,10 +182,11 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if !ok {
 			return echo.NewHTTPError(http.StatusNotFound, "sync not found")
 		}
-		if err := engine.RunSync(c.Request().Context(), syncID); err != nil {
+		run, enqueued, err := engine.EnqueueRun(c.Request().Context(), project.ID, syncID, "")
+		if err != nil {
 			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		}
-		return c.JSON(http.StatusOK, map[string]any{"ok": true})
+		return c.JSON(http.StatusOK, map[string]any{"ok": true, "run": run, "enqueued": enqueued})
 	})
 
 	// AI-assisted sync draft: discover the schema, let the authoring model

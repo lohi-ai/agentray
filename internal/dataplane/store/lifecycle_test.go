@@ -3,10 +3,17 @@ package storage
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
+
+func strptr(s string) *string { return &s }
 
 // Live tests for dashboard revision/archive and idempotency receipts. Needs
 // the compose Postgres; skips without one.
@@ -25,7 +32,7 @@ func TestDashboardRevisionAndArchive(t *testing.T) {
 	}
 
 	// Revision-checked update: correct revision applies and bumps once.
-	d2, err := s.UpdateDashboardRevision(ctx, projectID, d.ID, "Board A2", "renamed", 1)
+	d2, err := s.UpdateDashboardRevision(ctx, projectID, d.ID, strptr("Board A2"), strptr("renamed"), 1)
 	if err != nil {
 		t.Fatalf("update rev1: %v", err)
 	}
@@ -34,7 +41,7 @@ func TestDashboardRevisionAndArchive(t *testing.T) {
 	}
 
 	// Stale revision conflicts; the row is unchanged.
-	if _, err := s.UpdateDashboardRevision(ctx, projectID, d.ID, "sneaky", "", 1); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := s.UpdateDashboardRevision(ctx, projectID, d.ID, strptr("sneaky"), nil, 1); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale update err = %v, want ErrRevisionConflict", err)
 	}
 	cur, err := s.ListDashboards(ctx, projectID)
@@ -43,7 +50,7 @@ func TestDashboardRevisionAndArchive(t *testing.T) {
 	}
 
 	// Unknown id is not-found, not conflict.
-	if _, err := s.UpdateDashboardRevision(ctx, projectID, "00000000-0000-0000-0000-000000000000", "x", "", 1); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := s.UpdateDashboardRevision(ctx, projectID, "00000000-0000-0000-0000-000000000000", strptr("x"), nil, 1); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("missing dashboard err = %v, want ErrNoRows", err)
 	}
 
@@ -84,7 +91,7 @@ func TestDashboardRevisionAndArchive(t *testing.T) {
 
 	// Cross-project isolation: another project's id cannot be touched.
 	_, otherProject := seedConvProject(t, s)
-	if _, err := s.UpdateDashboardRevision(ctx, otherProject, d.ID, "nope", "", 3); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := s.UpdateDashboardRevision(ctx, otherProject, d.ID, strptr("nope"), nil, 3); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-project update err = %v, want ErrNoRows", err)
 	}
 	if _, err := s.ArchiveDashboard(ctx, otherProject, d.ID, 3); !errors.Is(err, pgx.ErrNoRows) {
@@ -106,7 +113,7 @@ func TestIdempotentWrites(t *testing.T) {
 	}
 
 	// First call claims, mutates, and records in one transaction.
-	d1, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, "Renamed", "", 1, "k1", "hash-a")
+	d1, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Renamed"), nil, 1, "k1", "hash-a")
 	if err != nil {
 		t.Fatalf("first update: %v", err)
 	}
@@ -114,7 +121,7 @@ func TestIdempotentWrites(t *testing.T) {
 		t.Fatalf("first = %+v", d1)
 	}
 	// Identical replay returns the receipt — revision does NOT bump again.
-	d2, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, "Renamed", "", 1, "k1", "hash-a")
+	d2, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Renamed"), nil, 1, "k1", "hash-a")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -122,7 +129,7 @@ func TestIdempotentWrites(t *testing.T) {
 		t.Fatalf("replay mutated: %+v", d2)
 	}
 	// Same key, different payload → conflict, no mutation.
-	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, "Other", "", 2, "k1", "hash-b"); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Other"), nil, 2, "k1", "hash-b"); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("reuse err = %v, want ErrIdempotencyConflict", err)
 	}
 	cur, _ := s.ListDashboards(ctx, projectID)
@@ -130,10 +137,10 @@ func TestIdempotentWrites(t *testing.T) {
 		t.Fatalf("conflict mutated the row: %+v", cur)
 	}
 	// A failed mutation rolls back claim AND write — the key is free again.
-	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, "X", "", 99, "k2", "hash-c"); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("X"), nil, 99, "k2", "hash-c"); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("failed mutation err = %v, want ErrRevisionConflict", err)
 	}
-	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, "Y", "", 2, "k2", "hash-c"); err != nil {
+	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Y"), nil, 2, "k2", "hash-c"); err != nil {
 		t.Fatalf("key not freed after rollback: %v", err)
 	}
 	// Concurrent identical claims: both succeed with the same result and the
@@ -160,5 +167,52 @@ func TestIdempotentWrites(t *testing.T) {
 				t.Fatalf("revision = %d, want 4 (exactly one mutation)", rev)
 			}
 		}
+	}
+}
+
+// TestIdempotentReplaySingleConn proves the replay path cannot deadlock a
+// one-connection pool: the losing claimant reads the winner's receipt through
+// its own transaction, not a second pool connection.
+func TestIdempotentReplaySingleConn(t *testing.T) {
+	url := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
+	if url == "" {
+		url = "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Skipf("no test database (%v)", err)
+	}
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Skipf("no test database (%v)", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("test database unreachable (%v)", err)
+	}
+	defer pool.Close()
+	s := &Store{pg: pool}
+	if err := s.migratePostgres(ctx, config.Config{PostgresURL: url, DefaultProjectName: "idem-test", DefaultProjectAPIKey: "idem_test_key"}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	_, projectID := seedConvProject(t, s)
+
+	d, err := s.CreateDashboard(ctx, projectID, "Board", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Once"), nil, 1, "k1", "hash-a"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Replay on the same single connection: must return the receipt, not hang.
+	got, err := s.UpdateDashboardIdempotent(ctx, projectID, d.ID, strptr("Once"), nil, 1, "k1", "hash-a")
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if got.Name != "Once" || got.Revision != 2 {
+		t.Fatalf("replay = %+v", got)
 	}
 }
