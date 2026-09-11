@@ -189,9 +189,9 @@ func (s *Store) CreateDataConnectorForProject(ctx context.Context, projectID, na
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, credential_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, true, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
 		projectID, name, kind, credentialID).
-		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt)
+		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
 	return c, err
 }
 
@@ -220,9 +220,9 @@ func (s *Store) CreateDataConnectorIdempotent(ctx context.Context, projectID, na
 			err := q.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, credential_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, true, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
 				projectID, name, kind, credentialID).
-				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt)
+				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
 			if err != nil {
 				return nil, err
 			}
@@ -261,9 +261,9 @@ SET name = CASE WHEN $3::text IS NULL THEN name WHEN $3 = '' THEN name ELSE $3 E
     credential_id = COALESCE($4::uuid, credential_id),
     revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $5
-RETURNING id::text, project_id::text, name, kind, true, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
 				connectorID, projectID, name, credentialID, expectedRevision).
-				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt)
+				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
 			if errors.Is(err, pgx.ErrNoRows) {
 				var exists bool
 				if qerr := q.QueryRow(ctx,
@@ -310,9 +310,9 @@ SET name = CASE WHEN $3 = '' THEN name ELSE $3 END,
     credential_id = COALESCE($4::uuid, credential_id),
     revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $5
-RETURNING id::text, project_id::text, name, kind, true, created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
 		connectorID, projectID, name, credentialID, expectedRevision).
-		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt)
+		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if qerr := s.pg.QueryRow(ctx,

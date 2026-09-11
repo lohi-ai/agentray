@@ -365,7 +365,23 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 	if payload.Project.ID != "" {
 		cfg.ProjectID = payload.Project.ID
 		cfg.ProjectName = payload.Project.Name
-		cfg.APIKey = payload.Project.APIKey
+		// Born-split projects make the project key capture-only, so the CLI
+		// mints a scoped management credential for its calls instead of
+		// persisting the project key. The secret is shown-once server-side;
+		// it lives only in this local config.
+		var credResp struct {
+			Secret string `json:"secret"`
+		}
+		if _, err := newAuthClient(base, token).do(http.MethodPost,
+			"/api/projects/"+payload.Project.ID+"/credentials",
+			map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
+			&credResp); err == nil && credResp.Secret != "" {
+			cfg.APIKey = credResp.Secret
+		} else {
+			// Older servers without the credential surface: keep the project
+			// key so login still works against them.
+			cfg.APIKey = payload.Project.APIKey
+		}
 	}
 	return saveConfig(cfg)
 }

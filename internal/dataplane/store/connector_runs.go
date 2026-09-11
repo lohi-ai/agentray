@@ -97,73 +97,77 @@ var ErrSyncPaused = errors.New("sync is paused")
 // already-active run returns it with enqueued=false (at most one active run
 // per sync — the second caller observes, it does not pile on).
 func (s *Store) EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run ConnectorRun, enqueued bool, err error) {
-	err = s.pg.QueryRow(ctx, `
-INSERT INTO connector_runs (project_id, sync_id, connector_id, idempotency_key)
-SELECT $1, $2, connector_id, $3 FROM connector_syncs
-WHERE id = $2 AND project_id = $1 AND enabled
-ON CONFLICT DO NOTHING
-RETURNING `+connectorRunColumns, projectID, syncID, idemKey).
-		Scan(connectorRunScanDest(&run)...)
-	if err == nil {
-		return run, true, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	// The whole decision runs in one transaction holding a row lock on the
+	// sync: key replay (direct or alias), active-run observe, pause check,
+	// insert, and alias binding are atomic — a pause or a run finish cannot
+	// slip between the checks and the write, and a key can never bind to two
+	// runs.
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
 		return ConnectorRun{}, false, err
 	}
-	// No row inserted: idempotency replay (direct key or alias), an active
-	// run, a paused sync, or a missing sync — in that order of precedence.
-	// Every fallback is scoped to THIS project: a foreign sync id must never
-	// return another tenant's run metadata, and a read error fails closed.
+	defer tx.Rollback(ctx)
+	var enabled bool
+	var connectorID string
+	if err := tx.QueryRow(ctx,
+		`SELECT enabled, connector_id::text FROM connector_syncs WHERE id = $1 AND project_id = $2 FOR UPDATE`,
+		syncID, projectID).Scan(&enabled, &connectorID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ConnectorRun{}, false, pgx.ErrNoRows
+		}
+		return ConnectorRun{}, false, err
+	}
 	if idemKey != "" {
 		var existing ConnectorRun
-		if qerr := s.pg.QueryRow(ctx,
+		if qerr := tx.QueryRow(ctx,
 			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND idempotency_key = $3`,
 			syncID, projectID, idemKey).Scan(connectorRunScanDest(&existing)...); qerr == nil {
-			return existing, false, nil
+			return existing, false, tx.Commit(ctx)
 		} else if !errors.Is(qerr, pgx.ErrNoRows) {
 			return ConnectorRun{}, false, qerr
 		}
-		// Alias: this key was bound to a run that already existed.
 		var aliased ConnectorRun
-		if qerr := s.pg.QueryRow(ctx,
-			`SELECT `+connectorRunColumns+` FROM connector_runs r
+		if qerr := tx.QueryRow(ctx,
+			`SELECT r.id::text, r.project_id::text, r.sync_id::text, r.connector_id::text, r.status,
+r.idempotency_key, r.cancel_requested, r.rows, r.cursor, r.cursor_key, r.error,
+r.queued_at, r.started_at, r.finished_at FROM connector_runs r
 JOIN connector_run_keys k ON k.run_id = r.id
 WHERE k.sync_id = $1 AND k.project_id = $2 AND k.idempotency_key = $3`,
 			syncID, projectID, idemKey).Scan(connectorRunScanDest(&aliased)...); qerr == nil {
-			return aliased, false, nil
+			return aliased, false, tx.Commit(ctx)
 		} else if !errors.Is(qerr, pgx.ErrNoRows) {
 			return ConnectorRun{}, false, qerr
 		}
 	}
 	var active ConnectorRun
-	if qerr := s.pg.QueryRow(ctx,
+	if qerr := tx.QueryRow(ctx,
 		`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND status IN ('queued','running')`,
-		syncID, projectID).Scan(connectorRunScanDest(&active)...); qerr != nil {
-		if !errors.Is(qerr, pgx.ErrNoRows) {
-			return ConnectorRun{}, false, qerr
-		}
-		var enabled bool
-		if qerr2 := s.pg.QueryRow(ctx,
-			`SELECT enabled FROM connector_syncs WHERE id = $1 AND project_id = $2`,
-			syncID, projectID).Scan(&enabled); errors.Is(qerr2, pgx.ErrNoRows) {
-			return ConnectorRun{}, false, pgx.ErrNoRows
-		} else if qerr2 != nil {
-			return ConnectorRun{}, false, qerr2
-		} else if !enabled {
-			return ConnectorRun{}, false, ErrSyncPaused
-		}
-		return ConnectorRun{}, false, fmt.Errorf("run conflict but no active run found: %w", qerr)
-	}
-	// Bind the caller's key to the active run so a retry after it finishes
-	// resolves to this run instead of starting a second sync.
-	if idemKey != "" {
-		if _, aerr := s.pg.Exec(ctx, `
+		syncID, projectID).Scan(connectorRunScanDest(&active)...); qerr == nil {
+		// Bind the caller's key to the active run so a retry after it finishes
+		// resolves to this run instead of starting a second sync.
+		if idemKey != "" {
+			if _, aerr := tx.Exec(ctx, `
 INSERT INTO connector_run_keys (project_id, sync_id, idempotency_key, run_id)
 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, projectID, syncID, idemKey, active.ID); aerr != nil {
-			return ConnectorRun{}, false, aerr
+				return ConnectorRun{}, false, aerr
+			}
 		}
+		return active, false, tx.Commit(ctx)
+	} else if !errors.Is(qerr, pgx.ErrNoRows) {
+		return ConnectorRun{}, false, qerr
 	}
-	return active, false, nil
+	if !enabled {
+		return ConnectorRun{}, false, ErrSyncPaused
+	}
+	err = tx.QueryRow(ctx, `
+INSERT INTO connector_runs (project_id, sync_id, connector_id, idempotency_key)
+VALUES ($1, $2, $3, $4)
+RETURNING `+connectorRunColumns, projectID, syncID, connectorID, idemKey).
+		Scan(connectorRunScanDest(&run)...)
+	if err != nil {
+		return ConnectorRun{}, false, err
+	}
+	return run, true, tx.Commit(ctx)
 }
 
 // ClaimConnectorRun moves a queued run to running under the caller's owner

@@ -111,7 +111,7 @@ func managementGrants(scopes []string) []opcore.Access {
 			set[opcore.AccessSourcesManage] = true
 			set[opcore.AccessSourcesRead] = true
 		case opcore.AccessAnalyticsRead, opcore.AccessDashboardsWrite,
-			opcore.AccessSourcesRead, opcore.AccessGrowthWrite:
+			opcore.AccessSourcesRead:
 			set[opcore.Access(s)] = true
 		}
 	}

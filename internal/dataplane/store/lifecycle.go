@@ -156,6 +156,38 @@ func (s *Store) ArchiveDashboard(ctx context.Context, projectID, dashboardID str
 	return archiveDashboard(ctx, s.pg, projectID, dashboardID, expectedRevision)
 }
 
+// UnarchiveDashboard reverses a soft archive: clears archived_at under the
+// same revision contract. An already-active row returns its current state
+// untouched — a repeat is a no-op, not a revision bump.
+func (s *Store) UnarchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (Dashboard, error) {
+	return unarchiveDashboard(ctx, s.pg, projectID, dashboardID, expectedRevision)
+}
+
+func unarchiveDashboard(ctx context.Context, q pgQuerier, projectID, dashboardID string, expectedRevision int64) (Dashboard, error) {
+	var d Dashboard
+	err := q.QueryRow(ctx, `
+UPDATE dashboards
+SET archived_at = NULL, revision = revision + 1, updated_at = now()
+WHERE project_id = $1 AND id = $2 AND archived_at IS NOT NULL AND revision = $3
+RETURNING `+dashboardColumns, projectID, dashboardID, expectedRevision).
+		Scan(dashboardScanDest(&d)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var existing Dashboard
+			if qerr := q.QueryRow(ctx,
+				`SELECT `+dashboardColumns+` FROM dashboards WHERE project_id = $1 AND id = $2`,
+				projectID, dashboardID).Scan(dashboardScanDest(&existing)...); qerr != nil {
+				return Dashboard{}, pgx.ErrNoRows
+			} else if existing.ArchivedAt == nil {
+				return existing, nil
+			}
+			return Dashboard{}, ErrRevisionConflict
+		}
+		return Dashboard{}, err
+	}
+	return d, nil
+}
+
 // runIdempotent executes mutate under an atomic claim on
 // (project, operation, key): the claim row, the mutation, and the result
 // receipt commit in ONE transaction, so a crash mid-operation leaves no
@@ -251,6 +283,28 @@ func (s *Store) ArchiveDashboardIdempotent(ctx context.Context, projectID, dashb
 	raw, err := s.runIdempotent(ctx, projectID, "archive_dashboard", idemKey, requestHash,
 		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
 			d, err := archiveDashboard(ctx, q, projectID, dashboardID, expectedRevision)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(d)
+		})
+	if err != nil {
+		return Dashboard{}, err
+	}
+	var d Dashboard
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return Dashboard{}, fmt.Errorf("stored dashboard receipt unreadable: %w", err)
+	}
+	return d, nil
+}
+
+// UnarchiveDashboardIdempotent is UnarchiveDashboard under an idempotency
+// claim — a retried restore replays the first receipt instead of mutating
+// again after a re-archive.
+func (s *Store) UnarchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (Dashboard, error) {
+	raw, err := s.runIdempotent(ctx, projectID, "unarchive_dashboard", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			d, err := unarchiveDashboard(ctx, q, projectID, dashboardID, expectedRevision)
 			if err != nil {
 				return nil, err
 			}

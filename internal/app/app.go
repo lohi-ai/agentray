@@ -236,15 +236,16 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	alertDeliverer := alerting.NewDeliverer(alertVault)
 	runnerOpts = append(runnerOpts, agentruntime.WithNotifier(alertDeliverer))
 
+	// The connector engine is built before the scheduler so in-process agents
+	// (scheduled AND interactive) get the same source-runner surface MCP and
+	// /api/op expose — one engine, three adapters.
+	connectorEngine := connector.NewEngine(store)
+	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
 	scheduler := agentruntime.NewScheduler(nc, store, runnerOpts...)
 	// The evaluator and the connector sync engine ride the scheduler's minute
 	// tick, sharing one clock with scheduled runs instead of standing up more
 	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
-	connectorEngine := connector.NewEngine(store)
-	// In-process agents get the same source-runner surface MCP and /api/op
-	// expose — one engine, three adapters.
-	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)

@@ -102,8 +102,10 @@ func testSource() opcore.Operation[testSourceInput, testSourceOutput] {
 
 const previewRowLimit = 25
 
-// previewByteCap bounds the serialized payload: a few large text/JSON/bytea
-// values must not turn a bounded probe into an unbounded MCP/HTTP response.
+// previewByteCap bounds the operation's serialized output: a few large
+// text/JSON/bytea values must not turn a bounded probe into an unbounded
+// MCP/HTTP response. Enforced by marshaling the final output — the cap is on
+// the real payload, not an estimate of it.
 const previewByteCap = 256 << 10
 
 type previewSourceInput struct {
@@ -196,20 +198,30 @@ func previewSource() opcore.Operation[previewSourceInput, previewSourceOutput] {
 				out.Error = err.Error()
 				return out, nil
 			}
-			encoded := 0
 			for _, r := range pull.Rows {
-				rowBytes, _ := json.Marshal(r.Data)
-				if encoded+len(rowBytes) > previewByteCap {
-					out.Warnings = append(out.Warnings, fmt.Sprintf("preview truncated at %d bytes — %d of %d pulled rows shown", previewByteCap, len(out.Rows), len(pull.Rows)))
-					break
-				}
-				encoded += len(rowBytes)
 				out.Rows = append(out.Rows, r.Data)
 			}
 			if pull.HasMore {
 				out.Warnings = append(out.Warnings, fmt.Sprintf("showing first %d rows", previewRowLimit))
 			}
+			// Bound the serialized output: drop trailing rows until the whole
+			// payload — columns, warnings, envelope — fits the cap. The
+			// truncation warning is added before measuring so it is part of
+			// the checked payload, then finalized after the loop.
 			out.OK = true
+			truncWarn := fmt.Sprintf("preview truncated to stay under %d bytes", previewByteCap)
+			out.Warnings = append(out.Warnings, truncWarn)
+			for len(out.Rows) > 0 {
+				raw, _ := json.Marshal(out)
+				if len(raw) <= previewByteCap {
+					break
+				}
+				out.Rows = out.Rows[:len(out.Rows)-1]
+			}
+			if len(out.Rows) == len(pull.Rows) {
+				// Nothing was dropped — the warning does not apply.
+				out.Warnings = out.Warnings[:len(out.Warnings)-1]
+			}
 			return out, nil
 		},
 	}

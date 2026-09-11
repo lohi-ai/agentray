@@ -21,11 +21,14 @@ import (
 
 // DataConnector is one configured source connection (DSN never included).
 type DataConnector struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	HasDSN    bool      `json:"has_dsn"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	HasDSN    bool   `json:"has_dsn"`
+	// Revision is the optimistic-concurrency counter update_source carries —
+	// same contract as dashboards and syncs.
+	Revision  int64     `json:"revision"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -153,7 +156,7 @@ func (s *Store) ListDataConnectors(ctx context.Context, userID, projectID string
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, kind, dsn_ciphertext != '', created_at, updated_at
+SELECT id::text, project_id::text, name, kind, dsn_ciphertext != '' OR credential_id IS NOT NULL, revision, created_at, updated_at
 FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -162,7 +165,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	out := make([]DataConnector, 0)
 	for rows.Next() {
 		var c DataConnector
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

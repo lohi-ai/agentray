@@ -182,3 +182,35 @@ func archiveDashboard() opcore.Operation[archiveDashboardInput, storage.Dashboar
 		},
 	}
 }
+
+// --- unarchive_dashboard ---
+
+type unarchiveDashboardInput struct {
+	DashboardID    string `json:"dashboard_id" required:"true" desc:"dashboard to restore from archive"`
+	Revision       int64  `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict; an already-active dashboard returns its current state"`
+	IdempotencyKey string `json:"idempotency_key" desc:"retry key — restoring twice is safe"`
+}
+
+func unarchiveDashboard() opcore.Operation[unarchiveDashboardInput, storage.Dashboard] {
+	return opcore.Operation[unarchiveDashboardInput, storage.Dashboard]{
+		Name:           "unarchive_dashboard",
+		Summary:        "Restore an archived dashboard to active lists. Repeating is idempotent.",
+		Access:         opcore.AccessDashboardsWrite,
+		MinSessionRole: "member",
+		Scope:          "analyze_build",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in unarchiveDashboardInput) (storage.Dashboard, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.Dashboard{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.Dashboard{}, fmt.Errorf("revision must be the dashboard's current revision (> 0)")
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.Dashboard{}, err
+			}
+			return d.Repo.UnarchiveDashboardIdempotent(ctx, cc.ProjectID, in.DashboardID, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}

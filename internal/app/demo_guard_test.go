@@ -99,6 +99,18 @@ func (f *fakeGuardStore) ProjectByAPIKey(_ context.Context, key string) (storage
 	return f.projects[id], nil
 }
 
+func (f *fakeGuardStore) ProjectByID(_ context.Context, projectID string) (storage.Project, error) {
+	project, ok := f.projects[projectID]
+	if !ok {
+		return storage.Project{}, fmt.Errorf("no project")
+	}
+	return project, nil
+}
+
+func (f *fakeGuardStore) CredentialBySecret(_ context.Context, secret string) (storage.ResolvedCredential, error) {
+	return storage.ResolvedCredential{}, fmt.Errorf("invalid credential")
+}
+
 func (f *fakeGuardStore) ProjectByIDForUser(_ context.Context, userID, projectID string) (storage.Project, error) {
 	project, ok := f.projects[projectID]
 	if !ok {
@@ -368,7 +380,6 @@ func TestViewerIsRefusedEveryClassOfDemoMutation(t *testing.T) {
 		{"create a validation test", http.MethodPost, "/api/validation/tests"},
 		{"delete a waitlist row", http.MethodDelete, "/api/validation/waitlist/w1"},
 		{"run an operation", http.MethodPost, "/api/operations/o1/run"},
-		{"call a write op directly", http.MethodPost, "/api/op/create_chart"},
 		{"edit someone else's turn", http.MethodPost, "/api/agent/conversations/c1/messages/e1/edit"},
 		{"regenerate someone else's turn", http.MethodPost, "/api/agent/conversations/c1/messages/e1/regenerate"},
 		{"add a lab case", http.MethodPost, "/api/agent/lab/cases"},

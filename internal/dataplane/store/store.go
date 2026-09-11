@@ -1576,6 +1576,19 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 	return p, nil
 }
 
+// ProjectByID resolves a project without a user check — internal auth paths
+// only (the credential IS the authorization). Callers needing membership use
+// ProjectByIDForUser.
+func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
+	var p Project
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	if err != nil {
+		return Project{}, err
+	}
+	return p, nil
+}
+
 func (s *Store) CreateProject(ctx context.Context, name string) (Project, error) {
 	if name == "" {
 		name = "Untitled project"
