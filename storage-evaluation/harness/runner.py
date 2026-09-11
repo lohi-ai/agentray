@@ -83,6 +83,14 @@ def _pct(values, p):
     return round(values[k] * 1000, 1)  # ms
 
 
+def _overlaps(span_start: float, span_end: float,
+              ingest_start: float, ingest_end: float) -> bool:
+    """A read overlaps the ingest iff it began before the ack and ended
+    after the ingest started — a read that finished before ingestion began
+    does not count."""
+    return span_start < ingest_end and span_end > ingest_start
+
+
 def _run_shape(engine, shape_id, days):
     t0 = time.monotonic()
     engine.run_shape(shape_id, days)
@@ -178,7 +186,8 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
                 }
 
         # Ingest leg: batch lands while readers run; overlap is recorded
-        # with timestamps, not assumed.
+        # with timestamps, not assumed. A span overlaps the ingest iff it
+        # started before the ack AND ended after the ingest began.
         with ThreadPoolExecutor(max_workers=readers) as pool:
             def timed_read():
                 s = time.monotonic()
@@ -187,6 +196,7 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             futs = [pool.submit(timed_read) for _ in range(readers)]
             t0 = time.monotonic()
             ing = eng.ingest(corpus_dir)
+            ingest_end = t0 + ing["ack_s"]
             visible_at = None
             expected_total = oracle["total_rows"] + oracle["ingest_rows"]
             while time.monotonic() - t0 < 60:
@@ -195,12 +205,14 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
                     break
                 time.sleep(0.5)
             spans = [f.result() for f in futs]
-        overlap = sum(1 for s, e in spans if s < t0 + ing["ack_s"])
+        overlap = sum(1 for s, e in spans if _overlaps(s, e, t0, ingest_end))
         leg["ingest"] = {
             "rows": oracle["ingest_rows"], "ack_s": round(ing["ack_s"], 2),
             "visibility_lag_s": (round(visible_at, 2) if visible_at is not None else ">60"),
             "expected_total": expected_total, "final_total": eng.count(),
             "readers_overlapping_ingest": overlap,
+            "reader_spans_s": [[round(s - t0, 3), round(e - t0, 3)]
+                              for s, e in spans],
         }
         leg["resources"]["disk_final_bytes"] = eng.disk()
         check_workdir()

@@ -172,6 +172,7 @@ class Oracle:
         self.funnel_levels = [0, 0, 0, 0]  # users at exact level 0..3
         self.retention_base = 0
         self.retention_w1 = 0
+        self.retention_immature = 0
         self.entity_current = 0
         self.entity_deleted_keys: list[str] = []
         self.entity_join_cents_7d = 0
@@ -194,12 +195,16 @@ class Oracle:
             if order_amount_cents is not None:
                 self.entity_join_cents_7d += order_amount_cents
 
-    def note_user(self, funnel_level: int, first_signup_ms: int | None, week1: bool):
+    def note_user(self, funnel_level: int, first_signup_ms: int | None,
+                  week1: bool, mature: bool):
         self.funnel_levels[funnel_level] += 1
         if first_signup_ms is not None:
-            self.retention_base += 1
-            if week1:
-                self.retention_w1 += 1
+            if mature:
+                self.retention_base += 1
+                if week1:
+                    self.retention_w1 += 1
+            else:
+                self.retention_immature += 1
 
     def note_session_gaps(self, ts_list: list[int]):
         ts_list.sort()
@@ -258,6 +263,8 @@ class Oracle:
                     "first_event": FIRST_EVENT,
                     "base": self.retention_base,
                     "week1_users": self.retention_w1,
+                    "immature_excluded": self.retention_immature,
+                    "note": "Only mature cohorts count: first signup + 14d <= corpus end, so the week-1 bracket is fully observed.",
                 },
                 "entity.current_rows": {
                     "kind": "baseline_parity",
@@ -483,7 +490,13 @@ def generate(scale: int, seed: int, ingest_rows: int = 10_000) -> Path:
             and any(first_signup_ms + 7 * 86400_000 <= t < first_signup_ms + 14 * 86400_000
                     for t in human_ts)
         )
-        oracle.note_user(_funnel_level(funnel_items), first_signup_ms, week1)
+        # Mature cohort: the week-1 bracket [first+7d, first+14d) is fully
+        # observed only when first+14d <= corpus end.
+        mature = (first_signup_ms is not None
+                  and first_signup_ms + 14 * 86400_000
+                      <= int(CORPUS_END.timestamp() * 1000))
+        oracle.note_user(_funnel_level(funnel_items), first_signup_ms, week1,
+                         mature)
 
         # Sessionize each (project, distinct_id) stream in arrival order —
         # exactly the sessionizer's view — then emit rows + 2% duplicates.

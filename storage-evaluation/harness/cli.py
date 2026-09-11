@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import corpus as corpus_mod
 from . import engines, report
@@ -126,7 +127,47 @@ def cmd_matrix(args):
 def cmd_report(args):
     out = report.write_report(args.require_labeled_gates)
     print(f"report: {out}")
+    _publish_durable()
     return 0
+
+
+def _publish_durable():
+    """Copy report + leg results + run metadata into the committed
+    storage-evaluation/results/ directory — the reviewable deliverable,
+    not just the gitignored work/ scratch."""
+    import shutil
+    import subprocess
+    dest = Path(__file__).resolve().parent.parent / "results"
+    dest.mkdir(exist_ok=True)
+    meta = {
+        "generated_by": "storage-evaluation harness",
+        "duckdb": DUCKDB_VERSION,
+        "clickhouse_image": CH_IMAGE,
+        "legs": [],
+    }
+    for p in sorted(RESULTS.glob("*.json")):
+        leg = report.load_json(p)
+        shutil.copy2(p, dest / p.name)
+        meta["legs"].append({
+            "file": p.name, "engine": leg.get("engine"),
+            "scale": leg.get("scale"), "seed": leg.get("seed"),
+            "readers": leg.get("readers"), "days": leg.get("days"),
+            "status": leg.get("status"),
+            "corpus_rows": None,
+        })
+        cd = report.corpus_dir(leg.get("scale", 0), leg.get("seed", 0))
+        oj = cd / "oracle.json"
+        if oj.exists():
+            meta["legs"][-1]["corpus_rows"] = report.load_json(oj).get("total_rows")
+    try:
+        meta["commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+            cwd=Path(__file__).resolve().parent.parent).stdout.strip()
+    except Exception:
+        pass
+    if (WORK / "report.md").exists():
+        shutil.copy2(WORK / "report.md", dest / "report.md")
+    dump_json(dest / "run-metadata.json", meta)
 
 
 def main(argv=None):

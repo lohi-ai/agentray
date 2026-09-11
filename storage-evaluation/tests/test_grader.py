@@ -5,7 +5,25 @@ pass; PASS always records compared values. Run inside the driver image:
 """
 import unittest
 
-from harness.runner import _grade
+from harness.runner import _grade, _overlaps
+
+
+class TestOverlap(unittest.TestCase):
+    def test_disjoint_before_is_not_overlap(self):
+        # read finished before ingest began
+        self.assertFalse(_overlaps(0.0, 0.5, 1.0, 1.2))
+
+    def test_disjoint_after_is_not_overlap(self):
+        self.assertFalse(_overlaps(2.0, 2.5, 1.0, 1.2))
+
+    def test_spanning_is_overlap(self):
+        self.assertTrue(_overlaps(0.5, 1.5, 1.0, 1.2))
+
+    def test_inside_is_overlap(self):
+        self.assertTrue(_overlaps(1.05, 1.1, 1.0, 1.2))
+
+    def test_touching_boundary_is_not_overlap(self):
+        self.assertFalse(_overlaps(0.0, 1.0, 1.0, 1.2))
 
 
 class TestGrader(unittest.TestCase):

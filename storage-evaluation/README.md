@@ -18,8 +18,13 @@ production cutover, and no production data or infrastructure is touched.
 - `harness/engines.py` — pinned engine containers (2 CPU / 2 GiB each).
 - `harness/runner.py` — one leg: load, oracle checks, cold/warm shapes,
   ingest-during-reads, RSS/CPU/disk sampling.
+  Latency columns are `first` (first timed pass — oracle checks already
+  touched the data, so not a true cold read) and `repeat`. Memory figures
+  are container cgroup usage, not process RSS.
 - `harness/report.py` — labeled report: MEASURED vs NOT RUN, baseline
   parity vs semantic gates.
+- `results/` — committed deliverable: report.md, per-leg result JSONs and
+  run-metadata.json (corpus rows, pins, seed, commit).
 
 ## Pins
 

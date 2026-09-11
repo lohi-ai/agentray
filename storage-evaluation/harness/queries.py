@@ -10,6 +10,8 @@ window start; {END} is the corpus end. {DELETED_KEYS} is a quoted CSV list.
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from .util import CORPUS_END, FUNNEL_STEPS, FIRST_EVENT, ts, window_start
 
 # --- shared view definitions -------------------------------------------------
@@ -75,7 +77,8 @@ _RETENTION_CH = f"""WITH firsts AS (
     SELECT canonical_id, min(timestamp) AS first_ts
     FROM v_events
     WHERE event_name = '{FIRST_EVENT}' AND visitor_class = 'human'
-    GROUP BY canonical_id)
+    GROUP BY canonical_id
+    HAVING first_ts <= {{MATURE14}})
   SELECT (SELECT count() FROM firsts) AS base,
          uniqExact(e.canonical_id) AS w1
   FROM v_events e
@@ -88,7 +91,8 @@ _RETENTION_DUCK = f"""WITH firsts AS (
     SELECT canonical_id, min(timestamp) AS first_ts
     FROM v_events
     WHERE event_name = '{FIRST_EVENT}' AND visitor_class = 'human'
-    GROUP BY canonical_id)
+    GROUP BY canonical_id
+    HAVING first_ts <= {{MATURE14}})
   SELECT (SELECT count(*) FROM firsts) AS base,
          count(DISTINCT e.canonical_id) AS w1
   FROM v_events e
@@ -231,6 +235,7 @@ LOAD_SHAPES = {
 
 def render(sql: str, days: int = 7, deleted_keys: list[str] | None = None) -> str:
     out = sql.replace("{END}", f"'{ts(CORPUS_END)}'")
+    out = out.replace("{MATURE14}", f"'{ts(CORPUS_END - timedelta(days=14))}'")
     out = out.replace("{W7}", f"'{ts(window_start(7))}'")
     out = out.replace("{W30}", f"'{ts(window_start(30))}'")
     out = out.replace("{W90}", f"'{ts(window_start(90))}'")
