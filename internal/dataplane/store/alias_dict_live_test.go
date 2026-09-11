@@ -68,14 +68,23 @@ LAYOUT(COMPLEX_KEY_HASHED()) LIFETIME(MIN 30 MAX 60)`); err != nil {
 	// Seed a self-contained fixture: a fresh project plus one alias in
 	// Postgres, so the backfill has something to carry and the test neither
 	// depends on nor dirties another project's rows. Cleanup is registered
-	// before the writes and removes only this fixture's records.
-	_, pid := seedConvProject(t, s)
-	seedAnon := "seed-anon-" + time.Now().Format("150405.000000")
-	seedCanon := "seed-canon-" + time.Now().Format("150405.000000")
+	// before the writes and removes only this fixture's records — including
+	// the user/workspace/project seedConvProject creates — on every path.
+	uid, pid := seedConvProject(t, s)
+	var wsID string
+	if err := pg.QueryRow(ctx, `SELECT workspace_id::text FROM projects WHERE id = $1`, pid).Scan(&wsID); err != nil {
+		t.Fatalf("workspace lookup: %v", err)
+	}
 	defer func() {
 		_, _ = pg.Exec(ctx, `DELETE FROM aliases WHERE project_id = $1`, pid)
 		_ = ch.Exec(ctx, `ALTER TABLE aliases DELETE WHERE project_id = ? SETTINGS mutations_sync = 2`, pid)
+		_, _ = pg.Exec(ctx, `DELETE FROM projects WHERE id = $1`, pid)
+		_, _ = pg.Exec(ctx, `DELETE FROM workspace_members WHERE workspace_id = $1`, wsID)
+		_, _ = pg.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, wsID)
+		_, _ = pg.Exec(ctx, `DELETE FROM users WHERE id = $1`, uid)
 	}()
+	seedAnon := "seed-anon-" + time.Now().Format("150405.000000")
+	seedCanon := "seed-canon-" + time.Now().Format("150405.000000")
 	if _, err := pg.Exec(ctx, `INSERT INTO aliases (project_id, anonymous_id, canonical_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, pid, seedAnon, seedCanon); err != nil {
 		t.Fatalf("seed alias: %v", err)
 	}

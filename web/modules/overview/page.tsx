@@ -60,10 +60,13 @@ function trendMeaning(res: OverviewResult): 'data' | 'receipt_only' | 'empty' {
   return 'empty';
 }
 
-function freshnessLabel(res: OverviewResult): { text: string; stale: boolean } {
+// freshnessLabel ages from the absolute last_event_at at render time, not the
+// cached age_seconds — a cached snapshot would say "Live" forever on an open
+// page. `now` is injectable so staleness is testable.
+export function freshnessLabel(res: OverviewResult, now = Date.now()): { text: string; stale: boolean } {
   const ds = res.data_status;
   if (ds.state === 'no_events' || !ds.last_event_at) return { text: 'No events received yet', stale: true };
-  const age = ds.age_seconds ?? 0;
+  const age = Math.max(0, (now - new Date(ds.last_event_at).getTime()) / 1000);
   const text =
     age < 120 ? 'Live — last event just now'
     : age < 3600 ? `Last event ${Math.round(age / 60)} min ago`
