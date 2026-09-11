@@ -227,7 +227,11 @@ func pauseSource() opcore.Operation[pauseSourceInput, storage.ConnectorSync] {
 			if in.Revision <= 0 {
 				return storage.ConnectorSync{}, fmt.Errorf("revision must be the sync's current revision (> 0)")
 			}
-			return d.Repo.SetConnectorSyncEnabled(ctx, cc.ProjectID, in.SyncID, !in.Paused, in.Revision)
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.ConnectorSync{}, err
+			}
+			return d.Repo.SetConnectorSyncEnabledIdempotent(ctx, cc.ProjectID, in.SyncID, !in.Paused, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
 		},
 	}
 }

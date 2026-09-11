@@ -61,6 +61,7 @@ type Repo interface {
 	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
 	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
 	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (storage.ConnectorSync, error)
 	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)

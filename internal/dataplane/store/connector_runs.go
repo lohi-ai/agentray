@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -99,19 +100,26 @@ RETURNING `+connectorRunColumns, projectID, syncID, idemKey).
 		return ConnectorRun{}, false, err
 	}
 	// No row inserted: idempotency replay, an active run, a paused sync, or a
-	// missing sync — in that order of precedence.
+	// missing sync — in that order of precedence. Every fallback is scoped to
+	// THIS project: a foreign sync id must never return another tenant's run
+	// metadata, and a read error fails closed rather than falling through.
 	if idemKey != "" {
 		var existing ConnectorRun
 		if qerr := s.pg.QueryRow(ctx,
-			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND idempotency_key = $2`,
-			syncID, idemKey).Scan(connectorRunScanDest(&existing)...); qerr == nil {
+			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND idempotency_key = $3`,
+			syncID, projectID, idemKey).Scan(connectorRunScanDest(&existing)...); qerr == nil {
 			return existing, false, nil
+		} else if !errors.Is(qerr, pgx.ErrNoRows) {
+			return ConnectorRun{}, false, qerr
 		}
 	}
 	var active ConnectorRun
 	if qerr := s.pg.QueryRow(ctx,
-		`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND status IN ('queued','running')`,
-		syncID).Scan(connectorRunScanDest(&active)...); qerr != nil {
+		`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND status IN ('queued','running')`,
+		syncID, projectID).Scan(connectorRunScanDest(&active)...); qerr != nil {
+		if !errors.Is(qerr, pgx.ErrNoRows) {
+			return ConnectorRun{}, false, qerr
+		}
 		var enabled bool
 		if qerr2 := s.pg.QueryRow(ctx,
 			`SELECT enabled FROM connector_syncs WHERE id = $1 AND project_id = $2`,
@@ -356,6 +364,42 @@ func (s *Store) ConnectorSyncForProject(ctx context.Context, projectID, syncID s
 		`SELECT `+connectorSyncColumns+`, revision FROM connector_syncs WHERE id = $1 AND project_id = $2`,
 		syncID, projectID).Scan(dest...)
 	return cs, err
+}
+
+// SetConnectorSyncEnabledIdempotent is SetConnectorSyncEnabled under an
+// idempotency claim — a retried pause with the original revision replays the
+// first result instead of conflicting on the bumped revision.
+func (s *Store) SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (ConnectorSync, error) {
+	raw, err := s.runIdempotent(ctx, projectID, "pause_source", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			var cs ConnectorSync
+			dest := append(syncScanDest(&cs), &cs.Revision)
+			err := q.QueryRow(ctx, `
+UPDATE connector_syncs SET enabled = $3, revision = revision + 1, updated_at = now()
+WHERE id = $1 AND project_id = $2 AND revision = $4
+RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expectedRevision).Scan(dest...)
+			if errors.Is(err, pgx.ErrNoRows) {
+				var exists bool
+				if qerr := q.QueryRow(ctx,
+					`SELECT EXISTS(SELECT 1 FROM connector_syncs WHERE id = $1 AND project_id = $2)`,
+					syncID, projectID).Scan(&exists); qerr == nil && exists {
+					return nil, ErrRevisionConflict
+				}
+				return nil, pgx.ErrNoRows
+			}
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(cs)
+		})
+	if err != nil {
+		return ConnectorSync{}, err
+	}
+	var cs ConnectorSync
+	if err := json.Unmarshal(raw, &cs); err != nil {
+		return ConnectorSync{}, fmt.Errorf("stored sync receipt unreadable: %w", err)
+	}
+	return cs, nil
 }
 
 // SetConnectorSyncEnabled pauses/resumes a sync with a revision check —
