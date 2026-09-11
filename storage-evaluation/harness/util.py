@@ -21,6 +21,7 @@ CORPUS_END = datetime(2026, 9, 1, tzinfo=UTC)
 CORPUS_DAYS = 90
 SESSION_WINDOW_S = 30 * 60  # mirrors internal/dataplane/ingest/sessionizer.go
 FUNNEL_STEPS = ["user.pageview", "user.signup", "user.conversion"]  # store.go defaults
+FUNNEL_WINDOW_S = 86400  # production default when no range is given
 FIRST_EVENT = "user.signup"  # retention cohort anchor, mirrors store.go retention()
 
 HOST_DIR = Path(os.environ.get("EVAL_HOST_DIR") or Path(__file__).resolve().parent.parent)
@@ -58,6 +59,7 @@ CAPS = {
         "ingest_rows": 10_000,
     },
     "matrix": {
+        "scales": [1_000_000, 10_000_000],
         "engine_mem": "2g",
         "engine_cpus": 2,
         "workdir_gib": 24,

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from .util import CORPUS_END, FUNNEL_STEPS, FIRST_EVENT, ts, window_start
+from .util import (
+    CORPUS_END, FUNNEL_STEPS, FUNNEL_WINDOW_S, FIRST_EVENT, ts, window_start,
+)
 
 # --- shared view definitions -------------------------------------------------
 # canonical_id resolution: CH uses the aliases_dict dictionary exactly like
@@ -37,7 +39,7 @@ DUCK_VIEWS = [
 ]
 
 _FUNNEL_CH = f"""SELECT level, count() AS c FROM (
-    SELECT windowFunnel(86400)(toDateTime(timestamp),
+    SELECT windowFunnel({FUNNEL_WINDOW_S * 1000})(toUnixTimestamp64Milli(timestamp),
       event_name = '{FUNNEL_STEPS[0]}',
       event_name = '{FUNNEL_STEPS[1]}',
       event_name = '{FUNNEL_STEPS[2]}') AS level
@@ -60,7 +62,7 @@ _FUNNEL_DUCK = f"""WITH ev AS (
         WHERE e2.canonical_id = a.canonical_id
           AND e2.event_name = '{FUNNEL_STEPS[1]}'
           AND e2.timestamp >= a.t1
-          AND e2.timestamp <= a.t1 + INTERVAL '86400 seconds') AS t2
+          AND e2.timestamp <= a.t1 + INTERVAL '{FUNNEL_WINDOW_S} seconds') AS t2
     FROM anchors a),
   lvl AS (
     SELECT canonical_id,
@@ -69,7 +71,7 @@ _FUNNEL_DUCK = f"""WITH ev AS (
                  WHERE e3.canonical_id = chains.canonical_id
                    AND e3.event_name = '{FUNNEL_STEPS[2]}'
                    AND e3.timestamp >= chains.t2
-                   AND e3.timestamp <= chains.t1 + INTERVAL '86400 seconds')
+                   AND e3.timestamp <= chains.t1 + INTERVAL '{FUNNEL_WINDOW_S} seconds')
                    IS NOT NULL THEN 3 ELSE 2 END) AS level
     FROM chains GROUP BY canonical_id)
   SELECT level, count(*) AS c FROM lvl GROUP BY level ORDER BY level"""

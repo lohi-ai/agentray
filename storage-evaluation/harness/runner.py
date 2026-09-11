@@ -100,11 +100,8 @@ def _run_shape(engine, shape_id, days):
 def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             caps: dict, deadline_s: float) -> dict:
     t_start = time.monotonic()
-    corpus_dir = corpus_mod.generate(scale, seed, caps["ingest_rows"])
-    oracle = load_json(corpus_dir / "oracle.json")
-    deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
-
-    eng = {"clickhouse": engines.ClickHouseEngine, "duckdb": engines.DuckDBEngine}[engine_name]()
+    eng = {"clickhouse": engines.ClickHouseEngine,
+           "duckdb": engines.DuckDBEngine}[engine_name]()
     leg = {
         "engine": engine_name, "scale": scale, "seed": seed,
         "readers": readers, "days": days, "status": "MEASURED",
@@ -124,14 +121,25 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
 
     # Watchdog: the deadline is also enforced mid-call — a hung HTTP request
     # must not outlive the wall cap. On expiry the engine container is
-    # force-stopped, which unblocks in-flight requests with an error.
-    watchdog = threading.Timer(deadline_s, lambda: engines.stop_container(
-        eng.container_name))
+    # force-stopped, which unblocks in-flight requests with an error; the
+    # fired flag lets the leg report ABORTED rather than a spurious ERROR.
+    # Armed before corpus generation so a slow generate() is capped too.
+    fired = threading.Event()
+
+    def _on_deadline():
+        fired.set()
+        engines.stop_container(eng.container_name)
+
+    watchdog = threading.Timer(deadline_s, _on_deadline)
     watchdog.daemon = True
 
     sampler = Sampler(eng.container_name)
     try:
         watchdog.start()
+        corpus_dir = corpus_mod.generate(scale, seed, caps["ingest_rows"])
+        oracle = load_json(corpus_dir / "oracle.json")
+        deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
+        remaining()
         eng.start(caps)
         sampler.start()
         time.sleep(3)  # idle baseline sample
@@ -223,8 +231,14 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         leg["status"] = "ABORTED"
         leg["abort_reason"] = str(e)
     except Exception as e:
-        leg["status"] = "ERROR"
-        leg["error"] = f"{type(e).__name__}: {e}"
+        if fired.is_set():
+            # The watchdog killed the engine mid-call; this is the wall cap
+            # firing, not an engine fault.
+            leg["status"] = "ABORTED"
+            leg["abort_reason"] = f"wall cap {deadline_s}s exceeded"
+        else:
+            leg["status"] = "ERROR"
+            leg["error"] = f"{type(e).__name__}: {e}"
     finally:
         watchdog.cancel()
         sampler.stop()

@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 from .util import (
-    RESULTS, UNRUN_GATES, WORK, corpus_dir, dump_json, free_gib, load_json,
+    CAPS, RESULTS, UNRUN_GATES, WORK, corpus_dir, dump_json, free_gib,
+    load_json,
 )
 
 
@@ -149,10 +150,11 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     L.append("|---|---|---|")
     ran_scales = {(l["scale"], l["engine"]) for l in legs if l["status"] == "MEASURED"}
     free = free_gib(WORK)
+    need = CAPS["matrix"]["preflight_free_gib"]
     matrix_reason = (
-        f"free disk {free:.1f} GiB below the 40 GiB preflight"
-        if free < 40 else "not requested in this run")
-    for scale in (1_000_000, 10_000_000):
+        f"free disk {free:.1f} GiB below the {need} GiB preflight"
+        if free < need else "not requested in this run")
+    for scale in CAPS["matrix"]["scales"]:
         for eng in ("clickhouse", "duckdb"):
             if (scale, eng) in ran_scales:
                 L.append(f"| matrix {scale} {eng} | MEASURED | |")

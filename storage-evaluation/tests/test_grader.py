@@ -1,6 +1,9 @@
 """Grader contract tests: missing/null/truncated engine output is never a
-pass; PASS always records compared values. Run inside the driver image:
-  docker run --rm -v $PWD:$PWD -w $PWD storage-eval-driver:py3.13 \
+pass; PASS always records compared values. Run inside the driver image —
+the eval wrapper tags it storage-eval-driver:py3.13-<fingerprint>:
+  ./eval corpus >/dev/null  # builds the image
+  docker run --rm -v $PWD:$PWD -w $PWD \
+    $(docker images -q 'storage-eval-driver:py3.13-*' | head -1) \
     python -m unittest discover -s tests -v
 """
 import unittest

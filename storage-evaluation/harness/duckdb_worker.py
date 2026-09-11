@@ -17,6 +17,7 @@ from pathlib import Path
 import duckdb
 
 from . import queries
+from .util import WORK
 
 DB_PATH = Path("/data/eval.duckdb")
 # One shared connection is the honest model of DuckDB's single owning
@@ -89,9 +90,13 @@ def _load_parquet(table: str, path: Path):
 
 
 def _corpus_path(raw: str, fname: str) -> Path:
-    """Resolve a driver-supplied corpus dir to a file inside it, rejecting
-    anything that escapes the directory."""
+    """Resolve a driver-supplied corpus dir to a file inside it. The base
+    must be a generated corpus dir under work/ and the file must sit
+    directly inside it — anything else is rejected."""
     base = Path(raw).resolve()
+    work = WORK.resolve()
+    if base.parent != work or not base.name.startswith("corpus-"):
+        raise ValueError(f"corpus dir outside work/: {raw}")
     p = (base / fname).resolve()
     if p.parent != base or p.name != fname:
         raise ValueError(f"corpus path escapes base: {raw}")
@@ -109,14 +114,16 @@ def _handle(op: dict) -> dict:
         return {"ok": True, "duckdb": duckdb.__version__}
     if kind == "load":
         corpus = Path(op["corpus"])
-        for table, fname in CORPUS_TABLES.items():
-            _load_parquet(table, _corpus_path(str(corpus), fname))
+        with LOCK:
+            for table, fname in CORPUS_TABLES.items():
+                _load_parquet(table, _corpus_path(str(corpus), fname))
         return {"ok": True}
     if kind == "ingest":
         with LOCK:
             _load_parquet("events",
                           _corpus_path(str(op["corpus"]), "ingest_batch.parquet"))
-        return {"ok": True, "total": _count()}
+            total = _count()
+        return {"ok": True, "total": total}
     if kind == "query":
         # Structured IDs only — the driver cannot send raw SQL to the writer.
         qid = op["id"]
@@ -131,7 +138,10 @@ def _handle(op: dict) -> dict:
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         return {"ok": True, "rows": rows}
     if kind == "count":
-        return {"ok": True, "total": _count()}
+        # Same single connection: count must queue behind in-flight reads
+        # like every other op, or it races a locked query mid-execute.
+        with LOCK:
+            return {"ok": True, "total": _count()}
     if kind == "shutdown":
         threading.Thread(target=_shutdown, daemon=True).start()
         return {"ok": True}

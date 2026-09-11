@@ -61,7 +61,10 @@ def cmd_doctor(_args):
 
 
 def cmd_corpus(args):
-    for p in _preflight(CAPS["smoke"]):
+    # Preflight against the envelope the requested scale will actually run
+    # under — a matrix-size corpus must not pass on smoke's 10 GiB floor.
+    caps = CAPS["matrix"] if args.scale > CAPS["smoke"]["scale"] else CAPS["smoke"]
+    for p in _preflight(caps):
         print(f"PREFLIGHT FAIL: {p}", file=sys.stderr)
         return 1
     out = corpus_mod.generate(args.scale, args.seed)

@@ -16,8 +16,9 @@ Semantics mirrored from production code:
   rows stay visible — reported as divergence, not tolerated.
 - currency: cost_usd is Float32 (store.go:1121); the oracle sums the
   float32-rounded stored values in float64.
-- funnel: windowFunnel over the analysis window, strictly increasing
-  timestamps, canonical-id grouping, humans only (store.go:3486-3577).
+- funnel: windowFunnel over the analysis window, non-strict (equal
+  timestamps may chain), canonical-id grouping, humans only
+  (store.go:3486-3577).
 - retention: weekly brackets from each user's first `user.signup`
   (store.go:3662-3704), humans only.
 """
@@ -38,8 +39,9 @@ from .util import (
     CORPUS_DAYS,
     CORPUS_END,
     FUNNEL_STEPS,
+    FUNNEL_WINDOW_S,
     FIRST_EVENT,
-    SESSION_WINDOW_S,
+    load_json,
     corpus_dir,
     dump_json,
     ts,
@@ -117,7 +119,6 @@ MODELS = ["gpt-5-mini", "claude-sonnet-4.5", "gpt-5.2"]
 TOOLS = ["run_sql", "explore_events", "create_chart", "search_docs"]
 
 NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # DNS namespace
-FUNNEL_WINDOW_S = 86400  # production default when no range is given
 
 
 def uid(*parts) -> str:
@@ -423,8 +424,18 @@ def _user_events(rng: random.Random, u_idx: int, canon: str, proj: str,
 def generate(scale: int, seed: int, ingest_rows: int = 10_000) -> Path:
     """Generate corpus + oracle manifest. Returns the corpus directory."""
     out = corpus_dir(scale, seed)
-    if (out / "oracle.json").exists():
-        return out
+    manifest_path = out / "oracle.json"
+    if manifest_path.exists():
+        # Reuse only a corpus generated under identical parameters — a
+        # stale ingest_rows would silently mis-size the ingest leg.
+        m = load_json(manifest_path)
+        if (m.get("scale"), m.get("seed"), m.get("ingest_rows")) == (
+                scale, seed, ingest_rows):
+            return out
+        raise RuntimeError(
+            f"corpus dir {out} exists with different parameters "
+            f"(scale={m.get('scale')}, seed={m.get('seed')}, "
+            f"ingest_rows={m.get('ingest_rows')}); remove it to regenerate")
     out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
     projects = [uid("project", i) for i in range(3)]
