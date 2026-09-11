@@ -131,6 +131,12 @@ type Engine struct {
 	heartbeatEvery time.Duration
 	// wg tracks spawned runs so shutdown (and tests) can wait for them.
 	wg sync.WaitGroup
+	// pending counts goroutines parked on sem — bounded by maxPendingRuns.
+	pending int
+	// heartbeatCallTimeout bounds ONE lease RPC; tests shrink it.
+	heartbeatCallTimeout time.Duration
+	// leaseStaleAfter is the last-confirmed-lease deadline; tests shrink it.
+	leaseStaleAfter time.Duration
 }
 
 // maxConcurrentRuns bounds simultaneous syncs in one process.
@@ -146,8 +152,18 @@ const runLeaseStaleAfter = 2 * time.Minute
 // landing rows — a peer may have fenced it and freed the active guard.
 const maxHeartbeatFailures = 3
 
+// heartbeatCallTimeout bounds ONE lease RPC: a hung query must not ride the
+// 10-minute run context past the 2-minute lease.
+const heartbeatCallTimeout = 15 * time.Second
+
+// maxPendingRuns bounds goroutines parked on the run semaphore. Runs beyond
+// it stay queued rows with no worker — reconcile fences them stale and a
+// later enqueue re-queues them, so admission is bounded rather than the
+// goroutine count growing without limit.
+const maxPendingRuns = maxConcurrentRuns
+
 func NewEngine(store Store) *Engine {
-	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second}
+	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
 }
 
 // Tick starts every due sync for this minute. Called from the scheduler's
@@ -191,9 +207,25 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 	if err != nil || !enqueued {
 		return run, enqueued, err
 	}
+	// Bounded admission: at most maxPendingRuns goroutines may park on the
+	// semaphore. A run refused a worker stays a queued row — reconcile fences
+	// it stale after runLeaseStaleAfter and a later enqueue re-queues it, so
+	// the row is never lost and the goroutine count stays bounded.
+	e.mu.Lock()
+	if e.pending >= maxPendingRuns {
+		e.mu.Unlock()
+		return run, true, nil
+	}
+	e.pending++
+	e.mu.Unlock()
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
+		defer func() {
+			e.mu.Lock()
+			e.pending--
+			e.mu.Unlock()
+		}()
 		e.sem <- struct{}{}
 		defer func() { <-e.sem }()
 		e.executeRun(run.ID, run.SyncID)
@@ -242,15 +274,24 @@ func (e *Engine) executeRun(runID, syncID string) {
 		tick := time.NewTicker(e.heartbeatEvery)
 		defer tick.Stop()
 		failures := 0
+		// Time fence, not just error count: a heartbeat that never confirms
+		// (hung query, slow network) must not let the lease lapse while the
+		// pull keeps writing. lastConfirmed tracks the last successful lease
+		// renewal; once it ages past the stale window the run is cancelled.
+		lastConfirmed := time.Now()
 		for {
 			select {
 			case <-runCtx.Done():
 				return
 			case <-tick.C:
-				cancelRequested, stillRunning, herr := e.store.HeartbeatConnectorRun(runCtx, runID)
+				// Each lease RPC is bounded — a hung query cannot ride the
+				// 10-minute run context past the 2-minute lease.
+				hbCtx, hbCancel := context.WithTimeout(runCtx, e.heartbeatCallTimeout)
+				cancelRequested, stillRunning, herr := e.store.HeartbeatConnectorRun(hbCtx, runID)
+				hbCancel()
 				if herr != nil {
 					failures++
-					if failures >= maxHeartbeatFailures {
+					if failures >= maxHeartbeatFailures || time.Since(lastConfirmed) > e.leaseStaleAfter {
 						// Lease unprovable — stop before a peer's reconcile
 						// frees the guard and a second writer lands rows.
 						cancel()
@@ -259,6 +300,7 @@ func (e *Engine) executeRun(runID, syncID string) {
 					continue
 				}
 				failures = 0
+				lastConfirmed = time.Now()
 				if cancelRequested || !stillRunning {
 					cancel()
 					return

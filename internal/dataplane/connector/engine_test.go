@@ -91,6 +91,9 @@ type fakeStore struct {
 	cancelled []bool
 	runs      map[string]*Run
 	runSeq    int
+	// heartbeatBlock, when non-nil, makes HeartbeatConnectorRun wait on it —
+	// a hung lease RPC for the bounded-call test.
+	heartbeatBlock chan struct{}
 }
 
 func newFakeStore(job SyncJob) *fakeStore {
@@ -141,6 +144,13 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 }
 
 func (f *fakeStore) HeartbeatConnectorRun(ctx context.Context, runID string) (bool, bool, error) {
+	if f.heartbeatBlock != nil {
+		select {
+		case <-f.heartbeatBlock:
+		case <-ctx.Done():
+			return false, false, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := f.runs[runID]
@@ -461,5 +471,38 @@ func TestRunSyncSnapshotCapReportsTruncation(t *testing.T) {
 	got := store.finished[0]
 	if got.AdvanceCursor || got.Err == "" || !strings.Contains(got.Err, "snapshot limit") || got.Rows != maxBatchesPerRun {
 		t.Fatalf("result = %+v, want no cursor, a snapshot-limit error, and %d landed rows", got, maxBatchesPerRun)
+	}
+}
+
+// A heartbeat that BLOCKS (not errors) must still fence the run: the per-call
+// timeout turns the hang into an error, and the last-confirmed deadline cancels
+// the run once the lease is unprovable — pull/land cannot outlive the lease.
+func TestRunSyncHungHeartbeatFencesRun(t *testing.T) {
+	block := make(chan struct{})
+	src := &fakeSource{blockCh: block}
+	useFakeSource(src, nil)
+	store := newFakeStore(incrementalJob())
+	store.heartbeatBlock = make(chan struct{}) // never closes — hung lease RPC
+	engine := NewEngine(store)
+	engine.heartbeatEvery = 5 * time.Millisecond
+	engine.heartbeatCallTimeout = 10 * time.Millisecond
+	engine.leaseStaleAfter = 50 * time.Millisecond
+
+	_, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s1", "")
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue: %v enqueued=%v", err, enqueued)
+	}
+	// The run blocks in PullRows; heartbeats hang then time out per call.
+	// The last-confirmed-lease deadline (50ms) fires the fence — a hung RPC
+	// cannot ride the run context past the lease.
+	done := make(chan struct{})
+	go func() { engine.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("hung heartbeat did not fence the run")
+	}
+	if len(store.finished) != 1 || !store.cancelled[0] {
+		t.Fatalf("finished=%d cancelled=%v, want one cancelled run", len(store.finished), store.cancelled)
 	}
 }
