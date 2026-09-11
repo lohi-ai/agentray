@@ -41,9 +41,10 @@ from .util import (
     FUNNEL_STEPS,
     FUNNEL_WINDOW_S,
     FIRST_EVENT,
-    load_json,
+    SESSION_WINDOW_S,
     corpus_dir,
     dump_json,
+    load_json,
     ts,
     window_start,
 )

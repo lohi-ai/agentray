@@ -6,8 +6,8 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 
 | engine | scale | readers | days | status | wall_s | load_s |
 |---|---|---|---|---|---|---|
-| clickhouse | 100000 | 1 | 7 | MEASURED | 17.9 | 4.61 |
-| duckdb | 100000 | 1 | 7 | MEASURED | 7.3 | 1.72 |
+| clickhouse | 100000 | 1 | 7 | MEASURED | 17.0 | 4.92 |
+| duckdb | 100000 | 1 | 7 | MEASURED | 8.2 | 2.26 |
 
 ## Correctness
 
@@ -53,16 +53,16 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 
 | engine | shape | first p50 | first p95 | repeat p50 | repeat p95 | mem_peak MiB | cpu% peak | disk GiB |
 |---|---|---|---|---|---|---|---|---|
-| clickhouse | aggregate | 15 | 15 | 17 | 17 | 610 | 42.9 | 0.01 |
-| clickhouse | entity_join | 20 | 20 | 38 | 38 | 610 | 42.9 | 0.01 |
-| clickhouse | funnel | 15 | 15 | 23 | 23 | 610 | 42.9 | 0.01 |
-| clickhouse | overview | 21 | 21 | 20 | 20 | 610 | 42.9 | 0.01 |
-| clickhouse | retention | 100 | 100 | 68 | 68 | 610 | 42.9 | 0.01 |
-| duckdb | aggregate | 8 | 8 | 13 | 13 | 349 | 21.2 | 0.11 |
-| duckdb | entity_join | 12 | 12 | 15 | 15 | 349 | 21.2 | 0.11 |
-| duckdb | funnel | 22 | 22 | 49 | 49 | 349 | 21.2 | 0.11 |
-| duckdb | overview | 12 | 12 | 20 | 20 | 349 | 21.2 | 0.11 |
-| duckdb | retention | 19 | 19 | 21 | 21 | 349 | 21.2 | 0.11 |
+| clickhouse | aggregate | 24 | 24 | 13 | 13 | 729 | 46.8 | 0.01 |
+| clickhouse | entity_join | 32 | 32 | 81 | 81 | 729 | 46.8 | 0.01 |
+| clickhouse | funnel | 24 | 24 | 20 | 20 | 729 | 46.8 | 0.01 |
+| clickhouse | overview | 57 | 57 | 24 | 24 | 729 | 46.8 | 0.01 |
+| clickhouse | retention | 71 | 71 | 78 | 78 | 729 | 46.8 | 0.01 |
+| duckdb | aggregate | 17 | 17 | 14 | 14 | 418 | 25.2 | 0.11 |
+| duckdb | entity_join | 24 | 24 | 13 | 13 | 418 | 25.2 | 0.11 |
+| duckdb | funnel | 16 | 16 | 36 | 36 | 418 | 25.2 | 0.11 |
+| duckdb | overview | 19 | 19 | 13 | 13 | 418 | 25.2 | 0.11 |
+| duckdb | retention | 12 | 12 | 22 | 22 | 418 | 25.2 | 0.11 |
 
 Latency columns: `first` is the first timed pass after oracle checks (not a true cold read); `repeat` is two further passes. n=1/2 samples are smoke-scale only. Memory is container cgroup usage, not process RSS.
 
@@ -70,17 +70,17 @@ Latency columns: `first` is the first timed pass after oracle checks (not a true
 
 | engine | rows | ack_s | visibility_lag_s | final_total |
 |---|---|---|---|---|
-| clickhouse | 10000 | 0.11 | 0.11 | 109538 |
-| duckdb | 10000 | 0.3 | 0.3 | 109538 |
+| clickhouse | 10000 | 0.09 | 0.09 | 109538 |
+| duckdb | 10000 | 0.08 | 0.08 | 109538 |
 
 ## Gate ledger
 
 | gate | status | why |
 |---|---|---|
-| matrix 1000000 clickhouse | NOT RUN | free disk 20.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb | NOT RUN | free disk 20.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse | NOT RUN | free disk 20.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb | NOT RUN | free disk 20.2 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse | NOT RUN | free disk 18.6 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb | NOT RUN | free disk 18.6 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse | NOT RUN | free disk 18.6 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb | NOT RUN | free disk 18.6 GiB below the 40 GiB preflight |
 | commit-before-ack crash/replay | NOT RUN | needs fault injection against a durable queue, not a benchmark |
 | backup checkpoint + restore + replay | NOT RUN | needs a defined backup/restore procedure to exercise |
 | cross-tenant / arbitrary-SQL isolation | NOT RUN | needs the project-isolated sandboxed execution env from strategy.md; this harness's docker-socket driver is trusted tooling, not that sandbox |

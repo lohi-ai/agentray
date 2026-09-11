@@ -39,7 +39,7 @@ DUCK_VIEWS = [
 ]
 
 _FUNNEL_CH = f"""SELECT level, count() AS c FROM (
-    SELECT windowFunnel({FUNNEL_WINDOW_S * 1000})(toUnixTimestamp64Milli(timestamp),
+    SELECT windowFunnel({FUNNEL_WINDOW_S * 1000})(toUInt64(toUnixTimestamp64Milli(timestamp)),
       event_name = '{FUNNEL_STEPS[0]}',
       event_name = '{FUNNEL_STEPS[1]}',
       event_name = '{FUNNEL_STEPS[2]}') AS level

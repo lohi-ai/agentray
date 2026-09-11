@@ -194,30 +194,30 @@
   "days": 7,
   "engine": "duckdb",
   "ingest": {
-    "ack_s": 0.3,
+    "ack_s": 0.08,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
-        -0.001,
-        0.015
+        -0.0,
+        0.109
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 0.3
+    "visibility_lag_s": 0.08
   },
-  "load_s": 1.72,
+  "load_s": 2.26,
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 7.4,
-    "cpu_pct_peak": 21.2,
+    "cpu_pct_mean": 7.8,
+    "cpu_pct_peak": 25.2,
     "disk_after_load_bytes": 116323986,
     "disk_before_bytes": 16033,
     "disk_final_bytes": 121861509,
-    "mem_idle_bytes": 82145280,
-    "mem_peak_bytes": 366260224,
-    "samples": 3
+    "mem_idle_bytes": 97718272,
+    "mem_peak_bytes": 437825536,
+    "samples": 4
   },
   "scale": 100000,
   "seed": 20260912,
@@ -225,74 +225,74 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 7.8,
-        "p95_ms": 7.8,
-        "p99_ms": 7.8
+        "p50_ms": 16.7,
+        "p95_ms": 16.7,
+        "p99_ms": 16.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 13.0,
-        "p95_ms": 13.0,
-        "p99_ms": 13.0
+        "p50_ms": 13.8,
+        "p95_ms": 13.8,
+        "p99_ms": 13.8
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 12.2,
-        "p95_ms": 12.2,
-        "p99_ms": 12.2
+        "p50_ms": 24.0,
+        "p95_ms": 24.0,
+        "p99_ms": 24.0
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 14.7,
-        "p95_ms": 14.7,
-        "p99_ms": 14.7
+        "p50_ms": 12.6,
+        "p95_ms": 12.6,
+        "p99_ms": 12.6
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 22.0,
-        "p95_ms": 22.0,
-        "p99_ms": 22.0
+        "p50_ms": 15.5,
+        "p95_ms": 15.5,
+        "p99_ms": 15.5
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 48.7,
-        "p95_ms": 48.7,
-        "p99_ms": 48.7
+        "p50_ms": 36.5,
+        "p95_ms": 36.5,
+        "p99_ms": 36.5
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 12.3,
-        "p95_ms": 12.3,
-        "p99_ms": 12.3
+        "p50_ms": 18.7,
+        "p95_ms": 18.7,
+        "p99_ms": 18.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 20.5,
-        "p95_ms": 20.5,
-        "p99_ms": 20.5
+        "p50_ms": 12.6,
+        "p95_ms": 12.6,
+        "p99_ms": 12.6
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 19.1,
-        "p95_ms": 19.1,
-        "p99_ms": 19.1
+        "p50_ms": 11.8,
+        "p95_ms": 11.8,
+        "p99_ms": 11.8
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 20.7,
-        "p95_ms": 20.7,
-        "p99_ms": 20.7
+        "p50_ms": 22.3,
+        "p95_ms": 22.3,
+        "p99_ms": 22.3
       }
     }
   },
   "status": "MEASURED",
-  "wall_s": 7.3
+  "wall_s": 8.2
 }
