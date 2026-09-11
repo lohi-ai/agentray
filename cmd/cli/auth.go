@@ -332,37 +332,38 @@ func cmdKey(base string, cfg cliConfig, args []string) error {
 	cfg.ProjectID = chosen.ID
 	cfg.ProjectName = chosen.Name
 	cfg.APIKey = chosen.APIKey // capture key — for SDK use, not ops
-	// A stale management credential from a previous project must never
-	// authenticate ops against it — clear first, then re-mint.
-	cfg.ManagementKey = ""
-	cfg.ManagementKeyProject = ""
-	// Refresh the management credential for the selected project so ops keep
-	// working after a project switch or a born-split project.
-	var credResp struct {
-		Secret string `json:"secret"`
+	// Reuse the stored management credential when it is already bound to this
+	// project — minting on every invocation would proliferate live keys.
+	// A credential bound to a different project is dropped, never reused.
+	if cfg.ManagementKeyProject != chosen.ID {
+		cfg.ManagementKey = ""
+		cfg.ManagementKeyProject = ""
 	}
-	_, mintErr := client.do(http.MethodPost, "/api/projects/"+chosen.ID+"/credentials",
-		map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
-		&credResp)
-	switch {
-	case mintErr == nil && credResp.Secret != "":
-		cfg.ManagementKey = credResp.Secret
-		cfg.ManagementKeyProject = chosen.ID
-	case mintErr != nil && strings.Contains(mintErr.Error(), "(404)"):
-		// Positively a legacy server without the credential surface.
-	default:
-		return fmt.Errorf("could not mint a management credential for %s: %w", chosen.Name, mintErr)
+	if cfg.ManagementKey == "" {
+		var credResp struct {
+			Secret string `json:"secret"`
+		}
+		_, mintErr := client.do(http.MethodPost, "/api/projects/"+chosen.ID+"/credentials",
+			map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
+			&credResp)
+		switch {
+		case mintErr == nil && credResp.Secret != "":
+			cfg.ManagementKey = credResp.Secret
+			cfg.ManagementKeyProject = chosen.ID
+		case mintErr != nil && strings.Contains(mintErr.Error(), "(404)"):
+			// Positively a legacy server without the credential surface.
+		default:
+			return fmt.Errorf("could not mint a management credential for %s: %w", chosen.Name, mintErr)
+		}
 	}
 	if err := saveConfig(cfg); err != nil {
 		return err
 	}
-	// Bare key on stdout: the management credential when we hold one (ops),
-	// else the capture key (legacy servers).
-	if cfg.ManagementKey != "" {
-		fmt.Println(cfg.ManagementKey)
-	} else {
-		fmt.Println(chosen.APIKey)
-	}
+	// Bare CAPTURE key on stdout: `export AGENTRAY_API_KEY=$(agentray key)` is
+	// the documented SDK flow — printing the management credential here would
+	// embed a private scoped secret in SDK config. Ops use the stored
+	// ManagementKey internally; they never read it from stdout.
+	fmt.Println(chosen.APIKey)
 	return nil
 }
 
@@ -400,8 +401,12 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 		cfg.ProjectID = payload.Project.ID
 		cfg.ProjectName = payload.Project.Name
 		cfg.APIKey = payload.Project.APIKey // capture key — for SDK use, not ops
-		cfg.ManagementKey = ""
-		cfg.ManagementKeyProject = ""
+		// Reuse the stored management credential when it is already bound to
+		// this project — a re-login must not mint another live key.
+		if cfg.ManagementKeyProject != payload.Project.ID {
+			cfg.ManagementKey = ""
+			cfg.ManagementKeyProject = ""
+		}
 		// Born-split projects make the project key capture-only, so the CLI
 		// mints a scoped management credential for its calls instead of
 		// persisting the project key. The secret is shown-once server-side;
@@ -409,19 +414,21 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 		var credResp struct {
 			Secret string `json:"secret"`
 		}
-		_, err := newAuthClient(base, token).do(http.MethodPost,
-			"/api/projects/"+payload.Project.ID+"/credentials",
-			map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
-			&credResp)
-		switch {
-		case err == nil && credResp.Secret != "":
-			cfg.ManagementKey = credResp.Secret
-			cfg.ManagementKeyProject = payload.Project.ID
-		case err != nil && strings.Contains(err.Error(), "(404)"):
-			// Positively a legacy server without the credential surface — the
-			// project key still carries management power there.
-		default:
-			return fmt.Errorf("could not mint a management credential: %w", err)
+		if cfg.ManagementKey == "" {
+			_, err := newAuthClient(base, token).do(http.MethodPost,
+				"/api/projects/"+payload.Project.ID+"/credentials",
+				map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
+				&credResp)
+			switch {
+			case err == nil && credResp.Secret != "":
+				cfg.ManagementKey = credResp.Secret
+				cfg.ManagementKeyProject = payload.Project.ID
+			case err != nil && strings.Contains(err.Error(), "(404)"):
+				// Positively a legacy server without the credential surface —
+				// the project key still carries management power there.
+			default:
+				return fmt.Errorf("could not mint a management credential: %w", err)
+			}
 		}
 	}
 	return saveConfig(cfg)
