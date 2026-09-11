@@ -142,26 +142,46 @@ def _publish_durable():
     import shutil
     dest = Path(__file__).resolve().parent.parent / "results"
     dest.mkdir(exist_ok=True)
+    # Preserve prior outputs in a scoped archive instead of overwriting —
+    # old legs keep their own provenance, never relabeled as current.
+    archive = dest / "archive"
+    for old in list(dest.glob("*.json")) + [dest / "report.md"]:
+        if old.exists():
+            archive.mkdir(exist_ok=True)
+            shutil.move(str(old), archive / old.name)
     meta = {
         "generated_by": "storage-evaluation harness",
         "duckdb": DUCKDB_VERSION,
         "clickhouse_image": CH_IMAGE,
+        "code_digest": None,
         "legs": [],
     }
+    digests = set()
     for p in sorted(RESULTS.glob("*.json")):
         leg = report.load_json(p)
         shutil.copy2(p, dest / p.name)
+        prov = leg.get("provenance", {})
+        digests.add(prov.get("code_digest"))
         meta["legs"].append({
             "file": p.name, "engine": leg.get("engine"),
             "scale": leg.get("scale"), "seed": leg.get("seed"),
             "readers": leg.get("readers"), "days": leg.get("days"),
             "status": leg.get("status"),
             "corpus_rows": None,
+            "code_commit": prov.get("code_commit"),
+            "code_digest": prov.get("code_digest"),
+            "corpus_digest": prov.get("corpus_digest"),
         })
         cd = report.corpus_dir(leg.get("scale", 0), leg.get("seed", 0))
         oj = cd / "oracle.json"
         if oj.exists():
             meta["legs"][-1]["corpus_rows"] = report.load_json(oj).get("total_rows")
+    mixed = len(digests) > 1
+    meta["code_digest"] = "MIXED" if mixed else (digests.pop() if digests else None)
+    if mixed:
+        meta["provenance_note"] = (
+            "legs were produced by different code states; per-leg "
+            "code_digest/corpus_digest identify each")
     # The slim driver image has no git; the eval wrapper passes the commit in.
     meta["commit"] = os.environ.get("EVAL_COMMIT") or None
     if (WORK / "report.md").exists():

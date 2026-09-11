@@ -192,37 +192,32 @@
     }
   },
   "days": 7,
-  "engine": "duckdb",
+  "engine": "clickhouse",
   "ingest": {
-    "ack_s": 0.24,
+    "ack_s": 0.09,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
-        -0.001,
-        0.043
+        -0.002,
+        0.031
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 0.26
+    "visibility_lag_s": 0.09
   },
-  "load_s": 15.13,
-  "provenance": {
-    "code_commit": "77223357aaf7e1eb1534c1589fcf358f683171ca",
-    "code_digest": "3d557ac2687a3c1dd7a88ad95eff3c1aafc453a65c409fc98e0ee632f3cb71d8",
-    "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b"
-  },
+  "load_s": 4.92,
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 18.5,
-    "cpu_pct_peak": 39.2,
-    "disk_after_load_bytes": 115275410,
-    "disk_before_bytes": 16033,
-    "disk_final_bytes": 120812933,
-    "mem_idle_bytes": 92762112,
-    "mem_peak_bytes": 445734912,
-    "samples": 11
+    "cpu_pct_mean": 23.2,
+    "cpu_pct_peak": 46.8,
+    "disk_after_load_bytes": 12358911,
+    "disk_before_bytes": 520336,
+    "disk_final_bytes": 13678360,
+    "mem_idle_bytes": 266670080,
+    "mem_peak_bytes": 764555264,
+    "samples": 5
   },
   "scale": 100000,
   "seed": 20260912,
@@ -230,74 +225,74 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 42.4,
-        "p95_ms": 42.4,
-        "p99_ms": 42.4
+        "p50_ms": 24.3,
+        "p95_ms": 24.3,
+        "p99_ms": 24.3
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 34.7,
-        "p95_ms": 34.7,
-        "p99_ms": 34.7
+        "p50_ms": 13.3,
+        "p95_ms": 13.3,
+        "p99_ms": 13.3
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 343.8,
-        "p95_ms": 343.8,
-        "p99_ms": 343.8
+        "p50_ms": 31.6,
+        "p95_ms": 31.6,
+        "p99_ms": 31.6
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 148.8,
-        "p95_ms": 148.8,
-        "p99_ms": 148.8
+        "p50_ms": 81.2,
+        "p95_ms": 81.2,
+        "p99_ms": 81.2
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 298.3,
-        "p95_ms": 298.3,
-        "p99_ms": 298.3
+        "p50_ms": 23.7,
+        "p95_ms": 23.7,
+        "p99_ms": 23.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 275.2,
-        "p95_ms": 275.2,
-        "p99_ms": 275.2
+        "p50_ms": 20.3,
+        "p95_ms": 20.3,
+        "p99_ms": 20.3
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 47.4,
-        "p95_ms": 47.4,
-        "p99_ms": 47.4
+        "p50_ms": 56.7,
+        "p95_ms": 56.7,
+        "p99_ms": 56.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 107.1,
-        "p95_ms": 107.1,
-        "p99_ms": 107.1
+        "p50_ms": 23.5,
+        "p95_ms": 23.5,
+        "p99_ms": 23.5
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 195.2,
-        "p95_ms": 195.2,
-        "p99_ms": 195.2
+        "p50_ms": 70.8,
+        "p95_ms": 70.8,
+        "p99_ms": 70.8
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 90.4,
-        "p95_ms": 90.4,
-        "p99_ms": 90.4
+        "p50_ms": 78.2,
+        "p95_ms": 78.2,
+        "p99_ms": 78.2
       }
     }
   },
   "status": "MEASURED",
-  "wall_s": 44.0
+  "wall_s": 17.0
 }

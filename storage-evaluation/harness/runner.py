@@ -4,15 +4,17 @@ ingest-during-reads, resource sampling. Writes work/results/<run>.json.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import statistics
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import corpus as corpus_mod
 from . import engines, queries
-from .util import WORK, dir_bytes, load_json
+from .util import WORK, code_digest, corpus_digest, dir_bytes, load_json
 
 
 class Deadline(Exception):
@@ -97,6 +99,61 @@ def _run_shape(engine, shape_id, days):
     return time.monotonic() - t0
 
 
+def generate_bounded(scale: int, seed: int, ingest_rows: int,
+                     budget_s: float, workdir_cap_gib: float) -> Path:
+    """Generate the corpus in a killable subprocess with a real wall budget
+    and a workdir cap enforced *during* generation, not only after.
+
+    Raises Deadline on timeout or workdir overflow; the child is killed
+    either way.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "harness.corpus_gen",
+         str(scale), str(seed), str(ingest_rows)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    t0 = time.monotonic()
+    try:
+        while proc.poll() is None:
+            if time.monotonic() - t0 > budget_s:
+                proc.kill()
+                raise Deadline(
+                    f"corpus generation exceeded {budget_s}s budget")
+            used = dir_bytes(WORK) / 1024**3
+            if used > workdir_cap_gib:
+                proc.kill()
+                raise Deadline(
+                    f"workdir {used:.1f} GiB exceeded cap "
+                    f"{workdir_cap_gib} GiB during generation")
+            time.sleep(0.5)
+        if proc.returncode != 0:
+            err = (proc.stderr.read() if proc.stderr else "")[-500:]
+            raise RuntimeError(f"corpus generation failed: {err}")
+        return Path(proc.stdout.read().strip().splitlines()[-1])
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def stop_bounded(eng, timeout_s: float = 30):
+    """Engine teardown bounded by a hard timeout — a wedged shutdown POST
+    must not outlive the leg. The container is force-removed on expiry."""
+    t = threading.Thread(target=lambda: _safe_stop(eng), daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        try:
+            engines.stop_container(eng.container_name)
+        except Exception:
+            pass
+
+
+def _safe_stop(eng):
+    try:
+        eng.stop()
+    except Exception:
+        pass
+
+
 def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             caps: dict, deadline_s: float) -> dict:
     t_start = time.monotonic()
@@ -106,6 +163,10 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         "engine": engine_name, "scale": scale, "seed": seed,
         "readers": readers, "days": days, "status": "MEASURED",
         "checks": {}, "shapes": {}, "ingest": {}, "resources": {},
+        "provenance": {
+            "code_commit": os.environ.get("EVAL_COMMIT") or None,
+            "code_digest": code_digest(),
+        },
     }
     def remaining():
         left = deadline_s - (time.monotonic() - t_start)
@@ -136,9 +197,15 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
     sampler = Sampler(eng.container_name)
     try:
         watchdog.start()
-        corpus_dir = corpus_mod.generate(scale, seed, caps["ingest_rows"])
+        # Generation runs in a killable subprocess with its own share of
+        # the wall budget and live workdir-cap enforcement — the engine
+        # watchdog cannot stop driver-side work (no engine exists yet).
+        corpus_dir = generate_bounded(
+            scale, seed, caps["ingest_rows"],
+            budget_s=remaining(), workdir_cap_gib=caps["workdir_gib"])
         oracle = load_json(corpus_dir / "oracle.json")
         deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
+        leg["provenance"]["corpus_digest"] = corpus_digest(corpus_dir)
         remaining()
         eng.start(caps)
         sampler.start()
@@ -204,12 +271,11 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
             t0 = time.monotonic()
             ing = eng.ingest(corpus_dir)
             ingest_end = t0 + ing["ack_s"]
-            # ingest() already returns the post-insert total; only poll when
-            # it hasn't caught up yet.
-            visible_at = ing["ack_s"] if ing.get("total", 0) >= (
-                oracle["total_rows"] + oracle["ingest_rows"]) else None
             expected_total = oracle["total_rows"] + oracle["ingest_rows"]
-            while visible_at is None and time.monotonic() - t0 < 60:
+            # Independently observed visibility: poll count() after the ack
+            # until the batch is reflected. Never assigned from ack_s.
+            visible_at = None
+            while time.monotonic() - t0 < 60:
                 if eng.count() >= expected_total:
                     visible_at = time.monotonic() - t0
                     break
@@ -218,6 +284,8 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         overlap = sum(1 for s, e in spans if _overlaps(s, e, t0, ingest_end))
         leg["ingest"] = {
             "rows": oracle["ingest_rows"], "ack_s": round(ing["ack_s"], 2),
+            # Independently observed via post-ack count() polling; this is
+            # an upper bound at 0.5s poll granularity, not the ack time.
             "visibility_lag_s": (round(visible_at, 2) if visible_at is not None else ">60"),
             "expected_total": expected_total, "final_total": eng.count(),
             "readers_overlapping_ingest": overlap,
@@ -245,10 +313,9 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         if sampler.is_alive() or sampler.ident is not None:
             sampler.join(timeout=5)
         leg["resources"].update(sampler.summary())
-        try:
-            eng.stop()
-        except Exception:
-            pass
+        # Teardown is bounded: a wedged worker shutdown POST must not
+        # outlive the leg; the container is force-removed on expiry.
+        stop_bounded(eng, timeout_s=30)
     leg["wall_s"] = round(time.monotonic() - t_start, 1)
     return leg
 

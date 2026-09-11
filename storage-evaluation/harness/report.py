@@ -54,12 +54,19 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     # --- legs ---------------------------------------------------------------
     L.append("## Runs")
     L.append("")
-    L.append("| engine | scale | readers | days | status | wall_s | load_s |")
-    L.append("|---|---|---|---|---|---|---|")
+    digests = {l.get("provenance", {}).get("code_digest") for l in legs}
+    if len(digests) > 1:
+        L.append("**MIXED PROVENANCE**: legs were produced by different code "
+                 "states; per-leg digest shown. Do not read this table as one "
+                 "coherent run.")
+        L.append("")
+    L.append("| engine | scale | readers | days | status | wall_s | load_s | code |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for leg in legs:
+        cd = (leg.get("provenance", {}).get("code_digest") or "")[:8] or "—"
         L.append(f"| {leg['engine']} | {leg['scale']} | {leg['readers']} | "
                  f"{leg['days']} | {leg['status']} | {leg.get('wall_s','—')} | "
-                 f"{leg.get('load_s','—')} |")
+                 f"{leg.get('load_s','—')} | {cd} |")
         if leg["status"] not in ("MEASURED", "NOT RUN", "ABORTED", "ERROR"):
             problems.append(f"leg {leg['engine']} has unlabeled status")
     if not legs:

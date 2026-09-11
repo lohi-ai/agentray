@@ -114,3 +114,30 @@ def load_json(path: Path):
 
 def corpus_dir(scale: int, seed: int) -> Path:
     return WORK / f"corpus-{scale}-s{seed}"
+
+
+def code_digest() -> str:
+    """SHA-256 over the harness source + build inputs — identifies the exact
+    code that ran a leg, including uncommitted edits."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(HOST_DIR.glob("harness/*.py")) + [
+            HOST_DIR / "eval", HOST_DIR / "Dockerfile",
+            HOST_DIR / "requirements.txt"]:
+        if p.exists():
+            h.update(p.name.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def corpus_digest(cdir: Path) -> str:
+    """SHA-256 over the corpus files + oracle manifest for a leg."""
+    import hashlib
+    h = hashlib.sha256()
+    for name in ("events.parquet", "aliases.parquet", "external_rows.parquet",
+                 "ingest_batch.parquet", "oracle.json"):
+        p = cdir / name
+        if p.exists():
+            h.update(name.encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
