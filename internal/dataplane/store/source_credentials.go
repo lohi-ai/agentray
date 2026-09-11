@@ -195,6 +195,28 @@ RETURNING id::text, project_id::text, name, kind, true, revision, created_at, up
 	return c, err
 }
 
+// CreateDataConnectorForUser is the session-facing create: owner/admin in the
+// project's workspace, then the same credential-referenced insert.
+func (s *Store) CreateDataConnectorForUser(ctx context.Context, userID, projectID, name, kind, credentialID string) (DataConnector, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	canManage, err := s.userCanManageWorkspace(ctx, userID, project.WorkspaceID)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	if !canManage {
+		return DataConnector{}, errAgentForbidden
+	}
+	c, err := s.CreateDataConnectorForProject(ctx, projectID, name, kind, credentialID)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "connector.create", "project", project.ID, project.Name, "{}")
+	return c, nil
+}
+
 // CreateDataConnectorIdempotent is CreateDataConnectorForProject under an
 // idempotency claim — a retried create replays the first connector instead
 // of inserting a duplicate.

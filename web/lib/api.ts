@@ -1845,8 +1845,18 @@ export class AgentRayAPI {
     return this.get<{ connectors: DataConnector[]; kinds: string[] }>('/api/connectors');
   }
 
-  createConnector(input: { name: string; kind: string; dsn: string }) {
-    return this.post<{ connector: DataConnector }>('/api/connectors', input);
+  // New connectors reference a source credential: the DSN is stored once via
+  // the session-only credential route and the connector carries only its ID.
+  async createConnector(input: { name: string; kind: string; dsn: string }) {
+    const cred = await this.post<{ credential: { id: string } }>(
+      `/api/projects/${this.projectID}/source-credentials`,
+      { name: input.name, dsn: input.dsn },
+    );
+    return this.post<{ connector: DataConnector }>('/api/connectors', {
+      name: input.name,
+      kind: input.kind,
+      credential_id: cred.credential.id,
+    });
   }
 
   deleteConnector(id: string) {

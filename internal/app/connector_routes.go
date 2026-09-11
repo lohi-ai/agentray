@@ -40,14 +40,21 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 			return err
 		}
 		var payload struct {
-			Name string `json:"name"`
-			Kind string `json:"kind"`
-			DSN  string `json:"dsn"`
+			Name         string `json:"name"`
+			Kind         string `json:"kind"`
+			CredentialID string `json:"credential_id"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		created, err := store.CreateDataConnector(c.Request().Context(), ctx.User.ID, project.ID, payload.Name, payload.Kind, payload.DSN)
+		// New connectors reference a live source credential — the secret is
+		// stored once via POST /api/projects/:id/source-credentials and never
+		// transits this route. Inline-DSN rows remain resolvable for existing
+		// connectors only.
+		if strings.TrimSpace(payload.CredentialID) == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "credential_id is required — store the DSN once via POST /api/projects/:id/source-credentials")
+		}
+		created, err := store.CreateDataConnectorForUser(c.Request().Context(), ctx.User.ID, project.ID, payload.Name, payload.Kind, payload.CredentialID)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}

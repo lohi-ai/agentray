@@ -40,7 +40,15 @@ type cliConfig struct {
 	Email        string `json:"email,omitempty"`
 	ProjectID    string `json:"project_id,omitempty"`
 	ProjectName  string `json:"project_name,omitempty"`
-	APIKey       string `json:"api_key,omitempty"`
+	// APIKey is the CAPTURE key — it feeds events and nothing else on a
+	// split project. ManagementKey is the scoped agm_ credential the CLI
+	// uses for /api/op and /mcp; it is what `key` prints for ops use.
+	APIKey        string `json:"api_key,omitempty"`
+	ManagementKey string `json:"management_key,omitempty"`
+	// ManagementKeyProject binds the credential to its project — a stale key
+	// from a previous selection must never authenticate ops against the wrong
+	// project.
+	ManagementKeyProject string `json:"management_key_project,omitempty"`
 }
 
 func configPath() string {
@@ -323,12 +331,38 @@ func cmdKey(base string, cfg cliConfig, args []string) error {
 	}
 	cfg.ProjectID = chosen.ID
 	cfg.ProjectName = chosen.Name
-	cfg.APIKey = chosen.APIKey
+	cfg.APIKey = chosen.APIKey // capture key — for SDK use, not ops
+	// A stale management credential from a previous project must never
+	// authenticate ops against it — clear first, then re-mint.
+	cfg.ManagementKey = ""
+	cfg.ManagementKeyProject = ""
+	// Refresh the management credential for the selected project so ops keep
+	// working after a project switch or a born-split project.
+	var credResp struct {
+		Secret string `json:"secret"`
+	}
+	_, mintErr := client.do(http.MethodPost, "/api/projects/"+chosen.ID+"/credentials",
+		map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
+		&credResp)
+	switch {
+	case mintErr == nil && credResp.Secret != "":
+		cfg.ManagementKey = credResp.Secret
+		cfg.ManagementKeyProject = chosen.ID
+	case mintErr != nil && strings.Contains(mintErr.Error(), "(404)"):
+		// Positively a legacy server without the credential surface.
+	default:
+		return fmt.Errorf("could not mint a management credential for %s: %w", chosen.Name, mintErr)
+	}
 	if err := saveConfig(cfg); err != nil {
 		return err
 	}
-	// Bare key on stdout: `export AGENTRAY_API_KEY=$(agentray key)`.
-	fmt.Println(chosen.APIKey)
+	// Bare key on stdout: the management credential when we hold one (ops),
+	// else the capture key (legacy servers).
+	if cfg.ManagementKey != "" {
+		fmt.Println(cfg.ManagementKey)
+	} else {
+		fmt.Println(chosen.APIKey)
+	}
 	return nil
 }
 
@@ -365,6 +399,9 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 	if payload.Project.ID != "" {
 		cfg.ProjectID = payload.Project.ID
 		cfg.ProjectName = payload.Project.Name
+		cfg.APIKey = payload.Project.APIKey // capture key — for SDK use, not ops
+		cfg.ManagementKey = ""
+		cfg.ManagementKeyProject = ""
 		// Born-split projects make the project key capture-only, so the CLI
 		// mints a scoped management credential for its calls instead of
 		// persisting the project key. The secret is shown-once server-side;
@@ -372,15 +409,19 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 		var credResp struct {
 			Secret string `json:"secret"`
 		}
-		if _, err := newAuthClient(base, token).do(http.MethodPost,
+		_, err := newAuthClient(base, token).do(http.MethodPost,
 			"/api/projects/"+payload.Project.ID+"/credentials",
 			map[string]any{"name": "cli", "scopes": []string{"analytics:read", "dashboards:write", "sources:read", "sources:manage"}},
-			&credResp); err == nil && credResp.Secret != "" {
-			cfg.APIKey = credResp.Secret
-		} else {
-			// Older servers without the credential surface: keep the project
-			// key so login still works against them.
-			cfg.APIKey = payload.Project.APIKey
+			&credResp)
+		switch {
+		case err == nil && credResp.Secret != "":
+			cfg.ManagementKey = credResp.Secret
+			cfg.ManagementKeyProject = payload.Project.ID
+		case err != nil && strings.Contains(err.Error(), "(404)"):
+			// Positively a legacy server without the credential surface — the
+			// project key still carries management power there.
+		default:
+			return fmt.Errorf("could not mint a management credential: %w", err)
 		}
 	}
 	return saveConfig(cfg)
@@ -389,7 +430,7 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 func printSessionSummary(payload accountPayload) {
 	if payload.Project.ID != "" {
 		fmt.Fprintf(os.Stderr, "Default project: %s\n", payload.Project.Name)
-		fmt.Fprintf(os.Stderr, "API key saved to %s — print it with `agentray key`.\n", configPath())
+		fmt.Fprintf(os.Stderr, "Credentials saved to %s — `agentray key` prints the management credential; the capture key is for SDKs.\n", configPath())
 	}
 }
 

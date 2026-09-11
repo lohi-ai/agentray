@@ -140,9 +140,9 @@ func (s *Store) CreateDataConnector(ctx context.Context, userID, projectID, name
 	err = s.pg.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, dsn_ciphertext)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, dsn_ciphertext != '', created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, dsn_ciphertext != '', revision, created_at, updated_at`,
 		projectID, name, kind, ciphertext).
-		Scan(&out.ID, &out.ProjectID, &out.Name, &out.Kind, &out.HasDSN, &out.CreatedAt, &out.UpdatedAt)
+		Scan(&out.ID, &out.ProjectID, &out.Name, &out.Kind, &out.HasDSN, &out.Revision, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return DataConnector{}, err
 	}
