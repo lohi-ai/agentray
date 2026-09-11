@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -84,7 +85,10 @@ func TestOverviewLive(t *testing.T) {
 		}
 	}
 
-	projectID := "11111111-2222-3333-4444-555555555555"
+	// Generated ids keep repeat and concurrent runs isolated; cleanup is
+	// synchronous (mutations_sync) so a rerun never sees a prior fixture.
+	projectID := uuid.NewString()
+	emptyProjectID := uuid.NewString()
 	// Pinned "now": 2026-09-12 14:00 UTC → 7d range = Sep 5..11 complete days.
 	now := time.Date(2026, 9, 12, 14, 0, 0, 0, time.UTC)
 	day := func(d int) time.Time { return time.Date(2026, 9, d, 12, 0, 0, 0, time.UTC) }
@@ -106,7 +110,7 @@ func TestOverviewLive(t *testing.T) {
 		ev("carol", "user.pageview", time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)),
 		ev("carol", "user.pageview", time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)), // D1 return
 		ev("carol", "user.pageview", time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)), // D7 return
-		ev("carol", "user.pageview", day(9)),                                       // active in range
+		ev("carol", "user.pageview", day(9)),                                        // active in range
 		// The verification event: receipt proof, must not count anywhere.
 		ev("verify-bot", overviewVerificationEvent, day(6)),
 		// A crawler: excluded from qualifying activity.
@@ -119,6 +123,18 @@ func TestOverviewLive(t *testing.T) {
 		// or all, never under platform=web.
 		{distinct: "dave", session: "s-dave", name: "user.pageview", typ: "user",
 			class: "human", platform: "ios", channel: "direct", props: `{"path":"/home"}`, ts: day(7)},
+		// erin: known web person (first seen Aug 20 on web) who opens the iOS
+		// app inside the range — project-wide first-seen means she is NOT a new
+		// user on either platform.
+		{distinct: "erin", session: "s-erin-aug", name: "user.pageview", typ: "user",
+			class: "human", platform: "web", channel: "direct", props: `{"path":"/"}`, ts: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)},
+		{distinct: "erin", session: "s-erin-ios", name: "user.pageview", typ: "user",
+			class: "human", platform: "ios", channel: "direct", props: `{"path":"/home"}`, ts: day(9)},
+		// frank: events under BOTH the anonymous id and the canonical id the
+		// alias maps it to — the dedup proof: 2 raw ids, 1 person.
+		ev("frank", "user.pageview", day(6)),
+		{distinct: "canonical-frank", session: "s-cf", name: "user.pageview", typ: "user",
+			class: "human", platform: "web", channel: "direct", props: `{"path":"/"}`, ts: day(7)},
 	}
 
 	batch, err := ch.PrepareBatch(ctx, `INSERT INTO events (project_id, distinct_id, session_id, event_name, event_type, properties, timestamp, visitor_class, referrer_channel, platform)`)
@@ -134,59 +150,79 @@ func TestOverviewLive(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	defer func() {
-		_ = ch.Exec(ctx, `ALTER TABLE events DELETE WHERE project_id = ?`, projectID)
+		// mutations_sync=2 makes the cleanup synchronous — an async DELETE can
+		// still be in flight when a rerun inserts the same fixture.
+		_ = ch.Exec(ctx, `ALTER TABLE events DELETE WHERE project_id = ? SETTINGS mutations_sync = 2`, projectID)
+		_ = ch.Exec(ctx, `ALTER TABLE aliases DELETE WHERE project_id = ? SETTINGS mutations_sync = 2`, projectID)
 	}()
+
+	// frank's alias exists from the start so the dedup proof is real: two raw
+	// distinct_ids (frank, canonical-frank) must fold to one person.
+	if err := ch.Exec(ctx, `INSERT INTO aliases (project_id, anonymous_id, canonical_id) VALUES (?, 'frank', 'canonical-frank')`, projectID); err != nil {
+		t.Fatalf("alias insert: %v", err)
+	}
+	s.resolvers.invalidate(projectID)
+	// Deterministic reload — LIFETIME+sleep raced the dictionary load once and
+	// silently un-folded the fixture.
+	if err := ch.Exec(ctx, "SYSTEM RELOAD DICTIONARY lohi_analytics.aliases_dict"); err != nil {
+		t.Fatalf("dict reload: %v", err)
+	}
 
 	res, err := s.Overview(ctx, projectID, "7d", "", now)
 	if err != nil {
 		t.Fatalf("overview: %v", err)
 	}
 
-	// Active users in Sep 5–11: alice, bob, carol, dave = 4. The verification
-	// event, the crawler, and the agent event must not count.
-	if res.Metrics.ActiveUsers.State != OverviewStateOK || res.Metrics.ActiveUsers.Value == nil || *res.Metrics.ActiveUsers.Value != 4 {
-		t.Fatalf("active_users = %+v, want ok 4", res.Metrics.ActiveUsers)
+	// Active users in Sep 5–11: alice, bob, carol, dave, erin, frank = 6 people
+	// (frank's two raw ids fold to one). The verification event, the crawler,
+	// and the agent event must not count.
+	if res.Metrics.ActiveUsers.State != OverviewStateOK || res.Metrics.ActiveUsers.Value == nil || *res.Metrics.ActiveUsers.Value != 6 {
+		t.Fatalf("active_users = %d (state %s), want ok 6", *res.Metrics.ActiveUsers.Value, res.Metrics.ActiveUsers.State)
 	}
-	// New users in range: alice (Sep 6), bob (Sep 8), dave (Sep 7) = 3.
-	// carol first seen Aug 10 — not new.
-	if res.Metrics.NewUsers.Value == nil || *res.Metrics.NewUsers.Value != 3 {
-		t.Fatalf("new_users = %+v, want 3", res.Metrics.NewUsers)
+	// New users in range: alice (Sep 6), bob (Sep 8), dave (Sep 7), frank
+	// (Sep 6) = 4. carol (Aug 10) and erin (Aug 20) first seen before the
+	// range — not new on any platform.
+	if res.Metrics.NewUsers.Value == nil || *res.Metrics.NewUsers.Value != 4 {
+		t.Fatalf("new_users = %+v, want 4", res.Metrics.NewUsers)
 	}
-	// Sessions: one per distinct session id on qualifying events in range:
-	// alice s-alice06 + s-alice07, bob s-bob08, carol s-carol09, dave s-dave = 5.
-	if res.Metrics.Sessions.Value == nil || *res.Metrics.Sessions.Value != 5 {
-		t.Fatalf("sessions = %+v, want 5", res.Metrics.Sessions)
+	// Sessions: alice s-alice06 + s-alice07, bob s-bob08, carol s-carol09,
+	// dave s-dave, erin s-erin-ios, frank s-frank06 + s-cf = 8.
+	if res.Metrics.Sessions.Value == nil || *res.Metrics.Sessions.Value != 8 {
+		t.Fatalf("sessions = %+v, want 8", res.Metrics.Sessions)
 	}
 	// Activation/revenue: unconfigured, never a number.
 	if res.Metrics.Activation.State != OverviewStateUnconfigured || res.Metrics.Revenue.State != OverviewStateUnconfigured {
 		t.Fatalf("activation/revenue must be unconfigured: %+v %+v", res.Metrics.Activation, res.Metrics.Revenue)
 	}
-	// Trend: 7 points, Sep 6 has alice+dave? No — dave is Sep 7. Sep 6: alice=1,
-	// Sep 7: alice+dave=2, Sep 8: bob=1, Sep 9: carol=1, others 0.
+	// Trend: 7 points. Sep 6: alice+frank=2, Sep 7: alice+dave+frank(canon)=3,
+	// Sep 8: bob=1, Sep 9: carol+erin=2, others 0.
 	if len(res.Trend) != 7 {
 		t.Fatalf("trend len = %d, want 7", len(res.Trend))
 	}
-	wantTrend := map[string]uint64{"2026-09-05": 0, "2026-09-06": 1, "2026-09-07": 2, "2026-09-08": 1, "2026-09-09": 1, "2026-09-10": 0, "2026-09-11": 0}
+	wantTrend := map[string]uint64{"2026-09-05": 0, "2026-09-06": 2, "2026-09-07": 3, "2026-09-08": 1, "2026-09-09": 2, "2026-09-10": 0, "2026-09-11": 0}
 	for _, p := range res.Trend {
 		if p.ActiveUsers != wantTrend[p.Day] {
 			t.Fatalf("trend %s = %d, want %d", p.Day, p.ActiveUsers, wantTrend[p.Day])
 		}
 	}
-	// Retention (lifetime cohorts): alice cohort Sep 6 (D1 returned Sep 7),
-	// bob Sep 8 (no return), carol Aug 10 (D1+D7 returned), dave Sep 7 (no return).
-	// D1 eligible: alice, bob, carol, dave all matured (cohort+2d <= Sep 12) = 4;
-	// returned: alice + carol = 2 → rate 0.5.
-	if res.Retention.D1.State != OverviewStateOK || res.Retention.D1.Eligible != 4 || res.Retention.D1.Returned != 2 {
-		t.Fatalf("d1 = %+v, want ok eligible 4 returned 2", res.Retention.D1)
+	// Retention (lifetime cohorts): alice Sep 6 (D1 returned Sep 7), bob Sep 8
+	// (no return), carol Aug 10 (D1+D7+D30 returned), dave Sep 7 (no return),
+	// erin Aug 20 (no return), frank Sep 6 (canonical-frank event Sep 7 = D1
+	// return — the stitched person, not a second member).
+	// D1 eligible: all six matured (cohort+2d <= Sep 12) = 6;
+	// returned: alice + carol + frank = 3 → rate 0.5.
+	if res.Retention.D1.State != OverviewStateOK || res.Retention.D1.Eligible != 6 || res.Retention.D1.Returned != 3 {
+		t.Fatalf("d1 = %+v, want ok eligible 6 returned 3", res.Retention.D1)
 	}
 	if res.Retention.D1.Rate != 0.5 {
 		t.Fatalf("d1 rate = %v, want 0.5", res.Retention.D1.Rate)
 	}
-	// D7 eligible: only carol (Aug 10 + 8d = Aug 18 <= Sep 12); alice/bob/dave
-	// cohorts are Sep 6-8, +8d = Sep 14-16 > Sep 12 — NOT eligible. Per-cohort-day
-	// maturity is the whole point: they must not enter the denominator.
-	if res.Retention.D7.State != OverviewStateOK || res.Retention.D7.Eligible != 1 || res.Retention.D7.Returned != 1 {
-		t.Fatalf("d7 = %+v, want ok eligible 1 returned 1", res.Retention.D7)
+	// D7 eligible: carol (Aug 10 + 8d = Aug 18) and erin (Aug 20 + 8d = Aug 28)
+	// — both <= Sep 12. alice/bob/dave/frank cohorts are Sep 6-8, +8d lands
+	// after Sep 12 — NOT eligible. Per-cohort-day maturity is the whole point:
+	// they must not enter the denominator.
+	if res.Retention.D7.State != OverviewStateOK || res.Retention.D7.Eligible != 2 || res.Retention.D7.Returned != 1 {
+		t.Fatalf("d7 = %+v, want ok eligible 2 returned 1", res.Retention.D7)
 	}
 	// D30: carol Aug 10 + 31d = Sep 10 <= Sep 12 → eligible 1; her Sep-9 event
 	// lands exactly on cohort day 30 → returned 1, rate 1.
@@ -203,11 +239,11 @@ func TestOverviewLive(t *testing.T) {
 	if res.DataStatus.PipelineLag != "unavailable" {
 		t.Fatalf("pipeline_lag = %q, want unavailable", res.DataStatus.PipelineLag)
 	}
-	// events_in_range counts everything (8 events Sep 5-11: alice×2, bob, carol,
-	// verify, crawler, agent, dave); qualifying_in_range excludes verify/crawler/
-	// agent → 5.
-	if res.DataStatus.EventsInRange != 8 || res.DataStatus.QualifyingInRange != 5 {
-		t.Fatalf("events_in_range=%d qualifying=%d, want 8/5", res.DataStatus.EventsInRange, res.DataStatus.QualifyingInRange)
+	// events_in_range counts everything (11 events Sep 5-11: alice×2, bob,
+	// carol, verify, crawler, agent, dave, erin-ios, frank, canonical-frank);
+	// qualifying_in_range excludes verify/crawler/agent → 8.
+	if res.DataStatus.EventsInRange != 11 || res.DataStatus.QualifyingInRange != 8 {
+		t.Fatalf("events_in_range=%d qualifying=%d, want 11/8", res.DataStatus.EventsInRange, res.DataStatus.QualifyingInRange)
 	}
 	// Top pages: raw pageview counts, unit declared.
 	if res.Content.TopPages.Unit != "pageviews" || len(res.Content.TopPages.Rows) == 0 {
@@ -224,8 +260,9 @@ func TestOverviewLive(t *testing.T) {
 		t.Fatalf("top_sources missing direct: %+v", res.Content.TopSources.Rows)
 	}
 
-	// Platform scoping: platform=ios → only dave qualifies; new_users=1 (dave's
-	// first event IS ios). platform=web → dave is not new (first event was ios).
+	// Platform scoping: platform=ios → dave + erin's ios event qualify;
+	// new_users=1 (dave's first event IS ios; erin first seen on web in Aug —
+	// project-wide first-seen means she is not a new iOS user).
 	ios, err := s.Overview(ctx, projectID, "7d", "ios", now)
 	if err != nil {
 		t.Fatalf("overview ios: %v", err)
@@ -233,33 +270,21 @@ func TestOverviewLive(t *testing.T) {
 	if ios.Metrics.NewUsers.Value == nil || *ios.Metrics.NewUsers.Value != 1 {
 		t.Fatalf("ios new_users = %+v, want 1 (dave)", ios.Metrics.NewUsers)
 	}
+	if ios.Metrics.ActiveUsers.Value == nil || *ios.Metrics.ActiveUsers.Value != 2 {
+		t.Fatalf("ios active_users = %+v, want 2 (dave + erin)", ios.Metrics.ActiveUsers)
+	}
 	web, err := s.Overview(ctx, projectID, "7d", "web", now)
 	if err != nil {
 		t.Fatalf("overview web: %v", err)
 	}
-	// web new users: alice + bob = 2 (dave's first event was ios — not a new
-	// web user; carol predates the range).
-	if web.Metrics.NewUsers.Value == nil || *web.Metrics.NewUsers.Value != 2 {
-		t.Fatalf("web new_users = %+v, want 2", web.Metrics.NewUsers)
-	}
-
-	// Identity stitching: alias alice's anonymous id to a canonical id and
-	// confirm the person is counted once. The dictionary LIFETIME is 1-2s here.
-	if err := ch.Exec(ctx, `INSERT INTO aliases (project_id, anonymous_id, canonical_id) VALUES (?, 'alice', 'canonical-alice')`, projectID); err != nil {
-		t.Fatalf("alias insert: %v", err)
-	}
-	s.resolvers.invalidate(projectID)
-	time.Sleep(3 * time.Second)
-	stitched, err := s.Overview(ctx, projectID, "7d", "", now)
-	if err != nil {
-		t.Fatalf("overview stitched: %v", err)
-	}
-	if stitched.Metrics.ActiveUsers.Value == nil || *stitched.Metrics.ActiveUsers.Value != 4 {
-		t.Fatalf("stitched active_users = %+v, want still 4 (alice folded, not double-counted)", stitched.Metrics.ActiveUsers)
+	// web new users: alice + bob + frank = 3 (dave's first event was ios — not
+	// a new web user; carol and erin predate the range).
+	if web.Metrics.NewUsers.Value == nil || *web.Metrics.NewUsers.Value != 3 {
+		t.Fatalf("web new_users = %+v, want 3", web.Metrics.NewUsers)
 	}
 
 	// Empty project: honest no_data everywhere, never a fabricated zero.
-	empty, err := s.Overview(ctx, "99999999-9999-9999-9999-999999999999", "7d", "", now)
+	empty, err := s.Overview(ctx, emptyProjectID, "7d", "", now)
 	if err != nil {
 		t.Fatalf("overview empty: %v", err)
 	}

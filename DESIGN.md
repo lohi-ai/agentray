@@ -19,7 +19,7 @@ product:
     - technical reviewers in debug mode
 principles:
   - Outcome before instrument. Lead with what changed, what matters, and what to do next.
-  - Conversation is the front door. Users should be able to ask before they configure.
+  - The product overview is the front door. A signed-in session lands on the deterministic read — what happened — before any agent conversation.
   - Data earns trust. Every recommendation should make the supporting signal reachable.
   - Agents feel like teammates. Show readiness, health, work in progress, and next action in plain language.
   - Marketing surfaces sell the next value moment. Remove friction between landing, insight, and action.
@@ -29,7 +29,7 @@ principles:
 
 # AgentRay Design System
 
-AgentRay is a dark SaaS product for growth teams that need to understand product usage, traffic quality, and AI-agent work without becoming analytics engineers. The experience is a guided operating cockpit: a conversational front door, a signal-rich growth workspace, and an agent control plane that explains what is happening and what to do next.
+AgentRay is a dark SaaS product for growth teams that need to understand product usage, traffic quality, and AI-agent work without becoming analytics engineers. The experience is a guided operating cockpit: a deterministic product overview as the front door, a signal-rich growth workspace, and an agent control plane that explains what is happening and what to do next.
 
 This document is the design contract for `agentray/web`. The UI is built on **Astryx** (`@astryxdesign/core`, v0.1.1, 148 components). The visual source of truth is `web/app/globals.css`, which wires Astryx's reset/theme/token layers into Tailwind and pins AgentRay's bespoke dark ramp. Production screens are composed from Astryx components plus the AgentRay shared patterns in `web/modules/shared/components/`.
 
@@ -260,36 +260,45 @@ Secondary actions use the `outline`, `ghost`, or `secondary` variants, or sheet 
 
 ### Front Door
 
-`/chat` is the front door. Root routes should lead users to conversation, not a static dashboard. The open thread is the runtime; the composer on that page is the chat channel.
+`/overview` is the front door. Root routes should lead a signed-in session to the product overview — the deterministic read of what happened — not to a chat thread. Conversation stays one nav stop away under Agents.
+
+### `/overview`
+
+Purpose: answer "is anyone arriving, activating, and returning" before any configuration.
+
+Must include:
+- headline metrics (active people, new people, sessions) over complete days in the project's timezone, each carrying its own state — never a fabricated zero
+- an activity trend with a textual equivalent
+- retention (D1/D7/D30) that reports "not enough mature cohorts" instead of a wrong number
+- top pages and top sources
+- visible source freshness and data status
+- honest empty / stale / error / unconfigured / immature states
+- first-event onboarding (manual snippet or a copyable external-agent task) when the project has no events
 
 ### Top-Level Navigation
 
-Organize the signed-in chrome around the four backend layers. Group headings may use the layer names (Runtime / Channels / Workloads / Data). Page titles and body copy stay in owner language.
+Organize the signed-in chrome around owner tasks, not backend layers. Group headings: Product / Understand / Work / Workspace. Page titles and body copy stay in owner language.
 
-#### Runtime
+#### Product
 
-- **Chat** — watch the teammate work. `/start` nests here (header Set up). Landing stays `/chat`.
+- **Overview** — the front door: the deterministic product read. Landing stays `/overview`.
 
-#### Channels
+#### Understand
 
-- **Operations** — schedules and webhooks that start a run without a conversation. Slack / Discord / Telegram are coming cards on this page, not nav rows.
-
-#### Workloads
-
-- **Agents** — the people doing the work. Hire, set up, lab, and monitor nest here. `/agent` is this roster, not Chat.
-
-#### Data
-
-- **Dashboards** — saved views. Templates and SQL nest here.
-- **Traffic** — acquisition, source quality, page movement, AI platform traffic.
-- **Product** — funnels, retention, trends. Prototypes nest here (marketing-first value feature, not a peer).
+- **Analytics** — saved views and exploration. Templates, SQL, Traffic, and Product (funnels/retention) nest here.
 - **People** — users, identity, journey context. Cohorts nest here.
-- **Events** — event stream. Replay nests here.
+- **Data** — the event stream and how events get in. Replay and Set up (`/start`) nest here.
+
+#### Work
+
+- **Plans** — findings and experiments (the prototypes surface).
+- **Agents** — the people doing the work: chat, operations (schedules/webhooks), hire, teams, lab, and monitor nest here. `/agent` is this roster.
 
 #### Workspace
 
-- **Settings** — workspace, people, and how events get in. Alerts nest here.
-- **Plans** — hosted only.
+- **Settings** — workspace, people, and billing. Alerts nest here; Pricing is a hosted-only child surface.
+
+Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state. Every previously shipped URL stays reachable — old deep links resolve to their new parent via aliases.
 
 Agent monitoring and lab routes are deep routes under Agents. They should inherit the Agents navigation state.
 
@@ -323,7 +332,7 @@ Must include:
 Purpose: see every channel that starts a run without a conversation.
 
 Must include:
-- Chat named as the other channel (the front door)
+- Chat named as the other channel (nested under Agents)
 - schedule and webhook rows with health
 - coming Slack / Discord / Telegram as non-linked “Not yet” cards
 - one CTA to give a teammate a schedule (lands on `/agents`, not a form)
@@ -508,7 +517,7 @@ Do not reuse a single empty state for first-run, no-results, and permission-limi
 
 ### Growth + Marketing UX
 
-- The value moment should be reachable in three actions or fewer from `/chat`, `/templates`, `/product`, or `/web-analytics`.
+- The value moment should be reachable in three actions or fewer from `/overview`, `/templates`, `/product`, or `/web-analytics`.
 - Copy should answer “why this matters for growth” before exposing controls.
 - Templates and guided questions should reduce blank-page friction.
 - CTA labels should name the outcome: “Run insight”, “Use starter”, “Talk to agent”, “Save as chart”.
@@ -569,3 +578,4 @@ For every AgentRay screen:
 | 2026-08-13 | Sidebar groups follow Ask → Team → Signals → Workspace | Paying users buy a growth teammate, not an OS diagram. Layers stay in docs. |
 | 2026-08-18 | Sidebar groups follow Runtime → Channels → Workloads → Data → Workspace | Chrome follows the product architecture. Prototypes nest under Product as a marketing-first value feature. Operations are channels. |
 | 2026-08-19 | SideNav heading is the project switcher | Create/switch is a chrome job. Heading = project, subheading = workspace. Last project persists via `agentray.projectId` + `/me?project_id=`. |
+| 2026-09-12 | Make `/overview` the front door; sidebar groups follow Product → Understand → Work → Workspace | The deterministic product read earns trust before any agent conversation; owner tasks replace backend layers as the organizing metaphor. Every shipped URL stays reachable via aliases and child surfaces. |

@@ -12,29 +12,30 @@ import (
 )
 
 // registerOverviewRoutes mounts GET /api/overview — a thin convenience adapter
-// over the shared `overview` operation. The handler invokes the registered op
-// verbatim, so the web front door, POST /api/op/overview, and MCP tools/call
-// all run the identical usecase code; there is no second contract to drift.
-//
-// Auth: projectFromRequest is the same resolver MountHTTP uses today. When the
-// credential split lands (opcore.PrincipalResolver), this adapter must switch
-// to that resolver so a capture-only key is denied here exactly as it is on
-// /api/op — never a separate, weaker check.
+// over the shared `overview` operation. The handler resolves the caller through
+// principalFromRequest and authorizes against the operation's Access class via
+// reg.Authorize — the exact check MountHTTP applies on /api/op — so a
+// capture-only key is denied here exactly as it is there, and the web front
+// door, POST /api/op/overview, and MCP tools/call all run the identical
+// usecase code. There is no second contract to drift.
 func registerOverviewRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier) {
-	overviewDeps := &usecase.Deps{
-		Repo:     store,
-		Memory:   agentruntime.NewPgMemory(store, false),
-		Notifier: notifier,
-	}
 	reg := usecase.Registry()
 	spec, ok := reg.Get("overview")
 	if !ok {
 		panic("app: overview operation not registered")
 	}
+	deps := &usecase.Deps{
+		Repo:     store,
+		Memory:   agentruntime.NewPgMemory(store, false),
+		Notifier: notifier,
+	}
 	e.GET("/api/overview", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		principal, err := principalFromRequest(c, store)
 		if err != nil {
 			return err
+		}
+		if !reg.Authorize(principal, spec.OpName()) {
+			return echo.NewHTTPError(http.StatusForbidden, "credential may not invoke "+spec.OpName())
 		}
 		// GET carries the input as query params; the op's own decoder validates
 		// the result, so the adapter adds no second validation layer.
@@ -51,7 +52,8 @@ func registerOverviewRoutes(e *echo.Echo, store *storage.Store, notifier usecase
 				body = string(b)
 			}
 		}
-		out, err := spec.OpInvoke(c.Request().Context(), opcore.CallContext{ProjectID: project.ID, Deps: overviewDeps}, body)
+		cc := opcore.CallContext{ProjectID: principal.ProjectID, Deps: deps, Principal: principal}
+		out, err := spec.OpInvoke(c.Request().Context(), cc, body)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}

@@ -14,11 +14,10 @@ import (
 // GET /api/overview in internal/app/overview_routes.go is a thin convenience
 // adapter over this same operation — there is no second contract.
 //
-// Access note for the credential-split merge: this operation belongs to
-// opcore.AccessAnalyticsRead. The Access field does not exist on this branch
-// yet (it lands with the MCP-parity work); whoever merges second adds
-// `Access: opcore.AccessAnalyticsRead` — the fail-closed default means a
-// missing field denies remote callers, never over-exposes.
+// Access: AccessAnalyticsRead — the credential-split contract. Session
+// principals with any workspace role and management credentials scoped
+// analytics:read may invoke it; capture-only keys and legacy keys (not in the
+// frozen allowlist) are denied by the adapters before the handler runs.
 
 type overviewInput struct {
 	// Period is "Nd" (N complete UTC days ending at the last UTC midnight,
@@ -33,6 +32,7 @@ func overview() opcore.Operation[overviewInput, storage.OverviewResult] {
 		Name:    "overview",
 		Summary: "Product overview: active/new users, sessions, retention, top pages and sources, and data status over a complete-day window.",
 		Scope:   "monitor",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in overviewInput) (storage.OverviewResult, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
