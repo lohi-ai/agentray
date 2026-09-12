@@ -189,3 +189,38 @@ func TestPickProjectBySelector(t *testing.T) {
 		t.Fatalf("empty selector should fall back to first project: %+v %v", p, err)
 	}
 }
+
+// Ops key precedence: the stored management credential must outrank
+// AGENTRAY_API_KEY — that env is the documented SDK flow and holds the
+// capture key, which every op adapter denies. The env still beats the saved
+// capture key, and a management credential minted under another project is
+// never reused.
+func TestOpKeyPrecedence(t *testing.T) {
+	cfg := cliConfig{
+		ProjectID:            "p1",
+		APIKey:               "capture-saved",
+		ManagementKey:        "agm_mgmt",
+		ManagementKeyProject: "p1",
+	}
+	if got := opKeyDefault(cfg, "capture-env"); got != "agm_mgmt" {
+		t.Fatalf("management key must outrank AGENTRAY_API_KEY, got %q", got)
+	}
+	if got := opKeyDefault(cfg, ""); got != "agm_mgmt" {
+		t.Fatalf("management key should be the default, got %q", got)
+	}
+	// No management credential: env beats the saved capture key.
+	cfg.ManagementKey = ""
+	cfg.ManagementKeyProject = ""
+	if got := opKeyDefault(cfg, "capture-env"); got != "capture-env" {
+		t.Fatalf("env should beat saved capture key, got %q", got)
+	}
+	if got := opKeyDefault(cfg, ""); got != "capture-saved" {
+		t.Fatalf("saved capture key is the last resort, got %q", got)
+	}
+	// A credential minted under a different project is dropped, not reused.
+	cfg.ManagementKey = "agm_stale"
+	cfg.ManagementKeyProject = "p2"
+	if got := opKeyDefault(cfg, "capture-env"); got != "capture-env" {
+		t.Fatalf("stale management key must not be reused, got %q", got)
+	}
+}

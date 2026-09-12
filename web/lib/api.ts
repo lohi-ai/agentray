@@ -707,6 +707,39 @@ export type AlertEvent = {
 
 // --- Data connectors ---
 
+// APIError is a failed API call. `code` carries the opcore error taxonomy
+// (not_found | conflict | retryable) when the server classified the failure —
+// consumers branch on it instead of parsing message text.
+export class APIError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(message: string, status: number, code = '') {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+// ConnectorRun is the durable sync-run receipt the run_source / source_status /
+// cancel_source_run operations return: queued → running → terminal, with a
+// cancel flag the worker polls.
+export type ConnectorRun = {
+  id: string;
+  project_id: string;
+  sync_id: string;
+  connector_id: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string;
+  idempotency_key?: string;
+  cancel_requested: boolean;
+  rows: number;
+  cursor?: string;
+  cursor_key?: string;
+  error?: string;
+  queued_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
 export type DataConnector = {
   id: string;
   project_id: string;
@@ -750,6 +783,10 @@ export type ConnectorSync = {
   revision: number;
   created_at: string;
   updated_at: string;
+  // latest_run is the sync's most recent durable run receipt, joined by the
+  // source_status operation — queued/running rows are what the UI polls and
+  // offers to cancel.
+  latest_run?: ConnectorRun | null;
 };
 
 // ConnectorSyncInput is the operator-editable subset of a sync config — the
@@ -1998,17 +2035,21 @@ export class AgentRayAPI {
 
   // New connectors reference a source credential: the DSN is stored once via
   // the session-only credential route and the connector carries only its ID.
+  // The create itself goes through the shared create_source operation — the
+  // same handler REST/MCP/CLI/agent callers run, with idempotent retries.
   async createConnector(input: { name: string; kind: string; dsn: string }) {
     const cred = await this.post<{ credential: { id: string } }>(
       `/api/projects/${this.projectID}/source-credentials`,
       { name: input.name, dsn: input.dsn },
     );
 
-    return this.post<{ connector: DataConnector }>('/api/connectors', {
+    const connector = await this.callOp<DataConnector>('create_source', {
       name: input.name,
       kind: input.kind,
       credential_id: cred.credential.id,
+      idempotency_key: crypto.randomUUID(),
     });
+    return { connector };
   }
 
   // --- Shared operations (POST /api/op/<name>) ---
@@ -2045,15 +2086,22 @@ export class AgentRayAPI {
   }
 
   testConnector(id: string) {
-    return this.post<{ ok: boolean; error?: string }>(`/api/connectors/${id}/test`, {});
+    return this.callOp<{ ok: boolean; error?: string }>('test_source', { connector_id: id });
   }
 
   connectorSchema(id: string) {
     return this.get<{ tables: ConnectorTable[] }>(`/api/connectors/${id}/schema`);
   }
 
-  connectorSyncs(connectorID: string) {
-    return this.get<{ syncs: ConnectorSync[] }>(`/api/connectors/${connectorID}/syncs`);
+  // connectorSyncs reads through the shared source_status operation so the
+  // list carries each sync's latest durable run receipt — the same rows the
+  // agent and CLI see, including live queued/running state.
+  async connectorSyncs(connectorID: string) {
+    const res = await this.callOp<{ syncs?: { sync: ConnectorSync; latest_run?: ConnectorRun }[] }>(
+      'source_status',
+      { connector_id: connectorID },
+    );
+    return { syncs: (res.syncs ?? []).map((s) => ({ ...s.sync, latest_run: s.latest_run ?? null })) };
   }
 
   createConnectorSync(connectorID: string, input: ConnectorSyncInput) {
@@ -2071,8 +2119,31 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/connector-syncs/${syncID}`), { method: 'DELETE' });
   }
 
+  // runConnectorSync enqueues a durable run through the shared run_source
+  // operation and returns its receipt — the caller polls source_status for
+  // queued → running → terminal and can cancel through cancelConnectorRun.
   runConnectorSync(syncID: string) {
-    return this.post<{ ok: boolean; error?: string }>(`/api/connector-syncs/${syncID}/run`, {});
+    return this.callOp<{ run: ConnectorRun; enqueued: boolean }>('run_source', {
+      sync_id: syncID,
+      idempotency_key: crypto.randomUUID(),
+    });
+  }
+
+  // cancelConnectorRun asks a queued/running run to stop — idempotent; a
+  // finished run returns its terminal state unchanged.
+  cancelConnectorRun(runID: string) {
+    return this.callOp<ConnectorRun>('cancel_source_run', { run_id: runID });
+  }
+
+  // setConnectorSyncEnabled pauses/resumes through the shared pause_source
+  // operation — revision-checked and idempotent, unlike the full-row PUT.
+  setConnectorSyncEnabled(sync: ConnectorSync, enabled: boolean) {
+    return this.callOp<ConnectorSync>('pause_source', {
+      sync_id: sync.id,
+      paused: !enabled,
+      revision: sync.revision,
+      idempotency_key: crypto.randomUUID(),
+    });
   }
 
   draftConnectorSyncs(connectorID: string, prompt: string) {
@@ -2821,7 +2892,14 @@ export class AgentRayAPI {
     }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload.message || payload.error || `AgentRay API returned ${response.status}`);
+      // Operation failures arrive as {error, code} — code is the opcore
+      // taxonomy (not_found | conflict | retryable) and rides on APIError so
+      // consumers can branch without parsing text.
+      throw new APIError(
+        payload.error || payload.message || `AgentRay API returned ${response.status}`,
+        response.status,
+        typeof payload.code === 'string' ? payload.code : '',
+      );
     }
     return payload as T;
   }

@@ -38,16 +38,14 @@ func main() {
 	cfg := loadConfig()
 	base := flag.String("url", firstNonEmpty(os.Getenv("AGENTRAY_URL"), cfg.URL, "http://localhost:8088"), "AgentRay API base URL")
 	// Ops authenticate with the scoped management credential when one is
-	// stored (Bearer agm_); the capture key is the fallback for legacy
-	// servers and SDK-style calls.
+	// stored (Bearer agm_); it outranks AGENTRAY_API_KEY because that env is
+	// the documented SDK flow (`export AGENTRAY_API_KEY=$(agentray key)`) and
+	// holds the CAPTURE key, which ops deny. The env still beats the saved
+	// capture key, and --key beats everything.
 	// The stored management credential is only valid for the project it was
 	// minted under — a stale one from a previous selection must not silently
 	// authenticate ops against the wrong project.
-	mgmtKey := cfg.ManagementKey
-	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
-		mgmtKey = ""
-	}
-	key := flag.String("key", firstNonEmpty(os.Getenv("AGENTRAY_API_KEY"), mgmtKey, cfg.APIKey), "management credential or project API key")
+	key := flag.String("key", opKeyDefault(cfg, os.Getenv("AGENTRAY_API_KEY")), "management credential or project API key")
 	flag.Parse()
 	args := flag.Args()
 
@@ -105,7 +103,7 @@ func printUsage(reg *opcore.Registry) {
 	fmt.Println("  login                  log in; session + default project key saved to ~/.agentray")
 	fmt.Println("  logout                 revoke the session and clear saved credentials")
 	fmt.Println("  whoami                 show the logged-in user and default project")
-	fmt.Println("  key                    print the project API key (--project, --rotate)")
+	fmt.Println("  key                    print the project capture key for SDKs (--project, --rotate)")
 	fmt.Println("  projects               list projects in your workspaces")
 	fmt.Println("\nOperations (require an API key):")
 	for _, s := range reg.Specs() {
@@ -128,4 +126,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// opKeyDefault picks the credential ops calls use when --key is not passed:
+// the stored management credential first (ops need its scopes), then
+// AGENTRAY_API_KEY (an explicit env override — usually a capture key for
+// legacy servers), then the saved capture key as the last resort.
+// A management credential minted under a different project is dropped, never
+// reused — it would silently authenticate ops against the wrong project.
+func opKeyDefault(cfg cliConfig, envKey string) string {
+	mgmtKey := cfg.ManagementKey
+	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
+		mgmtKey = ""
+	}
+	return firstNonEmpty(mgmtKey, envKey, cfg.APIKey)
 }

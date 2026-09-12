@@ -9,6 +9,10 @@ type Registry struct {
 	// legacyAllowlist is the frozen set of operation names a CredLegacy
 	// principal may invoke (see auth.go). Set once via SetLegacyAllowlist.
 	legacyAllowlist []string
+	// classifier maps store/engine sentinel errors onto the OpError taxonomy
+	// (see errors.go). Set once via SetErrorClassifier; nil leaves untyped
+	// errors untyped.
+	classifier func(error) error
 }
 
 // NewRegistry returns an empty registry.

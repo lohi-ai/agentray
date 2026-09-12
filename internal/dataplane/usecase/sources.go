@@ -291,13 +291,13 @@ func runSource() opcore.Operation[runSourceInput, runSourceOutput] {
 			run, enqueued, err := runner.EnqueueRun(ctx, cc.ProjectID, in.SyncID, strings.TrimSpace(in.IdempotencyKey))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					return runSourceOutput{}, fmt.Errorf("sync not found")
+					return runSourceOutput{}, opcore.NotFound("sync not found")
 				}
 				if errors.Is(err, storage.ErrSyncPaused) {
-					return runSourceOutput{}, fmt.Errorf("sync is paused — resume it before running")
+					return runSourceOutput{}, opcore.Conflict("sync is paused — resume it before running")
 				}
 				if errors.Is(err, connector.ErrEngineBusy) {
-					return runSourceOutput{}, fmt.Errorf("engine at capacity — retry shortly")
+					return runSourceOutput{}, opcore.Retryable("engine at capacity — retry shortly")
 				}
 				return runSourceOutput{}, err
 			}
@@ -340,7 +340,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 			case strings.TrimSpace(in.RunID) != "":
 				run, err := d.Repo.ConnectorRunForProject(ctx, cc.ProjectID, in.RunID)
 				if errors.Is(err, pgx.ErrNoRows) {
-					return sourceStatusOutput{}, fmt.Errorf("run not found")
+					return sourceStatusOutput{}, opcore.NotFound("run not found")
 				}
 				if err != nil {
 					return sourceStatusOutput{}, err
@@ -350,7 +350,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 			case strings.TrimSpace(in.SyncID) != "":
 				sync, err := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, in.SyncID)
 				if errors.Is(err, pgx.ErrNoRows) {
-					return sourceStatusOutput{}, fmt.Errorf("sync not found")
+					return sourceStatusOutput{}, opcore.NotFound("sync not found")
 				}
 				if err != nil {
 					return sourceStatusOutput{}, err
@@ -470,7 +470,7 @@ func cancelSourceRun() opcore.Operation[cancelSourceRunInput, connector.Run] {
 			}
 			run, err := d.Repo.CancelConnectorRun(ctx, cc.ProjectID, in.RunID)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return connector.Run{}, fmt.Errorf("run not found")
+				return connector.Run{}, opcore.NotFound("run not found")
 			}
 			if err != nil {
 				return connector.Run{}, err

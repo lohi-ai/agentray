@@ -193,7 +193,7 @@ function AddConnectorDialog({ kinds, onSubmit, onClose }: {
 }
 
 function SyncsPanel({ connector }: { connector: DataConnector }) {
-  const { syncs, loading, create, update, remove, run } = useConnectorSyncs(connector.id);
+  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id);
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
   const [adding, setAdding] = useState(false);
@@ -268,6 +268,21 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Last run',
       width: { type: 'proportional', value: 2, minWidth: 150 },
       renderCell: (s) => {
+        // A live receipt outranks the sync's last_* columns: those only move
+        // when the run finishes, so a queued/running run would otherwise read
+        // as its predecessor's outcome.
+        const live = s.latest_run;
+        if (live && (live.status === 'queued' || live.status === 'running')) {
+          return (
+            <span style={{ color: 'var(--color-text-secondary)' }}>
+              {live.status === 'queued' ? 'queued' : `running · ${formatCompact(live.rows)} rows`}
+              {live.cancel_requested ? ' · cancelling' : ''} · {formatRelative(live.queued_at)}
+            </span>
+          );
+        }
+        if (live && live.status === 'cancelled') {
+          return <span className="text-[var(--color-text-disabled)]">cancelled · {formatRelative(live.queued_at)}</span>;
+        }
         if (!s.last_run_at) return <span className="text-[var(--color-text-disabled)]">never</span>;
         if (s.last_status === 'error') {
           // A run that landed rows before it failed is partial, not a clean
@@ -297,7 +312,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Enabled',
       width: { type: 'pixel', value: 72 },
       renderCell: (s) => (
-        <Button variant="ghost" size="sm" onClick={() => void update.mutate({ id: s.id, input: syncInputOf(s, { enabled: !s.enabled }) })}>
+        <Button variant="ghost" size="sm" onClick={() => void setEnabled.mutate({ sync: s, enabled: !s.enabled })}>
           {s.enabled ? 'On' : 'Off'}
         </Button>
       ),
@@ -313,25 +328,34 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
         <span className="flex justify-end gap-1">
           <Button variant="ghost" size="sm" onClick={() => setPreviewing(s)}>Preview</Button>
           <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setRunning(s.id);
-              void run.mutateAsync(s.id).then((r) => {
-                if (r && !r.ok && r.error) setError(`Sync failed: ${r.error}`);
-              }).finally(() => setRunning(null));
-            }}
-          >
-            {running === s.id ? 'Running…' : 'Run now'}
-          </Button>
+          {s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running') ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={s.latest_run.cancel_requested}
+              onClick={() => void cancel.mutate(s.latest_run!.id)}
+            >
+              {s.latest_run.cancel_requested ? 'Cancelling…' : 'Cancel'}
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setRunning(s.id);
+                void run.mutateAsync(s.id).finally(() => setRunning(null));
+              }}
+            >
+              {running === s.id ? 'Running…' : 'Run now'}
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={() => void remove.mutate(s.id)}>
             <span style={{ color: 'var(--danger)' }}>Delete</span>
           </Button>
         </span>
       ),
     },
-    // update/run/remove are react-query mutations (stable identities).
+    // update/run/cancel/remove are react-query mutations (stable identities).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [running, setError]);
 

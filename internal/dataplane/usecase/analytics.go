@@ -63,6 +63,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, sourceStatus())
 	opcore.Register(r, cancelSourceRun())
 	r.SetLegacyAllowlist(legacyOperationAllowlist)
+	r.SetErrorClassifier(classifyOpError)
 	return r
 }
 

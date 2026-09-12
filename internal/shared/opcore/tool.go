@@ -13,6 +13,7 @@ import (
 type opTool struct {
 	spec Spec
 	cc   CallContext
+	reg  *Registry // for sentinel classification — same mapping the network adapters apply
 }
 
 func (t opTool) Name() string { return t.spec.OpName() }
@@ -26,7 +27,11 @@ func (t opTool) Schema() agentcore.ToolSchema {
 }
 
 func (t opTool) Run(ctx context.Context, args string) (string, error) {
-	return t.spec.OpInvoke(ctx, t.cc, args)
+	out, err := t.spec.OpInvoke(ctx, t.cc, args)
+	// Classify through the registry so the model sees the same "kind: message"
+	// text the CLI prints and the same kind REST/MCP carry in their typed
+	// channels — one taxonomy, four adapters.
+	return out, t.reg.classifyError(err)
 }
 
 // Tools projects every registered operation into agentcore.Tool form, bound to
@@ -37,7 +42,7 @@ func Tools(r *Registry, cc CallContext) []agentcore.Tool {
 	specs := r.Specs()
 	out := make([]agentcore.Tool, 0, len(specs))
 	for _, s := range specs {
-		out = append(out, opTool{spec: s, cc: cc})
+		out = append(out, opTool{spec: s, cc: cc, reg: r})
 	}
 	return out
 }
