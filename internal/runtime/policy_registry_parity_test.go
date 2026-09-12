@@ -29,6 +29,29 @@ func TestEveryRegisteredOperationIsReachableThroughAScope(t *testing.T) {
 	}
 }
 
+// The registry declares an operation's primary runtime scope while scopeTools
+// enforces it. Requiring the declaration to appear in that scope catches a
+// capability that is reachable only by an accidental duplicate mapping.
+func TestRegisteredOperationIsGrantedByItsDeclaredScope(t *testing.T) {
+	for _, op := range usecase.Registry().Specs() {
+		scope := op.OpScope()
+		if scope == "" {
+			t.Errorf("operation %q has no runtime scope", op.OpName())
+			continue
+		}
+		granted := false
+		for _, name := range scopeTools[scope] {
+			if name == op.OpName() {
+				granted = true
+				break
+			}
+		}
+		if !granted {
+			t.Errorf("operation %q declares scope %q but that scope does not grant it", op.OpName(), scope)
+		}
+	}
+}
+
 // The inverse: a scope must not promise a tool the registry does not implement.
 func TestEveryScopedToolIsARegisteredOperation(t *testing.T) {
 	registered := map[string]bool{}
