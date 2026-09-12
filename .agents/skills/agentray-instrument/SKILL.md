@@ -47,7 +47,7 @@ that duplicates it with zero extra properties.
 
 Rules that keep the plan consumable (full contract in `add-frontend-event`):
 `snake_case` past-tense names; structured properties (ids, amounts, enum
-states — no PII, values land in ClickHouse unredacted); browser = intent,
+states — no PII, values land in the event store unredacted); browser = intent,
 server = outcome; one emitter module per app; stable `distinct_id` with
 `identify()` at login so anonymous and identified activity stitch into one
 person.

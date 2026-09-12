@@ -18,7 +18,7 @@ import (
 // DuckDB is the embedded analytics engine: one process-local database file
 // holding the event log, the alias mirror, person profiles, and connector
 // landing rows. PostgreSQL remains the control-plane store; this type owns
-// everything the old ClickHouse write path owned.
+// the entire analytics write path.
 //
 // Concurrency: DuckDB is single-writer MVCC. Write serializes every mutation
 // through a one-slot gate; Read admits up to maxDuckDBReaders snapshot readers.
@@ -82,9 +82,8 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	// hook: every pooled connection (writer and readers alike) spills to the
 	// directory beside the database file rather than the process cwd.
 	// TimeZone=UTC pins TIMESTAMPTZ bucketing (date_trunc, INTERVAL math) to
-	// UTC regardless of the host's ICU zone — the old ClickHouse column was
-	// DateTime64(3, 'UTC'), so host-local bucketing would shift every
-	// timeline/date boundary on a non-UTC deployment.
+	// UTC regardless of the host's ICU zone — host-local bucketing would
+	// shift every timeline/date boundary on a non-UTC deployment.
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
 		for _, stmt := range []string{
 			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
@@ -210,9 +209,9 @@ func (d *DuckDB) migrate(ctx context.Context) error {
 	})
 }
 
-// duckDBSchema is the v1 analytics schema. It mirrors the ClickHouse tables it
-// replaces column-for-column where the product contract reads them, with two
-// deliberate upgrades the embedded engine makes cheap:
+// duckDBSchema is the v1 analytics schema: the event log, alias mirror,
+// person profiles, and connector landing rows, with two properties the
+// embedded engine makes cheap:
 //   - events has a real PRIMARY KEY on (project_id, event_id): the ingest
 //     dedup contract is enforced by the engine, not by merge-time luck.
 //   - persons is a plain transactional table (read-merge-write inside the
@@ -255,7 +254,7 @@ var duckDBSchema = []string{
 	)`,
 	// aliases mirrors the Postgres source of truth (reconciled at boot,
 	// upserted on write). resolved_events joins through it for canonical-id
-	// stitching — the job the ClickHouse aliases_dict dictionary did.
+	// stitching.
 	`CREATE TABLE IF NOT EXISTS aliases (
 		project_id UUID NOT NULL,
 		anonymous_id VARCHAR NOT NULL,

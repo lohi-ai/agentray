@@ -10,8 +10,8 @@ data, find the single weakest link in your funnel, design the smallest test,
 remember the result, and pick the thread back up next cycle.
 
 Underneath is a complete product-analytics base you can self-host with one
-`docker compose up` — fast Go ingestion, cheap event storage in ClickHouse,
-PostgreSQL metadata, and a **PostHog-compatible event model**, so existing
+`docker compose up` — fast Go ingestion, cheap event storage in embedded
+DuckDB,
 instrumentation migrates by changing only the host. On top sits what other
 platforms bolt on: an MCP server and ready-made agent skills, so Claude Code or
 Codex works your real event data — from one-off product questions to a
@@ -26,10 +26,10 @@ mapped in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). `agentcore/` and
 The foundation architecture (detailed in `docs/PostHog-clone.md`):
 
 - Go ingestion API built with Echo
-- ClickHouse raw event storage plus a materialized session view
+- DuckDB raw event storage plus a session view
 - PostgreSQL project metadata, saved queries, and analyst feedback tables
 - Redis-backed rate limiting for ingestion endpoints
-- NATS-backed asynchronous ingestion from HTTP handlers into ClickHouse
+- NATS-backed asynchronous ingestion from HTTP handlers into DuckDB
 - Next.js dashboard app in `web/` for project keys, activity, dashboards, and
   chart management
 - MVP analytics workflows: insight builder, dashboard filters, templates, web
@@ -59,7 +59,7 @@ is built entirely on these packages.
 
 - Built for AI-first products: agent runs, tool usage, token cost, latency, and
   failures fit the data model instead of feeling bolted on.
-- Easier to self-host: Go + ClickHouse + Postgres is simpler to reason about
+- Easier to self-host: Go + embedded DuckDB + Postgres is simpler to reason about
   than a much larger analytics platform.
 - Familiar migration path: it accepts the common event payload shape teams
   already send today.
@@ -106,7 +106,7 @@ Ingestion requests follow the foundation architecture from
 `docs/PostHog-clone.md`:
 
 ```text
-HTTP API -> Redis rate limit -> NATS queue -> ClickHouse storage
+HTTP API -> Redis rate limit -> NATS queue -> DuckDB storage
 ```
 
 Every new project (signup, workspace project creation, and the default local
@@ -364,8 +364,6 @@ Services exposed on your machine:
 
 - API: `http://localhost:8088`
 - Dashboard web: `http://localhost:3200`
-- ClickHouse HTTP: `http://localhost:18123`
-- ClickHouse native: `localhost:19000`
 - PostgreSQL: `localhost:5434`
 - Redis: `localhost:6389`
 - NATS: `localhost:4223`
@@ -441,8 +439,8 @@ AGENTRAY_E2E_INFRA_HOST=host.docker.internal \
 
 The storage model is tuned for the roadmap without overbuilding the MVP:
 
-- Raw events stay append-only in ClickHouse.
-- A `sessions_mv` materialized view rolls session aggregates forward as events
+- Raw events stay append-only in DuckDB.
+- A `sessions` view rolls session aggregates forward as events
   arrive, which keeps common session analytics cheap.
 - PostgreSQL keeps relational metadata and adds indexes for the read paths that
   are already present in the design.
@@ -452,7 +450,7 @@ The storage model is tuned for the roadmap without overbuilding the MVP:
 AgentRay currently targets Go `1.25` and the latest dependency set verified in
 container build during this migration:
 
-- `github.com/ClickHouse/clickhouse-go/v2 v2.46.0`
+- `github.com/duckdb/duckdb-go/v2 v2.10505.0`
 - `github.com/jackc/pgx/v5 v5.10.0`
 - `github.com/labstack/echo/v4 v4.15.2`
 - `github.com/nats-io/nats.go v1.52.0`

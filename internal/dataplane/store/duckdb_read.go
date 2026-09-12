@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// This file is the DuckDB read edge: every analytics read that used to run
-// through s.ch (ClickHouse) now runs through s.duck.Read, which admits the
+// This file is the DuckDB read edge: every analytics read runs through
+// s.duck.Read, which admits the
 // query on a pooled connection under the reader gate (maxDuckDBReaders
 // concurrent MVCC snapshots). Rows cannot escape the gate — *sql.Rows is bound
 // to the *sql.Conn — so the helpers consume the result inside the closure.
@@ -49,8 +49,6 @@ func (s *Store) duckQueryRow(ctx context.Context, query string, args []any, dest
 }
 
 // duckList converts a DuckDB LIST column scanned as []any into []string.
-// groupUniqArrayIf/arraySort returned a native []string under clickhouse-go;
-// go-duckdb hands back []any.
 func duckList(v any) []string {
 	items, ok := v.([]any)
 	if !ok {
@@ -65,31 +63,6 @@ func duckList(v any) []string {
 	return out
 }
 
-// --- DuckDB SQL fragments ---------------------------------------------------
-//
-// The ClickHouse dialect these replace, kept as named helpers so the port is
-// mechanical and the semantics stay in one place:
-//
-//	countIf(cond)                    -> count(*) FILTER (WHERE cond)
-//	uniqExact(x)                     -> count(DISTINCT x)
-//	uniqExactIf(x, cond)             -> count(DISTINCT x) FILTER (WHERE cond)
-//	argMaxIf(v, ts, cond)            -> arg_max(v, ts) FILTER (WHERE cond)
-//	                                    (wrap in coalesce(..., '') when the CH
-//	                                    default-value-on-empty mattered)
-//	ifNull(x, d)                     -> coalesce(x, d)
-//	JSONExtractString(p, 'k')        -> json_extract_string(p, '$.k')
-//	JSONExtractString(p, '$set','k') -> json_extract_string(p, '$."$set".k')
-//	JSONExtractFloat(p, 'k')         -> coalesce(try_cast(json_extract_string(p,'$.k') AS DOUBLE), 0)
-//	JSONExtractBool(p, 'k')          -> coalesce(try_cast(json_extract(p,'$.k') AS BOOLEAN), false)
-//	toStartOfHour(ts)                -> date_trunc('hour', ts)
-//	toDate(ts, tz)                   -> CAST(timezone(tz, ts) AS DATE)
-//	toStartOfWeek(ts, 1)             -> date_trunc('week', timezone('UTC', ts))
-//	dateDiff('second', a, b)         -> date_diff('second', a, b)
-//	positionCaseInsensitive(h, n)    -> strpos(lower(h), lower(n))
-//	multiIf(...)                     -> CASE WHEN ... END
-//	FINAL / *Merge aggregates        -> plain aggregates over the keyed tables
-//	                                   and views (events PK, sessions view)
-
 // duckJSONPath renders a property key as a DuckDB JSON path. Keys are bound
 // values in the queries that use this; the path is concatenated in SQL text.
 func duckJSONPath(key string) string {
@@ -97,8 +70,7 @@ func duckJSONPath(key string) string {
 }
 
 // sqlQuote renders a Go string as a single-quoted SQL literal using standard
-// '' escaping (DuckDB does not need ClickHouse's backslash form). Inputs are
-// validated tokens (validSubscriptionToken) or internal allow-list values;
+// '' escaping. Inputs are
 // this is defense in depth, not the injection boundary.
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"

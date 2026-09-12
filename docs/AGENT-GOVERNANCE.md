@@ -9,7 +9,7 @@ Read this before adding, wiring, or exposing any agent capability.
 ## Non-negotiable boundary
 
 **Agents never touch infrastructure.** No agent, tool handler, prompt, skill, or
-sub-agent may import `internal/dataplane/store`, hold a DB/NATS/Redis/ClickHouse handle,
+sub-agent may import `internal/dataplane/store`, hold a DB/NATS/Redis/DuckDB handle,
 or open its own connection to agentray data.
 
 All product data access goes through one path:

@@ -616,8 +616,8 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The embedded analytics engine replaces the ClickHouse connection: one
-	// DuckDB file owns the event log, alias mirror, person profiles, and
+	// The embedded analytics engine: one DuckDB file owns the event log,
+	// alias mirror, person profiles, and
 	// connector landing rows. Opened before the JetStream worker starts so the
 	// first consumed batch always has a durable place to land.
 	duck, err := OpenDuckDB(ctx, cfg.DuckDBPath)
@@ -1680,9 +1680,8 @@ func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
 // SinkEvents is the ingest worker's write path: the batch's events and their
 // person-profile projection commit in ONE DuckDB transaction, and the error
 // drives the JetStream ack/nak/dead-letter decision. Commit-before-ack plus
-// the (project_id, event_id) dedup key makes redelivery a no-op; the profile
-// can no longer be dropped by a saturated background applier the way the old
-// ClickHouse path could.
+// the (project_id, event_id) dedup key makes redelivery a no-op, and the
+// profile commits atomically with the batch.
 func (s *Store) SinkEvents(ctx context.Context, events []Event) error {
 	if s.duck == nil {
 		return errors.New("storage: duckdb not open")
@@ -4336,8 +4335,7 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 		// folded onto the identified user they later aliased to. Raw `distinct_id` is
 		// left untouched for exact-match filters; counts of unique users / retention
 		// should read `canonical_id` so a visitor who later logs in is one person, not
-		// two. The stitch is the resolved_events view's LEFT JOIN on the aliases
-		// mirror — the job dictGetOrDefault(aliases_dict) did on ClickHouse.
+		// two. The stitch is the resolved_events view's LEFT JOIN on the aliases mirror.
 		args = append(args, projectID)
 		ctes = append(ctes, "scoped_events AS (SELECT *, canonical_distinct_id AS canonical_id FROM resolved_events WHERE project_id = ?)")
 	}
@@ -4445,9 +4443,9 @@ var tableFunctionPattern = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*)\s*\(`)
 
 // forbiddenTableFunctions are table functions that read outside the sandbox:
 // network egress (SSRF), file reads, other-database scans, and dynamic
-// SQL/table access. run_sql must never reach them. The ClickHouse names stay
-// listed so a query written for the old dialect fails loudly here rather than
-// being reinterpreted.
+// SQL/table access. run_sql must never reach them; names from other engines
+// stay listed so a query written for a different dialect fails loudly here
+// rather than being reinterpreted.
 var forbiddenTableFunctions = map[string]bool{
 	"url": true, "urlcluster": true, "remote": true, "remotesecure": true,
 	"mysql": true, "postgresql": true, "mongodb": true, "redis": true,

@@ -8,8 +8,8 @@ Go service that handles event ingestion, analytics queries, auth, and dashboard 
 |---|---|
 | HTTP | Echo v4 |
 | Metadata DB | PostgreSQL (pgx/v5 pool) — users, sessions, workspaces, projects, dashboards, charts, saved queries |
-| Event DB | ClickHouse — all captured events, queried for analytics |
-| Message queue | NATS — decouples HTTP ingestion from ClickHouse writes |
+| Event DB | DuckDB (embedded in the API process) — all captured events, queried for analytics |
+| Message queue | NATS — decouples HTTP ingestion from DuckDB writes |
 | Rate limiting | Redis (sliding window, per IP) |
 | Language | Go 1.25 |
 
@@ -27,7 +27,7 @@ agentray/
     runtime/                    — AgentGarden + scheduler + runner (package agentruntime)
       authoring/                — free text → draft SOUL.md / AGENTS.md (authoring-time)
     dataplane/
-      ingest/                   — Capture, Batch, Identify, NATS → ClickHouse
+      ingest/                   — Capture, Batch, Identify, NATS → DuckDB
       connector/                — source plugin registry (postgres shipped)
     app/                        — composition root (HTTP)
     shared/                     — config, cronx, credential, opcore, mcpclient
@@ -42,7 +42,7 @@ agentray/
 ```
 GET /api/activity?project_id=xxx
   └─ projectFromRequest()         — resolves project from api_key or session cookie
-       └─ store.ActivitySummary() — ClickHouse query
+       └─ store.ActivitySummary() — DuckDB query
             └─ JSON response
 ```
 
@@ -84,10 +84,10 @@ POST /capture  (or /batch, /e/, PostHog-compatible aliases)
 
 NATS subject (agentray.events.ingest)
   └─ EventWorker (goroutine)
-       └─ json.Unmarshal → store.InsertEvents() → ClickHouse batch insert
+       └─ json.Unmarshal → store.InsertEvents() → DuckDB batch insert
 ```
 
-The NATS queue is the only async component. HTTP returns before ClickHouse write. The worker uses a channel-buffered NATS subscription (`ChanQueueSubscribe`, buffer 1024) so bursts don't block the HTTP layer.
+The NATS queue is the only async component. HTTP returns before the DuckDB write. The worker uses a channel-buffered NATS subscription (`ChanQueueSubscribe`, buffer 1024) so bursts don't block the HTTP layer.
 
 ### Auth flow
 
@@ -95,10 +95,10 @@ Sessions are stored in PostgreSQL. On login/signup the server sets an `HttpOnly`
 
 ## Storage Layer (`internal/dataplane/store/store.go`)
 
-`Store` holds a `*pgxpool.Pool` (Postgres) and a `clickhouse.Conn`.
+`Store` holds a `*pgxpool.Pool` (Postgres) and an embedded `*DuckDB`.
 
 - **Postgres** — users, sessions (TTL), workspaces, projects (API keys), dashboards, charts, saved queries
-- **ClickHouse** — `events` table. All analytics queries (`ActivitySummary`, `WebAnalytics`, `Persons`, `ExploreEvents`, `AgentReplay`, `RunInsight`, `RunSQL`) hit ClickHouse directly.
+- **DuckDB** — `events` table. All analytics queries (`ActivitySummary`, `WebAnalytics`, `Persons`, `ExploreEvents`, `AgentReplay`, `RunInsight`, `RunSQL`) hit DuckDB directly.
 
 `EventFilter` is the shared query parameter struct populated by `filterFromRequest()` from query string params (`hours`, `from`, `to`, `event_type`, `event_name`, `distinct_id`, `session_id`, `agent_id`, `model_name`, `search`, `error_only`, `limit`).
 
@@ -127,7 +127,7 @@ clients authenticate with the project API key. A portable client skill ships at
 
 **Plain web-only endpoint (not exposed to the agent).** Legacy `routes.go` style:
 
-1. Add a query method to `storage.Store` in `store.go` — Postgres or ClickHouse query depending on data source
+1. Add a query method to `storage.Store` in `store.go` — Postgres or DuckDB query depending on data source
 2. Register a new `GET /api/my-endpoint` handler in `routes.go` — call `projectFromRequest(c, store)` first, then call the store method
 3. Return `c.JSON(http.StatusOK, map[string]any{"project": project, "my_data": result})`
 4. Add the corresponding API method and TypeScript types in `web/lib/api.ts`

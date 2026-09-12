@@ -99,7 +99,7 @@ Rules, and why:
 - **snake_case name, past-tense verb** (`donate_clicked`, not `clickDonate`) —
   consistency makes the event explorer scannable.
 - **No PII in property values.** Emails, phone numbers, raw form input are
-  out; ids and amounts are in. Property values land in ClickHouse unredacted.
+  out; ids and amounts are in. Property values land in the event store unredacted.
 - **Group-scoped events attach `$groups`.** In web every novel-scoped
   event passes `novelSlug` through the `novelGroup(slug)` helper — forget it
   and the event disappears from per-novel analytics.
@@ -117,7 +117,7 @@ handler for click events.
 
 When autocapture (or a better event) makes an old one redundant, remove all
 three pieces in one commit: the emitter function, its call site(s), and the
-tracking-plan entry. Leave the historical rows alone — ClickHouse data is
+tracking-plan entry. Leave the historical rows alone — event data is
 append-only; old charts just stop receiving points.
 
 ## Checklist (verify before declaring done)

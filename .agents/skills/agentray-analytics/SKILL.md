@@ -41,9 +41,9 @@ Read first, then build:
 - `run_insight`: the analytical workhorse — `timeseries`, `funnel`, or
   `retention`. Prefer this over raw SQL for those three shapes; the result renders
   as a chart.
-- `run_sql`: arbitrary **SELECT-only** ClickHouse query against the `events`
+- `run_sql`: arbitrary **SELECT-only** SQL query against the `events`
   table for anything `run_insight` does not cover. Extract JSON props with
-  `JSONExtractString(properties, 'key')`.
+  `json_extract_string(properties, '$.key')`.
 - `list_dashboards`: see existing boards before creating a new one.
 - `create_dashboard` / `create_chart`: pin a worthwhile view. Create the
   dashboard first if none fits, then add charts to it.

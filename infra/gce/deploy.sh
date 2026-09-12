@@ -15,9 +15,10 @@ set -euo pipefail
 #   --gate-timeout  Seconds to wait for the new colour to go healthy (default 240).
 #
 # Schema migrations are automatic: the API creates/updates Postgres and
-# ClickHouse tables at startup. ClickHouse/Redis/NATS are shared single
-# instances (infra/) serving both envs; Postgres is the existing Cloud SQL
-# instance (secret agentray-db-url-<env>).
+# DuckDB tables at startup. Redis/NATS are shared single instances (infra/)
+# serving both envs; Postgres is the existing Cloud SQL instance (secret
+# agentray-db-url-<env>); DuckDB is embedded in the API container, one file
+# per colour.
 
 PROJECT_ID="lohi-dev-lohi"
 ZONE="asia-southeast1-a"
@@ -120,15 +121,7 @@ sudo docker compose -f ~/gce/caddy/docker-compose.yml up -d
 sudo docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true
 sudo bash ~/gce/agentray/fetch-secrets.sh '${ENV}'
 sudo docker compose -f ~/gce/agentray/infra/docker-compose.yml up -d
-echo 'waiting for clickhouse...'
-for i in \$(seq 1 30); do
-  sudo docker exec agentray-clickhouse wget --spider -q http://127.0.0.1:8123/ping 2>/dev/null && break
-  sleep 2
-done
-CH_PW=\$(sudo grep '^CLICKHOUSE_PASSWORD=' ~/gce/agentray/infra/secret.env | cut -d= -f2-)
-sudo docker exec agentray-clickhouse clickhouse-client \
-  --user agentray --password \"\$CH_PW\" \
-  --query 'CREATE DATABASE IF NOT EXISTS agentray_${ENV}'
+
 $(bg_pick "$UPSTREAM")
 BG_NEW_API=${ENV}-agentray-api-\$BG_COLOR
 BG_NEW_WEB=${ENV}-agentray-web-\$BG_COLOR

@@ -670,8 +670,7 @@ func (s *Store) WorkspaceUsage(ctx context.Context, userID string, workspaceID s
 	// are per-project — the alias dictionary is keyed that way, and nothing in the
 	// product resolves one person across two projects. Collapsing on the bare id
 	// would silently merge two projects' `user-42` into one person.
-	// resolved_events carries the stitched canonical id — the job the alias
-	// dictionary did on ClickHouse.
+	// resolved_events carries the stitched canonical id via the aliases mirror.
 	err = s.duckQueryRow(ctx, `
 SELECT
 	count(*),

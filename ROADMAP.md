@@ -19,7 +19,7 @@ Horizons: **Now** (next 4–6 weeks), **Next** (1–2 quarters), **Later**
 - Delivery channels: Slack webhook, email, generic webhook. Channels are also
   agent tools (`send_notification`) so scheduled agents can push findings —
   config-only, per governance.
-- Baseline anomaly detection can start simple (rolling z-score in ClickHouse);
+- Baseline anomaly detection can start simple (rolling z-score in DuckDB);
   an agent explains the anomaly on click ("why did this spike?" → routed chat).
 
 ### 2. Growth Autopilot v1 (design → shipped)
@@ -48,8 +48,8 @@ Horizons: **Now** (next 4–6 weeks), **Next** (1–2 quarters), **Later**
   agent settings.
 
 ### 5. Security debt from known findings
-- Least-privilege ClickHouse role for `run_sql` (closes the table-function
-  SSRF/cross-tenant bypass) and rate limits on auth endpoints.
+- `run_sql` sandboxing for untrusted SELECTs (denylisted table functions,
+  per-project scoping) and rate limits on auth endpoints.
 - Sandbox session egress allowlist (`SandboxLimits.NetworkAllow` is reserved —
   implement it; stop relying on the host firewall).
 

@@ -16,7 +16,7 @@ names are stable) produces confident, wrong charts.
 ## Stage 0 — Project and API key
 
 - **Local/self-hosted:** `docker compose up` starts API (`:8088`), web
-  (`:3200`), ClickHouse, Postgres, Redis, NATS. First boot seeds a default
+  (`:3200`), Postgres, Redis, NATS (DuckDB is embedded in the API). First boot seeds a default
   project with key `lohi_dev_project_token` and no events — there is no
   synthetic seeder. `AGENTRAY_DEMO_PROJECT_ID` shares one REAL project
   read-only with every account; unset on compose, so a local instance has no
@@ -116,7 +116,7 @@ before writing emitters. The mechanical contract (in full in the
    client; `donation_completed` from the payment webhook. Never emit revenue
    from the browser.
 6. **No PII in properties** (ids and amounts in; emails, phones, raw form
-   input out — property values land in ClickHouse unredacted). Attach
+   input out — property values land in the event store unredacted). Attach
    `$groups` on group-scoped events or they vanish from per-group analytics.
 7. **Tracking plan.** If the app keeps an event registry (e.g.
    `.analytics-events.json`), register every add/rename/remove in the same

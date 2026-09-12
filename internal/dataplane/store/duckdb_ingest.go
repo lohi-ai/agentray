@@ -10,8 +10,8 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
-// This file is the DuckDB write edge: everything that used to land in
-// ClickHouse through PrepareBatch lands here inside one gated transaction.
+// This file is the DuckDB write edge: every captured batch lands here inside
+// one gated transaction.
 // The dedup contract is the events PRIMARY KEY — (project_id, event_id) —
 // enforced by INSERT OR IGNORE, so a redelivered JetStream batch re-commits as
 // a no-op instead of double-counting.
@@ -93,9 +93,8 @@ INSERT OR IGNORE INTO events (
 // the (project_id, event_id) dedup key and the person merge re-applies
 // idempotently (mergePersonDelta's freshness guard makes the re-fold a no-op).
 //
-// This replaces the old two-phase shape (ClickHouse insert, then a best-effort
-// background applier that could drop a saturated hand-off): the profile can no
-// longer be lost once the batch is acked.
+// The person projection commits in the same transaction as the events, so the
+// profile can no longer be lost once the batch is acked.
 func (d *DuckDB) SinkEvents(ctx context.Context, events []Event) error {
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		if err := insertEventsTx(ctx, tx, events); err != nil {
