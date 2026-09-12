@@ -31,7 +31,7 @@ type updateTestInput struct {
 	TargetCount     *int     `json:"target_count"`
 	WindowDays      *int     `json:"window_days"`
 	ObservationID   *string  `json:"observation_id" desc:"finding id this experiment answers"`
-	Evidence        *string  `json:"evidence" desc:"typed envelope JSON: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark}"`
+	Evidence        *string  `json:"evidence" desc:"typed envelope JSON object: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark, warnings}"`
 	BaselineValue   *float64 `json:"baseline_value"`
 	BaselineUnit    *string  `json:"baseline_unit"`
 	BaselineWindow  *string  `json:"baseline_window"`
@@ -72,6 +72,11 @@ func updateTest() opcore.Operation[updateTestInput, updateTestOutput] {
 					return updateTestOutput{}, errBadInput("review_date must be RFC3339")
 				}
 				reviewDate = &t
+			}
+			if in.Evidence != nil {
+				if verr := validateEvidenceEnvelope(*in.Evidence); verr != nil {
+					return updateTestOutput{}, verr
+				}
 			}
 			upd := storage.ValidationTestUpdate{
 				Hypothesis: in.Hypothesis, MetricEvent: in.MetricEvent,
@@ -254,8 +259,9 @@ type datasetPreviewInput struct {
 }
 
 // dataset_preview is the dataset-semantics read: deduped FINAL rows with the
-// soft-delete filter applied, plus the freshness block. run_sql stays raw —
-// this is the only path that applies business semantics.
+// soft-delete filter applied, plus the freshness block and standing warnings.
+// run_sql applies the same soft-delete predicate inside scoped_external_rows;
+// this op adds the sync metadata, watermark and warnings around the rows.
 func datasetPreview() opcore.Operation[datasetPreviewInput, storage.DatasetPreview] {
 	return opcore.Operation[datasetPreviewInput, storage.DatasetPreview]{
 		Name:           "dataset_preview",
@@ -271,6 +277,23 @@ func datasetPreview() opcore.Operation[datasetPreviewInput, storage.DatasetPrevi
 			return d.Repo.DatasetPreviewForProject(ctx, cc.ProjectID, in.SyncID, in.Limit)
 		},
 	}
+}
+
+// validateEvidenceEnvelope checks the one contract the evidence field carries:
+// when present it must be a JSON object, so the typed envelope
+// ({query_ref, metric_version, dataset_version, range, filters, timezone,
+// watermark, warnings}) can never degrade into an unparseable string the UI
+// would render as "evidence unavailable" forever.
+func validateEvidenceEnvelope(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var env map[string]any
+	if err := json.Unmarshal([]byte(raw), &env); err != nil || env == nil {
+		return errBadInput("evidence must be a JSON object envelope ({query_ref, metric_version, dataset_version, range, filters, timezone, watermark, warnings})")
+	}
+	return nil
 }
 
 // errBadInput is a client-error shape for malformed op inputs.

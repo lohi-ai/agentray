@@ -823,14 +823,17 @@ export type DatasetPreviewRow = {
 };
 
 // DatasetPreview is the dataset_preview op output: deduped FINAL rows with
-// the soft-delete filter applied, plus the freshness block. landed_watermark
-// is the max cursor actually present in the landing table — it can lag the
-// resume cursor when a run failed mid-pull.
+// the soft-delete filter applied, plus the freshness block and the standing
+// warnings. landed_watermark is the max cursor actually present in the
+// landing table — it can lag the resume cursor when a run failed mid-pull.
+// warnings carries the honesty limits (current-state grain, deletion
+// coverage, synced_at tie-break) so no client re-derives them.
 export type DatasetPreview = {
   sync: ConnectorSync;
   rows: DatasetPreviewRow[];
   landed_watermark: string;
   total_rows: number;
+  warnings?: string[];
 };
 
 export type ConnectorColumn = {
