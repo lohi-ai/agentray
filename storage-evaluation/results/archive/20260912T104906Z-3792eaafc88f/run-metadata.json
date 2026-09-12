@@ -1,0 +1,94 @@
+{
+  "clickhouse_image": "clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621",
+  "code_digest": "903b0104b49fa7f6715d782dd2d15856a460c3cd4a6c7553d8e17b555d9ecc94",
+  "commit": "91fc4a24737296273852419a4ae235fd04017f1f",
+  "driver_image": "storage-eval-driver:py3.13-4db95b141922",
+  "driver_limits": {
+    "cpus": "1",
+    "mem": "512m"
+  },
+  "duckdb": "1.5.5",
+  "generated_by": "storage-evaluation harness",
+  "legs": [
+    {
+      "code_commit": "91fc4a24737296273852419a4ae235fd04017f1f",
+      "code_digest": "903b0104b49fa7f6715d782dd2d15856a460c3cd4a6c7553d8e17b555d9ecc94",
+      "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
+      "corpus_rows": 99538,
+      "days": 7,
+      "driver_image": "storage-eval-driver:py3.13-4db95b141922",
+      "engine": "clickhouse",
+      "file": "smoke-clickhouse-s100000-r1-d7.json",
+      "limits": {
+        "engine_cpus": 2,
+        "engine_mem": "2g",
+        "ingest_rows": 10000,
+        "wall_s": 900,
+        "workdir_gib": 8
+      },
+      "readers": 1,
+      "scale": 100000,
+      "seed": 20260912,
+      "status": "MEASURED",
+      "teardown": "stopped"
+    },
+    {
+      "code_commit": "91fc4a24737296273852419a4ae235fd04017f1f",
+      "code_digest": "903b0104b49fa7f6715d782dd2d15856a460c3cd4a6c7553d8e17b555d9ecc94",
+      "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
+      "corpus_rows": 99538,
+      "days": 7,
+      "driver_image": "storage-eval-driver:py3.13-4db95b141922",
+      "engine": "duckdb",
+      "file": "smoke-duckdb-s100000-r1-d7.json",
+      "limits": {
+        "engine_cpus": 2,
+        "engine_mem": "2g",
+        "ingest_rows": 10000,
+        "wall_s": 900,
+        "workdir_gib": 8
+      },
+      "readers": 1,
+      "scale": 100000,
+      "seed": 20260912,
+      "status": "MEASURED",
+      "teardown": "stopped"
+    }
+  ],
+  "requested": {
+    "caps": {
+      "days": [
+        7
+      ],
+      "engine_cpus": 2,
+      "engine_mem": "2g",
+      "ingest_rows": 10000,
+      "preflight_free_gib": 10,
+      "readers": [
+        1
+      ],
+      "scale": 100000,
+      "wall_s": 900,
+      "workdir_gib": 8
+    },
+    "legs": [
+      {
+        "days": 7,
+        "engine": "clickhouse",
+        "readers": 1,
+        "scale": 100000,
+        "seed": 20260912
+      },
+      {
+        "days": 7,
+        "engine": "duckdb",
+        "readers": 1,
+        "scale": 100000,
+        "seed": 20260912
+      }
+    ],
+    "preflight_free_gib": 26.2,
+    "requested_at": "2026-09-12T10:45:29Z",
+    "tag": "smoke"
+  }
+}

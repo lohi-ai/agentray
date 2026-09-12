@@ -462,6 +462,79 @@ FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 
 // --- dataset preview ---
 
+// softDeleteCondition renders the positive "this row is deleted" predicate for
+// one sync's soft-delete contract, applied AFTER FINAL so the newest version
+// of a row decides whether it is deleted. bool_true reads a JSON boolean;
+// non_null treats any present non-null value (e.g. a deleted_at timestamp) as
+// deleted — JSONExtractRaw returns a non-Nullable String, so isNull() on it is
+// constant-false and deleted_at:null would hide a live row; comparing the raw
+// text works because JSON null extracts to 'null' and a real value does not.
+// Both read paths — dataset_preview and the scoped_external_rows CTE behind
+// run_sql — build their filter from this one function so they can never
+// disagree about which rows are deleted.
+func softDeleteCondition(column, semantics string) string {
+	col := strings.ReplaceAll(column, `'`, `\'`)
+	switch semantics {
+	case "bool_true":
+		return `JSONHas(data, '` + col + `') AND JSONExtractBool(data, '` + col + `')`
+	case "non_null":
+		return `JSONHas(data, '` + col + `') AND JSONExtractRaw(data, '` + col + `') != 'null'`
+	}
+	return ""
+}
+
+// softDeleteRule is one sync's deletion contract reduced to what the scoped
+// read needs: which landing table it governs and how the deletion mark reads.
+type softDeleteRule struct {
+	ConnectorID string
+	Table       string
+	Column      string
+	Semantics   string
+}
+
+// softDeleteRulesForProject loads every soft-delete contract in the project.
+// run_sql applies these inside scoped_external_rows so a row the source marked
+// deleted reads as gone on every path, not just in dataset_preview.
+func (s *Store) softDeleteRulesForProject(ctx context.Context, projectID string) ([]softDeleteRule, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT connector_id::text, source_table, soft_delete_column, soft_delete_semantics
+FROM connector_syncs
+WHERE project_id = $1 AND deletion_mode = 'soft_column' AND soft_delete_column != ''`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rules []softDeleteRule
+	for rows.Next() {
+		var r softDeleteRule
+		if err := rows.Scan(&r.ConnectorID, &r.Table, &r.Column, &r.Semantics); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// datasetWarnings states the honesty limits a reader must know before
+// trusting the rows: the grain (current state, not history), deletion
+// coverage, and the replacement tie-break. They are standing facts about the
+// dataset, not transient errors, and they ship in the preview payload so
+// external agents and built-in clients read the same contract.
+func datasetWarnings(sync ConnectorSync) []string {
+	w := []string{
+		"current state only — one row per row_key; a re-sync replaces the row, it does not append history",
+	}
+	if sync.DeletionMode == "soft_column" && sync.SoftDeleteColumn != "" {
+		w = append(w, "rows marked deleted by "+sync.SoftDeleteColumn+" are excluded; hard deletes in the source are not tracked")
+	} else {
+		w = append(w, "deletions are not tracked — a row removed in the source stays in this dataset until the source marks it")
+	}
+	// synced_at is wall-clock per batch; a deterministic landing version is
+	// designed but deferred (engine change). Until then the tie is honest.
+	w = append(w, "two batches landing in the same millisecond tie on synced_at and an arbitrary version wins")
+	return w
+}
+
 // DatasetPreviewRow is one landed external row as the dataset surface reads
 // it — the raw JSON plus the cursor it landed under.
 type DatasetPreviewRow struct {
@@ -484,11 +557,15 @@ type DatasetPreview struct {
 	LandedWatermark string `json:"landed_watermark"`
 	// TotalRows is the deduped row count after the soft-delete filter.
 	TotalRows int64 `json:"total_rows"`
+	// Warnings carries the standing honesty limits — grain, deletion
+	// coverage, replacement tie-break — so no client has to re-derive them.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // DatasetPreviewForProject reads one sync's landed rows through FINAL +
-// soft-delete filter, project-scoped. run_sql stays raw — this is the
-// dataset-semantics path and the only one that applies the filter.
+// soft-delete filter, project-scoped. The scoped_external_rows CTE behind
+// run_sql applies the same predicate (softDeleteCondition), so the preview
+// and SQL can never disagree about which rows are deleted.
 func (s *Store) DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (DatasetPreview, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
@@ -505,33 +582,24 @@ FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID).
 		return DatasetPreview{}, err
 	}
 
-	// Soft-delete filter: applied AFTER FINAL so the newest version of a row
-	// decides whether it is deleted. bool_true reads a JSON boolean;
-	// non_null treats any present non-null value (e.g. a deleted_at
-	// timestamp) as deleted.
 	softFilter := ""
 	if sync.DeletionMode == "soft_column" && sync.SoftDeleteColumn != "" {
-		col := strings.ReplaceAll(sync.SoftDeleteColumn, `'`, `\'`)
-		switch sync.SoftDeleteSemantics {
-		case "bool_true":
-			softFilter = ` AND NOT (JSONHas(data, '` + col + `') AND JSONExtractBool(data, '` + col + `'))`
-		case "non_null":
-			// JSONExtractRaw returns a non-Nullable String, so isNull() on it is
-			// constant-false and deleted_at:null would hide a live row. Compare
-			// the raw text: JSON null extracts to 'null', a real value does not.
-			softFilter = ` AND NOT (JSONHas(data, '` + col + `') AND JSONExtractRaw(data, '` + col + `') != 'null')`
+		if cond := softDeleteCondition(sync.SoftDeleteColumn, sync.SoftDeleteSemantics); cond != "" {
+			softFilter = ` AND NOT (` + cond + `)`
 		}
 	}
 
-	out := DatasetPreview{Sync: sync, Rows: []DatasetPreviewRow{}}
+	out := DatasetPreview{Sync: sync, Rows: []DatasetPreviewRow{}, Warnings: datasetWarnings(sync)}
+	var total uint64
 	if err := s.ch.QueryRow(ctx, `
 SELECT count(), coalesce(max(cursor), '')
 FROM external_rows FINAL
 WHERE project_id = ? AND connector_id = ? AND table_name = ?`+softFilter,
 		sync.ProjectID, sync.ConnectorID, sync.SourceTable).
-		Scan(&out.TotalRows, &out.LandedWatermark); err != nil {
+		Scan(&total, &out.LandedWatermark); err != nil {
 		return out, err
 	}
+	out.TotalRows = int64(total)
 	rows, err := s.ch.Query(ctx, `
 SELECT row_key, cursor, data, toString(synced_at)
 FROM external_rows FINAL

@@ -10,7 +10,7 @@ func TestScopedReadonlySQLScopesEventsTable(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
 		"SELECT event_type, count() AS total_events FROM events WHERE project_id != {project_id} GROUP BY event_type",
 		"project-1",
-		identityResolver{},
+		identityResolver{}, nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
@@ -36,7 +36,7 @@ func TestScopedReadonlySQLStitchesCanonicalID(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
 		"SELECT uniqExact(canonical_id) AS users FROM events",
 		"project-1",
-		resolver,
+		resolver, nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
@@ -98,7 +98,7 @@ func TestScopedReadonlySQLScopesExternalRows(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
 		"SELECT JSONExtractString(data, 'email') FROM external_rows WHERE table_name = 'users'",
 		"project-1",
-		identityResolver{},
+		identityResolver{}, nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
@@ -117,11 +117,36 @@ func TestScopedReadonlySQLScopesExternalRows(t *testing.T) {
 	}
 }
 
+// A sync configured with soft_column deletions must hide its deleted rows on
+// the SQL path exactly as dataset_preview does — the same predicate, applied
+// per connector/table inside the scoped CTE. Identical source-table names may
+// legitimately exist on two connectors in one project, so the connector ID is
+// part of the rule identity.
+func TestScopedReadonlySQLAppliesSoftDeleteRules(t *testing.T) {
+	rules := []softDeleteRule{
+		{ConnectorID: "connector-users", Table: "users", Column: "is_deleted", Semantics: "bool_true"},
+		{ConnectorID: "connector-orders", Table: "orders", Column: "deleted_at", Semantics: "non_null"},
+	}
+	query, _, err := scopedReadonlySQL(
+		"SELECT row_key FROM external_rows",
+		"project-1",
+		identityResolver{}, rules,
+	)
+	if err != nil {
+		t.Fatalf("scopedReadonlySQL returned error: %v", err)
+	}
+	wantUsers := "AND NOT (connector_id = 'connector-users' AND table_name = 'users' AND JSONHas(data, 'is_deleted') AND JSONExtractBool(data, 'is_deleted'))"
+	wantOrders := "AND NOT (connector_id = 'connector-orders' AND table_name = 'orders' AND JSONHas(data, 'deleted_at') AND JSONExtractRaw(data, 'deleted_at') != 'null')"
+	if !strings.Contains(query, wantUsers) || !strings.Contains(query, wantOrders) {
+		t.Fatalf("scoped CTE missing connector-specific soft-delete predicates: %s", query)
+	}
+}
+
 func TestScopedReadonlySQLJoinsEventsWithExternalRows(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
 		"SELECT count() FROM events e JOIN external_rows x ON x.row_key = e.distinct_id WHERE x.project_id != {project_id}",
 		"project-1",
-		identityResolver{},
+		identityResolver{}, nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
@@ -136,7 +161,7 @@ func TestScopedReadonlySQLJoinsEventsWithExternalRows(t *testing.T) {
 }
 
 func TestScopedReadonlySQLStillRejectsUnknownSources(t *testing.T) {
-	if _, _, err := scopedReadonlySQL("SELECT * FROM secrets", "project-1", identityResolver{}); err == nil {
+	if _, _, err := scopedReadonlySQL("SELECT * FROM secrets", "project-1", identityResolver{}, nil); err == nil {
 		t.Fatal("expected query with no scoped source to be rejected")
 	}
 }
@@ -158,7 +183,7 @@ func TestScopedReadonlySQLRejectsResidualTenantTableReferences(t *testing.T) {
 		"SELECT events.name FROM external_rows AS events",
 	}
 	for _, q := range bypasses {
-		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}); err == nil {
+		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}, nil); err == nil {
 			t.Errorf("expected residual tenant-table reference to be rejected: %s", q)
 		}
 	}
@@ -173,7 +198,7 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 		"SELECT count() FROM events WHERE event_name = 'it''s external_rows'",
 	}
 	for _, q := range oks {
-		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}); err != nil {
+		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}, nil); err != nil {
 			t.Errorf("literal-only mention wrongly rejected (%v): %s", err, q)
 		}
 	}
@@ -185,7 +210,7 @@ func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {
 	_, _, err := scopedReadonlySQL(
 		"SELECT count() FROM external_rows x JOIN events e ON e.distinct_id = x.row_key",
 		"project-1",
-		identityResolver{},
+		identityResolver{}, nil,
 	)
 	if err == nil {
 		t.Fatal("expected JOIN events beside external_rows to be rejected")
@@ -196,7 +221,7 @@ func TestScopedReadonlySQLRejectsEventsJoin(t *testing.T) {
 	_, _, err := scopedReadonlySQL(
 		"SELECT count() FROM events JOIN events AS other ON other.distinct_id = events.distinct_id",
 		"project-1",
-		identityResolver{},
+		identityResolver{}, nil,
 	)
 	if err == nil {
 		t.Fatal("expected events join to be rejected")

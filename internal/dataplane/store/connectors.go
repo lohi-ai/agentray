@@ -28,9 +28,12 @@ type DataConnector struct {
 	HasDSN    bool   `json:"has_dsn"`
 	// Revision is the optimistic-concurrency counter update_source carries —
 	// same contract as dashboards and syncs.
-	Revision  int64     `json:"revision"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Revision int64 `json:"revision"`
+	// ArchivedAt marks a soft-archived source — reversible; archiving also
+	// disables its syncs transactionally (disabled_by_archive on the sync).
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // ConnectorSync is one table-sync config plus its run status.
@@ -69,15 +72,19 @@ type ConnectorSync struct {
 	SoftDeleteSemantics string `json:"soft_delete_semantics"`
 	// Revision is the optimistic-concurrency counter pause/update carry —
 	// same contract as dashboards.
-	Revision  int64     `json:"revision"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Revision int64 `json:"revision"`
+	// DisabledByArchive marks a sync the source archive turned off — the
+	// marker that lets unarchive resume exactly those syncs while an
+	// operator-paused sync stays paused.
+	DisabledByArchive bool      `json:"disabled_by_archive"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
 	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
 	last_success_at, join_key, join_validated, deletion_mode, soft_delete_column, soft_delete_semantics,
-	revision, created_at, updated_at`
+	revision, disabled_by_archive, created_at, updated_at`
 
 func (s *Store) migrateConnectors(ctx context.Context) error {
 	stmts := []string{
@@ -165,9 +172,9 @@ func (s *Store) CreateDataConnector(ctx context.Context, userID, projectID, name
 	err = s.pg.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, dsn_ciphertext)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, dsn_ciphertext != '', revision, created_at, updated_at`,
+RETURNING `+dataConnectorColumns,
 		projectID, name, kind, ciphertext).
-		Scan(&out.ID, &out.ProjectID, &out.Name, &out.Kind, &out.HasDSN, &out.Revision, &out.CreatedAt, &out.UpdatedAt)
+		Scan(dataConnectorScanDest(&out)...)
 	if err != nil {
 		return DataConnector{}, err
 	}
@@ -181,7 +188,7 @@ func (s *Store) ListDataConnectors(ctx context.Context, userID, projectID string
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, kind, dsn_ciphertext != '' OR credential_id IS NOT NULL, revision, created_at, updated_at
+SELECT `+dataConnectorColumns+`
 FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -190,7 +197,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	out := make([]DataConnector, 0)
 	for rows.Next() {
 		var c DataConnector
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(dataConnectorScanDest(&c)...); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -302,10 +309,15 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 		return ConnectorSync{}, err
 	}
 	// The connector must belong to the same project (an id from another
-	// tenant must not be attachable).
-	var one int
-	if err := s.pg.QueryRow(ctx, `SELECT 1 FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID).Scan(&one); err != nil {
+	// tenant must not be attachable) and must be live — a sync created under
+	// an archived source would look enabled yet can never run, and unarchive
+	// would silently activate it.
+	var archived bool
+	if err := s.pg.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID).Scan(&archived); err != nil {
 		return ConnectorSync{}, fmt.Errorf("connector not found")
+	}
+	if archived {
+		return ConnectorSync{}, ErrSourceArchived
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
@@ -340,6 +352,18 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	}
 	if err := validateSyncInput(in); err != nil {
 		return ConnectorSync{}, err
+	}
+	// A sync under an archived connector cannot be edited or re-enabled —
+	// unarchive the source instead (same fail-closed rule as the pause path).
+	var archived bool
+	if err := s.pg.QueryRow(ctx, `
+SELECT dc.archived_at IS NOT NULL
+FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
+WHERE cs.project_id = $1 AND cs.id = $2`, projectID, syncID).Scan(&archived); err != nil {
+		return ConnectorSync{}, fmt.Errorf("sync not found")
+	}
+	if archived {
+		return ConnectorSync{}, ErrSourceArchived
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
@@ -452,16 +476,20 @@ func syncScanDest(cs *ConnectorSync) []any {
 		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
 		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.LastSuccessAt, &cs.JoinKey, &cs.JoinValidated,
 		&cs.DeletionMode, &cs.SoftDeleteColumn, &cs.SoftDeleteSemantics,
-		&cs.Revision, &cs.CreatedAt, &cs.UpdatedAt}
+		&cs.Revision, &cs.DisabledByArchive, &cs.CreatedAt, &cs.UpdatedAt}
 }
 
 // --- engine surface (connector.Store) ---
 
 // ListEnabledConnectorSyncs returns every enabled sync with a schedule, for
-// the engine's minute tick.
+// the engine's minute tick. Syncs under an archived connector are excluded —
+// archive disables them, and this filter is the second line of defense.
 func (s *Store) ListEnabledConnectorSyncs(ctx context.Context) ([]connector.ScheduledSync, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_cron != ''`)
+SELECT cs.id::text, cs.project_id::text, cs.schedule_cron
+FROM connector_syncs cs
+JOIN data_connectors dc ON dc.id = cs.connector_id
+WHERE cs.enabled AND cs.schedule_cron != '' AND dc.archived_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +506,8 @@ SELECT id::text, project_id::text, schedule_cron FROM connector_syncs WHERE enab
 }
 
 // ConnectorSyncJob resolves one sync into a runnable job, decrypting the DSN.
-// Internal run path — authorization happens at the API edge.
+// Internal run path — authorization happens at the API edge. A sync under an
+// archived connector resolves to no job: archive is the reversible stop.
 func (s *Store) ConnectorSyncJob(ctx context.Context, syncID string) (connector.SyncJob, error) {
 	var job connector.SyncJob
 	var ciphertext, credentialID string
@@ -488,7 +517,7 @@ SELECT cs.id::text, cs.project_id::text, cs.connector_id::text, dc.kind, dc.dsn_
 	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor, cs.cursor_key
 FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id = cs.connector_id
-WHERE cs.id = $1`, syncID).
+WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext, &credentialID,
 			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor, &job.CursorKey)
 	if err != nil {

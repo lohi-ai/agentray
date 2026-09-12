@@ -10,6 +10,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import {
   AgentRayAPI,
+  newIdempotencyKey,
   type ConnectorSync,
   type ConnectorSyncDraft,
   type ConnectorSyncInput,
@@ -95,7 +96,7 @@ export function ConnectorsTab() {
       {adding ? (
         <AddConnectorDialog
           kinds={kinds}
-          onSubmit={(input) => void create.mutateAsync(input).then((r) => setSelectedID(r.connector.id))}
+          onSubmit={(input) => void create.mutateAsync({ ...input, idempotencyKey: newIdempotencyKey() }).then((r) => setSelectedID(r.connector.id))}
           onClose={() => setAdding(false)}
         />
       ) : null}
@@ -107,7 +108,7 @@ export function ConnectorsTab() {
           danger
           onConfirm={() => {
             if (selectedID === deleting.id) setSelectedID(null);
-            void remove.mutate(deleting.id);
+            void remove.mutate({ id: deleting.id, revision: deleting.revision, idempotencyKey: newIdempotencyKey() });
           }}
           onClose={() => setDeleting(null)}
         />
@@ -318,7 +319,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
             size="sm"
             onClick={() => {
               setRunning(s.id);
-              void run.mutateAsync(s.id).then((r) => {
+              void run.mutateAsync({ id: s.id, idempotencyKey: newIdempotencyKey() }).then((r) => {
                 if (r && !r.ok && r.error) setError(`Sync failed: ${r.error}`);
               }).finally(() => setRunning(null));
             }}
@@ -806,6 +807,15 @@ function DatasetPreviewDialog({ sync, onClose }: { sync: ConnectorSync; onClose:
             <span className="font-mono">{s.cursor || '—'}</span>
             {s.cursor_key ? <> (<span className="font-mono">{s.cursor_key}</span>)</> : null}
           </Text>
+          {preview?.warnings?.length ? (
+            <VStack gap={0.5} align="stretch">
+              {preview.warnings.map((w) => (
+                <Text key={w} type="supporting" style={{ color: 'var(--warning)' }}>
+                  {w}
+                </Text>
+              ))}
+            </VStack>
+          ) : null}
           {s.last_status === 'error' && s.last_rows > 0 ? (
             <Text type="supporting" style={{ color: 'var(--warning)' }}>
               partial — {formatCompact(s.last_rows)} rows landed before the last run failed{s.last_error ? `: ${s.last_error}` : ''}

@@ -160,6 +160,64 @@ func TestPrincipalResolution(t *testing.T) {
 	_ = err
 }
 
+func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	e := echo.New()
+
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-%d@test.local", time.Now().UnixNano()), "P Test", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	project := boot.Project
+
+	// A born-split project key remains valid for capture, never for a legacy
+	// route that reads or mutates project state.
+	_, err = projectFromRequest(reqCtx(e, map[string]string{"X-API-Key": project.APIKey}, nil), s)
+	if he, ok := err.(*echo.HTTPError); !ok || he.Code != http.StatusForbidden {
+		t.Fatalf("capture key legacy route error = %v, want 403", err)
+	}
+
+	// The frozen bridge still admits an unsplit project key.
+	legacy, err := s.CreateProject(ctx, "legacy-proj")
+	if err != nil {
+		t.Fatalf("create legacy project: %v", err)
+	}
+	got, err := projectFromRequest(reqCtx(e, map[string]string{"X-API-Key": legacy.APIKey}, nil), s)
+	if err != nil || got.ID != legacy.ID {
+		t.Fatalf("legacy key project = %+v, %v; want %s", got, err, legacy.ID)
+	}
+
+	// Management credentials and sessions are resolved to their authenticated
+	// project, rather than accepting a caller-supplied project identity.
+	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, project.ID, "legacy-route", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	got, err = projectFromRequest(reqCtx(e, map[string]string{"Authorization": "Bearer " + secret}, nil), s)
+	if err != nil || got.ID != project.ID {
+		t.Fatalf("management credential project = %+v, %v; want %s", got, err, project.ID)
+	}
+	other, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-other-%d@test.local", time.Now().UnixNano()), "Other", "password-123", "other-ws", "other-proj")
+	if err != nil {
+		t.Fatalf("create other account: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/events?project_id="+other.Project.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	got, err = projectFromRequest(e.NewContext(req, httptest.NewRecorder()), s)
+	if err != nil || got.ID != project.ID {
+		t.Fatalf("management credential crossed project boundary: %+v, %v; want %s", got, err, project.ID)
+	}
+	_, sessionToken, err := s.CreateUserSession(ctx, boot.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	got, err = projectFromRequest(reqCtx(e, nil, []*http.Cookie{{Name: sessionCookieName, Value: sessionToken}}), s)
+	if err != nil || got.ID != project.ID {
+		t.Fatalf("session project = %+v, %v; want %s", got, err, project.ID)
+	}
+}
+
 func TestSessionRoleGrants(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()

@@ -31,6 +31,7 @@ func registerMcpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Noti
 		Memory:   agentruntime.NewPgMemory(store, false),
 		Notifier: notifier,
 		Runner:   runner,
+		Audit:    store,
 	}
 	group := e.Group("/mcp")
 	opcore.MountMCP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {
