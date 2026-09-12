@@ -2,6 +2,9 @@ export type Project = {
   id: string;
   workspace_id?: string;
   name: string;
+  // Validated IANA timezone when the project owner configured one; absent for
+  // legacy nullable rows, whose overview context labels its UTC fallback.
+  timezone?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
   api_key: string;
@@ -166,6 +169,36 @@ export type OverviewMetric = {
   notes?: string[];
 };
 
+export type VerifySDKResult = {
+  found: boolean;
+  event_name?: string;
+  received_at?: string;
+  platform?: string;
+  identity_linked: boolean;
+  searched: number;
+  warnings: string[];
+};
+
+export type OverviewSourceStatus = {
+  connector_id: string;
+  connector_name: string;
+  connector_kind: string;
+  sync_id?: string;
+  source_table?: string;
+  sync_configured: boolean;
+  enabled: boolean;
+  state: 'not_configured' | 'paused' | 'not_ready' | 'healthy' | 'partial' | 'error';
+  cursor?: string;
+  cursor_key?: string;
+  last_run_at?: string;
+  last_success_at?: string;
+  last_status?: string;
+  last_error?: string;
+  last_rows: number;
+  total_rows: number;
+  schema_status: 'unavailable';
+};
+
 export type OverviewResult = {
   context: {
     project_id: string;
@@ -199,11 +232,14 @@ export type OverviewResult = {
     last_event_at?: string;
     last_received_at?: string;
     age_seconds?: number;
-    pipeline_lag: string;
+    pipeline_lag: 'unavailable';
+    schema_status: 'unavailable';
     events_in_range: number;
     qualifying_in_range: number;
     ever_received: boolean;
     state: 'fresh' | 'quiet' | 'no_events';
+    sources: OverviewSourceStatus[];
+    sources_truncated: boolean;
   };
 };
 
@@ -787,14 +823,17 @@ export type DatasetPreviewRow = {
 };
 
 // DatasetPreview is the dataset_preview op output: deduped FINAL rows with
-// the soft-delete filter applied, plus the freshness block. landed_watermark
-// is the max cursor actually present in the landing table — it can lag the
-// resume cursor when a run failed mid-pull.
+// the soft-delete filter applied, plus the freshness block and the standing
+// warnings. landed_watermark is the max cursor actually present in the
+// landing table — it can lag the resume cursor when a run failed mid-pull.
+// warnings carries the honesty limits (current-state grain, deletion
+// coverage, synced_at tie-break) so no client re-derives them.
 export type DatasetPreview = {
   sync: ConnectorSync;
   rows: DatasetPreviewRow[];
   landed_watermark: string;
   total_rows: number;
+  warnings?: string[];
 };
 
 export type ConnectorColumn = {
@@ -2084,6 +2123,10 @@ export class AgentRayAPI {
 
   datasetPreview(syncID: string, limit = 25) {
     return this.callOp<DatasetPreview>('dataset_preview', { sync_id: syncID, limit });
+  }
+
+  verifySDK(eventName = 'onboarding_verified') {
+    return this.callOp<VerifySDKResult>('verify_sdk', { event_name: eventName });
   }
 
   // recordOutcome appends one measured observation to a committed or decided

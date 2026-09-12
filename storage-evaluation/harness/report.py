@@ -60,18 +60,47 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
                  "states; per-leg digest shown. Do not read this table as one "
                  "coherent run.")
         L.append("")
-    L.append("| engine | scale | readers | days | status | wall_s | load_s | code |")
-    L.append("|---|---|---|---|---|---|---|---|")
+    corpora = {l.get("provenance", {}).get("corpus_digest") for l in legs}
+    if len(corpora) > 1:
+        L.append("**MIXED CORPORA**: legs ran against different corpus "
+                 "digests; they did not see identical workloads. Per-leg "
+                 "corpus digest shown.")
+        L.append("")
+    L.append("| engine | scale | readers | days | status | wall_s | load_s | "
+             "teardown | seed | corpus | code |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for leg in legs:
-        cd = (leg.get("provenance", {}).get("code_digest") or "")[:8] or "—"
+        prov = leg.get("provenance", {})
+        cd = (prov.get("code_digest") or "")[:8] or "—"
+        xd = (prov.get("corpus_digest") or "")[:8] or "—"
         L.append(f"| {leg['engine']} | {leg['scale']} | {leg['readers']} | "
                  f"{leg['days']} | {leg['status']} | {leg.get('wall_s','—')} | "
-                 f"{leg.get('load_s','—')} | {cd} |")
+                 f"{leg.get('load_s','—')} | {leg.get('teardown','—')} | "
+                 f"{leg.get('seed','—')} | {xd} | {cd} |")
         if leg["status"] not in ("MEASURED", "NOT RUN", "ABORTED", "ERROR"):
             problems.append(f"leg {leg['engine']} has unlabeled status")
+        # A MEASURED leg with no resource samples means sampling failed —
+        # the latency table must not render that as zero memory.
+        if leg["status"] == "MEASURED" and not leg.get(
+                "resources", {}).get("samples"):
+            problems.append(
+                f"leg {leg['engine']} MEASURED with no resource samples")
+        # A MEASURED leg missing whole evidence sections is incoherent —
+        # truncated or hand-edited, never a clean pass.
+        if leg["status"] == "MEASURED":
+            for section in ("checks", "shapes", "ingest"):
+                if not leg.get(section):
+                    problems.append(
+                        f"leg {leg['engine']} MEASURED with empty {section}")
     if not legs:
-        L.append("| — | — | — | — | NOT RUN | — | — |")
+        L.append("| — | — | — | — | NOT RUN | — | — | — | — | — | — |")
     L.append("")
+    for leg in legs:
+        reason = leg.get("abort_reason") or leg.get("error")
+        if reason:
+            L.append(f"- {leg['engine']} {leg['status']}: {_short(reason, 160)}")
+    if any(leg.get("abort_reason") or leg.get("error") for leg in legs):
+        L.append("")
 
     # --- oracle checks ------------------------------------------------------
     L.append("## Correctness")
@@ -100,9 +129,12 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
         for cid, res in leg.get("checks", {}).items():
             if res.get("kind") != "semantic_gate":
                 continue
-            spec = manifests.get((leg.get("scale"), leg.get("seed")), {}).get(
-                "checks", {}).get(cid, {})
-            note = res.get("note") or spec.get("note", "")
+            # New legs carry their oracle note. Do not recover a missing
+            # legacy note from an arbitrary current scratch corpus: that
+            # would silently rewrite historical evidence.
+            note = res.get("note")
+            if not note:
+                note = "semantic note unavailable: leg predates per-check note capture"
             if res["status"] == "DIVERGENT":
                 note = f"expected {res.get('expected')}, got {res.get('actual')}. {note}"
             L.append(f"| {cid} | {leg['engine']} | {res['status']} | {note} |")
@@ -126,28 +158,54 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     for leg in legs:
         res = leg.get("resources", {})
         disk = res.get("disk_final_bytes")
+        mem = res.get("mem_peak_bytes")
+        mem_s = f"{mem / 1024**2:.0f}" if isinstance(mem, (int, float)) else "—"
         for sid, sh in leg.get("shapes", {}).items():
             c, w = sh.get("first", {}), sh.get("repeat", {})
             L.append(f"| {leg['engine']} | {sid} | {_fmt_ms(c.get('p50_ms'))} | "
                      f"{_fmt_ms(c.get('p95_ms'))} | {_fmt_ms(w.get('p50_ms'))} | "
                      f"{_fmt_ms(w.get('p95_ms'))} | "
-                     f"{res.get('mem_peak_bytes', 0) / 1024**2:.0f} | "
+                     f"{mem_s} | "
                      f"{res.get('cpu_pct_peak', '—')} | {_fmt_gib(disk)} |")
     L.append("")
     L.append("Latency columns: `first` is the first timed pass after oracle "
              "checks (not a true cold read); `repeat` is two further passes. "
              "n=1/2 samples are smoke-scale only. Memory is container cgroup "
-             "usage, not process RSS.")
+             "usage, not process RSS; `—` means sampling produced no data, "
+             "not zero usage. DuckDB serves every op — reads included — on "
+             "one locked connection, so its reader-concurrency numbers are "
+             "serialized throughput, not parallel serving.")
+    for leg in legs:
+        res = leg.get("resources", {})
+        if res.get("sample_errors"):
+            L.append(f"- {leg['engine']}: resource sampler recorded "
+                     f"{res['sample_errors']} failed poll(s) "
+                     f"({_short(res.get('sample_error_first', ''), 120)}); "
+                     f"{res.get('samples', 0)} sample(s) succeeded")
     L.append("")
     L.append("## Ingest")
     L.append("")
-    L.append("| engine | rows | ack_s | visibility_lag_s | final_total |")
-    L.append("|---|---|---|---|---|")
+    L.append("| engine | rows | ack_s | visibility_lag_s | expected | "
+             "final_total | readers overlapping ingest |")
+    L.append("|---|---|---|---|---|---|---|")
     for leg in legs:
         ing = leg.get("ingest", {})
+        exp, fin = ing.get("expected_total"), ing.get("final_total")
+        # A final_total below expected_total is acknowledged-event loss —
+        # flag it in the cell, never let it pass as a number.
+        fin_s = ("—" if fin is None else
+                 f"{fin} (MISMATCH)" if exp is not None and fin != exp else f"{fin}")
         L.append(f"| {leg['engine']} | {ing.get('rows','—')} | "
                  f"{ing.get('ack_s','—')} | {ing.get('visibility_lag_s','—')} | "
-                 f"{ing.get('final_total','—')} |")
+                 f"{exp if exp is not None else '—'} | {fin_s} | "
+                 f"{ing.get('readers_overlapping_ingest','—')} |")
+    L.append("")
+    L.append("`ack_s` is the local insert call returning — it is NOT a "
+             "durable-queue commit-before-ack; that crash/replay gate stays "
+             "NOT RUN below. `visibility_lag_s` is observed by post-ack "
+             "count() polling (0.5s granularity upper bound). Overlap counts "
+             "reader spans that began before the ack and ended after the "
+             "ingest started.")
     L.append("")
 
     # --- gate ledger ----------------------------------------------------------
@@ -155,18 +213,44 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
     L.append("")
     L.append("| gate | status | why |")
     L.append("|---|---|---|")
-    ran_scales = {(l["scale"], l["engine"]) for l in legs if l["status"] == "MEASURED"}
-    free = free_gib(WORK)
+    # Coverage is keyed on the full (engine, scale, readers, days)
+    # combination — a leg at one reader/day count never marks the whole
+    # scale MEASURED. A leg that ran but did not finish MEASURED keeps its
+    # real status; a combination with no leg is NOT RUN.
+    ran = {}
+    for l in legs:
+        key = (l["engine"], l["scale"], l["readers"], l["days"])
+        prev = ran.get(key)
+        if prev is None or (prev != "MEASURED" and l["status"] == "MEASURED"):
+            ran[key] = l["status"]
+    # The NOT RUN reason quotes the free disk recorded when the run was
+    # requested (requested.json), not the live disk — rerendering the same
+    # evidence must produce the same report.
+    req = {}
+    req_path = WORK / "requested.json"
+    if req_path.exists():
+        req = load_json(req_path)
+    free = req.get("preflight_free_gib")
+    if not isinstance(free, (int, float)):
+        free = free_gib(WORK)
     need = CAPS["matrix"]["preflight_free_gib"]
     matrix_reason = (
         f"free disk {free:.1f} GiB below the {need} GiB preflight"
         if free < need else "not requested in this run")
-    for scale in CAPS["matrix"]["scales"]:
-        for eng in ("clickhouse", "duckdb"):
-            if (scale, eng) in ran_scales:
-                L.append(f"| matrix {scale} {eng} | MEASURED | |")
-            else:
-                L.append(f"| matrix {scale} {eng} | NOT RUN | {matrix_reason} |")
+    for eng in ("clickhouse", "duckdb"):
+        for scale in CAPS["matrix"]["scales"]:
+            for r in CAPS["matrix"]["readers"]:
+                for d in CAPS["matrix"]["days"]:
+                    st = ran.get((eng, scale, r, d))
+                    if st == "MEASURED":
+                        L.append(f"| matrix {scale} {eng} r{r} d{d} | "
+                                 f"MEASURED | |")
+                    elif st is not None:
+                        L.append(f"| matrix {scale} {eng} r{r} d{d} | {st} | "
+                                 f"leg ran but did not complete |")
+                    else:
+                        L.append(f"| matrix {scale} {eng} r{r} d{d} | "
+                                 f"NOT RUN | {matrix_reason} |")
     for gid, label, why in UNRUN_GATES:
         L.append(f"| {label} | NOT RUN | {why} |")
     L.append("")

@@ -60,18 +60,16 @@ function trendMeaning(res: OverviewResult): 'data' | 'receipt_only' | 'empty' {
   return 'empty';
 }
 
-// freshnessLabel prints the absolute last-event timestamp with explicit as-of
-// wording — never "Live" or a relative age. A relative label needs a re-render
-// to stay honest, and an untouched tab does not re-render: "Live" would sit on
-// screen forever. The absolute stamp is true whenever it is read. `now` is
-// injectable so staleness is testable.
+// freshnessLabel ages capture receipt time, not client occurrence time: an
+// offline event that arrives late proves the source is currently reachable.
+// `now` is injectable so staleness is testable.
 export function freshnessLabel(res: OverviewResult, now = Date.now()): { text: string; stale: boolean } {
   const ds = res.data_status;
-  if (ds.state === 'no_events' || !ds.last_event_at) return { text: 'No events received yet', stale: true };
-  const age = Math.max(0, (now - new Date(ds.last_event_at).getTime()) / 1000);
-  const at = new Date(ds.last_event_at);
-  const stamp = at.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-  return { text: `Last event ${stamp}`, stale: age >= 86400 };
+  if (ds.state === 'no_events' || !ds.last_received_at) return { text: 'No capture receipts yet', stale: true };
+  const age = Math.max(0, (now - new Date(ds.last_received_at).getTime()) / 1000);
+  const received = new Date(ds.last_received_at);
+  const stamp = received.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  return { text: `Last received ${stamp}`, stale: age >= 86400 };
 }
 
 export function OverviewPage() {
@@ -99,6 +97,12 @@ export function OverviewPage() {
   const showPlatform = platforms.length > 1 || !!platform;
 
   const freshness = res ? freshnessLabel(res) : null;
+  const occurredAt = res?.data_status.last_event_at
+    ? new Date(res.data_status.last_event_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+    : 'not available';
+  const receivedAt = res?.data_status.last_received_at
+    ? new Date(res.data_status.last_received_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+    : 'not available';
   const stats = res
     ? [
         metricTile('Active people', res.metrics.active_users),
@@ -257,10 +261,40 @@ export function OverviewPage() {
               <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
                 <span>{formatCompact(res.data_status.events_in_range)} events in range</span>
                 <span>{formatCompact(res.data_status.qualifying_in_range)} qualifying (human product activity)</span>
+                <span>Last occurred: {occurredAt}</span>
+                <span>Last received: {receivedAt}</span>
                 <span className="text-[var(--color-text-secondary)]">
                   Pipeline lag: {res.data_status.pipeline_lag === 'unavailable' ? 'not measured yet' : res.data_status.pipeline_lag}
                 </span>
+                <span className="text-[var(--color-text-secondary)]">
+                  Schema health: {res.data_status.schema_status === 'unavailable' ? 'not measured yet' : res.data_status.schema_status}
+                </span>
               </div>
+
+              {res.data_status.sources.length === 0 ? (
+                <p className="mt-3 text-sm text-[var(--color-text-secondary)]">No connected data sources.</p>
+              ) : (
+                <div className="mt-3 flex flex-col gap-2">
+                  {res.data_status.sources.map((source) => (
+                    <div key={source.sync_id || source.connector_id} className="border-t border-[var(--color-border)] pt-2 text-sm">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="font-medium">{source.connector_name}</span>
+                        <span className="text-[var(--color-text-secondary)]">{source.source_table || 'No table configured'}</span>
+                        <span className="text-[var(--color-text-secondary)]">
+                          {source.state === 'healthy' ? 'Healthy' : source.state === 'partial' ? 'Partial data' : source.state === 'error' ? 'Needs attention' : source.state === 'paused' ? 'Paused' : source.state === 'not_ready' ? 'Not run yet' : 'Set up a table'}
+                        </span>
+                      </div>
+                      {source.sync_configured ? (
+                        <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                          Last success {source.last_success_at ? new Date(source.last_success_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'never'} · last attempt {source.last_run_at ? new Date(source.last_run_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'never'} · resume cursor <span className="font-mono">{source.cursor || '—'}</span>{source.cursor_key ? <> (<span className="font-mono">{source.cursor_key}</span>)</> : null}
+                        </p>
+                      ) : null}
+                      {source.last_error ? <p className="mt-1 text-xs text-[var(--color-text-secondary)]">Last error: {source.last_error}</p> : null}
+                    </div>
+                  ))}
+                  {res.data_status.sources_truncated ? <p className="text-xs text-[var(--color-text-secondary)]">Showing the first 20 connected sources.</p> : null}
+                </div>
+              )}
             </Panel>
 
             <Panel title="Next step">

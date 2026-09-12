@@ -20,10 +20,10 @@ import (
 // frozen allowlist) are denied by the adapters before the handler runs.
 
 type overviewInput struct {
-	// Period is "Nd" (N complete UTC days ending at the last UTC midnight,
-	// 1-90) or "today" for the partial current day. Empty means "7d" — there
-	// is no ambiguous integer zero in the contract.
-	Period   string `json:"period" desc:"complete-day window: \"7d\" (default), \"Nd\" 1-90, or \"today\" (partial)"`
+	// Period is "Nd" (N complete project-local days ending at the last local
+	// midnight, 1-90) or "today" for the partial current local day. Empty
+	// means "7d" — there is no ambiguous integer zero in the contract.
+	Period   string `json:"period" desc:"project-local complete-day window: \"7d\" (default), \"Nd\" 1-90, or \"today\" (partial)"`
 	Platform string `json:"platform" desc:"web | ios | android | server | unknown; empty = all platforms"`
 }
 

@@ -124,11 +124,14 @@ func (c *resolverCache) invalidate(projectID string) {
 }
 
 type Project struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id,omitempty"`
-	Name        string    `json:"name"`
-	APIKey      string    `json:"api_key"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Name        string `json:"name"`
+	// Timezone is a validated IANA name when set. Empty means an existing
+	// nullable row, which Overview reports as its explicit UTC fallback.
+	Timezone  string    `json:"timezone,omitempty"`
+	APIKey    string    `json:"api_key"`
+	CreatedAt time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -838,6 +841,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
 	name VARCHAR(255) NOT NULL,
+	timezone VARCHAR(64),
 	api_key VARCHAR(128) UNIQUE NOT NULL,
 	owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -848,6 +852,11 @@ CREATE TABLE IF NOT EXISTS projects (
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id UUID`); err != nil {
+		return err
+	}
+	// Nullable avoids a table rewrite and preserves legacy rows; NULL has the
+	// labelled UTC fallback defined by overviewProjectTimezone.
+	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `
@@ -1581,8 +1590,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 		return Project{}, fmt.Errorf("missing api key")
 	}
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1594,8 +1603,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 // ProjectByIDForUser.
 func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE id = $1`, projectID).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1611,8 +1620,8 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO projects (name, api_key)
 VALUES ($1, $2)
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, name, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, name, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -1623,8 +1632,8 @@ func (s *Store) RotateProjectAPIKey(ctx context.Context, projectID string) (Proj
 UPDATE projects
 SET api_key = $2
 WHERE id = $1
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, projectID, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, projectID, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -3464,7 +3473,15 @@ func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([
 	if err != nil {
 		return nil, err
 	}
-	query, args, err := scopedReadonlySQL(sqlText, projectID, resolver)
+	// Soft-delete rules only matter when the query reads external_rows — skip
+	// the Postgres round-trip for the common events-only query.
+	var rules []softDeleteRule
+	if externalSourcePattern.MatchString(sqlText) {
+		if rules, err = s.softDeleteRulesForProject(ctx, projectID); err != nil {
+			return nil, err
+		}
+	}
+	query, args, err := scopedReadonlySQL(sqlText, projectID, resolver, rules)
 	if err != nil {
 		return nil, err
 	}
@@ -4923,7 +4940,7 @@ var (
 	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
 )
 
-func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver) (string, []any, error) {
+func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver, rules []softDeleteRule) (string, []any, error) {
 	// Normalize: strip trailing semicolons before validation and query building.
 	sqlText = strings.TrimRight(strings.TrimSpace(sqlText), ";")
 	if err := validateReadonlySQL(sqlText); err != nil {
@@ -4980,8 +4997,21 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 	if hasExternal {
 		// FINAL collapses the ReplacingMergeTree versions at query time, so a
 		// re-synced row reads as one row even before background merges run.
+		// The per-connector/table soft-delete predicate rides the same CTE so a
+		// row the source marked deleted reads as gone here exactly as it does in
+		// dataset_preview — one contract, one predicate (softDeleteCondition).
+		// Hard deletes are still invisible: a row removed in the source
+		// without a deletion mark stays, which the preview warnings state.
+		externalFilter := ""
+		for _, r := range rules {
+			if cond := softDeleteCondition(r.Column, r.Semantics); cond != "" {
+				connector := strings.ReplaceAll(r.ConnectorID, `'`, `\'`)
+				table := strings.ReplaceAll(r.Table, `'`, `\'`)
+				externalFilter += ` AND NOT (connector_id = '` + connector + `' AND table_name = '` + table + `' AND ` + cond + `)`
+			}
+		}
 		args = append(args, projectID)
-		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?)")
+		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?"+externalFilter+")")
 	}
 	for i := 0; i < projectPlaceholders; i++ {
 		args = append(args, projectID)
