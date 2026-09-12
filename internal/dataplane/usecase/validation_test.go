@@ -94,6 +94,25 @@ func invokeOp(t *testing.T, repo Repo, name, args string) map[string]any {
 	}
 	return m
 }
+func TestValidateEvidenceEnvelopeRequiresJSONObject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "empty remains optional", raw: "", want: true},
+		{name: "typed envelope", raw: `{"query_ref":"saved-query-1","range":"2026-09-01/2026-09-07","warnings":["partial source"]}`, want: true},
+		{name: "array is not an envelope", raw: `[]`},
+		{name: "malformed JSON", raw: `{bad`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateEvidenceEnvelope(tc.raw) == nil
+			if got != tc.want {
+				t.Fatalf("validateEvidenceEnvelope(%q) valid=%v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
 
 // An agent may DESIGN a test; only the owner can agree to be bound by one. If
 // propose_test could create a committed test, the threshold would be something

@@ -260,6 +260,12 @@ export type Dashboard = {
   project_id: string;
   name: string;
   description: string;
+  // Optimistic-concurrency counter the lifecycle ops fence on; mutations send
+  // it back so a stale write conflicts instead of overwriting.
+  revision: number;
+  // Soft-archive marker — set means the dashboard left the active list but
+  // its charts and data are kept.
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -278,6 +284,8 @@ export type Chart = {
   y_field: string;
   sort_order: number;
   col_span: number;
+  revision: number;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -761,6 +769,8 @@ export type DataConnector = {
   name: string;
   kind: string;
   has_dsn: boolean;
+  revision: number;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -825,14 +835,17 @@ export type DatasetPreviewRow = {
 };
 
 // DatasetPreview is the dataset_preview op output: deduped FINAL rows with
-// the soft-delete filter applied, plus the freshness block. landed_watermark
-// is the max cursor actually present in the landing table — it can lag the
-// resume cursor when a run failed mid-pull.
+// the soft-delete filter applied, plus the freshness block and the standing
+// warnings. landed_watermark is the max cursor actually present in the
+// landing table — it can lag the resume cursor when a run failed mid-pull.
+// warnings carries the honesty limits (current-state grain, deletion
+// coverage, synced_at tie-break) so no client re-derives them.
 export type DatasetPreview = {
   sync: ConnectorSync;
   rows: DatasetPreviewRow[];
   landed_watermark: string;
   total_rows: number;
+  warnings?: string[];
 };
 
 export type ConnectorColumn = {
@@ -1678,6 +1691,41 @@ function agentQuery(agentID: string): string {
   return agentID ? `?agent=${encodeURIComponent(agentID)}` : '';
 }
 
+// ApiError carries the typed outcome the lifecycle adapter returns: 'conflict'
+// for a stale revision or a reused idempotency key, 'not_found' for a missing
+// or foreign id, 'retryable' for a transient engine/server failure. Hooks map
+// the kind to a message instead of parsing text.
+export class ApiError extends APIError {
+  readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
+  constructor(
+    message: string,
+    status: number,
+    kind: 'conflict' | 'not_found' | 'retryable' | 'error',
+  ) {
+    super(status, message);
+    this.name = 'ApiError';
+    this.kind = kind;
+  }
+}
+
+// newIdempotencyKey mints one key per user intent; the caller holds it for the
+// life of that intent so a retried mutation replays instead of applying twice.
+export function newIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// apiErrorMessage renders a mutation failure for the UI: typed conflict and
+// not-found outcomes get an actionable message; anything else falls back to
+// the server's own text.
+export function apiErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    if (err.kind === 'conflict') return 'This changed elsewhere — refresh and try again.';
+    if (err.kind === 'not_found') return 'It no longer exists — refresh to see the current state.';
+    if (err.kind === 'retryable') return 'The server is busy — try again in a moment.';
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
 export class AgentRayAPI {
   constructor(
     private readonly projectID = '',
@@ -1963,15 +2011,23 @@ export class AgentRayAPI {
     return this.post<{ dashboard: Dashboard }>('/api/dashboards', { name, description });
   }
 
-  updateDashboard(id: string, name: string, description: string) {
+  // Lifecycle mutations carry the caller's expected revision and one
+  // idempotency key per intent; both are optional so a caller without them
+  // keeps the pre-revision behavior (the server resolves the current row).
+  updateDashboard(id: string, name: string, description: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<{ dashboard: Dashboard }>(this.withProject(`/api/dashboards/${id}`), {
       method: 'PUT',
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify({ name, description, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
-  deleteDashboard(id: string) {
-    return this.request<void>(this.withProject(`/api/dashboards/${id}`), { method: 'DELETE' });
+  // deleteDashboard is the reversible archive — the row, its charts, and its
+  // data stay; it only leaves the active list.
+  deleteDashboard(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/dashboards/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
   charts(dashboardID: string) {
@@ -1982,22 +2038,28 @@ export class AgentRayAPI {
     return this.post<{ chart: Chart }>(`/api/dashboards/${dashboardID}/charts`, input);
   }
 
-  updateChart(id: string, input: ChartInput) {
+  updateChart(id: string, input: ChartInput, opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<{ chart: Chart }>(this.withProject(`/api/charts/${id}`), {
       method: 'PUT',
-      body: JSON.stringify(input),
+      body: JSON.stringify({ ...input, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
-  deleteChart(id: string) {
-    return this.request<void>(this.withProject(`/api/charts/${id}`), { method: 'DELETE' });
+  // deleteChart is the reversible archive — the row and its config stay; it
+  // only leaves the board.
+  deleteChart(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/charts/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
-  // reorderCharts persists a new board order — chartIDs in their displayed order.
-  reorderCharts(dashboardID: string, chartIDs: string[]) {
+  // reorderCharts persists a new board order — chartIDs in their displayed
+  // order. The dashboard revision is the board's optimistic fence.
+  reorderCharts(dashboardID: string, chartIDs: string[], opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<void>(this.withProject(`/api/dashboards/${dashboardID}/charts/order`), {
       method: 'PUT',
-      body: JSON.stringify({ chart_ids: chartIDs }),
+      body: JSON.stringify({ chart_ids: chartIDs, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
@@ -2046,7 +2108,7 @@ export class AgentRayAPI {
 
   // New connectors reference a source credential: the DSN is stored once via
   // the session-only credential route and the connector carries only its ID.
-  async createConnector(input: { name: string; kind: string; dsn: string }) {
+  async createConnector(input: { name: string; kind: string; dsn: string }, opts: { idempotencyKey?: string } = {}) {
     const cred = await this.post<{ credential: { id: string } }>(
       `/api/projects/${this.projectID}/source-credentials`,
       { name: input.name, dsn: input.dsn },
@@ -2056,6 +2118,7 @@ export class AgentRayAPI {
       name: input.name,
       kind: input.kind,
       credential_id: cred.credential.id,
+      idempotency_key: opts.idempotencyKey,
     });
   }
 
@@ -2092,8 +2155,13 @@ export class AgentRayAPI {
     return this.callOp<{ test_id: string; status: string; revision: number; note: string }>('abandon_test', input as unknown as Record<string, unknown>);
   }
 
-  deleteConnector(id: string) {
-    return this.request<void>(this.withProject(`/api/connectors/${id}`), { method: 'DELETE' });
+  // deleteConnector is the reversible archive — the connector row, its
+  // credential reference, and landed data stay; its syncs pause until restore.
+  deleteConnector(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/connectors/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
   testConnector(id: string) {
@@ -2123,8 +2191,8 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/connector-syncs/${syncID}`), { method: 'DELETE' });
   }
 
-  runConnectorSync(syncID: string) {
-    return this.post<{ ok: boolean; error?: string }>(`/api/connector-syncs/${syncID}/run`, {});
+  runConnectorSync(syncID: string, opts: { idempotencyKey?: string } = {}) {
+    return this.post<{ ok: boolean; error?: string }>(`/api/connector-syncs/${syncID}/run`, { idempotency_key: opts.idempotencyKey });
   }
 
   draftConnectorSyncs(connectorID: string, prompt: string) {
@@ -2873,7 +2941,13 @@ export class AgentRayAPI {
     }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new APIError(response.status, payload.message || payload.error || `AgentRay API returned ${response.status}`);
+      const message = payload.message || payload.error || `AgentRay API returned ${response.status}`;
+      const kind =
+        response.status === 409 ? 'conflict'
+        : response.status === 404 ? 'not_found'
+        : response.status === 429 || response.status >= 500 ? 'retryable'
+        : 'error';
+      throw new ApiError(message, response.status, kind);
     }
     return payload as T;
   }

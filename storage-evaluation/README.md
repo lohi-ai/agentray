@@ -22,9 +22,13 @@ production cutover, and no production data or infrastructure is touched.
   touched the data, so not a true cold read) and `repeat`. Memory figures
   are container cgroup usage, not process RSS.
 - `harness/report.py` — labeled report: MEASURED vs NOT RUN, baseline
-  parity vs semantic gates.
+  parity vs semantic gates. The gate ledger enumerates every declared
+  (engine, scale, readers, days) matrix combination; teardown outcome,
+  ingest/reader overlap, and sampler failures are rendered, never dropped.
 - `results/` — committed deliverable: report.md, per-leg result JSONs and
-  run-metadata.json (corpus rows, pins, seed, commit).
+  run-metadata.json (corpus rows, pins, seed, commit, per-leg limits and
+  driver contract). Republishing unchanged results is a no-op; superseded
+  files move to a content-addressed `results/archive/<ts>-<digest>` dir.
 
 ## Pins
 
@@ -71,6 +75,7 @@ Matrix requires ≥40 GiB free disk; preflight refuses otherwise.
 
 Crash/commit-before-ack replay, backup restore, cross-tenant/arbitrary-SQL
 isolation, query cancellation, mixed-currency correctness, read-time dedup
-guarantee, and the 1M/10M matrix under the failed disk preflight. These
-stay labeled NOT RUN in `work/report.md`; nothing here is a production
-go/no-go.
+guarantee, and every 1M/10M matrix combination under the failed disk
+preflight. These stay labeled NOT RUN in `work/report.md`; nothing here is
+a production go/no-go. `ack_s` in the ingest table is the local insert
+call returning — not a durable-queue commit-before-ack.
