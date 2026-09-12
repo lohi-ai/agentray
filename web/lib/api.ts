@@ -2,6 +2,9 @@ export type Project = {
   id: string;
   workspace_id?: string;
   name: string;
+  // Validated IANA timezone when the project owner configured one; absent for
+  // legacy nullable rows, whose overview context labels its UTC fallback.
+  timezone?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
   api_key: string;

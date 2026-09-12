@@ -56,6 +56,7 @@ type projectResponse struct {
 		ID          string `json:"id"`
 		WorkspaceID string `json:"workspace_id"`
 		Name        string `json:"name"`
+		Timezone    string `json:"timezone"`
 		APIKey      string `json:"api_key"`
 		CreatedAt   string `json:"created_at"`
 	} `json:"project"`
@@ -438,6 +439,16 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	if createdProject.Project.ID == "" || createdProject.Project.APIKey == "" || createdProject.Project.WorkspaceID != signup.Workspaces[0].ID {
 		t.Fatalf("created project is missing id/api key: %+v", createdProject.Project)
 	}
+	var timezoneProject projectResponse
+	requestJSON(t, client, http.MethodPut, ts.URL+"/api/projects/"+createdProject.Project.ID, map[string]any{
+		"timezone": "America/Los_Angeles",
+	}, &timezoneProject, http.StatusOK)
+	if timezoneProject.Project.Timezone != "America/Los_Angeles" || timezoneProject.Project.Name != createdProject.Project.Name {
+		t.Fatalf("timezone-only update = %+v, want persisted timezone without renaming", timezoneProject.Project)
+	}
+	requestJSON(t, client, http.MethodPut, ts.URL+"/api/projects/"+createdProject.Project.ID, map[string]any{
+		"timezone": "America/Nope",
+	}, nil, http.StatusBadRequest)
 
 	collabJar, err := cookiejar.New(nil)
 	if err != nil {
@@ -503,7 +514,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	noSessionClient := &http.Client{Timeout: 5 * time.Second}
 	assertStatus(t, noSessionClient, http.MethodPost, fmt.Sprintf("%s/api/projects/%s/rotate-key?api_key=%s", ts.URL, createdProject.Project.ID, activeKey), []byte(`{}`), http.StatusUnauthorized)
 
-	postJSON(t, client, ts.URL+"/identify", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/identify", map[string]any{
 		"api_key":     activeKey,
 		"distinct_id": "user-e2e-1",
 		"$set": map[string]any{
@@ -512,7 +523,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		},
 	})
 
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "agent.tool_call",
 		"distinct_id": "user-e2e-1",
@@ -528,7 +539,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		},
 	})
 
-	postJSON(t, client, ts.URL+"/batch", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/batch", map[string]any{
 		"token": activeKey,
 		"batch": []map[string]any{
 			{
@@ -564,7 +575,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	})
 
 	oldSessionID := "session-e2e-old"
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "agent.tool_call",
 		"distinct_id": "user-e2e-old",
@@ -679,7 +690,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		t.Fatalf("table insight returned no rows")
 	}
 
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "user.pageview",
 		"distinct_id": "googlebot-e2e",
@@ -952,13 +963,13 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	// ── Alias: anonymous → identified ────────────────────────────────────────
 	// Send two events under an anonymous ID, then alias it to a new user and
 	// verify the Persons endpoint merges them into a single entry.
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "user.pageview",
 		"distinct_id": "anon-pre-login",
 		"properties":  map[string]any{"path": "/landing"},
 	})
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "user.pageview",
 		"distinct_id": "anon-pre-login",
@@ -966,26 +977,26 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	})
 
 	// Alias: anonymous session belongs to the identified user.
-	postJSON(t, client, ts.URL+"/alias", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/alias", map[string]any{
 		"api_key":      activeKey,
 		"anonymous_id": "anon-pre-login",
 		"distinct_id":  "user-after-login",
 	})
 
 	// Idempotent re-alias must not error.
-	postJSON(t, client, ts.URL+"/alias", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/alias", map[string]any{
 		"api_key":      activeKey,
 		"anonymous_id": "anon-pre-login",
 		"distinct_id":  "user-after-login",
 	})
 
 	// Identify the canonical user.
-	postJSON(t, client, ts.URL+"/identify", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/identify", map[string]any{
 		"api_key":     activeKey,
 		"distinct_id": "user-after-login",
 		"$set":        map[string]any{"email": "merged@example.com"},
 	})
-	postJSON(t, client, ts.URL+"/capture", map[string]any{
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
 		"api_key":     activeKey,
 		"event":       "user.pageview",
 		"distinct_id": "user-after-login",
@@ -1149,7 +1160,7 @@ func assertStatus(t *testing.T, client *http.Client, method string, url string, 
 	}
 }
 
-func postJSON(t *testing.T, client *http.Client, url string, payload any) {
+func postE2EJSON(t *testing.T, client *http.Client, url string, payload any) {
 	t.Helper()
 	requestJSON(t, client, http.MethodPost, url, payload, nil, http.StatusOK)
 }

@@ -124,11 +124,14 @@ func (c *resolverCache) invalidate(projectID string) {
 }
 
 type Project struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id,omitempty"`
-	Name        string    `json:"name"`
-	APIKey      string    `json:"api_key"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Name        string `json:"name"`
+	// Timezone is a validated IANA name when set. Empty means an existing
+	// nullable row, which Overview reports as its explicit UTC fallback.
+	Timezone  string    `json:"timezone,omitempty"`
+	APIKey    string    `json:"api_key"`
+	CreatedAt time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -832,6 +835,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
 	name VARCHAR(255) NOT NULL,
+	timezone VARCHAR(64),
 	api_key VARCHAR(128) UNIQUE NOT NULL,
 	owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -842,6 +846,11 @@ CREATE TABLE IF NOT EXISTS projects (
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id UUID`); err != nil {
+		return err
+	}
+	// Nullable avoids a table rewrite and preserves legacy rows; NULL has the
+	// labelled UTC fallback defined by overviewProjectTimezone.
+	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `
@@ -1575,8 +1584,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 		return Project{}, fmt.Errorf("missing api key")
 	}
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1588,8 +1597,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 // ProjectByIDForUser.
 func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE id = $1`, projectID).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1605,8 +1614,8 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO projects (name, api_key)
 VALUES ($1, $2)
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, name, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, name, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -1617,8 +1626,8 @@ func (s *Store) RotateProjectAPIKey(ctx context.Context, projectID string) (Proj
 UPDATE projects
 SET api_key = $2
 WHERE id = $1
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, projectID, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, projectID, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
