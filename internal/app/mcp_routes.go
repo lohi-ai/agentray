@@ -12,13 +12,17 @@ import (
 // so an external agent (Claude Code, Codex, any MCP client) can call the same
 // usecase handlers the in-house agent and the web client call. It is the fourth
 // projection of one operation definition — there is no second schema or handler
-// to keep in sync. Auth reuses projectFromRequest, so an MCP client authenticates
-// with the project's API key (X-API-Key header or ?api_key=), inheriting the
-// exact access checks as the REST surface.
+// to keep in sync.
+//
+// Auth resolves a Principal per request: a scoped management credential
+// (Authorization: Bearer agm_…), the legacy project key on unsplit projects
+// (X-API-Key or ?api_key=), or a session cookie. Capture-only keys are denied.
+// tools/list advertises only what the principal may call; tools/call
+// re-authorizes by name.
 //
 // Connect a client with, e.g.:
 //
-//	claude mcp add --transport http --header "X-API-Key: <project-key>" \
+//	claude mcp add --transport http --header "Authorization: Bearer <agm_…>" \
 //	  agentray https://agentray.lohi2.com/mcp
 func registerMcpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier) {
 	reg := usecase.Registry()
@@ -28,11 +32,7 @@ func registerMcpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Noti
 		Notifier: notifier,
 	}
 	group := e.Group("/mcp")
-	opcore.MountMCP(group, reg, deps, func(c echo.Context) (string, error) {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return "", err
-		}
-		return project.ID, nil
+	opcore.MountMCP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {
+		return principalFromRequest(c, store)
 	})
 }

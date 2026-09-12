@@ -7,6 +7,7 @@ package agentruntime
 
 import (
 	"context"
+	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -45,6 +46,10 @@ type DataSource interface {
 	// Notification channel resolution (send_notification, growth_suggest).
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
+
+	// Product overview (monitor). Mirrors usecase.Repo — the shared `overview`
+	// operation needs it on every adapter, including the in-process tool set.
+	Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -68,4 +73,5 @@ const (
 	ToolListTests        = "list_tests"
 	ToolRemember         = "remember"
 	ToolSendNotification = "send_notification"
+	ToolOverview         = "overview"
 )
