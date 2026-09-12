@@ -2,10 +2,12 @@ package ingestion
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -137,6 +139,11 @@ func (b *EventBatcher) Add(events []storage.Event) {
 
 // AddMsg hands a durable message's events plus its ack handle to the batcher. The
 // handle is acked after a successful insert, or NAK'd / dead-lettered on failure.
+//
+// Poison check happens HERE, before the events join a coalesced batch: a message
+// whose events can never insert (unparseable project/event UUID — the DuckDB
+// events primary key) is dead-lettered and terminated immediately, so one bad
+// payload can neither wedge the stream nor take a whole flush down with it.
 func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 	if len(events) == 0 {
 		// Nothing to insert, but the message must still be acked or it redelivers
@@ -146,7 +153,53 @@ func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 		}
 		return
 	}
+	if err := validateEvents(events); err != nil {
+		b.poison(msg, err)
+		return
+	}
 	b.in <- queued{events: events, msg: msg}
+}
+
+// validateEvents rejects a batch that cannot ever be stored: the events table
+// keys on (project_id, event_id) UUIDs, so an unparseable id is a permanent
+// failure, not a transient one. Checked at enqueue so the sink only ever sees
+// insertable rows and its errors stay in the transient class.
+func validateEvents(events []storage.Event) error {
+	for _, e := range events {
+		if _, err := uuid.Parse(e.ProjectID); err != nil {
+			return fmt.Errorf("project_id %q: %w", e.ProjectID, err)
+		}
+		if _, err := uuid.Parse(e.EventID); err != nil {
+			return fmt.Errorf("event_id %q: %w", e.EventID, err)
+		}
+	}
+	return nil
+}
+
+// poison settles a message that can never insert: republish its raw body to
+// the DLQ, then terminate it so it leaves the stream. If the DLQ itself is
+// unreachable the message is NAK'd instead — losing it to a dead-letter
+// outage would be worse than one more redelivery.
+func (b *EventBatcher) poison(msg msgHandle, cause error) {
+	if msg == nil {
+		log.Printf("ingestion batcher: dropping undeliverable batch: %v", cause)
+		return
+	}
+	if b.deadLetter != nil {
+		if err := b.deadLetter(msg.body()); err != nil {
+			log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
+			_ = msg.nak(b.nakDelay)
+			if b.metrics != nil {
+				b.metrics.recordNak()
+			}
+			return
+		}
+		if b.metrics != nil {
+			b.metrics.recordDeadLetter()
+		}
+	}
+	_ = msg.term()
+	log.Printf("ingestion batcher: terminated poison message: %v", cause)
 }
 
 func (b *EventBatcher) loop() {

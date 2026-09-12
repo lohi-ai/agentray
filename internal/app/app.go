@@ -417,13 +417,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.scheduler != nil {
 		s.scheduler.Stop()
 	}
+	// Drain the consumer first: Stop() blocks until the batcher's final flush
+	// commits, so every acked batch is durable in DuckDB before the engine
+	// checkpoints and closes.
 	_ = s.worker.Stop()
+	if s.db != nil {
+		s.db.CloseDuckDB()
+	}
 	if s.nats != nil {
 		s.nats.Close()
 	}
 	if s.redis != nil {
 		_ = s.redis.Close()
 	}
-	s.db.Close()
+	// Postgres (control plane) closes last, after the analytics engine.
+	if s.db != nil {
+		s.db.Close()
+	}
 	return err
 }
