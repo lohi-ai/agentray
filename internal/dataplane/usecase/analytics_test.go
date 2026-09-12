@@ -64,7 +64,8 @@ func TestRegistryHasEveryOperation(t *testing.T) {
 		"run_insight", "run_funnel", "run_retention", "list_dashboards", "create_dashboard", "create_chart",
 		"submit_recommendation", "propose_test", "test_status", "list_tests", "remember", "send_notification", "overview",
 		"verify_sdk", "update_dashboard", "archive_dashboard", "unarchive_dashboard",
-		"test_source", "preview_source", "create_source", "update_source", "pause_source", "run_source", "source_status", "cancel_source_run",
+		"list_charts", "update_chart", "archive_chart", "unarchive_chart", "reorder_charts",
+		"test_source", "preview_source", "list_sources", "create_source", "update_source", "archive_source", "unarchive_source", "pause_source", "run_source", "source_status", "cancel_source_run",
 		"update_test", "record_outcome", "abandon_test", "list_findings", "dataset_preview",
 	}
 	for _, name := range want {

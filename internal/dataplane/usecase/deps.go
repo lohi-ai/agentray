@@ -68,6 +68,13 @@ type Repo interface {
 	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	UnarchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	// Chart lifecycle: per-chart revision fences update/archive; the
+	// dashboard revision is the single fence for an atomic board reorder.
+	ListChartsFiltered(ctx context.Context, projectID, dashboardID string, includeArchived bool) ([]storage.Chart, error)
+	UpdateChartIdempotent(ctx context.Context, chart storage.Chart, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	ArchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	UnarchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	ReorderChartsIdempotent(ctx context.Context, projectID, dashboardID string, chartIDs []string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
 	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
 
@@ -83,6 +90,12 @@ type Repo interface {
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	// Source archive is reversible: it keeps the connector row and its
+	// credential reference and disables its syncs transactionally; unarchive
+	// resumes exactly the syncs the archive paused.
+	ListDataConnectorsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.DataConnector, error)
+	ArchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	UnarchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification
@@ -94,6 +107,12 @@ type Notifier interface {
 	Notify(ctx context.Context, ch storage.AlertChannel, title, body string) error
 }
 
+// OperationAuditSink records successful remote mutations. It stays separate
+// from Repo because runtime tools have no network principal to attribute.
+type OperationAuditSink interface {
+	RecordOperationAudit(ctx context.Context, projectID, actorID, credentialID, credentialKind, operation string) error
+}
+
 // Deps is the dependency bundle every operation handler receives via
 // opcore.CallContext.Deps. It holds only the Repo interface and an optional agent
 // MemoryStore — no pool, no queue — so a handler (and the agent that drives it)
@@ -102,10 +121,21 @@ type Deps struct {
 	Repo     Repo
 	Memory   agentcore.MemoryStore
 	Notifier Notifier
+	Audit    OperationAuditSink
 	// Runner is the connector engine's enqueue/cancel surface for
 	// run_source/cancel_source_run. Nil in processes without an engine —
 	// those operations report unavailable rather than silently queueing.
 	Runner SourceRunner
+}
+
+// RecordOperationAudit records a successful network mutation without exposing
+// storage to opcore. Audit failure is intentionally non-fatal: the mutation has
+// already committed and existing workspace audit writes follow this same policy.
+func (d *Deps) RecordOperationAudit(ctx context.Context, principal opcore.Principal, operation string) {
+	if d == nil || d.Audit == nil {
+		return
+	}
+	_ = d.Audit.RecordOperationAudit(ctx, principal.ProjectID, principal.UserID, principal.CredentialID, string(principal.Kind), operation)
 }
 
 // depsFrom recovers the typed Deps from an opcore.CallContext, failing loudly if

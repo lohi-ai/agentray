@@ -43,11 +43,7 @@ func main() {
 	// The stored management credential is only valid for the project it was
 	// minted under — a stale one from a previous selection must not silently
 	// authenticate ops against the wrong project.
-	mgmtKey := cfg.ManagementKey
-	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
-		mgmtKey = ""
-	}
-	key := flag.String("key", firstNonEmpty(os.Getenv("AGENTRAY_API_KEY"), mgmtKey, cfg.APIKey), "management credential or project API key")
+	key := flag.String("key", operationCredential(cfg, os.Getenv("AGENTRAY_API_KEY")), "management credential or project API key")
 	flag.Parse()
 	args := flag.Args()
 
@@ -119,6 +115,18 @@ func pretty(b []byte) []byte {
 		return b
 	}
 	return buf.Bytes()
+}
+
+// operationCredential prefers the project-bound management credential over the
+// capture key that `agentray key` deliberately prints for SDK configuration.
+// An explicit --key still wins after flag parsing; the environment is only the
+// default when no valid stored management credential exists.
+func operationCredential(cfg cliConfig, envKey string) string {
+	mgmtKey := cfg.ManagementKey
+	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
+		mgmtKey = ""
+	}
+	return firstNonEmpty(mgmtKey, envKey, cfg.APIKey)
 }
 
 func firstNonEmpty(values ...string) string {

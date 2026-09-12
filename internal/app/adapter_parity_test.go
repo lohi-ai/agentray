@@ -25,7 +25,7 @@ import (
 func mountRealAdapters(t *testing.T, s *storage.Store) *echo.Echo {
 	t.Helper()
 	e := echo.New()
-	deps := &usecase.Deps{Repo: s}
+	deps := &usecase.Deps{Repo: s, Audit: s}
 	reg := usecase.Registry()
 	resolve := func(c echo.Context) (opcore.Principal, error) {
 		return principalFromRequest(c, s)
