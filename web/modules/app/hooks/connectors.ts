@@ -111,8 +111,10 @@ export function useConnectorSchema(connectorID: string | null, enabled: boolean)
 
 // useDatasetPreview reads one sync's landed rows through the dataset_preview
 // op — deduped FINAL rows with the soft-delete filter applied, plus the
-// freshness block (last success vs last attempt vs landed watermark). It is
-// the dataset-semantics read; run_sql stays raw.
+// freshness block (last success vs last attempt vs landed watermark) and the
+// standing warnings (grain, deletion coverage, replacement tie-break). run_sql
+// applies the same soft-delete predicate inside its scoped CTE; this op adds
+// the sync metadata and warnings around the rows.
 export function useDatasetPreview(syncID: string | null) {
   const projectID = useAuthStore((s) => s.project?.id);
   const query = useQuery({

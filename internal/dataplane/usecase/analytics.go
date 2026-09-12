@@ -228,7 +228,10 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"JSONExtractString(data, 'column') (JSONExtractInt/Float for numbers); row_key is the source row's " +
-			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key). " +
+			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key) and " +
+			"each row is CURRENT state, not history — a re-sync replaces the row, it does not append. " +
+			"Rows the source marked deleted (the sync's soft-delete column) are already excluded; rows the " +
+			"source hard-deleted without a mark are NOT — a count here can overstate the source. " +
 			"To combine the two tables, put events on the FROM side and join external_rows onto it " +
 			"(FROM events e JOIN external_rows x ON ...): events may appear exactly once and only after FROM, " +
 			"external_rows only after FROM or JOIN — comma joins, quoted table names, and JOIN events are rejected.",
@@ -477,7 +480,7 @@ type submitRecInput struct {
 	Category    string         `json:"category" desc:"marketing | sales | growth | product | data"`
 	Title       string         `json:"title" desc:"short recommendation title" required:"true"`
 	Rationale   string         `json:"rationale" desc:"why, grounded in the data you saw"`
-	Evidence    map[string]any `json:"evidence" desc:"references to charts/queries/numbers"`
+	Evidence    map[string]any `json:"evidence" desc:"typed envelope object: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark, warnings} — cite the actual data window"`
 	ImpactScore float64        `json:"impact_score" desc:"0-100 estimated impact"`
 	// IdempotencyKey makes a retried submit replay the stored receipt instead
 	// of folding into (or duplicating) a finding twice.

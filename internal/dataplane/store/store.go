@@ -3446,7 +3446,15 @@ func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([
 	if err != nil {
 		return nil, err
 	}
-	query, args, err := scopedReadonlySQL(sqlText, projectID, resolver)
+	// Soft-delete rules only matter when the query reads external_rows — skip
+	// the Postgres round-trip for the common events-only query.
+	var rules []softDeleteRule
+	if externalSourcePattern.MatchString(sqlText) {
+		if rules, err = s.softDeleteRulesForProject(ctx, projectID); err != nil {
+			return nil, err
+		}
+	}
+	query, args, err := scopedReadonlySQL(sqlText, projectID, resolver, rules)
 	if err != nil {
 		return nil, err
 	}
@@ -4905,7 +4913,7 @@ var (
 	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
 )
 
-func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver) (string, []any, error) {
+func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver, rules []softDeleteRule) (string, []any, error) {
 	// Normalize: strip trailing semicolons before validation and query building.
 	sqlText = strings.TrimRight(strings.TrimSpace(sqlText), ";")
 	if err := validateReadonlySQL(sqlText); err != nil {
@@ -4962,8 +4970,21 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 	if hasExternal {
 		// FINAL collapses the ReplacingMergeTree versions at query time, so a
 		// re-synced row reads as one row even before background merges run.
+		// The per-connector/table soft-delete predicate rides the same CTE so a
+		// row the source marked deleted reads as gone here exactly as it does in
+		// dataset_preview — one contract, one predicate (softDeleteCondition).
+		// Hard deletes are still invisible: a row removed in the source
+		// without a deletion mark stays, which the preview warnings state.
+		externalFilter := ""
+		for _, r := range rules {
+			if cond := softDeleteCondition(r.Column, r.Semantics); cond != "" {
+				connector := strings.ReplaceAll(r.ConnectorID, `'`, `\'`)
+				table := strings.ReplaceAll(r.Table, `'`, `\'`)
+				externalFilter += ` AND NOT (connector_id = '` + connector + `' AND table_name = '` + table + `' AND ` + cond + `)`
+			}
+		}
 		args = append(args, projectID)
-		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?)")
+		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?"+externalFilter+")")
 	}
 	for i := 0; i < projectPlaceholders; i++ {
 		args = append(args, projectID)
