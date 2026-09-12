@@ -20,8 +20,19 @@ fi
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 mkdir -p "$HERE/work"
 
+# Unique driver name per invocation — a stale driver from a crashed run
+# can never collide with a new one. Sweep only containers carrying this
+# harness's label, so foreign containers named storage-eval-driver-* are
+# never touched.
+DRIVER_NAME="storage-eval-driver-$$-$(date +%s)"
+for stale in $(docker ps -aq --filter "name=storage-eval-driver" \
+               --filter "label=storage-eval=1" 2>/dev/null); do
+  docker rm -f "$stale" >/dev/null 2>&1 || true
+done
+
 exec docker run --rm -i \
-  --name storage-eval-driver \
+  --name "$DRIVER_NAME" \
+  --label storage-eval=1 \
   --memory 512m --cpus 1 \
   --network "$NET" \
   -v /var/run/docker.sock:/var/run/docker.sock \

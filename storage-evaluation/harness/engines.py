@@ -7,7 +7,9 @@ toward the workdir cap).
 """
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import time
 from pathlib import Path
 
@@ -33,8 +35,30 @@ _docker = None
 def client() -> docker.DockerClient:
     global _docker
     if _docker is None:
+        # docker-py leaks an unclosed unix socket when connect() fails
+        # inside version negotiation (the socket is a connect() local,
+        # orphaned before urllib3 tracks it). Fail fast on a missing
+        # socket instead of paying that leak.
+        host = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+        if host.startswith("unix://") and not os.path.exists(host[7:]):
+            raise RuntimeError(f"docker socket {host} not available")
         _docker = docker.from_env()
     return _docker
+
+
+def close_client():
+    """Close the lazily-created docker client — otherwise its socket
+    leaks a ResourceWarning at interpreter exit."""
+    global _docker
+    if _docker is not None:
+        try:
+            _docker.close()
+        except Exception:
+            pass
+        _docker = None
+
+
+atexit.register(close_client)
 
 
 def stop_container(name: str):

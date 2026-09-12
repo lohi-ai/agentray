@@ -107,38 +107,46 @@ def generate_bounded(scale: int, seed: int, ingest_rows: int,
     Raises Deadline on timeout or workdir overflow; the child is killed
     either way.
     """
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "harness.corpus_gen",
-         str(scale), str(seed), str(ingest_rows)],
-        # stderr goes to a file, not a pipe: a child that dumps >64KiB of
-        # traceback would deadlock a never-drained PIPE until the budget
-        # kill. stdout stays a pipe — it carries only the output path.
-        stdout=subprocess.PIPE,
-        stderr=open(WORK / "corpus-gen.err", "w"), text=True)
-    t0 = time.monotonic()
-    try:
-        while proc.poll() is None:
-            if time.monotonic() - t0 > budget_s:
+    err_path = WORK / "corpus-gen.err"
+    with open(err_path, "w") as err_f:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "harness.corpus_gen",
+             str(scale), str(seed), str(ingest_rows)],
+            # stderr goes to a file, not a pipe: a child that dumps >64KiB
+            # of traceback would deadlock a never-drained PIPE until the
+            # budget kill. stdout stays a pipe — only the output path.
+            stdout=subprocess.PIPE, stderr=err_f, text=True)
+        t0 = time.monotonic()
+        try:
+            while proc.poll() is None:
+                if time.monotonic() - t0 > budget_s:
+                    proc.kill()
+                    proc.wait()
+                    raise Deadline(
+                        f"corpus generation exceeded {budget_s}s budget")
+                used = dir_bytes(WORK) / 1024**3
+                if used > workdir_cap_gib:
+                    proc.kill()
+                    proc.wait()
+                    raise Deadline(
+                        f"workdir {used:.1f} GiB exceeded cap "
+                        f"{workdir_cap_gib} GiB during generation")
+                time.sleep(0.5)
+            if proc.returncode != 0:
+                try:
+                    err = err_path.read_text()[-500:]
+                except OSError:
+                    err = ""
+                raise RuntimeError(f"corpus generation failed: {err}")
+            return Path(proc.stdout.read().strip().splitlines()[-1])
+        finally:
+            # Deterministic cleanup: kill if still running, always reap,
+            # always close the pipe — no ResourceWarning, no zombie.
+            if proc.poll() is None:
                 proc.kill()
-                raise Deadline(
-                    f"corpus generation exceeded {budget_s}s budget")
-            used = dir_bytes(WORK) / 1024**3
-            if used > workdir_cap_gib:
-                proc.kill()
-                raise Deadline(
-                    f"workdir {used:.1f} GiB exceeded cap "
-                    f"{workdir_cap_gib} GiB during generation")
-            time.sleep(0.5)
-        if proc.returncode != 0:
-            try:
-                err = (WORK / "corpus-gen.err").read_text()[-500:]
-            except OSError:
-                err = ""
-            raise RuntimeError(f"corpus generation failed: {err}")
-        return Path(proc.stdout.read().strip().splitlines()[-1])
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+            proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
 
 
 def stop_bounded(eng, stop_s: float = 20, fallback_s: float = 10):
