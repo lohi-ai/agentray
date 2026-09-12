@@ -18,15 +18,12 @@ import (
 // Untrusted SQL (run_sql, saved queries, custom charts, alert rules) never
 // runs against the shared analytics file. Each project gets an in-memory
 // DuckDB instance that physically holds ONLY that project's events, aliases,
-// and external rows — copied in through a read-only ATTACH of the main file,
-// which is then detached. The query runs on a connection whose configuration
-// is locked down:
+// and external rows — copied in through Go reads on the main store, because
+// the sandbox instance itself is opened with enable_external_access=false:
+// it cannot read a file, open a network connection, ATTACH, or INSTALL/LOAD
+// an extension, and lock_configuration=true means the query cannot undo any
+// of that or raise memory/threads.
 //
-//   - enable_external_access=false: no file reads (read_csv/parquet/json,
-//     'file.csv' FROM sugar), no network (httpfs), no sqlite/postgres scans,
-//     no ATTACH, no extension INSTALL/LOAD.
-//   - lock_configuration=true: the query cannot undo any of that, nor raise
-//     memory/threads.
 //   - memory_limit + threads bound the sandbox instance (per-instance, unlike
 //     the shared file's global limit).
 //   - temp_directory points at the spill dir beside the database file so a
@@ -40,8 +37,7 @@ import (
 // layer (canonical_id, soft deletes), not the tenant boundary. The boundary
 // is physical.
 //
-// Sandboxes are lazily created, refreshed incrementally on each use
-// (INSERT OR IGNORE / INSERT OR REPLACE through the read-only attach), and
+// Sandboxes are lazily created, refreshed incrementally on each use, and
 // evicted by an LRU bound so tenant count cannot multiply memory without
 // limit.
 
@@ -55,13 +51,15 @@ const (
 	sandboxThreads = 2
 	// sandboxQueryTimeout bounds one untrusted query.
 	sandboxQueryTimeout = 30 * time.Second
+	// sandboxCopyBatch is the row count per INSERT batch during refresh.
+	sandboxCopyBatch = 2048
 )
 
 // sqlSandboxPool owns the per-project sandboxes for one Store.
 type sqlSandboxPool struct {
 	main *DuckDB
 
-	mu   sync.Mutex
+	mu sync.Mutex
 	// lru is most-recently-used first.
 	lru       []string
 	sandboxes map[string]*sqlSandbox
@@ -102,7 +100,7 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 
 // sandboxFor returns the project's sandbox, creating and loading it on first
 // use, and evicts the LRU entry past the cap. Creation happens outside the
-// pool lock so a cold open (attach + copy) never blocks other projects.
+// pool lock so a cold open (schema + copy) never blocks other projects.
 func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sqlSandbox, error) {
 	p.mu.Lock()
 	if sb, ok := p.sandboxes[projectID]; ok {
@@ -152,11 +150,12 @@ func (p *sqlSandboxPool) touch(projectID string) {
 // sqlSandbox is one project's isolated in-memory DuckDB.
 type sqlSandbox struct {
 	projectID string
-	mainPath  string
+	main      *DuckDB
 	db        *sql.DB
-	// feeder is the unlocked connection: it alone may ATTACH the main file
-	// read-only to refresh the sandbox tables. runner is the locked-down
-	// connection every untrusted query executes on.
+	// feeder is the connection refresh writes through; runner is the
+	// connection every untrusted query executes on. Both live on the same
+	// locked-down instance — the split exists so a refresh and a query never
+	// share a connection.
 	feeder *sql.Conn
 	runner *sql.Conn
 	mu     sync.Mutex
@@ -164,7 +163,7 @@ type sqlSandbox struct {
 }
 
 // openSQLSandbox creates the in-memory instance, builds the project-scoped
-// tables and views, and locks down the runner connection.
+// tables and views, and locks the whole instance down before any data lands.
 func openSQLSandbox(ctx context.Context, main *DuckDB, projectID string) (*sqlSandbox, error) {
 	tmpDir := main.tmpDir()
 	connector, err := duckdb.NewConnector("", func(execer driver.ExecerContext) error {
@@ -181,7 +180,7 @@ func openSQLSandbox(ctx context.Context, main *DuckDB, projectID string) (*sqlSa
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(2)
 
-	sb := &sqlSandbox{projectID: projectID, mainPath: main.Path(), db: db}
+	sb := &sqlSandbox{projectID: projectID, main: main, db: db}
 	feeder, err := db.Conn(ctx)
 	if err != nil {
 		db.Close()
@@ -195,23 +194,17 @@ func openSQLSandbox(ctx context.Context, main *DuckDB, projectID string) (*sqlSa
 	}
 	sb.runner = runner
 
-	// Resource bounds live on the instance (memory_limit/threads are
-	// database-wide in DuckDB, which is exactly what a per-project sandbox
-	// wants) and the access lockdown lives on the runner connection.
+	// Lockdown is instance-wide: enable_external_access is a global setting in
+	// DuckDB, so it must be set before the feeder needs no files (it never
+	// does — refresh copies rows through Go). After this the instance cannot
+	// touch the filesystem or network at all.
 	for _, stmt := range []string{
 		"SET memory_limit = '" + sandboxMemoryLimit + "'",
 		fmt.Sprintf("SET threads = %d", sandboxThreads),
-	} {
-		if _, err := feeder.ExecContext(ctx, stmt); err != nil {
-			sb.close()
-			return nil, fmt.Errorf("sandbox %q: %w", stmt, err)
-		}
-	}
-	for _, stmt := range []string{
 		"SET enable_external_access = false",
 		"SET lock_configuration = true",
 	} {
-		if _, err := runner.ExecContext(ctx, stmt); err != nil {
+		if _, err := feeder.ExecContext(ctx, stmt); err != nil {
 			sb.close()
 			return nil, fmt.Errorf("sandbox %q: %w", stmt, err)
 		}
@@ -240,51 +233,151 @@ func (sb *sqlSandbox) createTables(ctx context.Context) error {
 	return nil
 }
 
-// refresh copies the project's rows from the main file into the sandbox.
-// INSERT OR IGNORE / INSERT OR REPLACE make it incremental and idempotent;
-// the anti-join DELETEs catch rows removed from the main file. The attach is
-// read-only and detached before returning, so the sandbox never holds a live
-// handle into the shared store.
+// refresh copies the project's rows from the main store into the sandbox.
+// Events are append-only, so the copy is incremental on inserted_at; aliases
+// and external_rows are small enough to reconcile wholesale. A row removed
+// from the main file is removed here too — the count check keeps the common
+// refresh cheap.
 func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	if sb.closed {
 		return errDuckDBClosed
 	}
-	attach := fmt.Sprintf("ATTACH '%s' AS agentray_src (READ_ONLY)", strings.ReplaceAll(sb.mainPath, "'", "''"))
-	if _, err := sb.feeder.ExecContext(ctx, attach); err != nil {
-		return fmt.Errorf("attach main store: %w", err)
+	if err := sb.refreshEvents(ctx); err != nil {
+		return fmt.Errorf("refresh events: %w", err)
 	}
-	defer sb.feeder.ExecContext(context.Background(), "DETACH agentray_src")
+	if err := sb.refreshTable(ctx, "aliases",
+		`SELECT project_id, anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, 3); err != nil {
+		return fmt.Errorf("refresh aliases: %w", err)
+	}
+	if err := sb.refreshTable(ctx, "external_rows",
+		`SELECT project_id, connector_id, table_name, row_key, cursor, data, synced_at FROM external_rows WHERE project_id = ?`, 7); err != nil {
+		return fmt.Errorf("refresh external_rows: %w", err)
+	}
+	return nil
+}
 
-	stmts := []string{
-		// Events are append-only in the main file, so the high-water mark on
-		// inserted_at bounds the copy to what arrived since the last refresh.
-		`INSERT OR IGNORE INTO events SELECT * FROM agentray_src.events WHERE project_id = ? AND inserted_at > (SELECT coalesce(max(inserted_at), TIMESTAMPTZ '1970-01-01') FROM events)`,
-		`INSERT OR IGNORE INTO aliases SELECT * FROM agentray_src.aliases WHERE project_id = ?`,
-		`INSERT OR REPLACE INTO external_rows SELECT * FROM agentray_src.external_rows WHERE project_id = ?`,
-		// Hard deletes in the main file must not linger in the sandbox. The
-		// anti-join only runs when the row counts disagree — events are
-		// append-only today, so the common refresh pays two counts, not a
-		// per-row probe.
-		`DELETE FROM events WHERE (SELECT count(*) FROM events) > (SELECT count(*) FROM agentray_src.events s WHERE s.project_id = ?) AND NOT EXISTS (SELECT 1 FROM agentray_src.events s WHERE s.project_id = events.project_id AND s.event_id = events.event_id)`,
-		`DELETE FROM aliases WHERE NOT EXISTS (SELECT 1 FROM agentray_src.aliases s WHERE s.project_id = aliases.project_id AND s.anonymous_id = aliases.anonymous_id)`,
-		`DELETE FROM external_rows WHERE NOT EXISTS (SELECT 1 FROM agentray_src.external_rows s WHERE s.project_id = external_rows.project_id AND s.connector_id = external_rows.connector_id AND s.table_name = external_rows.table_name AND s.row_key = external_rows.row_key)`,
+// refreshEvents appends only what arrived since the last refresh. A count
+// drift (a delete in the main file — not possible today) rebuilds the table.
+func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
+	var highWater time.Time
+	if err := sb.feeder.QueryRowContext(ctx,
+		`SELECT coalesce(max(inserted_at), TIMESTAMPTZ '1970-01-01') FROM events`).Scan(&highWater); err != nil {
+		return err
 	}
-	for _, stmt := range stmts {
-		var err error
-		if strings.HasPrefix(stmt, "INSERT") {
-			_, err = sb.feeder.ExecContext(ctx, stmt, sb.projectID)
-		} else if strings.HasPrefix(stmt, "DELETE FROM events") {
-			_, err = sb.feeder.ExecContext(ctx, stmt, sb.projectID)
-		} else {
-			_, err = sb.feeder.ExecContext(ctx, stmt)
+	var sandboxCount, mainCount int64
+	if err := sb.feeder.QueryRowContext(ctx, `SELECT count(*) FROM events`).Scan(&sandboxCount); err != nil {
+		return err
+	}
+	if err := sb.main.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM events WHERE project_id = ?`, sb.projectID).Scan(&mainCount)
+	}); err != nil {
+		return err
+	}
+	if sandboxCount > mainCount {
+		// Rows vanished from the main file; rebuild rather than probe per row.
+		if _, err := sb.feeder.ExecContext(ctx, `DELETE FROM events`); err != nil {
+			return err
 		}
+		highWater = time.Time{}
+	}
+	return sb.copyRows(ctx,
+		`SELECT * FROM events WHERE project_id = ? AND inserted_at > ? ORDER BY inserted_at`,
+		[]any{sb.projectID, highWater},
+		"events", 28)
+}
+
+// refreshTable reconciles a small table wholesale: delete-then-copy so a row
+// removed upstream disappears here too. Both tables are small (aliases are
+// one row per identify, external_rows one per synced source row).
+func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string, nCols int) error {
+	if _, err := sb.feeder.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+		return err
+	}
+	return sb.copyRows(ctx, selectSQL, []any{sb.projectID}, table, nCols)
+}
+
+// copyRows streams rows out of the main store and inserts them into the
+// sandbox in batches. The sandbox never sees the file — only values.
+func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int) error {
+	var rows *sql.Rows
+	err := sb.main.Read(ctx, func(conn *sql.Conn) error {
+		var err error
+		rows, err = conn.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
 			return err
 		}
-	}
-	return nil
+		defer rows.Close()
+		cols, err := rows.Columns()
+		if err != nil {
+			return err
+		}
+		if len(cols) != nCols {
+			return fmt.Errorf("column count mismatch: %d != %d", len(cols), nCols)
+		}
+		// Build the batched INSERT once.
+		placeholder := "(" + strings.TrimSuffix(strings.Repeat("?,", nCols), ",") + ")"
+		insertSQL := fmt.Sprintf("INSERT INTO %s VALUES %s", table,
+			strings.TrimSuffix(strings.Repeat(placeholder+",", sandboxCopyBatch), ","))
+		stmt, err := sb.feeder.PrepareContext(ctx, insertSQL)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		single, err := sb.feeder.PrepareContext(ctx,
+			fmt.Sprintf("INSERT INTO %s VALUES %s", table, placeholder))
+		if err != nil {
+			return err
+		}
+		defer single.Close()
+
+		batch := make([]any, 0, sandboxCopyBatch*nCols)
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			if _, err := stmt.ExecContext(ctx, batch...); err != nil {
+				return err
+			}
+			batch = batch[:0]
+			return nil
+		}
+		for rows.Next() {
+			dest := make([]any, nCols)
+			for i := range dest {
+				dest[i] = new(any)
+			}
+			if err := rows.Scan(dest...); err != nil {
+				return err
+			}
+			for i := range dest {
+				batch = append(batch, *(dest[i].(*any)))
+			}
+			if len(batch) == sandboxCopyBatch*nCols {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Tail rows that didn't fill a batch.
+		for len(batch) > 0 {
+			n := nCols
+			if len(batch) < n {
+				n = len(batch)
+			}
+			if _, err := single.ExecContext(ctx, batch[:n]...); err != nil {
+				return err
+			}
+			batch = batch[n:]
+		}
+		return nil
+	})
+	return err
 }
 
 // run executes one already-validated, already-rewritten SELECT on the locked
@@ -324,7 +417,7 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return nil, err
 		}
-		item := map[string]any{}
+		item := make(map[string]any, len(columns))
 		for i, column := range columns {
 			item[column] = normalizeSQLValue(valuePtrs[i])
 		}
