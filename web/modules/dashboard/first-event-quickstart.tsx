@@ -200,9 +200,11 @@ export function FirstEventQuickstart() {
       setVerification(null);
       setVerificationError({ projectID, message: error instanceof Error ? error.message : 'Could not check whether the verification event arrived.' });
     } finally {
-      if (activeProjectID.current === projectID) {
-        setChecking((checkingProjectID) => checkingProjectID === projectID ? null : checkingProjectID);
-      }
+      // Always release the checking flag for the project that started this
+      // call — even when the user has since switched projects. Skipping the
+      // clear on a stale project leaves checking pinned to that project, so
+      // switching back shows a permanently spinning "Checking…" state.
+      setChecking((checkingProjectID) => checkingProjectID === projectID ? null : checkingProjectID);
     }
   }
 
