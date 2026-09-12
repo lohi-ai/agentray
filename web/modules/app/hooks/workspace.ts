@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { usePathname, useRouter } from 'next/navigation';
 import { AgentRayAPI, type Project, type WorkspaceRole } from '@/lib/api';
 import { useAuthStore, useFiltersStore, useUIStore } from '@/lib/app-state';
-import { projectDetailRoot } from '@/lib/ia';
+import { projectLanding } from '@/lib/ia';
 import { writePreferredProjectID } from '@/lib/project-preference';
 
 export function useWorkspaceUsage() {
@@ -165,7 +165,11 @@ export function useCurrentProject() {
   const projectID = project?.id;
   const { setMessage, setError } = useUIStore();
 
-  function activateProject(next: Project, toastText: string) {
+  // activateProject switches the selected project and unwinds detail routes
+  // that would otherwise show the previous project's id. `created` marks the
+  // create-project path: a newly created project always lands on /overview —
+  // the front door — no matter which surface the dialog was opened from.
+  function activateProject(next: Project, toastText: string, opts?: { created?: boolean }) {
     if (next.id === project?.id) return;
     setProject(next);
     writePreferredProjectID(next.id);
@@ -173,7 +177,7 @@ export function useCurrentProject() {
     setReplay(null);
     setSQLRows([]);
     setSavedResult(null);
-    const root = projectDetailRoot(pathname);
+    const root = projectLanding(pathname, opts);
     if (root) router.replace(root);
     setMessage(toastText);
   }
@@ -219,7 +223,7 @@ export function useCurrentProject() {
     },
     onSuccess: async (data) => {
       setProjects([...projects, data.project]);
-      activateProject(data.project, 'Project created and connected.');
+      activateProject(data.project, 'Project created and connected.', { created: true });
       await queryClient.invalidateQueries({ queryKey: ['console', projectID] });
       await queryClient.invalidateQueries({ queryKey: ['workspace-audit-logs', selectedWorkspaceID] });
     },

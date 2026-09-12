@@ -1,3 +1,15 @@
+// APIError carries the HTTP status alongside the message. Callers that need
+// to distinguish "forbidden" from "failed" (the overview's missing-access
+// state) must not parse the message text — the status is the contract.
+export class APIError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+  }
+}
+
 export type Project = {
   id: string;
   workspace_id?: string;
@@ -1683,14 +1695,15 @@ function agentQuery(agentID: string): string {
 // for a stale revision or a reused idempotency key, 'not_found' for a missing
 // or foreign id, 'retryable' for a transient engine/server failure. Hooks map
 // the kind to a message instead of parsing text.
-export class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error',
-  ) {
-    super(message);
+// ApiError extends APIError so the overview's `instanceof APIError` +
+// `status === 403` contract keeps working while lifecycle/plans callers get
+// the typed `kind`. `request` throws this classified subclass.
+export class ApiError extends APIError {
+  readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
+  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error') {
+    super(status, message);
     this.name = 'ApiError';
+    this.kind = kind;
   }
 }
 
@@ -2496,7 +2509,7 @@ export class AgentRayAPI {
   ): Promise<AgentChatStreamResult> {
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || payload.message || `AgentRay API returned ${response.status}`);
+      throw new APIError(response.status, payload.error || payload.message || `AgentRay API returned ${response.status}`);
     }
 
     const reader = response.body.getReader();
@@ -2863,7 +2876,7 @@ export class AgentRayAPI {
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || payload.message || `AgentRay API returned ${response.status}`);
+      throw new APIError(response.status, payload.error || payload.message || `AgentRay API returned ${response.status}`);
     }
 
     const reader = response.body.getReader();

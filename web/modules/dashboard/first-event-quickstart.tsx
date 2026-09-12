@@ -129,8 +129,8 @@ export function FirstEventQuickstart() {
     () => (source === 'warehouse' ? '' : verificationSnippet(source, lang, base, key)),
     [source, lang, base, key],
   );
-  const verificationResult = verification?.projectID === projectID ? verification.result : null;
-  const verificationErrorMessage = verificationError?.projectID === projectID ? verificationError.message : null;
+  const verificationResult = verification && verification.projectID === projectID ? verification.result : null;
+  const verificationErrorMessage = verificationError && verificationError.projectID === projectID ? verificationError.message : null;
   const isChecking = checking === projectID;
   const codeLang = source === 'website' ? 'html' : source === 'ios' ? 'swift' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
 
@@ -227,7 +227,7 @@ export function FirstEventQuickstart() {
           <div className="flex max-w-[560px] items-center gap-3 rounded-md bg-[var(--color-background-muted)] px-3 py-3 text-sm">
             <span className="min-w-0 flex-1 truncate font-mono tabular-nums">{key || '—'}</span>
             <button
-              className="inline-flex flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
+              className="inline-flex min-h-[44px] flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
               onClick={() => copy(key)}
               disabled={!key}
             >
@@ -239,7 +239,7 @@ export function FirstEventQuickstart() {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">Source</span>
-            <span className="ms-auto"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} /></span>
+            <span className="ms-auto [&_[role=radio]]:min-h-[44px]"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} label="Event source" /></span>
           </div>
 
           {source === 'warehouse' ? (
@@ -247,14 +247,14 @@ export function FirstEventQuickstart() {
               <p className="mb-2 flex items-center gap-2 text-[var(--color-text-primary)]">
                 <Warehouse size={14} /> Pull events from Postgres or an existing warehouse.
               </p>
-              <Button variant="primary" size="sm" onClick={() => router.push(settingsPath('connectors'))}>Open data connectors</Button>
+              <Button variant="primary" size="sm" className="min-h-[44px]" onClick={() => router.push(settingsPath('connectors'))}>Open data connectors</Button>
             </div>
           ) : (
             <>
               {source === 'app' ? (
                 <div className="mb-2 flex items-center gap-2">
                   <Smartphone size={14} className="text-[var(--color-text-secondary)]" />
-                  <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
+                  <span className="ms-auto [&_[role=radio]]:min-h-[44px]"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} label="Snippet language" /></span>
                 </div>
               ) : source === 'ios' ? (
                 <p className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
@@ -270,27 +270,32 @@ export function FirstEventQuickstart() {
           )}
         </div>
 
-        {isChecking ? (
-          <Callout tone="agentic" icon={<RefreshCw size={16} />} label="Verification" title="Checking for your event" detail="Looking at the most recent capture receipts for this project." />
-        ) : verificationErrorMessage ? (
-          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Verification" title="Could not check for your event" detail={verificationErrorMessage} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
-        ) : verificationResult?.found ? (
-          <Callout
-            tone="growth"
-            icon={<Check size={16} />}
-            label="SDK verified"
-            title={`${verificationResult.event_name || 'Verification event'} received`}
-            detail={`Received ${verificationResult.received_at || 'at an unknown time'} · platform ${verificationResult.platform || 'unknown'} · identity ${verificationResult.identity_linked ? 'linked' : 'not linked'}.`}
-          />
-        ) : verificationResult ? (
-          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Not received yet" title="No verification event found" detail={`Searched ${verificationResult.searched} recent capture receipts. ${verificationResult.warnings.join(' ')}`} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
-        ) : null}
+        {/* Verification results are announced: the check resolves
+            asynchronously, so the outcome region is a polite live region and
+            the failure case keeps Banner's role="alert". */}
+        <div aria-live="polite">
+          {isChecking ? (
+            <Callout tone="agentic" icon={<RefreshCw size={16} />} label="Verification" title="Checking for your event" detail="Looking at the most recent capture receipts for this project." />
+          ) : verificationErrorMessage ? (
+            <Callout tone="warn" icon={<RefreshCw size={16} />} label="Verification" title="Could not check for your event" detail={verificationErrorMessage} action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => void checkNow()}>Retry</Button>} />
+          ) : verificationResult?.found ? (
+            <Callout
+              tone="growth"
+              icon={<Check size={16} />}
+              label="SDK verified"
+              title={`${verificationResult.event_name || 'Verification event'} received`}
+              detail={`Received ${verificationResult.received_at || 'at an unknown time'} · platform ${verificationResult.platform || 'unknown'} · identity ${verificationResult.identity_linked ? 'linked' : 'not linked'}.`}
+            />
+          ) : verificationResult ? (
+            <Callout tone="warn" icon={<RefreshCw size={16} />} label="Not received yet" title="No verification event found" detail={`Searched ${verificationResult.searched} recent capture receipts. ${verificationResult.warnings.join(' ')}`} action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => void checkNow()}>Retry</Button>} />
+          ) : null}
+        </div>
 
         {verificationResult?.found && verificationResult.warnings.length > 0 ? (
           <p role="status" className="text-xs text-[var(--color-text-secondary)]">{verificationResult.warnings.join(' ')}</p>
         ) : null}
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 [&_button]:min-h-[44px]">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={() => void checkNow()} disabled={isChecking || !projectID}>
             {isChecking ? 'Checking…' : 'I’ve sent it — check now'}
           </Button>

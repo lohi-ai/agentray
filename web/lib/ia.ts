@@ -177,7 +177,7 @@ export function signedInLandingTarget(): string {
 export type FirstRunInput = {
   // Catalog rows or bare names. A verification-only catalog proves capture,
   // not product activity, so it keeps the first-event guide visible.
-  eventNames: readonly (string | { name?: string; event_name?: string })[] | null | undefined;
+  eventNames: readonly (string | { name?: string; event_name?: string; count?: number; users?: number })[] | null | undefined;
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
@@ -721,6 +721,15 @@ export function projectDetailRoot(pathname: string): string | null {
   if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
   if (/^\/plans\/[^/]+/.test(path)) return '/plans';
   return null;
+}
+
+// projectLanding decides where activating a project leaves the user. A newly
+// created project always lands on Overview — the front door — no matter which
+// surface the create dialog was opened from; switching an existing project
+// keeps the current safe-list unwind (null = stay on the current route).
+export function projectLanding(pathname: string, opts?: { created?: boolean }): string | null {
+  if (opts?.created) return SIGNED_IN_LANDING;
+  return projectDetailRoot(pathname);
 }
 
 export function settingsTabFromQuery(search: string): string {
