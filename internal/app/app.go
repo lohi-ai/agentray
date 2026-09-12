@@ -24,12 +24,13 @@ import (
 )
 
 type Server struct {
-	echo      *echo.Echo
-	db        *storage.Store
-	redis     *redis.Client
-	nats      *nats.Conn
-	worker    *ingestion.EventWorker
-	scheduler *agentruntime.Scheduler
+	echo            *echo.Echo
+	db              *storage.Store
+	redis           *redis.Client
+	nats            *nats.Conn
+	worker          *ingestion.EventWorker
+	scheduler       *agentruntime.Scheduler
+	connectorEngine *connector.Engine
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -269,7 +270,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -416,6 +417,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.echo.Shutdown(ctx)
 	if s.scheduler != nil {
 		s.scheduler.Stop()
+	}
+	// Connector runs outlive the request that enqueued them. Fence new work and
+	// drain every accepted run before closing DuckDB or Postgres underneath its
+	// landing and terminal-status writes.
+	if s.connectorEngine != nil {
+		s.connectorEngine.Shutdown()
 	}
 	// Drain the consumer first: Stop() blocks until the batcher's final flush
 	// commits, so every acked batch is durable in DuckDB before the engine
