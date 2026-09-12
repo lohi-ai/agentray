@@ -667,6 +667,26 @@ SELECT EXISTS (
 	return exists, err
 }
 
+// RecordOperationAudit attributes a successful remote operation to its session
+// user or management credential. Credential identity lives in existing metadata
+// because workspace_audit_logs deliberately has only a nullable user actor FK.
+func (s *Store) RecordOperationAudit(ctx context.Context, projectID, actorID, credentialID, credentialKind, operation string) error {
+	project, err := s.ProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	// Old standalone projects predate workspaces and have no audit destination.
+	if project.WorkspaceID == "" {
+		return nil
+	}
+	metadata := fmt.Sprintf(`{"credential_kind":%q`, credentialKind)
+	if credentialID != "" {
+		metadata += fmt.Sprintf(`,"credential_id":%q`, credentialID)
+	}
+	metadata += "}"
+	return s.recordWorkspaceAudit(ctx, project.WorkspaceID, actorID, "operation."+operation, "project", project.ID, project.Name, metadata)
+}
+
 func (s *Store) recordWorkspaceAudit(ctx context.Context, workspaceID string, actorID string, action string, targetType string, targetID string, targetLabel string, metadata string) error {
 	metadata = strings.TrimSpace(metadata)
 	if metadata == "" {
@@ -674,7 +694,7 @@ func (s *Store) recordWorkspaceAudit(ctx context.Context, workspaceID string, ac
 	}
 	_, err := s.pg.Exec(ctx, `
 INSERT INTO workspace_audit_logs (workspace_id, actor_id, action, target_type, target_id, target_label, metadata)
-VALUES ($1, $2, $3, $4, NULLIF($5, '')::uuid, $6, $7::jsonb)`, workspaceID, actorID, action, targetType, targetID, targetLabel, metadata)
+VALUES ($1, NULLIF($2, '')::uuid, $3, $4, NULLIF($5, '')::uuid, $6, $7::jsonb)`, workspaceID, actorID, action, targetType, targetID, targetLabel, metadata)
 	return err
 }
 

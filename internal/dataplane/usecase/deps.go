@@ -94,6 +94,12 @@ type Notifier interface {
 	Notify(ctx context.Context, ch storage.AlertChannel, title, body string) error
 }
 
+// OperationAuditSink records successful remote mutations. It stays separate
+// from Repo because runtime tools have no network principal to attribute.
+type OperationAuditSink interface {
+	RecordOperationAudit(ctx context.Context, projectID, actorID, credentialID, credentialKind, operation string) error
+}
+
 // Deps is the dependency bundle every operation handler receives via
 // opcore.CallContext.Deps. It holds only the Repo interface and an optional agent
 // MemoryStore — no pool, no queue — so a handler (and the agent that drives it)
@@ -102,10 +108,21 @@ type Deps struct {
 	Repo     Repo
 	Memory   agentcore.MemoryStore
 	Notifier Notifier
+	Audit    OperationAuditSink
 	// Runner is the connector engine's enqueue/cancel surface for
 	// run_source/cancel_source_run. Nil in processes without an engine —
 	// those operations report unavailable rather than silently queueing.
 	Runner SourceRunner
+}
+
+// RecordOperationAudit records a successful network mutation without exposing
+// storage to opcore. Audit failure is intentionally non-fatal: the mutation has
+// already committed and existing workspace audit writes follow this same policy.
+func (d *Deps) RecordOperationAudit(ctx context.Context, principal opcore.Principal, operation string) {
+	if d == nil || d.Audit == nil {
+		return
+	}
+	_ = d.Audit.RecordOperationAudit(ctx, principal.ProjectID, principal.UserID, principal.CredentialID, string(principal.Kind), operation)
 }
 
 // depsFrom recovers the typed Deps from an opcore.CallContext, failing loudly if

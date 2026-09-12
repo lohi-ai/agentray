@@ -13,6 +13,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
 // publicCollectSet is the set of endpoints a customer's own page calls directly:
@@ -999,29 +1000,16 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 }
 
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
-	apiKey := firstNonEmpty(c.QueryParam("api_key"), c.QueryParam("token"), c.Request().Header.Get("X-API-Key"))
-	if apiKey != "" {
-		project, err := store.ProjectByAPIKey(c.Request().Context(), apiKey)
-		if err != nil {
-			return storage.Project{}, echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
-		}
-		return project, nil
-	}
-	ctx, err := authFromRequest(c, store)
+	principal, err := principalFromRequest(c, store)
 	if err != nil {
 		return storage.Project{}, err
 	}
-	projectID := firstNonEmpty(c.QueryParam("project_id"), c.Param("project_id"))
-	if projectID != "" {
-		project, err := store.ProjectByIDForUser(c.Request().Context(), ctx.User.ID, projectID)
-		if err != nil {
-			return storage.Project{}, echo.NewHTTPError(http.StatusForbidden, "project not available")
-		}
-		return project, nil
+	if principal.Kind == opcore.CredCapture {
+		return storage.Project{}, echo.NewHTTPError(http.StatusForbidden, "capture credential cannot access management routes")
 	}
-	project, err := store.DefaultProjectForUser(c.Request().Context(), ctx.User.ID)
+	project, err := store.ProjectByID(c.Request().Context(), principal.ProjectID)
 	if err != nil {
-		return storage.Project{}, echo.NewHTTPError(http.StatusNotFound, "project not found")
+		return storage.Project{}, err
 	}
 	return project, nil
 }

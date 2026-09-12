@@ -241,7 +241,7 @@ func pauseSource() opcore.Operation[pauseSourceInput, storage.ConnectorSync] {
 		Name:           "pause_source",
 		Summary:        "Pause or resume a source sync (reversible). Pausing stops future runs; an active run keeps going — cancel it explicitly. Requires the current revision.",
 		Access:         opcore.AccessSourcesManage,
-		Scope:          "",
+		Scope:          "analyze_build",
 		MinSessionRole: "admin",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in pauseSourceInput) (storage.ConnectorSync, error) {
 			d, err := depsFrom(cc)
@@ -277,7 +277,7 @@ func runSource() opcore.Operation[runSourceInput, runSourceOutput] {
 		Name:           "run_source",
 		Summary:        "Start a source sync now. Returns a persistent run id for source_status/cancel_source_run. At most one active run per sync; a repeated idempotency key returns the same run.",
 		Access:         opcore.AccessSourcesManage,
-		Scope:          "",
+		Scope:          "analyze_build",
 		MinSessionRole: "admin",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in runSourceInput) (runSourceOutput, error) {
 			d, err := depsFrom(cc)
@@ -457,7 +457,7 @@ func cancelSourceRun() opcore.Operation[cancelSourceRunInput, connector.Run] {
 		Name:           "cancel_source_run",
 		Summary:        "Cancel a queued or running source run. Idempotent; a finished run returns its terminal state unchanged.",
 		Access:         opcore.AccessSourcesManage,
-		Scope:          "",
+		Scope:          "analyze_build",
 		MinSessionRole: "admin",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in cancelSourceRunInput) (connector.Run, error) {
 			d, err := depsFrom(cc)
