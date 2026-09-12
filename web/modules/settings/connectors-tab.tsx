@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Plus, Sparkles } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { HStack } from '@astryxdesign/core/HStack';
@@ -96,7 +96,7 @@ export function ConnectorsTab() {
       {adding ? (
         <AddConnectorDialog
           kinds={kinds}
-          onSubmit={(input) => void create.mutateAsync({ ...input, idempotencyKey: newIdempotencyKey() }).then((r) => setSelectedID(r.connector.id))}
+          onSubmit={(input) => create.mutateAsync(input).then((r) => setSelectedID(r.connector.id))}
           onClose={() => setAdding(false)}
         />
       ) : null}
@@ -156,24 +156,37 @@ export function ConnectorsTab() {
 
 function AddConnectorDialog({ kinds, onSubmit, onClose }: {
   kinds: string[];
-  onSubmit: (input: { name: string; kind: string; dsn: string }) => void;
+  onSubmit: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) => Promise<unknown>;
   onClose: () => void;
 }) {
   const [name, setName] = useState('');
   const [kind, setKind] = useState(kinds[0] ?? 'postgres');
   const [dsn, setDsn] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  // Kept for this open dialog, not minted per click: after a lost response
+  // the operator retries the exact transaction rather than creating a second
+  // source credential/connector pair.
+  const idempotencyKey = useRef(newIdempotencyKey());
 
-  function submit() {
-    if (!name.trim() || !dsn.trim()) return;
-    onSubmit({ name: name.trim(), kind, dsn: dsn.trim() });
-    onClose();
+  async function submit() {
+    if (!name.trim() || !dsn.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({ name: name.trim(), kind, dsn: dsn.trim(), idempotencyKey: idempotencyKey.current });
+      onClose();
+    } catch {
+      // The hook already exposes the actionable API error. Keep this dialog
+      // open with its original key so a retry is an idempotent replay.
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
     <Modal
       title="Add data connector"
-      onClose={onClose}
-      footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" onClick={submit}>Add connector</Button></>}
+      onClose={() => { if (!submitting) onClose(); }}
+      footer={<><Button variant="ghost" size="sm" disabled={submitting} onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" disabled={submitting} onClick={submit}>{submitting ? 'Adding…' : 'Add connector'}</Button></>}
     >
       <div className="flex flex-col gap-4 max-w-[440px]">
         <TextInput label="Name" value={name} placeholder="e.g. Production DB" onChange={setName} width="100%" />
@@ -194,7 +207,7 @@ function AddConnectorDialog({ kinds, onSubmit, onClose }: {
 }
 
 function SyncsPanel({ connector }: { connector: DataConnector }) {
-  const { syncs, loading, create, update, remove, run } = useConnectorSyncs(connector.id);
+  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id);
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
   const [adding, setAdding] = useState(false);
@@ -269,6 +282,21 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Last run',
       width: { type: 'proportional', value: 2, minWidth: 150 },
       renderCell: (s) => {
+        // A live receipt outranks the sync's last_* columns: those only move
+        // when the run finishes, so a queued/running run would otherwise read
+        // as its predecessor's outcome.
+        const live = s.latest_run;
+        if (live && (live.status === 'queued' || live.status === 'running')) {
+          return (
+            <span style={{ color: 'var(--color-text-secondary)' }}>
+              {live.status === 'queued' ? 'queued' : `running · ${formatCompact(live.rows)} rows`}
+              {live.cancel_requested ? ' · cancelling' : ''} · {formatRelative(live.queued_at)}
+            </span>
+          );
+        }
+        if (live && live.status === 'cancelled') {
+          return <span className="text-[var(--color-text-disabled)]">cancelled · {formatRelative(live.queued_at)}</span>;
+        }
         if (!s.last_run_at) return <span className="text-[var(--color-text-disabled)]">never</span>;
         if (s.last_status === 'error') {
           // A run that landed rows before it failed is partial, not a clean
@@ -298,7 +326,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Enabled',
       width: { type: 'pixel', value: 72 },
       renderCell: (s) => (
-        <Button variant="ghost" size="sm" onClick={() => void update.mutate({ id: s.id, input: syncInputOf(s, { enabled: !s.enabled }) })}>
+        <Button variant="ghost" size="sm" onClick={() => void setEnabled.mutate({ sync: s, enabled: !s.enabled })}>
           {s.enabled ? 'On' : 'Off'}
         </Button>
       ),
@@ -314,25 +342,34 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
         <span className="flex justify-end gap-1">
           <Button variant="ghost" size="sm" onClick={() => setPreviewing(s)}>Preview</Button>
           <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setRunning(s.id);
-              void run.mutateAsync({ id: s.id, idempotencyKey: newIdempotencyKey() }).then((r) => {
-                if (r && !r.ok && r.error) setError(`Sync failed: ${r.error}`);
-              }).finally(() => setRunning(null));
-            }}
-          >
-            {running === s.id ? 'Running…' : 'Run now'}
-          </Button>
+          {s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running') ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={s.latest_run.cancel_requested}
+              onClick={() => void cancel.mutate(s.latest_run!.id)}
+            >
+              {s.latest_run.cancel_requested ? 'Cancelling…' : 'Cancel'}
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setRunning(s.id);
+                void run.mutateAsync({ id: s.id, idempotencyKey: newIdempotencyKey() }).finally(() => setRunning(null));
+              }}
+            >
+              {running === s.id ? 'Running…' : 'Run now'}
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={() => void remove.mutate(s.id)}>
             <span style={{ color: 'var(--danger)' }}>Delete</span>
           </Button>
         </span>
       ),
     },
-    // update/run/remove are react-query mutations (stable identities).
+    // update/run/cancel/remove are react-query mutations (stable identities).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [running, setError]);
 

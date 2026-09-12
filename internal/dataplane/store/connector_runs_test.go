@@ -97,6 +97,55 @@ func TestConnectorRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestLatestConnectorRunsForProject(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	t.Setenv("AGENT_KEY_ENC_SECRET", "connector-runs-batch-test-secret")
+	userID, projectID := seedConvProject(t, s)
+	dc, err := s.CreateDataConnector(ctx, userID, projectID, "src", "postgres", "postgres://x")
+	if err != nil {
+		t.Fatalf("connector: %v", err)
+	}
+	firstSync, err := s.CreateConnectorSync(ctx, userID, projectID, dc.ID, ConnectorSyncInput{
+		SourceTable: "users", KeyColumn: "id", CursorColumn: "updated_at", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	secondSync, err := s.CreateConnectorSync(ctx, userID, projectID, dc.ID, ConnectorSyncInput{
+		SourceTable: "orders", KeyColumn: "id", CursorColumn: "updated_at", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	firstRun, _, err := s.EnqueueConnectorRun(ctx, projectID, firstSync.ID, "first-1")
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, err := s.CancelConnectorRun(ctx, projectID, firstRun.ID); err != nil {
+		t.Fatalf("cancel first run: %v", err)
+	}
+	newestFirst, _, err := s.EnqueueConnectorRun(ctx, projectID, firstSync.ID, "first-2")
+	if err != nil {
+		t.Fatalf("newest first run: %v", err)
+	}
+	secondRun, _, err := s.EnqueueConnectorRun(ctx, projectID, secondSync.ID, "second-1")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	runs, err := s.LatestConnectorRunsForProject(ctx, projectID, []string{firstSync.ID, secondSync.ID, "00000000-0000-0000-0000-000000000000"})
+	if err != nil {
+		t.Fatalf("latest batch: %v", err)
+	}
+	if runs[firstSync.ID].ID != newestFirst.ID || runs[secondSync.ID].ID != secondRun.ID {
+		t.Fatalf("latest batch = %+v, want first=%s second=%s", runs, newestFirst.ID, secondRun.ID)
+	}
+	if _, found := runs["00000000-0000-0000-0000-000000000000"]; found {
+		t.Fatalf("missing sync unexpectedly has a run: %+v", runs)
+	}
+}
+
 func TestConnectorRunPauseOrdering(t *testing.T) {
 	s := openConvTestStore(t)
 	ctx := context.Background()

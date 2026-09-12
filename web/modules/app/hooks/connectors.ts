@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, apiErrorMessage, newIdempotencyKey, type ConnectorSyncInput } from '@/lib/api';
+import { AgentRayAPI, ApiError, apiErrorMessage, newIdempotencyKey, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 // useConnectors drives the Data connectors settings tab: the project's
@@ -45,9 +45,11 @@ export function useConnectors() {
   };
 }
 
-// useConnectorSyncs lists one connector's table syncs (with run status) and
-// exposes create / update / delete / run-now mutations. Run-now is synchronous
-// on the API side, so its success invalidation already shows the run outcome.
+// useConnectorSyncs lists one connector's table syncs through the shared
+// source_status operation — each row carries its latest durable run receipt —
+// and exposes create / update / delete / run-now / cancel / pause mutations.
+// While any run is queued or running the query polls so the receipt's
+// terminal state (and the sync's last_* columns) arrive without a refresh.
 export function useConnectorSyncs(connectorID: string | null) {
   const queryClient = useQueryClient();
   const projectID = useAuthStore((s) => s.project?.id);
@@ -57,6 +59,10 @@ export function useConnectorSyncs(connectorID: string | null) {
     queryKey: ['connector-syncs', projectID, connectorID],
     queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID!),
     enabled: !!projectID && !!connectorID,
+    refetchInterval: (q) =>
+      (q.state.data?.syncs ?? []).some((s) => s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running'))
+        ? 2000
+        : false,
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
@@ -79,11 +85,30 @@ export function useConnectorSyncs(connectorID: string | null) {
     onError: (e) => setError(apiErrorMessage(e, 'Unable to delete sync')),
   });
 
+  // run-now enqueues a durable run and returns its receipt; the poll above
+  // tracks it to a terminal state. Typed conflict means the sync is paused;
+  // retryable means engine capacity.
   const run = useMutation({
     mutationFn: (input: { id: string; idempotencyKey: string }) =>
       new AgentRayAPI(projectID!).runConnectorSync(input.id, { idempotencyKey: input.idempotencyKey }),
     onSuccess: invalidate,
     onError: (e) => setError(apiErrorMessage(e, 'Unable to run sync')),
+  });
+
+  const cancel = useMutation({
+    mutationFn: (runID: string) => new AgentRayAPI(projectID!).cancelConnectorRun(runID),
+    onSuccess: invalidate,
+    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to cancel run'),
+  });
+
+  const setEnabled = useMutation({
+    mutationFn: ({ sync, enabled }: { sync: ConnectorSync; enabled: boolean }) =>
+      new AgentRayAPI(projectID!).setConnectorSyncEnabled(sync, enabled),
+    onSuccess: invalidate,
+    onError: (e) => {
+      if (e instanceof ApiError && e.kind === 'conflict') void invalidate();
+      setError(apiErrorMessage(e, 'Unable to update sync'));
+    },
   });
 
   return {
@@ -93,6 +118,8 @@ export function useConnectorSyncs(connectorID: string | null) {
     update,
     remove,
     run,
+    cancel,
+    setEnabled,
   };
 }
 

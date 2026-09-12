@@ -246,6 +246,44 @@ func registerCredentialRoutes(e *echo.Echo, store *storage.Store) {
 		return c.JSON(http.StatusCreated, map[string]any{"credential": cred})
 	})
 
+	// source-connectors is the atomic session-only bridge used when a reader
+	// enters a DSN in the Connectors tab. It deliberately does not join
+	// /api/op/create_source: that operation accepts only credential_id for
+	// MCP/CLI/runtime safety, while this route is the one place DSN material
+	// may enter. The idempotency key makes an ambiguous response replay the
+	// same connector instead of leaving an orphan credential or duplicating it.
+	e.POST("/api/projects/:project_id/source-connectors", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			Name           string `json:"name"`
+			Kind           string `json:"kind"`
+			DSN            string `json:"dsn"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		if strings.TrimSpace(payload.IdempotencyKey) == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "idempotency_key is required")
+		}
+		connector, err := store.CreateSourceConnectorIdempotent(
+			c.Request().Context(),
+			ctx.User.ID,
+			c.Param("project_id"),
+			strings.TrimSpace(payload.Name),
+			strings.TrimSpace(payload.Kind),
+			payload.DSN,
+			strings.TrimSpace(payload.IdempotencyKey),
+		)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return c.JSON(http.StatusCreated, map[string]any{"connector": connector})
+	})
+
 	e.DELETE("/api/projects/:project_id/source-credentials/:credential_id", func(c echo.Context) error {
 		ctx, err := authFromRequest(c, store)
 		if err != nil {

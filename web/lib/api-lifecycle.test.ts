@@ -59,28 +59,26 @@ describe('lifecycle mutation wire shape', () => {
     for (const c of calls) expect(c.url).toContain('project_id=p1');
   });
 
-  it('passes the intent key through connector create and run-now', async () => {
-    const calls = mockFetch(200, { credential: { id: 'cred-1' } });
+  it('passes the intent key through atomic connector create and run-now', async () => {
+    const calls = mockFetch(200, { connector: { id: 'x1' } });
     const api = new AgentRayAPI('p1');
-    // createConnector stores the DSN as a source credential first, then
-    // creates the connector referencing it — the key rides the mutation.
-    let n = 0;
-    vi.stubGlobal('fetch', async (url: string | URL, init: RequestInit = {}) => {
-      calls.push({ url: String(url), init });
-      n += 1;
-      const payload = n === 1 ? { credential: { id: 'cred-1' } } : { connector: { id: 'x1' } };
-      return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    await api.createConnector(
+      { name: 'pg', kind: 'postgres', dsn: 'postgres://u:p@h/d' },
+      { idempotencyKey: 'cc1' },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('/api/projects/p1/source-connectors');
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      name: 'pg',
+      kind: 'postgres',
+      dsn: 'postgres://u:p@h/d',
+      idempotency_key: 'cc1',
     });
-    await api.createConnector({ name: 'pg', kind: 'postgres', dsn: 'postgres://u:p@h/d' }, { idempotencyKey: 'cc1' });
-    expect(calls[0].url).toContain('/api/projects/p1/source-credentials');
-    expect(calls[1].url).toContain('/api/connectors');
-    expect(calls[1].url).toContain('project_id=p1');
-    expect(JSON.parse(String(calls[1].init.body)).idempotency_key).toBe('cc1');
 
     await api.runConnectorSync('s1', { idempotencyKey: 'rn1' });
-    expect(calls[2].url).toContain('/api/connector-syncs/s1/run');
-    expect(calls[2].url).toContain('project_id=p1');
-    expect(JSON.parse(String(calls[2].init.body))).toEqual({ idempotency_key: 'rn1' });
+    expect(calls[1].url).toContain('/api/op/run_source');
+    expect(calls[1].url).toContain('project_id=p1');
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ sync_id: 's1', idempotency_key: 'rn1' });
   });
 
   it('omitting opts keeps the pre-revision wire shape', async () => {

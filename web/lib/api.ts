@@ -2,11 +2,13 @@
 // to distinguish "forbidden" from "failed" (the overview's missing-access
 // state) must not parse the message text — the status is the contract.
 export class APIError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, message: string, code = '') {
     super(message);
     this.name = 'APIError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -763,6 +765,26 @@ export type AlertEvent = {
 
 // --- Data connectors ---
 
+
+// ConnectorRun is the durable sync-run receipt the run_source / source_status /
+// cancel_source_run operations return: queued → running → terminal, with a
+// cancel flag the worker polls.
+export type ConnectorRun = {
+  id: string;
+  project_id: string;
+  sync_id: string;
+  connector_id: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string;
+  idempotency_key?: string;
+  cancel_requested: boolean;
+  rows: number;
+  cursor?: string;
+  cursor_key?: string;
+  error?: string;
+  queued_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
 export type DataConnector = {
   id: string;
   project_id: string;
@@ -808,6 +830,10 @@ export type ConnectorSync = {
   revision: number;
   created_at: string;
   updated_at: string;
+  // latest_run is the sync's most recent durable run receipt, joined by the
+  // source_status operation — queued/running rows are what the UI polls and
+  // offers to cancel.
+  latest_run?: ConnectorRun | null;
 };
 
 // ConnectorSyncInput is the operator-editable subset of a sync config — the
@@ -1700,8 +1726,8 @@ function agentQuery(agentID: string): string {
 // the typed `kind`. `request` throws this classified subclass.
 export class ApiError extends APIError {
   readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
-  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error') {
-    super(status, message);
+  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error', code = '') {
+    super(status, message, code);
     this.name = 'ApiError';
     this.kind = kind;
   }
@@ -2105,20 +2131,20 @@ export class AgentRayAPI {
     return this.get<{ connectors: DataConnector[]; kinds: string[] }>('/api/connectors');
   }
 
-  // New connectors reference a source credential: the DSN is stored once via
-  // the session-only credential route and the connector carries only its ID.
-  async createConnector(input: { name: string; kind: string; dsn: string }, opts: { idempotencyKey?: string } = {}) {
-    const cred = await this.post<{ credential: { id: string } }>(
-      `/api/projects/${this.projectID}/source-credentials`,
-      { name: input.name, dsn: input.dsn },
+  // A DSN may enter only through the session-only source-connectors bridge.
+  // It atomically stores the encrypted credential and creates the connector
+  // under this caller-provided idempotency key: retry the SAME key after an
+  // ambiguous response and the server replays the original connector.
+  createConnector(input: { name: string; kind: string; dsn: string }, opts: { idempotencyKey: string }) {
+    return this.post<{ connector: DataConnector }>(
+      `/api/projects/${this.projectID}/source-connectors`,
+      {
+        name: input.name,
+        kind: input.kind,
+        dsn: input.dsn,
+        idempotency_key: opts.idempotencyKey,
+      },
     );
-
-    return this.post<{ connector: DataConnector }>('/api/connectors', {
-      name: input.name,
-      kind: input.kind,
-      credential_id: cred.credential.id,
-      idempotency_key: opts.idempotencyKey,
-    });
   }
 
   // --- Shared operations (POST /api/op/<name>) ---
@@ -2164,15 +2190,22 @@ export class AgentRayAPI {
   }
 
   testConnector(id: string) {
-    return this.post<{ ok: boolean; error?: string }>(`/api/connectors/${id}/test`, {});
+    return this.callOp<{ ok: boolean; error?: string }>('test_source', { connector_id: id });
   }
 
   connectorSchema(id: string) {
     return this.get<{ tables: ConnectorTable[] }>(`/api/connectors/${id}/schema`);
   }
 
-  connectorSyncs(connectorID: string) {
-    return this.get<{ syncs: ConnectorSync[] }>(`/api/connectors/${connectorID}/syncs`);
+  // connectorSyncs reads through the shared source_status operation so the
+  // list carries each sync's latest durable run receipt — the same rows the
+  // agent and CLI see, including live queued/running state.
+  async connectorSyncs(connectorID: string) {
+    const res = await this.callOp<{ syncs?: { sync: ConnectorSync; latest_run?: ConnectorRun }[] }>(
+      'source_status',
+      { connector_id: connectorID },
+    );
+    return { syncs: (res.syncs ?? []).map((s) => ({ ...s.sync, latest_run: s.latest_run ?? null })) };
   }
 
   createConnectorSync(connectorID: string, input: ConnectorSyncInput) {
@@ -2190,8 +2223,31 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/connector-syncs/${syncID}`), { method: 'DELETE' });
   }
 
+  // runConnectorSync enqueues a durable run through the shared run_source
+  // operation and returns its receipt — the caller polls source_status for
+  // queued → running → terminal and can cancel through cancelConnectorRun.
   runConnectorSync(syncID: string, opts: { idempotencyKey?: string } = {}) {
-    return this.post<{ ok: boolean; error?: string }>(`/api/connector-syncs/${syncID}/run`, { idempotency_key: opts.idempotencyKey });
+    return this.callOp<{ run: ConnectorRun; enqueued: boolean }>('run_source', {
+      sync_id: syncID,
+      idempotency_key: opts.idempotencyKey ?? newIdempotencyKey(),
+    });
+  }
+
+  // cancelConnectorRun asks a queued/running run to stop — idempotent; a
+  // finished run returns its terminal state unchanged.
+  cancelConnectorRun(runID: string) {
+    return this.callOp<ConnectorRun>('cancel_source_run', { run_id: runID });
+  }
+
+  // setConnectorSyncEnabled pauses/resumes through the shared pause_source
+  // operation — revision-checked and idempotent, unlike the full-row PUT.
+  setConnectorSyncEnabled(sync: ConnectorSync, enabled: boolean) {
+    return this.callOp<ConnectorSync>('pause_source', {
+      sync_id: sync.id,
+      paused: !enabled,
+      revision: sync.revision,
+      idempotency_key: newIdempotencyKey(),
+    });
   }
 
   draftConnectorSyncs(connectorID: string, prompt: string) {
@@ -2940,13 +2996,16 @@ export class AgentRayAPI {
     }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message = payload.message || payload.error || `AgentRay API returned ${response.status}`;
+      const message = payload.error || payload.message || `AgentRay API returned ${response.status}`;
+      const wireKind = typeof payload.code === 'string' ? payload.code : '';
       const kind =
-        response.status === 409 ? 'conflict'
-        : response.status === 404 ? 'not_found'
-        : response.status === 429 || response.status >= 500 ? 'retryable'
-        : 'error';
-      throw new ApiError(message, response.status, kind);
+        wireKind === 'conflict' || wireKind === 'not_found' || wireKind === 'retryable'
+          ? wireKind
+          : response.status === 409 ? 'conflict'
+          : response.status === 404 ? 'not_found'
+          : response.status === 429 || response.status >= 500 ? 'retryable'
+          : 'error';
+      throw new ApiError(message, response.status, kind, wireKind);
     }
     return payload as T;
   }

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,6 +87,84 @@ RETURNING id::text, project_id::text, name, created_by::text, created_at, revoke
 		return SourceCredential{}, err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "source_credential.create", "project", project.ID, project.Name, "{}")
+	return c, nil
+}
+
+// CreateSourceConnectorIdempotent is the session-only secret-entry bridge for
+// the web Connectors tab. It encrypts the DSN, inserts its write-only
+// credential, and references it from a connector in the SAME idempotent
+// transaction: a failed connector insert rolls the credential back, while a
+// response lost after commit safely replays the original connector with the
+// caller's idempotency key. The shared create_source operation remains the
+// credential-ID contract for CLI/MCP/runtime callers; it never accepts DSNs.
+func (s *Store) CreateSourceConnectorIdempotent(ctx context.Context, userID, projectID, name, kind, dsn, idemKey string) (DataConnector, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	canManage, err := s.userCanManageWorkspace(ctx, userID, project.WorkspaceID)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	if !canManage {
+		return DataConnector{}, errAgentForbidden
+	}
+	if len(dsn) < 8 {
+		return DataConnector{}, fmt.Errorf("credential material looks too short to be a DSN")
+	}
+	if !connectorKindKnown(kind) {
+		return DataConnector{}, fmt.Errorf("unknown connector kind %q", kind)
+	}
+	if name == "" {
+		name = "Untitled source"
+	}
+	ciphertext, err := encryptAgentKey(dsn)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	request, err := json.Marshal(struct {
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+		DSN  string `json:"dsn"`
+	}{Name: name, Kind: kind, DSN: dsn})
+	if err != nil {
+		return DataConnector{}, err
+	}
+	requestHash := fmt.Sprintf("%x", sha256.Sum256(request))
+
+	raw, err := s.runIdempotent(ctx, projectID, "create_source_connector", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			var credentialID string
+			if err := q.QueryRow(ctx, `
+INSERT INTO source_credentials (project_id, name, dsn_ciphertext, created_by)
+VALUES ($1, $2, $3, $4)
+RETURNING id::text`, projectID, name, ciphertext, userID).Scan(&credentialID); err != nil {
+				return nil, err
+			}
+			var c DataConnector
+			if err := q.QueryRow(ctx, `
+INSERT INTO data_connectors (project_id, name, kind, credential_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
+				projectID, name, kind, credentialID).
+				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt); err != nil {
+				return nil, err
+			}
+			if _, err := q.Exec(ctx, `
+INSERT INTO workspace_audit_logs (workspace_id, actor_id, action, target_type, target_id, target_label, metadata)
+VALUES ($1, $2, $3, $4, $5::uuid, $6, '{}'::jsonb)`,
+				project.WorkspaceID, userID, "source_connector.create", "connector", c.ID, c.Name); err != nil {
+				return nil, err
+			}
+			return json.Marshal(c)
+		})
+	if err != nil {
+		return DataConnector{}, err
+	}
+	var c DataConnector
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return DataConnector{}, fmt.Errorf("stored source connector receipt unreadable: %w", err)
+	}
 	return c, nil
 }
 

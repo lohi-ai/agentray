@@ -204,12 +204,12 @@ func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, 
 	if err != nil {
 		// Auth failures are reported as a tool error (isError) rather than a
 		// protocol error, so the model sees the reason and can surface it.
-		return ok(req.ID, errorResult("authentication failed: "+httpErrMessage(err)))
+		return ok(req.ID, errorResult("authentication failed: "+httpErrMessage(err), ""))
 	}
 	// tools/call re-authorizes by name: a principal cannot invoke an operation
 	// tools/list never advertised to it.
 	if !r.Authorize(principal, params.Name) {
-		return ok(req.ID, errorResult("credential may not invoke "+params.Name))
+		return ok(req.ID, errorResult("credential may not invoke "+params.Name, ""))
 	}
 
 	args := string(params.Arguments)
@@ -219,7 +219,8 @@ func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, 
 	cc := CallContext{ProjectID: principal.ProjectID, Deps: deps, Principal: principal}
 	out, err := spec.OpInvoke(c.Request().Context(), cc, args)
 	if err != nil {
-		return ok(req.ID, errorResult(err.Error()))
+		err = r.classifyError(err)
+		return ok(req.ID, errorResult(err.Error(), KindOf(err)))
 	}
 
 	result := mcpToolResult{
@@ -236,11 +237,18 @@ func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, 
 	return ok(req.ID, result)
 }
 
-func errorResult(msg string) mcpToolResult {
-	return mcpToolResult{
+// errorResult builds an isError tool result. The kind lands in _meta.error_code
+// so an MCP client can branch on the same taxonomy the REST body carries —
+// the text keeps the "kind: message" prefix for text-only consumers.
+func errorResult(msg string, kind ErrorKind) mcpToolResult {
+	res := mcpToolResult{
 		Content: []mcpContent{{Type: "text", Text: msg}},
 		IsError: true,
 	}
+	if kind != "" {
+		res.Meta = map[string]any{"error_code": string(kind)}
+	}
+	return res
 }
 
 func ok(id json.RawMessage, result any) jsonRPCResponse {

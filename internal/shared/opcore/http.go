@@ -1,6 +1,7 @@
 package opcore
 
 import (
+	"errors"
 	"io"
 	"net/http"
 
@@ -33,10 +34,15 @@ func MountHTTP(g *echo.Group, r *Registry, deps any, resolve PrincipalResolver) 
 			cc := CallContext{ProjectID: principal.ProjectID, Deps: deps, Principal: principal}
 			out, err := spec.OpInvoke(c.Request().Context(), cc, string(body))
 			if err != nil {
+				err = r.classifyError(err)
+				var oe *OpError
+				if errors.As(err, &oe) {
+					return c.JSON(statusForKind(oe.Kind), opErrorBody{Error: oe.Message, Code: string(oe.Kind)})
+				}
 				if he, ok := r.MapError(err).(*echo.HTTPError); ok {
 					return he
 				}
-				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+				return c.JSON(http.StatusBadRequest, opErrorBody{Error: err.Error()})
 			}
 			return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, []byte(out))
 		})
