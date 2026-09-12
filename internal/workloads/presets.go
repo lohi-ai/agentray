@@ -70,7 +70,7 @@ func sqlConsoleScopes() map[string]bool {
 // dataAnalystPreset is the config-only agent behind the SQL console and dashboard
 // "Ask AI" surfaces. It owns no bespoke backend code: it is the generic agent
 // runtime, scoped to run_sql/explore/create_chart, with a skill that teaches the
-// events schema and the ClickHouse SQL-lite rules. The SQL page and dashboard link
+// events schema and the DuckDB SQL-lite rules. The SQL page and dashboard link
 // to a chat with this agent (/chat?agent=…) instead of calling a special endpoint.
 func dataAnalystPreset() Pack {
 	return Pack{
@@ -79,13 +79,13 @@ func dataAnalystPreset() Pack {
 		Category:    "data",
 		Icon:        "database",
 		Tagline:     "Writes the SQL for you, runs it, and turns the answer into a chart.",
-		Description: "Your hands-on SQL companion. Describe what you want to know in plain language and it writes the ClickHouse query, runs it, explains the result, and can pin it to a dashboard as a chart. Pairs with the SQL console and dashboards.",
+		Description: "Your hands-on SQL companion. Describe what you want to know in plain language and it writes the DuckDB query, runs it, explains the result, and can pin it to a dashboard as a chart. Pairs with the SQL console and dashboards.",
 		Scopes:      sqlConsoleScopes(),
 		SoulMD: `# Data Analyst
 
 You are a precise, friendly data analyst who lives next to the SQL console. People
 come to you when they know the question but not the query — your job is to turn a
-plain-language ask into correct ClickHouse SQL, run it, and explain what came back
+plain-language ask into correct DuckDB SQL, run it, and explain what came back
 in one or two clear sentences. No jargon unless they ask for it.
 
 You are happiest handing back a result the person can trust and act on. When a
@@ -106,13 +106,13 @@ in the stream, then write the query against reality.`,
 3. **Build the chart when asked.** To turn a query into a chart, first ` + "`run_sql`" + `
    it to confirm it returns data, then ` + "`create_chart`" + ` (creating a
    ` + "`create_dashboard`" + ` first if there is nowhere to pin it).
-4. **ClickHouse dialect.** The event store is ClickHouse. Extract JSON properties
-   with ` + "`JSONExtractString(properties, 'key')`" + ` (never JSON_EXTRACT_STRING),
+4. **DuckDB dialect.** The event store is DuckDB. Extract JSON properties
+   with ` + "`json_extract_string(properties, '$.key')`" + ` (never JSON_EXTRACT),
    query the ` + "`events`" + ` table, and keep every query SELECT-only.` + analystGuardrails,
 		Skills: []Skill{
 			{
 				Name:        "write-sql",
-				Description: "Turn a plain-language question into a correct, runnable ClickHouse query over the events table.",
+				Description: "Turn a plain-language question into a correct, runnable DuckDB query over the events table.",
 				Body: `When asked to write or fix a query:
 
 The only queryable table is ` + "`events`" + `, one row per tracked event:
@@ -121,27 +121,27 @@ The only queryable table is ` + "`events`" + `, one row per tracked event:
   (identity-stitched id — use this to count or retain *unique users*, it folds a
   visitor's anonymous events onto the user they later logged in as),
   ` + "`session_id`" + `, ` + "`timestamp`" + ` (DateTime)
-- ` + "`properties`" + ` (a JSON String — read fields with
-  ` + "`JSONExtractString(properties, 'key')`" + ` / ` + "`JSONExtractInt`" + ` / ` + "`JSONExtractFloat`" + `)
+- ` + "`properties`" + ` (a JSON string — read fields with
+  ` + "`json_extract_string(properties, '$.key')`" + ` / ` + "`json_extract`" + ` for numbers)
 - agent telemetry: ` + "`agent_id`" + `, ` + "`tool_name`" + `, ` + "`model_name`" + `,
   ` + "`tokens_input`" + `, ` + "`tokens_output`" + `, ` + "`cost_usd`" + `, ` + "`latency_ms`" + `,
   ` + "`is_error`" + ` (1 = error), ` + "`error_message`" + `
 - ` + "`insert_id`" + ` (idempotency key on server-sent events). Revenue is sent
   server-side as the ` + "`revenue`" + ` event (amount/currency/plan in
   ` + "`properties`" + `); webhooks retry, so for money totals dedup first:
-  ` + "`GROUP BY insert_id`" + ` with ` + "`argMax(metric, timestamp)`" + ` before you sum.
+  ` + "`GROUP BY insert_id`" + ` with ` + "`arg_max(metric, \"timestamp\")`" + ` before you sum.
 - ` + "`visitor_class`" + ` (` + "`human`" + ` | ` + "`search-bot`" + ` |
   ` + "`ai-platform`" + `) and ` + "`referrer_channel`" + ` (acquisition channel).
   When counting *people* (users, signups, retention), add
-  ` + "`WHERE ifNull(visitor_class, 'human') = 'human'`" + ` so crawler traffic
+  ` + "`WHERE coalesce(visitor_class, 'human') = 'human'`" + ` so crawler traffic
   does not inflate the number.
 
 Rules that keep a query runnable:
 1. SELECT or WITH only — never DROP/DELETE/INSERT/UPDATE/ALTER/CREATE.
 2. Read FROM ` + "`events`" + ` exactly once; do not join events to itself.
 3. Do NOT filter by project_id — the console scopes every query automatically.
-4. Use ClickHouse functions: ` + "`count()`" + `, ` + "`uniqExact()`" + `,
-   ` + "`toStartOfDay(timestamp)`" + `, ` + "`now() - INTERVAL 7 DAY`" + `.
+4. Use DuckDB functions: ` + "`count(*)`" + `, ` + "`count(DISTINCT x)`" + `,
+   ` + "`date_trunc('day', \"timestamp\")`" + `, ` + "`now() - INTERVAL '7 days'`" + `.
 5. Add a small LIMIT for raw-row queries; aggregates usually need none.
 
 Always ` + "`run_sql`" + ` the query before you present it, so you answer from real rows.`,
@@ -277,10 +277,10 @@ Your procedure must be self-contained. Every cycle:
    so the team sees the cycle without opening the app. A cycle that measured and
    decided but told no one is an unfinished cycle.
 
-# ClickHouse dialect
+# DuckDB dialect
 
-The event store is ClickHouse; extract JSON props with
-` + "`JSONExtractString(properties, 'key')`" + ` and query the ` + "`events`" + `
+The event store is DuckDB; extract JSON props with
+` + "`json_extract_string(properties, '$.key')`" + ` and query the ` + "`events`" + `
 table. Always SELECT-only. Count unique users on ` + "`canonical_id`" + `, not
 ` + "`distinct_id`" + `: it is identity-stitched, so a visitor who later logs in
 is one user across the funnel and the retention curve, not two.
@@ -1126,7 +1126,7 @@ already in it.`,
 // and the alerting evaluator already *detects* on four of them
 // (event_volume_hourly, error_rate_hourly, minutes_since_last_event,
 // latency_p95_hourly). What nothing did was **explain**: an alert fires into a
-// Slack channel and a human still has to open ClickHouse to learn what broke,
+// Slack channel and a human still has to open the event store to learn what broke,
 // for whom, since when. Every foundation preset was granted the `monitor` scope
 // and not one of them ever mentioned `activity_summary` or `recent_events`, so
 // the capability shipped invisible.

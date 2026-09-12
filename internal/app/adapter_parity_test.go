@@ -457,7 +457,7 @@ func sourceJourney(t *testing.T, adapter string, s *storage.Store, userID, proje
 // replay, different-payload conflict, missing and foreign ids, reversible
 // archive/restore, and archived-source run fencing — and must produce the same
 // typed outcome class and the same receipts. Needs the compose Postgres +
-// ClickHouse; skips without them.
+// DuckDB; skips without them.
 func TestLifecycleParityAcrossAdapters(t *testing.T) {
 	t.Setenv("AGENT_KEY_ENC_SECRET", "lifecycle-parity-test-secret")
 	s := openAppTestStore(t)

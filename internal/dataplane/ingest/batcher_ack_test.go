@@ -59,7 +59,7 @@ func TestBatcherRetriesThenAcks(t *testing.T) {
 	var calls atomic.Int32
 	sink := func(_ context.Context, _ []storage.Event) error {
 		if calls.Add(1) < 3 {
-			return errors.New("clickhouse blip")
+			return errors.New("duckdb blip")
 		}
 		return nil
 	}

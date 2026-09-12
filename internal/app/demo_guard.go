@@ -119,7 +119,7 @@ var writeClasses = map[string]writeClass{
 	"/api/agent/hook/:token": writeUnscoped,
 
 	// --- reads that carry a body. Both run SELECT-only SQL on the
-	// least-privilege ClickHouse connection (store.RunSQL → scopedReadonlySQL),
+	// least-privilege DuckDB connection (store.RunSQL → scopedReadonlySQL),
 	// so they are the analytics surface, not a mutation. ---
 	"/api/sql/run":                     writeReadOnly,
 	"/api/saved-queries/:query_id/run": writeReadOnly,

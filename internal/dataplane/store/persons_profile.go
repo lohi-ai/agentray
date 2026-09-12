@@ -61,7 +61,7 @@ type eventProps struct {
 // earliest). Each event's raw distinct_id is mapped to its stitched canonical id
 // via resolve (nil = identity), so anonymous and logged-in ids for the same person
 // collapse into one delta — matching the canonical key the read path groups on. It
-// is pure so the merge rules can be unit-tested without ClickHouse.
+// is pure so the merge rules can be unit-tested without DuckDB.
 func extractPersonDeltas(events []Event, resolve func(projectID, distinctID string) string) map[personKey]*personDelta {
 	out := map[personKey]*personDelta{}
 	for _, e := range events {

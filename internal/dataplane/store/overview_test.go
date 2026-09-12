@@ -7,7 +7,7 @@ import (
 
 // overview_test.go locks the metric-semantics contract: range boundaries,
 // state mapping, and per-cohort-day retention maturity. The live fixture test
-// (overview_live_test.go) proves the queries against real ClickHouse.
+// (overview_live_test.go) proves the queries against real DuckDB.
 
 func TestOverviewRangeCompleteDays(t *testing.T) {
 	// 2026-09-12 14:30 UTC: "7d" must end at Sep-12 00:00, covering Sep 5–11.

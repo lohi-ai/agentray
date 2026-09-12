@@ -10,23 +10,15 @@ import (
 // stitching, so one human who browsed anonymously then logged in counted twice,
 // and no bot filter, so every crawler counted as a person. Measured on real
 // data: 1,083 reported against 835 actual — 6 crawler identities and 242
-// double-counted logins.
-func TestWorkspaceCanonicalExprStitchesThroughTheDictionary(t *testing.T) {
-	s := &Store{chDatabase: "lohi_analytics"}
+// double-counted logins. Stitching now comes from the resolved_events view's
+// canonical_distinct_id column, keyed on (project_id, distinct_id) inside the
+// view so identity namespaces stay per-project.
+func TestWorkspaceCanonicalExprStitchesThroughTheView(t *testing.T) {
+	s := &Store{}
 	expr := s.workspaceCanonicalExpr("distinct_id")
 
-	if !strings.Contains(expr, "lohi_analytics.aliases_dict") {
-		t.Errorf("expression must be database-qualified, got %q", expr)
-	}
-	// The dictionary key is (project_id, distinct_id). A workspace query spans
-	// many projects, so dropping project_id from the key would resolve one
-	// project's anonymous id against another project's alias map.
-	if !strings.Contains(expr, "(project_id, distinct_id)") {
-		t.Errorf("expression must key on (project_id, distinct_id), got %q", expr)
-	}
-	// Unknown ids fall back to themselves, or every un-aliased visitor collapses.
-	if !strings.Contains(expr, "dictGetOrDefault") {
-		t.Errorf("expression must fall back to the raw id, got %q", expr)
+	if expr != "canonical_distinct_id" {
+		t.Errorf("expression must read the stitched view column, got %q", expr)
 	}
 }
 
@@ -35,17 +27,10 @@ func TestWorkspaceCanonicalExprStitchesThroughTheDictionary(t *testing.T) {
 // bind arg it would land at the wrong position and silently query the wrong
 // thing, so it must contribute none.
 func TestWorkspaceCanonicalExprBindsNoArguments(t *testing.T) {
-	s := &Store{chDatabase: "lohi_analytics"}
+	s := &Store{}
 	expr := s.workspaceCanonicalExpr("distinct_id")
 	if strings.Contains(expr, "?") {
 		t.Errorf("expression must contain no placeholders, got %q", expr)
-	}
-}
-
-func TestWorkspaceCanonicalExprWithoutADatabase(t *testing.T) {
-	s := &Store{}
-	if got, want := s.workspaceCanonicalExpr("distinct_id"), "aliases_dict"; !strings.Contains(got, want) {
-		t.Errorf("got %q, want it to reference %q", got, want)
 	}
 }
 
@@ -53,8 +38,8 @@ func TestWorkspaceCanonicalExprWithoutADatabase(t *testing.T) {
 // surface resolve identity identically. A drift here is how two screens end up
 // reporting different people counts for the same window.
 func TestWorkspaceAndProjectCanonicalExprsAgree(t *testing.T) {
-	s := &Store{chDatabase: "lohi_analytics"}
-	perProject, args := identityResolver{database: "lohi_analytics"}.canonicalExpr("distinct_id")
+	s := &Store{}
+	perProject, args := identityResolver{}.canonicalExpr("distinct_id")
 	if len(args) != 0 {
 		t.Fatalf("canonicalExpr should bind no args, got %d", len(args))
 	}
@@ -70,7 +55,7 @@ func TestWorkspaceAndProjectCanonicalExprsAgree(t *testing.T) {
 // of the store spells it.
 func TestWorkspaceFilteredWhereSpellsTheHumanFilterConsistently(t *testing.T) {
 	where, _ := workspaceFilteredWhere([]string{"p1"}, EventFilter{HumansOnly: true}, false)
-	const want = "ifNull(visitor_class, 'human') = 'human'"
+	const want = "coalesce(visitor_class, 'human') = 'human'"
 	if !strings.Contains(where, want) {
 		t.Errorf("got %q, want it to contain %q", where, want)
 	}

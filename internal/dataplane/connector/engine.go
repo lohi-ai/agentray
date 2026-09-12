@@ -55,7 +55,7 @@ type SyncJob struct {
 	CursorKey string
 }
 
-// LandedRow is one row ready for the ClickHouse landing table.
+// LandedRow is one row ready for the DuckDB landing table.
 type LandedRow struct {
 	Key      string
 	Cursor   string
@@ -259,7 +259,7 @@ func (e *Engine) CancelRun(runID string) {
 }
 
 // executeRun claims and runs one queued run end to end: open the source, pull
-// incremental batches, land them in ClickHouse, persist cursor + status on
+// incremental batches, land them in DuckDB, persist cursor + status on
 // both the run row and the sync's last_* columns. The whole run is bounded by
 // syncRunTimeout; the finish write rides an independent bounded context so a
 // timed-out run still records its outcome.

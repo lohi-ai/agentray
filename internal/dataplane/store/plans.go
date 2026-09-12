@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -473,14 +474,18 @@ FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 // run_sql — build their filter from this one function so they can never
 // disagree about which rows are deleted.
 func softDeleteCondition(column, semantics string) string {
-	// chIdentLiteral escapes backslashes before quotes — a column name like
+	// sqlQuote escapes backslashes before quotes — a column name like
 	// `a\b` or a trailing backslash must not corrupt the literal.
-	col := chIdentLiteral(column)
+	col := sqlQuote(column)
 	switch semantics {
 	case "bool_true":
-		return `JSONHas(data, '` + col + `') AND JSONExtractBool(data, '` + col + `')`
+		// json_extract on a missing key returns NULL, so the predicate is
+		// simply false for rows without the column — the job JSONHas did.
+		return `try_cast(json_extract_string(data, ` + col + `) AS BOOLEAN)`
 	case "non_null":
-		return `JSONHas(data, '` + col + `') AND JSONExtractRaw(data, '` + col + `') != 'null'`
+		// json_extract returns the JSON value; a JSON null extracts to SQL
+		// NULL, so IS NOT NULL is exactly "present and not null".
+		return `json_extract(data, ` + col + `) IS NOT NULL`
 	}
 	return ""
 }
@@ -593,33 +598,29 @@ FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID).
 
 	out := DatasetPreview{Sync: sync, Rows: []DatasetPreviewRow{}, Warnings: datasetWarnings(sync)}
 	var total uint64
-	if err := s.ch.QueryRow(ctx, `
-SELECT count(), coalesce(max(cursor), '')
-FROM external_rows FINAL
+	if err := s.duckQueryRow(ctx, `
+SELECT count(*), coalesce(max(cursor), '')
+FROM external_rows
 WHERE project_id = ? AND connector_id = ? AND table_name = ?`+softFilter,
-		sync.ProjectID, sync.ConnectorID, sync.SourceTable).
-		Scan(&total, &out.LandedWatermark); err != nil {
+		[]any{sync.ProjectID, sync.ConnectorID, sync.SourceTable},
+		&total, &out.LandedWatermark); err != nil {
 		return out, err
 	}
 	out.TotalRows = int64(total)
-	rows, err := s.ch.Query(ctx, `
-SELECT row_key, cursor, data, toString(synced_at)
-FROM external_rows FINAL
+	err = s.duckQuery(ctx, `
+SELECT row_key, cursor, data, synced_at::VARCHAR
+FROM external_rows
 WHERE project_id = ? AND connector_id = ? AND table_name = ?`+softFilter+`
 ORDER BY cursor DESC, row_key ASC
-LIMIT ?`, sync.ProjectID, sync.ConnectorID, sync.SourceTable, limit)
-	if err != nil {
-		return out, err
-	}
-	defer rows.Close()
-	for rows.Next() {
+LIMIT ?`, []any{sync.ProjectID, sync.ConnectorID, sync.SourceTable, limit}, func(rows *sql.Rows) error {
 		var r DatasetPreviewRow
 		if err := rows.Scan(&r.RowKey, &r.Cursor, &r.DataJSON, &r.SyncedAt); err != nil {
-			return out, err
+			return err
 		}
 		out.Rows = append(out.Rows, r)
-	}
-	return out, rows.Err()
+		return nil
+	})
+	return out, err
 }
 
 // CreateRecommendationIdempotent is CreateRecommendation under an idempotency

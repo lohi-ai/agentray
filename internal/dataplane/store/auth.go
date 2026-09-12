@@ -670,13 +670,14 @@ func (s *Store) WorkspaceUsage(ctx context.Context, userID string, workspaceID s
 	// are per-project — the alias dictionary is keyed that way, and nothing in the
 	// product resolves one person across two projects. Collapsing on the bare id
 	// would silently merge two projects' `user-42` into one person.
-	canonical := s.workspaceCanonicalExpr("distinct_id")
-	err = s.ch.QueryRow(ctx, `
+	// resolved_events carries the stitched canonical id — the job the alias
+	// dictionary did on ClickHouse.
+	err = s.duckQueryRow(ctx, `
 SELECT
-	count(),
-	uniqExactIf((project_id, `+canonical+`), ifNull(visitor_class, 'human') = 'human')
-FROM events
-WHERE `+where, args...).Scan(&usage.EventCount, &usage.DistinctUsers)
+	count(*),
+	count(DISTINCT (project_id, canonical_distinct_id)) FILTER (WHERE coalesce(visitor_class, 'human') = 'human')
+FROM resolved_events
+WHERE `+where, args, &usage.EventCount, &usage.DistinctUsers)
 	return usage, err
 }
 

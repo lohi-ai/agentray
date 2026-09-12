@@ -107,6 +107,13 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 // Path reports the configured database file this instance owns.
 func (d *DuckDB) Path() string { return d.path }
 
+// tmpDir returns the spill directory beside the database file, created by
+// OpenDuckDB. Sandboxes point their temp_directory at it so a big GROUP BY
+// spills to bounded disk rather than process memory.
+func (d *DuckDB) tmpDir() string {
+	return filepath.Join(filepath.Dir(d.path), "tmp")
+}
+
 // Write runs fn inside the single-writer gate on one transaction. fn receives
 // the open *sql.Tx; a nil return commits, an error rolls back. The gate is
 // context-aware so a caller whose deadline passes while queued fails instead

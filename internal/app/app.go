@@ -57,8 +57,8 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	// Durable event pipeline (default): a file-backed JetStream stream makes an
-	// HTTP 200 mean "durably queued" and the worker acks only after the ClickHouse
-	// insert lands, so a crash / restart / ClickHouse outage redelivers instead of
+	// HTTP 200 mean "durably queued" and the worker acks only after the DuckDB
+	// insert lands, so a crash / restart / DuckDB outage redelivers instead of
 	// dropping events. INGEST_JETSTREAM=false falls back to fire-and-forget core
 	// NATS for a broker without JetStream (dev/tests).
 	var (

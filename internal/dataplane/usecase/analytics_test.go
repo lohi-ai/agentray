@@ -102,7 +102,7 @@ func TestSubmitRecommendationIsTerminal(t *testing.T) {
 	}
 }
 
-func TestRunSQLNormalizesClickHouseDialect(t *testing.T) {
+func TestRunSQLNormalizesDialect(t *testing.T) {
 	repo := &fakeRepo{}
 	reg := Registry()
 	spec, _ := reg.Get("run_sql")
@@ -114,7 +114,7 @@ func TestRunSQLNormalizesClickHouseDialect(t *testing.T) {
 	if _, err := spec.OpInvoke(context.Background(), cc, string(in)); err != nil {
 		t.Fatalf("OpInvoke: %v", err)
 	}
-	want := "SELECT JSONExtractString(properties, 'path') FROM events"
+	want := "SELECT json_extract_string(properties, 'path') FROM events"
 	if repo.gotSQL != want {
 		t.Errorf("normalized SQL = %q, want %q", repo.gotSQL, want)
 	}

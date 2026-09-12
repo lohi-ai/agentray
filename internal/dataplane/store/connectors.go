@@ -12,7 +12,7 @@ import (
 )
 
 // Data connectors (parent plan bs-eano39vq §1): operator-configured external
-// data sources whose rows are pulled into the ClickHouse external_rows landing
+// data sources whose rows are pulled into the DuckDB external_rows landing
 // table on a schedule, where run_sql can query them next to events. The DSN is
 // AES-encrypted with the same agentEncKey path as agent secrets and is
 // write-only over the API — list/read surfaces return only its presence.
@@ -204,7 +204,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 }
 
 // DeleteDataConnector removes a connector and its syncs (owner/admin only).
-// Landed rows in ClickHouse are kept — they are the analytical record.
+// Landed rows in DuckDB are kept — they are the analytical record.
 func (s *Store) DeleteDataConnector(ctx context.Context, userID, projectID, connectorID string) error {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {

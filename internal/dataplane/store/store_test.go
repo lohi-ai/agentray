@@ -8,14 +8,14 @@ import (
 
 func TestScopedReadonlySQLScopesEventsTable(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
-		"SELECT event_type, count() AS total_events FROM events WHERE project_id != {project_id} GROUP BY event_type",
+		"SELECT event_type, count(*) AS total_events FROM events WHERE project_id != {project_id} GROUP BY event_type",
 		"project-1",
-		identityResolver{}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
 	}
-	if !strings.Contains(query, "WITH scoped_events AS (SELECT *, dictGetOrDefault('aliases_dict', 'canonical_id', (project_id, distinct_id), distinct_id) AS canonical_id FROM events WHERE project_id = ?)") {
+	if !strings.Contains(query, "WITH scoped_events AS (SELECT *, canonical_distinct_id AS canonical_id FROM resolved_events WHERE project_id = ?)") {
 		t.Fatalf("query did not scope events table: %s", query)
 	}
 	if !strings.Contains(query, "FROM scoped_events") {
@@ -27,22 +27,20 @@ func TestScopedReadonlySQLScopesEventsTable(t *testing.T) {
 }
 
 // scoped_events must expose a canonical_id that folds the anonymous id onto the
-// identified user. Stitching now resolves through the aliases_dict dictionary in
-// ClickHouse (dictGet by project_id + distinct_id), so the CTE carries no bind
-// args for the alias map — only the project scoping arg remains. The dictionary
-// name is qualified with the configured database.
+// identified user. Stitching resolves through the resolved_events view — a
+// LEFT JOIN on the aliases mirror keyed by (project_id, distinct_id) — so the
+// CTE carries no bind args for the alias map; only the project scoping arg.
 func TestScopedReadonlySQLStitchesCanonicalID(t *testing.T) {
-	resolver := identityResolver{database: "analytics"}
 	query, args, err := scopedReadonlySQL(
-		"SELECT uniqExact(canonical_id) AS users FROM events",
+		"SELECT count(DISTINCT canonical_id) AS users FROM events",
 		"project-1",
-		resolver, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
 	}
-	if !strings.Contains(query, "dictGetOrDefault('analytics.aliases_dict', 'canonical_id', (project_id, distinct_id), distinct_id) AS canonical_id") {
-		t.Fatalf("query did not stitch canonical_id via dictionary: %s", query)
+	if !strings.Contains(query, "canonical_distinct_id AS canonical_id FROM resolved_events WHERE project_id = ?") {
+		t.Fatalf("query did not stitch canonical_id via resolved_events: %s", query)
 	}
 	if len(args) != 1 || args[0] != "project-1" {
 		t.Fatalf("args=%v want only the project scoping arg", args)
@@ -63,7 +61,7 @@ func TestValidateReadonlySQLRejectsTableFunctions(t *testing.T) {
 		"SELECT * FROM file('/etc/passwd', 'CSV')",
 		"SELECT * FROM s3('https://bucket/key', 'CSV')",
 		"WITH x AS (SELECT * FROM REMOTE('h:9000','d','t')) SELECT * FROM x",
-		// Comments are whitespace to ClickHouse, so they must not bridge a
+		// Comments are whitespace to the engine, so they must not bridge a
 		// function name to its paren past the `name(` match.
 		"SELECT * FROM url/**/('http://169.254.169.254/', CSV)",
 		"SELECT * FROM url -- hop\n('http://evil/', CSV)",
@@ -96,14 +94,14 @@ func TestValidateReadonlySQLAllowsInnocuousNames(t *testing.T) {
 // events, with CTE args in CTE order.
 func TestScopedReadonlySQLScopesExternalRows(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
-		"SELECT JSONExtractString(data, 'email') FROM external_rows WHERE table_name = 'users'",
+		"SELECT json_extract_string(data, '$.email') FROM external_rows WHERE table_name = 'users'",
 		"project-1",
-		identityResolver{}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
 	}
-	if !strings.Contains(query, "WITH scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?)") {
+	if !strings.Contains(query, "WITH scoped_external_rows AS (SELECT * FROM external_rows WHERE project_id = ?)") {
 		t.Fatalf("query did not scope external_rows: %s", query)
 	}
 	if !strings.Contains(query, "FROM scoped_external_rows") {
@@ -130,13 +128,13 @@ func TestScopedReadonlySQLAppliesSoftDeleteRules(t *testing.T) {
 	query, _, err := scopedReadonlySQL(
 		"SELECT row_key FROM external_rows",
 		"project-1",
-		identityResolver{}, rules,
+		rules,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
 	}
-	wantUsers := "AND NOT (connector_id = 'connector-users' AND table_name = 'users' AND JSONHas(data, 'is_deleted') AND JSONExtractBool(data, 'is_deleted'))"
-	wantOrders := "AND NOT (connector_id = 'connector-orders' AND table_name = 'orders' AND JSONHas(data, 'deleted_at') AND JSONExtractRaw(data, 'deleted_at') != 'null')"
+	wantUsers := "AND NOT (connector_id = 'connector-users' AND table_name = 'users' AND try_cast(json_extract_string(data, 'is_deleted') AS BOOLEAN))"
+	wantOrders := "AND NOT (connector_id = 'connector-orders' AND table_name = 'orders' AND json_extract(data, 'deleted_at') IS NOT NULL)"
 	if !strings.Contains(query, wantUsers) || !strings.Contains(query, wantOrders) {
 		t.Fatalf("scoped CTE missing connector-specific soft-delete predicates: %s", query)
 	}
@@ -144,9 +142,9 @@ func TestScopedReadonlySQLAppliesSoftDeleteRules(t *testing.T) {
 
 func TestScopedReadonlySQLJoinsEventsWithExternalRows(t *testing.T) {
 	query, args, err := scopedReadonlySQL(
-		"SELECT count() FROM events e JOIN external_rows x ON x.row_key = e.distinct_id WHERE x.project_id != {project_id}",
+		"SELECT count(*) FROM events e JOIN external_rows x ON x.row_key = e.distinct_id WHERE x.project_id != {project_id}",
 		"project-1",
-		identityResolver{}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
@@ -161,7 +159,7 @@ func TestScopedReadonlySQLJoinsEventsWithExternalRows(t *testing.T) {
 }
 
 func TestScopedReadonlySQLStillRejectsUnknownSources(t *testing.T) {
-	if _, _, err := scopedReadonlySQL("SELECT * FROM secrets", "project-1", identityResolver{}, nil); err == nil {
+	if _, _, err := scopedReadonlySQL("SELECT * FROM secrets", "project-1", nil); err == nil {
 		t.Fatal("expected query with no scoped source to be rejected")
 	}
 }
@@ -183,7 +181,7 @@ func TestScopedReadonlySQLRejectsResidualTenantTableReferences(t *testing.T) {
 		"SELECT events.name FROM external_rows AS events",
 	}
 	for _, q := range bypasses {
-		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}, nil); err == nil {
+		if _, _, err := scopedReadonlySQL(q, "project-1", nil); err == nil {
 			t.Errorf("expected residual tenant-table reference to be rejected: %s", q)
 		}
 	}
@@ -198,7 +196,7 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 		"SELECT count() FROM events WHERE event_name = 'it''s external_rows'",
 	}
 	for _, q := range oks {
-		if _, _, err := scopedReadonlySQL(q, "project-1", identityResolver{}, nil); err != nil {
+		if _, _, err := scopedReadonlySQL(q, "project-1", nil); err != nil {
 			t.Errorf("literal-only mention wrongly rejected (%v): %s", err, q)
 		}
 	}
@@ -208,9 +206,9 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 // cross-tenant — it must stay rejected even when external_rows is present.
 func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {
 	_, _, err := scopedReadonlySQL(
-		"SELECT count() FROM external_rows x JOIN events e ON e.distinct_id = x.row_key",
+		"SELECT count(*) FROM external_rows x JOIN events e ON e.distinct_id = x.row_key",
 		"project-1",
-		identityResolver{}, nil,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected JOIN events beside external_rows to be rejected")
@@ -219,9 +217,9 @@ func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {
 
 func TestScopedReadonlySQLRejectsEventsJoin(t *testing.T) {
 	_, _, err := scopedReadonlySQL(
-		"SELECT count() FROM events JOIN events AS other ON other.distinct_id = events.distinct_id",
+		"SELECT count(*) FROM events JOIN events AS other ON other.distinct_id = events.distinct_id",
 		"project-1",
-		identityResolver{}, nil,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected events join to be rejected")
@@ -234,7 +232,7 @@ func TestFilteredWhereHumansOnlyExcludesBots(t *testing.T) {
 		t.Fatalf("humans-only must be opt-in; default added a bot filter: %s", off)
 	}
 	on, _ := filteredWhereWithDefault("project-1", EventFilter{HumansOnly: true}, false)
-	if !strings.Contains(on, "ifNull(visitor_class, 'human') = 'human'") {
+	if !strings.Contains(on, "coalesce(visitor_class, 'human') = 'human'") {
 		t.Fatalf("HumansOnly did not exclude crawler traffic: %s", on)
 	}
 }
@@ -250,20 +248,19 @@ func TestFilteredWhereCanSkipDefaultTimeWindow(t *testing.T) {
 }
 
 func TestIdentityResolverCanonicalExpression(t *testing.T) {
-	// Unqualified when no database is configured (e.g. tests); qualified when one
-	// is. Either way the expression is a dictGet with no bind args.
+	// The resolved_events view carries the stitched column; canonicalExpr maps
+	// a distinct_id column reference onto it, preserving any table alias.
 	bare := identityResolver{}
 	expr, args := bare.canonicalExpr("distinct_id")
-	if expr != "dictGetOrDefault('aliases_dict', 'canonical_id', (project_id, distinct_id), distinct_id)" {
+	if expr != "canonical_distinct_id" {
 		t.Fatalf("expr=%q", expr)
 	}
 	if len(args) != 0 {
-		t.Fatalf("args=%v want no bind args for a dictionary lookup", args)
+		t.Fatalf("args=%v want no bind args for a view column", args)
 	}
-	qualified := identityResolver{database: "analytics"}
-	expr, _ = qualified.canonicalExpr("distinct_id")
-	if !strings.Contains(expr, "'analytics.aliases_dict'") {
-		t.Fatalf("expr did not qualify dict with database: %q", expr)
+	expr, _ = bare.canonicalExpr("e.distinct_id")
+	if expr != "e.canonical_distinct_id" {
+		t.Fatalf("expr did not preserve table alias: %q", expr)
 	}
 }
 
@@ -290,8 +287,8 @@ func TestResolverCacheHitExpiryAndInvalidate(t *testing.T) {
 	now := time.Unix(1000, 0)
 	c.now = func() time.Time { return now }
 
-	c.put("p1", identityResolver{database: "analytics"})
-	if r, ok := c.get("p1"); !ok || r.database != "analytics" {
+	c.put("p1", identityResolver{anonymousIDs: []string{"a"}})
+	if r, ok := c.get("p1"); !ok || len(r.anonymousIDs) != 1 {
 		t.Fatalf("want cache hit within TTL, got ok=%v r=%+v", ok, r)
 	}
 
@@ -301,7 +298,7 @@ func TestResolverCacheHitExpiryAndInvalidate(t *testing.T) {
 	}
 
 	now = time.Unix(1000, 0)
-	c.put("p1", identityResolver{database: "analytics"})
+	c.put("p1", identityResolver{anonymousIDs: []string{"a"}})
 	c.invalidate("p1")
 	if _, ok := c.get("p1"); ok {
 		t.Fatal("want cache miss after explicit invalidation")

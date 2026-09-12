@@ -194,9 +194,9 @@ func formatNumber(f float64) string {
 // than the raw SQL that produced it.
 //
 // The card is attached to whatever the run's LAST SQL query returned, and the
-// last query is very often a throwaway check — `SELECT count() FROM
-// external_rows`. ClickHouse names that column `count()`, and the answer about
-// retention arrived with a card headed "Count()" reading 0 stapled underneath
+// last query is very often a throwaway check — `SELECT count(*) FROM
+// external_rows`. DuckDB names that column `count(*)`, and the answer about
+// retention arrived with a card headed "Count(*)" reading 0 stapled underneath
 // it, which is the kind of detail that decides whether a number is believed.
 //
 // An alias is the analyst saying what a column means, so requiring one is both

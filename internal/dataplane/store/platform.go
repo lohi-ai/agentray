@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"context"
-	"fmt"
 	"strings"
 )
 
@@ -17,12 +15,10 @@ const (
 	PlatformServer  = "server"
 )
 
-// This lives in the store, not in the ingest package that calls it, because the
-// column has two writers: ingest classifies each event as it arrives, and
-// backfillPlatform classifies the rows written before the column existed. Two
-// implementations of "which app is this" would drift the day someone adds a
-// user-agent marker to one and not the other, and the drift would be invisible —
-// the split would just be wrong for old rows. One table, two readers.
+// This lives in the store, not in the ingest package that calls it, because
+// the classifier is the single definition of "which app is this" — a second
+// implementation would drift the day someone adds a user-agent marker to one
+// and not the other.
 
 // nativeAppleUAs mark an Apple client that is not a browser: URLSession sets
 // CFNetwork/Darwin on every request an app makes. Checked before the browser
@@ -152,73 +148,3 @@ func normalizeOS(value string) string {
 	}
 }
 
-// platformFromUserAgentSQL renders platformFromUserAgent as a ClickHouse
-// expression over `col`. It is generated from the same substring tables the Go
-// ladder walks, in the same order, so the two cannot disagree about which app a
-// user agent belongs to — the backfill is the Go classifier, expressed as SQL.
-//
-// One expression rather than a mutation per user agent: ALTER … UPDATE rewrites
-// the parts it touches, so N mutations is N table rewrites. This is one.
-func platformFromUserAgentSQL(col string) string {
-	lower := fmt.Sprintf("lower(trim(ifNull(%s, '')))", col)
-	// The inputs are package constants, never user input, but the expression is
-	// concatenated into DDL where a placeholder cannot go — so quote through the
-	// same escaper the rest of the store's inline literals use.
-	chQuoted := func(v string) string { return "'" + chIdentLiteral(v) + "'" }
-	contains := func(subs []string) string {
-		clauses := make([]string, 0, len(subs))
-		for _, sub := range subs {
-			clauses = append(clauses, fmt.Sprintf("position(%s, %s) > 0", lower, chQuoted(sub)))
-		}
-		return strings.Join(clauses, " OR ")
-	}
-	whole := func(values []string) string {
-		quoted := make([]string, 0, len(values))
-		for _, v := range values {
-			quoted = append(quoted, chQuoted(v))
-		}
-		return fmt.Sprintf("%s IN (%s)", lower, strings.Join(quoted, ", "))
-	}
-
-	return strings.Join([]string{
-		"multiIf(",
-		fmt.Sprintf("  %s = '', '',", lower),
-		fmt.Sprintf("  %s, %s,", contains(nativeAppleUAs), chQuoted(PlatformIOS)),
-		fmt.Sprintf("  %s, %s,", contains(nativeAndroidUAs), chQuoted(PlatformAndroid)),
-		fmt.Sprintf("  %s, %s,", contains([]string{"mozilla"}), chQuoted(PlatformWeb)),
-		fmt.Sprintf("  %s, %s,", contains([]string{"android"}), chQuoted(PlatformAndroid)),
-		fmt.Sprintf("  %s, %s,", whole(bareRuntimeUAs), chQuoted(PlatformServer)),
-		fmt.Sprintf("  %s, %s,", contains(serverUAs), chQuoted(PlatformServer)),
-		"  '')",
-	}, "\n")
-}
-
-// backfillPlatform classifies the events written before the platform column
-// existed. Without it the column is only as old as the deploy, so a project with
-// history opens Traffic and reads "unknown" for everything it has ever collected
-// — the split looks broken precisely for the customers who have enough data to
-// care about it.
-//
-// Only rows that still carry a user agent can be recovered; the rest stay ” and
-// render as unknown, which is the honest answer. Marker-guarded like
-// backfillRollups: a mutation this size must run once, not on every boot.
-func (s *Store) backfillPlatform(ctx context.Context) error {
-	const marker = "backfill_platform_v1"
-	var applied uint64
-	if err := s.ch.QueryRow(ctx, `SELECT count() FROM schema_markers WHERE name = ?`, marker).Scan(&applied); err != nil {
-		return fmt.Errorf("check platform backfill marker: %w", err)
-	}
-	if applied > 0 {
-		return nil
-	}
-	if err := s.ch.Exec(ctx, `
-ALTER TABLE events
-UPDATE platform = `+platformFromUserAgentSQL("user_agent")+`
-WHERE platform = '' AND user_agent IS NOT NULL AND user_agent != ''`); err != nil {
-		return fmt.Errorf("backfill platform: %w", err)
-	}
-	if err := s.ch.Exec(ctx, `INSERT INTO schema_markers (name) VALUES (?)`, marker); err != nil {
-		return fmt.Errorf("record platform backfill marker: %w", err)
-	}
-	return nil
-}

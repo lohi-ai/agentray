@@ -224,7 +224,7 @@ func openProviderTestStore(t *testing.T) *Store {
 	s := openConvTestStore(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// migratePostgres returns before migrateAgent (ClickHouse lives in a
+	// migratePostgres returns before migrateAgent (the analytics engine lives in a
 	// different function). The conversation helper only runs the PG core, so
 	// apply the agent schema here — including workspace_providers.
 	if err := s.migrateAgent(ctx); err != nil {
