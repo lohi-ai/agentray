@@ -223,7 +223,16 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
         prev = ran.get(key)
         if prev is None or (prev != "MEASURED" and l["status"] == "MEASURED"):
             ran[key] = l["status"]
-    free = free_gib(WORK)
+    # The NOT RUN reason quotes the free disk recorded when the run was
+    # requested (requested.json), not the live disk — rerendering the same
+    # evidence must produce the same report.
+    req = {}
+    req_path = WORK / "requested.json"
+    if req_path.exists():
+        req = load_json(req_path)
+    free = req.get("preflight_free_gib")
+    if not isinstance(free, (int, float)):
+        free = free_gib(WORK)
     need = CAPS["matrix"]["preflight_free_gib"]
     matrix_reason = (
         f"free disk {free:.1f} GiB below the {need} GiB preflight"

@@ -117,6 +117,25 @@ class TestReportRender(unittest.TestCase):
         text, _ = report.render([a, b], require_labeled=False)
         self.assertNotIn("MIXED CORPORA", text)
 
+    def test_not_run_reason_uses_recorded_preflight_disk(self):
+        # requested.json's preflight_free_gib wins over the live disk, so
+        # rerendering the same evidence is byte-stable.
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from harness.util import dump_json
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            dump_json(work / "requested.json", {"preflight_free_gib": 5.0})
+            with mock.patch.object(report, "WORK", work):
+                text, _ = report.render([_leg()], require_labeled=False)
+        self.assertIn("free disk 5.0 GiB below the 40 GiB preflight", text)
+
+    def test_render_is_deterministic(self):
+        a, _ = report.render([_leg()], require_labeled=False)
+        b, _ = report.render([_leg()], require_labeled=False)
+        self.assertEqual(a, b)
+
 
 if __name__ == "__main__":
     unittest.main()

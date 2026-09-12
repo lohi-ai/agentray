@@ -89,6 +89,10 @@ def _run_legs(legs_spec, caps, tag):
     dump_json(WORK / "requested.json", {
         "tag": tag, "requested_at": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # Free disk observed at request time — the report's NOT RUN reason
+        # must quote the preflight the run actually saw, not whatever the
+        # disk happens to hold at render time.
+        "preflight_free_gib": round(free_gib(WORK), 1),
         "legs": legs_spec,
         "caps": caps,
     })
@@ -250,12 +254,19 @@ def _publish_durable():
         meta["legs"][-1]["corpus_rows"] = prov.get("corpus_rows", "unknown")
     mixed = len(digests) > 1
     meta["code_digest"] = "MIXED" if mixed else (digests.pop() if digests else None)
+    # The slim driver image has no git; the eval wrapper passes the commit in.
+    # Prefer the legs' own code_commit — the commit that produced the
+    # evidence — over the publish-time HEAD, so republishing unchanged
+    # results stays byte-identical.
+    commits = {l.get("code_commit") for l in meta["legs"]
+               if l.get("code_commit")}
+    meta["commit"] = (commits.pop() if len(commits) == 1
+                      else ("MIXED" if commits else
+                            os.environ.get("EVAL_COMMIT") or None))
     if mixed:
         meta["provenance_note"] = (
             "legs were produced by different code states; per-leg "
             "code_digest/corpus_digest identify each")
-    # The slim driver image has no git; the eval wrapper passes the commit in.
-    meta["commit"] = os.environ.get("EVAL_COMMIT") or None
 
     # Stage the full incoming set in memory so archiving can compare
     # content, not just names: unchanged files are left in place and only
