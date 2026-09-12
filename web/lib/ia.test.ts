@@ -16,6 +16,7 @@ import {
   recoveryAction,
   settingsPath,
   projectDetailRoot,
+  projectLanding,
   threadNeedsRecovery,
   weakestLink,
   funnelStepNames,
@@ -420,6 +421,22 @@ describe('projectDetailRoot', () => {
     expect(projectDetailRoot('/chat')).toBeNull();
     expect(projectDetailRoot('/sql')).toBeNull();
     expect(projectDetailRoot('/settings?tab=projects')).toBeNull();
+  });
+});
+
+describe('projectLanding', () => {
+  it('sends a newly created project to /overview from any surface', () => {
+    // "Start new projects on Overview" holds even when the create dialog was
+    // opened from a detail route or a safe list page.
+    expect(projectLanding('/settings?tab=projects', { created: true })).toBe('/overview');
+    expect(projectLanding('/agents/abc/setup', { created: true })).toBe('/overview');
+    expect(projectLanding('/dashboard', { created: true })).toBe('/overview');
+  });
+
+  it('keeps the existing-project switch behavior unchanged', () => {
+    expect(projectLanding('/agents/abc/setup')).toBe('/agents');
+    expect(projectLanding('/chat')).toBeNull();
+    expect(projectLanding('/settings?tab=projects')).toBeNull();
   });
 });
 

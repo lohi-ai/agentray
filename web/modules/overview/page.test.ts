@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { OverviewResult } from '@/lib/api';
-import { freshnessLabel } from './page';
+import { APIError, type OverviewResult } from '@/lib/api';
+import { freshnessLabel, overviewViewState } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -20,7 +20,7 @@ function res(lastEventAt: string | undefined, lastReceivedAt: string | undefined
       sources: [],
       sources_truncated: false,
     },
-  } as OverviewResult;
+  } as unknown as OverviewResult;
 }
 
 describe('freshnessLabel', () => {
@@ -46,5 +46,70 @@ describe('freshnessLabel', () => {
     const l = freshnessLabel(res(undefined, undefined, 'no_events'), now);
     expect(l.text).toBe('No capture receipts yet');
     expect(l.stale).toBe(true);
+  });
+});
+
+// overviewViewState is the single mutually-exclusive state the page renders.
+// Each case pins one transition of the contract: loading retains layout, a
+// 403 names missing access, other failures retry, first-run wins over
+// receipt-only, and an active filter turns "nothing arrived" into a reset
+// offer instead of a bare empty state.
+function overviewRes(over: {
+  events?: number;
+  qualifying?: number;
+  everReceived?: boolean;
+}): OverviewResult {
+  return {
+    data_status: {
+      events_in_range: over.events ?? 0,
+      qualifying_in_range: over.qualifying ?? 0,
+      ever_received: over.everReceived ?? true,
+      state: 'fresh',
+      sources: [],
+      sources_truncated: false,
+      pipeline_lag: 'unavailable',
+      schema_status: 'unavailable',
+    },
+  } as unknown as OverviewResult;
+}
+
+const baseInput = {
+  projectID: 'p1',
+  isLoading: false,
+  error: null,
+  res: null as OverviewResult | null,
+  showFirstEvent: false,
+  platform: '',
+  period: '7d',
+};
+
+describe('overviewViewState', () => {
+  it('keeps the loading layout until the first result lands', () => {
+    expect(overviewViewState({ ...baseInput, isLoading: true })).toBe('loading');
+    expect(overviewViewState({ ...baseInput, projectID: undefined })).toBe('loading');
+  });
+
+  it('names missing access on 403 instead of offering a blind retry', () => {
+    expect(overviewViewState({ ...baseInput, error: new APIError(403, 'forbidden') })).toBe('no_access');
+    expect(overviewViewState({ ...baseInput, error: new APIError(500, 'boom') })).toBe('error');
+    expect(overviewViewState({ ...baseInput, error: new Error('network') })).toBe('error');
+  });
+
+  it('treats a never-received or verification-only project as first run', () => {
+    expect(overviewViewState({ ...baseInput, res: overviewRes({ everReceived: false }) })).toBe('first_run');
+    // A verification receipt arrived but no product event: still first run,
+    // not receipt_only — the guide stays up until real activity lands.
+    expect(overviewViewState({ ...baseInput, res: overviewRes({ events: 1 }), showFirstEvent: true })).toBe('first_run');
+  });
+
+  it('splits receipt-only from filtered-empty from bare empty', () => {
+    expect(overviewViewState({ ...baseInput, res: overviewRes({ events: 3 }) })).toBe('receipt_only');
+    expect(overviewViewState({ ...baseInput, res: overviewRes({}), platform: 'ios' })).toBe('filtered_empty');
+    expect(overviewViewState({ ...baseInput, res: overviewRes({}), period: 'today' })).toBe('filtered_empty');
+    expect(overviewViewState({ ...baseInput, res: overviewRes({}) })).toBe('empty');
+  });
+
+  it('reports data when qualifying events exist in range', () => {
+    expect(overviewViewState({ ...baseInput, res: overviewRes({ events: 5, qualifying: 2 }) })).toBe('data');
   });
 });
