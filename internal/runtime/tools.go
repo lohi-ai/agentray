@@ -85,6 +85,7 @@ type DataSource interface {
 	ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.AgentRecommendation, string, error)
 	RecommendationForProject(ctx context.Context, projectID, id string) (storage.AgentRecommendation, error)
 	DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (storage.DatasetPreview, error)
+
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
