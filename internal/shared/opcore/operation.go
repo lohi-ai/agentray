@@ -37,6 +37,13 @@ type CallContext struct {
 	Principal Principal
 }
 
+// OperationAuditRecorder records a successful mutating network operation.
+// It is implemented by the usecase dependency bundle; opcore remains unaware
+// of storage while ensuring all network adapters share one audit boundary.
+type OperationAuditRecorder interface {
+	RecordOperationAudit(ctx context.Context, principal Principal, operation string)
+}
+
 // MemoryScope is the scope key a handler must file agent-private state under —
 // long-term memory above all. It is the AGENT's scope id, not the project's,
 // because that is what recall reads (agentcore/loop.go passes def.ScopeID to
@@ -113,11 +120,22 @@ func (o Operation[I, O]) OpInvoke(ctx context.Context, cc CallContext, rawArgs s
 	if err != nil {
 		return "", err
 	}
+	if mutatingAccess(o.Access) && cc.Principal.Kind != "" {
+		if recorder, ok := cc.Deps.(OperationAuditRecorder); ok {
+			recorder.RecordOperationAudit(ctx, cc.Principal, o.Name)
+		}
+	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// mutatingAccess is deny-by-default for audit classification: new credential
+// access classes are audited until they are explicitly established as reads.
+func mutatingAccess(access Access) bool {
+	return access != "" && access != AccessAnalyticsRead && access != AccessSourcesRead
 }
 
 // schemaOf derives a JSON-Schema object from the input struct's fields using

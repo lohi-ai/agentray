@@ -23,16 +23,21 @@ export function outcomeEntries(json: string | undefined): TestOutcomeEntry[] {
   }
 }
 
-// evidenceLine renders a finding's evidence envelope in one line. Rows written
+// evidenceLine renders a finding's evidence envelope in one line. The
+// envelope is the typed contract the ops document — {query_ref,
+// metric_version, dataset_version, range, filters, timezone, watermark,
+// warnings} — and every field it carries renders here, because a provenance
+// field that disappears is a claim the reader cannot check. Rows written
 // before the envelope existed carry no evidence_json — the honest read is
 // "evidence unavailable" with the recording date, never an invented summary.
 export function evidenceLine(rec: { evidence_json?: string; created_at: string }): string {
   const raw = rec.evidence_json?.trim();
-  if (!raw) return `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
+  const unavailable = `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
+  if (!raw) return unavailable;
   try {
     const env = JSON.parse(raw) as Record<string, unknown>;
     const parts: string[] = [];
-    const ref = env.query_ref;
+    const ref = env.query_ref ?? env.query_id;
     if (ref && typeof ref === 'object') {
       const kind = (ref as Record<string, unknown>).kind;
       if (typeof kind === 'string' && kind) parts.push(kind.replace(/_/g, ' '));
@@ -41,9 +46,20 @@ export function evidenceLine(rec: { evidence_json?: string; created_at: string }
     }
     if (typeof env.range === 'string' && env.range) parts.push(env.range);
     if (typeof env.metric_version === 'string' && env.metric_version) parts.push(`metric ${env.metric_version}`);
-    return parts.length ? parts.join(' · ') : `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
+    if (typeof env.dataset_version === 'string' && env.dataset_version) parts.push(`dataset ${env.dataset_version}`);
+    if (typeof env.watermark === 'string' && env.watermark) parts.push(`watermark ${env.watermark}`);
+    if (typeof env.timezone === 'string' && env.timezone) parts.push(env.timezone);
+    if (env.filters !== undefined && env.filters !== null && env.filters !== '') {
+      parts.push(`filters: ${typeof env.filters === 'string' ? env.filters : JSON.stringify(env.filters)}`);
+    }
+    if (Array.isArray(env.warnings)) {
+      for (const w of env.warnings) {
+        if (typeof w === 'string' && w) parts.push(`warning: ${w}`);
+      }
+    }
+    return parts.length ? parts.join(' · ') : unavailable;
   } catch {
-    return `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
+    return unavailable;
   }
 }
 

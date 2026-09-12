@@ -60,6 +60,12 @@ CAPS = {
     },
     "matrix": {
         "scales": [1_000_000, 10_000_000],
+        # Declared coverage dimensions: the report's gate ledger enumerates
+        # every (engine, scale, readers, days) combination from these lists,
+        # so a leg at one reader/day count never marks the whole scale
+        # MEASURED.
+        "readers": [1, 5, 20],
+        "days": [7, 30, 90],
         "engine_mem": "2g",
         "engine_cpus": 2,
         "workdir_gib": 24,

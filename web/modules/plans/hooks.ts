@@ -124,6 +124,17 @@ export function useExperiment(id: string) {
     queryClient.invalidateQueries({ queryKey: [PLANS_KEY, projectID, 'experiment', id] });
     invalidateList();
   };
+  // A revision conflict means the row changed under this page — the honest
+  // recovery is to reload it and say so, not to leave the stale copy on
+  // screen behind an error toast.
+  const onWriteError = (e: Error) => {
+    if (e.message.includes('revision conflict')) {
+      invalidate();
+      setError('This experiment changed since you opened it — reloaded the latest.');
+      return;
+    }
+    setError(e.message);
+  };
 
   const commit = useMutation({
     mutationFn: () => new AgentRayAPI(projectID!).commitValidationTest(id),
@@ -158,7 +169,7 @@ export function useExperiment(id: string) {
       setMessage('Abandoned. The proposal is closed; the record stays for history.');
       invalidate();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: onWriteError,
   });
 
   // recordOutcome appends one observation to the append-only outcome list —
@@ -176,7 +187,7 @@ export function useExperiment(id: string) {
       setMessage('Outcome recorded. The decision is still yours — this entry is evidence, not a verdict.');
       invalidate();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: onWriteError,
   });
 
   return {

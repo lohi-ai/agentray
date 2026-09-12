@@ -75,6 +75,40 @@ func withTempConfig(t *testing.T) string {
 	return dir
 }
 
+func TestOperationCredentialPrefersBoundManagementKey(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  cliConfig
+		env  string
+		want string
+	}{
+		{
+			name: "stored management key outranks capture environment",
+			cfg:  cliConfig{ProjectID: "project-a", APIKey: "capture-a", ManagementKey: "agm_stored", ManagementKeyProject: "project-a"},
+			env:  "capture-from-key-command",
+			want: "agm_stored",
+		},
+		{
+			name: "stale management key is discarded",
+			cfg:  cliConfig{ProjectID: "project-b", APIKey: "capture-b", ManagementKey: "agm_stale", ManagementKeyProject: "project-a"},
+			env:  "capture-from-env",
+			want: "capture-from-env",
+		},
+		{
+			name: "capture config remains legacy fallback",
+			cfg:  cliConfig{ProjectID: "project-a", APIKey: "capture-a"},
+			want: "capture-a",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := operationCredential(tt.cfg, tt.env); got != tt.want {
+				t.Fatalf("operationCredential() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoginKeyRotateLogoutFlow(t *testing.T) {
 	srv := fakeServer(t)
 	dir := withTempConfig(t)
