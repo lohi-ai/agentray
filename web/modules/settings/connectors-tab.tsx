@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Plus, Sparkles } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { HStack } from '@astryxdesign/core/HStack';
@@ -10,6 +10,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import {
   AgentRayAPI,
+  newIdempotencyKey,
   type ConnectorSync,
   type ConnectorSyncDraft,
   type ConnectorSyncInput,
@@ -95,7 +96,7 @@ export function ConnectorsTab() {
       {adding ? (
         <AddConnectorDialog
           kinds={kinds}
-          onSubmit={(input) => void create.mutateAsync(input).then((r) => setSelectedID(r.connector.id))}
+          onSubmit={(input) => create.mutateAsync(input).then((r) => setSelectedID(r.connector.id))}
           onClose={() => setAdding(false)}
         />
       ) : null}
@@ -155,24 +156,37 @@ export function ConnectorsTab() {
 
 function AddConnectorDialog({ kinds, onSubmit, onClose }: {
   kinds: string[];
-  onSubmit: (input: { name: string; kind: string; dsn: string }) => void;
+  onSubmit: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) => Promise<unknown>;
   onClose: () => void;
 }) {
   const [name, setName] = useState('');
   const [kind, setKind] = useState(kinds[0] ?? 'postgres');
   const [dsn, setDsn] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  // Kept for this open dialog, not minted per click: after a lost response
+  // the operator retries the exact transaction rather than creating a second
+  // source credential/connector pair.
+  const idempotencyKey = useRef(newIdempotencyKey());
 
-  function submit() {
-    if (!name.trim() || !dsn.trim()) return;
-    onSubmit({ name: name.trim(), kind, dsn: dsn.trim() });
-    onClose();
+  async function submit() {
+    if (!name.trim() || !dsn.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({ name: name.trim(), kind, dsn: dsn.trim(), idempotencyKey: idempotencyKey.current });
+      onClose();
+    } catch {
+      // The hook already exposes the actionable API error. Keep this dialog
+      // open with its original key so a retry is an idempotent replay.
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
     <Modal
       title="Add data connector"
-      onClose={onClose}
-      footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" onClick={submit}>Add connector</Button></>}
+      onClose={() => { if (!submitting) onClose(); }}
+      footer={<><Button variant="ghost" size="sm" disabled={submitting} onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" disabled={submitting} onClick={submit}>{submitting ? 'Adding…' : 'Add connector'}</Button></>}
     >
       <div className="flex flex-col gap-4 max-w-[440px]">
         <TextInput label="Name" value={name} placeholder="e.g. Production DB" onChange={setName} width="100%" />

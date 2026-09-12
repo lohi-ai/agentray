@@ -355,8 +355,12 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
+				runs, err := d.Repo.LatestConnectorRunsForProject(ctx, cc.ProjectID, []string{sync.ID})
+				if err != nil {
+					return sourceStatusOutput{}, err
+				}
 				entry := syncStatus{Sync: sync}
-				if run, rerr := d.Repo.LatestConnectorRun(ctx, cc.ProjectID, in.SyncID); rerr == nil {
+				if run, ok := runs[sync.ID]; ok {
 					entry.LatestRun = &run
 				}
 				out.Syncs = []syncStatus{entry}
@@ -366,10 +370,18 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
-				out.Syncs = []syncStatus{}
+				ids := make([]string, 0, len(syncs))
+				for _, sync := range syncs {
+					ids = append(ids, sync.ID)
+				}
+				runs, err := d.Repo.LatestConnectorRunsForProject(ctx, cc.ProjectID, ids)
+				if err != nil {
+					return sourceStatusOutput{}, err
+				}
+				out.Syncs = make([]syncStatus, 0, len(syncs))
 				for _, sync := range syncs {
 					entry := syncStatus{Sync: sync}
-					if run, rerr := d.Repo.LatestConnectorRun(ctx, cc.ProjectID, sync.ID); rerr == nil {
+					if run, ok := runs[sync.ID]; ok {
 						entry.LatestRun = &run
 					}
 					out.Syncs = append(out.Syncs, entry)

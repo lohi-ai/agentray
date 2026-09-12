@@ -311,13 +311,44 @@ func (s *Store) ConnectorRunForProject(ctx context.Context, projectID, runID str
 	return r, err
 }
 
-// LatestConnectorRun returns the sync's most recent run, for source_status.
-func (s *Store) LatestConnectorRun(ctx context.Context, projectID, syncID string) (ConnectorRun, error) {
-	var r ConnectorRun
-	err := s.pg.QueryRow(ctx,
-		`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 ORDER BY queued_at DESC LIMIT 1`,
-		syncID, projectID).Scan(connectorRunScanDest(&r)...)
-	return r, err
+// latestConnectorRunsBatch is the maximum number of sync IDs one query sees.
+// source_status still returns every sync, but chunking holds array size, query
+// planning, and result memory to this bound instead of issuing one latest-run
+// round-trip per sync on every live UI poll.
+const latestConnectorRunsBatch = 100
+
+// LatestConnectorRunsForProject returns each requested sync's newest run.
+// Missing runs are absent from the map (rather than errors), matching the
+// existing source_status contract where a newly created sync has no receipt.
+// The store chunks larger callers so no SQL statement grows with connector
+// cardinality.
+func (s *Store) LatestConnectorRunsForProject(ctx context.Context, projectID string, syncIDs []string) (map[string]ConnectorRun, error) {
+	out := make(map[string]ConnectorRun, len(syncIDs))
+	for start := 0; start < len(syncIDs); start += latestConnectorRunsBatch {
+		end := min(start+latestConnectorRunsBatch, len(syncIDs))
+		rows, err := s.pg.Query(ctx, `
+SELECT DISTINCT ON (sync_id) `+connectorRunColumns+`
+FROM connector_runs
+WHERE project_id = $1 AND sync_id = ANY($2::uuid[])
+ORDER BY sync_id, queued_at DESC`, projectID, syncIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var r ConnectorRun
+			if err := rows.Scan(connectorRunScanDest(&r)...); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[r.SyncID] = r
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // ReconcileConnectorRuns runs at boot and fails only runs whose lease proves

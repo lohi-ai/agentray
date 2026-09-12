@@ -52,6 +52,29 @@ func (f *parityRepo) DistinctIDLinked(context.Context, string, string) (bool, er
 	return f.linked, nil
 }
 
+func (f *parityRepo) LatestConnectorRunsForProject(context.Context, string, []string) (map[string]storage.ConnectorRun, error) {
+	return map[string]storage.ConnectorRun{}, nil
+}
+
+// batchStatusRepo proves source_status asks the repository once for a
+// connector's latest receipts rather than issuing one LatestConnectorRun read
+// for every sync on every web poll.
+type batchStatusRepo struct {
+	fakeRepo
+	syncs      []storage.ConnectorSync
+	runs       map[string]storage.ConnectorRun
+	batchCalls [][]string
+}
+
+func (f *batchStatusRepo) ListConnectorSyncsForProject(context.Context, string, string) ([]storage.ConnectorSync, error) {
+	return f.syncs, nil
+}
+
+func (f *batchStatusRepo) LatestConnectorRunsForProject(_ context.Context, _ string, ids []string) (map[string]storage.ConnectorRun, error) {
+	f.batchCalls = append(f.batchCalls, append([]string(nil), ids...))
+	return f.runs, nil
+}
+
 // fakeRunner records enqueue/cancel and can be set to fail with the engine's
 // sentinels.
 type fakeRunner struct {
@@ -326,5 +349,40 @@ func TestVerifySDKFoundAndNotFound(t *testing.T) {
 	}
 	if !strings.Contains(out, `"found":false`) || !strings.Contains(out, `"searched":0`) {
 		t.Fatalf("verify_sdk empty = %s", out)
+	}
+}
+
+func TestSourceStatusBatchesLatestRuns(t *testing.T) {
+	repo := &batchStatusRepo{
+		syncs: []storage.ConnectorSync{
+			{ID: "sync-1", ConnectorID: "connector-1"},
+			{ID: "sync-2", ConnectorID: "connector-1"},
+			{ID: "sync-3", ConnectorID: "connector-1"},
+		},
+		runs: map[string]storage.ConnectorRun{
+			"sync-2": {ID: "run-2", SyncID: "sync-2", Status: "running"},
+		},
+	}
+	reg := Registry()
+	spec, ok := reg.Get("source_status")
+	if !ok {
+		t.Fatal("source_status not registered")
+	}
+	out, err := spec.OpInvoke(context.Background(), opcore.CallContext{
+		ProjectID: "p1",
+		Deps:      &Deps{Repo: repo},
+	}, `{"connector_id":"connector-1"}`)
+	if err != nil {
+		t.Fatalf("source_status: %v", err)
+	}
+	var result sourceStatusOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("source_status output: %v", err)
+	}
+	if len(repo.batchCalls) != 1 || strings.Join(repo.batchCalls[0], ",") != "sync-1,sync-2,sync-3" {
+		t.Fatalf("latest runs batch calls = %#v", repo.batchCalls)
+	}
+	if len(result.Syncs) != 3 || result.Syncs[1].LatestRun == nil || result.Syncs[1].LatestRun.ID != "run-2" {
+		t.Fatalf("source_status result = %+v", result)
 	}
 }

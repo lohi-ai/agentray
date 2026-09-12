@@ -57,4 +57,33 @@ describe('APIError', () => {
     expect(res.syncs[0].id).toBe('s1');
     expect(res.syncs[0].latest_run?.status).toBe('running');
   });
+
+  it('uses one idempotent session-only transaction for DSN entry', async () => {
+    let request: RequestInfo | URL | undefined;
+    let init: RequestInit | undefined;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+      request = input;
+      init = options;
+      return new Response(
+        JSON.stringify({ connector: { id: 'c1', name: 'warehouse' } }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+
+    const api = new AgentRayAPI('proj-1');
+    await api.createConnector({
+      name: 'warehouse',
+      kind: 'postgres',
+      dsn: 'postgres://u:p@db/source',
+      idempotencyKey: 'stable-retry-key',
+    });
+
+    expect(String(request)).toContain('/api/projects/proj-1/source-connectors');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: 'warehouse',
+      kind: 'postgres',
+      dsn: 'postgres://u:p@db/source',
+      idempotency_key: 'stable-retry-key',
+    });
+  });
 });

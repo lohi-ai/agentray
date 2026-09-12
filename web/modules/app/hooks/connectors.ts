@@ -21,7 +21,8 @@ export function useConnectors() {
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
 
   const create = useMutation({
-    mutationFn: (input: { name: string; kind: string; dsn: string }) => new AgentRayAPI(projectID!).createConnector(input),
+    mutationFn: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).createConnector(input),
     onSuccess: invalidate,
     onError: (e) => setError(e instanceof Error ? e.message : 'Unable to add connector'),
   });

@@ -219,6 +219,7 @@ var mutatingRoutes = [][2]string{
 	{http.MethodPost, "/api/projects/:project_id/credential-split"},
 	{http.MethodPost, "/api/projects/:project_id/source-credentials"},
 	{http.MethodDelete, "/api/projects/:project_id/source-credentials/:credential_id"},
+	{http.MethodPost, "/api/projects/:project_id/source-connectors"},
 	{http.MethodPost, "/api/teams"},
 	{http.MethodPut, "/api/teams/:team_id"},
 	{http.MethodDelete, "/api/teams/:team_id"},

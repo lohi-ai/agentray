@@ -2041,23 +2041,20 @@ export class AgentRayAPI {
     return this.get<{ connectors: DataConnector[]; kinds: string[] }>('/api/connectors');
   }
 
-  // New connectors reference a source credential: the DSN is stored once via
-  // the session-only credential route and the connector carries only its ID.
-  // The create itself goes through the shared create_source operation — the
-  // same handler REST/MCP/CLI/agent callers run, with idempotent retries.
-  async createConnector(input: { name: string; kind: string; dsn: string }) {
-    const cred = await this.post<{ credential: { id: string } }>(
-      `/api/projects/${this.projectID}/source-credentials`,
-      { name: input.name, dsn: input.dsn },
+  // A DSN may enter only through the session-only source-connectors bridge.
+  // It atomically stores the encrypted credential and creates the connector
+  // under this caller-provided idempotency key: retry the SAME key after an
+  // ambiguous response and the server replays the original connector.
+  createConnector(input: { name: string; kind: string; dsn: string; idempotencyKey: string }) {
+    return this.post<{ connector: DataConnector }>(
+      `/api/projects/${this.projectID}/source-connectors`,
+      {
+        name: input.name,
+        kind: input.kind,
+        dsn: input.dsn,
+        idempotency_key: input.idempotencyKey,
+      },
     );
-
-    const connector = await this.callOp<DataConnector>('create_source', {
-      name: input.name,
-      kind: input.kind,
-      credential_id: cred.credential.id,
-      idempotency_key: newIdempotencyKey(),
-    });
-    return { connector };
   }
 
   // --- Shared operations (POST /api/op/<name>) ---
