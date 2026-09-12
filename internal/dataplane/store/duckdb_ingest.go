@@ -109,34 +109,23 @@ func (d *DuckDB) SinkEvents(ctx context.Context, events []Event) error {
 // the caller's transaction. Canonical-id resolution reads the DuckDB aliases
 // mirror (not Postgres) so the projection never leaves the write transaction.
 func (d *DuckDB) applyPersonUpdatesTx(ctx context.Context, tx *sql.Tx, events []Event) error {
-	// Load the alias map once per project touched by the batch; the resolver
-	// closure then answers in-memory like the old Postgres-backed resolver did.
-	projects := map[string]struct{}{}
-	for _, e := range events {
-		projects[e.ProjectID] = struct{}{}
-	}
+	// Load the alias map for every project the batch touches, up front: the
+	// resolver closure then answers in-memory like the old Postgres-backed
+	// resolver did. A failed read is fatal — folding a profile under a raw
+	// distinct_id would silently split one person into two rows.
 	aliasMaps := map[string]map[string]string{}
-	loadAliases := func(projectID string) map[string]string {
-		m, ok := aliasMaps[projectID]
-		if !ok {
-			m = map[string]string{}
-			rows, err := tx.QueryContext(ctx,
-				`SELECT anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, projectID)
-			if err == nil {
-				for rows.Next() {
-					var anon, canon string
-					if rows.Scan(&anon, &canon) == nil {
-						m[anon] = canon
-					}
-				}
-				_ = rows.Close()
-			}
-			aliasMaps[projectID] = m
+	for _, e := range events {
+		if _, ok := aliasMaps[e.ProjectID]; ok {
+			continue
 		}
-		return m
+		m, err := loadAliasMap(ctx, tx, e.ProjectID)
+		if err != nil {
+			return err
+		}
+		aliasMaps[e.ProjectID] = m
 	}
 	resolve := func(projectID, distinctID string) string {
-		if canon, ok := loadAliases(projectID)[distinctID]; ok {
+		if canon, ok := aliasMaps[projectID][distinctID]; ok {
 			return canon
 		}
 		return distinctID
@@ -192,6 +181,27 @@ ON CONFLICT (project_id, distinct_id) DO UPDATE SET
 		}
 	}
 	return nil
+}
+
+// loadAliasMap reads one project's anonymous→canonical alias pairs inside the
+// caller's transaction. The rows are drained and closed before returning, so
+// the transaction is free for the next statement.
+func loadAliasMap(ctx context.Context, tx *sql.Tx, projectID string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	for rows.Next() {
+		var anon, canon string
+		if err := rows.Scan(&anon, &canon); err != nil {
+			return nil, err
+		}
+		m[anon] = canon
+	}
+	return m, rows.Err()
 }
 
 // duckQueryer is the query surface shared by *sql.Tx (inside the write gate)
