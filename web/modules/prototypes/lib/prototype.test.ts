@@ -13,6 +13,7 @@ function test(over: Partial<MeasuredTest> = {}): MeasuredTest {
     status: 'committed',
     decision_note: '',
     created_at: '2026-08-01T00:00:00Z',
+    revision: 1,
     measured: true,
     metric_count: 12,
     baseline_count: 400,

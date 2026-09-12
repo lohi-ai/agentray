@@ -40,14 +40,21 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 			return err
 		}
 		var payload struct {
-			Name string `json:"name"`
-			Kind string `json:"kind"`
-			DSN  string `json:"dsn"`
+			Name         string `json:"name"`
+			Kind         string `json:"kind"`
+			CredentialID string `json:"credential_id"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		created, err := store.CreateDataConnector(c.Request().Context(), ctx.User.ID, project.ID, payload.Name, payload.Kind, payload.DSN)
+		// New connectors reference a live source credential — the secret is
+		// stored once via POST /api/projects/:id/source-credentials and never
+		// transits this route. Inline-DSN rows remain resolvable for existing
+		// connectors only.
+		if strings.TrimSpace(payload.CredentialID) == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "credential_id is required — store the DSN once via POST /api/projects/:id/source-credentials")
+		}
+		created, err := store.CreateDataConnectorForUser(c.Request().Context(), ctx.User.ID, project.ID, payload.Name, payload.Kind, payload.CredentialID)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -159,8 +166,9 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	// Run one sync now (owner/admin). Synchronous: the response carries the
-	// outcome the run also persisted on the sync row.
+	// Run one sync now (owner/admin). Enqueues a persistent run row and
+	// returns it — the same contract the run_source operation uses, so REST
+	// and MCP callers observe identical status/cancel semantics.
 	e.POST("/api/connector-syncs/:sync_id/run", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
@@ -181,10 +189,11 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if !ok {
 			return echo.NewHTTPError(http.StatusNotFound, "sync not found")
 		}
-		if err := engine.RunSync(c.Request().Context(), syncID); err != nil {
+		run, enqueued, err := engine.EnqueueRun(c.Request().Context(), project.ID, syncID, "")
+		if err != nil {
 			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		}
-		return c.JSON(http.StatusOK, map[string]any{"ok": true})
+		return c.JSON(http.StatusOK, map[string]any{"ok": true, "run": run, "enqueued": enqueued})
 	})
 
 	// AI-assisted sync draft: discover the schema, let the authoring model

@@ -124,11 +124,14 @@ func (c *resolverCache) invalidate(projectID string) {
 }
 
 type Project struct {
-	ID          string    `json:"id"`
-	WorkspaceID string    `json:"workspace_id,omitempty"`
-	Name        string    `json:"name"`
-	APIKey      string    `json:"api_key"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Name        string `json:"name"`
+	// Timezone is a validated IANA name when set. Empty means an existing
+	// nullable row, which Overview reports as its explicit UTC fallback.
+	Timezone  string    `json:"timezone,omitempty"`
+	APIKey    string    `json:"api_key"`
+	CreatedAt time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -140,12 +143,14 @@ type Project struct {
 }
 
 type Dashboard struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"project_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	ProjectID   string     `json:"project_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Revision    int64      `json:"revision"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type Chart struct {
@@ -830,6 +835,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
 	name VARCHAR(255) NOT NULL,
+	timezone VARCHAR(64),
 	api_key VARCHAR(128) UNIQUE NOT NULL,
 	owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -840,6 +846,11 @@ CREATE TABLE IF NOT EXISTS projects (
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id UUID`); err != nil {
+		return err
+	}
+	// Nullable avoids a table rewrite and preserves legacy rows; NULL has the
+	// labelled UTC fallback defined by overviewProjectTimezone.
+	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `
@@ -1056,6 +1067,22 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateConnectorRuns(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateSourceCredentials(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateCredentials(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateLifecycle(ctx); err != nil {
+		return err
+	}
+
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; migrateClickHouse
 	// also calls migrateAgent and is idempotent.
@@ -1247,10 +1274,17 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 	}
 	// external_rows is the landing table for data-connector syncs: one wide
 	// JSON row per source row, deduplicated on merge by the replacing key so
-	// snapshot re-syncs and retried batches are idempotent. `cursor` versions
-	// the replacement so the newest pull of a row wins; run_sql reaches this
-	// table through the scoped_external_rows rewrite (scopedReadonlySQL) and
-	// the readonly role's database-wide SELECT grant already covers it.
+	// snapshot re-syncs and retried batches are idempotent. `synced_at`
+	// versions the replacement so the newest pull of a row wins; run_sql
+	// reaches this table through the scoped_external_rows rewrite
+	// (scopedReadonlySQL) and the readonly role's database-wide SELECT grant
+	// already covers it.
+	//
+	// Known limit, stated honestly: synced_at is wall-clock per batch, so two
+	// batches landing in the same millisecond tie on the version column and
+	// FINAL picks an arbitrary row. A deterministic landing version
+	// (per-sync sequence + batch index) is designed but deferred — it needs
+	// an engine change that cannot be applied in place.
 	if err := s.ch.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS external_rows (
 	project_id UUID,
@@ -1550,8 +1584,21 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 		return Project{}, fmt.Errorf("missing api key")
 	}
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
+	if err != nil {
+		return Project{}, err
+	}
+	return p, nil
+}
+
+// ProjectByID resolves a project without a user check — internal auth paths
+// only (the credential IS the authorization). Callers needing membership use
+// ProjectByIDForUser.
+func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
+	var p Project
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1567,8 +1614,8 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO projects (name, api_key)
 VALUES ($1, $2)
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, name, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, name, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -1579,14 +1626,16 @@ func (s *Store) RotateProjectAPIKey(ctx context.Context, projectID string) (Proj
 UPDATE projects
 SET api_key = $2
 WHERE id = $1
-RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`, projectID, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, projectID, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
 func (s *Store) ListDashboards(ctx context.Context, projectID string) ([]Dashboard, error) {
+	// Returns every dashboard including archived ones (archived_at marks them);
+	// the operation layer filters by caller intent via ListDashboardsFiltered.
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, description, created_at, updated_at
+SELECT `+dashboardColumns+`
 FROM dashboards
 WHERE project_id = $1
 ORDER BY created_at DESC`, projectID)
@@ -1598,7 +1647,7 @@ ORDER BY created_at DESC`, projectID)
 	dashboards := []Dashboard{}
 	for rows.Next() {
 		var d Dashboard
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(dashboardScanDest(&d)...); err != nil {
 			return nil, err
 		}
 		dashboards = append(dashboards, d)
@@ -1614,8 +1663,8 @@ func (s *Store) CreateDashboard(ctx context.Context, projectID string, name stri
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO dashboards (project_id, name, description)
 VALUES ($1, $2, $3)
-RETURNING id::text, project_id::text, name, description, created_at, updated_at`, projectID, name, description).
-		Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt)
+RETURNING `+dashboardColumns, projectID, name, description).
+		Scan(dashboardScanDest(&d)...)
 	return d, err
 }
 
@@ -1626,10 +1675,10 @@ func (s *Store) UpdateDashboard(ctx context.Context, projectID string, dashboard
 	var d Dashboard
 	err := s.pg.QueryRow(ctx, `
 UPDATE dashboards
-SET name = $3, description = $4, updated_at = now()
+SET name = $3, description = $4, revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
-RETURNING id::text, project_id::text, name, description, created_at, updated_at`, projectID, dashboardID, name, description).
-		Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt)
+RETURNING `+dashboardColumns, projectID, dashboardID, name, description).
+		Scan(dashboardScanDest(&d)...)
 	return d, err
 }
 

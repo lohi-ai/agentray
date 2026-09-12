@@ -40,7 +40,7 @@ export type Tone = 'agent' | 'warning' | 'success' | 'danger';
 // height) is restored globally by the `.astryx-button` override in globals.css.
 const ASTRYX_VARIANT = { primary: 'primary', agent: 'primary', outline: 'secondary', ghost: 'ghost' } as const;
 
-export function Button({ children, variant, size, icon, onClick, disabled, isIconOnly, tooltip }: { children: ReactNode; variant: 'primary' | 'agent' | 'outline' | 'ghost'; size?: 'sm'; icon?: ReactNode; onClick?: () => void; disabled?: boolean; isIconOnly?: boolean; tooltip?: string }) {
+export function Button({ children, variant, size, icon, onClick, disabled, isIconOnly, tooltip, className }: { children: ReactNode; variant: 'primary' | 'agent' | 'outline' | 'ghost'; size?: 'sm'; icon?: ReactNode; onClick?: () => void; disabled?: boolean; isIconOnly?: boolean; tooltip?: string; className?: string }) {
   const label = typeof children === 'string' ? children : '';
   return (
     <AstryxButton
@@ -52,7 +52,7 @@ export function Button({ children, variant, size, icon, onClick, disabled, isIco
       isDisabled={disabled}
       isIconOnly={isIconOnly}
       tooltip={tooltip}
-      className={variant === 'agent' ? '![background:var(--agent)] !text-[var(--agent-foreground)]' : undefined}
+      className={[variant === 'agent' ? '![background:var(--agent)] !text-[var(--agent-foreground)]' : '', className ?? ''].filter(Boolean).join(' ') || undefined}
     >
       {children}
     </AstryxButton>
@@ -153,11 +153,11 @@ type SegmentOption = string | { value: string; label: string };
 // `--color-neutral → surface-2` / `--color-background-surface → surface-3`
 // bridges (globals.css). Keep the legacy API: value is optional (defaults to the
 // first option) since several callers drive it uncontrolled.
-export function Segment({ options, value, onChange }: { options: SegmentOption[]; value?: string; onChange?: (option: string) => void }) {
+export function Segment({ options, value, onChange, label = 'Toggle' }: { options: SegmentOption[]; value?: string; onChange?: (option: string) => void; label?: string }) {
   const items = options.map((option) => (typeof option === 'string' ? { value: option, label: option } : option));
   const current = value ?? items[0]?.value ?? '';
   return (
-    <SegmentedControl value={current} onChange={(next) => onChange?.(next)} label="Toggle" size="sm">
+    <SegmentedControl value={current} onChange={(next) => onChange?.(next)} label={label} size="sm">
       {items.map((item) => (
         <SegmentedControlItem key={item.value} value={item.value} label={item.label} />
       ))}

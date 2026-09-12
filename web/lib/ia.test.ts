@@ -16,6 +16,7 @@ import {
   recoveryAction,
   settingsPath,
   projectDetailRoot,
+  projectLanding,
   threadNeedsRecovery,
   weakestLink,
   funnelStepNames,
@@ -51,27 +52,25 @@ const IN_DEMO = {
 };
 
 describe('nav grouping', () => {
-  it('groups the shell by layer: Runtime → Channels → Workloads → Data → Workspace', () => {
+  it('groups the shell by owner task: Product → Understand → Work → Workspace', () => {
     const groups = navGroups();
-    expect(groups.map((g) => g.id)).toEqual(['Runtime', 'Channels', 'Workloads', 'Data', 'Workspace']);
-    expect(groups[0].items.map((i) => i.label)).toEqual(['Chat', 'Set up']);
-    expect(groups[1].items.map((i) => i.label)).toEqual(['Operations']);
-    expect(groups[2].items.map((i) => i.label)).toEqual(['Agents']);
-    expect(groups[3].items.map((i) => i.label)).toEqual([
-      'Dashboards', 'Traffic', 'Product', 'People', 'Events',
+    expect(groups.map((g) => g.id)).toEqual(['Product', 'Understand', 'Work', 'Workspace']);
+    expect(groups[0].items.map((i) => i.label)).toEqual(['Overview']);
+    expect(groups[1].items.map((i) => i.label)).toEqual([
+      'Analytics', 'People', 'Data',
     ]);
-    expect(groups[4].items.map((i) => i.label)).toEqual(['Settings', 'Plans']);
-    expect(NAV_ITEMS.some((i) => i.href === '/prototypes')).toBe(false);
+    expect(groups[2].items.map((i) => i.label)).toEqual(['Plans', 'Agents']);
+    expect(groups[3].items.map((i) => i.label)).toEqual(['Settings']);
   });
 
-  it('drops the Plans item from the Workspace group on self-host', () => {
-    const groups = navGroups(navItemsFor({ hosted: false }));
-    expect(groups[4].items.map((i) => i.label)).toEqual(['Settings']);
+  it('hides hosted-only Pricing from self-host related surfaces', () => {
+    expect(childSurfacesFor('/settings', CHILD_SURFACES, { hosted: false }).map((s) => s.href)).not.toContain('/pricing');
+    expect(childSurfacesFor('/settings', CHILD_SURFACES, { hosted: true }).map((s) => s.href)).toContain('/pricing');
   });
 
-  it('does not list lab or agent monitor as peer Workloads items', () => {
-    const peerHrefs = NAV_ITEMS.filter((i) => i.group === 'Workloads').map((i) => i.href);
-    expect(peerHrefs).toEqual(['/agents']);
+  it('does not list lab or agent monitor as peer Work items', () => {
+    const peerHrefs = NAV_ITEMS.filter((i) => i.group === 'Work').map((i) => i.href);
+    expect(peerHrefs).toEqual(['/plans', '/agents']);
     expect(peerHrefs).not.toContain('/agents/monitor');
     expect(peerHrefs.some((href) => href.includes('/lab'))).toBe(false);
   });
@@ -80,51 +79,58 @@ describe('nav grouping', () => {
     const hrefs = CHILD_SURFACES.map((s) => s.href);
     expect(hrefs).toEqual(expect.arrayContaining([
       '/alerts', '/teams', '/marketplace', '/cohorts', '/agents/monitor',
+      '/chat', '/operations', '/start', '/web-analytics', '/product', '/pricing',
     ]));
     expect(childSurfacesFor('/agents').map((s) => s.label)).toEqual(
-      expect.arrayContaining(['Hire a teammate', 'Teams', 'Monitor']),
+      expect.arrayContaining(['Chat', 'Operations', 'Hire a teammate', 'Teams', 'Monitor']),
     );
     expect(childSurfacesFor('/agents').map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/teams', '/marketplace', '/agents/monitor']),
+      expect.arrayContaining(['/chat', '/operations', '/teams', '/marketplace', '/agents/monitor']),
     );
-    expect(childSurfacesFor('/settings').map((s) => s.href)).toContain('/alerts');
+    expect(childSurfacesFor('/settings', CHILD_SURFACES, { hosted: true }).map((s) => s.href)).toEqual(
+      expect.arrayContaining(['/alerts', '/pricing']),
+    );
     expect(childSurfacesFor('/persons').map((s) => s.href)).toContain('/cohorts');
-    expect(childSurfacesFor('/product').map((s) => s.href)).toContain('/prototypes');
     expect(childSurfacesFor('/dashboard').map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql']),
+      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
     );
-    expect(childSurfacesFor('/events').map((s) => s.href)).toContain('/replay');
-    expect(childSurfacesFor('/chat').map((s) => s.href)).toContain('/start');
+    expect(childSurfacesFor('/events').map((s) => s.href)).toEqual(
+      expect.arrayContaining(['/replay', '/start']),
+    );
   });
 });
 
 describe('matchActiveHref', () => {
-  const cases: Array<[string, string, 'Runtime' | 'Channels' | 'Workloads' | 'Data' | 'Workspace' | '']> = [
+  const cases: Array<[string, string, 'Product' | 'Understand' | 'Work' | 'Workspace' | '']> = [
     ['/', '', ''],
-    ['/start', '/start', 'Runtime'],
-    ['/chat', '/chat', 'Runtime'],
-    ['/prototypes', '/product', 'Data'],
-    ['/prototypes/abc-123', '/product', 'Data'],
-    ['/operations', '/operations', 'Channels'],
-    ['/operations/config%3Aproj-1', '/operations', 'Channels'],
-    ['/agents', '/agents', 'Workloads'],
-    ['/agents/grow-1/lab', '/agents', 'Workloads'],
-    ['/agents/monitor', '/agents', 'Workloads'],
-    ['/agents/grow-1/monitor', '/agents', 'Workloads'],
-    ['/teams', '/agents', 'Workloads'],
-    ['/marketplace', '/agents', 'Workloads'],
-    ['/agent', '/agents', 'Workloads'],
-    ['/dashboard', '/dashboard', 'Data'],
-    ['/web-analytics', '/web-analytics', 'Data'],
-    ['/product', '/product', 'Data'],
+    ['/overview', '/overview', 'Product'],
+    ['/start', '/events', 'Understand'],
+    ['/chat', '/agents', 'Work'],
+    ['/plans', '/plans', 'Work'],
+    ['/plans/abc-123', '/plans', 'Work'],
+    ['/prototypes', '/plans', 'Work'],
+    ['/prototypes/abc-123', '/plans', 'Work'],
+    ['/product', '/dashboard', 'Understand'],
+    ['/operations', '/agents', 'Work'],
+    ['/operations/config%3Aproj-1', '/agents', 'Work'],
+    ['/agents', '/agents', 'Work'],
+    ['/agents/grow-1/lab', '/agents', 'Work'],
+    ['/agents/monitor', '/agents', 'Work'],
+    ['/agents/grow-1/monitor', '/agents', 'Work'],
+    ['/teams', '/agents', 'Work'],
+    ['/marketplace', '/agents', 'Work'],
+    ['/agent', '/agents', 'Work'],
+    ['/dashboard', '/dashboard', 'Understand'],
+    ['/web-analytics', '/dashboard', 'Understand'],
+    ['/sql', '/dashboard', 'Understand'],
+    ['/templates', '/dashboard', 'Understand'],
     ['/settings', '/settings', 'Workspace'],
     ['/alerts', '/settings', 'Workspace'],
-    ['/persons', '/persons', 'Data'],
-    ['/cohorts', '/persons', 'Data'],
-    ['/events', '/events', 'Data'],
-    ['/replay', '/events', 'Data'],
-    ['/sql', '/dashboard', 'Data'],
-    ['/templates', '/dashboard', 'Data'],
+    ['/pricing', '/settings', 'Workspace'],
+    ['/persons', '/persons', 'Understand'],
+    ['/cohorts', '/persons', 'Understand'],
+    ['/events', '/events', 'Understand'],
+    ['/replay', '/events', 'Understand'],
   ];
 
   it.each(cases)('%s → href %s in %s', (pathname, href, group) => {
@@ -162,8 +168,8 @@ describe('architecture catalogs', () => {
 });
 
 describe('signedInLandingTarget', () => {
-  it('sends an authenticated session to the conversation front door', () => {
-    expect(signedInLandingTarget()).toBe('/chat');
+  it('sends an authenticated session to the product overview front door', () => {
+    expect(signedInLandingTarget()).toBe('/overview');
     expect(signedInLandingTarget()).not.toBe('/dashboard');
   });
 });
@@ -175,14 +181,20 @@ describe('firstValuePath', () => {
     expect(shouldShowFirstEventGuide({ eventNames: [], catalogReady: true })).toBe(true);
   });
 
-  it('hides the first-event card once any event name is in the catalog', () => {
+  it('hides the first-event card after a qualifying catalog event', () => {
     const path = firstValuePath({ eventNames: ['signup'], catalogReady: true });
     expect(path.showFirstEvent).toBe(false);
     expect(shouldShowFirstEventGuide({ eventNames: ['signup'], catalogReady: true })).toBe(false);
     expect(shouldShowFirstEventGuide({
-      eventNames: [{ name: 'signup' }],
+      eventNames: [{ event_name: 'signup' }],
       catalogReady: true,
     })).toBe(false);
+  });
+
+  it('keeps setup visible for the verification receipt but not the first-ask prompt', () => {
+    const path = firstValuePath({ eventNames: [{ event_name: 'onboarding_verified' }], catalogReady: true });
+    expect(path).toEqual({ showFirstEvent: true, showFirstAsk: false });
+    expect(shouldShowFirstEventGuide({ eventNames: ['onboarding_verified'], catalogReady: true })).toBe(true);
   });
 
   it('stays off while the catalog has not loaded', () => {
@@ -400,6 +412,7 @@ describe('projectDetailRoot', () => {
     expect(projectDetailRoot('/teams/t1')).toBe('/teams');
     expect(projectDetailRoot('/operations/op1')).toBe('/operations');
     expect(projectDetailRoot('/prototypes/p1')).toBe('/prototypes');
+    expect(projectDetailRoot('/plans/p1')).toBe('/plans');
   });
 
   it('leaves list pages, chat, sql, and /agents/monitor alone', () => {
@@ -408,6 +421,22 @@ describe('projectDetailRoot', () => {
     expect(projectDetailRoot('/chat')).toBeNull();
     expect(projectDetailRoot('/sql')).toBeNull();
     expect(projectDetailRoot('/settings?tab=projects')).toBeNull();
+  });
+});
+
+describe('projectLanding', () => {
+  it('sends a newly created project to /overview from any surface', () => {
+    // "Start new projects on Overview" holds even when the create dialog was
+    // opened from a detail route or a safe list page.
+    expect(projectLanding('/settings?tab=projects', { created: true })).toBe('/overview');
+    expect(projectLanding('/agents/abc/setup', { created: true })).toBe('/overview');
+    expect(projectLanding('/dashboard', { created: true })).toBe('/overview');
+  });
+
+  it('keeps the existing-project switch behavior unchanged', () => {
+    expect(projectLanding('/agents/abc/setup')).toBe('/agents');
+    expect(projectLanding('/chat')).toBeNull();
+    expect(projectLanding('/settings?tab=projects')).toBeNull();
   });
 });
 
@@ -596,14 +625,18 @@ describe('isRunError', () => {
 });
 
 describe('navItemsFor', () => {
-  it('hides pricing on a self-hosted instance', () => {
+  it('keeps pricing off the top-level nav on every install', () => {
+    // Pricing moved under Settings as a hosted-only child surface — it is a
+    // billing detail, not an owner task.
     const selfHost = navItemsFor({ hosted: false }).map((item) => item.href);
     expect(selfHost).not.toContain('/pricing');
     expect(selfHost).toContain('/settings');
     expect(navItemsFor({}).map((item) => item.href)).not.toContain('/pricing');
+    expect(navItemsFor({ hosted: true }).map((item) => item.href)).not.toContain('/pricing');
   });
 
-  it('shows pricing on the managed cloud', () => {
-    expect(navItemsFor({ hosted: true }).map((item) => item.href)).toContain('/pricing');
+  it('shows pricing as a Settings surface on the managed cloud only', () => {
+    expect(childSurfacesFor('/settings', CHILD_SURFACES, { hosted: true }).map((s) => s.href)).toContain('/pricing');
+    expect(childSurfacesFor('/settings', CHILD_SURFACES, { hosted: false }).map((s) => s.href)).not.toContain('/pricing');
   });
 });

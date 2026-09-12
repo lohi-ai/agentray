@@ -1,12 +1,14 @@
-// Product information architecture mapped onto the four backend layers:
-//   Channel (chat/mcp/schedule/webhook/lab) → Workloads (Garden packs)
-//   → Runtime (conversation / run) → Data (dataplane views).
+// Product information architecture mapped onto the jobs a product owner
+// recognizes (docs/redesign/strategy.md): understand usage, explore analytics,
+// inspect people, manage data, keep plans, connect agents, configure the
+// workspace. The old Runtime/Channels/Workloads layering named backend
+// subsystems; the owner-task IA names destinations.
 // Pure functions so unit tests can call the same helpers the shell uses.
-
-// Group headings are the layers. Chat is the runtime front door. Operations
-// are channels. Agents are workloads. Prototypes are a Product child, not a
-// peer of Operations.
-export type NavGroupId = 'Runtime' | 'Channels' | 'Workloads' | 'Data' | 'Workspace';
+//
+// Every pre-redesign route stays reachable: old top-level items became either
+// an alias on the new destination (deep links light the right nav item) or a
+// child surface under it. Nothing redirects away and no saved layout moves.
+export type NavGroupId = 'Product' | 'Understand' | 'Work' | 'Workspace';
 
 export type NavItemDef = {
   href: string;
@@ -19,20 +21,20 @@ export type NavItemDef = {
 };
 
 export const NAV_ITEMS: readonly NavItemDef[] = [
-  // Chat is the landing. Set up is the job index — it used to alias Chat and
-  // hide behind a ghost header button, which made the clearest screen the
-  // hardest to find.
-  { href: '/chat', label: 'Chat', group: 'Runtime' },
-  { href: '/start', label: 'Set up', group: 'Runtime' },
-  { href: '/operations', label: 'Operations', group: 'Channels' },
-  { href: '/agents', label: 'Agents', group: 'Workloads', aliases: ['/teams', '/marketplace', '/monitor', '/agent'] },
-  { href: '/dashboard', label: 'Dashboards', group: 'Data', aliases: ['/dashboards', '/templates', '/sql'] },
-  { href: '/web-analytics', label: 'Traffic', group: 'Data', aliases: ['/traffic'] },
-  { href: '/product', label: 'Product', group: 'Data', aliases: ['/prototypes'] },
-  { href: '/persons', label: 'People', group: 'Data', aliases: ['/cohorts'] },
-  { href: '/events', label: 'Events', group: 'Data', aliases: ['/replay'] },
-  { href: '/settings', label: 'Settings', group: 'Workspace', aliases: ['/alerts'] },
-  { href: '/pricing', label: 'Plans', group: 'Workspace', hostedOnly: true },
+  // Overview is the front door — the deterministic product read, not a chat.
+  { href: '/overview', label: 'Overview', group: 'Product' },
+  // Analytics = explore: dashboards, traffic, product views, templates, SQL.
+  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/web-analytics', '/traffic', '/product'] },
+  { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
+  // Data = connect and inspect: events, replay, SDK setup, connectors.
+  { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
+  // Plans = findings and experiments. /prototypes stays reachable as an
+  // alias — the pre-slice-4 surface it names still serves its URLs.
+  { href: '/plans', label: 'Plans', group: 'Work', aliases: ['/prototypes'] },
+  // Agents = every agent surface: chat, operations (triggers), Garden,
+  // teams, marketplace, monitor, lab.
+  { href: '/agents', label: 'Agents', group: 'Work', aliases: ['/teams', '/marketplace', '/monitor', '/agent', '/chat', '/operations'] },
+  { href: '/settings', label: 'Settings', group: 'Workspace', aliases: ['/alerts', '/pricing'] },
 ];
 
 // navItemsFor drops hosted-only surfaces on a self-hosted instance. A
@@ -88,20 +90,23 @@ export const WORKLOAD_CATEGORIES: readonly WorkloadCategory[] = [
 // jobLayers() in ./jobs, which states each layer as what it does for the job on
 // screen — a layer name on its own teaches a product owner nothing.
 
-export type ChildSurface = { href: string; label: string; parentHref: string };
+export type ChildSurface = { href: string; label: string; parentHref: string; hostedOnly?: boolean };
 
 // Surfaces that used to sit as peer nav items. They stay reachable from a
 // parent Main/Explore screen instead of competing with Chat / Agents / etc.
 export const CHILD_SURFACES: readonly ChildSurface[] = [
-  // Data-only: Chat is bleed. The rendered door is the header Set up control.
-  { href: '/start', label: 'Set up', parentHref: '/chat' },
+  { href: '/start', label: 'Set up', parentHref: '/events' },
+  { href: '/chat', label: 'Chat', parentHref: '/agents' },
+  { href: '/operations', label: 'Operations', parentHref: '/agents' },
   { href: '/marketplace', label: 'Hire a teammate', parentHref: '/agents' },
   { href: '/teams', label: 'Teams', parentHref: '/agents' },
   { href: '/agents/monitor', label: 'Monitor', parentHref: '/agents' },
   { href: '/templates', label: 'Templates', parentHref: '/dashboard' },
   { href: '/sql', label: 'SQL', parentHref: '/dashboard' },
-  { href: '/prototypes', label: 'Prototypes', parentHref: '/product' },
+  { href: '/web-analytics', label: 'Traffic', parentHref: '/dashboard' },
+  { href: '/product', label: 'Product', parentHref: '/dashboard' },
   { href: '/alerts', label: 'Alerts', parentHref: '/settings' },
+  { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
   { href: '/replay', label: 'Replay', parentHref: '/events' },
 ];
@@ -121,7 +126,7 @@ export function navPrefixes(item: NavItemDef): string[] {
 }
 
 export function navGroups(items: readonly NavItemDef[] = NAV_ITEMS): Array<{ id: NavGroupId; label: NavGroupId; items: NavItemDef[] }> {
-  const order: NavGroupId[] = ['Runtime', 'Channels', 'Workloads', 'Data', 'Workspace'];
+  const order: NavGroupId[] = ['Product', 'Understand', 'Work', 'Workspace'];
   return order.map((id) => ({ id, label: id, items: items.filter((item) => item.group === id) }));
 }
 
@@ -149,11 +154,15 @@ export function navGroupForPath(pathname: string, items: readonly NavItemDef[] =
   return items.find((item) => item.href === href)?.group ?? '';
 }
 
-export function childSurfacesFor(parentHref: string, surfaces: readonly ChildSurface[] = CHILD_SURFACES): ChildSurface[] {
-  return surfaces.filter((surface) => surface.parentHref === parentHref);
+export function childSurfacesFor(parentHref: string, surfaces: readonly ChildSurface[] = CHILD_SURFACES, opts: { hosted?: boolean } = {}): ChildSurface[] {
+  // hostedOnly children (billing) follow the same rule as hostedOnly nav
+  // items: a self-host operator never sees a surface they cannot use.
+  return surfaces.filter((surface) => surface.parentHref === parentHref && (!surface.hostedOnly || !!opts.hosted));
 }
 
-export const SIGNED_IN_LANDING = '/chat';
+// Overview is the signed-in front door: the deterministic product read comes
+// first, chat and agents are one nav stop away under Agents.
+export const SIGNED_IN_LANDING = '/overview';
 
 export function signedInLandingTarget(): string {
   return SIGNED_IN_LANDING;
@@ -166,8 +175,9 @@ export function signedInLandingTarget(): string {
 // prompts grouped by the situation the owner is actually in.
 
 export type FirstRunInput = {
-  // Catalog rows or bare names — only length matters for first-run gating.
-  eventNames: { readonly length: number } | null | undefined;
+  // Catalog rows or bare names. A verification-only catalog proves capture,
+  // not product activity, so it keeps the first-event guide visible.
+  eventNames: readonly (string | { name?: string; event_name?: string; count?: number; users?: number })[] | null | undefined;
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
@@ -178,11 +188,15 @@ export type FirstValuePath = {
   showFirstAsk: boolean;
 };
 
-// Empty catalog (zero event names, catalog has loaded) turns on the guided
-// first-event + first-ask path.
+
+// A verification receipt is intentionally excluded from product metrics. Keep
+// setup present until the catalog has a product event, while the chat prompt
+// remains reserved for an entirely empty catalog.
 export function firstValuePath(input: FirstRunInput): FirstValuePath {
-  const empty = input.catalogReady && (input.eventNames?.length ?? 0) === 0;
-  return { showFirstEvent: empty, showFirstAsk: empty };
+  const names = input.eventNames?.map((entry) => typeof entry === 'string' ? entry : entry.event_name ?? entry.name ?? '') ?? [];
+  const empty = input.catalogReady && names.length === 0;
+  const verificationOnly = input.catalogReady && names.length > 0 && names.every((name) => name === 'onboarding_verified');
+  return { showFirstEvent: empty || verificationOnly, showFirstAsk: empty };
 }
 
 export function shouldShowFirstEventGuide(input: FirstRunInput): boolean {
@@ -705,7 +719,17 @@ export function projectDetailRoot(pathname: string): string | null {
   if (/^\/teams\/[^/]+/.test(path)) return '/teams';
   if (/^\/operations\/[^/]+/.test(path)) return '/operations';
   if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
+  if (/^\/plans\/[^/]+/.test(path)) return '/plans';
   return null;
+}
+
+// projectLanding decides where activating a project leaves the user. A newly
+// created project always lands on Overview — the front door — no matter which
+// surface the create dialog was opened from; switching an existing project
+// keeps the current safe-list unwind (null = stay on the current route).
+export function projectLanding(pathname: string, opts?: { created?: boolean }): string | null {
+  if (opts?.created) return SIGNED_IN_LANDING;
+  return projectDetailRoot(pathname);
 }
 
 export function settingsTabFromQuery(search: string): string {

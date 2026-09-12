@@ -5,12 +5,12 @@ import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { Apple, Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
 import { CodeBlock } from '@astryxdesign/core/CodeBlock';
-import { apiBase } from '@/lib/api';
+import { AgentRayAPI, apiBase, type VerifySDKResult } from '@/lib/api';
 import { settingsPath, shouldShowFirstEventGuide } from '@/lib/ia';
 import { useAuthStore } from '@/lib/app-state';
 import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
-import { Button, Segment } from '@/modules/shared/components/signal-primitives';
-import { InstrumentSnippet, swiftSnippet } from '@/modules/start/components/instrument-snippet';
+import { Button, Callout, Segment } from '@/modules/shared/components/signal-primitives';
+import { swiftSnippet } from '@/modules/start/components/instrument-snippet';
 
 type Source = 'website' | 'ios' | 'app' | 'warehouse';
 type Lang = 'curl' | 'js' | 'python';
@@ -34,8 +34,6 @@ const LANGS: Array<{ value: Lang; label: string }> = [
   { value: 'python', label: 'Python' },
 ];
 
-
-
 function appSnippet(lang: Lang, base: string, key: string): string {
   const url = `${base}/capture`;
   if (lang === 'curl') {
@@ -44,9 +42,9 @@ function appSnippet(lang: Lang, base: string, key: string): string {
       `  -H "Content-Type: application/json" \\`,
       `  -d '{`,
       `    "api_key": "${key}",`,
-      `    "event": "user.signup",`,
+      `    "event": "onboarding_verified",`,
       `    "distinct_id": "user_123",`,
-      `    "properties": { "plan": "free" }`,
+      `    "properties": { "platform": "server" }`,
       `  }'`,
     ].join('\n');
   }
@@ -56,9 +54,10 @@ function appSnippet(lang: Lang, base: string, key: string): string {
       `  method: "POST",`,
       `  headers: { "Content-Type": "application/json" },`,
       `  body: JSON.stringify({`,
-      `    event: "user.signup",`,
+      `    api_key: "${key}",`,
+      `    event: "onboarding_verified",`,
       `    distinct_id: "user_123",`,
-      `    properties: { plan: "free" },`,
+      `    properties: { platform: "server" },`,
       `  }),`,
       `});`,
     ].join('\n');
@@ -67,11 +66,39 @@ function appSnippet(lang: Lang, base: string, key: string): string {
     `import requests`,
     ``,
     `requests.post("${url}", json={`,
-    `    "event": "user.signup",`,
+    `    "api_key": "${key}",`,
+    `    "event": "onboarding_verified",`,
     `    "distinct_id": "user_123",`,
-    `    "properties": {"plan": "free"},`,
+    `    "properties": {"platform": "server"},`,
     `})`,
   ].join('\n');
+}
+
+// verificationSnippet deliberately differs from the full SDK examples: it
+// sends only the excluded onboarding receipt, with an explicit platform, so a
+// copied setup check cannot contaminate product metrics.
+export function verificationSnippet(source: Exclude<Source, 'warehouse'>, lang: Lang, base: string, key: string): string {
+  if (source === 'website') {
+    return [
+      `<script>`,
+      `const key = ${JSON.stringify(key)};`,
+      `const id = localStorage.getItem("agentray_verify_id") || "v-" + Date.now().toString(36) + Math.random().toString(36).slice(2);`,
+      `localStorage.setItem("agentray_verify_id", id);`,
+      `fetch(${JSON.stringify(`${base}/capture`)}, {`,
+      `  method: "POST",`,
+      `  headers: { "Content-Type": "application/json" },`,
+      `  body: JSON.stringify({`,
+      `    api_key: key, event: "onboarding_verified", distinct_id: id,`,
+      `    properties: { platform: "web" },`,
+      `  }),`,
+      `});`,
+      `</script>`,
+    ].join('\n');
+  }
+  if (source === 'ios') {
+    return `${swiftSnippet(base, key)}\n\n// Verify setup once after initialization.\nAgentRay.capture("onboarding_verified")`;
+  }
+  return appSnippet(lang, base, key);
 }
 
 // FirstEventQuickstart is the activation surface for a project with nothing in
@@ -88,16 +115,23 @@ export function FirstEventQuickstart() {
 
   const [source, setSource] = useState<Source>('website');
   const [lang, setLang] = useState<Lang>('js');
-  const [copied, setCopied] = useState<'key' | null>(null);
+  const [copied, setCopied] = useState<'key' | 'task' | null>(null);
+  // Verification state is keyed to the project it was checked against: the
+  // component survives a project switch, and an in-flight check can resolve
+  // after one — an unkeyed receipt would vouch for the wrong project.
+  const [verification, setVerification] = useState<{ projectID: string; result: VerifySDKResult } | null>(null);
+  const [verificationError, setVerificationError] = useState<{ projectID: string; message: string } | null>(null);
+  const [checking, setChecking] = useState<string | null>(null);
 
   const key = project?.api_key ?? '';
   const base = apiBase();
   const code = useMemo(
-    () => appSnippet(lang, base, key),
-    [lang, base, key],
+    () => (source === 'warehouse' ? '' : verificationSnippet(source, lang, base, key)),
+    [source, lang, base, key],
   );
-  // The website snippet is a <script> tag, so it highlights as HTML; the app
-  // snippets follow the picked language.
+  const verificationResult = verification && verification.projectID === projectID ? verification.result : null;
+  const verificationErrorMessage = verificationError && verificationError.projectID === projectID ? verificationError.message : null;
+  const isChecking = checking === projectID;
   const codeLang = source === 'website' ? 'html' : source === 'ios' ? 'swift' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
 
   if (!shouldShowFirstEventGuide({
@@ -105,15 +139,71 @@ export function FirstEventQuickstart() {
     catalogReady: !loading && !!project,
   })) return null;
 
-  function copy(text: string) {
+  function copy(text: string, which: 'key' | 'task' = 'key') {
     void navigator.clipboard?.writeText(text);
-    setCopied('key');
-    setTimeout(() => setCopied(null), 1500);
+    setCopied(which);
+    setTimeout(() => setCopied((current) => (current === which ? null : current)), 1500);
   }
 
-  function checkNow() {
-    void queryClient.invalidateQueries({ queryKey: ['event-names', projectID] });
-    void queryClient.invalidateQueries({ queryKey: ['console', projectID] });
+  // A self-contained brief for an external coding agent (Claude Code, Cursor,
+  // a teammate's script). It points at the real SDK contract — init/autocapture,
+  // identify, reset — instead of hand-rolled fetch calls, because identity
+  // stitching lives inside the SDK and a reimplementation loses it.
+  function agentTask(): string {
+    return [
+      'Instrument this product with AgentRay analytics using the official SDK — do not hand-roll HTTP calls.',
+      '',
+      `Host: ${base}`,
+      `Project key: ${key || 'YOUR_PROJECT_KEY'}`,
+      'NOTE: this is the project capture key. On older (pre-split) projects the same key may also read data — treat it as a secret in server code, embed it client-side only where the SDK docs say to.',
+      '',
+      'Web: install the browser SDK per sdk/browser/README.md — the npm scope',
+      '  is not published yet, so use the GitHub release tarball or the',
+      '  <script> bundle exactly as that README describes. Then:',
+      '  import { init } from "@agentray/browser"',
+      `  const ar = init({ host: "${base}", apiKey: "<key>", autocapture: true })`,
+      '  autocapture covers pageviews (incl. SPA route changes) and clicks.',
+      '  ar.capture("event_name", { ... }) for custom events.',
+      '  ar.identify(userId, traits) on sign-in — it aliases the anonymous history,',
+      '    so a person who browsed before signup stays one person.',
+      '  ar.reset() on sign-out.',
+      '  SDK source + full contract: sdk/browser/README.md in the AgentRay repo.',
+      'iOS: sdk/swift/README.md — same identify-on-sign-in contract.',
+      'Server/backend: sdk/server/README.md or sdk/python/README.md — different',
+      '  contract: AgentRayServerClient, every capture takes an explicit',
+      '  distinctId, no anonymous lifecycle and no reset(). Do not port the',
+      '  browser identity flow to a server.',
+      '',
+      'Verification: send one event named "onboarding_verified" — the receipt',
+      'check, excluded from all product metrics. Do NOT fake a user.pageview.',
+      'Then tell me to press "I\'ve sent it — check now" on the AgentRay overview.',
+    ].join('\n');
+  }
+
+  async function checkNow() {
+    if (!projectID) return;
+    setChecking(projectID);
+    setVerificationError((current) => (current?.projectID === projectID ? null : current));
+    try {
+      const result = await new AgentRayAPI(projectID).verifySDK();
+      if (useAuthStore.getState().project?.id !== projectID) return;
+      setVerification({ projectID, result });
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['event-names', projectID] }),
+        queryClient.invalidateQueries({ queryKey: ['console', projectID] }),
+        queryClient.invalidateQueries({ queryKey: ['overview', projectID] }),
+      ]);
+    } catch (error) {
+      if (useAuthStore.getState().project?.id !== projectID) return;
+      setVerification((current) => (current?.projectID === projectID ? null : current));
+      setVerificationError({ projectID, message: error instanceof Error ? error.message : 'Could not check whether the verification event arrived.' });
+    } finally {
+      // Always release the checking flag for the project that started this
+      // call — even when the user has since switched projects. Skipping the
+      // clear on a stale project leaves checking pinned to that project, so
+      // switching back shows a permanently spinning "Checking…" state.
+      setChecking((checkingProjectID) => checkingProjectID === projectID ? null : checkingProjectID);
+    }
   }
 
   return (
@@ -124,9 +214,9 @@ export function FirstEventQuickstart() {
           <div className="mb-0.5 text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">
             Get started · ~2 min
           </div>
-          <div className="text-sm font-semibold">Send your first event</div>
+          <div className="text-sm font-semibold">Verify SDK capture</div>
           <div className="text-sm leading-[1.5] text-[var(--color-text-secondary)]">
-            No data yet. Drop a snippet on your site, in your iOS app, in your backend, or open a warehouse connector.
+            Send one verification event from your site, app, or backend. It confirms receipt without changing product metrics.
           </div>
         </div>
       </div>
@@ -137,7 +227,7 @@ export function FirstEventQuickstart() {
           <div className="flex max-w-[560px] items-center gap-3 rounded-md bg-[var(--color-background-muted)] px-3 py-3 text-sm">
             <span className="min-w-0 flex-1 truncate font-mono tabular-nums">{key || '—'}</span>
             <button
-              className="inline-flex flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
+              className="inline-flex min-h-[44px] flex-none items-center gap-1 rounded-sm border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-surface)] hover:text-[var(--color-text-primary)]"
               onClick={() => copy(key)}
               disabled={!key}
             >
@@ -149,7 +239,7 @@ export function FirstEventQuickstart() {
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">Source</span>
-            <span className="ms-auto"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} /></span>
+            <span className="ms-auto [&_[role=radio]]:min-h-[44px]"><Segment options={SOURCES} value={source} onChange={(v) => setSource(v as Source)} label="Event source" /></span>
           </div>
 
           {source === 'warehouse' ? (
@@ -157,38 +247,63 @@ export function FirstEventQuickstart() {
               <p className="mb-2 flex items-center gap-2 text-[var(--color-text-primary)]">
                 <Warehouse size={14} /> Pull events from Postgres or an existing warehouse.
               </p>
-              <Button variant="primary" size="sm" onClick={() => router.push(settingsPath('connectors'))}>Open data connectors</Button>
+              <Button variant="primary" size="sm" className="min-h-[44px]" onClick={() => router.push(settingsPath('connectors'))}>Open data connectors</Button>
             </div>
           ) : (
             <>
               {source === 'app' ? (
                 <div className="mb-2 flex items-center gap-2">
                   <Smartphone size={14} className="text-[var(--color-text-secondary)]" />
-                  <span className="ms-auto"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} /></span>
+                  <span className="ms-auto [&_[role=radio]]:min-h-[44px]"><Segment options={LANGS} value={lang} onChange={(v) => setLang(v as Lang)} label="Snippet language" /></span>
                 </div>
               ) : source === 'ios' ? (
                 <p className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                  <Apple size={14} /> Drop this in one Swift file. It tags every event <code className="font-mono">platform: ios</code>, so
-                  your app and your site stay separable.
+                  <Apple size={14} /> The iOS snippet keeps its <code className="font-mono">platform: ios</code> stamp and adds one verification capture.
                 </p>
               ) : (
                 <p className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                  <Globe size={14} /> Paste this on every page. It sends <code className="font-mono">user.pageview</code>.
+                  <Globe size={14} /> This one-time Web receipt is stamped <code className="font-mono">platform: web</code>.
                 </p>
               )}
-              {source === 'website' ? (
-                <InstrumentSnippet apiKey={key} host={base} />
-              ) : (
-                <CodeBlock code={source === 'ios' ? swiftSnippet(base, key) : code} language={codeLang} size="sm" width="100%" container="section" />
-              )}
+              <CodeBlock code={code} language={codeLang} size="sm" width="100%" container="section" />
             </>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
+        {/* Verification results are announced: the check resolves
+            asynchronously, so the outcome region is a polite live region and
+            the failure case keeps Banner's role="alert". */}
+        <div aria-live="polite">
+          {isChecking ? (
+            <Callout tone="agentic" icon={<RefreshCw size={16} />} label="Verification" title="Checking for your event" detail="Looking at the most recent capture receipts for this project." />
+          ) : verificationErrorMessage ? (
+            <Callout tone="warn" icon={<RefreshCw size={16} />} label="Verification" title="Could not check for your event" detail={verificationErrorMessage} action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => void checkNow()}>Retry</Button>} />
+          ) : verificationResult?.found ? (
+            <Callout
+              tone="growth"
+              icon={<Check size={16} />}
+              label="SDK verified"
+              title={`${verificationResult.event_name || 'Verification event'} received`}
+              detail={`Received ${verificationResult.received_at || 'at an unknown time'} · platform ${verificationResult.platform || 'unknown'} · identity ${verificationResult.identity_linked ? 'linked' : 'not linked'}.`}
+            />
+          ) : verificationResult ? (
+            <Callout tone="warn" icon={<RefreshCw size={16} />} label="Not received yet" title="No verification event found" detail={`Searched ${verificationResult.searched} recent capture receipts. ${verificationResult.warnings.join(' ')}`} action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => void checkNow()}>Retry</Button>} />
+          ) : null}
+        </div>
+
+        {verificationResult?.found && verificationResult.warnings.length > 0 ? (
+          <p role="status" className="text-xs text-[var(--color-text-secondary)]">{verificationResult.warnings.join(' ')}</p>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-2 [&_button]:min-h-[44px]">
+          <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={() => void checkNow()} disabled={isChecking || !projectID}>
+            {isChecking ? 'Checking…' : 'I’ve sent it — check now'}
+          </Button>
+          <Button variant="outline" size="sm" icon={copied === 'task' ? <Check size={14} /> : <Copy size={14} />} onClick={() => copy(agentTask(), 'task')}>
+            {copied === 'task' ? 'Copied' : 'Copy agent task'}
+          </Button>
           <span className="text-xs text-[var(--color-text-disabled)]">
-            Events can take a few seconds to appear. This card disappears once your first event lands.
+            Receipts can take a few seconds. Verification stays visible until real product activity arrives.
           </span>
         </div>
       </div>

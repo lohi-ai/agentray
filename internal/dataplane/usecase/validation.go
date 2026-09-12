@@ -2,10 +2,12 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -25,6 +27,19 @@ type proposeTestInput struct {
 	TargetCount   int    `json:"target_count" desc:"how many DISTINCT people must fire it for the idea to be worth building" required:"true"`
 	BaselineEvent string `json:"baseline_event" desc:"denominator event, usually user.pageview (optional)"`
 	WindowDays    int    `json:"window_days" desc:"how long the test runs, in days (default 14)"`
+	// Slice-4 resumable-experiment fields — all optional, all persisted so an
+	// agent with no chat history can resume the experiment from reads alone.
+	ObservationID   string  `json:"observation_id" desc:"finding id this experiment answers"`
+	Evidence        string  `json:"evidence" desc:"typed envelope JSON: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark}"`
+	BaselineValue   float64 `json:"baseline_value" desc:"measured baseline value (0 = not recorded)"`
+	BaselineUnit    string  `json:"baseline_unit" desc:"e.g. 'weekly return %', 'signups'"`
+	BaselineWindow  string  `json:"baseline_window" desc:"baseline measurement window"`
+	Audience        string  `json:"audience" desc:"segment or cohort the experiment targets"`
+	Owner           string  `json:"owner" desc:"responsible user or agent"`
+	SuccessMetric   string  `json:"success_metric" desc:"win condition"`
+	GuardrailMetric string  `json:"guardrail_metric" desc:"do-no-harm bound"`
+	ReviewDate      string  `json:"review_date" desc:"RFC3339 decision due date"`
+	IdempotencyKey  string  `json:"idempotency_key" desc:"retry-safe write key"`
 }
 
 type proposeTestOutput struct {
@@ -42,23 +57,52 @@ type proposeTestOutput struct {
 // is what makes the number a commitment rather than a suggestion.
 func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 	return opcore.Operation[proposeTestInput, proposeTestOutput]{
-		Name:    "propose_test",
-		Summary: "Propose a validation test: the success event, how many distinct people must fire it, and by when. The owner commits to it before the data arrives.",
-		Scope:   "growth_suggest",
+		Name:           "propose_test",
+		Summary:        "Propose a validation test: the success event, how many distinct people must fire it, and by when. The owner commits to it before the data arrives.",
+		Scope:          "growth_suggest",
+		Access:         opcore.AccessPlansWrite,
+		MinSessionRole: "member",
 		Handler: func(ctx context.Context, cc opcore.CallContext, in proposeTestInput) (proposeTestOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return proposeTestOutput{}, err
 			}
-			id, err := d.Repo.CreateValidationTest(ctx, storage.ValidationTest{
-				ProjectID:     cc.ProjectID,
-				RunID:         cc.RunID,
-				Hypothesis:    in.Hypothesis,
-				MetricEvent:   in.MetricEvent,
-				BaselineEvent: in.BaselineEvent,
-				TargetCount:   in.TargetCount,
-				WindowDays:    in.WindowDays,
-			})
+			var reviewDate *time.Time
+			if in.ReviewDate != "" {
+				t, perr := time.Parse(time.RFC3339, in.ReviewDate)
+				if perr != nil {
+					return proposeTestOutput{}, errBadInput("review_date must be RFC3339")
+				}
+				reviewDate = &t
+			}
+			var baselineValue *float64
+			if in.BaselineValue != 0 {
+				baselineValue = &in.BaselineValue
+			}
+			t := storage.ValidationTest{
+				ProjectID:       cc.ProjectID,
+				RunID:           cc.RunID,
+				Hypothesis:      in.Hypothesis,
+				MetricEvent:     in.MetricEvent,
+				BaselineEvent:   in.BaselineEvent,
+				TargetCount:     in.TargetCount,
+				WindowDays:      in.WindowDays,
+				ObservationID:   in.ObservationID,
+				EvidenceJSON:    in.Evidence,
+				BaselineValue:   baselineValue,
+				BaselineUnit:    in.BaselineUnit,
+				BaselineWindow:  in.BaselineWindow,
+				Audience:        in.Audience,
+				Owner:           in.Owner,
+				SuccessMetric:   in.SuccessMetric,
+				GuardrailMetric: in.GuardrailMetric,
+				ReviewDate:      reviewDate,
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return proposeTestOutput{}, err
+			}
+			id, err := d.Repo.CreateValidationTestIdempotent(ctx, t, strings.TrimSpace(in.IdempotencyKey), hash)
 			if err != nil {
 				return proposeTestOutput{}, err
 			}
@@ -105,6 +149,20 @@ type testStatusOutput struct {
 	// committed (= still running, too early to call).
 	Verdict string `json:"verdict,omitempty"`
 	Note    string `json:"note"`
+	// Slice-4 resumable fields — an agent with no chat history reconstructs
+	// the full experiment state from this read alone.
+	ObservationID   string   `json:"observation_id,omitempty"`
+	EvidenceJSON    string   `json:"evidence_json,omitempty"`
+	BaselineValue   *float64 `json:"baseline_value,omitempty"`
+	BaselineUnit    string   `json:"baseline_unit,omitempty"`
+	BaselineWindow  string   `json:"baseline_window,omitempty"`
+	Audience        string   `json:"audience,omitempty"`
+	Owner           string   `json:"owner,omitempty"`
+	SuccessMetric   string   `json:"success_metric,omitempty"`
+	GuardrailMetric string   `json:"guardrail_metric,omitempty"`
+	ReviewDate      string   `json:"review_date,omitempty"`
+	OutcomeJSON     string   `json:"outcome_json,omitempty"`
+	Revision        int64    `json:"revision"`
 }
 
 // testStatus reads the live test against its committed threshold. This is a
@@ -116,6 +174,7 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 		Name:    "test_status",
 		Summary: "Read one validation test — by id, or the project's active one — and how it is doing against the threshold agreed in advance.",
 		Scope:   "growth_suggest",
+		Access:  opcore.AccessAnalyticsRead,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in testStatusInput) (testStatusOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
@@ -127,7 +186,12 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				if fErr != nil {
 					// A named test that does not exist is not "no test": answering
 					// with the active one would report a different experiment's
-					// numbers under the name the owner asked about.
+					// numbers under the name the owner asked about. Infrastructure
+					// failures remain failures; only the repository's typed
+					// project-scoped not-found result becomes this useful reply.
+					if !storage.ErrNoSuchValidationTest(fErr) && !errors.Is(fErr, pgx.ErrNoRows) {
+						return testStatusOutput{}, fErr
+					}
 					return testStatusOutput{
 						HasTest: false,
 						Note: "No prototype with id " + id + " in this project. Call list_tests and use an id from it — " +
@@ -171,6 +235,22 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				DaysElapsed:   p.DaysElapsed,
 				DaysLeft:      p.DaysLeft,
 				WaitlistCount: count,
+				// Slice-4 resumable fields — an agent with no chat history
+				// reconstructs the full experiment state from this read alone.
+				ObservationID:   test.ObservationID,
+				EvidenceJSON:    test.EvidenceJSON,
+				BaselineValue:   test.BaselineValue,
+				BaselineUnit:    test.BaselineUnit,
+				BaselineWindow:  test.BaselineWindow,
+				Audience:        test.Audience,
+				Owner:           test.Owner,
+				SuccessMetric:   test.SuccessMetric,
+				GuardrailMetric: test.GuardrailMetric,
+				OutcomeJSON:     test.OutcomeJSON,
+				Revision:        test.Revision,
+			}
+			if test.ReviewDate != nil {
+				out.ReviewDate = test.ReviewDate.UTC().Format(time.RFC3339)
 			}
 			if test.BaselineEvent != "" && p.Baseline > 0 {
 				out.ConversionPct = float64(p.Metric) / float64(p.Baseline) * 100
@@ -215,7 +295,12 @@ func decisionNoteSuffix(note string) string {
 	return " They wrote: " + strings.TrimSpace(note) + "."
 }
 
-type listTestsInput struct{}
+type listTestsInput struct {
+	// Cursor pages the full history — the fixed newest-25 list cannot resume
+	// work older than the first page. Empty keeps the original capped read.
+	Cursor string `json:"cursor" desc:"keyset cursor from a previous page"`
+	Limit  int    `json:"limit" desc:"page size, max 50"`
+}
 
 // listedTest is deliberately thin: enough to name each prototype and say which
 // one needs the owner, not enough to answer "how is it doing". Measuring every
@@ -233,6 +318,8 @@ type listedTest struct {
 
 type listTestsOutput struct {
 	Tests []listedTest `json:"tests"`
+	// NextCursor continues the full-history walk when set.
+	NextCursor string `json:"next_cursor,omitempty"`
 	// Total is how many exist; Tests is a capped page of them. Reported so an
 	// agent never says "you have three prototypes" while looking at page one of
 	// forty.
@@ -250,10 +337,25 @@ func listTests() opcore.Operation[listTestsInput, listTestsOutput] {
 		Name:    "list_tests",
 		Summary: "List the project's validation tests (prototypes) — open ones first — with the id each one is read by.",
 		Scope:   "growth_suggest",
-		Handler: func(ctx context.Context, cc opcore.CallContext, _ listTestsInput) (listTestsOutput, error) {
+		Access:  opcore.AccessAnalyticsRead,
+		Handler: func(ctx context.Context, cc opcore.CallContext, in listTestsInput) (listTestsOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return listTestsOutput{}, err
+			}
+			if in.Cursor != "" || in.Limit > 0 {
+				page, next, perr := d.Repo.ListValidationTestsPage(ctx, cc.ProjectID, in.Cursor, in.Limit)
+				if perr != nil {
+					return listTestsOutput{}, perr
+				}
+				out := listTestsOutput{Tests: make([]listedTest, 0, len(page)), NextCursor: next}
+				for _, t := range page {
+					out.Tests = append(out.Tests, listedTest{
+						TestID: t.ID, Hypothesis: t.Hypothesis, Status: t.Status, MetricEvent: t.MetricEvent,
+						TargetCount: t.TargetCount, WindowDays: t.WindowDays, CreatedAt: t.CreatedAt.Format(time.RFC3339),
+					})
+				}
+				return out, nil
 			}
 			tests, total, err := d.Repo.ValidationTestsForProject(ctx, cc.ProjectID, 0)
 			if err != nil {

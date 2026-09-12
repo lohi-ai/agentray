@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -53,6 +54,33 @@ type ValidationTest struct {
 	DecidedAt     *time.Time `json:"decided_at,omitempty"`
 	DecisionNote  string     `json:"decision_note"`
 	CreatedAt     time.Time  `json:"created_at"`
+	// Slice-4 resumable-experiment fields. All nullable; legacy rows read as
+	// honest "not recorded" states rather than invented values.
+	// ObservationID links the agent_recommendations row this experiment
+	// answers — the observation→experiment edge.
+	ObservationID string `json:"observation_id,omitempty"`
+	// EvidenceJSON is the typed envelope {query_ref, metric_version,
+	// dataset_version, range, filters, timezone, watermark}; query_ref is a
+	// reproducible spec {kind: saved_query|metric|sql, id_or_definition,
+	// version}, never a bare id that can rot.
+	EvidenceJSON string `json:"evidence_json,omitempty"`
+	// BaselineValue/Unit/Window are the measured baseline, not just the
+	// denominator event.
+	BaselineValue   *float64   `json:"baseline_value,omitempty"`
+	BaselineUnit    string     `json:"baseline_unit,omitempty"`
+	BaselineWindow  string     `json:"baseline_window,omitempty"`
+	Audience        string     `json:"audience,omitempty"`
+	Owner           string     `json:"owner,omitempty"`
+	SuccessMetric   string     `json:"success_metric,omitempty"`
+	GuardrailMetric string     `json:"guardrail_metric,omitempty"`
+	ReviewDate      *time.Time `json:"review_date,omitempty"`
+	// OutcomeJSON is an append-only list of observation entries written only
+	// by record_outcome on committed/terminal states; the human decide act
+	// writes status+decision_note separately and never appends here.
+	OutcomeJSON string `json:"outcome_json,omitempty"`
+	// Revision is the optimistic-concurrency counter; NULL on legacy rows is
+	// read as 1.
+	Revision int64 `json:"revision"`
 }
 
 // Test lifecycle. `proposed` is the agent's draft; `committed` is the owner
@@ -112,6 +140,19 @@ func (s *Store) migrateValidation(ctx context.Context) error {
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`,
 		`CREATE INDEX IF NOT EXISTS validation_tests_project_idx ON validation_tests (project_id, created_at DESC)`,
+		// Slice-4 resumable-experiment fields — additive nullable, no rewrite.
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS observation_id UUID`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS evidence_json JSONB`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS baseline_value DOUBLE PRECISION`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS baseline_unit VARCHAR(64)`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS baseline_window VARCHAR(64)`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS audience TEXT`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS owner VARCHAR(256)`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS success_metric VARCHAR(256)`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS guardrail_metric VARCHAR(256)`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS review_date TIMESTAMPTZ`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS outcome_json JSONB`,
+		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS revision BIGINT`,
 		`CREATE TABLE IF NOT EXISTS waitlist_signups (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -143,6 +184,31 @@ func (s *Store) migrateValidation(ctx context.Context) error {
 // whoever writes it: an agent may design the test, but only the owner can agree
 // to be bound by it, and that agreement is CommitValidationTest.
 func (s *Store) CreateValidationTest(ctx context.Context, t ValidationTest) (string, error) {
+	return createValidationTest(ctx, s.pg, t)
+}
+
+// CreateValidationTestIdempotent atomically claims a retry key, writes the
+// proposal, and stores its ID as the replay receipt.
+func (s *Store) CreateValidationTestIdempotent(ctx context.Context, t ValidationTest, idemKey, requestHash string) (string, error) {
+	raw, err := s.runIdempotent(ctx, t.ProjectID, "propose_test", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			id, err := createValidationTest(ctx, q, t)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(id)
+		})
+	if err != nil {
+		return "", err
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return "", fmt.Errorf("stored propose_test receipt unreadable: %w", err)
+	}
+	return id, nil
+}
+
+func createValidationTest(ctx context.Context, q pgQuerier, t ValidationTest) (string, error) {
 	if strings.TrimSpace(t.Hypothesis) == "" {
 		return "", errors.New("hypothesis is required")
 	}
@@ -159,13 +225,25 @@ func (s *Store) CreateValidationTest(ctx context.Context, t ValidationTest) (str
 	if t.RunID != "" {
 		runArg = t.RunID
 	}
+	var obsArg any
+	if t.ObservationID != "" && looksLikeUUID(t.ObservationID) {
+		obsArg = t.ObservationID
+	}
+	var evidenceArg any
+	if t.EvidenceJSON != "" {
+		evidenceArg = t.EvidenceJSON
+	}
 	var id string
-	err := s.pg.QueryRow(ctx, `
-INSERT INTO validation_tests (project_id, run_id, hypothesis, metric_event, baseline_event, target_count, window_days)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+	err := q.QueryRow(ctx, `
+INSERT INTO validation_tests (project_id, run_id, hypothesis, metric_event, baseline_event, target_count, window_days,
+	observation_id, evidence_json, baseline_value, baseline_unit, baseline_window,
+	audience, owner, success_metric, guardrail_metric, review_date)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING id::text`,
 		t.ProjectID, runArg, strings.TrimSpace(t.Hypothesis), strings.TrimSpace(t.MetricEvent),
-		strings.TrimSpace(t.BaselineEvent), t.TargetCount, t.WindowDays).Scan(&id)
+		strings.TrimSpace(t.BaselineEvent), t.TargetCount, t.WindowDays,
+		obsArg, evidenceArg, t.BaselineValue, t.BaselineUnit, t.BaselineWindow,
+		t.Audience, t.Owner, t.SuccessMetric, t.GuardrailMetric, t.ReviewDate).Scan(&id)
 	return id, err
 }
 
@@ -174,8 +252,7 @@ RETURNING id::text`,
 // tests are history and never come back as active.
 func (s *Store) ActiveValidationTest(ctx context.Context, projectID string) (*ValidationTest, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
-       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
+SELECT `+validationTestCols+`
 FROM validation_tests
 WHERE project_id = $1 AND status IN ('committed','proposed')
 ORDER BY (status = 'committed') DESC, created_at DESC
@@ -228,8 +305,7 @@ func (s *Store) ValidationTestsForProject(ctx context.Context, projectID string,
 		limit = validationListCap
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
-       target_count, window_days, status, committed_at, decided_at, decision_note, created_at,
+SELECT `+validationTestCols+`,
        count(*) OVER () AS total
 FROM validation_tests
 WHERE project_id = $1
@@ -245,7 +321,9 @@ LIMIT $2`, projectID, limit)
 		var t ValidationTest
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.RunID, &t.Hypothesis, &t.MetricEvent, &t.BaselineEvent,
 			&t.TargetCount, &t.WindowDays, &t.Status, &t.CommittedAt, &t.DecidedAt, &t.DecisionNote, &t.CreatedAt,
-			&total); err != nil {
+			&t.ObservationID, &t.EvidenceJSON, &t.BaselineValue, &t.BaselineUnit, &t.BaselineWindow,
+			&t.Audience, &t.Owner, &t.SuccessMetric, &t.GuardrailMetric, &t.ReviewDate, &t.OutcomeJSON,
+			&t.Revision, &total); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, t)
@@ -278,8 +356,7 @@ func (s *Store) ValidationTestForProject(ctx context.Context, projectID, id stri
 		return ValidationTest{}, errNoSuchTest
 	}
 	row := s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
-       target_count, window_days, status, committed_at, decided_at, decision_note, created_at
+SELECT `+validationTestCols+`
 FROM validation_tests WHERE id = $1 AND project_id = $2`, id, projectID)
 	t, err := scanValidationTest(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -378,12 +455,25 @@ func (s *Store) MeasureValidationTests(ctx context.Context, tests []ValidationTe
 
 // rowScanner is satisfied by both pgx.Row and pgx.Rows, so the column list above
 // is written once and cannot drift between the single-row and list reads.
+// validationTestCols is the shared column list for every validation_tests
+// read — single-row and list reads cannot drift.
+const validationTestCols = `id::text, project_id::text, coalesce(run_id::text,''), hypothesis, metric_event, baseline_event,
+       target_count, window_days, status, committed_at, decided_at, decision_note, created_at,
+       coalesce(observation_id::text, ''), coalesce(evidence_json::text, ''), baseline_value,
+       coalesce(baseline_unit, ''), coalesce(baseline_window, ''),
+       coalesce(audience, ''), coalesce(owner, ''), coalesce(success_metric, ''),
+       coalesce(guardrail_metric, ''), review_date, coalesce(outcome_json::text, ''),
+       coalesce(revision, 1)`
+
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanValidationTest(row rowScanner) (ValidationTest, error) {
 	var t ValidationTest
 	err := row.Scan(&t.ID, &t.ProjectID, &t.RunID, &t.Hypothesis, &t.MetricEvent, &t.BaselineEvent,
-		&t.TargetCount, &t.WindowDays, &t.Status, &t.CommittedAt, &t.DecidedAt, &t.DecisionNote, &t.CreatedAt)
+		&t.TargetCount, &t.WindowDays, &t.Status, &t.CommittedAt, &t.DecidedAt, &t.DecisionNote, &t.CreatedAt,
+		&t.ObservationID, &t.EvidenceJSON, &t.BaselineValue, &t.BaselineUnit, &t.BaselineWindow,
+		&t.Audience, &t.Owner, &t.SuccessMetric, &t.GuardrailMetric, &t.ReviewDate, &t.OutcomeJSON,
+		&t.Revision)
 	return t, err
 }
 

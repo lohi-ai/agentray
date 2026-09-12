@@ -138,11 +138,26 @@ var writeClasses = map[string]writeClass{
 	"/api/agent/chat/steer":    writeAgentControl,
 	"/api/agent/chat/cancel":   writeAgentControl,
 	"/api/agent/conversations": writeAgentControl,
+
+	// --- the shared operation surface. Every call is a POST, but the op name
+	// lives in the body and the opcore authorizer enforces per-operation
+	// access classes — a viewer's write op is denied there, so guarding the
+	// transport as a write would reject reads the matrix allows. Classified
+	// read-only so the request reaches the real authorizer; inside the demo
+	// the read-only caller flag still suppresses any cache write-back. ---
 }
 
 // classifyWrite answers what a matched route is. The default arm is the
 // security property: an unrecognised mutating path must prove a writing role.
 func classifyWrite(path string) writeClass {
+	// The shared operation surface mounts per-operation paths
+	// (/api/op/<operation>) and /mcp — every call is a POST, but the op name
+	// lives in the body/path and the opcore authorizer enforces per-operation
+	// access classes. A viewer's write op is denied there, so guarding the
+	// transport as a write would reject reads the matrix allows.
+	if path == "/mcp" || path == "/mcp/" || strings.HasPrefix(path, "/api/op/") {
+		return writeReadOnly
+	}
 	if class, ok := writeClasses[path]; ok {
 		return class
 	}
@@ -158,6 +173,8 @@ type writeGuardStore interface {
 	DemoProjectID() string
 	UserBySessionToken(ctx context.Context, token string) (storage.User, storage.UserSession, error)
 	ProjectByAPIKey(ctx context.Context, apiKey string) (storage.Project, error)
+	ProjectByID(ctx context.Context, projectID string) (storage.Project, error)
+	CredentialBySecret(ctx context.Context, secret string) (storage.ResolvedCredential, error)
 	ProjectByIDForUser(ctx context.Context, userID string, projectID string) (storage.Project, error)
 	DefaultProjectForUser(ctx context.Context, userID string) (storage.Project, error)
 	WorkspaceRoleForUser(ctx context.Context, userID string, workspaceID string) (string, error)
@@ -176,6 +193,10 @@ type writeScope struct {
 	// byAPIKey marks the SDK/MCP path, which authenticates with the project's
 	// own key instead of a membership and therefore has no role at all.
 	byAPIKey bool
+	// byManagementKey marks a private scoped agm_ credential — unlike the
+	// public capture key it is NOT published, so the demo's "public key cannot
+	// mutate" refusal does not apply to it.
+	byManagementKey bool
 	// badKey marks an api_key that was supplied and did not resolve, so the
 	// refusal can say that instead of asking for a login the caller never
 	// intended to use.
@@ -238,7 +259,7 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				if class == writeReadOnly || class == writeAgentAsk || class == writeAgentControl {
 					return next(c)
 				}
-				if scope.byAPIKey || storage.RoleMayWrite(scope.role) {
+				if scope.byAPIKey || scope.byManagementKey || storage.RoleMayWrite(scope.role) {
 					return next(c)
 				}
 				return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
@@ -326,6 +347,24 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 // own account" failure this guard must not have.
 func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 	ctx := c.Request().Context()
+
+	// Management credentials arrive as Bearer agm_… and take precedence over
+	// every other transport — the same order principalFromRequest mandates,
+	// so a stale ?api_key or X-API-Key riding alongside cannot mis-scope or
+	// reject the request before the principal resolver sees the Bearer. They
+	// are private scoped credentials, not the public capture key, so the
+	// demo's public-key refusal does not apply.
+	if tok, present := bearerToken(c); present && tok != "" {
+		cred, err := g.CredentialBySecret(ctx, tok)
+		if err != nil {
+			return writeScope{badKey: true}, nil
+		}
+		project, err := g.ProjectByID(ctx, cred.ProjectID)
+		if err != nil {
+			return writeScope{badKey: true}, nil
+		}
+		return writeScope{workspaceID: project.WorkspaceID, projectID: project.ID, byManagementKey: true}, nil
+	}
 
 	// The SDK/MCP path: the project's own key, no session, no membership.
 	if key := firstNonEmpty(c.QueryParam("api_key"), c.QueryParam("token"), c.Request().Header.Get("X-API-Key")); key != "" {
