@@ -72,7 +72,7 @@ def cmd_corpus(args):
     for p in _preflight(caps):
         print(f"PREFLIGHT FAIL: {p}", file=sys.stderr)
         return 1
-    out = corpus_mod.generate(args.scale, args.seed)
+    out = corpus_mod.generate(args.scale, args.seed, caps["ingest_rows"])
     print(f"corpus: {out}")
     return 0
 
@@ -148,6 +148,15 @@ def cmd_matrix(args):
 def cmd_report(args):
     out = report.write_report(args.require_labeled_gates)
     print(f"report: {out}")
+    dest = Path(__file__).resolve().parent.parent / "results"
+    if not any(RESULTS.glob("*.json")) and any(dest.glob("*.json")):
+        # No legs in work/results but committed evidence exists — this
+        # publish would archive the real evidence and replace it with an
+        # empty report. Refuse; the report itself was still written.
+        print("publish skipped: no legs in work/results but results/ "
+              "holds evidence; refusing to archive it for an empty run",
+              file=sys.stderr)
+        return 1
     _publish_durable()
     return 0
 
@@ -205,8 +214,8 @@ def _publish_durable():
         "clickhouse_image": CH_IMAGE,
         # The driver contract: which image ran the harness and under what
         # envelope. Env vars are set by the eval wrapper; absent means the
-        # publish ran outside it.
-        "driver_image": os.environ.get("EVAL_DRIVER_IMAGE") or DRIVER_IMAGE,
+        # publish ran outside it — record null, never a guessed tag.
+        "driver_image": os.environ.get("EVAL_DRIVER_IMAGE"),
         "driver_limits": {
             "mem": os.environ.get("EVAL_DRIVER_MEM") or "unknown",
             "cpus": os.environ.get("EVAL_DRIVER_CPUS") or "unknown",

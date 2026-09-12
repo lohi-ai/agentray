@@ -91,6 +91,32 @@ class TestReportRender(unittest.TestCase):
         self.assertIn("NOT a", text)
         self.assertIn("commit-before-ack", text)
 
+    def test_measured_leg_with_empty_sections_is_incoherent(self):
+        leg = _leg()
+        leg["checks"] = {}
+        leg["shapes"] = {}
+        leg["ingest"] = {}
+        _, problems = report.render([leg], require_labeled=False)
+        self.assertTrue(any("empty checks" in p for p in problems))
+        self.assertTrue(any("empty shapes" in p for p in problems))
+        self.assertTrue(any("empty ingest" in p for p in problems))
+
+    def test_mixed_corpus_digests_are_warned(self):
+        a = _leg(engine="clickhouse")
+        b = _leg(engine="duckdb")
+        a["provenance"]["corpus_digest"] = "aaa"
+        b["provenance"]["corpus_digest"] = "bbb"
+        text, _ = report.render([a, b], require_labeled=False)
+        self.assertIn("MIXED CORPORA", text)
+
+    def test_same_corpus_digest_no_warning(self):
+        a = _leg(engine="clickhouse")
+        b = _leg(engine="duckdb")
+        a["provenance"]["corpus_digest"] = "aaa"
+        b["provenance"]["corpus_digest"] = "aaa"
+        text, _ = report.render([a, b], require_labeled=False)
+        self.assertNotIn("MIXED CORPORA", text)
+
 
 if __name__ == "__main__":
     unittest.main()

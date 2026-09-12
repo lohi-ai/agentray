@@ -60,14 +60,23 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
                  "states; per-leg digest shown. Do not read this table as one "
                  "coherent run.")
         L.append("")
+    corpora = {l.get("provenance", {}).get("corpus_digest") for l in legs}
+    if len(corpora) > 1:
+        L.append("**MIXED CORPORA**: legs ran against different corpus "
+                 "digests; they did not see identical workloads. Per-leg "
+                 "corpus digest shown.")
+        L.append("")
     L.append("| engine | scale | readers | days | status | wall_s | load_s | "
-             "teardown | code |")
-    L.append("|---|---|---|---|---|---|---|---|---|")
+             "teardown | seed | corpus | code |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for leg in legs:
-        cd = (leg.get("provenance", {}).get("code_digest") or "")[:8] or "—"
+        prov = leg.get("provenance", {})
+        cd = (prov.get("code_digest") or "")[:8] or "—"
+        xd = (prov.get("corpus_digest") or "")[:8] or "—"
         L.append(f"| {leg['engine']} | {leg['scale']} | {leg['readers']} | "
                  f"{leg['days']} | {leg['status']} | {leg.get('wall_s','—')} | "
-                 f"{leg.get('load_s','—')} | {leg.get('teardown','—')} | {cd} |")
+                 f"{leg.get('load_s','—')} | {leg.get('teardown','—')} | "
+                 f"{leg.get('seed','—')} | {xd} | {cd} |")
         if leg["status"] not in ("MEASURED", "NOT RUN", "ABORTED", "ERROR"):
             problems.append(f"leg {leg['engine']} has unlabeled status")
         # A MEASURED leg with no resource samples means sampling failed —
@@ -76,8 +85,15 @@ def render(legs: list[dict], require_labeled: bool) -> tuple[str, list[str]]:
                 "resources", {}).get("samples"):
             problems.append(
                 f"leg {leg['engine']} MEASURED with no resource samples")
+        # A MEASURED leg missing whole evidence sections is incoherent —
+        # truncated or hand-edited, never a clean pass.
+        if leg["status"] == "MEASURED":
+            for section in ("checks", "shapes", "ingest"):
+                if not leg.get(section):
+                    problems.append(
+                        f"leg {leg['engine']} MEASURED with empty {section}")
     if not legs:
-        L.append("| — | — | — | — | NOT RUN | — | — | — | — |")
+        L.append("| — | — | — | — | NOT RUN | — | — | — | — | — | — |")
     L.append("")
     for leg in legs:
         reason = leg.get("abort_reason") or leg.get("error")

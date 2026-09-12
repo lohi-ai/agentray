@@ -4,10 +4,10 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 
 ## Runs
 
-| engine | scale | readers | days | status | wall_s | load_s | teardown | seed | corpus | code |
-|---|---|---|---|---|---|---|---|---|---|---|
-| clickhouse | 100000 | 1 | 7 | MEASURED | 15.3 | 2.68 | stopped | 20260912 | 60404e7b | fd74dde1 |
-| duckdb | 100000 | 1 | 7 | MEASURED | 6.7 | 1.32 | stopped | 20260912 | 60404e7b | fd74dde1 |
+| engine | scale | readers | days | status | wall_s | load_s | teardown | code |
+|---|---|---|---|---|---|---|---|---|
+| clickhouse | 100000 | 1 | 7 | MEASURED | 14.1 | 2.9 | stopped | ebc08840 |
+| duckdb | 100000 | 1 | 7 | MEASURED | 6.4 | 0.92 | stopped | ebc08840 |
 
 ## Correctness
 
@@ -44,25 +44,25 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 |---|---|---|---|
 | currency.mixed | clickhouse | NOT RUN | The Event schema carries only cost_usd Float32 — there is no multi-currency field to evaluate. Mixed-currency billing correctness is untestable in this harness. |
 | dedup.read_time_guarantee | clickhouse | NOT RUN | Neither engine applies read-time dedup by default and the harness does not layer one on; the measured raw-vs-distinct gap quantifies exposure but is not a dedup guarantee. |
-| entity.tombstone_delete | clickhouse | DIVERGENT | expected 0, got 100. Target semantics: a source delete must remove the row. Current schema has no tombstone, so both engines are expected to show the rows — that is a DIVERGENT gate result, not a pass. |
+| entity.tombstone_delete | clickhouse | DIVERGENT | expected 0, got 100. semantic note unavailable: leg predates per-check note capture |
 | currency.mixed | duckdb | NOT RUN | The Event schema carries only cost_usd Float32 — there is no multi-currency field to evaluate. Mixed-currency billing correctness is untestable in this harness. |
 | dedup.read_time_guarantee | duckdb | NOT RUN | Neither engine applies read-time dedup by default and the harness does not layer one on; the measured raw-vs-distinct gap quantifies exposure but is not a dedup guarantee. |
-| entity.tombstone_delete | duckdb | DIVERGENT | expected 0, got 100. Target semantics: a source delete must remove the row. Current schema has no tombstone, so both engines are expected to show the rows — that is a DIVERGENT gate result, not a pass. |
+| entity.tombstone_delete | duckdb | DIVERGENT | expected 0, got 100. semantic note unavailable: leg predates per-check note capture |
 
 ## Query latency (ms) and resources
 
 | engine | shape | first p50 | first p95 | repeat p50 | repeat p95 | mem_peak MiB | cpu% peak | disk GiB |
 |---|---|---|---|---|---|---|---|---|
-| clickhouse | aggregate | 15 | 15 | 11 | 11 | 553 | 27.9 | 0.01 |
-| clickhouse | entity_join | 28 | 28 | 46 | 46 | 553 | 27.9 | 0.01 |
-| clickhouse | funnel | 16 | 16 | 17 | 17 | 553 | 27.9 | 0.01 |
-| clickhouse | overview | 20 | 20 | 22 | 22 | 553 | 27.9 | 0.01 |
-| clickhouse | retention | 71 | 71 | 68 | 68 | 553 | 27.9 | 0.01 |
-| duckdb | aggregate | 9 | 9 | 7 | 7 | 375 | 22.1 | 0.11 |
-| duckdb | entity_join | 12 | 12 | 12 | 12 | 375 | 22.1 | 0.11 |
-| duckdb | funnel | 22 | 22 | 19 | 19 | 375 | 22.1 | 0.11 |
-| duckdb | overview | 17 | 17 | 11 | 11 | 375 | 22.1 | 0.11 |
-| duckdb | retention | 11 | 11 | 14 | 14 | 375 | 22.1 | 0.11 |
+| clickhouse | aggregate | 11 | 11 | 11 | 11 | 934 | 28.3 | 0.01 |
+| clickhouse | entity_join | 19 | 19 | 29 | 29 | 934 | 28.3 | 0.01 |
+| clickhouse | funnel | 13 | 13 | 16 | 16 | 934 | 28.3 | 0.01 |
+| clickhouse | overview | 15 | 15 | 16 | 16 | 934 | 28.3 | 0.01 |
+| clickhouse | retention | 58 | 58 | 66 | 66 | 934 | 28.3 | 0.01 |
+| duckdb | aggregate | 7 | 7 | 7 | 7 | 364 | 11.3 | 0.11 |
+| duckdb | entity_join | 8 | 8 | 12 | 12 | 364 | 11.3 | 0.11 |
+| duckdb | funnel | 12 | 12 | 15 | 15 | 364 | 11.3 | 0.11 |
+| duckdb | overview | 10 | 10 | 15 | 15 | 364 | 11.3 | 0.11 |
+| duckdb | retention | 13 | 13 | 11 | 11 | 364 | 11.3 | 0.11 |
 
 Latency columns: `first` is the first timed pass after oracle checks (not a true cold read); `repeat` is two further passes. n=1/2 samples are smoke-scale only. Memory is container cgroup usage, not process RSS; `—` means sampling produced no data, not zero usage. DuckDB serves every op — reads included — on one locked connection, so its reader-concurrency numbers are serialized throughput, not parallel serving.
 
@@ -70,8 +70,8 @@ Latency columns: `first` is the first timed pass after oracle checks (not a true
 
 | engine | rows | ack_s | visibility_lag_s | expected | final_total | readers overlapping ingest |
 |---|---|---|---|---|---|---|
-| clickhouse | 10000 | 0.04 | 0.05 | 109538 | 109538 | 1 |
-| duckdb | 10000 | 0.11 | 0.11 | 109538 | 109538 | 1 |
+| clickhouse | 10000 | 0.05 | 0.06 | 109538 | 109538 | 1 |
+| duckdb | 10000 | 0.06 | 0.07 | 109538 | 109538 | 1 |
 
 `ack_s` is the local insert call returning — it is NOT a durable-queue commit-before-ack; that crash/replay gate stays NOT RUN below. `visibility_lag_s` is observed by post-ack count() polling (0.5s granularity upper bound). Overlap counts reader spans that began before the ack and ended after the ingest started.
 
@@ -79,42 +79,42 @@ Latency columns: `first` is the first timed pass after oracle checks (not a true
 
 | gate | status | why |
 |---|---|---|
-| matrix 1000000 clickhouse r1 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r1 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r1 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r5 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r5 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r5 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r20 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r20 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 clickhouse r20 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r1 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r1 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r1 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r5 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r5 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r5 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r20 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r20 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 clickhouse r20 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r1 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r1 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r1 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r5 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r5 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r5 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r20 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r20 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 1000000 duckdb r20 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r1 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r1 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r1 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r5 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r5 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r5 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r20 d7 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r20 d30 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
-| matrix 10000000 duckdb r20 d90 | NOT RUN | free disk 26.2 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r1 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r1 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r1 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r5 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r5 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r5 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r20 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r20 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 clickhouse r20 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r1 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r1 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r1 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r5 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r5 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r5 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r20 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r20 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 clickhouse r20 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r1 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r1 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r1 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r5 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r5 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r5 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r20 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r20 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 1000000 duckdb r20 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r1 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r1 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r1 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r5 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r5 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r5 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r20 d7 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r20 d30 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
+| matrix 10000000 duckdb r20 d90 | NOT RUN | free disk 20.1 GiB below the 40 GiB preflight |
 | commit-before-ack crash/replay | NOT RUN | needs fault injection against a durable queue, not a benchmark |
 | backup checkpoint + restore + replay | NOT RUN | needs a defined backup/restore procedure to exercise |
 | cross-tenant / arbitrary-SQL isolation | NOT RUN | needs the project-isolated sandboxed execution env from strategy.md; this harness's docker-socket driver is trusted tooling, not that sandbox |

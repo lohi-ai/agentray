@@ -158,6 +158,21 @@ class TestArchivePrior(unittest.TestCase):
             self.assertEqual(len(dirs), 1)
             self.assertEqual((dirs[0] / "run.json").read_bytes(), b"A")
 
+    def test_report_refuses_to_publish_over_evidence_with_no_legs(self):
+        # work/results empty but results/ holds committed evidence —
+        # publishing would archive it for an empty report.
+        with tempfile.TemporaryDirectory() as td:
+            empty_results = Path(td) / "empty"
+            empty_results.mkdir()
+            with mock.patch.object(cli, "RESULTS", empty_results), \
+                    mock.patch.object(cli.report, "write_report",
+                                      return_value=Path(td) / "r.md"), \
+                    mock.patch.object(cli, "_publish_durable") as pub:
+                rc = cli.cmd_report(
+                    type("A", (), {"require_labeled_gates": False})())
+            self.assertEqual(rc, 1)
+            pub.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
