@@ -193,6 +193,23 @@ func TestDuckDBPoisonDLQ(t *testing.T) {
 	}
 }
 
+// Without a configured DLQ, poison preserves the existing durable contract:
+// NAK for redelivery rather than terminating a message with nowhere to replay.
+func TestDuckDBPoisonNaksWithoutDLQ(t *testing.T) {
+	b := NewEventBatcher(func(context.Context, []storage.Event) error {
+		t.Fatal("poison message reached sink")
+		return nil
+	}, EventBatcherConfig{})
+	defer b.Stop()
+
+	msg := &fakeMsg{deliv: 1}
+	b.AddMsg([]storage.Event{{ProjectID: "not-a-uuid", EventID: uuid.NewString()}}, msg)
+	waitForState(t, msg, func() bool { _, nacked, _ := msg.state(); return nacked })
+	if acked, nacked, termed := msg.state(); acked || !nacked || termed {
+		t.Fatalf("want nak only, got ack=%v nak=%v term=%v", acked, nacked, termed)
+	}
+}
+
 // Stop drains accepted durable messages before the DuckDB owner checkpoints
 // and closes. This is the server shutdown boundary: an accepted batch must be
 // committed and acked even when it never reached the timer/size threshold.

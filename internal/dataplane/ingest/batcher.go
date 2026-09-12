@@ -176,27 +176,32 @@ func validateEvents(events []storage.Event) error {
 	return nil
 }
 
-// poison settles a message that can never insert: republish its raw body to
-// the DLQ, then terminate it so it leaves the stream. If the DLQ itself is
-// unreachable the message is NAK'd instead — losing it to a dead-letter
-// outage would be worse than one more redelivery.
+// poison settles a message that can never insert. A configured DLQ receives
+// the raw body before the original terminates; if DLQ publication is disabled
+// or fails, the old durable contract is preserved by NAKing for redelivery.
 func (b *EventBatcher) poison(msg msgHandle, cause error) {
 	if msg == nil {
 		log.Printf("ingestion batcher: dropping undeliverable batch: %v", cause)
 		return
 	}
-	if b.deadLetter != nil {
-		if err := b.deadLetter(msg.body()); err != nil {
-			log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
-			_ = msg.nak(b.nakDelay)
-			if b.metrics != nil {
-				b.metrics.recordNak()
-			}
-			return
-		}
+	if b.deadLetter == nil {
+		log.Printf("ingestion batcher: poison batch has no DLQ, will retry: %v", cause)
+		_ = msg.nak(b.nakDelay)
 		if b.metrics != nil {
-			b.metrics.recordDeadLetter()
+			b.metrics.recordNak()
 		}
+		return
+	}
+	if err := b.deadLetter(msg.body()); err != nil {
+		log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
+		_ = msg.nak(b.nakDelay)
+		if b.metrics != nil {
+			b.metrics.recordNak()
+		}
+		return
+	}
+	if b.metrics != nil {
+		b.metrics.recordDeadLetter()
 	}
 	_ = msg.term()
 	log.Printf("ingestion batcher: terminated poison message: %v", cause)
