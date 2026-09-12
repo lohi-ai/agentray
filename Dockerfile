@@ -12,12 +12,18 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -o /out/agentray ./cmd/server
 
 FROM debian:bookworm-slim
-# libstdc++ is the DuckDB static bundle's runtime C++ dependency.
+# libstdc++ is the DuckDB static bundle's runtime C++ dependency; wget is the
+# healthcheck client the blue-green deploy's `wget --spider` probe needs —
+# bookworm-slim ships neither.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libstdc++6 \
+ && apt-get install -y --no-install-recommends libstdc++6 wget \
  && rm -rf /var/lib/apt/lists/* \
- && adduser --system --no-create-home --group lohi
+ && adduser --system --no-create-home --group lohi \
+ && mkdir -p /data && chown lohi:lohi /data
 USER lohi
+# DuckDB is a single-writer embedded database; /data is a mounted volume in
+# every deployed environment so the file survives container recreation.
+ENV DUCKDB_PATH=/data/agentray.duckdb
 COPY --from=builder /out/agentray /usr/local/bin/agentray
 EXPOSE 8080
 ENTRYPOINT ["agentray"]

@@ -2,7 +2,6 @@ package usecase
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,8 +9,8 @@ import (
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
-// fakeRepo records what it receives so handler behavior (SQL normalization, title
-// derivation) can be asserted end-to-end through the operation.
+// fakeRepo records what it receives so handler behavior (title derivation,
+// terminal flags) can be asserted end-to-end through the operation.
 type fakeRepo struct {
 	Repo
 	gotSQL          string
@@ -102,23 +101,6 @@ func TestSubmitRecommendationIsTerminal(t *testing.T) {
 	}
 }
 
-func TestRunSQLNormalizesDialect(t *testing.T) {
-	repo := &fakeRepo{}
-	reg := Registry()
-	spec, _ := reg.Get("run_sql")
-	cc := opcore.CallContext{ProjectID: "p1", Deps: &Deps{Repo: repo}}
-
-	in, _ := json.Marshal(map[string]string{
-		"sql": "SELECT JSON_EXTRACT_STRING(properties, 'path') FROM events",
-	})
-	if _, err := spec.OpInvoke(context.Background(), cc, string(in)); err != nil {
-		t.Fatalf("OpInvoke: %v", err)
-	}
-	want := "SELECT json_extract_string(properties, 'path') FROM events"
-	if repo.gotSQL != want {
-		t.Errorf("normalized SQL = %q, want %q", repo.gotSQL, want)
-	}
-}
 
 func (f *fakeRepo) CreateRecommendation(_ context.Context, rec storage.AgentRecommendation) (string, error) {
 	f.gotRec = rec

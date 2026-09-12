@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
-	"reflect"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -25,11 +27,17 @@ import (
 // of that or raise memory/threads.
 //
 //   - memory_limit + threads bound the sandbox instance (per-instance, unlike
-//     the shared file's global limit).
-//   - temp_directory points at the spill dir beside the database file so a
-//     big GROUP BY spills to bounded disk, not process memory.
+//     the shared file's global limit); a process-wide semaphore bounds how
+//     many sandboxes run a query at once.
+//   - temp_directory is a per-sandbox dir under the main file's tmp/ — two
+//     instances must never share one (DuckDB names spill files
+//     duckdb_temp_storage-* and concurrent instances collide) — and
+//     max_temp_directory_size caps the spill so a high-cardinality GROUP BY
+//     cannot fill the volume the main database lives on.
 //   - The caller's context deadline interrupts the query (go-duckdb maps ctx
-//     cancellation to DuckDB's interrupt).
+//     cancellation to DuckDB's interrupt); sandboxQueryTimeout bounds it.
+//   - Results materialize into Go under a hard row cap — the engine's memory
+//     limit does not cover the []map[string]any the caller receives.
 //
 // Because the sandbox holds only the project's rows, a catalog escape
 // (main.events, duckdb_tables(), a qualified name) can only ever see the
@@ -37,36 +45,68 @@ import (
 // layer (canonical_id, soft deletes), not the tenant boundary. The boundary
 // is physical.
 //
-// Sandboxes are lazily created, refreshed incrementally on each use, and
-// evicted by an LRU bound so tenant count cannot multiply memory without
-// limit.
+// Sandboxes are lazily created (single-flight per project), refreshed
+// incrementally on each use, leased while a query is in flight so eviction
+// cannot close one mid-read, and evicted by an LRU bound so tenant count
+// cannot multiply memory without limit.
 
 const (
 	// sandboxMaxProjects bounds live sandboxes; the least-recently-used one
 	// is evicted (closed) when a new project needs a slot.
-	sandboxMaxProjects = 16
+	sandboxMaxProjects = 8
 	// sandboxMemoryLimit caps each sandbox instance's memory.
-	sandboxMemoryLimit = "256MB"
+	sandboxMemoryLimit = "128MB"
 	// sandboxThreads caps each sandbox instance's worker threads.
-	sandboxThreads = 2
+	sandboxThreads = 1
+	// sandboxMaxConcurrent bounds queries executing across ALL sandboxes —
+	// per-instance limits alone would let N projects × 128MB exhaust the
+	// container. Two concurrent untrusted queries is generous for a
+	// dashboard; the rest queue.
+	sandboxMaxConcurrent = 2
 	// sandboxQueryTimeout bounds one untrusted query.
 	sandboxQueryTimeout = 30 * time.Second
+	// sandboxRefreshTimeout bounds the copy phase: a project whose events
+	// take longer than this to mirror fails the query rather than holding
+	// the sandbox mutex (and its lease) indefinitely.
+	sandboxRefreshTimeout = 60 * time.Second
 	// sandboxCopyBatch is the row count per INSERT batch during refresh.
 	sandboxCopyBatch = 2048
+	// sandboxMaxRows caps materialized result rows. The engine's memory
+	// limit does not cover the Go maps the caller receives.
+	sandboxMaxRows = 10_000
+	// sandboxTempSize caps one sandbox's spill directory.
+	sandboxTempSize = "512MB"
 )
 
 // sqlSandboxPool owns the per-project sandboxes for one Store.
 type sqlSandboxPool struct {
 	main *DuckDB
 
+	// sem bounds concurrent untrusted queries across all sandboxes.
+	sem chan struct{}
+
 	mu sync.Mutex
 	// lru is most-recently-used first.
 	lru       []string
 	sandboxes map[string]*sqlSandbox
+	// opening single-flights a cold open per project so a burst of queries
+	// for one new project doesn't open N sandboxes and discard N-1.
+	opening map[string]*sandboxOpen
+}
+
+type sandboxOpen struct {
+	done chan struct{}
+	sb   *sqlSandbox
+	err  error
 }
 
 func newSQLSandboxPool(main *DuckDB) *sqlSandboxPool {
-	return &sqlSandboxPool{main: main, sandboxes: map[string]*sqlSandbox{}}
+	return &sqlSandboxPool{
+		main:      main,
+		sem:       make(chan struct{}, sandboxMaxConcurrent),
+		sandboxes: map[string]*sqlSandbox{},
+		opening:   map[string]*sandboxOpen{},
+	}
 }
 
 // closeAll closes every sandbox. Called from CloseDuckDB before the main
@@ -76,12 +116,13 @@ func (p *sqlSandboxPool) closeAll() {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, sb := range p.sandboxes {
-		sb.close()
-	}
+	sandboxes := p.sandboxes
 	p.sandboxes = map[string]*sqlSandbox{}
 	p.lru = nil
+	p.mu.Unlock()
+	for _, sb := range sandboxes {
+		sb.close()
+	}
 }
 
 // query runs sqlText (already rewritten by scopedReadonlySQL) inside the
@@ -92,15 +133,32 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	if err != nil {
 		return nil, err
 	}
-	if err := sb.refresh(ctx); err != nil {
+	// The lease keeps this sandbox alive until the query finishes; eviction
+	// can only claim a sandbox with refs == 0.
+	sb.lease()
+	defer sb.release()
+
+	rctx, rcancel := context.WithTimeout(ctx, sandboxRefreshTimeout)
+	if err := sb.refresh(rctx); err != nil {
+		rcancel()
 		return nil, fmt.Errorf("sandbox refresh: %w", err)
+	}
+	rcancel()
+
+	// Bound concurrent untrusted queries process-wide.
+	select {
+	case p.sem <- struct{}{}:
+		defer func() { <-p.sem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	return sb.run(ctx, query, args)
 }
 
 // sandboxFor returns the project's sandbox, creating and loading it on first
-// use, and evicts the LRU entry past the cap. Creation happens outside the
-// pool lock so a cold open (schema + copy) never blocks other projects.
+// use, and evicts the LRU entry past the cap. Creation is single-flighted per
+// project and happens outside the pool lock so a cold open (schema + copy)
+// never blocks other projects.
 func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sqlSandbox, error) {
 	p.mu.Lock()
 	if sb, ok := p.sandboxes[projectID]; ok {
@@ -108,32 +166,72 @@ func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sql
 		p.mu.Unlock()
 		return sb, nil
 	}
+	if op, ok := p.opening[projectID]; ok {
+		p.mu.Unlock()
+		select {
+		case <-op.done:
+			return op.sb, op.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	op := &sandboxOpen{done: make(chan struct{})}
+	p.opening[projectID] = op
 	p.mu.Unlock()
 
 	sb, err := openSQLSandbox(ctx, p.main, projectID)
-	if err != nil {
-		return nil, err
-	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if existing, ok := p.sandboxes[projectID]; ok {
-		// A concurrent opener won; use it and drop ours.
-		sb.close()
-		p.touch(projectID)
-		return existing, nil
+	delete(p.opening, projectID)
+	if err == nil {
+		p.sandboxes[projectID] = sb
+		p.lru = append([]string{projectID}, p.lru...)
+		p.evictLocked()
 	}
-	p.sandboxes[projectID] = sb
-	p.lru = append([]string{projectID}, p.lru...)
+	op.sb, op.err = sb, err
+	close(op.done)
+	p.mu.Unlock()
+	return sb, err
+}
+
+// evictLocked closes LRU sandboxes past the cap. A sandbox with an active
+// lease (refs > 0) is skipped — its releaser re-checks the cap. Callers hold
+// p.mu.
+func (p *sqlSandboxPool) evictLocked() {
 	for len(p.lru) > sandboxMaxProjects {
 		victim := p.lru[len(p.lru)-1]
-		p.lru = p.lru[:len(p.lru)-1]
-		if evicted, ok := p.sandboxes[victim]; ok {
-			evicted.close()
-			delete(p.sandboxes, victim)
+		sb, ok := p.sandboxes[victim]
+		if !ok {
+			p.lru = p.lru[:len(p.lru)-1]
+			continue
 		}
+		if sb.refs.Load() > 0 {
+			// In flight — try the next-oldest instead.
+			if len(p.lru) == 1 {
+				return
+			}
+			// Rotate it to the front so it isn't picked again this pass.
+			p.lru = append([]string{victim}, p.lru[:len(p.lru)-1]...)
+			// If every sandbox is leased, stop.
+			allLeased := true
+			for _, id := range p.lru {
+				if s, ok := p.sandboxes[id]; ok && s.refs.Load() == 0 {
+					allLeased = false
+					break
+				}
+			}
+			if allLeased {
+				return
+			}
+			continue
+		}
+		p.lru = p.lru[:len(p.lru)-1]
+		delete(p.sandboxes, victim)
+		// Close outside the pool lock would be nicer, but close() takes the
+		// sandbox mutex — a leased sandbox is never here, so the only waiter
+		// is a refresh/run that already holds refs > 0. Safe to close inline.
+		sb.close()
 	}
-	return sb, nil
 }
 
 func (p *sqlSandboxPool) touch(projectID string) {
@@ -158,21 +256,43 @@ type sqlSandbox struct {
 	// share a connection.
 	feeder *sql.Conn
 	runner *sql.Conn
+	// tmpDir is this sandbox's private spill directory.
+	tmpDir string
+	// refs counts in-flight refresh/run pairs; eviction skips leased
+	// sandboxes so a query can never observe a closed instance.
+	refs   atomic.Int64
 	mu     sync.Mutex
 	closed bool
 }
 
+func (sb *sqlSandbox) lease()   { sb.refs.Add(1) }
+func (sb *sqlSandbox) release() { sb.refs.Add(-1) }
+
 // openSQLSandbox creates the in-memory instance, builds the project-scoped
 // tables and views, and locks the whole instance down before any data lands.
 func openSQLSandbox(ctx context.Context, main *DuckDB, projectID string) (*sqlSandbox, error) {
-	tmpDir := main.tmpDir()
-	connector, err := duckdb.NewConnector("", func(execer driver.ExecerContext) error {
-		if tmpDir == "" {
-			return nil
+	// Each sandbox gets its own spill dir — DuckDB names temp files
+	// duckdb_temp_storage-* and two instances sharing one directory collide.
+	tmpDir := ""
+	if base := main.tmpDir(); base != "" {
+		tmpDir = filepath.Join(base, "sandbox-"+projectID)
+		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+			return nil, fmt.Errorf("sandbox tmp dir: %w", err)
 		}
-		_, err := execer.ExecContext(context.Background(),
-			"SET temp_directory = '"+strings.ReplaceAll(tmpDir, "'", "''")+"'", nil)
-		return err
+	}
+	connector, err := duckdb.NewConnector("", func(execer driver.ExecerContext) error {
+		stmts := []string{"SET TimeZone = 'UTC'"}
+		if tmpDir != "" {
+			stmts = append(stmts,
+				"SET temp_directory = '"+strings.ReplaceAll(tmpDir, "'", "''")+"'",
+				"SET max_temp_directory_size = '"+sandboxTempSize+"'")
+		}
+		for _, stmt := range stmts {
+			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sandbox connector: %w", err)
@@ -180,7 +300,7 @@ func openSQLSandbox(ctx context.Context, main *DuckDB, projectID string) (*sqlSa
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(2)
 
-	sb := &sqlSandbox{projectID: projectID, main: main, db: db}
+	sb := &sqlSandbox{projectID: projectID, main: main, db: db, tmpDir: tmpDir}
 	feeder, err := db.Conn(ctx)
 	if err != nil {
 		db.Close()
@@ -234,10 +354,10 @@ func (sb *sqlSandbox) createTables(ctx context.Context) error {
 }
 
 // refresh copies the project's rows from the main store into the sandbox.
-// Events are append-only, so the copy is incremental on inserted_at; aliases
-// and external_rows are small enough to reconcile wholesale. A row removed
-// from the main file is removed here too — the count check keeps the common
-// refresh cheap.
+// Events are append-only, so the copy is incremental on (inserted_at,
+// event_id); aliases and external_rows are small enough to reconcile
+// wholesale. A row removed from the main file is removed here too — the
+// count check keeps the common refresh cheap.
 func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -258,12 +378,19 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	return nil
 }
 
-// refreshEvents appends only what arrived since the last refresh. A count
-// drift (a delete in the main file — not possible today) rebuilds the table.
+// refreshEvents appends only what arrived since the last refresh. The cursor
+// is (inserted_at, event_id) — a bare inserted_at high-water mark skips rows
+// that share the timestamp of the last copied row. A count drift (a delete
+// in the main file — not possible today) rebuilds the table.
 func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 	var highWater time.Time
+	var highWaterID string
 	if err := sb.feeder.QueryRowContext(ctx,
 		`SELECT coalesce(max(inserted_at), TIMESTAMPTZ '1970-01-01') FROM events`).Scan(&highWater); err != nil {
+		return err
+	}
+	if err := sb.feeder.QueryRowContext(ctx,
+		`SELECT coalesce(max(event_id::VARCHAR), '') FROM events WHERE inserted_at = ?`, highWater).Scan(&highWaterID); err != nil {
 		return err
 	}
 	var sandboxCount, mainCount int64
@@ -282,10 +409,13 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 			return err
 		}
 		highWater = time.Time{}
+		highWaterID = ""
 	}
 	return sb.copyRows(ctx,
-		`SELECT * FROM events WHERE project_id = ? AND inserted_at > ? ORDER BY inserted_at`,
-		[]any{sb.projectID, highWater},
+		`SELECT * FROM events WHERE project_id = ?
+		 AND (inserted_at > ? OR (inserted_at = ? AND event_id::VARCHAR > ?))
+		 ORDER BY inserted_at, event_id`,
+		[]any{sb.projectID, highWater, highWater, highWaterID},
 		"events", 28)
 }
 
@@ -400,26 +530,24 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 	if err != nil {
 		return nil, err
 	}
-	columnTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, err
-	}
 	results := []map[string]any{}
 	for rows.Next() {
+		if len(results) >= sandboxMaxRows {
+			return nil, fmt.Errorf("query exceeded %d rows; add a LIMIT", sandboxMaxRows)
+		}
+		// Scan into *any: the driver's ScanType() reports the primitive type
+		// without nullability, so a NULL in a VARCHAR column scanned into
+		// *string errors. *any takes whatever the driver hands back.
 		valuePtrs := make([]any, len(columns))
 		for i := range columns {
-			scanType := columnTypes[i].ScanType()
-			if scanType == nil {
-				scanType = reflect.TypeOf("")
-			}
-			valuePtrs[i] = reflect.New(scanType).Interface()
+			valuePtrs[i] = new(any)
 		}
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return nil, err
 		}
 		item := make(map[string]any, len(columns))
 		for i, column := range columns {
-			item[column] = normalizeSQLValue(valuePtrs[i])
+			item[column] = normalizeSQLValue(*(valuePtrs[i].(*any)))
 		}
 		results = append(results, item)
 	}
@@ -442,12 +570,17 @@ func (sb *sqlSandbox) close() {
 	if sb.db != nil {
 		_ = sb.db.Close()
 	}
+	if sb.tmpDir != "" {
+		_ = os.RemoveAll(sb.tmpDir)
+	}
 }
 
 // sandboxSchema mirrors the analytics tables inside a sandbox. The project_id
 // columns stay: the scoped CTEs still filter on them, and keeping the column
 // makes the sandbox schema a strict subset of the main one.
 var sandboxSchema = []string{
+	// Column-for-column mirror of the main events table — refresh copies
+	// SELECT *, so order and count must match exactly.
 	`CREATE TABLE IF NOT EXISTS events (
 		project_id UUID NOT NULL,
 		event_id UUID NOT NULL,
@@ -487,12 +620,12 @@ var sandboxSchema = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS external_rows (
 		project_id UUID NOT NULL,
-		connector_id UUID NOT NULL,
+		connector_id VARCHAR NOT NULL,
 		table_name VARCHAR NOT NULL,
 		row_key VARCHAR NOT NULL,
-		cursor VARCHAR NOT NULL DEFAULT '',
-		data VARCHAR NOT NULL DEFAULT '',
-		synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		cursor VARCHAR,
+		data VARCHAR NOT NULL DEFAULT '{}',
+		synced_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (project_id, connector_id, table_name, row_key)
 	)`,
 	`CREATE VIEW IF NOT EXISTS resolved_events AS

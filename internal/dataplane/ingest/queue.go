@@ -124,8 +124,12 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, store *storage.Sto
 		Metrics:    metrics,
 	})
 
+	durable := ss.Durable
+	if durable == "" {
+		durable = "agentray-ingestors"
+	}
 	cons, err := ss.Ingest.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       "agentray-ingestors",
+		Durable:       durable,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       120 * time.Second,
 		MaxAckPending: 8192,

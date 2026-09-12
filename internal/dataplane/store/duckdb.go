@@ -81,10 +81,20 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	// temp_directory is per-connection, so it goes through the connector's init
 	// hook: every pooled connection (writer and readers alike) spills to the
 	// directory beside the database file rather than the process cwd.
+	// TimeZone=UTC pins TIMESTAMPTZ bucketing (date_trunc, INTERVAL math) to
+	// UTC regardless of the host's ICU zone — the old ClickHouse column was
+	// DateTime64(3, 'UTC'), so host-local bucketing would shift every
+	// timeline/date boundary on a non-UTC deployment.
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
-		_, err := execer.ExecContext(context.Background(),
-			"SET temp_directory = '"+strings.ReplaceAll(tmpDir, "'", "''")+"'", nil)
-		return err
+		for _, stmt := range []string{
+			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
+			"SET TimeZone = 'UTC'",
+		} {
+			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("duckdb: connector: %w", err)

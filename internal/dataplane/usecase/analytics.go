@@ -251,7 +251,7 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			if err != nil {
 				return runSQLOutput{}, err
 			}
-			rows, err := d.Repo.RunSQL(ctx, cc.ProjectID, normalizeSQL(in.SQL)) // read-only enforced in storage
+			rows, err := d.Repo.RunSQL(ctx, cc.ProjectID, in.SQL) // read-only enforced in storage
 			if err != nil {
 				return runSQLOutput{}, err
 			}
@@ -260,27 +260,6 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 	}
 }
 
-// normalizeSQL translates the JSON helpers the model most often reaches for
-// (MySQL/Postgres flavored, or the old ClickHouse names a saved query may
-// still carry) into the DuckDB equivalent, so a query that is otherwise
-// correct doesn't fail on dialect alone. The system prompt documents the
-// right names; this is the safety net behind it.
-func normalizeSQL(s string) string {
-	repl := strings.NewReplacer(
-		"JSON_EXTRACT_STRING(", "json_extract_string(",
-		"JSONExtractString(", "json_extract_string(",
-		"JSONExtractFloat(", "json_extract(",
-		"JSONExtractInt(", "json_extract(",
-		"JSONExtractBool(", "json_extract(",
-		"JSONExtractRaw(", "json_extract(",
-		"JSONHas(", "json_exists(",
-		"uniqExact(", "count(DISTINCT ",
-		"uniq(", "count(DISTINCT ",
-		"count()", "count(*)",
-		"ifNull(", "coalesce(",
-	)
-	return repl.Replace(s)
-}
 
 // --- Authoring operations (analyze_build) ---
 
@@ -441,7 +420,7 @@ func createChart() opcore.Operation[createChartInput, storage.Chart] {
 			return d.Repo.CreateChart(ctx, storage.Chart{
 				DashboardID: in.DashboardID, ProjectID: cc.ProjectID, Name: in.Name, Kind: in.Kind,
 				Metric: in.Metric, EventName: in.EventName, EventType: in.EventType,
-				SQL: normalizeSQL(in.SQL), XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
+				SQL: in.SQL, XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
 			})
 		},
 	}

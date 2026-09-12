@@ -1393,14 +1393,14 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Product Overview",
 			description: "Starter board with DAU, MAU, traffic breakdowns, and visitor identification.",
 			charts: []TemplateChart{
-				{Name: "DAU", Kind: "line", SQL: `SELECT toDate(timestamp) AS day, uniqExact(distinct_id) AS dau FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "dau", SortOrder: 0},
-				{Name: "MAU", Kind: "line", SQL: `SELECT toStartOfMonth(timestamp) AS month, uniqExact(distinct_id) AS mau FROM events GROUP BY month ORDER BY month ASC LIMIT 12`, XField: "month", YField: "mau", SortOrder: 1},
+				{Name: "DAU", Kind: "line", SQL: `SELECT CAST("timestamp" AS DATE) AS day, count(DISTINCT distinct_id) AS dau FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "dau", SortOrder: 0},
+				{Name: "MAU", Kind: "line", SQL: `SELECT date_trunc('month', "timestamp") AS month, count(DISTINCT distinct_id) AS mau FROM events GROUP BY month ORDER BY month ASC LIMIT 12`, XField: "month", YField: "mau", SortOrder: 1},
 				{Name: "Event trend", Kind: "line", Metric: "events", SortOrder: 2},
 				{Name: "Sessions", Kind: "stat", Metric: "sessions", SortOrder: 3},
 				{Name: "Top events", Kind: "bar", Metric: "event_breakdown", SortOrder: 4},
 				{Name: "AI cost", Kind: "stat", Metric: "cost", EventType: "agent", SortOrder: 5},
-				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT ifNull(visitor_class, 'human') AS class, count() AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 6},
-				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 7},
+				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 6},
+				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 7},
 			},
 		},
 		{
@@ -1440,10 +1440,10 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Growth & Retention",
 			description: "Acquisition, activation, and how well readers come back week over week.",
 			charts: []TemplateChart{
-				{Name: "New vs returning (daily)", Kind: "line", SQL: `SELECT toDate(timestamp) AS day, uniqExactIf(distinct_id, is_first) AS new_readers, uniqExactIf(distinct_id, NOT is_first) AS returning_readers FROM (SELECT distinct_id, timestamp, min(timestamp) OVER (PARTITION BY distinct_id) = timestamp AS is_first FROM events) GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "returning_readers", SortOrder: 0},
-				{Name: "WAU", Kind: "line", SQL: `SELECT toStartOfWeek(timestamp) AS week, uniqExact(distinct_id) AS wau FROM events GROUP BY week ORDER BY week ASC LIMIT 12`, XField: "week", YField: "wau", SortOrder: 1},
+				{Name: "New vs returning (daily)", Kind: "line", SQL: `SELECT CAST("timestamp" AS DATE) AS day, count(DISTINCT distinct_id) FILTER (WHERE is_first) AS new_readers, count(DISTINCT distinct_id) FILTER (WHERE NOT is_first) AS returning_readers FROM (SELECT distinct_id, "timestamp", min("timestamp") OVER (PARTITION BY distinct_id) = "timestamp" AS is_first FROM events) GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "returning_readers", SortOrder: 0},
+				{Name: "WAU", Kind: "line", SQL: `SELECT date_trunc('week', "timestamp") AS week, count(DISTINCT distinct_id) AS wau FROM events GROUP BY week ORDER BY week ASC LIMIT 12`, XField: "week", YField: "wau", SortOrder: 1},
 				{Name: "Active readers (7d)", Kind: "stat", Metric: "sessions", SortOrder: 2},
-				{Name: "Reading depth (events/reader)", Kind: "bar", SQL: `SELECT toDate(timestamp) AS day, round(count() / uniqExact(distinct_id), 1) AS events_per_reader FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "events_per_reader", SortOrder: 3},
+				{Name: "Reading depth (events/reader)", Kind: "bar", SQL: `SELECT CAST("timestamp" AS DATE) AS day, round(count(*) / count(DISTINCT distinct_id), 1) AS events_per_reader FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "events_per_reader", SortOrder: 3},
 				{Name: "Top events", Kind: "bar", Metric: "event_breakdown", SortOrder: 4},
 			},
 		},
@@ -1452,9 +1452,9 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Marketing & Acquisition",
 			description: "Traffic sources, the visit→read→subscribe funnel, and guest-to-identified conversion.",
 			charts: []TemplateChart{
-				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT ifNull(visitor_class, 'human') AS class, count() AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 0},
-				{Name: "Top referrers", Kind: "bar", SQL: `SELECT ifNull(nullIf(JSONExtractString(properties, 'referrer'), ''), 'direct') AS referrer, count() AS visits FROM events WHERE event_name = 'user.pageview' GROUP BY referrer ORDER BY visits DESC LIMIT 10`, XField: "referrer", YField: "visits", SortOrder: 1},
-				{Name: "Guest vs identified", Kind: "bar", SQL: `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 2},
+				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 0},
+				{Name: "Top referrers", Kind: "bar", SQL: `SELECT coalesce(nullif(json_extract_string(properties, '$.referrer'), ''), 'direct') AS referrer, count(*) AS visits FROM events WHERE event_name = 'user.pageview' GROUP BY referrer ORDER BY visits DESC LIMIT 10`, XField: "referrer", YField: "visits", SortOrder: 1},
+				{Name: "Guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 2},
 				{Name: "Pageviews trend", Kind: "line", Metric: "events", EventName: "user.pageview", SortOrder: 3},
 				{Name: "Conversions", Kind: "bar", Metric: "event_breakdown", EventName: "user.conversion", SortOrder: 4},
 			},
@@ -2917,6 +2917,7 @@ func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([
 	return s.sandboxes.query(ctx, projectID, query, args)
 }
 
+
 func (s *Store) filteredTimeline(ctx context.Context, projectID string, filter EventFilter) ([]TimelinePoint, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
@@ -3037,27 +3038,40 @@ func buildFunnelQuery(cleanSteps []string, windowSeconds int64, where string, wh
 	SELECT ` + canonicalID + ` AS cid, event_name, "timestamp" FROM resolved_events
 	WHERE ` + where + ` AND event_name IN (` + inList + `)),
 anchors AS (
-	SELECT cid, "timestamp" AS t1 FROM ev WHERE event_name = ?),
-chains AS (
-	SELECT a.cid, a.t1`)
+	SELECT cid, "timestamp" AS t1 FROM ev WHERE event_name = ?)`)
+	// Each step is its own CTE so the correlated subquery can reference the
+	// previous step's column — DuckDB does not let a SELECT expression read a
+	// sibling alias (a.t2 inside t3's subquery is a binder error).
+	prev := "anchors"
 	for i := 2; i <= len(cleanSteps); i++ {
 		fmt.Fprintf(&b, `,
+step%d AS (
+	SELECT p.*,
 		(SELECT min("timestamp") FROM ev e%d
-			WHERE e%d.cid = a.cid AND e%d.event_name = ?
-			  AND e%d."timestamp" >= a.t%d
-			  AND e%d."timestamp" <= a.t1 + INTERVAL '%d seconds') AS t%d`,
-			i, i, i, i, i-1, i, windowSeconds, i)
+			WHERE e%d.cid = p.cid AND e%d.event_name = ?
+			  AND e%d."timestamp" >= p.t%d
+			  AND e%d."timestamp" <= p.t1 + INTERVAL '%d seconds') AS t%d
+	FROM %s p)`,
+			i, i, i, i, i, i-1, i, windowSeconds, i, prev)
+		prev = fmt.Sprintf("step%d", i)
 	}
-	b.WriteString(`
-	FROM anchors a),
+	if len(cleanSteps) == 1 {
+		// A bare CASE with no WHEN is invalid; one step means every anchor is
+		// depth 1 by definition.
+		b.WriteString(`,
+lvl AS (SELECT cid, 1 AS level FROM anchors)
+SELECT level, count(*) AS people FROM lvl GROUP BY level`)
+		return b.String(), args
+	}
+	b.WriteString(`,
 lvl AS (
 	SELECT cid, max(CASE`)
 	for i := 2; i <= len(cleanSteps); i++ {
 		fmt.Fprintf(&b, ` WHEN t%d IS NULL THEN %d`, i, i-1)
 	}
 	fmt.Fprintf(&b, ` ELSE %d END) AS level
-	FROM chains GROUP BY cid)
-SELECT level, count(*) AS people FROM lvl WHERE level > 0 GROUP BY level`, len(cleanSteps))
+	FROM %s GROUP BY cid)
+SELECT level, count(*) AS people FROM lvl WHERE level > 0 GROUP BY level`, len(cleanSteps), prev)
 	return b.String(), args
 }
 
@@ -4021,7 +4035,7 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 			clauses = append(clauses, "distinct_id = ?")
 			args = append(args, filter.DistinctID)
 		} else {
-			clauses = append(clauses, "distinct_id IN ("+placeholders(len(relatedDistinctIDs))+")")
+			clauses = append(clauses, "distinct_id IN "+placeholders(len(relatedDistinctIDs)))
 			for _, id := range relatedDistinctIDs {
 				args = append(args, id)
 			}
@@ -4059,7 +4073,7 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 }
 
 func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTimeWindow bool) (string, []any) {
-	clauses := []string{"project_id IN (" + placeholders(len(projectIDs)) + ")"}
+	clauses := []string{"project_id IN " + placeholders(len(projectIDs))}
 	args := make([]any, 0, len(projectIDs)+8)
 	for _, projectID := range projectIDs {
 		args = append(args, projectID)
@@ -4153,12 +4167,13 @@ func platformClause(platform string) (string, any, bool) {
 	}
 }
 
+// placeholders renders a parenthesized IN-list of ? binds — "(?, ?, ?)".
 func placeholders(count int) string {
 	out := make([]string, count)
 	for i := range out {
 		out[i] = "?"
 	}
-	return strings.Join(out, ", ")
+	return "(" + strings.Join(out, ", ") + ")"
 }
 
 func emptySinceHours(filter EventFilter) int {
@@ -4390,14 +4405,22 @@ func validateReadonlySQL(sqlText string) error {
 	// name and its paren (e.g. `read_csv/**/('…')`), which would otherwise slip
 	// past the `name(` match. Matched as `name(` so a column literally named
 	// `url` is unaffected.
-	if fn := forbiddenTableFunction(stripSQLComments(sqlText)); fn != "" {
+	//
+	// Both checks run on literal-masked SQL: a string literal is data, so
+	// `WHERE event_name = 'query(foo)'` must not trip the table-function
+	// check, and `FROM 'checkout'` inside a literal must not trip the
+	// file-read check. The mask keeps the quote characters, so a real
+	// `FROM 'x.csv'` still matches `from\s*'`.
+	masked := maskSQLLiterals(stripSQLComments(sqlText))
+	if fn := forbiddenTableFunction(masked); fn != "" {
 		return fmt.Errorf("forbidden table function: %s", fn)
 	}
 	// DuckDB reads a bare string after FROM/JOIN as a file path ('data.csv',
 	// 's3://…'). The sandbox's enable_external_access=false would already refuse
 	// it; rejecting here returns the clearer error and keeps the guard honest
-	// outside the sandbox too.
-	if fromStringLiteralPattern.MatchString(stripSQLComments(sqlText)) {
+	// outside the sandbox too. Single quotes only — a double-quoted token is
+	// an identifier, not a path.
+	if fromStringLiteralPattern.MatchString(masked) {
 		return fmt.Errorf("reading a file or URL as a table is not allowed")
 	}
 	return nil
@@ -4462,9 +4485,10 @@ func forbiddenTableFunction(sqlText string) string {
 // belt-and-suspenders for a keyword smuggled inside a subquery or CTE body.
 var forbiddenKeywordPattern = regexp.MustCompile(`(?i)\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|SYSTEM|GRANT|REVOKE|ATTACH|DETACH|USE|SET|PRAGMA|INSTALL|LOAD|COPY|EXPORT|IMPORT|CALL|PREPARE|EXECUTE|CHECKPOINT|VACUUM|ANALYZE|RESET)\b`)
 
-// fromStringLiteralPattern catches DuckDB's file-read sugar — `FROM 'x.csv'`,
-// `FROM "s3://…"` — which needs no function name to escape the sandbox's data.
-var fromStringLiteralPattern = regexp.MustCompile(`(?i)\b(from|join)\s*['"]`)
+// fromStringLiteralPattern catches DuckDB's file-read sugar — `FROM 'x.csv'` —
+// which needs no function name to escape the sandbox's data. Single-quoted
+// only: a double-quoted token is an identifier, not a path.
+var fromStringLiteralPattern = regexp.MustCompile(`(?i)\b(from|join)\s*'`)
 
 // forbiddenKeyword returns the first statement keyword appearing as a bare token
 // in sqlText, or "". Callers pass SQL with comments and quoted spans already

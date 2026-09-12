@@ -4,10 +4,8 @@ services:
     environment:
       HTTP_ADDR: ":8080"
       POSTGRES_URL: "postgres://lohi:lohi@postgres:5432/lohi_analytics?sslmode=disable"
-      CLICKHOUSE_ADDR: "clickhouse:9000"
-      CLICKHOUSE_DATABASE: "lohi_analytics"
-      CLICKHOUSE_USER: "lohi"
-      CLICKHOUSE_PASSWORD: "lohi"
+      # DuckDB is embedded; the file lives on the duckdb-data volume.
+      DUCKDB_PATH: "/data/agentray.duckdb"
       REDIS_URL: "redis://redis:6379/0"
       NATS_URL: "nats://nats:4222"
       INGEST_SUBJECT: "agentray.events.ingest"
@@ -24,12 +22,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      clickhouse:
-        condition: service_healthy
       redis:
         condition: service_healthy
       nats:
         condition: service_started
+    volumes:
+      - duckdb-data:/data
     ports:
       - "${AGENTRAY_API_PORT:-8088}:8080"
 
@@ -60,23 +58,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.12-alpine
-    environment:
-      CLICKHOUSE_DB: lohi_analytics
-      CLICKHOUSE_USER: lohi
-      CLICKHOUSE_PASSWORD: lohi
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    ports:
-      - "${AGENTRAY_CLICKHOUSE_HTTP_PORT:-18123}:8123"
-      - "${AGENTRAY_CLICKHOUSE_NATIVE_PORT:-19000}:9000"
-    volumes:
-      - clickhouse-data:/var/lib/clickhouse
-
   redis:
     image: redis:7-alpine
     healthcheck:
@@ -98,5 +79,5 @@ services:
 
 volumes:
   postgres-data:
-  clickhouse-data:
+  duckdb-data:
   nats-data:

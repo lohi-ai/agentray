@@ -215,7 +215,7 @@ func personProfilesByKeysTx(ctx context.Context, q duckQueryer, projectID string
 	rows, err := q.QueryContext(ctx, `
 SELECT distinct_id, properties, properties_once, email, name, first_seen, last_seen
 FROM persons
-WHERE project_id = ? AND distinct_id IN (`+placeholders(len(distinctIDs))+`)`, args...)
+WHERE project_id = ? AND distinct_id IN `+placeholders(len(distinctIDs)), args...)
 	if err != nil {
 		return nil, err
 	}

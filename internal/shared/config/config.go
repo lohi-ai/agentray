@@ -32,6 +32,11 @@ type Config struct {
 	IngestDLQSubject string
 	// IngestMaxDeliver bounds redelivery attempts before a batch is dead-lettered.
 	IngestMaxDeliver int
+	// IngestDurable names the JetStream durable consumer. Blue-green deploys
+	// give each colour its own durable (e.g. agentray-ingestors-blue) so both
+	// colours receive every message — a shared durable would split the stream
+	// between them and the two DuckDB files would diverge.
+	IngestDurable string
 	// PipelineMetricsProjectAPIKey names the project that pipeline self-metrics
 	// (system.pipeline.* events: flush size, insert failures, dead-letters, ingest
 	// lag) are written to, so the existing alerting/dashboards observe the pipeline
@@ -156,6 +161,7 @@ func FromEnv() Config {
 		IngestStreamName:             env("INGEST_STREAM_NAME", "AGENTRAY_EVENTS"),
 		IngestDLQSubject:             env("INGEST_DLQ_SUBJECT", "agentray.events.dlq"),
 		IngestMaxDeliver:             envInt("INGEST_MAX_DELIVER", 5),
+		IngestDurable:                env("INGEST_DURABLE", "agentray-ingestors"),
 		PipelineMetricsProjectAPIKey: env("PIPELINE_METRICS_PROJECT_API_KEY", env("DEFAULT_PROJECT_API_KEY", "lohi_dev_project_token")),
 		RateLimitPerMinute:           envInt("RATE_LIMIT_PER_MINUTE", 600),
 		DefaultProjectName:           env("DEFAULT_PROJECT_NAME", "AgentRay local"),

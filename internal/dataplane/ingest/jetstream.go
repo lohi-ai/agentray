@@ -21,6 +21,9 @@ type StreamSet struct {
 	Subject  string
 	DLQSubj  string
 	MaxDeliv int
+	// Durable names this process's consumer. Blue-green colours each get
+	// their own so both receive every message.
+	Durable string
 }
 
 // EnsureStreams connects a JetStream context on nc and idempotently provisions
@@ -61,9 +64,6 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		return nil, fmt.Errorf("ensure dlq stream: %w", err)
 	}
 	maxDeliv := cfg.IngestMaxDeliver
-	if maxDeliv <= 0 {
-		maxDeliv = 5
-	}
 	return &StreamSet{
 		JS:       js,
 		Ingest:   ingest,
@@ -71,5 +71,6 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		Subject:  cfg.IngestSubject,
 		DLQSubj:  cfg.IngestDLQSubject,
 		MaxDeliv: maxDeliv,
+		Durable:  cfg.IngestDurable,
 	}, nil
 }
