@@ -590,14 +590,16 @@ FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID).
 	}
 
 	out := DatasetPreview{Sync: sync, Rows: []DatasetPreviewRow{}, Warnings: datasetWarnings(sync)}
+	var total uint64
 	if err := s.ch.QueryRow(ctx, `
 SELECT count(), coalesce(max(cursor), '')
 FROM external_rows FINAL
 WHERE project_id = ? AND connector_id = ? AND table_name = ?`+softFilter,
 		sync.ProjectID, sync.ConnectorID, sync.SourceTable).
-		Scan(&out.TotalRows, &out.LandedWatermark); err != nil {
+		Scan(&total, &out.LandedWatermark); err != nil {
 		return out, err
 	}
+	out.TotalRows = int64(total)
 	rows, err := s.ch.Query(ctx, `
 SELECT row_key, cursor, data, toString(synced_at)
 FROM external_rows FINAL
