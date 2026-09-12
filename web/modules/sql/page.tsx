@@ -15,7 +15,7 @@ import { Button, EmptyState, Panel } from '@/modules/shared/components/signal-pr
 import { SqlEditor } from './sql-editor';
 import { SchemaReference } from './schema-reference';
 
-const SAMPLE = 'SELECT event_name, count() AS c FROM events GROUP BY event_name ORDER BY c DESC LIMIT 20';
+const SAMPLE = 'SELECT event_name, count(*) AS c FROM events GROUP BY event_name ORDER BY c DESC LIMIT 20';
 const MAX_DISPLAY_ROWS = 100;
 
 // openChat sends the user to the agent chat with a seeded question. The agent

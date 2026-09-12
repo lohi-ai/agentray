@@ -494,7 +494,11 @@ function catalogEvents(names: FirstRunInput['eventNames']): CatalogEvent[] {
       if (typeof name === 'string' && name) out.push({ name, count, users });
     }
   }
-  return out;
+  // onboarding_verified is a verification receipt, not a product signal —
+  // every consumer (first-run gating, first-session notice, weakest-link,
+  // written opinion) reads through this one function, so the exclusion lives
+  // here and can never disagree between surfaces.
+  return out.filter((e) => e.name !== 'onboarding_verified');
 }
 
 function catalogLabels(names: FirstRunInput['eventNames']): string[] {
@@ -580,8 +584,8 @@ export type WeakestLink = {
   // toCount / fromCount. This is a ratio of two independently-measured people
   // counts, NOT a measured passage rate: the catalog cannot tell us whether the
   // `to` people are the same people as the `from` people, or whether they did
-  // the steps in that order. Only the funnel query (windowFunnel, server-side)
-  // establishes passage. Word it as a gap, never as "conversion".
+  // the steps in that order. Only the funnel query (ordered earliest-match,
+  // server-side) establishes passage. Word it as a gap, never as "conversion".
   rate: number;
   missing: boolean;
   // How many funnel stages sit untracked between the two we matched. Anything

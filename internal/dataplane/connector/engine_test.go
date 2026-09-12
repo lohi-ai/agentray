@@ -292,7 +292,7 @@ type failSecondInsertStore struct {
 func (f *failSecondInsertStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
 	f.calls++
 	if f.calls == 2 {
-		return fmt.Errorf("clickhouse down")
+		return fmt.Errorf("duckdb down")
 	}
 	return f.fakeStore.InsertExternalRows(ctx, projectID, connectorID, table, rows)
 }

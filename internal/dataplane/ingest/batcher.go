@@ -2,10 +2,12 @@ package ingestion
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -15,7 +17,7 @@ func logBatchError(err error) {
 
 // msgHandle is the acknowledgement surface the batcher needs from a durable
 // (JetStream) message. The JetStream worker supplies a real one so a batch is
-// acked only after its ClickHouse insert succeeds and NAK'd (redelivered) or
+// acked only after its DuckDB insert succeeds and NAK'd (redelivered) or
 // dead-lettered otherwise. The legacy core-NATS path supplies no handle
 // (fire-and-forget: a failed insert is logged and dropped, as before).
 type msgHandle interface {
@@ -27,7 +29,7 @@ type msgHandle interface {
 }
 
 // queued pairs a decoded message's events with its (optional) ack handle so the
-// batcher can coalesce events from many messages into one ClickHouse insert yet
+// batcher can coalesce events from many messages into one DuckDB insert yet
 // still acknowledge each source message correctly.
 type queued struct {
 	events []storage.Event
@@ -35,7 +37,7 @@ type queued struct {
 }
 
 // EventBatcher coalesces events arriving from many small NATS messages into
-// larger inserts before they reach ClickHouse. ClickHouse is an OLAP store that
+// larger inserts before they reach DuckDB. DuckDB is an OLAP store that
 // wants few, large inserts: every INSERT creates a part, and a flood of
 // single-row inserts (one per browser `capture`) explodes the part count and
 // the background-merge load. The worker hands every decoded message to Add/AddMsg;
@@ -137,6 +139,11 @@ func (b *EventBatcher) Add(events []storage.Event) {
 
 // AddMsg hands a durable message's events plus its ack handle to the batcher. The
 // handle is acked after a successful insert, or NAK'd / dead-lettered on failure.
+//
+// Poison check happens HERE, before the events join a coalesced batch: a message
+// whose events can never insert (unparseable project/event UUID — the DuckDB
+// events primary key) is dead-lettered and terminated immediately, so one bad
+// payload can neither wedge the stream nor take a whole flush down with it.
 func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 	if len(events) == 0 {
 		// Nothing to insert, but the message must still be acked or it redelivers
@@ -146,7 +153,58 @@ func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 		}
 		return
 	}
+	if err := validateEvents(events); err != nil {
+		b.poison(msg, err)
+		return
+	}
 	b.in <- queued{events: events, msg: msg}
+}
+
+// validateEvents rejects a batch that cannot ever be stored: the events table
+// keys on (project_id, event_id) UUIDs, so an unparseable id is a permanent
+// failure, not a transient one. Checked at enqueue so the sink only ever sees
+// insertable rows and its errors stay in the transient class.
+func validateEvents(events []storage.Event) error {
+	for _, e := range events {
+		if _, err := uuid.Parse(e.ProjectID); err != nil {
+			return fmt.Errorf("project_id %q: %w", e.ProjectID, err)
+		}
+		if _, err := uuid.Parse(e.EventID); err != nil {
+			return fmt.Errorf("event_id %q: %w", e.EventID, err)
+		}
+	}
+	return nil
+}
+
+// poison settles a message that can never insert. A configured DLQ receives
+// the raw body before the original terminates; if DLQ publication is disabled
+// or fails, the old durable contract is preserved by NAKing for redelivery.
+func (b *EventBatcher) poison(msg msgHandle, cause error) {
+	if msg == nil {
+		log.Printf("ingestion batcher: dropping undeliverable batch: %v", cause)
+		return
+	}
+	if b.deadLetter == nil {
+		log.Printf("ingestion batcher: poison batch has no DLQ, will retry: %v", cause)
+		_ = msg.nak(b.nakDelay)
+		if b.metrics != nil {
+			b.metrics.recordNak()
+		}
+		return
+	}
+	if err := b.deadLetter(msg.body()); err != nil {
+		log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
+		_ = msg.nak(b.nakDelay)
+		if b.metrics != nil {
+			b.metrics.recordNak()
+		}
+		return
+	}
+	if b.metrics != nil {
+		b.metrics.recordDeadLetter()
+	}
+	_ = msg.term()
+	log.Printf("ingestion batcher: terminated poison message: %v", cause)
 }
 
 func (b *EventBatcher) loop() {
@@ -190,7 +248,7 @@ func (b *EventBatcher) loop() {
 	}
 }
 
-// flush inserts every buffered message's events in one ClickHouse write and then
+// flush inserts every buffered message's events in one DuckDB write and then
 // settles each source message (ack on success; NAK or dead-letter on failure).
 func (b *EventBatcher) flush(items []queued) {
 	total := 0
@@ -254,7 +312,7 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 }
 
 // sinkWithRetry does a few quick, bounded retries with exponential backoff to ride
-// out a transient ClickHouse blip without a full redelivery cycle. On a longer
+// out a transient DuckDB blip without a full redelivery cycle. On a longer
 // outage it gives up and returns the error so the caller NAKs (JetStream then owns
 // the slower redelivery/backoff).
 func (b *EventBatcher) sinkWithRetry(events []storage.Event) error {

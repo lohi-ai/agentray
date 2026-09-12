@@ -3,6 +3,7 @@ package opcore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,6 +64,16 @@ func (c *Client) Call(ctx context.Context, op string, input []byte) ([]byte, err
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
+		// The server answers operation failures as {"error","code"} — decode
+		// the typed body so callers (and the CLI's stderr) keep the kind
+		// instead of a bare status line.
+		var ebody opErrorBody
+		if json.Unmarshal(body, &ebody) == nil && ebody.Error != "" {
+			if ebody.Code != "" {
+				return nil, &OpError{Kind: ErrorKind(ebody.Code), Message: ebody.Error}
+			}
+			return nil, fmt.Errorf("op %s failed (%d): %s", op, resp.StatusCode, ebody.Error)
+		}
 		return nil, fmt.Errorf("op %s failed (%d): %s", op, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -228,7 +229,7 @@ func overviewRange(period string, now time.Time, loc *time.Location) (OverviewRa
 // shares: real user events from humans, minus the onboarding verification
 // event. It is a fragment (not a filter flag) because it must compose with the
 // half-open range bounds this package builds itself.
-const overviewQualifying = `event_type = 'user' AND ifNull(visitor_class, 'human') = 'human' AND event_name != '` + overviewVerificationEvent + `'`
+const overviewQualifying = `event_type = 'user' AND coalesce(visitor_class, 'human') = 'human' AND event_name != '` + overviewVerificationEvent + `'`
 
 // overviewDataState maps receipt facts to the data-status label. "quiet" is an
 // age statement (nothing received lately), never a pipeline-lag claim.
@@ -269,7 +270,7 @@ func overviewRetentionPoint(eligible, returned uint64) OverviewRetentionPoint {
 func uint64Ptr(v uint64) *uint64 { return &v }
 
 // Overview computes the whole Product Overview in one deterministic pass over
-// the current ClickHouse store. now is injectable so tests can pin the
+// the current DuckDB store. now is injectable so tests can pin the
 // project-local calendar boundary; production callers pass time.Now().
 func (s *Store) Overview(ctx context.Context, projectID, period, platform string, now time.Time) (OverviewResult, error) {
 	res := OverviewResult{Trend: []OverviewTrendPoint{}}
@@ -302,11 +303,8 @@ func (s *Store) Overview(ctx context.Context, projectID, period, platform string
 		MetricVersion:  OverviewMetricVersion,
 	}
 
-	resolver, err := s.identityResolver(ctx, projectID)
-	if err != nil {
-		return res, err
-	}
-	canonicalID, _ := resolver.canonicalExpr("distinct_id")
+	// resolved_events supplies the stitched canonical id (the aliases_dict job).
+	canonicalID := "canonical_distinct_id"
 
 	// One WHERE fragment for the whole read: project + half-open range +
 	// optional platform. Qualifying-activity clauses are added per query so
@@ -324,25 +322,27 @@ func (s *Store) Overview(ctx context.Context, projectID, period, platform string
 	// --- data status (all events, no qualifying clause) ---
 	{
 		var total uint64
-		var lastEvent, lastReceived time.Time
-		err = s.ch.QueryRow(ctx, `
-SELECT count(), max(timestamp), max(ifNull(inserted_at, timestamp))
+		var lastEvent, lastReceived sql.NullTime
+		err = s.duckQueryRow(ctx, `
+SELECT count(*), max("timestamp"), max(coalesce(inserted_at, "timestamp"))
 FROM events
-WHERE project_id = ?`, projectID).Scan(&total, &lastEvent, &lastReceived)
+WHERE project_id = ?`, []any{projectID}, &total, &lastEvent, &lastReceived)
 		if err != nil {
 			return res, err
 		}
 		res.DataStatus.EverReceived = total > 0
 		if res.DataStatus.EverReceived {
-			res.DataStatus.LastEventAt = &lastEvent
-			res.DataStatus.LastReceivedAt = &lastReceived
-			age := now.UTC().Sub(lastReceived)
+			lastEventAt := lastEvent.Time
+			lastReceivedAt := lastReceived.Time
+			res.DataStatus.LastEventAt = &lastEventAt
+			res.DataStatus.LastReceivedAt = &lastReceivedAt
+			age := now.UTC().Sub(lastReceivedAt)
 			if age < 0 {
 				age = 0
 			}
 			res.DataStatus.AgeSeconds = int64(age.Seconds())
 		}
-		res.DataStatus.State = overviewDataState(res.DataStatus.EverReceived, now.UTC().Sub(lastReceived))
+		res.DataStatus.State = overviewDataState(res.DataStatus.EverReceived, now.UTC().Sub(lastReceived.Time))
 		res.DataStatus.PipelineLag = "unavailable"
 		res.DataStatus.SchemaStatus = "unavailable"
 
@@ -354,10 +354,10 @@ WHERE project_id = ?`, projectID).Scan(&total, &lastEvent, &lastReceived)
 		res.DataStatus.SourcesTruncated = truncated
 
 		var inRange, qualifying uint64
-		err = s.ch.QueryRow(ctx, `
-SELECT count(), countIf(`+overviewQualifying+`)
+		err = s.duckQueryRow(ctx, `
+SELECT count(*), count(*) FILTER (WHERE `+overviewQualifying+`)
 FROM events
-WHERE `+where, args...).Scan(&inRange, &qualifying)
+WHERE `+where, args, &inRange, &qualifying)
 		if err != nil {
 			return res, err
 		}
@@ -380,16 +380,16 @@ WHERE `+where, args...).Scan(&inRange, &qualifying)
 		if platArg != nil {
 			qargs = append(qargs, platArg)
 		}
-		err = s.ch.QueryRow(ctx, `
+		err = s.duckQueryRow(ctx, `
 SELECT
-	uniqExactIf(`+canonicalID+`, timestamp >= ? AND timestamp < ?),
-	uniqExactIf(`+canonicalID+`, timestamp >= ? AND timestamp < ?),
-	uniqExactIf(session_id, session_id != '' AND timestamp >= ? AND timestamp < ?),
-	uniqExactIf(session_id, session_id != '' AND timestamp >= ? AND timestamp < ?)
-FROM events
-WHERE project_id = ? AND timestamp >= ? AND timestamp < ? AND `+overviewQualifying+platClause,
-			qargs...,
-		).Scan(&active, &activePrev, &sessions, &sessionsPrev)
+	count(DISTINCT `+canonicalID+`) FILTER (WHERE "timestamp" >= ? AND "timestamp" < ?),
+	count(DISTINCT `+canonicalID+`) FILTER (WHERE "timestamp" >= ? AND "timestamp" < ?),
+	count(DISTINCT session_id) FILTER (WHERE session_id <> '' AND "timestamp" >= ? AND "timestamp" < ?),
+	count(DISTINCT session_id) FILTER (WHERE session_id <> '' AND "timestamp" >= ? AND "timestamp" < ?)
+FROM resolved_events
+WHERE project_id = ? AND "timestamp" >= ? AND "timestamp" < ? AND `+overviewQualifying+platClause,
+			qargs,
+			&active, &activePrev, &sessions, &sessionsPrev)
 		if err != nil {
 			return res, err
 		}
@@ -423,18 +423,18 @@ WHERE project_id = ? AND timestamp >= ? AND timestamp < ? AND `+overviewQualifyi
 		if platArg != nil {
 			qargs = append(qargs, platArg)
 		}
-		err = s.ch.QueryRow(ctx, `
+		err = s.duckQueryRow(ctx, `
 SELECT
-	countIf(first_ts >= ? AND first_ts < ?),
-	countIf(first_ts >= ? AND first_ts < ?)
+	count(*) FILTER (WHERE first_ts >= ? AND first_ts < ?),
+	count(*) FILTER (WHERE first_ts >= ? AND first_ts < ?)
 FROM (
-	SELECT `+canonicalID+` AS cid, min(timestamp) AS first_ts,
-		argMin(ifNull(platform, ''), timestamp) AS first_platform
-	FROM events
+	SELECT `+canonicalID+` AS cid, min("timestamp") AS first_ts,
+		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+	FROM resolved_events
 	WHERE project_id = ? AND `+overviewQualifying+`
 	GROUP BY cid
 )
-WHERE 1 = 1`+firstPlatformClause(platform), qargs...).Scan(&newUsers, &newUsersPrev)
+WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		if err != nil {
 			return res, err
 		}
@@ -465,26 +465,22 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs...).Scan(&newUsers, &newUsersP
 
 	// --- daily active-user trend ---
 	{
-		rows, err := s.ch.Query(ctx, `
-SELECT toDate(timestamp, ?) AS day, uniqExact(`+canonicalID+`) AS users
-FROM events
+		byDay := map[string]uint64{}
+		err := s.duckQuery(ctx, `
+SELECT CAST(timezone(?, "timestamp") AS DATE) AS day, count(DISTINCT `+canonicalID+`) AS users
+FROM resolved_events
 WHERE `+qualWhere+`
 GROUP BY day
-ORDER BY day`, append([]any{timezone}, args...)...)
-		if err != nil {
-			return res, err
-		}
-		defer rows.Close()
-		byDay := map[string]uint64{}
-		for rows.Next() {
+ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 			var day time.Time
 			var users uint64
 			if err := rows.Scan(&day, &users); err != nil {
-				return res, err
+				return err
 			}
 			byDay[day.Format("2006-01-02")] = users
-		}
-		if err := rows.Err(); err != nil {
+			return nil
+		})
+		if err != nil {
 			return res, err
 		}
 		// Emit every local calendar day in the range, including zero days — a
@@ -513,26 +509,22 @@ ORDER BY day`, append([]any{timezone}, args...)...)
 		}
 		res.Content.TopPages = OverviewList{Unit: "pageviews", Rows: pages}
 
-		srcRows, err := s.ch.Query(ctx, `
-SELECT if(ifNull(referrer_channel, '') = '', 'unknown', referrer_channel) AS channel, count() AS count
+		sources := []PathCount{}
+		err = s.duckQuery(ctx, `
+SELECT if(coalesce(referrer_channel, '') = '', 'unknown', referrer_channel) AS channel, count(*) AS count
 FROM events
 WHERE `+where+` AND event_name = 'user.pageview'
 GROUP BY channel
 ORDER BY count DESC
-LIMIT 20`, args...)
-		if err != nil {
-			return res, err
-		}
-		defer srcRows.Close()
-		sources := []PathCount{}
-		for srcRows.Next() {
+LIMIT 20`, args, func(rows *sql.Rows) error {
 			var item PathCount
-			if err := srcRows.Scan(&item.Value, &item.Count); err != nil {
-				return res, err
+			if err := rows.Scan(&item.Value, &item.Count); err != nil {
+				return err
 			}
 			sources = append(sources, item)
-		}
-		if err := srcRows.Err(); err != nil {
+			return nil
+		})
+		if err != nil {
 			return res, err
 		}
 		res.Content.TopSources = OverviewList{Unit: "pageviews", Rows: sources}
@@ -557,7 +549,7 @@ SELECT c.id::text, c.name, c.kind,
 FROM data_connectors c
 LEFT JOIN connector_syncs cs
   ON cs.connector_id = c.id AND cs.project_id = c.project_id
-WHERE c.project_id = $1
+WHERE c.project_id = $1 AND c.archived_at IS NULL
 ORDER BY c.created_at DESC, c.id, cs.created_at ASC NULLS LAST, cs.id
 LIMIT $2`, projectID, overviewSourceLimit+1)
 	if err != nil {
@@ -644,24 +636,19 @@ func overviewPlatform(platform string) (string, any) {
 // new users. Returns themselves remain scoped to the selected platform.
 func (s *Store) overviewRetention(ctx context.Context, projectID, platform, timezone string, to time.Time) (OverviewRetention, error) {
 	out := OverviewRetention{CohortWindow: "lifetime"}
-	resolver, err := s.identityResolver(ctx, projectID)
-	if err != nil {
-		return out, err
-	}
-	canonicalID, _ := resolver.canonicalExpr("distinct_id")
-	// The join aliases events as e, so the canonical expression must be built
-	// against e.distinct_id — prefixing the resolved expression with "e."
-	// breaks the moment canonicalExpr emits anything but a bare column.
-	canonicalE, _ := resolver.canonicalExpr("e.distinct_id")
-
 	platClause, platArg := overviewPlatform(platform)
 	firstClause := firstPlatformClause(platform)
+	// resolved_events carries the stitched canonical id (the aliases_dict job).
+	// The join aliases it as e, so the canonical column is e.canonical_distinct_id.
+	canonicalID := "canonical_distinct_id"
+	canonicalE := "e.canonical_distinct_id"
+
 	firsts := `
-SELECT cid, toDate(first_ts, ?) AS cohort_day
+SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
 FROM (
-	SELECT ` + canonicalID + ` AS cid, min(timestamp) AS first_ts,
-		argMin(ifNull(platform, ''), timestamp) AS first_platform
-	FROM events
+	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
+		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+	FROM resolved_events
 	WHERE project_id = ? AND ` + overviewQualifying + `
 	GROUP BY cid
 )
@@ -674,12 +661,12 @@ WHERE 1 = 1` + firstClause
 	// eligible_N = members whose local calendar day-N window has fully closed
 	// by `to`; a partial Today window cannot mature an in-progress local day.
 	var elig [3]uint64
-	err = s.ch.QueryRow(ctx, `
+	err := s.duckQueryRow(ctx, `
 SELECT
-	countIf(cohort_day + INTERVAL 2 DAY <= toDate(?, ?)),
-	countIf(cohort_day + INTERVAL 8 DAY <= toDate(?, ?)),
-	countIf(cohort_day + INTERVAL 31 DAY <= toDate(?, ?))
-FROM (`+firsts+`)`, append([]any{to, timezone, to, timezone, to, timezone}, firstArgs...)...).Scan(&elig[0], &elig[1], &elig[2])
+	count(*) FILTER (WHERE cohort_day + INTERVAL '2 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(*) FILTER (WHERE cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(*) FILTER (WHERE cohort_day + INTERVAL '31 days' <= CAST(timezone(?, ?) AS DATE))
+FROM (`+firsts+`)`, append([]any{timezone, to, timezone, to, timezone, to}, firstArgs...), &elig[0], &elig[1], &elig[2])
 	if err != nil {
 		return out, err
 	}
@@ -688,16 +675,16 @@ FROM (`+firsts+`)`, append([]any{to, timezone, to, timezone, to, timezone}, firs
 	// calendar day. Both the cohort subquery and return events obey the same
 	// first-platform/platform-filter semantics as new users and active users.
 	var ret [3]uint64
-	err = s.ch.QueryRow(ctx, `
+	err = s.duckQueryRow(ctx, `
 SELECT
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 1 DAY AND f.cohort_day + INTERVAL 2 DAY <= toDate(?, ?)),
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 7 DAY AND f.cohort_day + INTERVAL 8 DAY <= toDate(?, ?)),
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 30 DAY AND f.cohort_day + INTERVAL 31 DAY <= toDate(?, ?))
-FROM events e
+	count(DISTINCT `+canonicalE+`) FILTER (WHERE CAST(timezone(?, e."timestamp") AS DATE) = f.cohort_day + INTERVAL '1 day' AND f.cohort_day + INTERVAL '2 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(DISTINCT `+canonicalE+`) FILTER (WHERE CAST(timezone(?, e."timestamp") AS DATE) = f.cohort_day + INTERVAL '7 days' AND f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(DISTINCT `+canonicalE+`) FILTER (WHERE CAST(timezone(?, e."timestamp") AS DATE) = f.cohort_day + INTERVAL '30 days' AND f.cohort_day + INTERVAL '31 days' <= CAST(timezone(?, ?) AS DATE))
+FROM resolved_events e
 INNER JOIN (`+firsts+`) f ON `+canonicalE+` = f.cid
 WHERE e.project_id = ? AND `+overviewQualifying+platClause,
-		append(append([]any{timezone, to, timezone, timezone, to, timezone, timezone, to, timezone}, firstArgs...), append([]any{projectID}, platformArgs(platArg)...)...)...,
-	).Scan(&ret[0], &ret[1], &ret[2])
+		append(append([]any{timezone, timezone, to, timezone, timezone, to, timezone, timezone, to}, firstArgs...), append([]any{projectID}, platformArgs(platArg)...)...),
+		&ret[0], &ret[1], &ret[2])
 	if err != nil {
 		return out, err
 	}

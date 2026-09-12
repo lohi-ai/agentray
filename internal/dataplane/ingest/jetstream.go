@@ -11,7 +11,7 @@ import (
 )
 
 // StreamSet holds the JetStream handles the durable pipeline needs: the ingest
-// stream (events awaiting a ClickHouse write) and the dead-letter stream (batches
+// stream (events awaiting a DuckDB write) and the dead-letter stream (batches
 // that exhausted redelivery). Both are file-backed so they survive a broker
 // restart.
 type StreamSet struct {
@@ -21,6 +21,9 @@ type StreamSet struct {
 	Subject  string
 	DLQSubj  string
 	MaxDeliv int
+	// Durable names this process's consumer. Blue-green colours each get
+	// their own so both receive every message.
+	Durable string
 }
 
 // EnsureStreams connects a JetStream context on nc and idempotently provisions
@@ -41,7 +44,7 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		// A LimitsPolicy stream purges by age regardless of ack state, so MaxAge is
 		// the outage window we can survive without losing un-processed events. NAK'd
 		// messages dead-letter after MaxDeliver attempts (minutes), so the stream only
-		// accumulates unacked messages during a *total* worker/ClickHouse outage —
+		// accumulates unacked messages during a *total* worker/DuckDB outage —
 		// give that a month of recovery slack (matching the DLQ retention) rather than
 		// a week, so a long incident degrades to backlog, not data loss.
 		MaxAge:     30 * 24 * time.Hour,
@@ -61,9 +64,6 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		return nil, fmt.Errorf("ensure dlq stream: %w", err)
 	}
 	maxDeliv := cfg.IngestMaxDeliver
-	if maxDeliv <= 0 {
-		maxDeliv = 5
-	}
 	return &StreamSet{
 		JS:       js,
 		Ingest:   ingest,
@@ -71,5 +71,6 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		Subject:  cfg.IngestSubject,
 		DLQSubj:  cfg.IngestDLQSubject,
 		MaxDeliv: maxDeliv,
+		Durable:  cfg.IngestDurable,
 	}, nil
 }

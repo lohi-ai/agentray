@@ -9,10 +9,15 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -86,7 +91,7 @@ type Repo interface {
 	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)
 	SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (storage.ConnectorSync, error)
 	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
-	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
+	LatestConnectorRunsForProject(ctx context.Context, projectID string, syncIDs []string) (map[string]storage.ConnectorRun, error)
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
@@ -146,6 +151,44 @@ func depsFrom(cc opcore.CallContext) (*Deps, error) {
 		return nil, fmt.Errorf("usecase: operation invoked without deps")
 	}
 	return d, nil
+}
+
+// MapOpError translates a handler's typed error into the HTTP status the
+// operation contract promises: revision and idempotency conflicts are 409,
+// missing rows 404, an archived source 409, a saturated engine 503
+// (retryable). Everything else stays a 400. Installed on the registry so
+// /api/op answers identically to the legacy adapter's opError — a web client
+// classifying by status sees the typed outcome on every adapter.
+func MapOpError(err error) error {
+	var he *echo.HTTPError
+	if errors.As(err, &he) {
+		return he
+	}
+	var oe *opcore.OpError
+	if errors.As(err, &oe) {
+		switch oe.Kind {
+		case opcore.ErrNotFound:
+			return echo.NewHTTPError(http.StatusNotFound, oe.Message)
+		case opcore.ErrConflict:
+			return echo.NewHTTPError(http.StatusConflict, oe.Message)
+		case opcore.ErrRetryable:
+			return echo.NewHTTPError(http.StatusServiceUnavailable, oe.Message)
+		}
+	}
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return echo.NewHTTPError(http.StatusNotFound, "not found")
+	case errors.Is(err, storage.ErrRevisionConflict):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, storage.ErrIdempotencyConflict):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, storage.ErrSourceArchived):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, connector.ErrEngineBusy):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+	default:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
 }
 
 // recentFilter returns the default look-back filter used when an operation takes

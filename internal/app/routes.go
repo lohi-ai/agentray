@@ -457,7 +457,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name, payload.Timezone)
 		if err != nil {
-			if errors.Is(err, storage.ErrInvalidProjectTimezone) {
+			if errors.Is(err, storage.ErrInvalidProjectTimezone) || errors.Is(err, storage.ErrNoProjectFields) {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 			return echo.NewHTTPError(http.StatusForbidden, "project permission denied")
@@ -819,7 +819,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		rows, err := store.RunSQL(c.Request().Context(), project.ID, payload.SQL)
 		if err != nil {
-			// Surface the underlying SQL error (e.g. ClickHouse syntax/column
+			// Surface the underlying SQL error (e.g. DuckDB syntax/column
 			// errors) to the author instead of Echo's generic 500 — the SQL
 			// screen shows this message inline so users can fix their query.
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())

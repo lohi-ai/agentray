@@ -40,13 +40,28 @@ x-agentray-web: &agentray-web-svc
     - edge
 
 services:
+  # DuckDB is a single-writer embedded database, so each colour owns its own
+  # file on its own volume — a shared file would lock out the incoming colour
+  # and a shared volume would corrupt it. Each colour also gets its own
+  # JetStream durable (INGEST_DURABLE) so both receive every event while both
+  # run; a fresh colour replays the stream's retention window on first boot.
   agentray-api-blue:
     <<: *agentray-api-svc
     container_name: dev-agentray-api-blue
+    environment:
+      DUCKDB_PATH: /data/agentray.duckdb
+      INGEST_DURABLE: agentray-ingestors-dev-blue
+    volumes:
+      - duckdb-dev-blue:/data
 
   agentray-api-green:
     <<: *agentray-api-svc
     container_name: dev-agentray-api-green
+    environment:
+      DUCKDB_PATH: /data/agentray.duckdb
+      INGEST_DURABLE: agentray-ingestors-dev-green
+    volumes:
+      - duckdb-dev-green:/data
 
   agentray-web-blue:
     <<: *agentray-web-svc
@@ -55,6 +70,10 @@ services:
   agentray-web-green:
     <<: *agentray-web-svc
     container_name: dev-agentray-web-green
+
+volumes:
+  duckdb-dev-blue:
+  duckdb-dev-green:
 
 networks:
   edge:

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -47,8 +48,15 @@ func (r *recordingSink) totalRows() int {
 
 func ev(n int) []storage.Event {
 	out := make([]storage.Event, n)
+	projectID := uuid.NewString()
 	for i := range out {
-		out[i] = storage.Event{EventName: "user.pageview"}
+		out[i] = storage.Event{
+			ProjectID:  projectID,
+			EventID:    uuid.NewString(),
+			EventName:  "user.pageview",
+			DistinctID: "test-user",
+			Timestamp:  time.Now().UTC(),
+		}
 	}
 	return out
 }

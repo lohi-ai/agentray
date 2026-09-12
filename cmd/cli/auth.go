@@ -437,7 +437,7 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 func printSessionSummary(payload accountPayload) {
 	if payload.Project.ID != "" {
 		fmt.Fprintf(os.Stderr, "Default project: %s\n", payload.Project.Name)
-		fmt.Fprintf(os.Stderr, "Credentials saved to %s — `agentray key` prints the management credential; the capture key is for SDKs.\n", configPath())
+		fmt.Fprintf(os.Stderr, "Credentials saved to %s — `agentray key` prints the capture key for SDKs; ops use the stored management credential.\n", configPath())
 	}
 }
 

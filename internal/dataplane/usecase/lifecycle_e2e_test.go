@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ import (
 
 // End-to-end lifecycle QA: drives the REAL operation registry (the same
 // definitions REST /api/op, MCP, CLI, and the in-process agent all share)
-// against a live Postgres + ClickHouse. This is the adapter-neutral proof
+// against a live Postgres + DuckDB. This is the adapter-neutral proof
 // that the slice-2 contract works through opcore.Operation -> usecase.Repo ->
 // storage, not just at the store layer. Skips without a reachable database.
 
@@ -30,10 +31,7 @@ func openE2EStore(t *testing.T) *storage.Store {
 	defer cancel()
 	s, err := storage.Open(ctx, config.Config{
 		PostgresURL:          pgURL,
-		ClickHouseAddr:       envOr("AGENTRAY_TEST_CLICKHOUSE_ADDR", "localhost:19000"),
-		ClickHouseDatabase:   "lohi_analytics",
-		ClickHouseUser:       "lohi",
-		ClickHousePassword:   "lohi",
+		DuckDBPath:           filepath.Join(t.TempDir(), "e2e.duckdb"),
 		DefaultProjectName:   "e2e-default",
 		DefaultProjectAPIKey: "e2e_default_key",
 	})

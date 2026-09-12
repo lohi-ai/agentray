@@ -9,6 +9,15 @@ type Registry struct {
 	// legacyAllowlist is the frozen set of operation names a CredLegacy
 	// principal may invoke (see auth.go). Set once via SetLegacyAllowlist.
 	legacyAllowlist []string
+	// classifier maps store/engine sentinel errors onto the OpError taxonomy
+	// (see errors.go). Set once via SetErrorClassifier; nil leaves untyped
+	// errors untyped.
+	classifier func(error) error
+	// errMapper translates a handler's typed error into the adapter's error
+	// shape (an *echo.HTTPError for HTTP mounts). Set once by the usecase
+	// layer, which owns the operations and their error contract; nil means
+	// every failure is a plain 400.
+	errMapper func(error) error
 }
 
 // NewRegistry returns an empty registry.
@@ -38,4 +47,21 @@ func (r *Registry) Specs() []Spec {
 		out = append(out, r.specs[n])
 	}
 	return out
+}
+
+// SetErrorMapper installs the operation layer's typed-error translation.
+// MountHTTP applies it to handler failures so a revision conflict, a missing
+// row, or an archived source reaches the client with its real status instead
+// of a blanket 400 — the same contract the legacy adapter's opError applies.
+func (r *Registry) SetErrorMapper(mapper func(error) error) {
+	r.errMapper = mapper
+}
+
+// MapError runs the installed mapper, defaulting to the identity. Adapters
+// call it on a handler error before framing the response.
+func (r *Registry) MapError(err error) error {
+	if r.errMapper == nil {
+		return err
+	}
+	return r.errMapper(err)
 }

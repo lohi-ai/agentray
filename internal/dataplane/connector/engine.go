@@ -55,7 +55,7 @@ type SyncJob struct {
 	CursorKey string
 }
 
-// LandedRow is one row ready for the ClickHouse landing table.
+// LandedRow is one row ready for the DuckDB landing table.
 type LandedRow struct {
 	Key      string
 	Cursor   string
@@ -131,8 +131,10 @@ type Engine struct {
 	heartbeatEvery time.Duration
 	// wg tracks spawned runs so shutdown (and tests) can wait for them.
 	wg sync.WaitGroup
-	// pending counts goroutines parked on sem — bounded by maxPendingRuns.
+	// pending counts admitted calls and goroutines parked on sem — bounded by
+	// maxPendingRuns. closed fences admission before shutdown waits on wg.
 	pending int
+	closed  bool
 	// heartbeatCallTimeout bounds ONE lease RPC; tests shrink it.
 	heartbeatCallTimeout time.Duration
 	// leaseStaleAfter is the last-confirmed-lease deadline; tests shrink it.
@@ -178,6 +180,17 @@ func NewEngine(store Store) *Engine {
 // the tick. Failures are recorded on the sync row; the per-sync claim keeps a
 // still-running sync from being started again by a later tick.
 func (e *Engine) Tick(ctx context.Context, now time.Time) {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return
+	}
+	// Track the whole callback, not only the runs it dispatches: Shutdown may
+	// race the scheduler after Stop unsubscribes an already-running tick.
+	e.wg.Add(1)
+	e.mu.Unlock()
+	defer e.wg.Done()
+
 	// Periodic recovery: a run orphaned by a process that died and restarted
 	// inside the stale window keeps a fresh-looking heartbeat at startup —
 	// only a later pass fences it once the lease actually expires.
@@ -201,8 +214,21 @@ func (e *Engine) Tick(ctx context.Context, now time.Time) {
 	}
 }
 
-// Wait blocks until every tick-spawned run has finished.
+// Wait blocks until every admitted run has finished. Callers that can race new
+// enqueues must use Shutdown so the wait-group cannot be incremented after Wait.
 func (e *Engine) Wait() { e.wg.Wait() }
+
+// Shutdown rejects new runs, cancels the currently active runs, and waits for
+// every admitted run to finish before its backing stores are closed.
+func (e *Engine) Shutdown() {
+	e.mu.Lock()
+	e.closed = true
+	for _, cancel := range e.cancels {
+		cancel()
+	}
+	e.mu.Unlock()
+	e.wg.Wait()
+}
 
 // EnqueueRun records a queued run and dispatches a worker. The store decides
 // whether this call created the run (enqueued) or observed an existing one —
@@ -213,17 +239,21 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 	// never be recorded — an orphaned queued row would be fenced stale and a
 	// same-key retry would replay the failure instead of running.
 	e.mu.Lock()
-	if e.pending >= maxPendingRuns {
+	if e.closed || e.pending >= maxPendingRuns {
 		e.mu.Unlock()
 		return Run{}, false, ErrEngineBusy
 	}
 	e.pending++
+	// Add while holding the admission lock so Shutdown cannot begin waiting
+	// between accepting this call and registering it with the wait group.
+	e.wg.Add(1)
 	e.mu.Unlock()
 	run, enqueued, err = e.store.EnqueueConnectorRun(ctx, projectID, syncID, idemKey)
 	if err != nil {
 		e.mu.Lock()
 		e.pending--
 		e.mu.Unlock()
+		e.wg.Done()
 		return run, enqueued, err
 	}
 	if !enqueued {
@@ -231,9 +261,9 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 		e.mu.Lock()
 		e.pending--
 		e.mu.Unlock()
+		e.wg.Done()
 		return run, enqueued, err
 	}
-	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		defer func() {
@@ -259,7 +289,7 @@ func (e *Engine) CancelRun(runID string) {
 }
 
 // executeRun claims and runs one queued run end to end: open the source, pull
-// incremental batches, land them in ClickHouse, persist cursor + status on
+// incremental batches, land them in DuckDB, persist cursor + status on
 // both the run row and the sync's last_* columns. The whole run is bounded by
 // syncRunTimeout; the finish write rides an independent bounded context so a
 // timed-out run still records its outcome.

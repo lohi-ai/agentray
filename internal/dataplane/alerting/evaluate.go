@@ -264,16 +264,16 @@ func toFloat(v any) (float64, bool) {
 // `FROM events` exactly once (RunSQL scopes it to the rule's project).
 var opsMetricSQL = map[string]string{
 	// Per-hour event volume over the last 24h — for volume drops (lt) or spikes (z_score).
-	"event_volume_hourly": `SELECT toStartOfHour(timestamp) AS bucket, count() AS value
-FROM events WHERE timestamp > now() - INTERVAL 24 HOUR GROUP BY bucket ORDER BY bucket`,
+	"event_volume_hourly": `SELECT date_trunc('hour', "timestamp") AS bucket, count(*) AS value
+FROM events WHERE "timestamp" > now() - INTERVAL '24 hours' GROUP BY bucket ORDER BY bucket`,
 	// Per-hour error rate (%) over the last 24h.
-	"error_rate_hourly": `SELECT toStartOfHour(timestamp) AS bucket,
-100 * countIf(is_error = 1) / greatest(count(), 1) AS value
-FROM events WHERE timestamp > now() - INTERVAL 24 HOUR GROUP BY bucket ORDER BY bucket`,
+	"error_rate_hourly": `SELECT date_trunc('hour', "timestamp") AS bucket,
+100 * count(*) FILTER (WHERE is_error) / greatest(count(*), 1) AS value
+FROM events WHERE "timestamp" > now() - INTERVAL '24 hours' GROUP BY bucket ORDER BY bucket`,
 	// Minutes since the last event — an ingestion-gap watchdog (gt to alert on silence).
-	"minutes_since_last_event": `SELECT dateDiff('minute', max(timestamp), now()) AS value FROM events`,
+	"minutes_since_last_event": `SELECT date_diff('minute', max("timestamp"), now()) AS value FROM events`,
 	// Per-hour p95 latency (ms) over the last 24h.
-	"latency_p95_hourly": `SELECT toStartOfHour(timestamp) AS bucket,
-quantile(0.95)(latency_ms) AS value
-FROM events WHERE timestamp > now() - INTERVAL 24 HOUR AND latency_ms IS NOT NULL GROUP BY bucket ORDER BY bucket`,
+	"latency_p95_hourly": `SELECT date_trunc('hour', "timestamp") AS bucket,
+quantile(latency_ms, 0.95) AS value
+FROM events WHERE "timestamp" > now() - INTERVAL '24 hours' AND latency_ms IS NOT NULL GROUP BY bucket ORDER BY bucket`,
 }

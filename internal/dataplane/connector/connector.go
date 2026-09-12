@@ -1,7 +1,7 @@
 // Package connector is the generic external-data-source plugin framework: a
 // Source knows how to test a connection, discover its schema, and pull rows
 // incrementally; the Engine schedules configured syncs and lands the pulled
-// rows in ClickHouse through the storage layer. Platform code, not agent code
+// rows in DuckDB through the storage layer. Platform code, not agent code
 // — agents only ever see the landed rows through run_sql, never a Source.
 package connector
 

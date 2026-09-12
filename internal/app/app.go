@@ -24,12 +24,13 @@ import (
 )
 
 type Server struct {
-	echo      *echo.Echo
-	db        *storage.Store
-	redis     *redis.Client
-	nats      *nats.Conn
-	worker    *ingestion.EventWorker
-	scheduler *agentruntime.Scheduler
+	echo            *echo.Echo
+	db              *storage.Store
+	redis           *redis.Client
+	nats            *nats.Conn
+	worker          *ingestion.EventWorker
+	scheduler       *agentruntime.Scheduler
+	connectorEngine *connector.Engine
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -57,8 +58,8 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	// Durable event pipeline (default): a file-backed JetStream stream makes an
-	// HTTP 200 mean "durably queued" and the worker acks only after the ClickHouse
-	// insert lands, so a crash / restart / ClickHouse outage redelivers instead of
+	// HTTP 200 mean "durably queued" and the worker acks only after the DuckDB
+	// insert lands, so a crash / restart / DuckDB outage redelivers instead of
 	// dropping events. INGEST_JETSTREAM=false falls back to fire-and-forget core
 	// NATS for a broker without JetStream (dev/tests).
 	var (
@@ -269,7 +270,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -417,13 +418,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.scheduler != nil {
 		s.scheduler.Stop()
 	}
+	// Connector runs outlive the request that enqueued them. Fence new work and
+	// drain every accepted run before closing DuckDB or Postgres underneath its
+	// landing and terminal-status writes.
+	if s.connectorEngine != nil {
+		s.connectorEngine.Shutdown()
+	}
+	// Drain the consumer first: Stop() blocks until the batcher's final flush
+	// commits, so every acked batch is durable in DuckDB before the engine
+	// checkpoints and closes.
 	_ = s.worker.Stop()
+	if s.db != nil {
+		s.db.CloseDuckDB()
+	}
 	if s.nats != nil {
 		s.nats.Close()
 	}
 	if s.redis != nil {
 		_ = s.redis.Close()
 	}
-	s.db.Close()
+	// Postgres (control plane) closes last, after the analytics engine.
+	if s.db != nil {
+		s.db.Close()
+	}
 	return err
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,8 +17,8 @@ import (
 )
 
 // Integration tests for principalFromRequest — the credential boundary every
-// op adapter shares. Needs the compose Postgres + ClickHouse; skips without
-// them (same convention as the store suite).
+// op adapter shares. Needs the compose Postgres; DuckDB is a temp file per
+// test. Skips without Postgres (same convention as the store suite).
 
 func openAppTestStore(t *testing.T) *storage.Store {
 	t.Helper()
@@ -25,18 +26,11 @@ func openAppTestStore(t *testing.T) *storage.Store {
 	if pgURL == "" {
 		pgURL = "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"
 	}
-	chAddr := os.Getenv("AGENTRAY_TEST_CLICKHOUSE_ADDR")
-	if chAddr == "" {
-		chAddr = "localhost:19000"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, config.Config{
 		PostgresURL:          pgURL,
-		ClickHouseAddr:       chAddr,
-		ClickHouseDatabase:   "lohi_analytics",
-		ClickHouseUser:       "lohi",
-		ClickHousePassword:   "lohi",
+		DuckDBPath:           filepath.Join(t.TempDir(), "test.duckdb"),
 		DefaultProjectName:   "principal-test",
 		DefaultProjectAPIKey: "principal_test_default_" + fmt.Sprint(time.Now().UnixNano()),
 	})

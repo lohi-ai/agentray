@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -68,43 +67,3 @@ func TestClassifyPlatform(t *testing.T) {
 	}
 }
 
-// TestPlatformFromUserAgentSQLMirrorsGo is the guard on the backfill. The Go
-// ladder decides new events and the SQL decides old ones; if they ever disagree
-// the platform split is silently wrong across the boundary of a deploy, and
-// nothing in the product would show it. So: every marker the Go tables carry has
-// to appear in the SQL, in the same branch order, and the branches have to be the
-// ones the ladder walks.
-func TestPlatformFromUserAgentSQLMirrorsGo(t *testing.T) {
-	sql := platformFromUserAgentSQL("user_agent")
-
-	for _, group := range [][]string{nativeAppleUAs, nativeAndroidUAs, bareRuntimeUAs, serverUAs} {
-		for _, marker := range group {
-			if !strings.Contains(sql, "'"+chIdentLiteral(marker)+"'") {
-				t.Errorf("marker %q is in the Go tables but not in the backfill SQL", marker)
-			}
-		}
-	}
-
-	// Branch order is the whole correctness argument: Safari-on-iPhone must hit
-	// the browser branch, and a CFNetwork app must be claimed before it. Match the
-	// predicate spellings, not the bare markers — 'android' is also a *result*
-	// value two branches earlier, on the okhttp arm.
-	order := []string{", 'cfnetwork')", ", 'okhttp')", ", 'mozilla')", ", 'android')", "IN ('node'", ", 'curl/')"}
-	at := -1
-	for _, needle := range order {
-		next := strings.Index(sql, needle)
-		if next < 0 {
-			t.Fatalf("backfill SQL is missing %s entirely:\n%s", needle, sql)
-		}
-		if next <= at {
-			t.Fatalf("backfill SQL puts %s out of ladder order:\n%s", needle, sql)
-		}
-		at = next
-	}
-
-	// A NULL user_agent must not blow up the mutation — every pre-column row that
-	// never carried one has NULL there.
-	if !strings.Contains(sql, "ifNull(user_agent, '')") {
-		t.Errorf("backfill SQL does not guard a NULL user_agent:\n%s", sql)
-	}
-}

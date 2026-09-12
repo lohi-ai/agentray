@@ -250,20 +250,16 @@ func TestAgentDelegationE2E(t *testing.T) {
 		infraHost = "127.0.0.1"
 	}
 	pgPort := freePort(t)
-	chHTTPPort := freePort(t)
-	chNativePort := freePort(t)
 	redisPort := freePort(t)
 	natsPort := freePort(t)
 
 	env := append(os.Environ(),
 		fmt.Sprintf("AGENTRAY_POSTGRES_PORT=%d", pgPort),
-		fmt.Sprintf("AGENTRAY_CLICKHOUSE_HTTP_PORT=%d", chHTTPPort),
-		fmt.Sprintf("AGENTRAY_CLICKHOUSE_NATIVE_PORT=%d", chNativePort),
 		fmt.Sprintf("AGENTRAY_REDIS_PORT=%d", redisPort),
 		fmt.Sprintf("AGENTRAY_NATS_PORT=%d", natsPort),
 	)
 
-	composeUp := exec.Command("docker", "compose", "-p", project, "-f", filepath.Join(root, "docker-compose.yml"), "up", "-d", "postgres", "clickhouse", "redis", "nats")
+	composeUp := exec.Command("docker", "compose", "-p", project, "-f", filepath.Join(root, "docker-compose.yml"), "up", "-d", "postgres", "redis", "nats")
 	composeUp.Dir = root
 	composeUp.Env = env
 	if output, err := composeUp.CombinedOutput(); err != nil {
@@ -283,14 +279,10 @@ func TestAgentDelegationE2E(t *testing.T) {
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, pgPort))
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, redisPort))
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, natsPort))
-	waitForHTTP(t, ctx, fmt.Sprintf("http://%s:%d/ping", infraHost, chHTTPPort))
 
 	cfg := config.Config{
 		PostgresURL:          fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort),
-		ClickHouseAddr:       fmt.Sprintf("%s:%d", infraHost, chNativePort),
-		ClickHouseDatabase:   "lohi_analytics",
-		ClickHouseUser:       "lohi",
-		ClickHousePassword:   "lohi",
+		DuckDBPath:           filepath.Join(t.TempDir(), "delegation-e2e.duckdb"),
 		RedisURL:             fmt.Sprintf("redis://%s:%d/0", infraHost, redisPort),
 		NATSURL:              fmt.Sprintf("nats://%s:%d", infraHost, natsPort),
 		IngestSubject:        "agentray.delegation-e2e.events.ingest",

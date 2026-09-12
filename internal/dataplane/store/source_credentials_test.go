@@ -93,3 +93,44 @@ func TestSourceCredentialLifecycle(t *testing.T) {
 		t.Fatalf("missing connector err = %v, want ErrNoRows", err)
 	}
 }
+
+// The web's DSN entry is a single idempotent transaction: invalid input creates
+// neither row, and retrying the same key after a lost response replays exactly
+// one connector/credential pair instead of accumulating orphan credentials.
+func TestCreateSourceConnectorIdempotent(t *testing.T) {
+	s := openConvTestStore(t)
+	t.Setenv("AGENT_KEY_ENC_SECRET", "atomic-source-connector-test-secret")
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+
+	if _, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "bad", "unknown", "postgres://u:p@h/db", "bad-key"); err == nil {
+		t.Fatal("unknown kind accepted")
+	}
+	creds, err := s.ListSourceCredentials(ctx, userID, projectID)
+	if err != nil || len(creds) != 0 {
+		t.Fatalf("invalid request left credential(s): %+v %v", creds, err)
+	}
+
+	first, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "warehouse", "postgres", "postgres://u:p@h/db", "retry-key")
+	if err != nil {
+		t.Fatalf("create atomic pair: %v", err)
+	}
+	replay, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "warehouse", "postgres", "postgres://u:p@h/db", "retry-key")
+	if err != nil || replay.ID != first.ID {
+		t.Fatalf("ambiguous-response replay = %+v %v", replay, err)
+	}
+	creds, err = s.ListSourceCredentials(ctx, userID, projectID)
+	if err != nil || len(creds) != 1 {
+		t.Fatalf("replay created orphan credential(s): %+v %v", creds, err)
+	}
+	connectors, err := s.ListDataConnectorsForProject(ctx, projectID)
+	if err != nil || len(connectors) != 1 || connectors[0].ID != first.ID {
+		t.Fatalf("replay created connector(s): %+v %v", connectors, err)
+	}
+	if _, dsn, err := s.ConnectorDSNForProject(ctx, projectID, first.ID); err != nil || dsn != "postgres://u:p@h/db" {
+		t.Fatalf("atomic connector DSN = %q %v", dsn, err)
+	}
+	if _, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "warehouse", "postgres", "postgres://changed@h/db", "retry-key"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("key reused for changed DSN = %v, want idempotency conflict", err)
+	}
+}
