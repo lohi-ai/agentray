@@ -96,7 +96,6 @@ type sqlSandboxPool struct {
 
 type sandboxOpen struct {
 	done chan struct{}
-	sb   *sqlSandbox
 	err  error
 }
 
@@ -133,9 +132,8 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	if err != nil {
 		return nil, err
 	}
-	// The lease keeps this sandbox alive until the query finishes; eviction
-	// can only claim a sandbox with refs == 0.
-	sb.lease()
+	// sandboxFor returns the sandbox already leased, so eviction cannot close it
+	// between lookup and this query starting.
 	defer sb.release()
 
 	rctx, rcancel := context.WithTimeout(ctx, sandboxRefreshTimeout)
@@ -160,38 +158,48 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 // project and happens outside the pool lock so a cold open (schema + copy)
 // never blocks other projects.
 func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sqlSandbox, error) {
-	p.mu.Lock()
-	if sb, ok := p.sandboxes[projectID]; ok {
-		p.touch(projectID)
-		p.mu.Unlock()
-		return sb, nil
-	}
-	if op, ok := p.opening[projectID]; ok {
-		p.mu.Unlock()
-		select {
-		case <-op.done:
-			return op.sb, op.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	for {
+		p.mu.Lock()
+		if sb, ok := p.sandboxes[projectID]; ok {
+			sb.lease()
+			p.touch(projectID)
+			p.mu.Unlock()
+			return sb, nil
 		}
-	}
-	op := &sandboxOpen{done: make(chan struct{})}
-	p.opening[projectID] = op
-	p.mu.Unlock()
+		if op, ok := p.opening[projectID]; ok {
+			p.mu.Unlock()
+			select {
+			case <-op.done:
+				if op.err != nil {
+					return nil, op.err
+				}
+				// Re-enter through the pool lock: the opener's lease may have
+				// ended and allowed eviction before this waiter woke.
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		op := &sandboxOpen{done: make(chan struct{})}
+		p.opening[projectID] = op
+		p.mu.Unlock()
 
-	sb, err := openSQLSandbox(ctx, p.main, projectID)
+		sb, err := openSQLSandbox(ctx, p.main, projectID)
 
-	p.mu.Lock()
-	delete(p.opening, projectID)
-	if err == nil {
-		p.sandboxes[projectID] = sb
-		p.lru = append([]string{projectID}, p.lru...)
-		p.evictLocked()
+		p.mu.Lock()
+		delete(p.opening, projectID)
+		if err == nil {
+			sb.pool = p
+			sb.lease()
+			p.sandboxes[projectID] = sb
+			p.lru = append([]string{projectID}, p.lru...)
+			p.evictLocked()
+		}
+		op.err = err
+		close(op.done)
+		p.mu.Unlock()
+		return sb, err
 	}
-	op.sb, op.err = sb, err
-	close(op.done)
-	p.mu.Unlock()
-	return sb, err
 }
 
 // evictLocked closes LRU sandboxes past the cap. A sandbox with an active
@@ -249,6 +257,7 @@ func (p *sqlSandboxPool) touch(projectID string) {
 type sqlSandbox struct {
 	projectID string
 	main      *DuckDB
+	pool      *sqlSandboxPool
 	db        *sql.DB
 	// feeder is the connection refresh writes through; runner is the
 	// connection every untrusted query executes on. Both live on the same
@@ -265,8 +274,19 @@ type sqlSandbox struct {
 	closed bool
 }
 
-func (sb *sqlSandbox) lease()   { sb.refs.Add(1) }
-func (sb *sqlSandbox) release() { sb.refs.Add(-1) }
+func (sb *sqlSandbox) lease() { sb.refs.Add(1) }
+
+func (sb *sqlSandbox) release() {
+	if sb.refs.Add(-1) != 0 || sb.pool == nil {
+		return
+	}
+	// evictLocked may have deferred enforcement while every sandbox was
+	// leased. Re-check as soon as one becomes idle so the pool returns to its
+	// configured bound without waiting for another cold project.
+	sb.pool.mu.Lock()
+	sb.pool.evictLocked()
+	sb.pool.mu.Unlock()
+}
 
 // openSQLSandbox creates the in-memory instance, builds the project-scoped
 // tables and views, and locks the whole instance down before any data lands.
