@@ -23,7 +23,7 @@ The backend is four layers — **channels → workloads → runtime → dataplan
 mapped in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). `agentcore/` and
 `sandbox/` stay at the module root as the public runtime libraries.
 
-The foundation architecture (detailed in `docs/PostHog-clone.md`):
+The foundation architecture (detailed in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
 
 - Go ingestion API built with Echo
 - DuckDB raw event storage plus a session view
@@ -103,7 +103,7 @@ Supported compatibility aliases:
 Both `api_key` and `token` are accepted for project authentication.
 
 Ingestion requests follow the foundation architecture from
-`docs/PostHog-clone.md`:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
 
 ```text
 HTTP API -> Redis rate limit -> NATS queue -> DuckDB storage
