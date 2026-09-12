@@ -91,10 +91,3 @@ export const EXPERIMENT_PILL: Record<string, string> = {
   failed: 'attention',
   abandoned: 'paused',
 };
-
-// newIdempotencyKey mints the retry-safe write key the plans ops require.
-export function newIdempotencyKey(): string {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}

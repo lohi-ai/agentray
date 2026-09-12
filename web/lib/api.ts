@@ -721,6 +721,14 @@ export class APIError extends Error {
   }
 }
 
+// newIdempotencyKey works in secure browser contexts and in self-hosted HTTP
+// deployments where crypto.randomUUID is not exposed.
+export function newIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 // ConnectorRun is the durable sync-run receipt the run_source / source_status /
 // cancel_source_run operations return: queued → running → terminal, with a
 // cancel flag the worker polls.
@@ -2047,7 +2055,7 @@ export class AgentRayAPI {
       name: input.name,
       kind: input.kind,
       credential_id: cred.credential.id,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: newIdempotencyKey(),
     });
     return { connector };
   }
@@ -2125,7 +2133,7 @@ export class AgentRayAPI {
   runConnectorSync(syncID: string) {
     return this.callOp<{ run: ConnectorRun; enqueued: boolean }>('run_source', {
       sync_id: syncID,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: newIdempotencyKey(),
     });
   }
 
@@ -2142,7 +2150,7 @@ export class AgentRayAPI {
       sync_id: sync.id,
       paused: !enabled,
       revision: sync.revision,
-      idempotency_key: crypto.randomUUID(),
+      idempotency_key: newIdempotencyKey(),
     });
   }
 

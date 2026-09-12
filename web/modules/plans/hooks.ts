@@ -1,9 +1,8 @@
 'use client';
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI } from '@/lib/api';
+import { AgentRayAPI, newIdempotencyKey } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
-import { newIdempotencyKey } from './lib/plans';
 
 // hooks.ts — /plans reads findings through the list_findings op (keyset pages,
 // so the full history is resumable) and experiments through the existing

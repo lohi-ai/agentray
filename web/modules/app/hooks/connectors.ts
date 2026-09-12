@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
+import { AgentRayAPI, APIError, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 // useConnectors drives the Data connectors settings tab: the project's
@@ -100,7 +100,10 @@ export function useConnectorSyncs(connectorID: string | null) {
     mutationFn: ({ sync, enabled }: { sync: ConnectorSync; enabled: boolean }) =>
       new AgentRayAPI(projectID!).setConnectorSyncEnabled(sync, enabled),
     onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to update sync'),
+    onError: (e) => {
+      if (e instanceof APIError && e.code === 'conflict') void invalidate();
+      setError(e instanceof Error ? e.message : 'Unable to update sync');
+    },
   });
 
   return {
