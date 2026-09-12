@@ -173,6 +173,13 @@ func TestOverviewLive(t *testing.T) {
 		t.Fatalf("overview: %v", err)
 	}
 
+	if res.DataStatus.SchemaStatus != "unavailable" {
+		t.Fatalf("schema status = %q, want unavailable", res.DataStatus.SchemaStatus)
+	}
+	if res.DataStatus.Sources == nil || len(res.DataStatus.Sources) != 0 || res.DataStatus.SourcesTruncated {
+		t.Fatalf("empty project sources = %#v, truncated=%t", res.DataStatus.Sources, res.DataStatus.SourcesTruncated)
+	}
+
 	// Active users in Sep 5–11: alice, bob, carol, dave, erin, frank = 6 people
 	// (frank's two raw ids fold to one). The verification event, the crawler,
 	// and the agent event must not count.

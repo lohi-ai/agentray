@@ -180,14 +180,20 @@ describe('firstValuePath', () => {
     expect(shouldShowFirstEventGuide({ eventNames: [], catalogReady: true })).toBe(true);
   });
 
-  it('hides the first-event card once any event name is in the catalog', () => {
+  it('hides the first-event card after a qualifying catalog event', () => {
     const path = firstValuePath({ eventNames: ['signup'], catalogReady: true });
     expect(path.showFirstEvent).toBe(false);
     expect(shouldShowFirstEventGuide({ eventNames: ['signup'], catalogReady: true })).toBe(false);
     expect(shouldShowFirstEventGuide({
-      eventNames: [{ name: 'signup' }],
+      eventNames: [{ event_name: 'signup' }],
       catalogReady: true,
     })).toBe(false);
+  });
+
+  it('keeps setup visible for the verification receipt but not the first-ask prompt', () => {
+    const path = firstValuePath({ eventNames: [{ event_name: 'onboarding_verified' }], catalogReady: true });
+    expect(path).toEqual({ showFirstEvent: true, showFirstAsk: false });
+    expect(shouldShowFirstEventGuide({ eventNames: ['onboarding_verified'], catalogReady: true })).toBe(true);
   });
 
   it('stays off while the catalog has not loaded', () => {

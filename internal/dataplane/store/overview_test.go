@@ -69,6 +69,33 @@ func TestOverviewDataState(t *testing.T) {
 	}
 }
 
+func TestOverviewSourceState(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name                string
+		configured, enabled bool
+		lastStatus          string
+		lastRows            int
+		want                string
+	}{
+		{name: "connector without table", want: "not_configured"},
+		{name: "paused sync", configured: true, want: "paused"},
+		{name: "never run", configured: true, enabled: true, want: "not_ready"},
+		{name: "successful run", configured: true, enabled: true, lastStatus: "ok", want: "healthy"},
+		{name: "failed run", configured: true, enabled: true, lastStatus: "error", want: "error"},
+		{name: "partial failed run", configured: true, enabled: true, lastStatus: "error", lastRows: 3, want: "partial"},
+	}
+	for _, tc := range cases {
+		var lastRunAt *time.Time
+		if tc.configured && tc.enabled && tc.name != "never run" {
+			lastRunAt = &now
+		}
+		if got := overviewSourceState(tc.configured, tc.enabled, lastRunAt, tc.lastStatus, tc.lastRows); got != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestOverviewMetricStateKeysOffQualifying(t *testing.T) {
 	// The receipt-only case: events arrived but none qualify — metrics must
 	// report no_data so the UI shows "integrated, no qualifying activity",

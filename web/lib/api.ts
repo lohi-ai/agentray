@@ -166,6 +166,36 @@ export type OverviewMetric = {
   notes?: string[];
 };
 
+export type VerifySDKResult = {
+  found: boolean;
+  event_name?: string;
+  received_at?: string;
+  platform?: string;
+  identity_linked: boolean;
+  searched: number;
+  warnings: string[];
+};
+
+export type OverviewSourceStatus = {
+  connector_id: string;
+  connector_name: string;
+  connector_kind: string;
+  sync_id?: string;
+  source_table?: string;
+  sync_configured: boolean;
+  enabled: boolean;
+  state: 'not_configured' | 'paused' | 'not_ready' | 'healthy' | 'partial' | 'error';
+  cursor?: string;
+  cursor_key?: string;
+  last_run_at?: string;
+  last_success_at?: string;
+  last_status?: string;
+  last_error?: string;
+  last_rows: number;
+  total_rows: number;
+  schema_status: 'unavailable';
+};
+
 export type OverviewResult = {
   context: {
     project_id: string;
@@ -199,11 +229,14 @@ export type OverviewResult = {
     last_event_at?: string;
     last_received_at?: string;
     age_seconds?: number;
-    pipeline_lag: string;
+    pipeline_lag: 'unavailable';
+    schema_status: 'unavailable';
     events_in_range: number;
     qualifying_in_range: number;
     ever_received: boolean;
     state: 'fresh' | 'quiet' | 'no_events';
+    sources: OverviewSourceStatus[];
+    sources_truncated: boolean;
   };
 };
 
@@ -2026,6 +2059,10 @@ export class AgentRayAPI {
 
   datasetPreview(syncID: string, limit = 25) {
     return this.callOp<DatasetPreview>('dataset_preview', { sync_id: syncID, limit });
+  }
+
+  verifySDK(eventName = 'onboarding_verified') {
+    return this.callOp<VerifySDKResult>('verify_sdk', { event_name: eventName });
   }
 
   // recordOutcome appends one measured observation to a committed or decided
