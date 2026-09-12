@@ -584,8 +584,8 @@ export type WeakestLink = {
   // toCount / fromCount. This is a ratio of two independently-measured people
   // counts, NOT a measured passage rate: the catalog cannot tell us whether the
   // `to` people are the same people as the `from` people, or whether they did
-  // the steps in that order. Only the funnel query (windowFunnel, server-side)
-  // establishes passage. Word it as a gap, never as "conversion".
+  // the steps in that order. Only the funnel query (ordered earliest-match,
+  // server-side) establishes passage. Word it as a gap, never as "conversion".
   rate: number;
   missing: boolean;
   // How many funnel stages sit untracked between the two we matched. Anything

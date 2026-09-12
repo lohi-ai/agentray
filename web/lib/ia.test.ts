@@ -318,7 +318,7 @@ describe('weakestLink', () => {
 
   // The catalog gives two independent people counts. It cannot establish that
   // the `to` people are a subset of the `from` people — only the server-side
-  // windowFunnel can. So the number is a gap, and a gap can never exceed 100%.
+  // ordered funnel can. So the number is a gap, and a gap can never exceed 100%.
   it('never reports passage above 100%', () => {
     const link = weakestLink([
       { event_name: 'signup', count: 2, users: 2 },
