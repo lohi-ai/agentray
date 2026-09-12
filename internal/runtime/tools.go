@@ -27,7 +27,6 @@ type DataSource interface {
 
 	// Insight + authoring (P1, analyze_build).
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
-	ListDashboards(ctx context.Context, projectID string) ([]storage.Dashboard, error)
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 
@@ -47,6 +46,30 @@ type DataSource interface {
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
 
+	// Lifecycle (slice 2): revision-checked dashboard writes, soft archive,
+	// atomic idempotent writes (claim+mutation+receipt in one tx), identity
+	// linkage, and the bounded event read verify_sdk uses.
+	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
+	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64) (storage.Dashboard, error)
+	ArchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (storage.Dashboard, error)
+	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	UnarchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
+	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
+
+	// Source lifecycle (slice 2): project-scoped connector probes and the
+	// persistent run contract.
+	ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error)
+	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
+	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (storage.ConnectorSync, error)
+	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
+	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
+	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 	// Product overview (monitor). Mirrors usecase.Repo — the shared `overview`
 	// operation needs it on every adapter, including the in-process tool set.
 	Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error)
@@ -56,22 +79,34 @@ type DataSource interface {
 // They must equal the opcore operation names registered in usecase.Registry so
 // the scope -> tool allow-list (policy.go) lines up with the registry.
 const (
-	ToolActivitySummary  = "activity_summary"
-	ToolRecentEvents     = "recent_events"
-	ToolPersons          = "persons"
-	ToolExploreEvents    = "explore_events"
-	ToolRunSQL           = "run_sql"
-	ToolRunInsight       = "run_insight"
-	ToolRunFunnel        = "run_funnel"
-	ToolRunRetention     = "run_retention"
-	ToolListDashboards   = "list_dashboards"
-	ToolCreateDashboard  = "create_dashboard"
-	ToolCreateChart      = "create_chart"
-	ToolSubmitRec        = "submit_recommendation"
-	ToolProposeTest      = "propose_test"
-	ToolTestStatus       = "test_status"
-	ToolListTests        = "list_tests"
-	ToolRemember         = "remember"
-	ToolSendNotification = "send_notification"
-	ToolOverview         = "overview"
+	ToolActivitySummary    = "activity_summary"
+	ToolRecentEvents       = "recent_events"
+	ToolPersons            = "persons"
+	ToolExploreEvents      = "explore_events"
+	ToolRunSQL             = "run_sql"
+	ToolRunInsight         = "run_insight"
+	ToolRunFunnel          = "run_funnel"
+	ToolRunRetention       = "run_retention"
+	ToolListDashboards     = "list_dashboards"
+	ToolCreateDashboard    = "create_dashboard"
+	ToolCreateChart        = "create_chart"
+	ToolSubmitRec          = "submit_recommendation"
+	ToolProposeTest        = "propose_test"
+	ToolTestStatus         = "test_status"
+	ToolListTests          = "list_tests"
+	ToolRemember           = "remember"
+	ToolSendNotification   = "send_notification"
+	ToolOverview           = "overview"
+	ToolVerifySDK          = "verify_sdk"
+	ToolUpdateDashboard    = "update_dashboard"
+	ToolArchiveDashboard   = "archive_dashboard"
+	ToolUnarchiveDashboard = "unarchive_dashboard"
+	ToolTestSource         = "test_source"
+	ToolPreviewSource      = "preview_source"
+	ToolPauseSource        = "pause_source"
+	ToolRunSource          = "run_source"
+	ToolSourceStatus       = "source_status"
+	ToolCancelSourceRun    = "cancel_source_run"
+	ToolCreateSource       = "create_source"
+	ToolUpdateSource       = "update_source"
 )

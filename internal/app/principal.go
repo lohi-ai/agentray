@@ -208,4 +208,50 @@ func registerCredentialRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		return c.JSON(http.StatusOK, map[string]any{"split": true})
 	})
+
+	// --- source credentials: session-only, write-only secrets. ---
+	// The DSN is stored encrypted and never returned — not on create, not on
+	// list. Operations and agents reference the credential by ID only.
+	e.GET("/api/projects/:project_id/source-credentials", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		creds, err := store.ListSourceCredentials(c.Request().Context(), ctx.User.ID, c.Param("project_id"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, "project not available")
+		}
+		return c.JSON(http.StatusOK, map[string]any{"credentials": creds})
+	})
+
+	e.POST("/api/projects/:project_id/source-credentials", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			Name string `json:"name"`
+			DSN  string `json:"dsn"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		cred, err := store.CreateSourceCredential(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name, payload.DSN)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		// Metadata only — the secret is stored, never echoed back.
+		return c.JSON(http.StatusCreated, map[string]any{"credential": cred})
+	})
+
+	e.DELETE("/api/projects/:project_id/source-credentials/:credential_id", func(c echo.Context) error {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return err
+		}
+		if err := store.RevokeSourceCredential(c.Request().Context(), ctx.User.ID, c.Param("project_id"), c.Param("credential_id")); err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
 }

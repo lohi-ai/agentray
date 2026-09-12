@@ -29,7 +29,7 @@ type Repo interface {
 	ExploreEvents(ctx context.Context, projectID string, filter storage.EventFilter) (storage.EventExplorer, error)
 	RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error)
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
-	ListDashboards(ctx context.Context, projectID string) ([]storage.Dashboard, error)
+	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
@@ -44,6 +44,29 @@ type Repo interface {
 	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
+	// Lifecycle operations (slice 2): revision-checked dashboard writes, soft
+	// archive, atomic idempotent writes (claim+mutation+receipt in one tx),
+	// identity linkage, and the bounded event read verify_sdk uses.
+	UpdateDashboardRevision(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64) (storage.Dashboard, error)
+	ArchiveDashboard(ctx context.Context, projectID, dashboardID string, expectedRevision int64) (storage.Dashboard, error)
+	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	UnarchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
+	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
+
+	// Source lifecycle (slice 2): project-scoped connector probes and the
+	// persistent run contract.
+	ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error)
+	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
+	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)
+	SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (storage.ConnectorSync, error)
+	ConnectorRunForProject(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	LatestConnectorRun(ctx context.Context, projectID, syncID string) (storage.ConnectorRun, error)
+	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
+	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
+	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 	// Overview is the deterministic product-overview read behind the shared
 	// `overview` operation (REST /api/op/overview, MCP, and GET /api/overview).
 	// now is injectable so tests can pin the complete-day boundary.
@@ -67,6 +90,10 @@ type Deps struct {
 	Repo     Repo
 	Memory   agentcore.MemoryStore
 	Notifier Notifier
+	// Runner is the connector engine's enqueue/cancel surface for
+	// run_source/cancel_source_run. Nil in processes without an engine —
+	// those operations report unavailable rather than silently queueing.
+	Runner SourceRunner
 }
 
 // depsFrom recovers the typed Deps from an opcore.CallContext, failing loudly if

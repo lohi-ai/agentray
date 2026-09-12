@@ -37,7 +37,17 @@ import (
 func main() {
 	cfg := loadConfig()
 	base := flag.String("url", firstNonEmpty(os.Getenv("AGENTRAY_URL"), cfg.URL, "http://localhost:8088"), "AgentRay API base URL")
-	key := flag.String("key", firstNonEmpty(os.Getenv("AGENTRAY_API_KEY"), cfg.APIKey), "project API key (X-API-Key)")
+	// Ops authenticate with the scoped management credential when one is
+	// stored (Bearer agm_); the capture key is the fallback for legacy
+	// servers and SDK-style calls.
+	// The stored management credential is only valid for the project it was
+	// minted under — a stale one from a previous selection must not silently
+	// authenticate ops against the wrong project.
+	mgmtKey := cfg.ManagementKey
+	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
+		mgmtKey = ""
+	}
+	key := flag.String("key", firstNonEmpty(os.Getenv("AGENTRAY_API_KEY"), mgmtKey, cfg.APIKey), "management credential or project API key")
 	flag.Parse()
 	args := flag.Args()
 

@@ -181,7 +181,17 @@ func (s *Store) RevokeProjectCredential(ctx context.Context, userID, projectID, 
 	if !canManage {
 		return errAgentForbidden
 	}
-	res, err := s.pg.Exec(ctx, `
+	// Lock the project row so a concurrent MarkProjectCredentialSplit cannot
+	// count this credential as live while this revoke commits underneath it.
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT id FROM projects WHERE id = $1 FOR UPDATE`, projectID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(ctx, `
 UPDATE project_credentials SET revoked_at = now()
 WHERE project_id = $1 AND id = $2 AND revoked_at IS NULL`, projectID, credentialID)
 	if err != nil {
@@ -189,6 +199,9 @@ WHERE project_id = $1 AND id = $2 AND revoked_at IS NULL`, projectID, credential
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("credential not found or already revoked")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "credential.revoked", "project", project.ID, project.Name,
 		fmt.Sprintf(`{"credential_id":%q}`, credentialID))
@@ -243,21 +256,36 @@ func (s *Store) MarkProjectCredentialSplit(ctx context.Context, userID, projectI
 	if !canManage {
 		return errAgentForbidden
 	}
+	// The live-credential check and the split flag must be atomic with
+	// revocation: lock the project row (which RevokeProjectCredential also
+	// takes) so a concurrent revoke of the last credential cannot slip
+	// between the count and the update and brick every management client.
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT id FROM projects WHERE id = $1 FOR UPDATE`, projectID); err != nil {
+		return err
+	}
 	var live int
-	if err := s.pg.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 SELECT count(*) FROM project_credentials WHERE project_id = $1 AND revoked_at IS NULL`, projectID).Scan(&live); err != nil {
 		return err
 	}
 	if live == 0 {
 		return fmt.Errorf("create a management credential before splitting: the project key becomes capture-only")
 	}
-	res, err := s.pg.Exec(ctx, `
+	res, err := tx.Exec(ctx, `
 UPDATE projects SET credential_split_at = now() WHERE id = $1 AND credential_split_at IS NULL`, projectID)
 	if err != nil {
 		return err
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("project is already split")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "project.credential_split", "project", project.ID, project.Name, "{}")
 	return nil

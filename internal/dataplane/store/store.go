@@ -140,12 +140,14 @@ type Project struct {
 }
 
 type Dashboard struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"project_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	ProjectID   string     `json:"project_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Revision    int64      `json:"revision"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type Chart struct {
@@ -1056,10 +1058,20 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateConnectorRuns(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateSourceCredentials(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateCredentials(ctx); err != nil {
 		return err
 	}
 
+	if err := s.migrateLifecycle(ctx); err != nil {
+		return err
+	}
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; migrateClickHouse
 	// also calls migrateAgent and is idempotent.
@@ -1562,6 +1574,19 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 	return p, nil
 }
 
+// ProjectByID resolves a project without a user check — internal auth paths
+// only (the credential IS the authorization). Callers needing membership use
+// ProjectByIDForUser.
+func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
+	var p Project
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.APIKey, &p.CreatedAt)
+	if err != nil {
+		return Project{}, err
+	}
+	return p, nil
+}
+
 func (s *Store) CreateProject(ctx context.Context, name string) (Project, error) {
 	if name == "" {
 		name = "Untitled project"
@@ -1589,8 +1614,10 @@ RETURNING id::text, coalesce(workspace_id::text, ''), name, api_key, created_at`
 }
 
 func (s *Store) ListDashboards(ctx context.Context, projectID string) ([]Dashboard, error) {
+	// Returns every dashboard including archived ones (archived_at marks them);
+	// the operation layer filters by caller intent via ListDashboardsFiltered.
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, description, created_at, updated_at
+SELECT `+dashboardColumns+`
 FROM dashboards
 WHERE project_id = $1
 ORDER BY created_at DESC`, projectID)
@@ -1602,7 +1629,7 @@ ORDER BY created_at DESC`, projectID)
 	dashboards := []Dashboard{}
 	for rows.Next() {
 		var d Dashboard
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(dashboardScanDest(&d)...); err != nil {
 			return nil, err
 		}
 		dashboards = append(dashboards, d)
@@ -1618,8 +1645,8 @@ func (s *Store) CreateDashboard(ctx context.Context, projectID string, name stri
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO dashboards (project_id, name, description)
 VALUES ($1, $2, $3)
-RETURNING id::text, project_id::text, name, description, created_at, updated_at`, projectID, name, description).
-		Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt)
+RETURNING `+dashboardColumns, projectID, name, description).
+		Scan(dashboardScanDest(&d)...)
 	return d, err
 }
 
@@ -1630,10 +1657,10 @@ func (s *Store) UpdateDashboard(ctx context.Context, projectID string, dashboard
 	var d Dashboard
 	err := s.pg.QueryRow(ctx, `
 UPDATE dashboards
-SET name = $3, description = $4, updated_at = now()
+SET name = $3, description = $4, revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
-RETURNING id::text, project_id::text, name, description, created_at, updated_at`, projectID, dashboardID, name, description).
-		Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt)
+RETURNING `+dashboardColumns, projectID, dashboardID, name, description).
+		Scan(dashboardScanDest(&d)...)
 	return d, err
 }
 
