@@ -13,6 +13,10 @@ import (
 // location supported by the server's embedded timezone database.
 var ErrInvalidProjectTimezone = errors.New("invalid project timezone")
 
+// ErrNoProjectFields means an update carried neither name nor timezone — a
+// client validation failure, not a permission denial.
+var ErrNoProjectFields = errors.New("update project: name or timezone is required")
+
 // normalizeProjectTimezone accepts the IANA location names that Go ships with,
 // including UTC, but rejects process-local and empty values. Empty is reserved
 // for existing nullable rows and resolves through overviewProjectTimezone.

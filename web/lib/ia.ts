@@ -494,7 +494,11 @@ function catalogEvents(names: FirstRunInput['eventNames']): CatalogEvent[] {
       if (typeof name === 'string' && name) out.push({ name, count, users });
     }
   }
-  return out;
+  // onboarding_verified is a verification receipt, not a product signal —
+  // every consumer (first-run gating, first-session notice, weakest-link,
+  // written opinion) reads through this one function, so the exclusion lives
+  // here and can never disagree between surfaces.
+  return out.filter((e) => e.name !== 'onboarding_verified');
 }
 
 function catalogLabels(names: FirstRunInput['eventNames']): string[] {

@@ -546,7 +546,7 @@ func (s *Store) UpdateProjectForUser(ctx context.Context, userID string, project
 		args = append(args, value)
 	}
 	if len(sets) == 0 {
-		return Project{}, fmt.Errorf("update project: name or timezone is required")
+		return Project{}, ErrNoProjectFields
 	}
 	var project Project
 	err := s.pg.QueryRow(ctx, `

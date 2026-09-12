@@ -132,8 +132,10 @@ export function OverviewPage() {
   const [period, setPeriod] = useState('7d');
   const [platform, setPlatform] = useState('');
 
-  const { names: eventNames, loading: catalogLoading } = useEventNames();
-  const catalogReady = !catalogLoading && !!projectID;
+  const { names: eventNames, loading: catalogLoading, error: catalogError } = useEventNames();
+  // A failed catalog fetch is not an empty catalog — gating on success keeps
+  // a transient error from forcing the first-run setup state.
+  const catalogReady = !catalogLoading && !catalogError && !!projectID;
   const firstValue = firstValuePath({ eventNames, catalogReady });
 
   const query = useQuery({

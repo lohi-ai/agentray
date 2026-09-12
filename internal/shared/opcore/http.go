@@ -33,7 +33,7 @@ func MountHTTP(g *echo.Group, r *Registry, deps any, resolve PrincipalResolver) 
 			cc := CallContext{ProjectID: principal.ProjectID, Deps: deps, Principal: principal}
 			out, err := spec.OpInvoke(c.Request().Context(), cc, string(body))
 			if err != nil {
-				if he, ok := err.(*echo.HTTPError); ok {
+				if he, ok := r.MapError(err).(*echo.HTTPError); ok {
 					return he
 				}
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
