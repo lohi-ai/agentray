@@ -96,7 +96,10 @@ export function useDashboards() {
   const reorderChartsMutation = useMutation({
     mutationFn: ({ dashboardID, chartIDs, revision, idempotencyKey }: { dashboardID: string; chartIDs: string[]; revision?: number; idempotencyKey: string }) =>
       new AgentRayAPI(projectID!).reorderCharts(dashboardID, chartIDs, { revision, idempotencyKey }),
-    onSuccess: async (_, vars) => { await invalidateCharts(vars.dashboardID); },
+    // reorder bumps the dashboard revision — the board's fence — so the
+    // console query (which carries it) must refresh too, or the next reorder
+    // sends a stale revision and conflicts.
+    onSuccess: async (_, vars) => { await invalidateCharts(vars.dashboardID); await invalidate(); },
     onError: (err) => setError(apiErrorMessage(err, 'Failed to reorder charts')),
   });
 

@@ -245,11 +245,10 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter)
 		if err != nil {
 			return err
 		}
-		var payload struct {
-			IdempotencyKey string `json:"idempotency_key"`
+		mut, err := readOptionalMutationBody(c)
+		if err != nil {
+			return err
 		}
-		// An empty body is fine — the key is optional.
-		_ = c.Bind(&payload)
 		syncID := c.Param("sync_id")
 		ok, err := store.SyncBelongsToProject(c.Request().Context(), project.ID, syncID)
 		if err != nil {
@@ -260,7 +259,7 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter)
 		}
 		out, err := ops.invoke(c, principal, "run_source", map[string]any{
 			"sync_id":         syncID,
-			"idempotency_key": payload.IdempotencyKey,
+			"idempotency_key": mut.IdempotencyKey,
 		})
 		if err != nil {
 			var he *echo.HTTPError
