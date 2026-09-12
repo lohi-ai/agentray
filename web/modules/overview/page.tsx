@@ -293,7 +293,7 @@ export function OverviewPage() {
           <>
             <EmptyState
               title="No events match this filter"
-              detail={`Nothing arrived for ${platform ? platformLabel(platform) : 'this platform'} in the selected range.`}
+              detail={platform ? `Nothing arrived for ${platformLabel(platform)} in the selected range.` : 'Nothing arrived in the selected range.'}
               action={
                 <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { setPlatform(''); setPeriod('7d'); }}>
                   Reset to all platforms, 7 days
