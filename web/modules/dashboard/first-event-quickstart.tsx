@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { Apple, Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
@@ -122,8 +122,6 @@ export function FirstEventQuickstart() {
   const [verification, setVerification] = useState<{ projectID: string; result: VerifySDKResult } | null>(null);
   const [verificationError, setVerificationError] = useState<{ projectID: string; message: string } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
-  const activeProjectID = useRef(projectID);
-  activeProjectID.current = projectID;
 
   const key = project?.api_key ?? '';
   const base = apiBase();
@@ -188,7 +186,7 @@ export function FirstEventQuickstart() {
     setVerificationError(null);
     try {
       const result = await new AgentRayAPI(projectID).verifySDK();
-      if (activeProjectID.current !== projectID) return;
+      if (useAuthStore.getState().project?.id !== projectID) return;
       setVerification({ projectID, result });
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['event-names', projectID] }),
@@ -196,7 +194,7 @@ export function FirstEventQuickstart() {
         queryClient.invalidateQueries({ queryKey: ['overview', projectID] }),
       ]);
     } catch (error) {
-      if (activeProjectID.current !== projectID) return;
+      if (useAuthStore.getState().project?.id !== projectID) return;
       setVerification(null);
       setVerificationError({ projectID, message: error instanceof Error ? error.message : 'Could not check whether the verification event arrived.' });
     } finally {
