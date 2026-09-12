@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { Apple, Check, Copy, Globe, KeyRound, Plug, RefreshCw, Smartphone, Warehouse } from 'lucide-react';
@@ -116,16 +116,24 @@ export function FirstEventQuickstart() {
   const [source, setSource] = useState<Source>('website');
   const [lang, setLang] = useState<Lang>('js');
   const [copied, setCopied] = useState<'key' | 'task' | null>(null);
-  const [verification, setVerification] = useState<VerifySDKResult | null>(null);
-  const [verificationError, setVerificationError] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
+  // Verification state is keyed to the project it was checked against: the
+  // component survives a project switch, and an in-flight check can resolve
+  // after one — an unkeyed receipt would vouch for the wrong project.
+  const [verification, setVerification] = useState<{ projectID: string; result: VerifySDKResult } | null>(null);
+  const [verificationError, setVerificationError] = useState<{ projectID: string; message: string } | null>(null);
+  const [checking, setChecking] = useState<string | null>(null);
+  const activeProjectID = useRef(projectID);
+  activeProjectID.current = projectID;
 
   const key = project?.api_key ?? '';
   const base = apiBase();
   const code = useMemo(
-    () => verificationSnippet(source === 'warehouse' ? 'website' : source, lang, base, key),
+    () => (source === 'warehouse' ? '' : verificationSnippet(source, lang, base, key)),
     [source, lang, base, key],
   );
+  const verificationResult = verification?.projectID === projectID ? verification.result : null;
+  const verificationErrorMessage = verificationError?.projectID === projectID ? verificationError.message : null;
+  const isChecking = checking === projectID;
   const codeLang = source === 'website' ? 'html' : source === 'ios' ? 'swift' : lang === 'js' ? 'javascript' : lang === 'curl' ? 'bash' : 'python';
 
   if (!shouldShowFirstEventGuide({
@@ -176,21 +184,25 @@ export function FirstEventQuickstart() {
 
   async function checkNow() {
     if (!projectID) return;
-    setChecking(true);
+    setChecking(projectID);
     setVerificationError(null);
     try {
       const result = await new AgentRayAPI(projectID).verifySDK();
-      setVerification(result);
+      if (activeProjectID.current !== projectID) return;
+      setVerification({ projectID, result });
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['event-names', projectID] }),
         queryClient.invalidateQueries({ queryKey: ['console', projectID] }),
         queryClient.invalidateQueries({ queryKey: ['overview', projectID] }),
       ]);
     } catch (error) {
+      if (activeProjectID.current !== projectID) return;
       setVerification(null);
-      setVerificationError(error instanceof Error ? error.message : 'Could not check whether the verification event arrived.');
+      setVerificationError({ projectID, message: error instanceof Error ? error.message : 'Could not check whether the verification event arrived.' });
     } finally {
-      setChecking(false);
+      if (activeProjectID.current === projectID) {
+        setChecking((checkingProjectID) => checkingProjectID === projectID ? null : checkingProjectID);
+      }
     }
   }
 
@@ -258,29 +270,29 @@ export function FirstEventQuickstart() {
           )}
         </div>
 
-        {checking ? (
+        {isChecking ? (
           <Callout tone="agentic" icon={<RefreshCw size={16} />} label="Verification" title="Checking for your event" detail="Looking at the most recent capture receipts for this project." />
-        ) : verificationError ? (
-          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Verification" title="Could not check for your event" detail={verificationError} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
-        ) : verification?.found ? (
+        ) : verificationErrorMessage ? (
+          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Verification" title="Could not check for your event" detail={verificationErrorMessage} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
+        ) : verificationResult?.found ? (
           <Callout
             tone="growth"
             icon={<Check size={16} />}
             label="SDK verified"
-            title={`${verification.event_name || 'Verification event'} received`}
-            detail={`Received ${verification.received_at || 'at an unknown time'} · platform ${verification.platform || 'unknown'} · identity ${verification.identity_linked ? 'linked' : 'not linked'}.`}
+            title={`${verificationResult.event_name || 'Verification event'} received`}
+            detail={`Received ${verificationResult.received_at || 'at an unknown time'} · platform ${verificationResult.platform || 'unknown'} · identity ${verificationResult.identity_linked ? 'linked' : 'not linked'}.`}
           />
-        ) : verification ? (
-          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Not received yet" title="No verification event found" detail={`Searched ${verification.searched} recent capture receipts. ${verification.warnings.join(' ')}`} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
+        ) : verificationResult ? (
+          <Callout tone="warn" icon={<RefreshCw size={16} />} label="Not received yet" title="No verification event found" detail={`Searched ${verificationResult.searched} recent capture receipts. ${verificationResult.warnings.join(' ')}`} action={<Button variant="outline" size="sm" onClick={() => void checkNow()}>Retry</Button>} />
         ) : null}
 
-        {verification?.found && verification.warnings.length > 0 ? (
-          <p role="status" className="text-xs text-[var(--color-text-secondary)]">{verification.warnings.join(' ')}</p>
+        {verificationResult?.found && verificationResult.warnings.length > 0 ? (
+          <p role="status" className="text-xs text-[var(--color-text-secondary)]">{verificationResult.warnings.join(' ')}</p>
         ) : null}
 
         <div className="flex items-center gap-2">
-          <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={() => void checkNow()} disabled={checking || !projectID}>
-            {checking ? 'Checking…' : 'I’ve sent it — check now'}
+          <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={() => void checkNow()} disabled={isChecking || !projectID}>
+            {isChecking ? 'Checking…' : 'I’ve sent it — check now'}
           </Button>
           <Button variant="outline" size="sm" icon={copied === 'task' ? <Check size={14} /> : <Copy size={14} />} onClick={() => copy(agentTask(), 'task')}>
             {copied === 'task' ? 'Copied' : 'Copy agent task'}
