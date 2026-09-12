@@ -93,6 +93,16 @@ func (s *Store) ListDashboardsFiltered(ctx context.Context, projectID string, in
 	return dashboards, rows.Err()
 }
 
+// DashboardForProject reads one dashboard, project-scoped, archived rows
+// included — the adapter's revision lookup for callers that do not send one.
+func (s *Store) DashboardForProject(ctx context.Context, projectID, dashboardID string) (Dashboard, error) {
+	var d Dashboard
+	err := s.pg.QueryRow(ctx,
+		`SELECT `+dashboardColumns+` FROM dashboards WHERE project_id = $1 AND id = $2`,
+		projectID, dashboardID).Scan(dashboardScanDest(&d)...)
+	return d, err
+}
+
 // updateDashboardRevision applies a partial name/description update only when
 // the row's revision still equals expectedRevision — the optimistic-
 // concurrency check that makes a concurrent pair yield exactly one success.
@@ -449,6 +459,16 @@ WHERE project_id = $1 AND dashboard_id = $2`
 	return charts, rows.Err()
 }
 
+// ChartForProject reads one chart, project-scoped, archived rows included —
+// the adapter's revision lookup for callers that do not send one.
+func (s *Store) ChartForProject(ctx context.Context, projectID, chartID string) (Chart, error) {
+	var c Chart
+	err := s.pg.QueryRow(ctx,
+		`SELECT `+chartColumns+` FROM charts WHERE project_id = $1 AND id = $2`,
+		projectID, chartID).Scan(chartScanDest(&c)...)
+	return c, err
+}
+
 // updateChartRevision applies a full-field chart update only when the row's
 // revision still equals expectedRevision — the same optimistic-concurrency
 // contract dashboards carry. Runs on any pgQuerier so the idempotent claim
@@ -721,6 +741,16 @@ WHERE project_id = $1`
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// DataConnectorForProject reads one connector, project-scoped, archived rows
+// included — the adapter's revision lookup for callers that do not send one.
+func (s *Store) DataConnectorForProject(ctx context.Context, projectID, connectorID string) (DataConnector, error) {
+	var c DataConnector
+	err := s.pg.QueryRow(ctx,
+		`SELECT `+dataConnectorColumns+` FROM data_connectors WHERE project_id = $1 AND id = $2`,
+		projectID, connectorID).Scan(dataConnectorScanDest(&c)...)
+	return c, err
 }
 
 // archiveDataConnector soft-archives a connector and disables its syncs in

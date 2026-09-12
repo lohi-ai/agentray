@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -45,7 +47,7 @@ func (s publicCollectSet) has(path string) bool { return s[path] }
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
@@ -824,149 +826,8 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		return c.JSON(http.StatusOK, map[string]any{"rows": rows, "generated_at": time.Now().UTC()})
 	})
+	mountDashboardLifecycle(e, store, ops)
 
-	e.GET("/api/dashboards", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		dashboards, err := store.ListDashboardsFiltered(c.Request().Context(), project.ID, false)
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"project":    project,
-			"dashboards": dashboards,
-		})
-	})
-
-	e.POST("/api/dashboards", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		var payload struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		}
-		if err := c.Bind(&payload); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
-		}
-		dashboard, err := store.CreateDashboard(c.Request().Context(), project.ID, strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description))
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusCreated, map[string]any{"dashboard": dashboard})
-	})
-
-	e.PUT("/api/dashboards/:dashboard_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		var payload struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		}
-		if err := c.Bind(&payload); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
-		}
-		dashboard, err := store.UpdateDashboard(c.Request().Context(), project.ID, c.Param("dashboard_id"), strings.TrimSpace(payload.Name), strings.TrimSpace(payload.Description))
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{"dashboard": dashboard})
-	})
-
-	e.DELETE("/api/dashboards/:dashboard_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		if err := store.DeleteDashboard(c.Request().Context(), project.ID, c.Param("dashboard_id")); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-
-	e.GET("/api/dashboards/:dashboard_id/charts", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		charts, err := store.ListCharts(c.Request().Context(), project.ID, c.Param("dashboard_id"))
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"project": project,
-			"charts":  charts,
-		})
-	})
-
-	e.POST("/api/dashboards/:dashboard_id/charts", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		chart, err := chartFromRequest(c)
-		if err != nil {
-			return err
-		}
-		chart.ProjectID = project.ID
-		chart.DashboardID = c.Param("dashboard_id")
-		created, err := store.CreateChart(c.Request().Context(), chart)
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusCreated, map[string]any{"chart": created})
-	})
-
-	e.PUT("/api/charts/:chart_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		chart, err := chartFromRequest(c)
-		if err != nil {
-			return err
-		}
-		chart.ProjectID = project.ID
-		chart.ID = c.Param("chart_id")
-		updated, err := store.UpdateChart(c.Request().Context(), chart)
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{"chart": updated})
-	})
-
-	e.DELETE("/api/charts/:chart_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		if err := store.DeleteChart(c.Request().Context(), project.ID, c.Param("chart_id")); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-
-	e.PUT("/api/dashboards/:dashboard_id/charts/order", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
-		if err != nil {
-			return err
-		}
-		var payload struct {
-			ChartIDs []string `json:"chart_ids"`
-		}
-		if err := c.Bind(&payload); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
-		}
-		if err := store.ReorderCharts(c.Request().Context(), project.ID, c.Param("dashboard_id"), payload.ChartIDs); err != nil {
-			return err
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
 
 	e.GET("/api/events", func(c echo.Context) error {
 		project, err := projectFromRequest(c, store)
@@ -1003,6 +864,278 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 }
 
+// mountDashboardLifecycle registers the dashboard/chart lifecycle routes. They
+// are thin adapters over the shared operation registry: same URLs, same
+// envelopes, but the mutation runs the opcore -> usecase -> store path every
+// other adapter runs. Admission stays the legacy contract (any non-capture
+// credential for the project) — the op's Access class governs /api/op, not
+// this surface. Extracted from registerRoutes so tests can mount it alone.
+func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter) {
+	// Dashboard/chart lifecycle routes are thin adapters over the shared
+	// operation registry: same URLs, same envelopes, but the mutation runs the
+	// opcore -> usecase -> store path every other adapter runs. Admission stays
+	// the legacy contract (projectFromRequest: any non-capture credential for
+	// the project) — the op's Access class governs /api/op, not this surface.
+	e.GET("/api/dashboards", func(c echo.Context) error {
+		principal, project, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		out, err := ops.invoke(c, principal, "list_dashboards", map[string]any{})
+		if err != nil {
+			return err
+		}
+		var result struct {
+			Dashboards []storage.Dashboard `json:"dashboards"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"project":    project,
+			"dashboards": result.Dashboards,
+		})
+	})
+
+	e.POST("/api/dashboards", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		out, err := ops.invoke(c, principal, "create_dashboard", map[string]any{
+			"name":        strings.TrimSpace(payload.Name),
+			"description": strings.TrimSpace(payload.Description),
+		})
+		if err != nil {
+			return err
+		}
+		return c.Blob(http.StatusCreated, echo.MIMEApplicationJSON, wrapObject(out, "dashboard"))
+	})
+
+	e.PUT("/api/dashboards/:dashboard_id", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			Name           string `json:"name"`
+			Description    string `json:"description"`
+			Revision       int64  `json:"revision"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		dashboardID := c.Param("dashboard_id")
+		revision, err := revisionFor(c, payload.Revision, func(ctx context.Context) (int64, error) {
+			d, err := store.DashboardForProject(ctx, principal.ProjectID, dashboardID)
+			return d.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		// Legacy PUT rewrote both fields unconditionally; the op's partial
+		// update preserves that by sending both as present values.
+		name := strings.TrimSpace(payload.Name)
+		description := strings.TrimSpace(payload.Description)
+		out, err := ops.invoke(c, principal, "update_dashboard", map[string]any{
+			"dashboard_id":    dashboardID,
+			"name":            name,
+			"description":     description,
+			"revision":        revision,
+			"idempotency_key": payload.IdempotencyKey,
+		})
+		if err != nil {
+			return err
+		}
+		return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, wrapObject(out, "dashboard"))
+	})
+
+	// DELETE is the reversible archive: the dashboard row, its charts, and
+	// every artifact stay; it only leaves the active list.
+	e.DELETE("/api/dashboards/:dashboard_id", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		mut, err := readOptionalMutationBody(c)
+		if err != nil {
+			return err
+		}
+		dashboardID := c.Param("dashboard_id")
+		revision, err := revisionFor(c, mut.Revision, func(ctx context.Context) (int64, error) {
+			d, err := store.DashboardForProject(ctx, principal.ProjectID, dashboardID)
+			return d.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := ops.invoke(c, principal, "archive_dashboard", map[string]any{
+			"dashboard_id":    dashboardID,
+			"revision":        revision,
+			"idempotency_key": mut.IdempotencyKey,
+		}); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	e.GET("/api/dashboards/:dashboard_id/charts", func(c echo.Context) error {
+		principal, project, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		out, err := ops.invoke(c, principal, "list_charts", map[string]any{
+			"dashboard_id": c.Param("dashboard_id"),
+		})
+		if err != nil {
+			return err
+		}
+		var result struct {
+			Charts []storage.Chart `json:"charts"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"project": project,
+			"charts":  result.Charts,
+		})
+	})
+
+	e.POST("/api/dashboards/:dashboard_id/charts", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		chart, _, err := chartFromRequest(c)
+		if err != nil {
+			return err
+		}
+		out, err := ops.invoke(c, principal, "create_chart", map[string]any{
+			"dashboard_id": c.Param("dashboard_id"),
+			"name":         chart.Name,
+			"kind":         chart.Kind,
+			"metric":       chart.Metric,
+			"event_name":   chart.EventName,
+			"event_type":   chart.EventType,
+			"sql":          chart.SQL,
+			"x_field":      chart.XField,
+			"y_field":      chart.YField,
+			"col_span":     chart.ColSpan,
+		})
+		if err != nil {
+			return err
+		}
+		return c.Blob(http.StatusCreated, echo.MIMEApplicationJSON, wrapObject(out, "chart"))
+	})
+
+	e.PUT("/api/charts/:chart_id", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		chart, mut, err := chartFromRequest(c)
+		if err != nil {
+			return err
+		}
+		chartID := c.Param("chart_id")
+		revision, err := revisionFor(c, mut.Revision, func(ctx context.Context) (int64, error) {
+			existing, err := store.ChartForProject(ctx, principal.ProjectID, chartID)
+			return existing.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		out, err := ops.invoke(c, principal, "update_chart", map[string]any{
+			"chart_id":        chartID,
+			"name":            chart.Name,
+			"kind":            chart.Kind,
+			"metric":          chart.Metric,
+			"event_name":      chart.EventName,
+			"event_type":      chart.EventType,
+			"sql":             chart.SQL,
+			"x_field":         chart.XField,
+			"y_field":         chart.YField,
+			"col_span":        chart.ColSpan,
+			"revision":        revision,
+			"idempotency_key": mut.IdempotencyKey,
+		})
+		if err != nil {
+			return err
+		}
+		return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, wrapObject(out, "chart"))
+	})
+
+	// DELETE is the reversible archive: the chart row and its config stay; it
+	// only leaves the board.
+	e.DELETE("/api/charts/:chart_id", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		mut, err := readOptionalMutationBody(c)
+		if err != nil {
+			return err
+		}
+		chartID := c.Param("chart_id")
+		revision, err := revisionFor(c, mut.Revision, func(ctx context.Context) (int64, error) {
+			existing, err := store.ChartForProject(ctx, principal.ProjectID, chartID)
+			return existing.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := ops.invoke(c, principal, "archive_chart", map[string]any{
+			"chart_id":        chartID,
+			"revision":        revision,
+			"idempotency_key": mut.IdempotencyKey,
+		}); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+
+	e.PUT("/api/dashboards/:dashboard_id/charts/order", func(c echo.Context) error {
+		principal, _, err := principalAndProject(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			ChartIDs       []string `json:"chart_ids"`
+			Revision       int64    `json:"revision"`
+			IdempotencyKey string   `json:"idempotency_key"`
+		}
+		if err := c.Bind(&payload); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+		}
+		dashboardID := c.Param("dashboard_id")
+		revision, err := revisionFor(c, payload.Revision, func(ctx context.Context) (int64, error) {
+			d, err := store.DashboardForProject(ctx, principal.ProjectID, dashboardID)
+			return d.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := ops.invoke(c, principal, "reorder_charts", map[string]any{
+			"dashboard_id":    dashboardID,
+			"chart_ids":       payload.ChartIDs,
+			"revision":        revision,
+			"idempotency_key": payload.IdempotencyKey,
+		}); err != nil {
+			return err
+		}
+		return c.NoContent(http.StatusNoContent)
+	})
+}
+
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {
@@ -1016,6 +1149,52 @@ func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, 
 		return storage.Project{}, err
 	}
 	return project, nil
+}
+// wrapObject re-envelopes an operation's bare JSON result under the legacy
+// response key — {"id":…} becomes {"dashboard":{"id":…}} — so the adapter
+// keeps the envelope the web client already parses.
+func wrapObject(out json.RawMessage, key string) []byte {
+	wrapped := make([]byte, 0, len(out)+len(key)+8)
+	wrapped = append(wrapped, '{')
+	wrapped = append(wrapped, '"')
+	wrapped = append(wrapped, key...)
+	wrapped = append(wrapped, '"', ':')
+	wrapped = append(wrapped, out...)
+	wrapped = append(wrapped, '}')
+	return wrapped
+}
+
+// chartFromRequest binds the legacy chart payload. The returned
+// optionalMutationBody carries the revision/idempotency fields the lifecycle
+// operations consume; they are not part of storage.Chart.
+func chartFromRequest(c echo.Context) (storage.Chart, optionalMutationBody, error) {
+	var payload struct {
+		Name           string `json:"name"`
+		Kind           string `json:"kind"`
+		Metric         string `json:"metric"`
+		EventName      string `json:"event_name"`
+		EventType      string `json:"event_type"`
+		SQL            string `json:"sql"`
+		XField         string `json:"x_field"`
+		YField         string `json:"y_field"`
+		ColSpan        int    `json:"col_span"`
+		Revision       int64  `json:"revision"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	if err := c.Bind(&payload); err != nil {
+		return storage.Chart{}, optionalMutationBody{}, echo.NewHTTPError(http.StatusBadRequest, "invalid json")
+	}
+	return storage.Chart{
+		Name:      strings.TrimSpace(payload.Name),
+		Kind:      strings.TrimSpace(payload.Kind),
+		Metric:    strings.TrimSpace(payload.Metric),
+		EventName: strings.TrimSpace(payload.EventName),
+		EventType: strings.TrimSpace(payload.EventType),
+		SQL:       strings.TrimSpace(payload.SQL),
+		XField:    strings.TrimSpace(payload.XField),
+		YField:    strings.TrimSpace(payload.YField),
+		ColSpan:   payload.ColSpan,
+	}, optionalMutationBody{Revision: payload.Revision, IdempotencyKey: payload.IdempotencyKey}, nil
 }
 
 func accountResources(c echo.Context, store *storage.Store, ctx authContext, preferredProjectID string) ([]storage.Workspace, []storage.Project, storage.Project, error) {
@@ -1057,33 +1236,6 @@ func accountResources(c echo.Context, store *storage.Store, ctx authContext, pre
 	return workspaces, projects, project, nil
 }
 
-func chartFromRequest(c echo.Context) (storage.Chart, error) {
-	var payload struct {
-		Name      string `json:"name"`
-		Kind      string `json:"kind"`
-		Metric    string `json:"metric"`
-		EventName string `json:"event_name"`
-		EventType string `json:"event_type"`
-		SQL       string `json:"sql"`
-		XField    string `json:"x_field"`
-		YField    string `json:"y_field"`
-		ColSpan   int    `json:"col_span"`
-	}
-	if err := c.Bind(&payload); err != nil {
-		return storage.Chart{}, echo.NewHTTPError(http.StatusBadRequest, "invalid json")
-	}
-	return storage.Chart{
-		Name:      strings.TrimSpace(payload.Name),
-		Kind:      strings.TrimSpace(payload.Kind),
-		Metric:    strings.TrimSpace(payload.Metric),
-		EventName: strings.TrimSpace(payload.EventName),
-		EventType: strings.TrimSpace(payload.EventType),
-		SQL:       strings.TrimSpace(payload.SQL),
-		XField:    strings.TrimSpace(payload.XField),
-		YField:    strings.TrimSpace(payload.YField),
-		ColSpan:   payload.ColSpan,
-	}, nil
-}
 
 func intParam(c echo.Context, name string, fallback int, minValue int, maxValue int) int {
 	value := fallback

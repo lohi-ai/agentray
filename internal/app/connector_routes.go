@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,36 +14,70 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
 // registerConnectorRoutes mounts the data-connector surface: connection CRUD
 // (DSN write-only), test/schema probes, per-table sync configs with run
-// status, manual run-now, and an AI-assisted sync draft. Reads are
-// member-level; anything that writes or touches the decrypted DSN is
-// owner/admin, enforced in the store.
-func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connector.Engine) {
+// status, manual run-now, and an AI-assisted sync draft. The lifecycle
+// endpoints are thin adapters over the shared operation registry — same URLs
+// and envelopes, but the mutation runs the opcore -> usecase -> store path
+// every other adapter runs. Auth stays session-only (the legacy contract);
+// the session principal is authorized against each operation's Access class,
+// which preserves the member-read / owner-admin-write boundary the store
+// enforced.
+func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter) {
+	// sessionOp resolves the session caller into an opcore principal for the
+	// project this request names — the legacy session-only admission plus the
+	// registry's access-class check.
+	sessionOp := func(c echo.Context, opName string) (opcore.Principal, storage.Project, error) {
+		ctx, err := authFromRequest(c, store)
+		if err != nil {
+			return opcore.Principal{}, storage.Project{}, err
+		}
+		projectID, err := sessionProjectID(c, store, ctx.User.ID)
+		if err != nil {
+			return opcore.Principal{}, storage.Project{}, err
+		}
+		principal, project, err := sessionPrincipal(c, store, ctx.User.ID, projectID)
+		if err != nil {
+			return opcore.Principal{}, storage.Project{}, err
+		}
+		if err := ops.authorize(principal, opName); err != nil {
+			return opcore.Principal{}, storage.Project{}, err
+		}
+		return principal, project, nil
+	}
+
 	// --- connectors ---
 	e.GET("/api/connectors", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		principal, _, err := sessionOp(c, "list_sources")
 		if err != nil {
 			return err
 		}
-		connectors, err := store.ListDataConnectors(c.Request().Context(), ctx.User.ID, project.ID)
+		out, err := ops.invoke(c, principal, "list_sources", map[string]any{})
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return err
 		}
-		return c.JSON(http.StatusOK, map[string]any{"connectors": connectors, "kinds": connector.Kinds()})
+		var result struct {
+			Sources []storage.DataConnector `json:"sources"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{"connectors": result.Sources, "kinds": connector.Kinds()})
 	})
 
 	e.POST("/api/connectors", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		principal, _, err := sessionOp(c, "create_source")
 		if err != nil {
 			return err
 		}
 		var payload struct {
-			Name         string `json:"name"`
-			Kind         string `json:"kind"`
-			CredentialID string `json:"credential_id"`
+			Name           string `json:"name"`
+			Kind           string `json:"kind"`
+			CredentialID   string `json:"credential_id"`
+			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
@@ -54,41 +89,62 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if strings.TrimSpace(payload.CredentialID) == "" {
 			return echo.NewHTTPError(http.StatusBadRequest, "credential_id is required — store the DSN once via POST /api/projects/:id/source-credentials")
 		}
-		created, err := store.CreateDataConnectorForUser(c.Request().Context(), ctx.User.ID, project.ID, payload.Name, payload.Kind, payload.CredentialID)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-		}
-		return c.JSON(http.StatusCreated, map[string]any{"connector": created})
-	})
-
-	e.DELETE("/api/connectors/:connector_id", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		out, err := ops.invoke(c, principal, "create_source", map[string]any{
+			"name":            payload.Name,
+			"kind":            payload.Kind,
+			"credential_id":   payload.CredentialID,
+			"idempotency_key": payload.IdempotencyKey,
+		})
 		if err != nil {
 			return err
 		}
-		if err := store.DeleteDataConnector(c.Request().Context(), ctx.User.ID, project.ID, c.Param("connector_id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+		return c.Blob(http.StatusCreated, echo.MIMEApplicationJSON, wrapObject(out, "connector"))
+	})
+
+	// DELETE is the reversible archive: the connector row, its credential
+	// reference, and every landed row stay; its syncs pause transactionally
+	// and unarchive resumes exactly those.
+	e.DELETE("/api/connectors/:connector_id", func(c echo.Context) error {
+		principal, _, err := sessionOp(c, "archive_source")
+		if err != nil {
+			return err
+		}
+		mut, err := readOptionalMutationBody(c)
+		if err != nil {
+			return err
+		}
+		connectorID := c.Param("connector_id")
+		revision, err := revisionFor(c, mut.Revision, func(ctx context.Context) (int64, error) {
+			existing, err := store.DataConnectorForProject(ctx, principal.ProjectID, connectorID)
+			return existing.Revision, err
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := ops.invoke(c, principal, "archive_source", map[string]any{
+			"connector_id":    connectorID,
+			"revision":        revision,
+			"idempotency_key": mut.IdempotencyKey,
+		}); err != nil {
+			return err
 		}
 		return c.NoContent(http.StatusNoContent)
 	})
 
 	// --- probes (open the source in-process; the DSN never leaves) ---
 	e.POST("/api/connectors/:connector_id/test", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		principal, _, err := sessionOp(c, "test_source")
 		if err != nil {
 			return err
 		}
-		probeCtx, cancel := context.WithTimeout(c.Request().Context(), probeTimeout)
-		defer cancel()
-		source, err := openConnectorSource(probeCtx, store, ctx.User.ID, project.ID, c.Param("connector_id"))
+		out, err := ops.invoke(c, principal, "test_source", map[string]any{
+			"connector_id": c.Param("connector_id"),
+		})
 		if err != nil {
-			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return err
 		}
-		defer source.Close()
-		if err := source.TestConnection(probeCtx); err != nil {
-			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-		}
-		return c.JSON(http.StatusOK, map[string]any{"ok": true})
+		// test_source already answers in the legacy {ok, error?} envelope.
+		return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, out)
 	})
 
 	e.GET("/api/connectors/:connector_id/schema", func(c echo.Context) error {
@@ -112,13 +168,27 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 
 	// --- syncs ---
 	e.GET("/api/connectors/:connector_id/syncs", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		principal, _, err := sessionOp(c, "source_status")
 		if err != nil {
 			return err
 		}
-		syncs, err := store.ListConnectorSyncs(c.Request().Context(), ctx.User.ID, project.ID, c.Param("connector_id"))
+		out, err := ops.invoke(c, principal, "source_status", map[string]any{
+			"connector_id": c.Param("connector_id"),
+		})
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			return err
+		}
+		var result struct {
+			Syncs []struct {
+				Sync storage.ConnectorSync `json:"sync"`
+			} `json:"syncs"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return err
+		}
+		syncs := make([]storage.ConnectorSync, 0, len(result.Syncs))
+		for _, entry := range result.Syncs {
+			syncs = append(syncs, entry.Sync)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"syncs": syncs})
 	})
@@ -166,20 +236,18 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	// Run one sync now (owner/admin). Enqueues a persistent run row and
-	// returns it — the same contract the run_source operation uses, so REST
-	// and MCP callers observe identical status/cancel semantics.
+	// Run one sync now (owner/admin). The shared run_source operation owns the
+	// enqueue contract — one active run per sync, idempotent replay — so REST
+	// and MCP callers observe identical status/cancel semantics. The legacy
+	// envelope reports engine failures in-band as {ok:false,error}.
 	e.POST("/api/connector-syncs/:sync_id/run", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		principal, project, err := sessionOp(c, "run_source")
 		if err != nil {
 			return err
 		}
-		canManage, err := store.UserCanManageWorkspace(c.Request().Context(), ctx.User.ID, project.WorkspaceID)
+		mut, err := readOptionalMutationBody(c)
 		if err != nil {
 			return err
-		}
-		if !canManage {
-			return echo.NewHTTPError(http.StatusForbidden, "connector permission denied")
 		}
 		syncID := c.Param("sync_id")
 		ok, err := store.SyncBelongsToProject(c.Request().Context(), project.ID, syncID)
@@ -189,11 +257,25 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, engine *connect
 		if !ok {
 			return echo.NewHTTPError(http.StatusNotFound, "sync not found")
 		}
-		run, enqueued, err := engine.EnqueueRun(c.Request().Context(), project.ID, syncID, "")
+		out, err := ops.invoke(c, principal, "run_source", map[string]any{
+			"sync_id":         syncID,
+			"idempotency_key": mut.IdempotencyKey,
+		})
 		if err != nil {
+			var he *echo.HTTPError
+			if errors.As(err, &he) {
+				return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": he.Message})
+			}
 			return c.JSON(http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		}
-		return c.JSON(http.StatusOK, map[string]any{"ok": true, "run": run, "enqueued": enqueued})
+		var result struct {
+			Run      connector.Run `json:"run"`
+			Enqueued bool          `json:"enqueued"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, map[string]any{"ok": true, "run": result.Run, "enqueued": result.Enqueued})
 	})
 
 	// AI-assisted sync draft: discover the schema, let the authoring model

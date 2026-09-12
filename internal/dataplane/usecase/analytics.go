@@ -405,9 +405,11 @@ type createChartInput struct {
 	Kind        string `json:"kind" desc:"line | bar | area | number | table (default line)"`
 	Metric      string `json:"metric" desc:"built-in metric, e.g. events | users"`
 	EventName   string `json:"event_name"`
+	EventType   string `json:"event_type"`
 	SQL         string `json:"sql" desc:"optional SELECT for a custom chart"`
 	XField      string `json:"x_field"`
 	YField      string `json:"y_field"`
+	ColSpan     int    `json:"col_span" desc:"grid columns 1-3 (default 1)"`
 }
 
 func createChart() opcore.Operation[createChartInput, storage.Chart] {
@@ -424,7 +426,8 @@ func createChart() opcore.Operation[createChartInput, storage.Chart] {
 			}
 			return d.Repo.CreateChart(ctx, storage.Chart{
 				DashboardID: in.DashboardID, ProjectID: cc.ProjectID, Name: in.Name, Kind: in.Kind,
-				Metric: in.Metric, EventName: in.EventName, SQL: normalizeSQL(in.SQL), XField: in.XField, YField: in.YField,
+				Metric: in.Metric, EventName: in.EventName, EventType: in.EventType,
+				SQL: normalizeSQL(in.SQL), XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
 			})
 		},
 	}
