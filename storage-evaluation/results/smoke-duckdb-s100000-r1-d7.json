@@ -199,23 +199,23 @@
   "days": 7,
   "engine": "duckdb",
   "ingest": {
-    "ack_s": 0.19,
+    "ack_s": 0.06,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
-        -0.001,
-        0.044
+        -0.0,
+        0.074
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 0.19
+    "visibility_lag_s": 0.07
   },
-  "load_s": 1.26,
+  "load_s": 0.83,
   "provenance": {
-    "code_commit": "91fc4a24737296273852419a4ae235fd04017f1f",
-    "code_digest": "903b0104b49fa7f6715d782dd2d15856a460c3cd4a6c7553d8e17b555d9ecc94",
+    "code_commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
+    "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
     "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
     "corpus_rows": 99538,
     "driver_cpus": "1",
@@ -231,13 +231,13 @@
   },
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 6.4,
-    "cpu_pct_peak": 19.0,
-    "disk_after_load_bytes": 116323986,
+    "cpu_pct_mean": 3.2,
+    "cpu_pct_peak": 9.7,
+    "disk_after_load_bytes": 115275410,
     "disk_before_bytes": 16033,
-    "disk_final_bytes": 121861509,
-    "mem_idle_bytes": 88076288,
-    "mem_peak_bytes": 407810048,
+    "disk_final_bytes": 120812933,
+    "mem_idle_bytes": 83742720,
+    "mem_peak_bytes": 360935424,
     "samples": 3
   },
   "scale": 100000,
@@ -246,75 +246,75 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 9.6,
-        "p95_ms": 9.6,
-        "p99_ms": 9.6
+        "p50_ms": 6.2,
+        "p95_ms": 6.2,
+        "p99_ms": 6.2
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 13.0,
-        "p95_ms": 13.0,
-        "p99_ms": 13.0
+        "p50_ms": 7.8,
+        "p95_ms": 7.8,
+        "p99_ms": 7.8
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 27.6,
-        "p95_ms": 27.6,
-        "p99_ms": 27.6
+        "p50_ms": 8.7,
+        "p95_ms": 8.7,
+        "p99_ms": 8.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 19.6,
-        "p95_ms": 19.6,
-        "p99_ms": 19.6
+        "p50_ms": 14.4,
+        "p95_ms": 14.4,
+        "p99_ms": 14.4
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 19.3,
-        "p95_ms": 19.3,
-        "p99_ms": 19.3
+        "p50_ms": 10.6,
+        "p95_ms": 10.6,
+        "p99_ms": 10.6
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 25.8,
-        "p95_ms": 25.8,
-        "p99_ms": 25.8
+        "p50_ms": 15.4,
+        "p95_ms": 15.4,
+        "p99_ms": 15.4
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 25.2,
-        "p95_ms": 25.2,
-        "p99_ms": 25.2
+        "p50_ms": 10.5,
+        "p95_ms": 10.5,
+        "p99_ms": 10.5
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 26.3,
-        "p95_ms": 26.3,
-        "p99_ms": 26.3
+        "p50_ms": 13.6,
+        "p95_ms": 13.6,
+        "p99_ms": 13.6
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 15.7,
-        "p95_ms": 15.7,
-        "p99_ms": 15.7
+        "p50_ms": 12.3,
+        "p95_ms": 12.3,
+        "p99_ms": 12.3
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 17.4,
-        "p95_ms": 17.4,
-        "p99_ms": 17.4
+        "p50_ms": 51.2,
+        "p95_ms": 51.2,
+        "p99_ms": 51.2
       }
     }
   },
   "status": "MEASURED",
   "teardown": "stopped",
-  "wall_s": 7.6
+  "wall_s": 6.4
 }
