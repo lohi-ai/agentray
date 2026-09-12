@@ -119,17 +119,43 @@ type OverviewDataStatus struct {
 	// AgeSeconds is now − last_received_at: how quiet the project is. It is
 	// deliberately not called lag — no ingest watermark exists to measure
 	// processing delay against.
-	AgeSeconds  int64  `json:"age_seconds,omitempty"`
-	PipelineLag string `json:"pipeline_lag"` // always "unavailable" today
+	AgeSeconds   int64  `json:"age_seconds,omitempty"`
+	PipelineLag  string `json:"pipeline_lag"`  // always "unavailable" today
+	SchemaStatus string `json:"schema_status"` // always "unavailable" today
 	// EventsInRange counts ALL events in the window (any type/class) so the UI
 	// can tell "integrated but nothing qualifying" from "nothing arrived".
 	EventsInRange uint64 `json:"events_in_range"`
 	// QualifyingInRange counts only qualifying-activity events — the
 	// discriminator between "integrated, no qualifying activity yet" and
 	// "no completed-day data".
-	QualifyingInRange uint64 `json:"qualifying_in_range"`
-	EverReceived      bool   `json:"ever_received"`
-	State             string `json:"state"` // fresh | quiet | no_events
+	QualifyingInRange uint64                 `json:"qualifying_in_range"`
+	EverReceived      bool                   `json:"ever_received"`
+	State             string                 `json:"state"` // fresh | quiet | no_events
+	Sources           []OverviewSourceStatus `json:"sources"`
+	SourcesTruncated  bool                   `json:"sources_truncated"`
+}
+
+// OverviewSourceStatus is the bounded, project-scoped source health record
+// displayed beside capture freshness. It reports only persisted connector-sync
+// facts; it never infers schema health or processing lag.
+type OverviewSourceStatus struct {
+	ConnectorID    string     `json:"connector_id"`
+	ConnectorName  string     `json:"connector_name"`
+	ConnectorKind  string     `json:"connector_kind"`
+	SyncID         string     `json:"sync_id,omitempty"`
+	SourceTable    string     `json:"source_table,omitempty"`
+	SyncConfigured bool       `json:"sync_configured"`
+	Enabled        bool       `json:"enabled"`
+	State          string     `json:"state"` // not_configured | paused | not_ready | healthy | partial | error
+	Cursor         string     `json:"cursor,omitempty"`
+	CursorKey      string     `json:"cursor_key,omitempty"`
+	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
+	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
+	LastStatus     string     `json:"last_status,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	LastRows       int        `json:"last_rows"`
+	TotalRows      int64      `json:"total_rows"`
+	SchemaStatus   string     `json:"schema_status"` // always "unavailable" today
 }
 
 type OverviewMetrics struct {
@@ -318,6 +344,14 @@ WHERE project_id = ?`, projectID).Scan(&total, &lastEvent, &lastReceived)
 		}
 		res.DataStatus.State = overviewDataState(res.DataStatus.EverReceived, now.UTC().Sub(lastReceived))
 		res.DataStatus.PipelineLag = "unavailable"
+		res.DataStatus.SchemaStatus = "unavailable"
+
+		sources, truncated, sourceErr := s.overviewSources(ctx, projectID)
+		if sourceErr != nil {
+			return res, sourceErr
+		}
+		res.DataStatus.Sources = sources
+		res.DataStatus.SourcesTruncated = truncated
 
 		var inRange, qualifying uint64
 		err = s.ch.QueryRow(ctx, `
@@ -505,6 +539,76 @@ LIMIT 20`, args...)
 	}
 
 	return res, nil
+}
+
+const overviewSourceLimit = 20
+
+// overviewSources reads enough rows to say when the Overview's bounded source
+// list has been truncated. It uses the persisted sync summary rather than
+// performing one latest-run lookup per row.
+func (s *Store) overviewSources(ctx context.Context, projectID string) ([]OverviewSourceStatus, bool, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT c.id::text, c.name, c.kind,
+       COALESCE(cs.id::text, ''), COALESCE(cs.source_table, ''),
+       cs.id IS NOT NULL, COALESCE(cs.enabled, false),
+       COALESCE(cs.cursor, ''), COALESCE(cs.cursor_key, ''),
+       cs.last_run_at, cs.last_success_at, COALESCE(cs.last_status, ''),
+       COALESCE(cs.last_error, ''), COALESCE(cs.last_rows, 0), COALESCE(cs.total_rows, 0)
+FROM data_connectors c
+LEFT JOIN connector_syncs cs
+  ON cs.connector_id = c.id AND cs.project_id = c.project_id
+WHERE c.project_id = $1
+ORDER BY c.created_at DESC, c.id, cs.created_at ASC NULLS LAST, cs.id
+LIMIT $2`, projectID, overviewSourceLimit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	sources := make([]OverviewSourceStatus, 0, overviewSourceLimit)
+	for rows.Next() {
+		var source OverviewSourceStatus
+		if err := rows.Scan(
+			&source.ConnectorID, &source.ConnectorName, &source.ConnectorKind,
+			&source.SyncID, &source.SourceTable,
+			&source.SyncConfigured, &source.Enabled,
+			&source.Cursor, &source.CursorKey,
+			&source.LastRunAt, &source.LastSuccessAt, &source.LastStatus,
+			&source.LastError, &source.LastRows, &source.TotalRows,
+		); err != nil {
+			return nil, false, err
+		}
+		source.State = overviewSourceState(source.SyncConfigured, source.Enabled, source.LastRunAt, source.LastStatus, source.LastRows)
+		source.SchemaStatus = "unavailable"
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(sources) > overviewSourceLimit
+	if truncated {
+		sources = sources[:overviewSourceLimit]
+	}
+	return sources, truncated, nil
+}
+
+func overviewSourceState(configured, enabled bool, lastRunAt *time.Time, lastStatus string, lastRows int) string {
+	if !configured {
+		return "not_configured"
+	}
+	if !enabled {
+		return "paused"
+	}
+	if lastRunAt == nil {
+		return "not_ready"
+	}
+	if lastStatus == "error" {
+		if lastRows > 0 {
+			return "partial"
+		}
+		return "error"
+	}
+	return "healthy"
 }
 
 // firstPlatformClause filters a first-seen subquery by the platform OF THE

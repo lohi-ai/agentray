@@ -63,7 +63,7 @@ func TestAdaptersEnforceCredentialContract(t *testing.T) {
 	project := boot.Project // born-split: its api key is capture-only
 
 	// Capture key: denied on MCP and /api/op for a read op AND a write op.
-	for _, op := range []string{"activity_summary", "update_dashboard", "run_source"} {
+	for _, op := range []string{"activity_summary", "verify_sdk", "update_dashboard", "run_source"} {
 		rec := postJSON(t, e, "/mcp", mcpCall(op, `{}`), map[string]string{"X-API-Key": project.APIKey})
 		if !strings.Contains(rec.Body.String(), "isError\":true") {
 			t.Fatalf("MCP %s with capture key: %s", op, rec.Body.String())
@@ -82,6 +82,10 @@ func TestAdaptersEnforceCredentialContract(t *testing.T) {
 	rec := postJSON(t, e, "/api/op/activity_summary", `{"hours":1}`, map[string]string{"Authorization": "Bearer " + readSecret})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("analytics:read activity_summary: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postJSON(t, e, "/api/op/verify_sdk", `{"event_name":"onboarding_verified"}`, map[string]string{"Authorization": "Bearer " + readSecret})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analytics:read verify_sdk: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = postJSON(t, e, "/api/op/update_dashboard", `{"dashboard_id":"x","revision":1}`, map[string]string{"Authorization": "Bearer " + readSecret})
 	if rec.Code == http.StatusOK {

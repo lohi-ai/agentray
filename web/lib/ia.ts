@@ -175,8 +175,9 @@ export function signedInLandingTarget(): string {
 // prompts grouped by the situation the owner is actually in.
 
 export type FirstRunInput = {
-  // Catalog rows or bare names — only length matters for first-run gating.
-  eventNames: { readonly length: number } | null | undefined;
+  // Catalog rows or bare names. A verification-only catalog proves capture,
+  // not product activity, so it keeps the first-event guide visible.
+  eventNames: readonly (string | { name?: string; event_name?: string })[] | null | undefined;
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
@@ -187,11 +188,15 @@ export type FirstValuePath = {
   showFirstAsk: boolean;
 };
 
-// Empty catalog (zero event names, catalog has loaded) turns on the guided
-// first-event + first-ask path.
+
+// A verification receipt is intentionally excluded from product metrics. Keep
+// setup present until the catalog has a product event, while the chat prompt
+// remains reserved for an entirely empty catalog.
 export function firstValuePath(input: FirstRunInput): FirstValuePath {
-  const empty = input.catalogReady && (input.eventNames?.length ?? 0) === 0;
-  return { showFirstEvent: empty, showFirstAsk: empty };
+  const names = input.eventNames?.map((entry) => typeof entry === 'string' ? entry : entry.event_name ?? entry.name ?? '') ?? [];
+  const empty = input.catalogReady && names.length === 0;
+  const verificationOnly = input.catalogReady && names.length > 0 && names.every((name) => name === 'onboarding_verified');
+  return { showFirstEvent: empty || verificationOnly, showFirstAsk: empty };
 }
 
 export function shouldShowFirstEventGuide(input: FirstRunInput): boolean {
