@@ -108,3 +108,23 @@ export function useConnectorSchema(connectorID: string | null, enabled: boolean)
     error: query.error instanceof Error ? query.error.message : null,
   };
 }
+
+// useDatasetPreview reads one sync's landed rows through the dataset_preview
+// op — deduped FINAL rows with the soft-delete filter applied, plus the
+// freshness block (last success vs last attempt vs landed watermark). It is
+// the dataset-semantics read; run_sql stays raw.
+export function useDatasetPreview(syncID: string | null) {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const query = useQuery({
+    queryKey: ['dataset-preview', projectID, syncID],
+    queryFn: () => new AgentRayAPI(projectID!).datasetPreview(syncID!),
+    enabled: !!projectID && !!syncID,
+    staleTime: 30 * 1000,
+    retry: false,
+  });
+  return {
+    preview: query.data ?? null,
+    loading: query.isFetching,
+    error: query.error instanceof Error ? query.error.message : null,
+  };
+}

@@ -28,8 +28,9 @@ export const NAV_ITEMS: readonly NavItemDef[] = [
   { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
   // Data = connect and inspect: events, replay, SDK setup, connectors.
   { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
-  // Plans = findings and experiments (the existing prototypes surface).
-  { href: '/prototypes', label: 'Plans', group: 'Work' },
+  // Plans = findings and experiments. /prototypes stays reachable as an
+  // alias — the pre-slice-4 surface it names still serves its URLs.
+  { href: '/plans', label: 'Plans', group: 'Work', aliases: ['/prototypes'] },
   // Agents = every agent surface: chat, operations (triggers), Garden,
   // teams, marketplace, monitor, lab.
   { href: '/agents', label: 'Agents', group: 'Work', aliases: ['/teams', '/marketplace', '/monitor', '/agent', '/chat', '/operations'] },
@@ -713,6 +714,7 @@ export function projectDetailRoot(pathname: string): string | null {
   if (/^\/teams\/[^/]+/.test(path)) return '/teams';
   if (/^\/operations\/[^/]+/.test(path)) return '/operations';
   if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
+  if (/^\/plans\/[^/]+/.test(path)) return '/plans';
   return null;
 }
 

@@ -142,6 +142,20 @@ type testStatusOutput struct {
 	// committed (= still running, too early to call).
 	Verdict string `json:"verdict,omitempty"`
 	Note    string `json:"note"`
+	// Slice-4 resumable fields — an agent with no chat history reconstructs
+	// the full experiment state from this read alone.
+	ObservationID   string  `json:"observation_id,omitempty"`
+	EvidenceJSON    string  `json:"evidence_json,omitempty"`
+	BaselineValue   *float64 `json:"baseline_value,omitempty"`
+	BaselineUnit    string  `json:"baseline_unit,omitempty"`
+	BaselineWindow  string  `json:"baseline_window,omitempty"`
+	Audience        string  `json:"audience,omitempty"`
+	Owner           string  `json:"owner,omitempty"`
+	SuccessMetric   string  `json:"success_metric,omitempty"`
+	GuardrailMetric string  `json:"guardrail_metric,omitempty"`
+	ReviewDate      string  `json:"review_date,omitempty"`
+	OutcomeJSON     string  `json:"outcome_json,omitempty"`
+	Revision        int64   `json:"revision"`
 }
 
 // testStatus reads the live test against its committed threshold. This is a
@@ -209,6 +223,22 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				DaysElapsed:   p.DaysElapsed,
 				DaysLeft:      p.DaysLeft,
 				WaitlistCount: count,
+				// Slice-4 resumable fields — an agent with no chat history
+				// reconstructs the full experiment state from this read alone.
+				ObservationID:   test.ObservationID,
+				EvidenceJSON:    test.EvidenceJSON,
+				BaselineValue:   test.BaselineValue,
+				BaselineUnit:    test.BaselineUnit,
+				BaselineWindow:  test.BaselineWindow,
+				Audience:        test.Audience,
+				Owner:           test.Owner,
+				SuccessMetric:   test.SuccessMetric,
+				GuardrailMetric: test.GuardrailMetric,
+				OutcomeJSON:     test.OutcomeJSON,
+				Revision:        test.Revision,
+			}
+			if test.ReviewDate != nil {
+				out.ReviewDate = test.ReviewDate.UTC().Format(time.RFC3339)
 			}
 			if test.BaselineEvent != "" && p.Baseline > 0 {
 				out.ConversionPct = float64(p.Metric) / float64(p.Baseline) * 100

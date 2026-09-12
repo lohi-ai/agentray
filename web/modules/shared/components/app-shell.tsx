@@ -29,7 +29,7 @@ import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
 import { AsideSection, PageShell } from '@/modules/shared/components/page-shell';
 import { RelatedSurfacesNav } from '@/modules/shared/components/related-surfaces';
 
-export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'operations';
+export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'plans' | 'operations';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/overview': Gauge,
@@ -38,7 +38,7 @@ const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/settings': Settings,
   '/persons': Users,
   '/events': List,
-  '/prototypes': FlaskConical,
+  '/plans': FlaskConical,
 };
 
 // Small pulsing "live" indicator shown on the Chat item. Uses the --agent token

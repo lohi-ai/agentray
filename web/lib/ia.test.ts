@@ -69,7 +69,7 @@ describe('nav grouping', () => {
 
   it('does not list lab or agent monitor as peer Work items', () => {
     const peerHrefs = NAV_ITEMS.filter((i) => i.group === 'Work').map((i) => i.href);
-    expect(peerHrefs).toEqual(['/prototypes', '/agents']);
+    expect(peerHrefs).toEqual(['/plans', '/agents']);
     expect(peerHrefs).not.toContain('/agents/monitor');
     expect(peerHrefs.some((href) => href.includes('/lab'))).toBe(false);
   });
@@ -105,8 +105,10 @@ describe('matchActiveHref', () => {
     ['/overview', '/overview', 'Product'],
     ['/start', '/events', 'Understand'],
     ['/chat', '/agents', 'Work'],
-    ['/prototypes', '/prototypes', 'Work'],
-    ['/prototypes/abc-123', '/prototypes', 'Work'],
+    ['/plans', '/plans', 'Work'],
+    ['/plans/abc-123', '/plans', 'Work'],
+    ['/prototypes', '/plans', 'Work'],
+    ['/prototypes/abc-123', '/plans', 'Work'],
     ['/product', '/dashboard', 'Understand'],
     ['/operations', '/agents', 'Work'],
     ['/operations/config%3Aproj-1', '/agents', 'Work'],
@@ -403,6 +405,7 @@ describe('projectDetailRoot', () => {
     expect(projectDetailRoot('/teams/t1')).toBe('/teams');
     expect(projectDetailRoot('/operations/op1')).toBe('/operations');
     expect(projectDetailRoot('/prototypes/p1')).toBe('/prototypes');
+    expect(projectDetailRoot('/plans/p1')).toBe('/plans');
   });
 
   it('leaves list pages, chat, sql, and /agents/monitor alone', () => {
