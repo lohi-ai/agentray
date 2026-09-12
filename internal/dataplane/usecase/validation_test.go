@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -24,9 +25,10 @@ type fakeValidationRepo struct {
 	// byID / list back the plural reads. total is what the project HAS, which is
 	// deliberately allowed to exceed len(list) so the truncation contract is
 	// testable.
-	byID  map[string]storage.ValidationTest
-	list  []storage.ValidationTest
-	total int
+	byID    map[string]storage.ValidationTest
+	list    []storage.ValidationTest
+	readErr error
+	total   int
 }
 
 func (f *fakeValidationRepo) ValidationTestsForProject(_ context.Context, _ string, _ int) ([]storage.ValidationTest, int, error) {
@@ -38,14 +40,22 @@ func (f *fakeValidationRepo) ValidationTestsForProject(_ context.Context, _ stri
 }
 
 func (f *fakeValidationRepo) ValidationTestForProject(_ context.Context, _, id string) (storage.ValidationTest, error) {
+	if f.readErr != nil {
+		return storage.ValidationTest{}, f.readErr
+	}
 	t, ok := f.byID[id]
 	if !ok {
-		return storage.ValidationTest{}, errors.New("no test with that id in this project")
+		return storage.ValidationTest{}, pgx.ErrNoRows
 	}
 	return t, nil
 }
 
 func (f *fakeValidationRepo) CreateValidationTest(_ context.Context, t storage.ValidationTest) (string, error) {
+	f.created = t
+	return "test-1", nil
+}
+
+func (f *fakeValidationRepo) CreateValidationTestIdempotent(_ context.Context, t storage.ValidationTest, _, _ string) (string, error) {
 	f.created = t
 	return "test-1", nil
 }
@@ -237,6 +247,17 @@ func TestTestStatusRefusesToSubstituteAnotherTestForAnUnknownID(t *testing.T) {
 	}
 	if !strings.Contains(out["note"].(string), "list_tests") {
 		t.Errorf("the note must point at the repair, got %q", out["note"])
+	}
+}
+
+func TestTestStatusPropagatesNamedReadFailures(t *testing.T) {
+	repo := &fakeValidationRepo{readErr: errors.New("database unavailable")}
+	spec, _ := Registry().Get("test_status")
+	_, err := spec.OpInvoke(context.Background(), opcore.CallContext{
+		ProjectID: "p1", Deps: &Deps{Repo: repo},
+	}, `{"test_id":"test-1"}`)
+	if err == nil || !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("named read error = %v, want original repository error", err)
 	}
 }
 

@@ -2,10 +2,12 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -77,7 +79,7 @@ func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 			if in.BaselineValue != 0 {
 				baselineValue = &in.BaselineValue
 			}
-			id, err := d.Repo.CreateValidationTest(ctx, storage.ValidationTest{
+			t := storage.ValidationTest{
 				ProjectID:       cc.ProjectID,
 				RunID:           cc.RunID,
 				Hypothesis:      in.Hypothesis,
@@ -95,7 +97,12 @@ func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 				SuccessMetric:   in.SuccessMetric,
 				GuardrailMetric: in.GuardrailMetric,
 				ReviewDate:      reviewDate,
-			})
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return proposeTestOutput{}, err
+			}
+			id, err := d.Repo.CreateValidationTestIdempotent(ctx, t, strings.TrimSpace(in.IdempotencyKey), hash)
 			if err != nil {
 				return proposeTestOutput{}, err
 			}
@@ -144,18 +151,18 @@ type testStatusOutput struct {
 	Note    string `json:"note"`
 	// Slice-4 resumable fields — an agent with no chat history reconstructs
 	// the full experiment state from this read alone.
-	ObservationID   string  `json:"observation_id,omitempty"`
-	EvidenceJSON    string  `json:"evidence_json,omitempty"`
+	ObservationID   string   `json:"observation_id,omitempty"`
+	EvidenceJSON    string   `json:"evidence_json,omitempty"`
 	BaselineValue   *float64 `json:"baseline_value,omitempty"`
-	BaselineUnit    string  `json:"baseline_unit,omitempty"`
-	BaselineWindow  string  `json:"baseline_window,omitempty"`
-	Audience        string  `json:"audience,omitempty"`
-	Owner           string  `json:"owner,omitempty"`
-	SuccessMetric   string  `json:"success_metric,omitempty"`
-	GuardrailMetric string  `json:"guardrail_metric,omitempty"`
-	ReviewDate      string  `json:"review_date,omitempty"`
-	OutcomeJSON     string  `json:"outcome_json,omitempty"`
-	Revision        int64   `json:"revision"`
+	BaselineUnit    string   `json:"baseline_unit,omitempty"`
+	BaselineWindow  string   `json:"baseline_window,omitempty"`
+	Audience        string   `json:"audience,omitempty"`
+	Owner           string   `json:"owner,omitempty"`
+	SuccessMetric   string   `json:"success_metric,omitempty"`
+	GuardrailMetric string   `json:"guardrail_metric,omitempty"`
+	ReviewDate      string   `json:"review_date,omitempty"`
+	OutcomeJSON     string   `json:"outcome_json,omitempty"`
+	Revision        int64    `json:"revision"`
 }
 
 // testStatus reads the live test against its committed threshold. This is a
@@ -179,7 +186,12 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				if fErr != nil {
 					// A named test that does not exist is not "no test": answering
 					// with the active one would report a different experiment's
-					// numbers under the name the owner asked about.
+					// numbers under the name the owner asked about. Infrastructure
+					// failures remain failures; only the repository's typed
+					// project-scoped not-found result becomes this useful reply.
+					if !storage.ErrNoSuchValidationTest(fErr) && !errors.Is(fErr, pgx.ErrNoRows) {
+						return testStatusOutput{}, fErr
+					}
 					return testStatusOutput{
 						HasTest: false,
 						Note: "No prototype with id " + id + " in this project. Call list_tests and use an id from it — " +

@@ -132,11 +132,15 @@ func recordOutcome() opcore.Operation[recordOutcomeInput, recordOutcomeOutput] {
 			if err != nil {
 				return recordOutcomeOutput{}, err
 			}
+			authorKind, authorID := "agent", cc.RunID
+			if authorID == "" {
+				authorKind, authorID = "user", cc.Principal.UserID
+			}
 			entry := storage.TestOutcomeEntry{
 				Value: in.Value, Unit: in.Unit, Window: in.Window,
 				EvidenceRef: in.EvidenceRef,
-				AuthorKind:  "agent",
-				AuthorID:    cc.RunID,
+				AuthorKind:  authorKind,
+				AuthorID:    authorID,
 				RecordedAt:  time.Now().UTC().Format(time.RFC3339),
 			}
 			hash, err := requestHash(in)
@@ -164,7 +168,7 @@ func recordOutcome() opcore.Operation[recordOutcomeInput, recordOutcomeOutput] {
 
 type abandonTestInput struct {
 	TestID         string `json:"test_id" required:"true"`
-	Revision       int64   `json:"revision" required:"true"`
+	Revision       int64  `json:"revision" required:"true"`
 	Reason         string `json:"reason" desc:"why the proposal is being closed"`
 	IdempotencyKey string `json:"idempotency_key"`
 }

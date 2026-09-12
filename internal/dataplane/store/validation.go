@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -65,14 +66,14 @@ type ValidationTest struct {
 	EvidenceJSON string `json:"evidence_json,omitempty"`
 	// BaselineValue/Unit/Window are the measured baseline, not just the
 	// denominator event.
-	BaselineValue  *float64 `json:"baseline_value,omitempty"`
-	BaselineUnit   string   `json:"baseline_unit,omitempty"`
-	BaselineWindow string   `json:"baseline_window,omitempty"`
-	Audience       string   `json:"audience,omitempty"`
-	Owner          string   `json:"owner,omitempty"`
-	SuccessMetric  string   `json:"success_metric,omitempty"`
-	GuardrailMetric string  `json:"guardrail_metric,omitempty"`
-	ReviewDate     *time.Time `json:"review_date,omitempty"`
+	BaselineValue   *float64   `json:"baseline_value,omitempty"`
+	BaselineUnit    string     `json:"baseline_unit,omitempty"`
+	BaselineWindow  string     `json:"baseline_window,omitempty"`
+	Audience        string     `json:"audience,omitempty"`
+	Owner           string     `json:"owner,omitempty"`
+	SuccessMetric   string     `json:"success_metric,omitempty"`
+	GuardrailMetric string     `json:"guardrail_metric,omitempty"`
+	ReviewDate      *time.Time `json:"review_date,omitempty"`
 	// OutcomeJSON is an append-only list of observation entries written only
 	// by record_outcome on committed/terminal states; the human decide act
 	// writes status+decision_note separately and never appends here.
@@ -81,6 +82,7 @@ type ValidationTest struct {
 	// read as 1.
 	Revision int64 `json:"revision"`
 }
+
 // Test lifecycle. `proposed` is the agent's draft; `committed` is the owner
 // having agreed to it in advance, which is the whole point of the row; the
 // three terminal states are the decision.
@@ -182,6 +184,31 @@ func (s *Store) migrateValidation(ctx context.Context) error {
 // whoever writes it: an agent may design the test, but only the owner can agree
 // to be bound by it, and that agreement is CommitValidationTest.
 func (s *Store) CreateValidationTest(ctx context.Context, t ValidationTest) (string, error) {
+	return createValidationTest(ctx, s.pg, t)
+}
+
+// CreateValidationTestIdempotent atomically claims a retry key, writes the
+// proposal, and stores its ID as the replay receipt.
+func (s *Store) CreateValidationTestIdempotent(ctx context.Context, t ValidationTest, idemKey, requestHash string) (string, error) {
+	raw, err := s.runIdempotent(ctx, t.ProjectID, "propose_test", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			id, err := createValidationTest(ctx, q, t)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(id)
+		})
+	if err != nil {
+		return "", err
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return "", fmt.Errorf("stored propose_test receipt unreadable: %w", err)
+	}
+	return id, nil
+}
+
+func createValidationTest(ctx context.Context, q pgQuerier, t ValidationTest) (string, error) {
 	if strings.TrimSpace(t.Hypothesis) == "" {
 		return "", errors.New("hypothesis is required")
 	}
@@ -207,7 +234,7 @@ func (s *Store) CreateValidationTest(ctx context.Context, t ValidationTest) (str
 		evidenceArg = t.EvidenceJSON
 	}
 	var id string
-	err := s.pg.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 INSERT INTO validation_tests (project_id, run_id, hypothesis, metric_event, baseline_event, target_count, window_days,
 	observation_id, evidence_json, baseline_value, baseline_unit, baseline_window,
 	audience, owner, success_metric, guardrail_metric, review_date)
