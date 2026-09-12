@@ -309,10 +309,15 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 		return ConnectorSync{}, err
 	}
 	// The connector must belong to the same project (an id from another
-	// tenant must not be attachable).
-	var one int
-	if err := s.pg.QueryRow(ctx, `SELECT 1 FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID).Scan(&one); err != nil {
+	// tenant must not be attachable) and must be live — a sync created under
+	// an archived source would look enabled yet can never run, and unarchive
+	// would silently activate it.
+	var archived bool
+	if err := s.pg.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID).Scan(&archived); err != nil {
 		return ConnectorSync{}, fmt.Errorf("connector not found")
+	}
+	if archived {
+		return ConnectorSync{}, ErrSourceArchived
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
@@ -347,6 +352,18 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	}
 	if err := validateSyncInput(in); err != nil {
 		return ConnectorSync{}, err
+	}
+	// A sync under an archived connector cannot be edited or re-enabled —
+	// unarchive the source instead (same fail-closed rule as the pause path).
+	var archived bool
+	if err := s.pg.QueryRow(ctx, `
+SELECT dc.archived_at IS NOT NULL
+FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
+WHERE cs.project_id = $1 AND cs.id = $2`, projectID, syncID).Scan(&archived); err != nil {
+		return ConnectorSync{}, fmt.Errorf("sync not found")
+	}
+	if archived {
+		return ConnectorSync{}, ErrSourceArchived
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `

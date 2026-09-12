@@ -91,6 +91,7 @@ export function ChartEditor({ chart, onSubmit, onClose }: {
     y_field: input.y_field,
     sort_order: chart?.sort_order ?? 0,
     col_span: colSpan,
+    revision: chart?.revision ?? 0,
     created_at: '',
     updated_at: '',
   }), [chart, projectID, name, effectiveKind, input.metric, input.event_name, input.x_field, input.y_field, source, previewSql, colSpan]);

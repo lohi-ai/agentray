@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, type ChartInput } from '@/lib/api';
+import { AgentRayAPI, apiErrorMessage, newIdempotencyKey, type ChartInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { useConsoleQuery } from './console';
 
@@ -46,47 +46,58 @@ export function useDashboards() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (input: { name: string; description: string }) =>
-      new AgentRayAPI(projectID!).updateDashboard(selectedDashboard!.id, input.name, input.description),
+    mutationFn: (input: { name: string; description: string; revision: number; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).updateDashboard(selectedDashboard!.id, input.name, input.description, {
+        revision: input.revision,
+        idempotencyKey: input.idempotencyKey,
+      }),
     onSuccess: async () => { setMessage('Dashboard updated.'); await invalidate(); },
+    onError: (err) => setError(apiErrorMessage(err, 'Failed to update dashboard')),
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => new AgentRayAPI(projectID!).deleteDashboard(selectedDashboard!.id),
+    mutationFn: (input: { revision: number; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).deleteDashboard(selectedDashboard!.id, {
+        revision: input.revision,
+        idempotencyKey: input.idempotencyKey,
+      }),
     onSuccess: async () => {
       setMessage('Dashboard deleted.');
       setSelectedDashboardID('');
       await invalidate();
     },
+    onError: (err) => setError(apiErrorMessage(err, 'Failed to delete dashboard')),
   });
 
   const saveChartMutation = useMutation({
-    mutationFn: ({ input, chartID }: { input: ChartInput; chartID?: string }) => {
+    mutationFn: ({ input, chartID, revision, idempotencyKey }: { input: ChartInput; chartID?: string; revision?: number; idempotencyKey: string }) => {
       if (!selectedDashboard) throw new Error('No dashboard selected');
       return chartID
-        ? new AgentRayAPI(projectID!).updateChart(chartID, input)
+        ? new AgentRayAPI(projectID!).updateChart(chartID, input, { revision, idempotencyKey })
         : new AgentRayAPI(projectID!).createChart(selectedDashboard.id, input);
     },
     onSuccess: async (_, vars) => {
       setMessage(vars.chartID ? 'Chart updated.' : 'Chart created.');
       if (selectedDashboard) await invalidateCharts(selectedDashboard.id);
     },
-    onError: (err) => setError(err instanceof Error ? err.message : 'Failed to save chart'),
+    onError: (err) => setError(apiErrorMessage(err, 'Failed to save chart')),
   });
 
   const deleteChartMutation = useMutation({
-    mutationFn: (chartID: string) => new AgentRayAPI(projectID!).deleteChart(chartID),
+    mutationFn: ({ chartID, revision, idempotencyKey }: { chartID: string; revision?: number; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).deleteChart(chartID, { revision, idempotencyKey }),
     onSuccess: async () => {
       setMessage('Chart deleted.');
       if (selectedDashboard) await invalidateCharts(selectedDashboard.id);
     },
+    onError: (err) => setError(apiErrorMessage(err, 'Failed to delete chart')),
   });
 
   const reorderChartsMutation = useMutation({
-    mutationFn: ({ dashboardID, chartIDs }: { dashboardID: string; chartIDs: string[] }) =>
-      new AgentRayAPI(projectID!).reorderCharts(dashboardID, chartIDs),
+    mutationFn: ({ dashboardID, chartIDs, revision, idempotencyKey }: { dashboardID: string; chartIDs: string[]; revision?: number; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).reorderCharts(dashboardID, chartIDs, { revision, idempotencyKey }),
     onSuccess: async (_, vars) => { await invalidateCharts(vars.dashboardID); },
-    onError: (err) => setError(err instanceof Error ? err.message : 'Failed to reorder charts'),
+    onError: (err) => setError(apiErrorMessage(err, 'Failed to reorder charts')),
   });
 
   const saveSQLChartMutation = useMutation({
@@ -106,11 +117,23 @@ export function useDashboards() {
     loading: query.isFetching,
     setSelectedDashboardID: async (id: string) => { setSelectedDashboardID(id); },
     createDashboard: async (input: { name: string; description: string }) => { await createMutation.mutateAsync(input); },
-    updateDashboard: async (input: { name: string; description: string }) => { await updateMutation.mutateAsync(input); },
-    deleteDashboard: async () => { await deleteMutation.mutateAsync(); },
-    saveChart: async (input: ChartInput, chartID?: string) => { await saveChartMutation.mutateAsync({ input, chartID }); },
-    deleteChart: async (chartID: string) => { await deleteChartMutation.mutateAsync(chartID); },
-    reorderCharts: async (dashboardID: string, chartIDs: string[]) => { await reorderChartsMutation.mutateAsync({ dashboardID, chartIDs }); },
-    saveSQLChart: async (dashboardID: string, input: ChartInput) => { await saveSQLChartMutation.mutateAsync({ dashboardID, input }); },
+    updateDashboard: async (input: { name: string; description: string }) => {
+      await updateMutation.mutateAsync({ ...input, revision: selectedDashboard?.revision ?? 0, idempotencyKey: newIdempotencyKey() });
+    },
+    deleteDashboard: async () => {
+      await deleteMutation.mutateAsync({ revision: selectedDashboard?.revision ?? 0, idempotencyKey: newIdempotencyKey() });
+    },
+    saveChart: async (input: ChartInput, chartID?: string) => {
+      const revision = chartID ? chartsQuery.data?.charts?.find((c) => c.id === chartID)?.revision : undefined;
+      await saveChartMutation.mutateAsync({ input, chartID, revision, idempotencyKey: newIdempotencyKey() });
+    },
+    deleteChart: async (chartID: string) => {
+      const revision = chartsQuery.data?.charts?.find((c) => c.id === chartID)?.revision;
+      await deleteChartMutation.mutateAsync({ chartID, revision, idempotencyKey: newIdempotencyKey() });
+    },
+    reorderCharts: async (dashboardID: string, chartIDs: string[]) => {
+      const revision = dashboards.find((d) => d.id === dashboardID)?.revision;
+      await reorderChartsMutation.mutateAsync({ dashboardID, chartIDs, revision, idempotencyKey: newIdempotencyKey() });
+    },
   };
 }
