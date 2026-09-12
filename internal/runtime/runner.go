@@ -129,6 +129,9 @@ type Runner struct {
 	// secret-resolving fan-out. nil leaves the tool wired but returning a clear
 	// "not configured" error, so an agent granted the scope degrades cleanly.
 	Notifier usecase.Notifier
+	// SourceRunner is the connector engine's enqueue/cancel surface, threaded
+	// into usecase.Deps for run_source/cancel_source_run.
+	SourceRunner usecase.SourceRunner
 }
 
 // RunnerOption configures a Runner at construction. Threaded unchanged through
@@ -306,6 +309,15 @@ func WithMaxToolCalls(n int) RunnerOption {
 func WithNotifier(n usecase.Notifier) RunnerOption {
 	return func(r *Runner) {
 		r.Notifier = n
+	}
+}
+
+// WithSourceRunner wires the connector engine into every run's deps so
+// run_source/cancel_source_run work for in-process agents the same as over
+// MCP and /api/op. nil leaves those tools reporting unavailable.
+func WithSourceRunner(sr usecase.SourceRunner) RunnerOption {
+	return func(r *Runner) {
+		r.SourceRunner = sr
 	}
 }
 
@@ -795,6 +807,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Data:         r.Store,
 		Memory:       mem,
 		Notifier:     r.Notifier,
+		SourceRunner: r.SourceRunner,
 		RunID:        runID,
 		Sandbox:      r.Sandbox,
 		Credentials:  creds,

@@ -825,7 +825,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		dashboards, err := store.ListDashboards(c.Request().Context(), project.ID)
+		dashboards, err := store.ListDashboardsFiltered(c.Request().Context(), project.ID, false)
 		if err != nil {
 			return err
 		}

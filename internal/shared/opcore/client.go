@@ -44,7 +44,14 @@ func (c *Client) Call(ctx context.Context, op string, input []byte) ([]byte, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
-		req.Header.Set("X-API-Key", c.APIKey)
+		// Management credentials (agm_…) travel as Bearer — the resolver only
+		// accepts them there, never as a project key. Everything else stays on
+		// X-API-Key so capture/legacy keys are unchanged.
+		if strings.HasPrefix(c.APIKey, "agm_") {
+			req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		} else {
+			req.Header.Set("X-API-Key", c.APIKey)
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

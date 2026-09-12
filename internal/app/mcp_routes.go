@@ -24,12 +24,13 @@ import (
 //
 //	claude mcp add --transport http --header "Authorization: Bearer <agm_…>" \
 //	  agentray https://agentray.lohi2.com/mcp
-func registerMcpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier) {
+func registerMcpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notifier, runner usecase.SourceRunner) {
 	reg := usecase.Registry()
 	deps := &usecase.Deps{
 		Repo:     store,
 		Memory:   agentruntime.NewPgMemory(store, false),
 		Notifier: notifier,
+		Runner:   runner,
 	}
 	group := e.Group("/mcp")
 	opcore.MountMCP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {

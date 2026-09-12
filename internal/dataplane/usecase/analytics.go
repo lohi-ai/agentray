@@ -45,6 +45,18 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, remember())
 	opcore.Register(r, sendNotification())
 	opcore.Register(r, overview())
+	opcore.Register(r, verifySDK())
+	opcore.Register(r, updateDashboard())
+	opcore.Register(r, archiveDashboard())
+	opcore.Register(r, unarchiveDashboard())
+	opcore.Register(r, testSource())
+	opcore.Register(r, previewSource())
+	opcore.Register(r, createSource())
+	opcore.Register(r, updateSource())
+	opcore.Register(r, pauseSource())
+	opcore.Register(r, runSource())
+	opcore.Register(r, sourceStatus())
+	opcore.Register(r, cancelSourceRun())
 	r.SetLegacyAllowlist(legacyOperationAllowlist)
 	return r
 }
@@ -326,18 +338,24 @@ type listDashboardsOutput struct {
 	Dashboards []storage.Dashboard `json:"dashboards"`
 }
 
-func listDashboards() opcore.Operation[noInput, listDashboardsOutput] {
-	return opcore.Operation[noInput, listDashboardsOutput]{
+type listDashboardsInput struct {
+	// IncludeArchived is the explicit archived view the soft-archive contract
+	// requires — default lists stay active-only.
+	IncludeArchived bool `json:"include_archived" desc:"include archived dashboards (default false)"`
+}
+
+func listDashboards() opcore.Operation[listDashboardsInput, listDashboardsOutput] {
+	return opcore.Operation[listDashboardsInput, listDashboardsOutput]{
 		Name:    "list_dashboards",
-		Summary: "List the project's existing dashboards (id + name) to pin charts to.",
+		Summary: "List the project's existing dashboards (id + name) to pin charts to. Pass include_archived for the archived view.",
 		Scope:   "analyze_build",
 		Access:  opcore.AccessAnalyticsRead,
-		Handler: func(ctx context.Context, cc opcore.CallContext, _ noInput) (listDashboardsOutput, error) {
+		Handler: func(ctx context.Context, cc opcore.CallContext, in listDashboardsInput) (listDashboardsOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return listDashboardsOutput{}, err
 			}
-			boards, err := d.Repo.ListDashboards(ctx, cc.ProjectID)
+			boards, err := d.Repo.ListDashboardsFiltered(ctx, cc.ProjectID, in.IncludeArchived)
 			if err != nil {
 				return listDashboardsOutput{}, err
 			}
