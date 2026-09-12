@@ -87,7 +87,6 @@ type fakeStore struct {
 	syncs     []ScheduledSync
 	job       SyncJob
 	inserted  [][]LandedRow
-	versions  []uint64
 	insertErr error
 	finished  []SyncResult
 	cancelled []bool
@@ -110,14 +109,13 @@ func (f *fakeStore) ConnectorSyncJob(ctx context.Context, syncID string) (SyncJo
 	job.SyncID = syncID
 	return job, nil
 }
-func (f *fakeStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow, version uint64) error {
+func (f *fakeStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.insertErr != nil {
 		return f.insertErr
 	}
 	f.inserted = append(f.inserted, rows)
-	f.versions = append(f.versions, version)
 	return nil
 }
 
@@ -291,12 +289,12 @@ type failSecondInsertStore struct {
 	calls int
 }
 
-func (f *failSecondInsertStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow, version uint64) error {
+func (f *failSecondInsertStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
 	f.calls++
 	if f.calls == 2 {
 		return fmt.Errorf("clickhouse down")
 	}
-	return f.fakeStore.InsertExternalRows(ctx, projectID, connectorID, table, rows, version)
+	return f.fakeStore.InsertExternalRows(ctx, projectID, connectorID, table, rows)
 }
 
 // Snapshot mode (no cursor column) re-pulls from the beginning every run:

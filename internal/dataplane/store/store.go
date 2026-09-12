@@ -1265,27 +1265,17 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 	}
 	// external_rows is the landing table for data-connector syncs: one wide
 	// JSON row per source row, deduplicated on merge by the replacing key so
-	// snapshot re-syncs and retried batches are idempotent. `version` is the
-	// deterministic replacement order — landing_seq*1e6 + batch_index, where
-	// landing_seq increments once per run on connector_syncs (runs are
-	// serialized per sync by connector_runs_one_active). Wall-clock synced_at
-	// is kept for observability but is NOT the version: two batches can share
-	// a millisecond, and a tie picks an arbitrary row. run_sql reaches this
-	// table through the scoped_external_rows rewrite (scopedReadonlySQL) and
-	// the readonly role's database-wide SELECT grant already covers it.
+	// snapshot re-syncs and retried batches are idempotent. `synced_at`
+	// versions the replacement so the newest pull of a row wins; run_sql
+	// reaches this table through the scoped_external_rows rewrite
+	// (scopedReadonlySQL) and the readonly role's database-wide SELECT grant
+	// already covers it.
 	//
-	// Engine change note: ReplacingMergeTree's version column cannot be
-	// altered in place. There are no production users yet, so the migration
-	// drops and recreates the table when it finds the old synced_at engine —
-	// acceptable only while the table is empty in every environment.
-	var engine string
-	if err := s.ch.QueryRow(ctx, `
-SELECT engine_full FROM system.tables WHERE database = currentDatabase() AND name = 'external_rows'`).Scan(&engine); err == nil &&
-		!strings.Contains(engine, "ReplacingMergeTree(version)") {
-		if derr := s.ch.Exec(ctx, `DROP TABLE external_rows`); derr != nil {
-			return derr
-		}
-	}
+	// Known limit, stated honestly: synced_at is wall-clock per batch, so two
+	// batches landing in the same millisecond tie on the version column and
+	// FINAL picks an arbitrary row. A deterministic landing version
+	// (per-sync sequence + batch index) is designed but deferred — it needs
+	// an engine change that cannot be applied in place.
 	if err := s.ch.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS external_rows (
 	project_id UUID,
@@ -1294,10 +1284,9 @@ CREATE TABLE IF NOT EXISTS external_rows (
 	row_key String,
 	cursor String,
 	data String,
-	synced_at DateTime64(3, 'UTC') DEFAULT now64(),
-	version UInt64 DEFAULT 0
+	synced_at DateTime64(3, 'UTC') DEFAULT now64()
 )
-ENGINE = ReplacingMergeTree(version)
+ENGINE = ReplacingMergeTree(synced_at)
 ORDER BY (project_id, connector_id, table_name, row_key)`); err != nil {
 		return err
 	}

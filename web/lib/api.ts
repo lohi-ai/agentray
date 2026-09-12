@@ -747,8 +747,6 @@ export type ConnectorSync = {
   deletion_mode: string;
   soft_delete_column: string;
   soft_delete_semantics: string;
-  // Per-sync monotonic run sequence feeding the external_rows version column.
-  landing_seq: number;
   revision: number;
   created_at: string;
   updated_at: string;
