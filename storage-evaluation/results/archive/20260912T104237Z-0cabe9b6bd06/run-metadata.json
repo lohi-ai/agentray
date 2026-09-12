@@ -1,7 +1,7 @@
 {
   "clickhouse_image": "clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621",
-  "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
-  "commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
+  "code_digest": "fd74dde13c26cc5cbc85595aa37a71b52080f88d276838535263100323ad7e17",
+  "commit": "2ea4c13c7a36f9c27433b289ec4efe89ab9d7818",
   "driver_image": "storage-eval-driver:py3.13-4db95b141922",
   "driver_limits": {
     "cpus": "1",
@@ -11,8 +11,8 @@
   "generated_by": "storage-evaluation harness",
   "legs": [
     {
-      "code_commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
-      "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
+      "code_commit": "2ea4c13c7a36f9c27433b289ec4efe89ab9d7818",
+      "code_digest": "fd74dde13c26cc5cbc85595aa37a71b52080f88d276838535263100323ad7e17",
       "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
       "corpus_rows": 99538,
       "days": 7,
@@ -33,8 +33,8 @@
       "teardown": "stopped"
     },
     {
-      "code_commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
-      "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
+      "code_commit": "2ea4c13c7a36f9c27433b289ec4efe89ab9d7818",
+      "code_digest": "fd74dde13c26cc5cbc85595aa37a71b52080f88d276838535263100323ad7e17",
       "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
       "corpus_rows": 99538,
       "days": 7,
@@ -87,8 +87,7 @@
         "seed": 20260912
       }
     ],
-    "preflight_free_gib": 24.0,
-    "requested_at": "2026-09-12T10:48:48Z",
+    "requested_at": "2026-09-12T10:39:36Z",
     "tag": "smoke"
   }
 }

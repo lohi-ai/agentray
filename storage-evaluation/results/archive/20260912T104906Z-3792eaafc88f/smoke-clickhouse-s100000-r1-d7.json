@@ -199,23 +199,23 @@
   "days": 7,
   "engine": "clickhouse",
   "ingest": {
-    "ack_s": 0.03,
+    "ack_s": 0.06,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
-        -0.0,
-        0.021
+        -0.002,
+        0.025
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 0.04
+    "visibility_lag_s": 0.07
   },
-  "load_s": 1.49,
+  "load_s": 1.62,
   "provenance": {
-    "code_commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
-    "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
+    "code_commit": "91fc4a24737296273852419a4ae235fd04017f1f",
+    "code_digest": "903b0104b49fa7f6715d782dd2d15856a460c3cd4a6c7553d8e17b555d9ecc94",
     "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
     "corpus_rows": 99538,
     "driver_cpus": "1",
@@ -231,14 +231,14 @@
   },
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 7.7,
-    "cpu_pct_peak": 20.0,
-    "disk_after_load_bytes": 11823239,
-    "disk_before_bytes": 530918,
-    "disk_final_bytes": 13142688,
-    "mem_idle_bytes": 226668544,
-    "mem_peak_bytes": 489349120,
-    "samples": 3
+    "cpu_pct_mean": 5.4,
+    "cpu_pct_peak": 17.7,
+    "disk_after_load_bytes": 11822723,
+    "disk_before_bytes": 530402,
+    "disk_final_bytes": 13142172,
+    "mem_idle_bytes": 221491200,
+    "mem_peak_bytes": 588402688,
+    "samples": 4
   },
   "scale": 100000,
   "seed": 20260912,
@@ -246,75 +246,75 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 11.0,
-        "p95_ms": 11.0,
-        "p99_ms": 11.0
+        "p50_ms": 20.4,
+        "p95_ms": 20.4,
+        "p99_ms": 20.4
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 10.3,
-        "p95_ms": 10.3,
-        "p99_ms": 10.3
+        "p50_ms": 14.3,
+        "p95_ms": 14.3,
+        "p99_ms": 14.3
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 20.2,
-        "p95_ms": 20.2,
-        "p99_ms": 20.2
+        "p50_ms": 24.3,
+        "p95_ms": 24.3,
+        "p99_ms": 24.3
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 30.7,
-        "p95_ms": 30.7,
-        "p99_ms": 30.7
+        "p50_ms": 57.3,
+        "p95_ms": 57.3,
+        "p99_ms": 57.3
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 12.0,
-        "p95_ms": 12.0,
-        "p99_ms": 12.0
+        "p50_ms": 16.3,
+        "p95_ms": 16.3,
+        "p99_ms": 16.3
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 12.5,
-        "p95_ms": 12.5,
-        "p99_ms": 12.5
+        "p50_ms": 16.8,
+        "p95_ms": 16.8,
+        "p99_ms": 16.8
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 13.6,
-        "p95_ms": 13.6,
-        "p99_ms": 13.6
+        "p50_ms": 25.7,
+        "p95_ms": 25.7,
+        "p99_ms": 25.7
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 12.3,
-        "p95_ms": 12.3,
-        "p99_ms": 12.3
+        "p50_ms": 18.1,
+        "p95_ms": 18.1,
+        "p99_ms": 18.1
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 46.4,
-        "p95_ms": 46.4,
-        "p99_ms": 46.4
+        "p50_ms": 58.0,
+        "p95_ms": 58.0,
+        "p99_ms": 58.0
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 48.5,
-        "p95_ms": 48.5,
-        "p99_ms": 48.5
+        "p50_ms": 65.0,
+        "p95_ms": 65.0,
+        "p99_ms": 65.0
       }
     }
   },
   "status": "MEASURED",
   "teardown": "stopped",
-  "wall_s": 11.4
+  "wall_s": 14.0
 }

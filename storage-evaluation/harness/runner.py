@@ -33,13 +33,17 @@ class Sampler(threading.Thread):
         self.container_name = container_name
         self.interval = interval
         self.samples = []
+        # Sampling failures are recorded, not swallowed: a leg with zero
+        # samples must report the failure, not render as if memory were 0.
+        self.errors = []
         self._stop_event = threading.Event()
 
     def run(self):
-        cli = engines.client()
         try:
+            cli = engines.client()
             c = cli.containers.get(self.container_name)
-        except Exception:
+        except Exception as e:
+            self.errors.append(f"{type(e).__name__}: {e}")
             return
         while not self._stop_event.is_set():
             try:
@@ -56,25 +60,29 @@ class Sampler(threading.Thread):
                 ncpu = len(s["cpu_stats"]["cpu_usage"].get("percpu_usage") or [1])
                 cpu_pct = (cpu_delta / sys_delta * ncpu * 100.0) if sys_delta > 0 else 0.0
                 self.samples.append({"t": time.time(), "mem": mem, "cpu_pct": cpu_pct})
-            except Exception:
-                pass
+            except Exception as e:
+                self.errors.append(f"{type(e).__name__}: {e}")
             self._stop_event.wait(self.interval)
 
     def stop(self):
         self._stop_event.set()
 
     def summary(self) -> dict:
-        if not self.samples:
-            return {}
-        mem = [s["mem"] for s in self.samples]
-        cpu = [s["cpu_pct"] for s in self.samples]
-        return {
-            "mem_idle_bytes": mem[0],
-            "mem_peak_bytes": max(mem),
-            "cpu_pct_peak": round(max(cpu), 1),
-            "cpu_pct_mean": round(statistics.mean(cpu), 1),
-            "samples": len(self.samples),
-        }
+        out = {}
+        if self.samples:
+            mem = [s["mem"] for s in self.samples]
+            cpu = [s["cpu_pct"] for s in self.samples]
+            out.update({
+                "mem_idle_bytes": mem[0],
+                "mem_peak_bytes": max(mem),
+                "cpu_pct_peak": round(max(cpu), 1),
+                "cpu_pct_mean": round(statistics.mean(cpu), 1),
+            })
+        out["samples"] = len(self.samples)
+        if self.errors:
+            out["sample_errors"] = len(self.errors)
+            out["sample_error_first"] = self.errors[0][:200]
+        return out
 
 
 def _pct(values, p):
@@ -107,6 +115,7 @@ def generate_bounded(scale: int, seed: int, ingest_rows: int,
     Raises Deadline on timeout or workdir overflow; the child is killed
     either way.
     """
+    WORK.mkdir(parents=True, exist_ok=True)
     err_path = WORK / "corpus-gen.err"
     with open(err_path, "w") as err_f:
         proc = subprocess.Popen(
@@ -209,6 +218,21 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         "provenance": {
             "code_commit": os.environ.get("EVAL_COMMIT") or None,
             "code_digest": code_digest(),
+            # The limits this leg actually ran under — the run contract is
+            # incomplete without them (same numbers, different envelope =
+            # different evidence).
+            "limits": {
+                "engine_mem": caps["engine_mem"],
+                "engine_cpus": caps["engine_cpus"],
+                "workdir_gib": caps["workdir_gib"],
+                "wall_s": deadline_s,
+                "ingest_rows": caps["ingest_rows"],
+            },
+            # Driver envelope: the eval wrapper passes its own caps in;
+            # absent means the leg ran outside the wrapper.
+            "driver_image": os.environ.get("EVAL_DRIVER_IMAGE") or None,
+            "driver_mem": os.environ.get("EVAL_DRIVER_MEM") or None,
+            "driver_cpus": os.environ.get("EVAL_DRIVER_CPUS") or None,
         },
     }
     def remaining():
@@ -278,7 +302,13 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
                 if cid == "identity.canonical_events_7d":
                     extra = eng.run_check("identity.canonical_total_7d", days,
                                           deleted_keys)
-                leg["checks"][cid] = _grade(cid, spec, rows, extra)
+                result = _grade(cid, spec, rows, extra)
+                # Persist semantic context with the executed leg. A later
+                # report must not depend on whatever scratch corpus happens
+                # to remain on disk to explain this result.
+                if spec.get("note"):
+                    result["note"] = spec["note"]
+                leg["checks"][cid] = result
             except Exception as e:
                 leg["checks"][cid] = {"kind": spec["kind"], "status": "ERROR",
                                       "error": str(e)[:300]}

@@ -4,7 +4,6 @@
       "actual": 20.18883811908654,
       "expected": 20.18883811908654,
       "kind": "baseline_parity",
-      "note": "cost_usd is Float32 USD agent cost only; parity here is NOT evidence of gross/net billing or mixed-currency correctness.",
       "status": "PASS"
     },
     "currency.mixed": {
@@ -22,7 +21,6 @@
         7669
       ],
       "kind": "baseline_parity",
-      "note": "InsertID is stored but never deduplicated on read (store.go:201-210); raw > distinct is frozen production behavior, not an engine bug.",
       "status": "PASS"
     },
     "dedup.read_time_guarantee": {
@@ -40,14 +38,12 @@
       "actual": 100,
       "expected": 100,
       "kind": "baseline_parity",
-      "note": "external_rows has no delete marker (store.go:1248-1265); upstream-deleted rows remain visible. Parity here documents the limitation.",
       "status": "PASS"
     },
     "entity.tombstone_delete": {
       "actual": 100,
       "expected": 0,
       "kind": "semantic_gate",
-      "note": "Target semantics: a source delete must remove the row. Current schema has no tombstone, so both engines are expected to show the rows \u2014 that is a DIVERGENT gate result, not a pass.",
       "status": "DIVERGENT"
     },
     "entity_join.order_paid_7d": {
@@ -180,7 +176,6 @@
         1281
       ],
       "kind": "baseline_parity",
-      "note": "Only mature cohorts count: first signup + 14d <= corpus end, so the week-1 bracket is fully observed.",
       "status": "PASS"
     },
     "sessionization.gap_violations": {
@@ -197,47 +192,37 @@
     }
   },
   "days": 7,
-  "engine": "clickhouse",
+  "engine": "duckdb",
   "ingest": {
-    "ack_s": 0.03,
+    "ack_s": 0.06,
     "expected_total": 109538,
     "final_total": 109538,
     "reader_spans_s": [
       [
         -0.0,
-        0.021
+        0.074
       ]
     ],
     "readers_overlapping_ingest": 1,
     "rows": 10000,
-    "visibility_lag_s": 0.04
+    "visibility_lag_s": 0.07
   },
-  "load_s": 1.49,
+  "load_s": 0.92,
   "provenance": {
-    "code_commit": "55aa54408b6efecce11808ed530c6de30bfdc6b3",
-    "code_digest": "bb8f331747d29c79877112c08f12cc2820d3953797805ac3587f15500fd28f1e",
+    "code_commit": "b633e8e702dd5a578ebd94eb1d9fcacc977f3f95",
+    "code_digest": "ebc08840fd6e1b6b1aa1793ad5d823ed8db6d9464c69f3e415b9c04237690a7f",
     "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
-    "corpus_rows": 99538,
-    "driver_cpus": "1",
-    "driver_image": "storage-eval-driver:py3.13-4db95b141922",
-    "driver_mem": "512m",
-    "limits": {
-      "engine_cpus": 2,
-      "engine_mem": "2g",
-      "ingest_rows": 10000,
-      "wall_s": 900,
-      "workdir_gib": 8
-    }
+    "corpus_rows": 99538
   },
   "readers": 1,
   "resources": {
-    "cpu_pct_mean": 7.7,
-    "cpu_pct_peak": 20.0,
-    "disk_after_load_bytes": 11823239,
-    "disk_before_bytes": 530918,
-    "disk_final_bytes": 13142688,
-    "mem_idle_bytes": 226668544,
-    "mem_peak_bytes": 489349120,
+    "cpu_pct_mean": 3.8,
+    "cpu_pct_peak": 11.3,
+    "disk_after_load_bytes": 116323986,
+    "disk_before_bytes": 16033,
+    "disk_final_bytes": 121861509,
+    "mem_idle_bytes": 88199168,
+    "mem_peak_bytes": 382115840,
     "samples": 3
   },
   "scale": 100000,
@@ -246,75 +231,75 @@
     "aggregate": {
       "first": {
         "n": 1,
-        "p50_ms": 11.0,
-        "p95_ms": 11.0,
-        "p99_ms": 11.0
+        "p50_ms": 7.1,
+        "p95_ms": 7.1,
+        "p99_ms": 7.1
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 10.3,
-        "p95_ms": 10.3,
-        "p99_ms": 10.3
+        "p50_ms": 7.4,
+        "p95_ms": 7.4,
+        "p99_ms": 7.4
       }
     },
     "entity_join": {
       "first": {
         "n": 1,
-        "p50_ms": 20.2,
-        "p95_ms": 20.2,
-        "p99_ms": 20.2
+        "p50_ms": 8.5,
+        "p95_ms": 8.5,
+        "p99_ms": 8.5
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 30.7,
-        "p95_ms": 30.7,
-        "p99_ms": 30.7
+        "p50_ms": 11.7,
+        "p95_ms": 11.7,
+        "p99_ms": 11.7
       }
     },
     "funnel": {
       "first": {
         "n": 1,
-        "p50_ms": 12.0,
-        "p95_ms": 12.0,
-        "p99_ms": 12.0
+        "p50_ms": 11.6,
+        "p95_ms": 11.6,
+        "p99_ms": 11.6
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 12.5,
-        "p95_ms": 12.5,
-        "p99_ms": 12.5
+        "p50_ms": 14.6,
+        "p95_ms": 14.6,
+        "p99_ms": 14.6
       }
     },
     "overview": {
       "first": {
         "n": 1,
-        "p50_ms": 13.6,
-        "p95_ms": 13.6,
-        "p99_ms": 13.6
+        "p50_ms": 10.3,
+        "p95_ms": 10.3,
+        "p99_ms": 10.3
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 12.3,
-        "p95_ms": 12.3,
-        "p99_ms": 12.3
+        "p50_ms": 14.7,
+        "p95_ms": 14.7,
+        "p99_ms": 14.7
       }
     },
     "retention": {
       "first": {
         "n": 1,
-        "p50_ms": 46.4,
-        "p95_ms": 46.4,
-        "p99_ms": 46.4
+        "p50_ms": 13.4,
+        "p95_ms": 13.4,
+        "p99_ms": 13.4
       },
       "repeat": {
         "n": 2,
-        "p50_ms": 48.5,
-        "p95_ms": 48.5,
-        "p99_ms": 48.5
+        "p50_ms": 10.9,
+        "p95_ms": 10.9,
+        "p99_ms": 10.9
       }
     }
   },
   "status": "MEASURED",
   "teardown": "stopped",
-  "wall_s": 11.4
+  "wall_s": 6.4
 }
