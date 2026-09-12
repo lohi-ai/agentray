@@ -238,6 +238,11 @@ func TestSourceArchivePausesSyncs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sync: %v", err)
 	}
+	// Run admission rejects inside its locked transaction — no run row is
+	// persisted for a sync under an archived connector.
+	if _, _, err := s.EnqueueConnectorRun(ctx, projectID, enabledSync.ID, "run1"); !errors.Is(err, ErrSourceArchived) {
+		t.Fatalf("enqueue under archived connector = %v, want ErrSourceArchived", err)
+	}
 	if _, err := s.SetConnectorSyncEnabledIdempotent(ctx, projectID, enabledSync.ID, true, cur.Revision, "pe1", "h3"); !errors.Is(err, ErrSourceArchived) {
 		t.Fatalf("enable under archived connector = %v, want ErrSourceArchived", err)
 	}
