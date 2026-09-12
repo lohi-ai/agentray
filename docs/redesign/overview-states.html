@@ -25,12 +25,12 @@ nav{display:grid;gap:var(--space-1)}
 nav a{min-height:44px;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md)}
 nav a[aria-current]{background:var(--surface-3);color:var(--primary)}
 nav .sub{padding-left:var(--space-6);font-size:var(--fs-xs);min-height:44px;white-space:nowrap}
-nav .off{color:var(--faint)}
+nav .off{color:var(--muted-foreground)}
 .navgroup{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground);padding:var(--space-3) var(--space-3) var(--space-1)}
 main{max-width:1400px;width:100%;padding:var(--space-6);min-width:0}
 .muted,small{color:var(--muted-foreground)}
 small{font-size:var(--fs-xs)}
-.faint{color:var(--faint)}
+.unavail{color:var(--muted-foreground)}
 h1,h2,h3,p{margin:0}
 h1{font-size:var(--fs-lg)}
 h2{font-size:var(--fs-md)}
@@ -56,7 +56,7 @@ h3{font-size:var(--fs-sm)}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success)}
 .dot.warn{background:var(--warning)}
 .dot.err{background:var(--danger)}
-.dot.off{background:var(--faint)}
+.dot.off{background:var(--muted-foreground)}
 .callout{padding:var(--space-4);border-radius:var(--radius-lg);background:var(--surface-1);border-left:3px solid var(--warning)}
 .callout .clabel{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground)}
 .callout .ctitle{font-size:var(--fs-sm);font-weight:600}
@@ -147,7 +147,7 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
     <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
     <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible · within 24h</small></div>
-    <div class="stat"><span class="label">Revenue</span><span class="value faint">Set up</span><small>No billing source connected</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
   </div>
 
   <details><summary>How these numbers are computed</summary>
@@ -162,7 +162,7 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <article class="panel stack"><h2>Retention</h2>
       <p><strong>Day 1: 41%</strong><br><small>132 of 320 returned</small></p>
       <p><strong>Day 7: 24%</strong><br><small>48 of 200 in the mature Aug 29–Sep 4 cohort</small></p>
-      <p><strong>Day 30: <span class="faint">Not ready</span></strong><br><small>No cohort has matured 30 days yet</small></p>
+      <p><strong>Day 30: <span class="unavail">Not ready</span></strong><br><small>No cohort has matured 30 days yet</small></p>
       <small>Lifetime cohorts — a person counts from their first-ever event, not the selected range.</small>
     </article>
   </div>
@@ -217,21 +217,22 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <div class="stats stats3">
       <div class="stat"><span class="label">First-time downloads</span><span class="value">412</span><small>App Store Connect · UTC days</small></div>
       <div class="stat"><span class="label">Redownloads</span><span class="value">58</span><small>App Store Connect · UTC days</small></div>
-      <div class="stat"><span class="label">Conversion rate</span><span class="value faint">Not available</span><small>Definition pending — Apple counts downloads ÷ unique-device impressions</small></div>
+      <div class="stat"><span class="label">Conversion rate</span><span class="value">4.1%</span><small>Downloads + pre-orders ÷ unique-device impressions · App Store Connect</small></div>
       <div class="stat"><span class="label">Impressions / day</span><span class="value">1,430</span><small>Daily average · App Store Connect</small></div>
       <div class="stat"><span class="label">Product page views</span><span class="value">9,980</span><small>App Store Connect · UTC days</small></div>
       <div class="stat"><span class="label">Updates</span><span class="value">1,120</span><small>App Store Connect · UTC days</small></div>
     </div>
+    <small>Conversion rate uses Apple’s definition — (first-time downloads + redownloads + pre-orders) ÷ unique-device impressions, with a pre-order not counted again once it converts to a download. It stays <em>Not available</em> until the source exposes every input.</small>
   </article>
 
   <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button" href="#analytics">See more</a></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">Proceeds</span><span class="value">$1,284</span><small>USD · net of Apple commission · refunds excluded</small></div>
+      <div class="stat"><span class="label">Proceeds</span><span class="value">$1,284</span><small>USD · estimated customer price less applicable tax and Apple’s commission · refunds reported separately</small></div>
       <div class="stat"><span class="label">Paying users</span><span class="value">96</span><small>App Store Connect · UTC days</small></div>
       <div class="stat"><span class="label">In-app purchases / day</span><span class="value">18</span><small>Daily average · App Store Connect</small></div>
       <div class="stat"><span class="label">Download→paid D1</span><span class="value">2.9%</span><small>12 of 412 first-time downloads</small></div>
-      <div class="stat"><span class="label">Download→paid D7</span><span class="value faint">Not ready</span><small>Cohort not mature</small></div>
-      <div class="stat"><span class="label">Download→paid D35</span><span class="value faint">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Download→paid D7</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Download→paid D35</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
     </div>
     <small>One currency per figure; unlike currencies are never summed.</small>
   </article>
@@ -240,14 +241,20 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <div class="stats stats4">
       <div class="stat"><span class="label">Avg retention D1</span><span class="value">38%</span><small>Opt-in devices only</small></div>
       <div class="stat"><span class="label">Avg retention D7</span><span class="value">21%</span><small>Opt-in devices only</small></div>
-      <div class="stat"><span class="label">Avg retention D14</span><span class="value faint">Not ready</span><small>Cohort not mature</small></div>
-      <div class="stat"><span class="label">Avg retention D28</span><span class="value faint">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Avg retention D14</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Avg retention D28</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>Crashes by app version</th><th>Crashes</th><th>Devices</th></tr></thead><tbody>
       <tr><td class="mono">1.4.2</td><td class="mono">34</td><td class="mono">1,920</td></tr>
       <tr><td class="mono">1.4.1</td><td class="mono">12</td><td class="mono">410</td></tr>
     </tbody></table></div>
-    <small>Crash and usage figures cover devices that opted in to sharing; they undercount the full install base and are labeled as such.</small>
+    <small>Crash and usage figures cover devices that opted in to sharing; they undercount the full install base and are labeled as such. Apple also withholds low-volume rows — a version or day below the reporting threshold shows <em>Not available</em>, never zero.</small>
+  </article>
+
+  <article class="panel stack"><div class="row"><h2>Best next step</h2><span class="tag">From Plans · evidence-backed</span></div>
+    <p><strong>Your App Store conversion is falling while product-page views hold.</strong> Conversion moved from 5.2% to 4.1% this week; product page views are flat, so the drop is downstream of discovery.</p>
+    <p class="muted"><small>Evidence: app conversion metric v1 · Sep 5–11 · App Store Connect UTC days · coverage 100% of eligible impressions · refreshed 2 min ago. Observation, not a tested cause.</small></p>
+    <div class="row"><a class="button primary" href="#plans">Open the finding</a><a class="button" href="#agents">Ask your agent to investigate</a></div>
   </article>
 
   <article class="panel"><div class="row"><h2>Data status</h2><small>Mixed freshness per source</small></div>
@@ -269,6 +276,10 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
       <li><strong>Come back here</strong> — the overview fills in once real usage lands. Test events never count toward these numbers.</li>
     </ol>
     <div class="row"><a class="button primary" href="#data">Set up the SDK</a><a class="button" href="#agents">Copy an agent setup task</a></div>
+  </article>
+  <article class="panel stack"><h2>What this overview will show you</h2>
+    <p class="muted">Once events arrive, this page answers three questions without any setup: who is arriving, whether they activate, and whether they come back. When a pattern is worth acting on, a <strong>Best next step</strong> panel appears here with the evidence behind it — the metric, its range, and its freshness.</p>
+    <p class="muted"><small><strong>Example — not your data.</strong> “Activation fell from 31% to 25% this week; 80 of 320 new users finished setup.” A real finding replaces this once your data lands.</small></p>
   </article>
   <article class="panel"><h2>Data status</h2><p class="muted">No connected data sources yet. Capture keys are write-only; management credentials stay with you.</p></article>
 </section>
@@ -300,7 +311,7 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <div class="stat"><span class="label">New people</span><span class="value">320</span><small class="warn">As of Sep 8</small></div>
     <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small class="warn">As of Sep 8</small></div>
     <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small class="warn">As of Sep 8</small></div>
-    <div class="stat"><span class="label">Revenue</span><span class="value faint">Set up</span><small>No billing source connected</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
   </div>
   <article class="panel"><div class="row"><h2>Data status</h2><span class="pill"><span class="dot warn"></span>Quiet — nothing received for 3 days</span></div>
     <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
@@ -313,7 +324,7 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
 <!-- ================= ERROR ================= -->
 <section class="state" id="state-error" aria-label="Error — overview unavailable">
   <header class="row"><div><h1>Overview</h1><p class="muted">The last complete days, at a glance.</p></div></header>
-  <div class="callout"><span class="clabel">Overview unavailable</span>
+  <div class="callout" role="status"><span class="clabel">Overview unavailable</span>
     <p class="ctitle">Could not load the overview</p>
     <p class="cdetail">The overview request failed. Your data is unchanged — this is a read problem, not a data problem.</p>
     <p style="margin-top:var(--space-3)"><a class="button" href="#state-error">Retry</a></p>
@@ -329,32 +340,38 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <p class="cdetail">Downloads, impressions, product page views, proceeds, purchases, App Clip and benchmark data come only from Apple — they cannot be derived from SDK events. Until a verified source is connected, every tile below reports its state, never a number.</p>
   </div>
 
-  <article class="panel stack"><div class="row"><h2>Acquisition</h2><a class="button primary" href="#data">Connect source</a></div>
+  <article class="panel stack"><div class="row"><h2>Acquisition</h2><a class="button" href="#data">Connect source</a></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">First-time downloads</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Redownloads</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Conversion rate</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Impressions / day</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Product page views</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Updates</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">First-time downloads</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Redownloads</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Conversion rate</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Impressions / day</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Product page views</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Updates</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
     </div>
   </article>
 
-  <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button primary" href="#data">Connect source</a></div>
+  <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button" href="#data">Connect source</a></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">Proceeds</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Paying users</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">In-app purchases / day</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Download→paid D1/D7/D35</span><span class="value faint">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Proceeds</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Paying users</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">In-app purchases / day</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Download→paid D1/D7/D35</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
     </div>
   </article>
 
-  <article class="panel stack"><div class="row"><h2>App usage</h2><a class="button primary" href="#data">Connect source</a></div>
+  <article class="panel stack"><div class="row"><h2>App usage</h2><a class="button" href="#data">Connect source</a></div>
     <div class="stats stats4">
-      <div class="stat"><span class="label">Avg retention D1–D28</span><span class="value faint">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
-      <div class="stat"><span class="label">Crashes by version</span><span class="value faint">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
+      <div class="stat"><span class="label">Avg retention D1–D28</span><span class="value unavail">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
+      <div class="stat"><span class="label">Crashes by version</span><span class="value unavail">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
     </div>
     <small>SDK-derived sessions and active people still work — see the generic overview. Only Apple-sourced metrics are gated.</small>
+  </article>
+
+  <article class="panel stack"><h2>What connecting App Store Connect adds</h2>
+    <p class="muted">Your SDK already tells you what people do inside the app. Connecting App Store Connect adds what happens <em>before</em> they install — impressions, product page views, downloads, pre-orders — and what Apple pays you, so a drop in activation can be traced back to a drop in conversion rather than guessed at.</p>
+    <p class="muted"><small><strong>Example — not your data.</strong> “Conversion fell from 5.2% to 4.1% while product page views held flat.” This is what a finding looks like once the source is connected; it is not a projection of your results.</small></p>
+    <div class="row"><a class="button primary" href="#data">Connect App Store Connect</a><a class="button" href="#agents">Ask your agent to set it up</a></div>
   </article>
 
   <article class="panel"><div class="row"><h2>Data status</h2></div>
