@@ -21,19 +21,25 @@ Compose from existing components only: `AppShell`/`SideNav`, `PageShell`, `Panel
 7. **Best next step** — `Panel` rendering the top open `AgentRecommendation` (Plans contract): title, one-line observation with comparison, evidence line via `evidenceLine()` (query ref, metric version, range, timezone, watermark, warnings), and two actions: "Open the finding" → `/plans`, "Ask your agent to investigate" → `/chat` or MCP handoff. Absent findings → panel omitted, not stubbed.
 8. **Data status** — existing panel: events in range, qualifying count, last occurred/received, pipeline lag ("not measured yet" until a watermark exists), per-source rows with `StatusPill` states.
 
-### App view (platform = iOS/Android with an Apple source)
+### App Store Connect metric groups (default view, not iOS-only)
 
-When the project has a connected App Store Connect source and the platform filter selects the app, the overview gains three grouped sections between the stats strip and data status. Each group is a `Panel` with a `See more` action drilling into the matching Analytics subsection.
+The three sourced groups below are part of the **default Overview** — they render on **All platforms** and on the **iOS** platform view whenever the project has a connected App Store Connect source. They are not hidden behind an iOS selection: a project whose product is an app must see its store metrics on the front door.
+
+**Platform rule (hard requirement).** These groups are iOS/App Store facts. They render when the platform filter is `All platforms` or `iOS`. On **Android** they must not render as Android data — the view shows an explicit "App Store metrics are iOS-only" note with the groups withheld, never re-labeled. On `Web`/`Server`/`Unknown` they are likewise withheld. The generic SDK metrics (active people, sessions, activation, retention, top pages/sources) always reflect the active platform filter and stay useful on every platform.
 
 - **Acquisition** — First-time downloads, Redownloads, Conversion rate, Impressions/day (daily average), Product page views, Updates. **Conversion rate adopts Apple's versioned definition** ([Apple metric definitions](https://developer.apple.com/help/app-store-connect-analytics/reference/metrics-definitions/)): (total downloads — first-time downloads + redownloads — plus pre-orders) ÷ unique-device impressions. A pre-order is **not** counted a second time when it later converts to a download. The tile is `unavailable`/`not_ready` until the source exposes both numerator fields and the unique-device-impression denominator with its eligibility window; it is never computed from product page views.
 - **Monetization** — Proceeds (currency-labeled: **estimated customer price less applicable tax and Apple's commission**; refunds are reported separately and are not netted into the figure), Paying users, In-app purchases/day, Download→paid D1/D7/D35 (immature cohorts → "Not ready").
 - **App usage** — Average retention D1/D7/D14/D28 (opt-in devices only, labeled), Crashes by app version (table).
 
-**Provenance contract (hard requirement):** every Apple-sourced tile carries a provenance line — `App Store Connect · UTC days` — and the section opens with a `Callout` stating these are not SDK counts and usage/crash figures cover opt-in devices only. Apple withholds or thresholds low-volume rows and reports usage/crash data only for devices that opted in to sharing, so a tile whose source row is absent or below threshold renders `unavailable` with the qualification named — never zero, never a sample value. AgentRay SDK metrics keep project-timezone labeling; the two day-boundary conventions are never silently mixed. No Apple source → every tile renders `Not available` + `Requires App Store Connect` with a `Connect source` action, and the generic SDK metrics remain usable. Never derive, estimate, or sample-fill an Apple metric from SDK events.
+Each group is a `Panel` with a `See more` action drilling into the matching **Acquisition / Monetization / App Usage** child surface under Analytics. A child surface whose page is not yet implemented is rendered as a non-linked "Coming soon" affordance — never a link to a route that does not exist.
+
+**Provenance contract (hard requirement):** every Apple-sourced tile carries a provenance line — `App Store Connect · UTC days` — and the section opens with a `Callout` stating these are not SDK counts and usage/crash figures cover opt-in devices only. Apple withholds or thresholds low-volume rows and reports usage/crash data only for devices that opted in to sharing, so a tile whose source row is absent or below threshold renders `unavailable` with the qualification named — never zero, never a sample value. AgentRay SDK metrics keep project-timezone labeling; the two day-boundary conventions are never silently mixed.
+
+**No Apple source (discoverable, honest).** A project with an iOS presence but no App Store Connect source shows a single compact **Connect App Store Connect** panel on the default view — naming what the source adds and offering the connect action — rather than three grids of "Not available". The full per-tile `Not available` + `Requires App Store Connect` grid is the iOS platform view's rendering of the same state. A project with no iOS presence at all (web-only) shows no Apple affordance on the default view. Generic SDK metrics stay useful in every case. Never derive, estimate, or sample-fill an Apple metric from SDK events.
 
 ### Navigation
 
-`web/lib/ia.ts` gains a conditional child surface: **App analytics** under Analytics (`/dashboard` aliases), visible only when the project has a connected Apple source; otherwise it renders as a non-linked "Not connected" affordance or is omitted per the hosted/self-hosted rules already in `navItemsFor`. Proposed hierarchy when connected: Acquisition (Sources, Product Pages, In-App Events, App Clip, Campaigns), Monetization (Sales, Subscriptions, Cohorts, Offers, Retention, Benchmarks), App Usage. Destinations with no connected source are not linked. All existing URLs and aliases stay reachable.
+`web/lib/ia.ts` gains a conditional child surface: **App analytics** under Analytics (`/dashboard` aliases), visible only when the project has a connected Apple source; otherwise it renders as a non-linked "Not connected" affordance or is omitted per the hosted/self-hosted rules already in `navItemsFor`. Child surfaces under it: **Acquisition** (Sources, Product Pages, In-App Events, App Clip, Campaigns), **Monetization** (Sales, Subscriptions, Cohorts, Offers, Retention, Benchmarks), **App Usage**. Each is represented in the IA; a destination whose page is not implemented renders as a non-linked "Coming soon" affordance rather than a dead link. All existing URLs and aliases stay reachable.
 
 ## States
 
@@ -50,9 +56,11 @@ One mutually exclusive view state, extending `overviewViewState()`:
 | `empty` | no events in range | honest empty, data status visible |
 | `data` | qualifying events present | full layout |
 | `stale` (modifier) | `data_status.state == 'quiet'` | warn `Callout` + last-known figures timestamped "As of …" |
-| `source_not_connected` (modifier) | app view without Apple source | Apple groups render `Not available` tiles + `Connect source`; SDK metrics unaffected |
+| `apple_groups` (modifier) | Apple source connected **and** platform is `All platforms` or `iOS` | three sourced groups render on the default view |
+| `apple_ios_only` (modifier) | Apple source connected **and** platform is `Android` (or Web/Server/Unknown) | groups withheld with an explicit "App Store metrics are iOS-only" note; never re-labeled as that platform's data |
+| `source_not_connected` (modifier) | iOS presence without an Apple source | default view: one compact `Connect App Store Connect` panel; iOS view: full per-tile `Not available` grid; web-only: no Apple affordance |
 
-Stale and source-not-connected are modifiers, not replacements: last-known data stays visible with its timestamp; gated groups show state labels.
+Stale, Apple-group, and source-not-connected are modifiers, not replacements: last-known data stays visible with its timestamp; withheld groups show state labels or an explicit platform note.
 
 ## Responsive and accessibility
 
@@ -80,7 +88,7 @@ Both branches are truthful about what is and is not measured. The paid-value sto
 
 ## Data contract additions
 
-`OverviewResult` gains an optional `app` block, present only when an Apple source is connected and the platform filter selects the app:
+`OverviewResult` gains an optional `app` block, present when an Apple source is connected and the platform filter is `All platforms` or `iOS` (the default view included). It is absent — not zeroed — for `Android`/`Web`/`Server`/`Unknown`, and absent when no Apple source is connected.
 
 ```
 app: {
@@ -95,6 +103,6 @@ Every field is an `OverviewMetric`-style state object (`ok | no_data | not_ready
 
 ## Verification
 
-- Prototype: `open docs/redesign/overview-states.html` — state switcher covers populated, app view, first run, no data, stale, error, source-not-connected; verified at 1440×1000 and 390×844.
+- Prototype: `open docs/redesign/overview-states.html` — state switcher covers populated, default-with-Apple, first run, no data, stale, error, source-not-connected. The default-with-Apple and source-not-connected states carry a working platform switcher: `All platforms` and `iOS` show the three sourced groups (or the full `Not available` grid), `Android` withholds them behind an explicit "App Store metrics are iOS-only" note, and the no-source default shows one compact connect panel. Verified at 1440×1000 and 390×844.
 - Implementation: `cd web && pnpm test && pnpm lint`; `go test ./internal/dataplane/...`; browser journey for web-without-Apple and app-with-Apple per the ticket's acceptance criteria.
 - **Live Apple verification requires an authorized App Store Connect app with generated analytics reports.** When that is unavailable, QA runs the fixture-based contract tests plus the browser journey against fixtures, and records live-source verification as a **named limitation** — never an invented PASS. A fixture PASS does not establish live-source correctness.
