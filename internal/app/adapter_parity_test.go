@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -296,10 +297,18 @@ func dashboardJourney(t *testing.T, adapter string, inv, foreign opInvoker) {
 		t.Fatalf("%s update_dashboard = %s", adapter, string(upd.raw))
 	}
 
-	// Same key + same payload replays the first receipt — no second bump.
+	// Same key + same payload replays the first receipt — the whole stored
+	// result, not just id/revision, and no second bump.
 	replay := expectOp(t, adapter, inv, "update_dashboard",
 		fmt.Sprintf(`{"dashboard_id":%q,"name":"Parity 2","description":"d2","revision":1,"idempotency_key":"%s-u1"}`, dashID, adapter), "ok")
-	if numField(t, replay, "revision") != 2 || field(t, replay, "id") != field(t, upd, "id") {
+	var wantReceipt, gotReceipt map[string]any
+	if err := json.Unmarshal(upd.raw, &wantReceipt); err != nil {
+		t.Fatalf("%s first receipt not an object: %s", adapter, string(upd.raw))
+	}
+	if err := json.Unmarshal(replay.raw, &gotReceipt); err != nil {
+		t.Fatalf("%s replay receipt not an object: %s", adapter, string(replay.raw))
+	}
+	if !reflect.DeepEqual(wantReceipt, gotReceipt) {
 		t.Fatalf("%s replay diverged: %s vs %s", adapter, string(replay.raw), string(upd.raw))
 	}
 
@@ -527,7 +536,17 @@ func TestLifecycleParityAcrossAdapters(t *testing.T) {
 			inv = runtimeInvoker(usecase.Registry(), opcore.CallContext{ProjectID: boot.Project.ID, Deps: &usecase.Deps{Repo: s, Runner: storeRunner{s}}})
 		}
 		got := expectOp(t, adapter, inv, "update_dashboard", args, "ok")
-		if field(t, got, "id") != field(t, first, "id") || numField(t, got, "revision") != numField(t, first, "revision") {
+		// The receipt is the whole stored result — every field must be
+		// identical, not just id/revision, or an adapter could drop or corrupt
+		// part of the row and still look like a replay.
+		var want, gotMap map[string]any
+		if err := json.Unmarshal(first.raw, &want); err != nil {
+			t.Fatalf("first receipt not an object: %s", string(first.raw))
+		}
+		if err := json.Unmarshal(got.raw, &gotMap); err != nil {
+			t.Fatalf("%s receipt not an object: %s", adapter, string(got.raw))
+		}
+		if !reflect.DeepEqual(want, gotMap) {
 			t.Fatalf("%s replayed a different receipt: %s vs %s", adapter, string(got.raw), string(first.raw))
 		}
 	}

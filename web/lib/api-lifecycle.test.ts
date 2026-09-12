@@ -27,6 +27,8 @@ describe('lifecycle mutation wire shape', () => {
     const calls = mockFetch(200, { dashboard: { id: 'd1', revision: 2 } });
     await new AgentRayAPI('p1').updateDashboard('d1', 'n', 'd', { revision: 1, idempotencyKey: 'k1' });
     expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('/api/dashboards/d1');
+    expect(calls[0].url).toContain('project_id=p1');
     expect(calls[0].init.method).toBe('PUT');
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       name: 'n', description: 'd', revision: 1, idempotency_key: 'k1',
@@ -48,6 +50,13 @@ describe('lifecycle mutation wire shape', () => {
       { revision: 5, idempotency_key: 'xk' },
     ]);
     expect(calls.map((c) => c.init.method)).toEqual(['DELETE', 'DELETE', 'PUT', 'DELETE']);
+    // The endpoint and project routing are part of the contract: a mutation
+    // aimed at the wrong URL or a dropped ?project_id must fail this suite.
+    expect(calls[0].url).toContain('/api/dashboards/d1');
+    expect(calls[1].url).toContain('/api/charts/c1');
+    expect(calls[2].url).toContain('/api/dashboards/d1/charts/order');
+    expect(calls[3].url).toContain('/api/connectors/x1');
+    for (const c of calls) expect(c.url).toContain('project_id=p1');
   });
 
   it('passes the intent key through connector create and run-now', async () => {
@@ -63,9 +72,14 @@ describe('lifecycle mutation wire shape', () => {
       return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
     await api.createConnector({ name: 'pg', kind: 'postgres', dsn: 'postgres://u:p@h/d' }, { idempotencyKey: 'cc1' });
+    expect(calls[0].url).toContain('/api/projects/p1/source-credentials');
+    expect(calls[1].url).toContain('/api/connectors');
+    expect(calls[1].url).toContain('project_id=p1');
     expect(JSON.parse(String(calls[1].init.body)).idempotency_key).toBe('cc1');
 
     await api.runConnectorSync('s1', { idempotencyKey: 'rn1' });
+    expect(calls[2].url).toContain('/api/connector-syncs/s1/run');
+    expect(calls[2].url).toContain('project_id=p1');
     expect(JSON.parse(String(calls[2].init.body))).toEqual({ idempotency_key: 'rn1' });
   });
 
