@@ -30,15 +30,19 @@ for stale in $(docker ps -aq --filter "name=storage-eval-driver" \
   docker rm -f "$stale" >/dev/null 2>&1 || true
 done
 
+DRIVER_MEM=512m
+DRIVER_CPUS=1
 exec docker run --rm -i \
   --name "$DRIVER_NAME" \
   --label storage-eval=1 \
-  --memory 512m --cpus 1 \
+  --memory "$DRIVER_MEM" --cpus "$DRIVER_CPUS" \
   --network "$NET" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$HERE:$HERE" \
   -e EVAL_HOST_DIR="$HERE" \
   -e EVAL_DRIVER_IMAGE="$IMAGE" \
+  -e EVAL_DRIVER_MEM="$DRIVER_MEM" \
+  -e EVAL_DRIVER_CPUS="$DRIVER_CPUS" \
   -e EVAL_COMMIT="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)" \
   -w "$HERE" \
   "$IMAGE" python -m harness.cli "$@"

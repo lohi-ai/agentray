@@ -23,7 +23,7 @@ import (
 
 // OverviewMetricVersion is bumped when any metric definition changes, so a
 // saved chart or agent finding can name the semantics it was computed under.
-const OverviewMetricVersion = "overview.v1"
+const OverviewMetricVersion = "overview.v2"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -50,8 +50,9 @@ const (
 )
 
 type OverviewInput struct {
-	// Period is "Nd" (N complete UTC days ending at the last UTC midnight,
-	// 1..90) or "today" (the partial current UTC day). Empty means "7d".
+	// Period is "Nd" (N complete project-local days ending at the last local
+	// midnight, 1..90) or "today" (the partial current project-local day).
+	// Empty means "7d".
 	Period   string `json:"period"`
 	Platform string `json:"platform"`
 }
@@ -64,9 +65,11 @@ type OverviewRange struct {
 }
 
 type OverviewContext struct {
-	ProjectID      string        `json:"project_id"`
-	Timezone       string        `json:"timezone"`
-	TimezoneSource string        `json:"timezone_source"` // "fallback" until projects persist one
+	ProjectID string `json:"project_id"`
+	Timezone  string `json:"timezone"`
+	// TimezoneSource is "project" when a validated project setting drove the
+	// result, or "fallback" when a legacy nullable row used UTC.
+	TimezoneSource string        `json:"timezone_source"`
 	Range          OverviewRange `json:"range"`
 	PreviousRange  OverviewRange `json:"previous_range"`
 	Platform       string        `json:"platform"`
@@ -86,7 +89,7 @@ type OverviewMetric struct {
 }
 
 type OverviewTrendPoint struct {
-	Day         string `json:"day"` // YYYY-MM-DD, UTC
+	Day         string `json:"day"` // YYYY-MM-DD in Context.Timezone
 	ActiveUsers uint64 `json:"active_users"`
 }
 
@@ -116,17 +119,43 @@ type OverviewDataStatus struct {
 	// AgeSeconds is now − last_received_at: how quiet the project is. It is
 	// deliberately not called lag — no ingest watermark exists to measure
 	// processing delay against.
-	AgeSeconds  int64  `json:"age_seconds,omitempty"`
-	PipelineLag string `json:"pipeline_lag"` // always "unavailable" today
+	AgeSeconds   int64  `json:"age_seconds,omitempty"`
+	PipelineLag  string `json:"pipeline_lag"`  // always "unavailable" today
+	SchemaStatus string `json:"schema_status"` // always "unavailable" today
 	// EventsInRange counts ALL events in the window (any type/class) so the UI
 	// can tell "integrated but nothing qualifying" from "nothing arrived".
 	EventsInRange uint64 `json:"events_in_range"`
 	// QualifyingInRange counts only qualifying-activity events — the
 	// discriminator between "integrated, no qualifying activity yet" and
 	// "no completed-day data".
-	QualifyingInRange uint64 `json:"qualifying_in_range"`
-	EverReceived      bool   `json:"ever_received"`
-	State             string `json:"state"` // fresh | quiet | no_events
+	QualifyingInRange uint64                 `json:"qualifying_in_range"`
+	EverReceived      bool                   `json:"ever_received"`
+	State             string                 `json:"state"` // fresh | quiet | no_events
+	Sources           []OverviewSourceStatus `json:"sources"`
+	SourcesTruncated  bool                   `json:"sources_truncated"`
+}
+
+// OverviewSourceStatus is the bounded, project-scoped source health record
+// displayed beside capture freshness. It reports only persisted connector-sync
+// facts; it never infers schema health or processing lag.
+type OverviewSourceStatus struct {
+	ConnectorID    string     `json:"connector_id"`
+	ConnectorName  string     `json:"connector_name"`
+	ConnectorKind  string     `json:"connector_kind"`
+	SyncID         string     `json:"sync_id,omitempty"`
+	SourceTable    string     `json:"source_table,omitempty"`
+	SyncConfigured bool       `json:"sync_configured"`
+	Enabled        bool       `json:"enabled"`
+	State          string     `json:"state"` // not_configured | paused | not_ready | healthy | partial | error
+	Cursor         string     `json:"cursor,omitempty"`
+	CursorKey      string     `json:"cursor_key,omitempty"`
+	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
+	LastSuccessAt  *time.Time `json:"last_success_at,omitempty"`
+	LastStatus     string     `json:"last_status,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	LastRows       int        `json:"last_rows"`
+	TotalRows      int64      `json:"total_rows"`
+	SchemaStatus   string     `json:"schema_status"` // always "unavailable" today
 }
 
 type OverviewMetrics struct {
@@ -164,13 +193,15 @@ type OverviewResult struct {
 
 var overviewPeriodRe = regexp.MustCompile(`^(\d{1,2})d$`)
 
-// overviewRange resolves the period string into half-open UTC bounds
-// [from, to). Complete-day periods end at the most recent UTC midnight so a
-// day in progress is never mixed into a "last 7 days" figure; "today" is the
-// explicit partial-period escape and is flagged CompleteDays=false.
-func overviewRange(period string, now time.Time) (OverviewRange, error) {
-	now = now.UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+// overviewRange resolves the period string into half-open UTC instants [from,
+// to), whose boundaries are midnight in loc. Complete-day ranges exclude the
+// current local day; "today" is the explicit partial-period escape.
+func overviewRange(period string, now time.Time, loc *time.Location) (OverviewRange, error) {
+	if loc == nil {
+		return OverviewRange{}, fmt.Errorf("overview: timezone is required")
+	}
+	localNow := now.In(loc)
+	midnight := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
 	if period == "" {
 		period = "7d"
 	}
@@ -239,10 +270,18 @@ func uint64Ptr(v uint64) *uint64 { return &v }
 
 // Overview computes the whole Product Overview in one deterministic pass over
 // the current ClickHouse store. now is injectable so tests can pin the
-// complete-day boundary; production callers pass time.Now().
+// project-local calendar boundary; production callers pass time.Now().
 func (s *Store) Overview(ctx context.Context, projectID, period, platform string, now time.Time) (OverviewResult, error) {
 	res := OverviewResult{Trend: []OverviewTrendPoint{}}
-	r, err := overviewRange(period, now)
+	var storedTimezone string
+	if err := s.pg.QueryRow(ctx, `SELECT coalesce(timezone, '') FROM projects WHERE id = $1`, projectID).Scan(&storedTimezone); err != nil {
+		return res, err
+	}
+	timezone, timezoneSource, loc, err := overviewProjectTimezone(storedTimezone)
+	if err != nil {
+		return res, err
+	}
+	r, err := overviewRange(period, now, loc)
 	if err != nil {
 		return res, err
 	}
@@ -254,8 +293,8 @@ func (s *Store) Overview(ctx context.Context, projectID, period, platform string
 	}
 	res.Context = OverviewContext{
 		ProjectID:      projectID,
-		Timezone:       "UTC",
-		TimezoneSource: "fallback",
+		Timezone:       timezone,
+		TimezoneSource: timezoneSource,
 		Range:          r,
 		PreviousRange:  prev,
 		Platform:       platform,
@@ -305,6 +344,14 @@ WHERE project_id = ?`, projectID).Scan(&total, &lastEvent, &lastReceived)
 		}
 		res.DataStatus.State = overviewDataState(res.DataStatus.EverReceived, now.UTC().Sub(lastReceived))
 		res.DataStatus.PipelineLag = "unavailable"
+		res.DataStatus.SchemaStatus = "unavailable"
+
+		sources, truncated, sourceErr := s.overviewSources(ctx, projectID)
+		if sourceErr != nil {
+			return res, sourceErr
+		}
+		res.DataStatus.Sources = sources
+		res.DataStatus.SourcesTruncated = truncated
 
 		var inRange, qualifying uint64
 		err = s.ch.QueryRow(ctx, `
@@ -348,7 +395,7 @@ WHERE project_id = ? AND timestamp >= ? AND timestamp < ? AND `+overviewQualifyi
 		}
 		res.Metrics.ActiveUsers = OverviewMetric{
 			State:      metricState,
-			Definition: "Distinct people (canonical identity) with qualifying human product activity per complete UTC day range.",
+			Definition: "Distinct people (canonical identity) with qualifying human product activity per complete project-local calendar-day range.",
 			Notes:      []string{exclusionNote, "anonymous people are approximate until an explicit identify link exists"},
 		}
 		res.Metrics.Sessions = OverviewMetric{
@@ -382,7 +429,7 @@ SELECT
 	countIf(first_ts >= ? AND first_ts < ?)
 FROM (
 	SELECT `+canonicalID+` AS cid, min(timestamp) AS first_ts,
-		argMin(ifNull(platform, ''), timestamp) AS first_platform
+		argMin(ifNull(platform, ''), (timestamp, event_id)) AS first_platform
 	FROM events
 	WHERE project_id = ? AND `+overviewQualifying+`
 	GROUP BY cid
@@ -419,11 +466,11 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs...).Scan(&newUsers, &newUsersP
 	// --- daily active-user trend ---
 	{
 		rows, err := s.ch.Query(ctx, `
-SELECT toDate(timestamp, 'UTC') AS day, uniqExact(`+canonicalID+`) AS users
+SELECT toDate(timestamp, ?) AS day, uniqExact(`+canonicalID+`) AS users
 FROM events
 WHERE `+qualWhere+`
 GROUP BY day
-ORDER BY day`, args...)
+ORDER BY day`, append([]any{timezone}, args...)...)
 		if err != nil {
 			return res, err
 		}
@@ -440,9 +487,9 @@ ORDER BY day`, args...)
 		if err := rows.Err(); err != nil {
 			return res, err
 		}
-		// Emit every day in the range, including zero days — a gap in the series
-		// must read as a zero day, not a missing point the chart interpolates.
-		for d := r.From; d.Before(r.To); d = d.AddDate(0, 0, 1) {
+		// Emit every local calendar day in the range, including zero days — a
+		// gap in the series must read as a zero day, not a missing interpolation.
+		for d := r.From.In(loc); d.Before(r.To); d = d.AddDate(0, 0, 1) {
 			key := d.Format("2006-01-02")
 			res.Trend = append(res.Trend, OverviewTrendPoint{Day: key, ActiveUsers: byDay[key]})
 		}
@@ -450,7 +497,7 @@ ORDER BY day`, args...)
 
 	// --- D1/D7/D30 retention: per-cohort-day maturity ---
 	{
-		ret, err := s.overviewRetention(ctx, projectID, platform, r.To)
+		ret, err := s.overviewRetention(ctx, projectID, platform, timezone, r.To)
 		if err != nil {
 			return res, err
 		}
@@ -494,6 +541,76 @@ LIMIT 20`, args...)
 	return res, nil
 }
 
+const overviewSourceLimit = 20
+
+// overviewSources reads enough rows to say when the Overview's bounded source
+// list has been truncated. It uses the persisted sync summary rather than
+// performing one latest-run lookup per row.
+func (s *Store) overviewSources(ctx context.Context, projectID string) ([]OverviewSourceStatus, bool, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT c.id::text, c.name, c.kind,
+       COALESCE(cs.id::text, ''), COALESCE(cs.source_table, ''),
+       cs.id IS NOT NULL, COALESCE(cs.enabled, false),
+       COALESCE(cs.cursor, ''), COALESCE(cs.cursor_key, ''),
+       cs.last_run_at, cs.last_success_at, COALESCE(cs.last_status, ''),
+       COALESCE(cs.last_error, ''), COALESCE(cs.last_rows, 0), COALESCE(cs.total_rows, 0)
+FROM data_connectors c
+LEFT JOIN connector_syncs cs
+  ON cs.connector_id = c.id AND cs.project_id = c.project_id
+WHERE c.project_id = $1 AND c.archived_at IS NULL
+ORDER BY c.created_at DESC, c.id, cs.created_at ASC NULLS LAST, cs.id
+LIMIT $2`, projectID, overviewSourceLimit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	sources := make([]OverviewSourceStatus, 0, overviewSourceLimit)
+	for rows.Next() {
+		var source OverviewSourceStatus
+		if err := rows.Scan(
+			&source.ConnectorID, &source.ConnectorName, &source.ConnectorKind,
+			&source.SyncID, &source.SourceTable,
+			&source.SyncConfigured, &source.Enabled,
+			&source.Cursor, &source.CursorKey,
+			&source.LastRunAt, &source.LastSuccessAt, &source.LastStatus,
+			&source.LastError, &source.LastRows, &source.TotalRows,
+		); err != nil {
+			return nil, false, err
+		}
+		source.State = overviewSourceState(source.SyncConfigured, source.Enabled, source.LastRunAt, source.LastStatus, source.LastRows)
+		source.SchemaStatus = "unavailable"
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(sources) > overviewSourceLimit
+	if truncated {
+		sources = sources[:overviewSourceLimit]
+	}
+	return sources, truncated, nil
+}
+
+func overviewSourceState(configured, enabled bool, lastRunAt *time.Time, lastStatus string, lastRows int) string {
+	if !configured {
+		return "not_configured"
+	}
+	if !enabled {
+		return "paused"
+	}
+	if lastRunAt == nil {
+		return "not_ready"
+	}
+	if lastStatus == "error" {
+		if lastRows > 0 {
+			return "partial"
+		}
+		return "error"
+	}
+	return "healthy"
+}
+
 // firstPlatformClause filters a first-seen subquery by the platform OF THE
 // FIRST EVENT, not by the platform of any event — a known web user whose first
 // iOS event arrives today is not a new iOS user. "" = all, "unknown" = the
@@ -521,12 +638,11 @@ func overviewPlatform(platform string) (string, any) {
 	return " AND " + clause, arg
 }
 
-// overviewRetention computes D1/D7/D30 return rates over daily cohorts.
-// Cohort = a person's first qualifying event day. A member is eligible for day
-// N only when their own cohort_day + (N+1) days <= the range end — maturity is
-// per member, so a blended rate never counts someone who could not have
-// returned. to is the exclusive range end (UTC midnight for complete days).
-func (s *Store) overviewRetention(ctx context.Context, projectID, platform string, to time.Time) (OverviewRetention, error) {
+// overviewRetention computes D1/D7/D30 return rates over project-local daily
+// cohorts. A cohort is first-ever qualifying activity, then optionally filtered
+// by the platform of that first event — the same first-platform contract as
+// new users. Returns themselves remain scoped to the selected platform.
+func (s *Store) overviewRetention(ctx context.Context, projectID, platform, timezone string, to time.Time) (OverviewRetention, error) {
 	out := OverviewRetention{CohortWindow: "lifetime"}
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
@@ -539,43 +655,48 @@ func (s *Store) overviewRetention(ctx context.Context, projectID, platform strin
 	canonicalE, _ := resolver.canonicalExpr("e.distinct_id")
 
 	platClause, platArg := overviewPlatform(platform)
+	firstClause := firstPlatformClause(platform)
 	firsts := `
-SELECT ` + canonicalID + ` AS cid, toDate(min(timestamp), 'UTC') AS cohort_day
-FROM events
-WHERE project_id = ? AND ` + overviewQualifying + platClause + `
-GROUP BY cid`
-	// firsts arg order: project_id then the platform bind (if any). The outer
-	// WHERE repeats the same pair for the aliased events table.
-	boundPair := func() []any {
-		if platArg != nil {
-			return []any{projectID, platArg}
-		}
-		return []any{projectID}
+SELECT cid, toDate(first_ts, ?) AS cohort_day
+FROM (
+	SELECT ` + canonicalID + ` AS cid, min(timestamp) AS first_ts,
+		argMin(ifNull(platform, ''), (timestamp, event_id)) AS first_platform
+	FROM events
+	WHERE project_id = ? AND ` + overviewQualifying + `
+	GROUP BY cid
+)
+WHERE 1 = 1` + firstClause
+	firstArgs := []any{timezone, projectID}
+	if platArg != nil {
+		firstArgs = append(firstArgs, platArg)
 	}
 
-	// eligible_N = members whose day-N window has fully closed by `to`.
+	// eligible_N = members whose local calendar day-N window has fully closed
+	// by `to`; a partial Today window cannot mature an in-progress local day.
 	var elig [3]uint64
 	err = s.ch.QueryRow(ctx, `
 SELECT
-	countIf(cohort_day + INTERVAL 2 DAY <= toDate(?, 'UTC')),
-	countIf(cohort_day + INTERVAL 8 DAY <= toDate(?, 'UTC')),
-	countIf(cohort_day + INTERVAL 31 DAY <= toDate(?, 'UTC'))
-FROM (`+firsts+`)`, append([]any{to, to, to}, boundPair()...)...).Scan(&elig[0], &elig[1], &elig[2])
+	countIf(cohort_day + INTERVAL 2 DAY <= toDate(?, ?)),
+	countIf(cohort_day + INTERVAL 8 DAY <= toDate(?, ?)),
+	countIf(cohort_day + INTERVAL 31 DAY <= toDate(?, ?))
+FROM (`+firsts+`)`, append([]any{to, timezone, to, timezone, to, timezone}, firstArgs...)...).Scan(&elig[0], &elig[1], &elig[2])
 	if err != nil {
 		return out, err
 	}
 
-	// returned_N = eligible members with a qualifying event exactly on day N.
+	// returned_N = eligible members with a qualifying event on the Nth local
+	// calendar day. Both the cohort subquery and return events obey the same
+	// first-platform/platform-filter semantics as new users and active users.
 	var ret [3]uint64
 	err = s.ch.QueryRow(ctx, `
 SELECT
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, 'UTC') = f.cohort_day + INTERVAL 1 DAY AND f.cohort_day + INTERVAL 2 DAY <= toDate(?, 'UTC')),
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, 'UTC') = f.cohort_day + INTERVAL 7 DAY AND f.cohort_day + INTERVAL 8 DAY <= toDate(?, 'UTC')),
-	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, 'UTC') = f.cohort_day + INTERVAL 30 DAY AND f.cohort_day + INTERVAL 31 DAY <= toDate(?, 'UTC'))
+	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 1 DAY AND f.cohort_day + INTERVAL 2 DAY <= toDate(?, ?)),
+	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 7 DAY AND f.cohort_day + INTERVAL 8 DAY <= toDate(?, ?)),
+	uniqExactIf(`+canonicalE+`, toDate(e.timestamp, ?) = f.cohort_day + INTERVAL 30 DAY AND f.cohort_day + INTERVAL 31 DAY <= toDate(?, ?))
 FROM events e
 INNER JOIN (`+firsts+`) f ON `+canonicalE+` = f.cid
 WHERE e.project_id = ? AND `+overviewQualifying+platClause,
-		append(append([]any{to, to, to}, boundPair()...), boundPair()...)...,
+		append(append([]any{timezone, to, timezone, timezone, to, timezone, timezone, to, timezone}, firstArgs...), append([]any{projectID}, platformArgs(platArg)...)...)...,
 	).Scan(&ret[0], &ret[1], &ret[2])
 	if err != nil {
 		return out, err
@@ -585,4 +706,11 @@ WHERE e.project_id = ? AND `+overviewQualifying+platClause,
 	out.D7 = overviewRetentionPoint(elig[1], ret[1])
 	out.D30 = overviewRetentionPoint(elig[2], ret[2])
 	return out, nil
+}
+
+func platformArgs(arg any) []any {
+	if arg == nil {
+		return nil
+	}
+	return []any{arg}
 }

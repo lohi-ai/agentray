@@ -258,11 +258,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, runnerOpts...)
+	// One adapter bundle serves every legacy route that now runs through the
+	// shared operation registry — the same deps MountHTTP hands /api/op.
+	ops := newOpAdapter(store, alertDeliverer, connectorEngine)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerOverviewRoutes(e, store, alertDeliverer)
-	registerConnectorRoutes(e, store, connectorEngine)
+	registerConnectorRoutes(e, store, ops)
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 

@@ -253,11 +253,12 @@ func (s *Store) CreateDataConnectorForProject(ctx context.Context, projectID, na
 	if name == "" {
 		name = "Untitled source"
 	}
-	// Prove the credential exists, is this project's, and is not revoked —
-	// before the connector row references it.
+	// Prove the credential exists, is this project's, is not revoked, and was
+	// session-created (created_by set — only CreateSourceCredential writes
+	// rows, always with the session user) — before the connector references it.
 	var live bool
 	if err := s.pg.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL)`,
+		`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL AND created_by IS NOT NULL)`,
 		credentialID, projectID).Scan(&live); err != nil {
 		return DataConnector{}, err
 	}
@@ -268,9 +269,9 @@ func (s *Store) CreateDataConnectorForProject(ctx context.Context, projectID, na
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, credential_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
+RETURNING `+dataConnectorColumns,
 		projectID, name, kind, credentialID).
-		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
+		Scan(dataConnectorScanDest(&c)...)
 	return c, err
 }
 
@@ -310,7 +311,7 @@ func (s *Store) CreateDataConnectorIdempotent(ctx context.Context, projectID, na
 			}
 			var live bool
 			if err := q.QueryRow(ctx,
-				`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL)`,
+				`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL AND created_by IS NOT NULL)`,
 				credentialID, projectID).Scan(&live); err != nil {
 				return nil, err
 			}
@@ -321,9 +322,9 @@ func (s *Store) CreateDataConnectorIdempotent(ctx context.Context, projectID, na
 			err := q.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, credential_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
+RETURNING `+dataConnectorColumns,
 				projectID, name, kind, credentialID).
-				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
+				Scan(dataConnectorScanDest(&c)...)
 			if err != nil {
 				return nil, err
 			}
@@ -347,7 +348,7 @@ func (s *Store) UpdateDataConnectorIdempotent(ctx context.Context, projectID, co
 			if credentialID != nil {
 				var live bool
 				if err := q.QueryRow(ctx,
-					`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL)`,
+					`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL AND created_by IS NOT NULL)`,
 					*credentialID, projectID).Scan(&live); err != nil {
 					return nil, err
 				}
@@ -362,9 +363,9 @@ SET name = CASE WHEN $3::text IS NULL THEN name WHEN $3 = '' THEN name ELSE $3 E
     credential_id = COALESCE($4::uuid, credential_id),
     revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $5
-RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
+RETURNING `+dataConnectorColumns,
 				connectorID, projectID, name, credentialID, expectedRevision).
-				Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
+				Scan(dataConnectorScanDest(&c)...)
 			if errors.Is(err, pgx.ErrNoRows) {
 				var exists bool
 				if qerr := q.QueryRow(ctx,
@@ -396,7 +397,7 @@ func (s *Store) UpdateDataConnectorForProject(ctx context.Context, projectID, co
 	if credentialID != nil {
 		var live bool
 		if err := s.pg.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL)`,
+			`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL AND created_by IS NOT NULL)`,
 			*credentialID, projectID).Scan(&live); err != nil {
 			return DataConnector{}, err
 		}
@@ -411,9 +412,9 @@ SET name = CASE WHEN $3 = '' THEN name ELSE $3 END,
     credential_id = COALESCE($4::uuid, credential_id),
     revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $5
-RETURNING id::text, project_id::text, name, kind, true, revision, created_at, updated_at`,
+RETURNING `+dataConnectorColumns,
 		connectorID, projectID, name, credentialID, expectedRevision).
-		Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt)
+		Scan(dataConnectorScanDest(&c)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if qerr := s.pg.QueryRow(ctx,

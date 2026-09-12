@@ -89,6 +89,15 @@ func TestOverviewLive(t *testing.T) {
 	// synchronous (mutations_sync) so a rerun never sees a prior fixture.
 	projectID := uuid.NewString()
 	emptyProjectID := uuid.NewString()
+	for _, id := range []string{projectID, emptyProjectID} {
+		if _, err := pg.Exec(ctx, `INSERT INTO projects (id, name, api_key) VALUES ($1, $2, $3)`, id, "overview-live", "overview-live-"+id); err != nil {
+			t.Fatalf("seed project: %v", err)
+		}
+	}
+	defer func() {
+		_, _ = pg.Exec(ctx, `DELETE FROM projects WHERE id = ANY($1)`, []string{projectID, emptyProjectID})
+	}()
+
 	// Pinned "now": 2026-09-12 14:00 UTC → 7d range = Sep 5..11 complete days.
 	now := time.Date(2026, 9, 12, 14, 0, 0, 0, time.UTC)
 	day := func(d int) time.Time { return time.Date(2026, 9, d, 12, 0, 0, 0, time.UTC) }
@@ -171,6 +180,13 @@ func TestOverviewLive(t *testing.T) {
 	res, err := s.Overview(ctx, projectID, "7d", "", now)
 	if err != nil {
 		t.Fatalf("overview: %v", err)
+	}
+
+	if res.DataStatus.SchemaStatus != "unavailable" {
+		t.Fatalf("schema status = %q, want unavailable", res.DataStatus.SchemaStatus)
+	}
+	if res.DataStatus.Sources == nil || len(res.DataStatus.Sources) != 0 || res.DataStatus.SourcesTruncated {
+		t.Fatalf("empty project sources = %#v, truncated=%t", res.DataStatus.Sources, res.DataStatus.SourcesTruncated)
 	}
 
 	// Active users in Sep 5–11: alice, bob, carol, dave, erin, frank = 6 people
@@ -273,6 +289,12 @@ func TestOverviewLive(t *testing.T) {
 	if ios.Metrics.ActiveUsers.Value == nil || *ios.Metrics.ActiveUsers.Value != 2 {
 		t.Fatalf("ios active_users = %+v, want 2 (dave + erin)", ios.Metrics.ActiveUsers)
 	}
+	// Retention cohorts use that same first-platform rule: erin's later iOS
+	// event is activity, not an iOS acquisition cohort. Dave is the sole D1
+	// eligible iOS cohort and did not return.
+	if ios.Retention.D1.State != OverviewStateOK || ios.Retention.D1.Eligible != 1 || ios.Retention.D1.Returned != 0 {
+		t.Fatalf("ios d1 = %+v, want one eligible first-ios cohort with no return", ios.Retention.D1)
+	}
 	web, err := s.Overview(ctx, projectID, "7d", "web", now)
 	if err != nil {
 		t.Fatalf("overview web: %v", err)
@@ -308,6 +330,24 @@ func TestOverviewLive(t *testing.T) {
 	}
 	if partial.Metrics.ActiveUsers.Previous != nil {
 		t.Fatalf("partial range must omit previous comparison, got %v", *partial.Metrics.ActiveUsers.Previous)
+	}
+	if _, err := pg.Exec(ctx, `UPDATE projects SET timezone = 'America/Los_Angeles' WHERE id = $1`, projectID); err != nil {
+		t.Fatalf("set project timezone: %v", err)
+	}
+	local, err := s.Overview(ctx, projectID, "7d", "", now)
+	if err != nil {
+		t.Fatalf("overview project timezone: %v", err)
+	}
+	if local.Context.Timezone != "America/Los_Angeles" || local.Context.TimezoneSource != "project" {
+		t.Fatalf("timezone context = %+v", local.Context)
+	}
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !local.Context.Range.From.Equal(time.Date(2026, 9, 5, 0, 0, 0, 0, loc)) ||
+		!local.Context.Range.To.Equal(time.Date(2026, 9, 12, 0, 0, 0, 0, loc)) {
+		t.Fatalf("project-local range = %+v", local.Context.Range)
 	}
 
 	fmt.Println("overview live fixture: all semantics verified")

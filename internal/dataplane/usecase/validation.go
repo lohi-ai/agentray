@@ -30,7 +30,7 @@ type proposeTestInput struct {
 	// Slice-4 resumable-experiment fields — all optional, all persisted so an
 	// agent with no chat history can resume the experiment from reads alone.
 	ObservationID   string  `json:"observation_id" desc:"finding id this experiment answers"`
-	Evidence        string  `json:"evidence" desc:"typed envelope JSON: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark}"`
+	Evidence        string  `json:"evidence" desc:"typed envelope JSON object: {query_ref, metric_version, dataset_version, range, filters, timezone, watermark, warnings}"`
 	BaselineValue   float64 `json:"baseline_value" desc:"measured baseline value (0 = not recorded)"`
 	BaselineUnit    string  `json:"baseline_unit" desc:"e.g. 'weekly return %', 'signups'"`
 	BaselineWindow  string  `json:"baseline_window" desc:"baseline measurement window"`
@@ -74,6 +74,9 @@ func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 					return proposeTestOutput{}, errBadInput("review_date must be RFC3339")
 				}
 				reviewDate = &t
+			}
+			if verr := validateEvidenceEnvelope(in.Evidence); verr != nil {
+				return proposeTestOutput{}, verr
 			}
 			var baselineValue *float64
 			if in.BaselineValue != 0 {

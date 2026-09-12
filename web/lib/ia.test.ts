@@ -16,6 +16,7 @@ import {
   recoveryAction,
   settingsPath,
   projectDetailRoot,
+  projectLanding,
   threadNeedsRecovery,
   weakestLink,
   funnelStepNames,
@@ -180,14 +181,20 @@ describe('firstValuePath', () => {
     expect(shouldShowFirstEventGuide({ eventNames: [], catalogReady: true })).toBe(true);
   });
 
-  it('hides the first-event card once any event name is in the catalog', () => {
+  it('hides the first-event card after a qualifying catalog event', () => {
     const path = firstValuePath({ eventNames: ['signup'], catalogReady: true });
     expect(path.showFirstEvent).toBe(false);
     expect(shouldShowFirstEventGuide({ eventNames: ['signup'], catalogReady: true })).toBe(false);
     expect(shouldShowFirstEventGuide({
-      eventNames: [{ name: 'signup' }],
+      eventNames: [{ event_name: 'signup' }],
       catalogReady: true,
     })).toBe(false);
+  });
+
+  it('keeps setup visible for the verification receipt but not the first-ask prompt', () => {
+    const path = firstValuePath({ eventNames: [{ event_name: 'onboarding_verified' }], catalogReady: true });
+    expect(path).toEqual({ showFirstEvent: true, showFirstAsk: false });
+    expect(shouldShowFirstEventGuide({ eventNames: ['onboarding_verified'], catalogReady: true })).toBe(true);
   });
 
   it('stays off while the catalog has not loaded', () => {
@@ -414,6 +421,22 @@ describe('projectDetailRoot', () => {
     expect(projectDetailRoot('/chat')).toBeNull();
     expect(projectDetailRoot('/sql')).toBeNull();
     expect(projectDetailRoot('/settings?tab=projects')).toBeNull();
+  });
+});
+
+describe('projectLanding', () => {
+  it('sends a newly created project to /overview from any surface', () => {
+    // "Start new projects on Overview" holds even when the create dialog was
+    // opened from a detail route or a safe list page.
+    expect(projectLanding('/settings?tab=projects', { created: true })).toBe('/overview');
+    expect(projectLanding('/agents/abc/setup', { created: true })).toBe('/overview');
+    expect(projectLanding('/dashboard', { created: true })).toBe('/overview');
+  });
+
+  it('keeps the existing-project switch behavior unchanged', () => {
+    expect(projectLanding('/agents/abc/setup')).toBe('/agents');
+    expect(projectLanding('/chat')).toBeNull();
+    expect(projectLanding('/settings?tab=projects')).toBeNull();
   });
 });
 

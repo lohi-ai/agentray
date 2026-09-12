@@ -22,6 +22,7 @@ func registerOpRoutes(e *echo.Echo, store *storage.Store, notifier usecase.Notif
 		Memory:   agentruntime.NewPgMemory(store, false),
 		Notifier: notifier,
 		Runner:   runner,
+		Audit:    store,
 	}
 	group := e.Group("/api/op")
 	opcore.MountHTTP(group, reg, deps, func(c echo.Context) (opcore.Principal, error) {

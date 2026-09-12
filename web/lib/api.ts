@@ -1,7 +1,24 @@
+// APIError carries the HTTP status alongside the message. Callers that need
+// to distinguish "forbidden" from "failed" (the overview's missing-access
+// state) must not parse the message text — the status is the contract.
+export class APIError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, message: string, code = '') {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export type Project = {
   id: string;
   workspace_id?: string;
   name: string;
+  // Validated IANA timezone when the project owner configured one; absent for
+  // legacy nullable rows, whose overview context labels its UTC fallback.
+  timezone?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
   api_key: string;
@@ -166,6 +183,36 @@ export type OverviewMetric = {
   notes?: string[];
 };
 
+export type VerifySDKResult = {
+  found: boolean;
+  event_name?: string;
+  received_at?: string;
+  platform?: string;
+  identity_linked: boolean;
+  searched: number;
+  warnings: string[];
+};
+
+export type OverviewSourceStatus = {
+  connector_id: string;
+  connector_name: string;
+  connector_kind: string;
+  sync_id?: string;
+  source_table?: string;
+  sync_configured: boolean;
+  enabled: boolean;
+  state: 'not_configured' | 'paused' | 'not_ready' | 'healthy' | 'partial' | 'error';
+  cursor?: string;
+  cursor_key?: string;
+  last_run_at?: string;
+  last_success_at?: string;
+  last_status?: string;
+  last_error?: string;
+  last_rows: number;
+  total_rows: number;
+  schema_status: 'unavailable';
+};
+
 export type OverviewResult = {
   context: {
     project_id: string;
@@ -199,11 +246,14 @@ export type OverviewResult = {
     last_event_at?: string;
     last_received_at?: string;
     age_seconds?: number;
-    pipeline_lag: string;
+    pipeline_lag: 'unavailable';
+    schema_status: 'unavailable';
     events_in_range: number;
     qualifying_in_range: number;
     ever_received: boolean;
     state: 'fresh' | 'quiet' | 'no_events';
+    sources: OverviewSourceStatus[];
+    sources_truncated: boolean;
   };
 };
 
@@ -212,6 +262,12 @@ export type Dashboard = {
   project_id: string;
   name: string;
   description: string;
+  // Optimistic-concurrency counter the lifecycle ops fence on; mutations send
+  // it back so a stale write conflicts instead of overwriting.
+  revision: number;
+  // Soft-archive marker — set means the dashboard left the active list but
+  // its charts and data are kept.
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -230,6 +286,8 @@ export type Chart = {
   y_field: string;
   sort_order: number;
   col_span: number;
+  revision: number;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -707,27 +765,6 @@ export type AlertEvent = {
 
 // --- Data connectors ---
 
-// APIError is a failed API call. `code` carries the opcore error taxonomy
-// (not_found | conflict | retryable) when the server classified the failure —
-// consumers branch on it instead of parsing message text.
-export class APIError extends Error {
-  readonly status: number;
-  readonly code: string;
-  constructor(message: string, status: number, code = '') {
-    super(message);
-    this.name = 'APIError';
-    this.status = status;
-    this.code = code;
-  }
-}
-
-// newIdempotencyKey works in secure browser contexts and in self-hosted HTTP
-// deployments where crypto.randomUUID is not exposed.
-export function newIdempotencyKey(): string {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 // ConnectorRun is the durable sync-run receipt the run_source / source_status /
 // cancel_source_run operations return: queued → running → terminal, with a
@@ -754,6 +791,8 @@ export type DataConnector = {
   name: string;
   kind: string;
   has_dsn: boolean;
+  revision: number;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -822,14 +861,17 @@ export type DatasetPreviewRow = {
 };
 
 // DatasetPreview is the dataset_preview op output: deduped FINAL rows with
-// the soft-delete filter applied, plus the freshness block. landed_watermark
-// is the max cursor actually present in the landing table — it can lag the
-// resume cursor when a run failed mid-pull.
+// the soft-delete filter applied, plus the freshness block and the standing
+// warnings. landed_watermark is the max cursor actually present in the
+// landing table — it can lag the resume cursor when a run failed mid-pull.
+// warnings carries the honesty limits (current-state grain, deletion
+// coverage, synced_at tie-break) so no client re-derives them.
 export type DatasetPreview = {
   sync: ConnectorSync;
   rows: DatasetPreviewRow[];
   landed_watermark: string;
   total_rows: number;
+  warnings?: string[];
 };
 
 export type ConnectorColumn = {
@@ -1675,6 +1717,40 @@ function agentQuery(agentID: string): string {
   return agentID ? `?agent=${encodeURIComponent(agentID)}` : '';
 }
 
+// ApiError carries the typed outcome the lifecycle adapter returns: 'conflict'
+// for a stale revision or a reused idempotency key, 'not_found' for a missing
+// or foreign id, 'retryable' for a transient engine/server failure. Hooks map
+// the kind to a message instead of parsing text.
+// ApiError extends APIError so the overview's `instanceof APIError` +
+// `status === 403` contract keeps working while lifecycle/plans callers get
+// the typed `kind`. `request` throws this classified subclass.
+export class ApiError extends APIError {
+  readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
+  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error', code = '') {
+    super(status, message, code);
+    this.name = 'ApiError';
+    this.kind = kind;
+  }
+}
+
+// newIdempotencyKey mints one key per user intent; the caller holds it for the
+// life of that intent so a retried mutation replays instead of applying twice.
+export function newIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// apiErrorMessage renders a mutation failure for the UI: typed conflict and
+// not-found outcomes get an actionable message; anything else falls back to
+// the server's own text.
+export function apiErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    if (err.kind === 'conflict') return 'This changed elsewhere — refresh and try again.';
+    if (err.kind === 'not_found') return 'It no longer exists — refresh to see the current state.';
+    if (err.kind === 'retryable') return 'The server is busy — try again in a moment.';
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
 export class AgentRayAPI {
   constructor(
     private readonly projectID = '',
@@ -1960,15 +2036,23 @@ export class AgentRayAPI {
     return this.post<{ dashboard: Dashboard }>('/api/dashboards', { name, description });
   }
 
-  updateDashboard(id: string, name: string, description: string) {
+  // Lifecycle mutations carry the caller's expected revision and one
+  // idempotency key per intent; both are optional so a caller without them
+  // keeps the pre-revision behavior (the server resolves the current row).
+  updateDashboard(id: string, name: string, description: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<{ dashboard: Dashboard }>(this.withProject(`/api/dashboards/${id}`), {
       method: 'PUT',
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify({ name, description, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
-  deleteDashboard(id: string) {
-    return this.request<void>(this.withProject(`/api/dashboards/${id}`), { method: 'DELETE' });
+  // deleteDashboard is the reversible archive — the row, its charts, and its
+  // data stay; it only leaves the active list.
+  deleteDashboard(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/dashboards/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
   charts(dashboardID: string) {
@@ -1979,22 +2063,28 @@ export class AgentRayAPI {
     return this.post<{ chart: Chart }>(`/api/dashboards/${dashboardID}/charts`, input);
   }
 
-  updateChart(id: string, input: ChartInput) {
+  updateChart(id: string, input: ChartInput, opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<{ chart: Chart }>(this.withProject(`/api/charts/${id}`), {
       method: 'PUT',
-      body: JSON.stringify(input),
+      body: JSON.stringify({ ...input, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
-  deleteChart(id: string) {
-    return this.request<void>(this.withProject(`/api/charts/${id}`), { method: 'DELETE' });
+  // deleteChart is the reversible archive — the row and its config stay; it
+  // only leaves the board.
+  deleteChart(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/charts/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
-  // reorderCharts persists a new board order — chartIDs in their displayed order.
-  reorderCharts(dashboardID: string, chartIDs: string[]) {
+  // reorderCharts persists a new board order — chartIDs in their displayed
+  // order. The dashboard revision is the board's optimistic fence.
+  reorderCharts(dashboardID: string, chartIDs: string[], opts: { revision?: number; idempotencyKey?: string } = {}) {
     return this.request<void>(this.withProject(`/api/dashboards/${dashboardID}/charts/order`), {
       method: 'PUT',
-      body: JSON.stringify({ chart_ids: chartIDs }),
+      body: JSON.stringify({ chart_ids: chartIDs, revision: opts.revision, idempotency_key: opts.idempotencyKey }),
     });
   }
 
@@ -2045,14 +2135,14 @@ export class AgentRayAPI {
   // It atomically stores the encrypted credential and creates the connector
   // under this caller-provided idempotency key: retry the SAME key after an
   // ambiguous response and the server replays the original connector.
-  createConnector(input: { name: string; kind: string; dsn: string; idempotencyKey: string }) {
+  createConnector(input: { name: string; kind: string; dsn: string }, opts: { idempotencyKey: string }) {
     return this.post<{ connector: DataConnector }>(
       `/api/projects/${this.projectID}/source-connectors`,
       {
         name: input.name,
         kind: input.kind,
         dsn: input.dsn,
-        idempotency_key: input.idempotencyKey,
+        idempotency_key: opts.idempotencyKey,
       },
     );
   }
@@ -2074,6 +2164,10 @@ export class AgentRayAPI {
     return this.callOp<DatasetPreview>('dataset_preview', { sync_id: syncID, limit });
   }
 
+  verifySDK(eventName = 'onboarding_verified') {
+    return this.callOp<VerifySDKResult>('verify_sdk', { event_name: eventName });
+  }
+
   // recordOutcome appends one measured observation to a committed or decided
   // experiment — append-only, revision-checked, idempotent.
   recordOutcome(input: { test_id: string; revision: number; value: number; unit: string; window: string; evidence_ref: string; idempotency_key: string }) {
@@ -2086,8 +2180,13 @@ export class AgentRayAPI {
     return this.callOp<{ test_id: string; status: string; revision: number; note: string }>('abandon_test', input as unknown as Record<string, unknown>);
   }
 
-  deleteConnector(id: string) {
-    return this.request<void>(this.withProject(`/api/connectors/${id}`), { method: 'DELETE' });
+  // deleteConnector is the reversible archive — the connector row, its
+  // credential reference, and landed data stay; its syncs pause until restore.
+  deleteConnector(id: string, opts: { revision?: number; idempotencyKey?: string } = {}) {
+    return this.request<void>(this.withProject(`/api/connectors/${id}`), {
+      method: 'DELETE',
+      body: JSON.stringify({ revision: opts.revision, idempotency_key: opts.idempotencyKey }),
+    });
   }
 
   testConnector(id: string) {
@@ -2127,10 +2226,10 @@ export class AgentRayAPI {
   // runConnectorSync enqueues a durable run through the shared run_source
   // operation and returns its receipt — the caller polls source_status for
   // queued → running → terminal and can cancel through cancelConnectorRun.
-  runConnectorSync(syncID: string) {
+  runConnectorSync(syncID: string, opts: { idempotencyKey?: string } = {}) {
     return this.callOp<{ run: ConnectorRun; enqueued: boolean }>('run_source', {
       sync_id: syncID,
-      idempotency_key: newIdempotencyKey(),
+      idempotency_key: opts.idempotencyKey ?? newIdempotencyKey(),
     });
   }
 
@@ -2466,7 +2565,7 @@ export class AgentRayAPI {
   ): Promise<AgentChatStreamResult> {
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || payload.message || `AgentRay API returned ${response.status}`);
+      throw new APIError(response.status, payload.error || payload.message || `AgentRay API returned ${response.status}`);
     }
 
     const reader = response.body.getReader();
@@ -2833,7 +2932,7 @@ export class AgentRayAPI {
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || payload.message || `AgentRay API returned ${response.status}`);
+      throw new APIError(response.status, payload.error || payload.message || `AgentRay API returned ${response.status}`);
     }
 
     const reader = response.body.getReader();
@@ -2897,14 +2996,16 @@ export class AgentRayAPI {
     }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      // Operation failures arrive as {error, code} — code is the opcore
-      // taxonomy (not_found | conflict | retryable) and rides on APIError so
-      // consumers can branch without parsing text.
-      throw new APIError(
-        payload.error || payload.message || `AgentRay API returned ${response.status}`,
-        response.status,
-        typeof payload.code === 'string' ? payload.code : '',
-      );
+      const message = payload.error || payload.message || `AgentRay API returned ${response.status}`;
+      const wireKind = typeof payload.code === 'string' ? payload.code : '';
+      const kind =
+        wireKind === 'conflict' || wireKind === 'not_found' || wireKind === 'retryable'
+          ? wireKind
+          : response.status === 409 ? 'conflict'
+          : response.status === 404 ? 'not_found'
+          : response.status === 429 || response.status >= 500 ? 'retryable'
+          : 'error';
+      throw new ApiError(message, response.status, kind, wireKind);
     }
     return payload as T;
   }

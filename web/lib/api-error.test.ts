@@ -71,12 +71,14 @@ describe('APIError', () => {
     });
 
     const api = new AgentRayAPI('proj-1');
-    await api.createConnector({
-      name: 'warehouse',
-      kind: 'postgres',
-      dsn: 'postgres://u:p@db/source',
-      idempotencyKey: 'stable-retry-key',
-    });
+    await api.createConnector(
+      {
+        name: 'warehouse',
+        kind: 'postgres',
+        dsn: 'postgres://u:p@db/source',
+      },
+      { idempotencyKey: 'stable-retry-key' },
+    );
 
     expect(String(request)).toContain('/api/projects/proj-1/source-connectors');
     expect(JSON.parse(String(init?.body))).toEqual({

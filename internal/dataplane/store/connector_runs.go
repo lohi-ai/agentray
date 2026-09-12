@@ -107,11 +107,13 @@ func (s *Store) EnqueueConnectorRun(ctx context.Context, projectID, syncID, idem
 		return ConnectorRun{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	var enabled bool
+	var enabled, archived bool
 	var connectorID string
 	if err := tx.QueryRow(ctx,
-		`SELECT enabled, connector_id::text FROM connector_syncs WHERE id = $1 AND project_id = $2 FOR UPDATE`,
-		syncID, projectID).Scan(&enabled, &connectorID); err != nil {
+		`SELECT cs.enabled, cs.connector_id::text, dc.archived_at IS NOT NULL
+FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
+WHERE cs.id = $1 AND cs.project_id = $2 FOR UPDATE OF cs`,
+		syncID, projectID).Scan(&enabled, &connectorID, &archived); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ConnectorRun{}, false, pgx.ErrNoRows
 		}
@@ -155,6 +157,9 @@ VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, projectID, syncID, idemKey, act
 		return active, false, tx.Commit(ctx)
 	} else if !errors.Is(qerr, pgx.ErrNoRows) {
 		return ConnectorRun{}, false, qerr
+	}
+	if archived {
+		return ConnectorRun{}, false, ErrSourceArchived
 	}
 	if !enabled {
 		return ConnectorRun{}, false, ErrSyncPaused
@@ -378,11 +383,15 @@ WHERE (status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < $1))
 // same-project); legacy inline ciphertext still decrypts.
 func (s *Store) ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error) {
 	var ciphertext, credentialID string
+	var archivedAt *time.Time
 	err = s.pg.QueryRow(ctx,
-		`SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, '') FROM data_connectors WHERE id = $1 AND project_id = $2`,
-		connectorID, projectID).Scan(&kind, &ciphertext, &credentialID)
+		`SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, ''), archived_at FROM data_connectors WHERE id = $1 AND project_id = $2`,
+		connectorID, projectID).Scan(&kind, &ciphertext, &credentialID, &archivedAt)
 	if err != nil {
 		return "", "", err
+	}
+	if archivedAt != nil {
+		return "", "", ErrSourceArchived
 	}
 	if credentialID != "" {
 		dsn, err = s.sourceCredentialDSN(ctx, s.pg, projectID, credentialID)
@@ -398,10 +407,12 @@ func (s *Store) ConnectorDSNForProject(ctx context.Context, projectID, connector
 	return kind, dsn, nil
 }
 
-// ListDataConnectorsForProject lists a project's connectors (no DSN material).
+// ListDataConnectorsForProject lists a project's connectors (no DSN
+// material), including archived rows — the operation layer filters by caller
+// intent via ListDataConnectorsFiltered.
 func (s *Store) ListDataConnectorsForProject(ctx context.Context, projectID string) ([]DataConnector, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, kind, dsn_ciphertext <> '', created_at, updated_at
+SELECT `+dataConnectorColumns+`
 FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -410,7 +421,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	out := []DataConnector{}
 	for rows.Next() {
 		var c DataConnector
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(dataConnectorScanDest(&c)...); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -455,21 +466,7 @@ func (s *Store) ConnectorSyncForProject(ctx context.Context, projectID, syncID s
 func (s *Store) SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (ConnectorSync, error) {
 	raw, err := s.runIdempotent(ctx, projectID, "pause_source", idemKey, requestHash,
 		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
-			var cs ConnectorSync
-			dest := append(syncScanDest(&cs), &cs.Revision)
-			err := q.QueryRow(ctx, `
-UPDATE connector_syncs SET enabled = $3, revision = revision + 1, updated_at = now()
-WHERE id = $1 AND project_id = $2 AND revision = $4
-RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expectedRevision).Scan(dest...)
-			if errors.Is(err, pgx.ErrNoRows) {
-				var exists bool
-				if qerr := q.QueryRow(ctx,
-					`SELECT EXISTS(SELECT 1 FROM connector_syncs WHERE id = $1 AND project_id = $2)`,
-					syncID, projectID).Scan(&exists); qerr == nil && exists {
-					return nil, ErrRevisionConflict
-				}
-				return nil, pgx.ErrNoRows
-			}
+			cs, err := setConnectorSyncEnabled(ctx, q, projectID, syncID, enabled, expectedRevision)
 			if err != nil {
 				return nil, err
 			}
@@ -485,24 +482,44 @@ RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expec
 	return cs, nil
 }
 
-// SetConnectorSyncEnabled pauses/resumes a sync with a revision check —
+// setConnectorSyncEnabled pauses/resumes a sync with a revision check —
 // pause_source's mutation. Pausing never kills an active run; it only stops
-// future enqueue (EnqueueConnectorRun refuses disabled syncs).
-func (s *Store) SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (ConnectorSync, error) {
+// future enqueue (EnqueueConnectorRun refuses disabled syncs). The archived
+// predicate is folded INTO the update's WHERE so a source archive landing
+// between check and write cannot slip an enable through: whichever
+// transaction commits first decides — archive wins the row lock and the
+// enable re-evaluates to no rows, or enable wins and the archive's own
+// WHERE enabled still disables the sync.
+func setConnectorSyncEnabled(ctx context.Context, q pgQuerier, projectID, syncID string, enabled bool, expectedRevision int64) (ConnectorSync, error) {
 	var cs ConnectorSync
-	dest := append(syncScanDest(&cs), &cs.Revision)
-	err := s.pg.QueryRow(ctx, `
-UPDATE connector_syncs SET enabled = $3, revision = revision + 1, updated_at = now()
+	err := q.QueryRow(ctx, `
+UPDATE connector_syncs SET enabled = $3, disabled_by_archive = false, revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $4
-RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expectedRevision).Scan(dest...)
+AND ($3 = false OR NOT EXISTS(
+	SELECT 1 FROM data_connectors dc
+	WHERE dc.id = connector_syncs.connector_id AND dc.archived_at IS NOT NULL))
+RETURNING `+connectorSyncColumns, syncID, projectID, enabled, expectedRevision).Scan(syncScanDest(&cs)...)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var exists bool
-		if qerr := s.pg.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM connector_syncs WHERE id = $1 AND project_id = $2)`,
-			syncID, projectID).Scan(&exists); qerr == nil && exists {
-			return ConnectorSync{}, ErrRevisionConflict
+		var exists, archived bool
+		if qerr := q.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM connector_syncs WHERE id = $1 AND project_id = $2),
+       EXISTS(SELECT 1 FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
+              WHERE cs.id = $1 AND cs.project_id = $2 AND dc.archived_at IS NOT NULL)`,
+			syncID, projectID).Scan(&exists, &archived); qerr != nil {
+			return ConnectorSync{}, qerr
+		} else if !exists {
+			return ConnectorSync{}, pgx.ErrNoRows
+		} else if enabled && archived {
+			return ConnectorSync{}, ErrSourceArchived
 		}
-		return ConnectorSync{}, pgx.ErrNoRows
+		return ConnectorSync{}, ErrRevisionConflict
 	}
 	return cs, err
+}
+
+// SetConnectorSyncEnabled is the non-transactional edge for callers that do
+// not need an idempotency receipt. Resuming under an archived connector is
+// rejected — unarchive the source instead.
+func (s *Store) SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (ConnectorSync, error) {
+	return setConnectorSyncEnabled(ctx, s.pg, projectID, syncID, enabled, expectedRevision)
 }

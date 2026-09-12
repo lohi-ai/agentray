@@ -35,12 +35,12 @@ func MountHTTP(g *echo.Group, r *Registry, deps any, resolve PrincipalResolver) 
 			out, err := spec.OpInvoke(c.Request().Context(), cc, string(body))
 			if err != nil {
 				err = r.classifyError(err)
-				if he, ok := err.(*echo.HTTPError); ok {
-					return he
-				}
 				var oe *OpError
 				if errors.As(err, &oe) {
 					return c.JSON(statusForKind(oe.Kind), opErrorBody{Error: oe.Message, Code: string(oe.Kind)})
+				}
+				if he, ok := r.MapError(err).(*echo.HTTPError); ok {
+					return he
 				}
 				return c.JSON(http.StatusBadRequest, opErrorBody{Error: err.Error()})
 			}

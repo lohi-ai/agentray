@@ -12,7 +12,7 @@ import (
 func TestOverviewRangeCompleteDays(t *testing.T) {
 	// 2026-09-12 14:30 UTC: "7d" must end at Sep-12 00:00, covering Sep 5–11.
 	now := time.Date(2026, 9, 12, 14, 30, 0, 0, time.UTC)
-	r, err := overviewRange("7d", now)
+	r, err := overviewRange("7d", now, time.UTC)
 	if err != nil {
 		t.Fatalf("7d: %v", err)
 	}
@@ -27,13 +27,38 @@ func TestOverviewRangeCompleteDays(t *testing.T) {
 	}
 }
 
+func TestOverviewRangeProjectTimezoneDST(t *testing.T) {
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mar 9 is the first full local day after DST begins. The seven-day range
+	// crosses the offset change, so its bounds must be local midnights, not
+	// fixed 24-hour subtraction.
+	now := time.Date(2026, 3, 9, 10, 30, 0, 0, time.UTC)
+	r, err := overviewRange("7d", now, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.From.Equal(time.Date(2026, 3, 2, 0, 0, 0, 0, loc)) || !r.To.Equal(time.Date(2026, 3, 9, 0, 0, 0, 0, loc)) {
+		t.Fatalf("DST range = %+v, want Mar 2–9 local midnights", r)
+	}
+	today, err := overviewRange("today", now, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if today.CompleteDays || !today.From.Equal(r.To) || !today.To.Equal(now) {
+		t.Fatalf("DST today = %+v, want partial range from Mar-9 local midnight", today)
+	}
+}
+
 func TestOverviewRangeDefaultAndToday(t *testing.T) {
 	now := time.Date(2026, 9, 12, 14, 30, 0, 0, time.UTC)
-	r, err := overviewRange("", now)
+	r, err := overviewRange("", now, time.UTC)
 	if err != nil || r.Days != 7 || !r.CompleteDays {
 		t.Fatalf("empty period must default to 7d complete: %+v err=%v", r, err)
 	}
-	today, err := overviewRange("today", now)
+	today, err := overviewRange("today", now, time.UTC)
 	if err != nil {
 		t.Fatalf("today: %v", err)
 	}
@@ -48,11 +73,11 @@ func TestOverviewRangeDefaultAndToday(t *testing.T) {
 func TestOverviewRangeRejectsBadPeriod(t *testing.T) {
 	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
 	for _, p := range []string{"0d", "91d", "7", "week", "-3d", "7D", "100d"} {
-		if _, err := overviewRange(p, now); err == nil {
+		if _, err := overviewRange(p, now, time.UTC); err == nil {
 			t.Fatalf("period %q must be rejected", p)
 		}
 	}
-	if _, err := overviewRange("90d", now); err != nil {
+	if _, err := overviewRange("90d", now, time.UTC); err != nil {
 		t.Fatalf("90d must be accepted: %v", err)
 	}
 }
@@ -66,6 +91,33 @@ func TestOverviewDataState(t *testing.T) {
 	}
 	if got := overviewDataState(true, 25*time.Hour); got != "quiet" {
 		t.Fatalf("25h old = %q", got)
+	}
+}
+
+func TestOverviewSourceState(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name                string
+		configured, enabled bool
+		lastStatus          string
+		lastRows            int
+		want                string
+	}{
+		{name: "connector without table", want: "not_configured"},
+		{name: "paused sync", configured: true, want: "paused"},
+		{name: "never run", configured: true, enabled: true, want: "not_ready"},
+		{name: "successful run", configured: true, enabled: true, lastStatus: "ok", want: "healthy"},
+		{name: "failed run", configured: true, enabled: true, lastStatus: "error", want: "error"},
+		{name: "partial failed run", configured: true, enabled: true, lastStatus: "error", lastRows: 3, want: "partial"},
+	}
+	for _, tc := range cases {
+		var lastRunAt *time.Time
+		if tc.configured && tc.enabled && tc.name != "never run" {
+			lastRunAt = &now
+		}
+		if got := overviewSourceState(tc.configured, tc.enabled, lastRunAt, tc.lastStatus, tc.lastRows); got != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

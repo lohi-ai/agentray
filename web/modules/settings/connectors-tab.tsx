@@ -108,7 +108,7 @@ export function ConnectorsTab() {
           danger
           onConfirm={() => {
             if (selectedID === deleting.id) setSelectedID(null);
-            void remove.mutate(deleting.id);
+            void remove.mutate({ id: deleting.id, revision: deleting.revision, idempotencyKey: newIdempotencyKey() });
           }}
           onClose={() => setDeleting(null)}
         />
@@ -357,7 +357,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
               size="sm"
               onClick={() => {
                 setRunning(s.id);
-                void run.mutateAsync(s.id).finally(() => setRunning(null));
+                void run.mutateAsync({ id: s.id, idempotencyKey: newIdempotencyKey() }).finally(() => setRunning(null));
               }}
             >
               {running === s.id ? 'Running…' : 'Run now'}
@@ -844,6 +844,15 @@ function DatasetPreviewDialog({ sync, onClose }: { sync: ConnectorSync; onClose:
             <span className="font-mono">{s.cursor || '—'}</span>
             {s.cursor_key ? <> (<span className="font-mono">{s.cursor_key}</span>)</> : null}
           </Text>
+          {preview?.warnings?.length ? (
+            <VStack gap={0.5} align="stretch">
+              {preview.warnings.map((w) => (
+                <Text key={w} type="supporting" style={{ color: 'var(--warning)' }}>
+                  {w}
+                </Text>
+              ))}
+            </VStack>
+          ) : null}
           {s.last_status === 'error' && s.last_rows > 0 ? (
             <Text type="supporting" style={{ color: 'var(--warning)' }}>
               partial — {formatCompact(s.last_rows)} rows landed before the last run failed{s.last_error ? `: ${s.last_error}` : ''}

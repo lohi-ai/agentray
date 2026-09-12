@@ -75,6 +75,40 @@ func withTempConfig(t *testing.T) string {
 	return dir
 }
 
+func TestOperationCredentialPrefersBoundManagementKey(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  cliConfig
+		env  string
+		want string
+	}{
+		{
+			name: "stored management key outranks capture environment",
+			cfg:  cliConfig{ProjectID: "project-a", APIKey: "capture-a", ManagementKey: "agm_stored", ManagementKeyProject: "project-a"},
+			env:  "capture-from-key-command",
+			want: "agm_stored",
+		},
+		{
+			name: "stale management key is discarded",
+			cfg:  cliConfig{ProjectID: "project-b", APIKey: "capture-b", ManagementKey: "agm_stale", ManagementKeyProject: "project-a"},
+			env:  "capture-from-env",
+			want: "capture-from-env",
+		},
+		{
+			name: "capture config remains legacy fallback",
+			cfg:  cliConfig{ProjectID: "project-a", APIKey: "capture-a"},
+			want: "capture-a",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := operationCredential(tt.cfg, tt.env); got != tt.want {
+				t.Fatalf("operationCredential() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoginKeyRotateLogoutFlow(t *testing.T) {
 	srv := fakeServer(t)
 	dir := withTempConfig(t)
@@ -202,25 +236,25 @@ func TestOpKeyPrecedence(t *testing.T) {
 		ManagementKey:        "agm_mgmt",
 		ManagementKeyProject: "p1",
 	}
-	if got := opKeyDefault(cfg, "capture-env"); got != "agm_mgmt" {
+	if got := operationCredential(cfg, "capture-env"); got != "agm_mgmt" {
 		t.Fatalf("management key must outrank AGENTRAY_API_KEY, got %q", got)
 	}
-	if got := opKeyDefault(cfg, ""); got != "agm_mgmt" {
+	if got := operationCredential(cfg, ""); got != "agm_mgmt" {
 		t.Fatalf("management key should be the default, got %q", got)
 	}
 	// No management credential: env beats the saved capture key.
 	cfg.ManagementKey = ""
 	cfg.ManagementKeyProject = ""
-	if got := opKeyDefault(cfg, "capture-env"); got != "capture-env" {
+	if got := operationCredential(cfg, "capture-env"); got != "capture-env" {
 		t.Fatalf("env should beat saved capture key, got %q", got)
 	}
-	if got := opKeyDefault(cfg, ""); got != "capture-saved" {
+	if got := operationCredential(cfg, ""); got != "capture-saved" {
 		t.Fatalf("saved capture key is the last resort, got %q", got)
 	}
 	// A credential minted under a different project is dropped, not reused.
 	cfg.ManagementKey = "agm_stale"
 	cfg.ManagementKeyProject = "p2"
-	if got := opKeyDefault(cfg, "capture-env"); got != "capture-env" {
+	if got := operationCredential(cfg, "capture-env"); got != "capture-env" {
 		t.Fatalf("stale management key must not be reused, got %q", got)
 	}
 }

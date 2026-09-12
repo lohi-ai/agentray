@@ -45,7 +45,7 @@ func main() {
 	// The stored management credential is only valid for the project it was
 	// minted under — a stale one from a previous selection must not silently
 	// authenticate ops against the wrong project.
-	key := flag.String("key", opKeyDefault(cfg, os.Getenv("AGENTRAY_API_KEY")), "management credential or project API key")
+	key := flag.String("key", operationCredential(cfg, os.Getenv("AGENTRAY_API_KEY")), "management credential or project API key")
 	flag.Parse()
 	args := flag.Args()
 
@@ -119,6 +119,18 @@ func pretty(b []byte) []byte {
 	return buf.Bytes()
 }
 
+// operationCredential prefers the project-bound management credential over the
+// capture key that `agentray key` deliberately prints for SDK configuration.
+// An explicit --key still wins after flag parsing; the environment is only the
+// default when no valid stored management credential exists.
+func operationCredential(cfg cliConfig, envKey string) string {
+	mgmtKey := cfg.ManagementKey
+	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
+		mgmtKey = ""
+	}
+	return firstNonEmpty(mgmtKey, envKey, cfg.APIKey)
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -126,18 +138,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-// opKeyDefault picks the credential ops calls use when --key is not passed:
-// the stored management credential first (ops need its scopes), then
-// AGENTRAY_API_KEY (an explicit env override — usually a capture key for
-// legacy servers), then the saved capture key as the last resort.
-// A management credential minted under a different project is dropped, never
-// reused — it would silently authenticate ops against the wrong project.
-func opKeyDefault(cfg cliConfig, envKey string) string {
-	mgmtKey := cfg.ManagementKey
-	if cfg.ManagementKeyProject != "" && cfg.ProjectID != "" && cfg.ManagementKeyProject != cfg.ProjectID {
-		mgmtKey = ""
-	}
-	return firstNonEmpty(mgmtKey, envKey, cfg.APIKey)
 }

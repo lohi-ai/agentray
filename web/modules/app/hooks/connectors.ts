@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentRayAPI, APIError, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
+import { AgentRayAPI, ApiError, apiErrorMessage, newIdempotencyKey, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 // useConnectors drives the Data connectors settings tab: the project's
@@ -22,15 +22,18 @@ export function useConnectors() {
 
   const create = useMutation({
     mutationFn: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) =>
-      new AgentRayAPI(projectID!).createConnector(input),
+      new AgentRayAPI(projectID!).createConnector(input, { idempotencyKey: input.idempotencyKey }),
     onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to add connector'),
+    onError: (e) => setError(apiErrorMessage(e, 'Unable to add connector')),
   });
 
+  // remove is the reversible archive: the connector leaves the list, its syncs
+  // pause, and the row + credential + landed data are kept for restore.
   const remove = useMutation({
-    mutationFn: (id: string) => new AgentRayAPI(projectID!).deleteConnector(id),
+    mutationFn: (input: { id: string; revision?: number; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).deleteConnector(input.id, { revision: input.revision, idempotencyKey: input.idempotencyKey }),
     onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to delete connector'),
+    onError: (e) => setError(apiErrorMessage(e, 'Unable to delete connector')),
   });
 
   return {
@@ -79,16 +82,17 @@ export function useConnectorSyncs(connectorID: string | null) {
   const remove = useMutation({
     mutationFn: (id: string) => new AgentRayAPI(projectID!).deleteConnectorSync(id),
     onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to delete sync'),
+    onError: (e) => setError(apiErrorMessage(e, 'Unable to delete sync')),
   });
 
   // run-now enqueues a durable run and returns its receipt; the poll above
-  // tracks it to a terminal state. Errors are typed (APIError.code) — a
-  // 'conflict' means the sync is paused, 'retryable' means engine capacity.
+  // tracks it to a terminal state. Typed conflict means the sync is paused;
+  // retryable means engine capacity.
   const run = useMutation({
-    mutationFn: (id: string) => new AgentRayAPI(projectID!).runConnectorSync(id),
+    mutationFn: (input: { id: string; idempotencyKey: string }) =>
+      new AgentRayAPI(projectID!).runConnectorSync(input.id, { idempotencyKey: input.idempotencyKey }),
     onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to run sync'),
+    onError: (e) => setError(apiErrorMessage(e, 'Unable to run sync')),
   });
 
   const cancel = useMutation({
@@ -102,8 +106,8 @@ export function useConnectorSyncs(connectorID: string | null) {
       new AgentRayAPI(projectID!).setConnectorSyncEnabled(sync, enabled),
     onSuccess: invalidate,
     onError: (e) => {
-      if (e instanceof APIError && e.code === 'conflict') void invalidate();
-      setError(e instanceof Error ? e.message : 'Unable to update sync');
+      if (e instanceof ApiError && e.kind === 'conflict') void invalidate();
+      setError(apiErrorMessage(e, 'Unable to update sync'));
     },
   });
 
@@ -139,8 +143,10 @@ export function useConnectorSchema(connectorID: string | null, enabled: boolean)
 
 // useDatasetPreview reads one sync's landed rows through the dataset_preview
 // op — deduped FINAL rows with the soft-delete filter applied, plus the
-// freshness block (last success vs last attempt vs landed watermark). It is
-// the dataset-semantics read; run_sql stays raw.
+// freshness block (last success vs last attempt vs landed watermark) and the
+// standing warnings (grain, deletion coverage, replacement tie-break). run_sql
+// applies the same soft-delete predicate inside its scoped CTE; this op adds
+// the sync metadata and warnings around the rows.
 export function useDatasetPreview(syncID: string | null) {
   const projectID = useAuthStore((s) => s.project?.id);
   const query = useQuery({

@@ -175,8 +175,9 @@ export function signedInLandingTarget(): string {
 // prompts grouped by the situation the owner is actually in.
 
 export type FirstRunInput = {
-  // Catalog rows or bare names — only length matters for first-run gating.
-  eventNames: { readonly length: number } | null | undefined;
+  // Catalog rows or bare names. A verification-only catalog proves capture,
+  // not product activity, so it keeps the first-event guide visible.
+  eventNames: readonly (string | { name?: string; event_name?: string; count?: number; users?: number })[] | null | undefined;
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
@@ -187,11 +188,15 @@ export type FirstValuePath = {
   showFirstAsk: boolean;
 };
 
-// Empty catalog (zero event names, catalog has loaded) turns on the guided
-// first-event + first-ask path.
+
+// A verification receipt is intentionally excluded from product metrics. Keep
+// setup present until the catalog has a product event, while the chat prompt
+// remains reserved for an entirely empty catalog.
 export function firstValuePath(input: FirstRunInput): FirstValuePath {
-  const empty = input.catalogReady && (input.eventNames?.length ?? 0) === 0;
-  return { showFirstEvent: empty, showFirstAsk: empty };
+  const names = input.eventNames?.map((entry) => typeof entry === 'string' ? entry : entry.event_name ?? entry.name ?? '') ?? [];
+  const empty = input.catalogReady && names.length === 0;
+  const verificationOnly = input.catalogReady && names.length > 0 && names.every((name) => name === 'onboarding_verified');
+  return { showFirstEvent: empty || verificationOnly, showFirstAsk: empty };
 }
 
 export function shouldShowFirstEventGuide(input: FirstRunInput): boolean {
@@ -489,7 +494,11 @@ function catalogEvents(names: FirstRunInput['eventNames']): CatalogEvent[] {
       if (typeof name === 'string' && name) out.push({ name, count, users });
     }
   }
-  return out;
+  // onboarding_verified is a verification receipt, not a product signal —
+  // every consumer (first-run gating, first-session notice, weakest-link,
+  // written opinion) reads through this one function, so the exclusion lives
+  // here and can never disagree between surfaces.
+  return out.filter((e) => e.name !== 'onboarding_verified');
 }
 
 function catalogLabels(names: FirstRunInput['eventNames']): string[] {
@@ -716,6 +725,15 @@ export function projectDetailRoot(pathname: string): string | null {
   if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
   if (/^\/plans\/[^/]+/.test(path)) return '/plans';
   return null;
+}
+
+// projectLanding decides where activating a project leaves the user. A newly
+// created project always lands on Overview — the front door — no matter which
+// surface the create dialog was opened from; switching an existing project
+// keeps the current safe-list unwind (null = stay on the current route).
+export function projectLanding(pathname: string, opts?: { created?: boolean }): string | null {
+  if (opts?.created) return SIGNED_IN_LANDING;
+  return projectDetailRoot(pathname);
 }
 
 export function settingsTabFromQuery(search: string): string {

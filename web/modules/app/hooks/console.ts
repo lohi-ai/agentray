@@ -361,7 +361,7 @@ export function useEventNames() {
     staleTime: 10 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
-  return { names: query.data?.names ?? [], loading: query.isLoading };
+  return { names: query.data?.names ?? [], loading: query.isLoading, error: query.isError };
 }
 
 // useFunnelByPlatform runs the same funnel once per platform, so a product that
