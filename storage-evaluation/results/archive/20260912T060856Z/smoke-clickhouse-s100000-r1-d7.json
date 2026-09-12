@@ -1,0 +1,305 @@
+{
+  "checks": {
+    "currency.cost_7d": {
+      "actual": 20.18883811908654,
+      "expected": 20.18883811908654,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "currency.mixed": {
+      "kind": "semantic_gate",
+      "note": "The Event schema carries only cost_usd Float32 \u2014 there is no multi-currency field to evaluate. Mixed-currency billing correctness is untestable in this harness.",
+      "status": "NOT RUN"
+    },
+    "dedup.raw_vs_distinct_7d": {
+      "actual": [
+        7797,
+        7669
+      ],
+      "expected": [
+        7797,
+        7669
+      ],
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "dedup.read_time_guarantee": {
+      "kind": "semantic_gate",
+      "note": "Neither engine applies read-time dedup by default and the harness does not layer one on; the measured raw-vs-distinct gap quantifies exposure but is not a dedup guarantee.",
+      "status": "NOT RUN"
+    },
+    "entity.current_rows": {
+      "actual": 10000,
+      "expected": 10000,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "entity.deleted_still_visible": {
+      "actual": 100,
+      "expected": 100,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "entity.tombstone_delete": {
+      "actual": 100,
+      "expected": 0,
+      "kind": "semantic_gate",
+      "status": "DIVERGENT"
+    },
+    "entity_join.order_paid_7d": {
+      "actual": 92127437,
+      "expected": 92127437,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "funnel.signup_window_7d": {
+      "actual": [
+        2223,
+        44,
+        0
+      ],
+      "expected": [
+        2223,
+        44,
+        0
+      ],
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "identity.canonical_events_7d": {
+      "actual": {
+        "top10": [
+          [
+            "76bccbca-b862-57de-b8f3-c841d26318fa",
+            19
+          ],
+          [
+            "de369194-527e-5613-afa2-80066d940e33",
+            15
+          ],
+          [
+            "dc8d93bf-69e5-5e42-a714-593c80753dd0",
+            14
+          ],
+          [
+            "0486f18e-0f67-5f2b-a81c-7adb2e902bbe",
+            13
+          ],
+          [
+            "6bb2b919-534e-5f38-9802-950354ea1308",
+            13
+          ],
+          [
+            "741391f1-1ffa-50a0-8791-d56a32e85d61",
+            13
+          ],
+          [
+            "8938a991-352f-58f6-9058-9fce802341b4",
+            13
+          ],
+          [
+            "8c31a2d6-d299-5c93-92be-c26ac233b154",
+            13
+          ],
+          [
+            "0a2a0ac3-13ef-51fb-be68-40dfc700ccbf",
+            12
+          ],
+          [
+            "2738a89e-5f78-5ab5-b195-1002eefd677b",
+            12
+          ]
+        ],
+        "total": 7797
+      },
+      "expected": {
+        "top10": [
+          [
+            "76bccbca-b862-57de-b8f3-c841d26318fa",
+            19
+          ],
+          [
+            "de369194-527e-5613-afa2-80066d940e33",
+            15
+          ],
+          [
+            "dc8d93bf-69e5-5e42-a714-593c80753dd0",
+            14
+          ],
+          [
+            "0486f18e-0f67-5f2b-a81c-7adb2e902bbe",
+            13
+          ],
+          [
+            "6bb2b919-534e-5f38-9802-950354ea1308",
+            13
+          ],
+          [
+            "741391f1-1ffa-50a0-8791-d56a32e85d61",
+            13
+          ],
+          [
+            "8938a991-352f-58f6-9058-9fce802341b4",
+            13
+          ],
+          [
+            "8c31a2d6-d299-5c93-92be-c26ac233b154",
+            13
+          ],
+          [
+            "0a2a0ac3-13ef-51fb-be68-40dfc700ccbf",
+            12
+          ],
+          [
+            "2738a89e-5f78-5ab5-b195-1002eefd677b",
+            12
+          ]
+        ],
+        "total": 7797
+      },
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "late_events.bucket_7d": {
+      "actual": 399,
+      "expected": 399,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "retention.week1_mature": {
+      "actual": [
+        1632,
+        1281
+      ],
+      "expected": [
+        1632,
+        1281
+      ],
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "sessionization.gap_violations": {
+      "actual": 0,
+      "expected": 0,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    },
+    "sessionization.sessions_7d": {
+      "actual": 7623,
+      "expected": 7623,
+      "kind": "baseline_parity",
+      "status": "PASS"
+    }
+  },
+  "days": 7,
+  "engine": "clickhouse",
+  "ingest": {
+    "ack_s": 0.1,
+    "expected_total": 109538,
+    "final_total": 109538,
+    "reader_spans_s": [
+      [
+        -0.001,
+        0.036
+      ]
+    ],
+    "readers_overlapping_ingest": 1,
+    "rows": 10000,
+    "visibility_lag_s": 0.12
+  },
+  "load_s": 1.46,
+  "provenance": {
+    "code_commit": "2d4d6861278b7b28c472275e80a29a1b88cd1401",
+    "code_digest": "3e65ba54d8d36d51794d45b9a7a11906d28dbc79432126f9f2748cc053400b2c",
+    "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
+    "corpus_rows": 99538
+  },
+  "readers": 1,
+  "resources": {
+    "cpu_pct_mean": 9.0,
+    "cpu_pct_peak": 20.3,
+    "disk_after_load_bytes": 11815691,
+    "disk_before_bytes": 523370,
+    "disk_final_bytes": 13135140,
+    "mem_idle_bytes": 272961536,
+    "mem_peak_bytes": 676945920,
+    "samples": 3
+  },
+  "scale": 100000,
+  "seed": 20260912,
+  "shapes": {
+    "aggregate": {
+      "first": {
+        "n": 1,
+        "p50_ms": 21.3,
+        "p95_ms": 21.3,
+        "p99_ms": 21.3
+      },
+      "repeat": {
+        "n": 2,
+        "p50_ms": 18.9,
+        "p95_ms": 18.9,
+        "p99_ms": 18.9
+      }
+    },
+    "entity_join": {
+      "first": {
+        "n": 1,
+        "p50_ms": 37.0,
+        "p95_ms": 37.0,
+        "p99_ms": 37.0
+      },
+      "repeat": {
+        "n": 2,
+        "p50_ms": 64.7,
+        "p95_ms": 64.7,
+        "p99_ms": 64.7
+      }
+    },
+    "funnel": {
+      "first": {
+        "n": 1,
+        "p50_ms": 17.7,
+        "p95_ms": 17.7,
+        "p99_ms": 17.7
+      },
+      "repeat": {
+        "n": 2,
+        "p50_ms": 30.8,
+        "p95_ms": 30.8,
+        "p99_ms": 30.8
+      }
+    },
+    "overview": {
+      "first": {
+        "n": 1,
+        "p50_ms": 22.8,
+        "p95_ms": 22.8,
+        "p99_ms": 22.8
+      },
+      "repeat": {
+        "n": 2,
+        "p50_ms": 33.8,
+        "p95_ms": 33.8,
+        "p99_ms": 33.8
+      }
+    },
+    "retention": {
+      "first": {
+        "n": 1,
+        "p50_ms": 91.0,
+        "p95_ms": 91.0,
+        "p99_ms": 91.0
+      },
+      "repeat": {
+        "n": 2,
+        "p50_ms": 77.6,
+        "p95_ms": 77.6,
+        "p99_ms": 77.6
+      }
+    }
+  },
+  "status": "MEASURED",
+  "teardown": "stopped",
+  "wall_s": 12.3
+}

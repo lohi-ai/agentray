@@ -62,7 +62,10 @@ func TestRegistryHasEveryOperation(t *testing.T) {
 	want := []string{
 		"activity_summary", "recent_events", "persons", "explore_events", "run_sql",
 		"run_insight", "run_funnel", "run_retention", "list_dashboards", "create_dashboard", "create_chart",
-		"submit_recommendation", "propose_test", "test_status", "list_tests", "remember", "send_notification",
+		"submit_recommendation", "propose_test", "test_status", "list_tests", "remember", "send_notification", "overview",
+		"verify_sdk", "update_dashboard", "archive_dashboard", "unarchive_dashboard",
+		"test_source", "preview_source", "create_source", "update_source", "pause_source", "run_source", "source_status", "cancel_source_run",
+		"update_test", "record_outcome", "abandon_test", "list_findings", "dataset_preview",
 	}
 	for _, name := range want {
 		if _, ok := reg.Get(name); !ok {

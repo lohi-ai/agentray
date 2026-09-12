@@ -2,9 +2,12 @@
 
 import { useMemo, useState } from 'react';
 import { Plus, Sparkles } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { HStack } from '@astryxdesign/core/HStack';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Text } from '@astryxdesign/core/Text';
+import { VStack } from '@astryxdesign/core/VStack';
 import {
   AgentRayAPI,
   type ConnectorSync,
@@ -15,7 +18,7 @@ import {
 } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { formatCompact, formatRelative } from '@/lib/format';
-import { useConnectors, useConnectorSchema, useConnectorSyncs } from '@/modules/app/hooks/connectors';
+import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview } from '@/modules/app/hooks/connectors';
 import { ConfirmDialog, Modal, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/signal-primitives';
@@ -194,11 +197,12 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<ConnectorSync | null>(null);
+  const [previewing, setPreviewing] = useState<ConnectorSync | null>(null);
   const [drafting, setDrafting] = useState(false);
   const [draft, setDraft] = useState<ConnectorSyncDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(false);
   const [running, setRunning] = useState<string | null>(null);
-
   async function requestDraft(hint: string) {
     if (!projectID) return;
     setDraftLoading(true);
@@ -221,6 +225,39 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       renderCell: (s) => <span className="font-mono text-[var(--color-text-secondary)]">{s.key_column}{s.cursor_column ? ` / ${s.cursor_column}` : ' / full re-sync'}</span>,
     },
     {
+      key: 'join_key',
+      header: 'Join',
+      sortable: false,
+      width: { type: 'proportional', value: 1, minWidth: 110 },
+      renderCell: (s) => {
+        if (!s.join_key) return <span className="text-[var(--color-text-disabled)]">—</span>;
+        return (
+          <HStack gap={1} align="center">
+            <span className="font-mono text-[var(--color-text-secondary)]">{s.join_key}</span>
+            {s.join_validated === 'validated' ? (
+              <Badge variant="success" label="validated" />
+            ) : s.join_validated === 'unvalidated' ? (
+              <Badge variant="warning" label="unvalidated" />
+            ) : null}
+          </HStack>
+        );
+      },
+    },
+    {
+      key: 'deletion_mode',
+      header: 'Deletions',
+      sortable: false,
+      width: { type: 'proportional', value: 1, minWidth: 110 },
+      renderCell: (s) =>
+        s.deletion_mode === 'soft_column' ? (
+          <span className="font-mono text-[var(--color-text-secondary)]" title={`${s.soft_delete_column} · ${s.soft_delete_semantics}`}>
+            {s.soft_delete_column}
+          </span>
+        ) : (
+          <span className="text-[var(--color-text-disabled)]">none</span>
+        ),
+    },
+    {
       key: 'schedule_cron',
       header: 'Schedule',
       width: { type: 'proportional', value: 1, minWidth: 90 },
@@ -229,10 +266,20 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
     {
       key: 'last_status',
       header: 'Last run',
-      width: { type: 'proportional', value: 2, minWidth: 140 },
+      width: { type: 'proportional', value: 2, minWidth: 150 },
       renderCell: (s) => {
         if (!s.last_run_at) return <span className="text-[var(--color-text-disabled)]">never</span>;
         if (s.last_status === 'error') {
+          // A run that landed rows before it failed is partial, not a clean
+          // failure — the dataset is stale AND populated, which reads
+          // differently from "error, nothing landed".
+          if (s.last_rows > 0) {
+            return (
+              <span style={{ color: 'var(--warning)' }} title={s.last_error}>
+                partial — {formatCompact(s.last_rows)} rows landed · {formatRelative(s.last_run_at)}
+              </span>
+            );
+          }
           return <span style={{ color: 'var(--danger)' }} title={s.last_error}>error · {formatRelative(s.last_run_at)}</span>;
         }
         return <span className="text-[var(--color-text-secondary)]">ok · {formatCompact(s.last_rows)} rows · {formatRelative(s.last_run_at)}</span>;
@@ -250,7 +297,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Enabled',
       width: { type: 'pixel', value: 72 },
       renderCell: (s) => (
-        <Button variant="ghost" size="sm" onClick={() => void update.mutate({ id: s.id, input: { source_table: s.source_table, key_column: s.key_column, cursor_column: s.cursor_column, schedule_cron: s.schedule_cron, enabled: !s.enabled } })}>
+        <Button variant="ghost" size="sm" onClick={() => void update.mutate({ id: s.id, input: syncInputOf(s, { enabled: !s.enabled }) })}>
           {s.enabled ? 'On' : 'Off'}
         </Button>
       ),
@@ -261,9 +308,11 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       hideable: false,
       sortable: false,
       align: 'end',
-      width: { type: 'pixel', value: 180 },
+      width: { type: 'pixel', value: 260 },
       renderCell: (s) => (
         <span className="flex justify-end gap-1">
+          <Button variant="ghost" size="sm" onClick={() => setPreviewing(s)}>Preview</Button>
+          <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
           <Button
             variant="ghost"
             size="sm"
@@ -296,6 +345,17 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
           onSubmit={(input) => void create.mutate(input)}
           onClose={() => setAdding(false)}
         />
+      ) : null}
+      {editing ? (
+        <EditSyncDialog
+          connectorID={connector.id}
+          sync={editing}
+          onSubmit={(input) => void update.mutateAsync({ id: editing.id, input }).then(() => setEditing(null))}
+          onClose={() => setEditing(null)}
+        />
+      ) : null}
+      {previewing ? (
+        <DatasetPreviewDialog sync={previewing} onClose={() => setPreviewing(null)} />
       ) : null}
       {drafting ? (
         <PromptDialog
@@ -348,6 +408,91 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
   );
 }
 
+// syncInputOf rebuilds the full editable shape from a sync row — the PUT body
+// overwrites every field, so a partial input would silently clear join_key
+// and the deletion settings.
+function syncInputOf(s: ConnectorSync, overrides: Partial<ConnectorSyncInput> = {}): ConnectorSyncInput {
+  return {
+    source_table: s.source_table,
+    key_column: s.key_column,
+    cursor_column: s.cursor_column,
+    schedule_cron: s.schedule_cron,
+    enabled: s.enabled,
+    join_key: s.join_key,
+    deletion_mode: s.deletion_mode || 'none',
+    soft_delete_column: s.soft_delete_column,
+    soft_delete_semantics: s.soft_delete_semantics,
+    ...overrides,
+  };
+}
+
+const DELETION_MODE_OPTIONS = [
+  { value: 'none', label: 'Not tracked' },
+  { value: 'soft_column', label: 'Source marks deletions' },
+];
+
+const SOFT_DELETE_SEMANTICS_OPTIONS = [
+  { value: 'bool_true', label: 'Deleted when the value is true' },
+  { value: 'non_null', label: 'Deleted when the value is set (e.g. deleted_at)' },
+];
+
+// SyncSemanticsFields is the join + deletion block shared by the add and edit
+// sync dialogs: which source column joins rows to people, and how the source
+// marks deleted rows.
+function SyncSemanticsFields({
+  columnNames,
+  joinKey,
+  onJoinKey,
+  deletionMode,
+  onDeletionMode,
+  softDeleteColumn,
+  onSoftDeleteColumn,
+  softDeleteSemantics,
+  onSoftDeleteSemantics,
+}: {
+  columnNames: string[];
+  joinKey: string;
+  onJoinKey: (v: string) => void;
+  deletionMode: string;
+  onDeletionMode: (v: string) => void;
+  softDeleteColumn: string;
+  onSoftDeleteColumn: (v: string) => void;
+  softDeleteSemantics: string;
+  onSoftDeleteSemantics: (v: string) => void;
+}) {
+  return (
+    <>
+      <Selector
+        label="Join key (person identity column; empty = no join)"
+        size="sm"
+        options={['', ...columnNames]}
+        value={joinKey}
+        onChange={onJoinKey}
+      />
+      <Selector label="Deletions" size="sm" options={DELETION_MODE_OPTIONS} value={deletionMode} onChange={onDeletionMode} />
+      {deletionMode === 'soft_column' ? (
+        <>
+          <Selector
+            label="Soft-delete column"
+            size="sm"
+            options={columnNames}
+            value={softDeleteColumn}
+            onChange={onSoftDeleteColumn}
+            placeholder="Pick a column…"
+          />
+          <Selector
+            label="A row counts as deleted when"
+            size="sm"
+            options={SOFT_DELETE_SEMANTICS_OPTIONS}
+            value={softDeleteSemantics || 'bool_true'}
+            onChange={onSoftDeleteSemantics}
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function AddSyncDialog({ connectorID, onSubmit, onClose }: {
   connectorID: string;
   onSubmit: (input: ConnectorSyncInput) => void;
@@ -358,6 +503,10 @@ function AddSyncDialog({ connectorID, onSubmit, onClose }: {
   const [keyColumn, setKeyColumn] = useState('');
   const [cursorColumn, setCursorColumn] = useState('');
   const [cron, setCron] = useState('0 * * * *');
+  const [joinKey, setJoinKey] = useState('');
+  const [deletionMode, setDeletionMode] = useState('none');
+  const [softDeleteColumn, setSoftDeleteColumn] = useState('');
+  const [softDeleteSemantics, setSoftDeleteSemantics] = useState('bool_true');
 
   const table: ConnectorTable | undefined = tables.find((t) => t.name === tableName);
   const columnNames = table?.columns.map((c) => c.name) ?? [];
@@ -367,11 +516,24 @@ function AddSyncDialog({ connectorID, onSubmit, onClose }: {
     const t = tables.find((x) => x.name === name);
     setKeyColumn(t?.columns.find((c) => c.is_primary_key)?.name ?? t?.columns[0]?.name ?? '');
     setCursorColumn('');
+    setJoinKey('');
+    setSoftDeleteColumn('');
   }
 
   function submit() {
     if (!tableName || !keyColumn) return;
-    onSubmit({ source_table: tableName, key_column: keyColumn, cursor_column: cursorColumn, schedule_cron: cron.trim(), enabled: true });
+    if (deletionMode === 'soft_column' && !softDeleteColumn) return;
+    onSubmit({
+      source_table: tableName,
+      key_column: keyColumn,
+      cursor_column: cursorColumn,
+      schedule_cron: cron.trim(),
+      enabled: true,
+      join_key: joinKey,
+      deletion_mode: deletionMode,
+      soft_delete_column: deletionMode === 'soft_column' ? softDeleteColumn : '',
+      soft_delete_semantics: deletionMode === 'soft_column' ? softDeleteSemantics : '',
+    });
     onClose();
   }
 
@@ -399,6 +561,17 @@ function AddSyncDialog({ connectorID, onSubmit, onClose }: {
                 onChange={setCursorColumn}
               />
               <TextInput label="Schedule (5-field cron, empty = manual only)" value={cron} placeholder="0 * * * *" onChange={setCron} onEnter={submit} width="100%" />
+              <SyncSemanticsFields
+                columnNames={columnNames}
+                joinKey={joinKey}
+                onJoinKey={setJoinKey}
+                deletionMode={deletionMode}
+                onDeletionMode={setDeletionMode}
+                softDeleteColumn={softDeleteColumn}
+                onSoftDeleteColumn={setSoftDeleteColumn}
+                softDeleteSemantics={softDeleteSemantics}
+                onSoftDeleteSemantics={setSoftDeleteSemantics}
+              />
             </>
           ) : null}
         </div>
@@ -435,7 +608,17 @@ function DraftReviewDialog({ draft, onApprove, onClose }: {
                 setSaving(i);
                 // The mutation hook surfaces failures via setError; here a
                 // failed row just stays approvable instead of reading "Added".
-                onApprove({ source_table: s.source_table, key_column: s.key_column, cursor_column: s.cursor_column, schedule_cron: s.schedule_cron, enabled: true })
+                onApprove({
+                  source_table: s.source_table,
+                  key_column: s.key_column,
+                  cursor_column: s.cursor_column,
+                  schedule_cron: s.schedule_cron,
+                  enabled: true,
+                  join_key: s.join_key ?? '',
+                  deletion_mode: s.deletion_mode || 'none',
+                  soft_delete_column: s.soft_delete_column ?? '',
+                  soft_delete_semantics: s.soft_delete_semantics ?? '',
+                })
                   .then(() => setApproved((prev) => new Set(prev).add(i)))
                   .catch(() => undefined)
                   .finally(() => setSaving((cur) => (cur === i ? null : cur)));
@@ -446,6 +629,213 @@ function DraftReviewDialog({ draft, onApprove, onClose }: {
           </div>
         ))}
       </div>
+    </Modal>
+  );
+}
+
+function EditSyncDialog({ connectorID, sync, onSubmit, onClose }: {
+  connectorID: string;
+  sync: ConnectorSync;
+  onSubmit: (input: ConnectorSyncInput) => void;
+  onClose: () => void;
+}) {
+  const { tables, loading, error } = useConnectorSchema(connectorID, true);
+  const [keyColumn, setKeyColumn] = useState(sync.key_column);
+  const [cursorColumn, setCursorColumn] = useState(sync.cursor_column);
+  const [cron, setCron] = useState(sync.schedule_cron);
+  const [enabled, setEnabled] = useState(sync.enabled);
+  const [joinKey, setJoinKey] = useState(sync.join_key);
+  const [deletionMode, setDeletionMode] = useState(sync.deletion_mode || 'none');
+  const [softDeleteColumn, setSoftDeleteColumn] = useState(sync.soft_delete_column);
+  const [softDeleteSemantics, setSoftDeleteSemantics] = useState(sync.soft_delete_semantics || 'bool_true');
+
+  const table: ConnectorTable | undefined = tables.find((t) => t.name === sync.source_table);
+  // The sync's own columns stay selectable even while the schema is still
+  // loading or discovery failed — an edit must never drop a configured value.
+  const columnNames = useMemo(() => {
+    const names = new Set(table?.columns.map((c) => c.name) ?? []);
+    for (const c of [sync.key_column, sync.cursor_column, sync.join_key, sync.soft_delete_column]) {
+      if (c) names.add(c);
+    }
+    return [...names];
+  }, [table, sync]);
+
+  function submit() {
+    if (!keyColumn) return;
+    if (deletionMode === 'soft_column' && !softDeleteColumn) return;
+    onSubmit(syncInputOf(sync, {
+      key_column: keyColumn,
+      cursor_column: cursorColumn,
+      schedule_cron: cron.trim(),
+      enabled,
+      join_key: joinKey,
+      deletion_mode: deletionMode,
+      soft_delete_column: deletionMode === 'soft_column' ? softDeleteColumn : '',
+      soft_delete_semantics: deletionMode === 'soft_column' ? softDeleteSemantics : '',
+    }));
+  }
+
+  return (
+    <Modal
+      title={`Edit sync — ${sync.source_table}`}
+      onClose={onClose}
+      footer={<><Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button><Button variant="primary" size="sm" onClick={submit}>Save changes</Button></>}
+    >
+      <div className="flex flex-col gap-4 max-w-[440px]">
+        <Text type="supporting">
+          Source table <span className="font-mono">{sync.source_table}</span>. Changing the key or cursor column resets the resume position.
+        </Text>
+        {error ? (
+          <Text type="supporting" style={{ color: 'var(--danger)' }}>Schema discovery failed: {error} — editing against the configured columns.</Text>
+        ) : null}
+        <Selector label="Key column (row identity)" size="sm" options={columnNames} value={keyColumn} onChange={setKeyColumn} />
+        <Selector
+          label="Cursor column (incremental; empty = full re-sync)"
+          size="sm"
+          options={['', ...columnNames]}
+          value={cursorColumn}
+          onChange={setCursorColumn}
+        />
+        <TextInput label="Schedule (5-field cron, empty = manual only)" value={cron} placeholder="0 * * * *" onChange={setCron} onEnter={submit} width="100%" />
+        <Selector
+          label="Enabled"
+          size="sm"
+          options={[{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]}
+          value={enabled ? 'on' : 'off'}
+          onChange={(v) => setEnabled(v === 'on')}
+        />
+        <SyncSemanticsFields
+          columnNames={columnNames}
+          joinKey={joinKey}
+          onJoinKey={setJoinKey}
+          deletionMode={deletionMode}
+          onDeletionMode={setDeletionMode}
+          softDeleteColumn={softDeleteColumn}
+          onSoftDeleteColumn={setSoftDeleteColumn}
+          softDeleteSemantics={softDeleteSemantics}
+          onSoftDeleteSemantics={setSoftDeleteSemantics}
+        />
+        {loading ? <Loading label="Discovering schema…" /> : null}
+      </div>
+    </Modal>
+  );
+}
+
+// previewColumns derives the table's columns from the union of keys across the
+// preview rows — landed rows are schemaless JSON, so the table shows what is
+// actually there rather than the source's declared columns.
+function previewColumns(rows: { data: string }[]): string[] {
+  const seen = new Set<string>();
+  for (const r of rows) {
+    try {
+      const obj = JSON.parse(r.data) as Record<string, unknown>;
+      for (const k of Object.keys(obj)) {
+        if (seen.size < 8) seen.add(k);
+      }
+    } catch {
+      // A row that is not an object still renders its raw JSON in the data cell.
+    }
+  }
+  return [...seen];
+}
+
+function DatasetPreviewDialog({ sync, onClose }: { sync: ConnectorSync; onClose: () => void }) {
+  const { preview, loading, error } = useDatasetPreview(sync.id);
+  const rows = useMemo(() => preview?.rows ?? [], [preview]);
+  const cols = useMemo(() => previewColumns(rows), [rows]);
+
+  const previewData = useMemo(
+    () =>
+      rows.map((r) => {
+        let obj: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(r.data);
+          if (parsed && typeof parsed === 'object') obj = parsed as Record<string, unknown>;
+        } catch {
+          obj = { data: r.data };
+        }
+        return { row_key: r.row_key, cursor: r.cursor, synced_at: r.synced_at, ...obj } as Record<string, unknown>;
+      }),
+    [rows],
+  );
+
+  const tableColumns = useMemo<DataColumn<Record<string, unknown>>[]>(() => [
+    { key: 'row_key', header: 'Row', width: { type: 'proportional', value: 1, minWidth: 90 }, renderCell: (r) => <span className="font-mono text-[var(--color-text-secondary)]">{String(r.row_key ?? '')}</span> },
+    ...cols.map((c) => ({
+      key: c,
+      header: c,
+      sortable: false,
+      width: { type: 'proportional' as const, value: 1, minWidth: 90 },
+      renderCell: (r: Record<string, unknown>) => {
+        const v = r[c];
+        const text = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+        return <span className="font-mono text-[var(--color-text-secondary)]">{text}</span>;
+      },
+    })),
+    { key: 'synced_at', header: 'Synced', width: { type: 'proportional', value: 1, minWidth: 80 }, renderCell: (r) => <span className="text-[var(--color-text-secondary)]">{formatRelative(String(r.synced_at ?? ''))}</span> },
+  ], [cols]);
+
+  const s = preview?.sync ?? sync;
+
+  return (
+    <Modal title={`Dataset — ${sync.source_table}`} onClose={onClose} wide>
+      <VStack gap={4} align="stretch">
+        <VStack gap={1} align="stretch">
+          <HStack gap={2} align="center" className="flex-wrap">
+            {s.join_key ? (
+              <>
+                <Badge variant="neutral" label={<code>join {s.join_key}</code>} />
+                {s.join_validated === 'validated' ? (
+                  <Badge variant="success" label="validated" />
+                ) : s.join_validated === 'unvalidated' ? (
+                  <Badge variant="warning" label="unvalidated" />
+                ) : null}
+              </>
+            ) : (
+              <Text type="supporting">No join key — rows are not linked to people.</Text>
+            )}
+            <Badge
+              variant="neutral"
+              label={s.deletion_mode === 'soft_column' ? `deletions: ${s.soft_delete_column}` : 'deletions: not tracked'}
+            />
+          </HStack>
+          <Text type="supporting">
+            Last success {s.last_success_at ? formatRelative(s.last_success_at) : 'never'} · last attempt{' '}
+            {s.last_run_at ? formatRelative(s.last_run_at) : 'never'} · landed watermark{' '}
+            <span className="font-mono">{preview?.landed_watermark || '—'}</span> · resume cursor{' '}
+            <span className="font-mono">{s.cursor || '—'}</span>
+            {s.cursor_key ? <> (<span className="font-mono">{s.cursor_key}</span>)</> : null}
+          </Text>
+          {s.last_status === 'error' && s.last_rows > 0 ? (
+            <Text type="supporting" style={{ color: 'var(--warning)' }}>
+              partial — {formatCompact(s.last_rows)} rows landed before the last run failed{s.last_error ? `: ${s.last_error}` : ''}
+            </Text>
+          ) : s.last_status === 'error' && s.last_error ? (
+            <Text type="supporting" style={{ color: 'var(--danger)' }}>Last error: {s.last_error}</Text>
+          ) : null}
+        </VStack>
+
+        {loading ? (
+          <Loading label="Reading landed rows…" />
+        ) : error ? (
+          <Text type="supporting" style={{ color: 'var(--danger)' }}>
+            Preview unavailable: {error}
+          </Text>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            title="No rows landed yet"
+            detail="Run the sync to pull rows in. The preview reads the deduped dataset with the soft-delete filter applied — what agents and SQL see."
+          />
+        ) : (
+          <>
+            <Text type="supporting">
+              {formatCompact(preview?.total_rows ?? 0)} rows in the deduped dataset
+              {s.deletion_mode === 'soft_column' ? ' (soft-deleted rows excluded)' : ''} — showing the {rows.length} most recent.
+            </Text>
+            <DataTable columns={tableColumns} data={previewData} pageSize={10} />
+          </>
+        )}
+      </VStack>
     </Modal>
   );
 }

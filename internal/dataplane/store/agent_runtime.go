@@ -667,6 +667,9 @@ type AgentRecommendation struct {
 	// not acted on, which is worth surfacing rather than hiding.
 	SeenCount  int       `json:"seen_count"`
 	LastSeenAt time.Time `json:"last_seen_at"`
+	// Revision is the optimistic-concurrency counter; NULL on legacy rows
+	// reads as 1.
+	Revision int64 `json:"revision"`
 }
 
 // recommendationSimilarity is the trigram score above which two titles are
@@ -694,6 +697,13 @@ const recommendationRepeatWindow = 14 * 24 * time.Hour
 // records that it was seen again, keeps the highest impact score observed, and
 // takes the newest wording. Only a genuinely new finding creates a card.
 func (s *Store) CreateRecommendation(ctx context.Context, rec AgentRecommendation) (string, error) {
+	return createRecommendation(ctx, s.pg, rec)
+}
+
+// createRecommendation runs on any pgQuerier so the idempotent claim wrapper
+// can execute it inside the claim transaction — claim + mutation + receipt
+// commit atomically.
+func createRecommendation(ctx context.Context, q pgQuerier, rec AgentRecommendation) (string, error) {
 	evidence := rec.EvidenceJSON
 	if evidence == "" {
 		evidence = "{}"
@@ -710,7 +720,7 @@ func (s *Store) CreateRecommendation(ctx context.Context, rec AgentRecommendatio
 	// Fold into the closest open match, if one is close enough. The trigram
 	// index serves the candidate lookup, so this stays cheap as the table grows.
 	var existing string
-	err := s.pg.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 SELECT id::text FROM agent_recommendations
 WHERE project_id = $1 AND category = $2 AND status = 'open'
   AND last_seen_at > now() - $3::interval
@@ -718,7 +728,7 @@ WHERE project_id = $1 AND category = $2 AND status = 'open'
 ORDER BY similarity(title, $4) DESC
 LIMIT 1`, rec.ProjectID, category, recommendationRepeatWindow.String(), rec.Title, recommendationSimilarity).Scan(&existing)
 	if err == nil && existing != "" {
-		if _, err := s.pg.Exec(ctx, `
+		if _, err := q.Exec(ctx, `
 UPDATE agent_recommendations
 SET seen_count = seen_count + 1,
     last_seen_at = now(),
@@ -737,7 +747,7 @@ WHERE id = $1::uuid`, existing, rec.ImpactScore, rec.Title, rec.Rationale, evide
 	}
 
 	var id string
-	err = s.pg.QueryRow(ctx, `
+	err = q.QueryRow(ctx, `
 INSERT INTO agent_recommendations (project_id, run_id, category, title, rationale, evidence_json, impact_score)
 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
 RETURNING id::text`, rec.ProjectID, runArg, category, rec.Title, rec.Rationale, evidence, rec.ImpactScore).Scan(&id)
@@ -757,7 +767,8 @@ func (s *Store) ListRecommendations(ctx context.Context, userID, projectID strin
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
-       evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at
+       evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
+       coalesce(revision, 1)
 FROM agent_recommendations WHERE project_id = $1
 ORDER BY (status = 'open') DESC, impact_score DESC, last_seen_at DESC
 LIMIT $2`, project.ID, recommendationListLimit)
@@ -770,7 +781,7 @@ LIMIT $2`, project.ID, recommendationListLimit)
 		var r AgentRecommendation
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.RunID, &r.Category, &r.Title, &r.Rationale,
 			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt,
-			&r.SeenCount, &r.LastSeenAt); err != nil {
+			&r.SeenCount, &r.LastSeenAt, &r.Revision); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

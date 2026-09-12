@@ -1,0 +1,35 @@
+{
+  "clickhouse_image": "clickhouse/clickhouse-server:24.12-alpine@sha256:cd450891db46cc6ffe313ca2b0fb7dbfb897a6873ca74a724cbe050a2cf62621",
+  "code_digest": "3d557ac2687a3c1dd7a88ad95eff3c1aafc453a65c409fc98e0ee632f3cb71d8",
+  "commit": "77223357aaf7e1eb1534c1589fcf358f683171ca",
+  "duckdb": "1.5.5",
+  "generated_by": "storage-evaluation harness",
+  "legs": [
+    {
+      "code_commit": "77223357aaf7e1eb1534c1589fcf358f683171ca",
+      "code_digest": "3d557ac2687a3c1dd7a88ad95eff3c1aafc453a65c409fc98e0ee632f3cb71d8",
+      "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
+      "corpus_rows": 99538,
+      "days": 7,
+      "engine": "clickhouse",
+      "file": "smoke-clickhouse-s100000-r1-d7.json",
+      "readers": 1,
+      "scale": 100000,
+      "seed": 20260912,
+      "status": "MEASURED"
+    },
+    {
+      "code_commit": "77223357aaf7e1eb1534c1589fcf358f683171ca",
+      "code_digest": "3d557ac2687a3c1dd7a88ad95eff3c1aafc453a65c409fc98e0ee632f3cb71d8",
+      "corpus_digest": "60404e7bcb3cf7e8a960defb7198a2b38613b09dda9a2692f03d948237d2274b",
+      "corpus_rows": 99538,
+      "days": 7,
+      "engine": "duckdb",
+      "file": "smoke-duckdb-s100000-r1-d7.json",
+      "readers": 1,
+      "scale": 100000,
+      "seed": 20260912,
+      "status": "MEASURED"
+    }
+  ]
+}

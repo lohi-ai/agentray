@@ -21,11 +21,14 @@ import (
 
 // DataConnector is one configured source connection (DSN never included).
 type DataConnector struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	HasDSN    bool      `json:"has_dsn"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	HasDSN    bool   `json:"has_dsn"`
+	// Revision is the optimistic-concurrency counter update_source carries —
+	// same contract as dashboards and syncs.
+	Revision  int64     `json:"revision"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -47,13 +50,34 @@ type ConnectorSync struct {
 	LastError    string     `json:"last_error"`
 	LastRows     int        `json:"last_rows"`
 	TotalRows    int64      `json:"total_rows"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// LastSuccessAt is the last run whose final status was 'succeeded' —
+	// distinct from LastRunAt, which records the last attempt of any outcome.
+	LastSuccessAt *time.Time `json:"last_success_at"`
+	// JoinKey names the source column holding a person-identity value
+	// (resolved to distinct_id via aliases). Fact-level keys are rejected.
+	JoinKey string `json:"join_key"`
+	// JoinValidated is 'validated' | 'unvalidated' | '' — a bounded
+	// duplicate-key check over the deduped set; fail-closed above the cap.
+	JoinValidated string `json:"join_validated"`
+	// DeletionMode: 'none' (hard deletes unsupported — honest default) or
+	// 'soft_column' (source marks deletions).
+	DeletionMode string `json:"deletion_mode"`
+	// SoftDeleteColumn names the source column carrying the deletion mark.
+	SoftDeleteColumn string `json:"soft_delete_column"`
+	// SoftDeleteSemantics: 'bool_true' (boolean, true = deleted) or
+	// 'non_null' (e.g. deleted_at timestamp, non-NULL = deleted).
+	SoftDeleteSemantics string `json:"soft_delete_semantics"`
+	// Revision is the optimistic-concurrency counter pause/update carry —
+	// same contract as dashboards.
+	Revision  int64     `json:"revision"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
 	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
-	created_at, updated_at`
+	last_success_at, join_key, join_validated, deletion_mode, soft_delete_column, soft_delete_semantics,
+	revision, created_at, updated_at`
 
 func (s *Store) migrateConnectors(ctx context.Context) error {
 	stmts := []string{
@@ -89,8 +113,15 @@ func (s *Store) migrateConnectors(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS connector_syncs_project_idx ON connector_syncs (project_id, created_at DESC)`,
 		// cursor_key is the tie-breaking half of the keyset cursor: the key of
 		// the last synced row, so rows sharing one cursor value are never
-		// skipped across a batch boundary.
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS cursor_key TEXT NOT NULL DEFAULT ''`,
+		// Slice-4 dataset contract: join/deletion config and the monotonic
+		// landing sequence feeding the external_rows version column.
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS join_key VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS join_validated VARCHAR(16) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS deletion_mode VARCHAR(16) NOT NULL DEFAULT 'none'`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_column VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_semantics VARCHAR(16) NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -134,9 +165,9 @@ func (s *Store) CreateDataConnector(ctx context.Context, userID, projectID, name
 	err = s.pg.QueryRow(ctx, `
 INSERT INTO data_connectors (project_id, name, kind, dsn_ciphertext)
 VALUES ($1, $2, $3, $4)
-RETURNING id::text, project_id::text, name, kind, dsn_ciphertext != '', created_at, updated_at`,
+RETURNING id::text, project_id::text, name, kind, dsn_ciphertext != '', revision, created_at, updated_at`,
 		projectID, name, kind, ciphertext).
-		Scan(&out.ID, &out.ProjectID, &out.Name, &out.Kind, &out.HasDSN, &out.CreatedAt, &out.UpdatedAt)
+		Scan(&out.ID, &out.ProjectID, &out.Name, &out.Kind, &out.HasDSN, &out.Revision, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return DataConnector{}, err
 	}
@@ -150,7 +181,7 @@ func (s *Store) ListDataConnectors(ctx context.Context, userID, projectID string
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, kind, dsn_ciphertext != '', created_at, updated_at
+SELECT id::text, project_id::text, name, kind, dsn_ciphertext != '' OR credential_id IS NOT NULL, revision, created_at, updated_at
 FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -159,7 +190,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	out := make([]DataConnector, 0)
 	for rows.Next() {
 		var c DataConnector
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.Revision, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -193,12 +224,19 @@ func (s *Store) DeleteDataConnector(ctx context.Context, userID, projectID, conn
 // test-connection, schema discovery). Caller must have authorized the user —
 // this is the internal trust-boundary read, mirroring AgentSecretsForRun.
 func (s *Store) ConnectorDSNForRun(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error) {
-	var ciphertext string
+	var ciphertext, credentialID string
 	err = s.pg.QueryRow(ctx, `
-SELECT kind, dsn_ciphertext FROM data_connectors WHERE project_id = $1 AND id = $2`,
-		projectID, connectorID).Scan(&kind, &ciphertext)
+SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, '') FROM data_connectors WHERE project_id = $1 AND id = $2`,
+		projectID, connectorID).Scan(&kind, &ciphertext, &credentialID)
 	if err != nil {
 		return "", "", err
+	}
+	if credentialID != "" {
+		dsn, err = s.sourceCredentialDSN(ctx, s.pg, projectID, credentialID)
+		if err != nil {
+			return "", "", err
+		}
+		return kind, dsn, nil
 	}
 	dsn, err = decryptAgentKey(ciphertext)
 	if err != nil {
@@ -226,7 +264,6 @@ func (s *Store) ConnectorDSNForUser(ctx context.Context, userID, projectID, conn
 }
 
 // --- sync CRUD ---
-
 // ConnectorSyncInput is the operator-editable subset of a sync config.
 type ConnectorSyncInput struct {
 	SourceTable  string `json:"source_table"`
@@ -234,6 +271,18 @@ type ConnectorSyncInput struct {
 	CursorColumn string `json:"cursor_column"`
 	ScheduleCron string `json:"schedule_cron"`
 	Enabled      bool   `json:"enabled"`
+	// JoinKey names the source column holding a person-identity value
+	// (resolved to distinct_id via aliases). Fact-level keys are rejected by
+	// the usecase layer's join validation.
+	JoinKey string `json:"join_key"`
+	// DeletionMode: 'none' (hard deletes unsupported — honest default) or
+	// 'soft_column' (source marks deletions).
+	DeletionMode string `json:"deletion_mode"`
+	// SoftDeleteColumn names the source column carrying the deletion mark.
+	SoftDeleteColumn string `json:"soft_delete_column"`
+	// SoftDeleteSemantics: 'bool_true' (boolean, true = deleted) or
+	// 'non_null' (e.g. deleted_at timestamp, non-NULL = deleted).
+	SoftDeleteSemantics string `json:"soft_delete_semantics"`
 }
 
 // CreateConnectorSync adds a table sync to a connector (owner/admin only).
@@ -260,10 +309,12 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, schedule_cron, enabled)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, schedule_cron, enabled,
+	join_key, deletion_mode, soft_delete_column, soft_delete_semantics)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING `+connectorSyncColumns,
-		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled).
+		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
+		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
@@ -294,12 +345,15 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	err = s.pg.QueryRow(ctx, `
 UPDATE connector_syncs SET
 	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, schedule_cron = $6, enabled = $7,
+	join_key = $8::text, deletion_mode = $9::text, soft_delete_column = $10::text, soft_delete_semantics = $11::text,
+	join_validated = CASE WHEN join_key IS DISTINCT FROM $8::text THEN '' ELSE join_validated END,
 	cursor = CASE WHEN source_table = $3::text AND cursor_column = $5::text THEN cursor ELSE '' END,
 	cursor_key = CASE WHEN source_table = $3::text AND cursor_column = $5::text AND key_column = $4::text THEN cursor_key ELSE '' END,
-	updated_at = now()
+	revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
-		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled).
+		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
+		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
@@ -371,6 +425,21 @@ func validateSyncInput(in ConnectorSyncInput) error {
 	if in.ScheduleCron != "" && len(strings.Fields(in.ScheduleCron)) != 5 {
 		return fmt.Errorf("schedule must be a 5-field cron expression")
 	}
+	switch in.DeletionMode {
+	case "", "none":
+		if in.SoftDeleteColumn != "" || in.SoftDeleteSemantics != "" {
+			return fmt.Errorf("soft_delete_column requires deletion_mode 'soft_column'")
+		}
+	case "soft_column":
+		if strings.TrimSpace(in.SoftDeleteColumn) == "" {
+			return fmt.Errorf("soft_delete_column is required when deletion_mode is 'soft_column'")
+		}
+		if in.SoftDeleteSemantics != "bool_true" && in.SoftDeleteSemantics != "non_null" {
+			return fmt.Errorf("soft_delete_semantics must be 'bool_true' or 'non_null'")
+		}
+	default:
+		return fmt.Errorf("deletion_mode must be 'none' or 'soft_column'")
+	}
 	return nil
 }
 
@@ -381,7 +450,9 @@ func connectorKindKnown(kind string) bool {
 func syncScanDest(cs *ConnectorSync) []any {
 	return []any{&cs.ID, &cs.ConnectorID, &cs.ProjectID, &cs.SourceTable, &cs.KeyColumn,
 		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
-		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.CreatedAt, &cs.UpdatedAt}
+		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.LastSuccessAt, &cs.JoinKey, &cs.JoinValidated,
+		&cs.DeletionMode, &cs.SoftDeleteColumn, &cs.SoftDeleteSemantics,
+		&cs.Revision, &cs.CreatedAt, &cs.UpdatedAt}
 }
 
 // --- engine surface (connector.Store) ---
@@ -390,7 +461,7 @@ func syncScanDest(cs *ConnectorSync) []any {
 // the engine's minute tick.
 func (s *Store) ListEnabledConnectorSyncs(ctx context.Context) ([]connector.ScheduledSync, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_cron != ''`)
+SELECT id::text, project_id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_cron != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +469,7 @@ SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_c
 	out := make([]connector.ScheduledSync, 0)
 	for rows.Next() {
 		var ss connector.ScheduledSync
-		if err := rows.Scan(&ss.ID, &ss.Cron); err != nil {
+		if err := rows.Scan(&ss.ID, &ss.ProjectID, &ss.Cron); err != nil {
 			return nil, err
 		}
 		out = append(out, ss)
@@ -410,44 +481,31 @@ SELECT id::text, schedule_cron FROM connector_syncs WHERE enabled AND schedule_c
 // Internal run path — authorization happens at the API edge.
 func (s *Store) ConnectorSyncJob(ctx context.Context, syncID string) (connector.SyncJob, error) {
 	var job connector.SyncJob
-	var ciphertext string
+	var ciphertext, credentialID string
 	err := s.pg.QueryRow(ctx, `
 SELECT cs.id::text, cs.project_id::text, cs.connector_id::text, dc.kind, dc.dsn_ciphertext,
+	COALESCE(dc.credential_id::text, ''),
 	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor, cs.cursor_key
 FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id = cs.connector_id
 WHERE cs.id = $1`, syncID).
-		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext,
+		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext, &credentialID,
 			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor, &job.CursorKey)
 	if err != nil {
 		return connector.SyncJob{}, err
+	}
+	if credentialID != "" {
+		job.DSN, err = s.sourceCredentialDSN(ctx, s.pg, job.ProjectID, credentialID)
+		if err != nil {
+			return connector.SyncJob{}, err
+		}
+		return job, nil
 	}
 	job.DSN, err = decryptAgentKey(ciphertext)
 	if err != nil {
 		return connector.SyncJob{}, err
 	}
 	return job, nil
-}
-
-// FinishConnectorSync persists one run's outcome. The error text is truncated
-// defensively; sources are responsible for never leaking credentials into it.
-func (s *Store) FinishConnectorSync(ctx context.Context, syncID string, result connector.SyncResult) error {
-	status := "ok"
-	errText := result.Err
-	if errText != "" {
-		status = "error"
-		if len(errText) > 500 {
-			errText = errText[:500]
-		}
-	}
-	_, err := s.pg.Exec(ctx, `
-UPDATE connector_syncs SET
-	cursor = CASE WHEN $2 THEN $3 ELSE cursor END,
-	cursor_key = CASE WHEN $2 THEN $4 ELSE cursor_key END,
-	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7::int,
-	total_rows = total_rows + $7::bigint, updated_at = now()
-WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, status, errText, result.Rows)
-	return err
 }
 
 // InsertExternalRows lands one batch in the ClickHouse external_rows table.

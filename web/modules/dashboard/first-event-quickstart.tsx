@@ -88,7 +88,7 @@ export function FirstEventQuickstart() {
 
   const [source, setSource] = useState<Source>('website');
   const [lang, setLang] = useState<Lang>('js');
-  const [copied, setCopied] = useState<'key' | null>(null);
+  const [copied, setCopied] = useState<'key' | 'task' | null>(null);
 
   const key = project?.api_key ?? '';
   const base = apiBase();
@@ -105,15 +105,54 @@ export function FirstEventQuickstart() {
     catalogReady: !loading && !!project,
   })) return null;
 
-  function copy(text: string) {
+  function copy(text: string, which: 'key' | 'task' = 'key') {
     void navigator.clipboard?.writeText(text);
-    setCopied('key');
+    setCopied(which);
     setTimeout(() => setCopied(null), 1500);
+  }
+
+  // A self-contained brief for an external coding agent (Claude Code, Cursor,
+  // a teammate's script). It points at the real SDK contract — init/autocapture,
+  // identify, reset — instead of hand-rolled fetch calls, because identity
+  // stitching lives inside the SDK and a reimplementation loses it.
+  function agentTask(): string {
+    return [
+      'Instrument this product with AgentRay analytics using the official SDK — do not hand-roll HTTP calls.',
+      '',
+      `Host: ${base}`,
+      `Project key: ${key || 'YOUR_PROJECT_KEY'}`,
+      'NOTE: this is the project capture key. On older (pre-split) projects the same key may also read data — treat it as a secret in server code, embed it client-side only where the SDK docs say to.',
+      '',
+      'Web: install the browser SDK per sdk/browser/README.md — the npm scope',
+      '  is not published yet, so use the GitHub release tarball or the',
+      '  <script> bundle exactly as that README describes. Then:',
+      '  import { init } from "@agentray/browser"',
+      `  const ar = init({ host: "${base}", apiKey: "<key>", autocapture: true })`,
+      '  autocapture covers pageviews (incl. SPA route changes) and clicks.',
+      '  ar.capture("event_name", { ... }) for custom events.',
+      '  ar.identify(userId, traits) on sign-in — it aliases the anonymous history,',
+      '    so a person who browsed before signup stays one person.',
+      '  ar.reset() on sign-out.',
+      '  SDK source + full contract: sdk/browser/README.md in the AgentRay repo.',
+      'iOS: sdk/swift/README.md — same identify-on-sign-in contract.',
+      'Server/backend: sdk/server/README.md or sdk/python/README.md — different',
+      '  contract: AgentRayServerClient, every capture takes an explicit',
+      '  distinctId, no anonymous lifecycle and no reset(). Do not port the',
+      '  browser identity flow to a server.',
+      '',
+      'Verification: send one event named "onboarding_verified" — the receipt',
+      'check, excluded from all product metrics. Do NOT fake a user.pageview.',
+      'Then tell me to press "I\'ve sent it — check now" on the AgentRay overview.',
+    ].join('\n');
   }
 
   function checkNow() {
     void queryClient.invalidateQueries({ queryKey: ['event-names', projectID] });
     void queryClient.invalidateQueries({ queryKey: ['console', projectID] });
+    // The overview page caches under ['overview', projectID, …] with
+    // refetchOnWindowFocus off — without this the front door keeps saying
+    // "no events" after the first one lands.
+    void queryClient.invalidateQueries({ queryKey: ['overview', projectID] });
   }
 
   return (
@@ -187,6 +226,9 @@ export function FirstEventQuickstart() {
 
         <div className="flex items-center gap-2">
           <Button variant="primary" size="sm" icon={<RefreshCw size={14} />} onClick={checkNow}>I&apos;ve sent it — check now</Button>
+          <Button variant="outline" size="sm" icon={copied === 'task' ? <Check size={14} /> : <Copy size={14} />} onClick={() => copy(agentTask(), 'task')}>
+            {copied === 'task' ? 'Copied' : 'Copy agent task'}
+          </Button>
           <span className="text-xs text-[var(--color-text-disabled)]">
             Events can take a few seconds to appear. This card disappears once your first event lands.
           </span>

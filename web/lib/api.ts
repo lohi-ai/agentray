@@ -2,6 +2,9 @@ export type Project = {
   id: string;
   workspace_id?: string;
   name: string;
+  // Validated IANA timezone when the project owner configured one; absent for
+  // legacy nullable rows, whose overview context labels its UTC fallback.
+  timezone?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
   api_key: string;
@@ -152,6 +155,59 @@ export type ActivitySummary = {
    *  facet can always switch back. */
   platforms: string[];
   generated_at: string;
+};
+
+// ---- Product overview (GET /api/overview) ---------------------------------
+// Mirrors internal/dataplane/store/overview.go. Every metric carries its own
+// state so the UI can render "not enough data yet" honestly instead of a
+// fabricated zero.
+export type OverviewMetric = {
+  state: 'ok' | 'no_data' | 'not_ready' | 'unconfigured' | 'unavailable';
+  value?: number;
+  previous?: number;
+  definition: string;
+  notes?: string[];
+};
+
+export type OverviewResult = {
+  context: {
+    project_id: string;
+    timezone: string;
+    timezone_source: string;
+    range: { from: string; to: string; days: number; complete_days: boolean };
+    previous_range: { from: string; to: string; days: number; complete_days: boolean };
+    platform: string;
+    generated_at: string;
+    metric_version: string;
+  };
+  metrics: {
+    active_users: OverviewMetric;
+    new_users: OverviewMetric;
+    sessions: OverviewMetric;
+    activation: OverviewMetric;
+    revenue: OverviewMetric;
+  };
+  trend: Array<{ day: string; active_users: number }>;
+  retention: {
+    cohort_window: string;
+    d1: { state: string; rate: number; returned: number; eligible: number };
+    d7: { state: string; rate: number; returned: number; eligible: number };
+    d30: { state: string; rate: number; returned: number; eligible: number };
+  };
+  content: {
+    top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+  };
+  data_status: {
+    last_event_at?: string;
+    last_received_at?: string;
+    age_seconds?: number;
+    pipeline_lag: string;
+    events_in_range: number;
+    qualifying_in_range: number;
+    ever_received: boolean;
+    state: 'fresh' | 'quiet' | 'no_events';
+  };
 };
 
 export type Dashboard = {
@@ -674,21 +730,64 @@ export type ConnectorSync = {
   schedule_cron: string;
   enabled: boolean;
   cursor: string;
+  cursor_key: string;
   last_run_at: string | null;
   last_status: string;
   last_error: string;
   last_rows: number;
   total_rows: number;
+  // Last run whose final status was 'succeeded' — distinct from last_run_at,
+  // which records the last attempt of any outcome.
+  last_success_at: string | null;
+  // Source column holding a person-identity value (resolved to distinct_id
+  // via aliases). join_validated is 'validated' | 'unvalidated' | '' — a
+  // bounded duplicate-key check over the deduped set.
+  join_key: string;
+  join_validated: string;
+  // 'none' (hard deletes unsupported — honest default) or 'soft_column'
+  // (the source marks deletions in soft_delete_column; semantics is
+  // 'bool_true' or 'non_null').
+  deletion_mode: string;
+  soft_delete_column: string;
+  soft_delete_semantics: string;
+  revision: number;
   created_at: string;
   updated_at: string;
 };
 
+// ConnectorSyncInput is the operator-editable subset of a sync config — the
+// PUT body overwrites every field, so every caller must send the full shape
+// (omitting join_key would silently clear it).
 export type ConnectorSyncInput = {
   source_table: string;
   key_column: string;
   cursor_column: string;
   schedule_cron: string;
   enabled: boolean;
+  join_key: string;
+  deletion_mode: string;
+  soft_delete_column: string;
+  soft_delete_semantics: string;
+};
+
+// DatasetPreviewRow is one landed external row as the dataset surface reads
+// it — the raw JSON plus the cursor it landed under.
+export type DatasetPreviewRow = {
+  row_key: string;
+  cursor: string;
+  data: string;
+  synced_at: string;
+};
+
+// DatasetPreview is the dataset_preview op output: deduped FINAL rows with
+// the soft-delete filter applied, plus the freshness block. landed_watermark
+// is the max cursor actually present in the landing table — it can lag the
+// resume cursor when a run failed mid-pull.
+export type DatasetPreview = {
+  sync: ConnectorSync;
+  rows: DatasetPreviewRow[];
+  landed_watermark: string;
+  total_rows: number;
 };
 
 export type ConnectorColumn = {
@@ -1143,6 +1242,28 @@ export type AgentRecommendation = {
   // rather than appending a card; a high count is a standing problem.
   seen_count: number;
   last_seen_at: string;
+  // Revision is the optimistic-concurrency counter; legacy rows read as 1.
+  revision: number;
+};
+
+// TestOutcomeEntry is one appended observation on a test's outcome list —
+// written only by record_outcome, immutable; a correction is a new entry.
+export type TestOutcomeEntry = {
+  value: number;
+  unit: string;
+  window: string;
+  evidence_ref: string;
+  author_kind: string; // 'agent' | 'user'
+  author_id: string;
+  recorded_at: string;
+};
+
+// ListFindingsResult is the list_findings op output — a keyset page of
+// findings, or a single exact read when finding_id was passed.
+export type ListFindingsResult = {
+  findings?: AgentRecommendation[];
+  finding?: AgentRecommendation;
+  next_cursor?: string;
 };
 
 // AgentToolCatalogEntry mirrors agentanalyst.ToolCatalogEntry — one selectable
@@ -1200,6 +1321,30 @@ export type ValidationTest = {
   decided_at?: string;
   decision_note: string;
   created_at: string;
+  // Slice-4 resumable-experiment fields. All optional; legacy rows read as
+  // honest "not recorded" states rather than invented values.
+  // observation_id links the agent_recommendations row this experiment
+  // answers — the observation→experiment edge.
+  observation_id?: string;
+  // evidence_json is the typed envelope {query_ref, metric_version,
+  // dataset_version, range, filters, timezone, watermark}.
+  evidence_json?: string;
+  // baseline_value/unit/window are the measured baseline, not just the
+  // denominator event.
+  baseline_value?: number;
+  baseline_unit?: string;
+  baseline_window?: string;
+  audience?: string;
+  owner?: string;
+  success_metric?: string;
+  guardrail_metric?: string;
+  review_date?: string;
+  // outcome_json is an append-only list of TestOutcomeEntry written only by
+  // record_outcome; the human decide act never appends here.
+  outcome_json?: string;
+  // revision is the optimistic-concurrency counter update/record/abandon
+  // carry; legacy rows read as 1.
+  revision: number;
 };
 
 export type ValidationProgress = {
@@ -1617,6 +1762,15 @@ export class AgentRayAPI {
     return this.get<{ project: Project; summary: ActivitySummary }>(`/api/activity?${new URLSearchParams(filterParams(filters)).toString()}`);
   }
 
+  // The product overview is its own contract (GET /api/overview), not a
+  // console-query facet: it has its own period semantics (complete days) and
+  // platform facet, independent of the shared Filters store.
+  overview(period = '7d', platform = '') {
+    const params = new URLSearchParams({ period });
+    if (platform) params.set('platform', platform);
+    return this.get<OverviewResult>(`/api/overview?${params.toString()}`);
+  }
+
   insight(type: string, filters: Filters, metric = '', steps: string[] = []) {
     const params = new URLSearchParams(filterParams(filters));
     params.set('type', type);
@@ -1845,8 +1999,48 @@ export class AgentRayAPI {
     return this.get<{ connectors: DataConnector[]; kinds: string[] }>('/api/connectors');
   }
 
-  createConnector(input: { name: string; kind: string; dsn: string }) {
-    return this.post<{ connector: DataConnector }>('/api/connectors', input);
+  // New connectors reference a source credential: the DSN is stored once via
+  // the session-only credential route and the connector carries only its ID.
+  async createConnector(input: { name: string; kind: string; dsn: string }) {
+    const cred = await this.post<{ credential: { id: string } }>(
+      `/api/projects/${this.projectID}/source-credentials`,
+      { name: input.name, dsn: input.dsn },
+    );
+
+    return this.post<{ connector: DataConnector }>('/api/connectors', {
+      name: input.name,
+      kind: input.kind,
+      credential_id: cred.credential.id,
+    });
+  }
+
+  // --- Shared operations (POST /api/op/<name>) ---
+  //
+  // The same usecase handlers the agent's in-process tools and the CLI run,
+  // mounted over HTTP. Session cookie auth; the project resolves from
+  // ?project_id= like every other call.
+  callOp<T>(name: string, input: Record<string, unknown> = {}) {
+    return this.post<T>(`/api/op/${name}`, input);
+  }
+
+  listFindings(input: { cursor?: string; limit?: number; finding_id?: string } = {}) {
+    return this.callOp<ListFindingsResult>('list_findings', input as Record<string, unknown>);
+  }
+
+  datasetPreview(syncID: string, limit = 25) {
+    return this.callOp<DatasetPreview>('dataset_preview', { sync_id: syncID, limit });
+  }
+
+  // recordOutcome appends one measured observation to a committed or decided
+  // experiment — append-only, revision-checked, idempotent.
+  recordOutcome(input: { test_id: string; revision: number; value: number; unit: string; window: string; evidence_ref: string; idempotency_key: string }) {
+    return this.callOp<{ test_id: string; status: string; revision: number; entries: number; note: string }>('record_outcome', input as unknown as Record<string, unknown>);
+  }
+
+  // abandonTestOp closes a PROPOSED experiment (proposed → abandoned only);
+  // committed tests close through the owner's decide action.
+  abandonTestOp(input: { test_id: string; revision: number; reason: string; idempotency_key: string }) {
+    return this.callOp<{ test_id: string; status: string; revision: number; note: string }>('abandon_test', input as unknown as Record<string, unknown>);
   }
 
   deleteConnector(id: string) {

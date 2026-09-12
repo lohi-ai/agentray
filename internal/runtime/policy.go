@@ -15,10 +15,10 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents},
-	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart},
-	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolRemember, ToolSendNotification},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings},
+	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolCreateSource, ToolUpdateSource},
+	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
 }
 
 // readTools classifies which scope-granted tools READ project data, versus the
@@ -30,6 +30,7 @@ var scopeTools = map[string][]string{
 var readTools = map[string]bool{
 	ToolActivitySummary: true,
 	ToolRecentEvents:    true,
+	ToolOverview:        true,
 	ToolExploreEvents:   true,
 	ToolPersons:         true,
 	ToolRunSQL:          true,
@@ -40,8 +41,16 @@ var readTools = map[string]bool{
 	// test_status reads the live experiment out of the event store against a
 	// committed threshold. It is the pre-product agent's activity_summary, and
 	// leaving it unclassified would nudge the one agent that DID check.
-	ToolTestStatus: true,
-	ToolListTests:  true,
+	ToolTestStatus:     true,
+	ToolListTests:      true,
+	ToolListFindings:   true,
+	ToolDatasetPreview: true,
+	ToolVerifySDK:      true,
+	// Source probes/status read the source's schema and the project's run
+	// rows — evidence for the data-quality agent, not side effects.
+	ToolTestSource:    true,
+	ToolPreviewSource: true,
+	ToolSourceStatus:  true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.

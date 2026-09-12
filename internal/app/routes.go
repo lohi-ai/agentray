@@ -446,13 +446,17 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 			return err
 		}
 		var payload struct {
-			Name string `json:"name"`
+			Name     *string `json:"name"`
+			Timezone *string `json:"timezone"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name)
+		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name, payload.Timezone)
 		if err != nil {
+			if errors.Is(err, storage.ErrInvalidProjectTimezone) {
+				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			}
 			return echo.NewHTTPError(http.StatusForbidden, "project permission denied")
 		}
 		return c.JSON(http.StatusOK, map[string]any{"project": project})
@@ -825,7 +829,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err != nil {
 			return err
 		}
-		dashboards, err := store.ListDashboards(c.Request().Context(), project.ID)
+		dashboards, err := store.ListDashboardsFiltered(c.Request().Context(), project.ID, false)
 		if err != nil {
 			return err
 		}
