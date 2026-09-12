@@ -219,6 +219,26 @@ func TestNotFoundParityAcrossAdapters(t *testing.T) {
 	}
 }
 
+// The legacy REST adapter invokes MapOpError directly, after a handler has
+// already returned an OpError. Keep those explicit classifications instead of
+// downgrading them to the mapper's generic 400 fallback.
+func TestMapOpErrorPreservesExplicitOperationKinds(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{opcore.NotFound("gone"), http.StatusNotFound},
+		{opcore.Conflict("stale"), http.StatusConflict},
+		{opcore.Retryable("busy"), http.StatusServiceUnavailable},
+	} {
+		mapped := MapOpError(tc.err)
+		var he *echo.HTTPError
+		if !errors.As(mapped, &he) || he.Code != tc.want {
+			t.Fatalf("MapOpError(%v) = %#v, want HTTP %d", tc.err, mapped, tc.want)
+		}
+	}
+}
+
 // Paused syncs conflict; a saturated engine is retryable — and the kinds must
 // agree across REST and MCP.
 func TestConflictAndRetryableParity(t *testing.T) {

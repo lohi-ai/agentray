@@ -164,6 +164,17 @@ func MapOpError(err error) error {
 	if errors.As(err, &he) {
 		return he
 	}
+	var oe *opcore.OpError
+	if errors.As(err, &oe) {
+		switch oe.Kind {
+		case opcore.ErrNotFound:
+			return echo.NewHTTPError(http.StatusNotFound, oe.Message)
+		case opcore.ErrConflict:
+			return echo.NewHTTPError(http.StatusConflict, oe.Message)
+		case opcore.ErrRetryable:
+			return echo.NewHTTPError(http.StatusServiceUnavailable, oe.Message)
+		}
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return echo.NewHTTPError(http.StatusNotFound, "not found")
