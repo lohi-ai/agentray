@@ -10,13 +10,15 @@ class TestGenerateBounded(unittest.TestCase):
     def test_tiny_budget_aborts(self):
         t0 = time.monotonic()
         with self.assertRaises(Deadline):
-            generate_bounded(100000, 20260912, 10, budget_s=0.05,
+            # Unused seed: an existing corpus dir would fail fast with the
+            # stale-corpus guard instead of exercising the timeout.
+            generate_bounded(100000, 424242, 10, budget_s=0.05,
                              workdir_cap_gib=999)
         self.assertLess(time.monotonic() - t0, 10)
 
     def test_zero_workdir_cap_aborts(self):
         with self.assertRaises(Deadline):
-            generate_bounded(100000, 20260912, 10, budget_s=60,
+            generate_bounded(100000, 424243, 10, budget_s=60,
                              workdir_cap_gib=0)
 
 

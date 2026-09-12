@@ -110,7 +110,11 @@ def generate_bounded(scale: int, seed: int, ingest_rows: int,
     proc = subprocess.Popen(
         [sys.executable, "-m", "harness.corpus_gen",
          str(scale), str(seed), str(ingest_rows)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # stderr goes to a file, not a pipe: a child that dumps >64KiB of
+        # traceback would deadlock a never-drained PIPE until the budget
+        # kill. stdout stays a pipe — it carries only the output path.
+        stdout=subprocess.PIPE,
+        stderr=open(WORK / "corpus-gen.err", "w"), text=True)
     t0 = time.monotonic()
     try:
         while proc.poll() is None:
@@ -126,7 +130,10 @@ def generate_bounded(scale: int, seed: int, ingest_rows: int,
                     f"{workdir_cap_gib} GiB during generation")
             time.sleep(0.5)
         if proc.returncode != 0:
-            err = (proc.stderr.read() if proc.stderr else "")[-500:]
+            try:
+                err = (WORK / "corpus-gen.err").read_text()[-500:]
+            except OSError:
+                err = ""
             raise RuntimeError(f"corpus generation failed: {err}")
         return Path(proc.stdout.read().strip().splitlines()[-1])
     finally:
