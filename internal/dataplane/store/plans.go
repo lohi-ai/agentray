@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,18 @@ import (
 // is history. Runs on any pgQuerier so the idempotent claim wrapper can
 // execute it inside the claim transaction.
 func updateValidationTest(ctx context.Context, q pgQuerier, projectID, id string, in ValidationTestUpdate, expectedRevision int64) (ValidationTest, error) {
+	if in.Hypothesis != nil && strings.TrimSpace(*in.Hypothesis) == "" {
+		return ValidationTest{}, errors.New("hypothesis is required")
+	}
+	if in.MetricEvent != nil && strings.TrimSpace(*in.MetricEvent) == "" {
+		return ValidationTest{}, errors.New("metric_event is required")
+	}
+	if in.TargetCount != nil && *in.TargetCount <= 0 {
+		return ValidationTest{}, errors.New("target_count must be greater than zero")
+	}
+	if in.WindowDays != nil && *in.WindowDays <= 0 {
+		return ValidationTest{}, errors.New("window_days must be greater than zero")
+	}
 	var t ValidationTest
 	err := q.QueryRow(ctx, `
 UPDATE validation_tests SET
@@ -337,9 +350,10 @@ LIMIT $6`,
 		out = out[:limit]
 		last := out[len(out)-1]
 		rank := 2
-		if last.Status == TestProposed {
+		switch last.Status {
+		case TestProposed:
 			rank = 0
-		} else if last.Status == TestCommitted {
+		case TestCommitted:
 			rank = 1
 		}
 		next = fmt.Sprintf("%d|%s|%s", rank, last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
@@ -347,25 +361,44 @@ LIMIT $6`,
 	return out, next, nil
 }
 
-// ListRecommendationsPage returns one keyset page of a project's findings —
-// open first by impact, then the rest — plus the next cursor.
+// ListRecommendationsPage returns one keyset page of a project's findings:
+// current open findings by impact first, followed by the historical record.
 func (s *Store) ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]AgentRecommendation, string, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
 	}
+	var cursorOpen bool
+	var cursorImpact float64
 	var cursorTime time.Time
 	var cursorID string
 	if cursor != "" {
-		parts := strings.SplitN(cursor, "|", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(cursor, "|", 4)
+		if len(parts) != 4 {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		var perr error
-		cursorTime, perr = time.Parse(time.RFC3339Nano, parts[0])
-		if perr != nil {
+		var err error
+		cursorOpen, err = strconv.ParseBool(parts[0])
+		if err != nil {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		cursorID = parts[1]
+		cursorImpact, err = strconv.ParseFloat(parts[1], 64)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		cursorTime, err = time.Parse(time.RFC3339Nano, parts[2])
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		cursorID = parts[3]
+		if !looksLikeUUID(cursorID) {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	// A NULL id keeps the tuple's $6::uuid cast from ever seeing '' — the OR
+	// short-circuits on an empty cursor, but the cast must not depend on that.
+	var cursorIDArg any
+	if cursor != "" {
+		cursorIDArg = cursorID
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
@@ -373,9 +406,11 @@ SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, r
        coalesce(revision, 1)
 FROM agent_recommendations
 WHERE project_id = $1
-  AND ($2::text = '' OR (created_at, id::text) > ($3::timestamptz, $4))
-ORDER BY created_at ASC, id ASC
-LIMIT $5`, projectID, cursor, cursorTime, cursorID, limit+1)
+  AND ($2::text = '' OR
+       ((status = 'open'), impact_score, created_at, id) <
+       ($3::bool, $4::float8, $5::timestamptz, $6::uuid))
+ORDER BY (status = 'open') DESC, impact_score DESC, created_at DESC, id DESC
+LIMIT $7`, projectID, cursor, cursorOpen, cursorImpact, cursorTime, cursorIDArg, limit+1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -397,7 +432,9 @@ LIMIT $5`, projectID, cursor, cursorTime, cursorID, limit+1)
 	if len(out) > limit {
 		out = out[:limit]
 		last := out[len(out)-1]
-		next = fmt.Sprintf("%s|%s", last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
+		next = fmt.Sprintf("%t|%s|%s|%s", last.Status == "open",
+			strconv.FormatFloat(last.ImpactScore, 'g', -1, 64),
+			last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
 	}
 	return out, next, nil
 }
@@ -438,8 +475,8 @@ type DatasetPreviewRow struct {
 // FINAL view with the soft-delete filter applied, plus the freshness block
 // the UI and agents need to trust or distrust what they see.
 type DatasetPreview struct {
-	Sync            ConnectorSync       `json:"sync"`
-	Rows            []DatasetPreviewRow `json:"rows"`
+	Sync ConnectorSync       `json:"sync"`
+	Rows []DatasetPreviewRow `json:"rows"`
 	// LandedWatermark is the max cursor actually present in the landing table
 	// — the honest frontier, which can lag the resume cursor when a run
 	// failed mid-pull (the cursor only advances past landed rows, but a crash
@@ -479,7 +516,10 @@ FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID).
 		case "bool_true":
 			softFilter = ` AND NOT (JSONHas(data, '` + col + `') AND JSONExtractBool(data, '` + col + `'))`
 		case "non_null":
-			softFilter = ` AND NOT (JSONHas(data, '` + col + `') AND NOT isNull(JSONExtractRaw(data, '` + col + `')))`
+			// JSONExtractRaw returns a non-Nullable String, so isNull() on it is
+			// constant-false and deleted_at:null would hide a live row. Compare
+			// the raw text: JSON null extracts to 'null', a real value does not.
+			softFilter = ` AND NOT (JSONHas(data, '` + col + `') AND JSONExtractRaw(data, '` + col + `') != 'null')`
 		}
 	}
 

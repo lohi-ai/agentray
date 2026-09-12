@@ -41,9 +41,11 @@ var readTools = map[string]bool{
 	// test_status reads the live experiment out of the event store against a
 	// committed threshold. It is the pre-product agent's activity_summary, and
 	// leaving it unclassified would nudge the one agent that DID check.
-	ToolTestStatus: true,
-	ToolListTests:  true,
-	ToolVerifySDK:  true,
+	ToolTestStatus:     true,
+	ToolListTests:      true,
+	ToolListFindings:   true,
+	ToolDatasetPreview: true,
+	ToolVerifySDK:      true,
 	// Source probes/status read the source's schema and the project's run
 	// rows — evidence for the data-quality agent, not side effects.
 	ToolTestSource:    true,

@@ -234,3 +234,51 @@ func TestRecommendationForProjectExactRead(t *testing.T) {
 		t.Fatalf("cross-project read: got %v, want not-found", err)
 	}
 }
+
+// The findings page is the agent's resume entry point: open findings by impact
+// first, then the settled record — and the cursor has to carry that ordering
+// across the open/settled boundary, not just within one group.
+func TestListRecommendationsPageOrdersOpenByImpactThenHistory(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+
+	mk := func(title string, impact float64) string {
+		id, err := s.CreateRecommendation(ctx, AgentRecommendation{
+			ProjectID: projectID, Category: "growth", Title: title,
+			Rationale: "r", ImpactScore: impact,
+		})
+		if err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+		return id
+	}
+	old := mk("old settled", 90)
+	low := mk("open low", 10)
+	high := mk("open high", 80)
+	if err := s.AckRecommendation(ctx, userID, projectID, old, "dismissed", "done"); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	page1, next, err := s.ListRecommendationsPage(ctx, projectID, "", 2)
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(page1) != 2 || next == "" {
+		t.Fatalf("page1 = %d rows, next %q", len(page1), next)
+	}
+	// Open findings lead, ordered by impact — not by age.
+	if page1[0].ID != high || page1[1].ID != low {
+		t.Fatalf("page1 order = %q,%q want %q,%q", page1[0].Title, page1[1].Title, "open high", "open low")
+	}
+	page2, next2, err := s.ListRecommendationsPage(ctx, projectID, next, 2)
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 1 || page2[0].ID != old {
+		t.Fatalf("page2 = %+v, want the settled row", page2)
+	}
+	if next2 != "" {
+		t.Fatalf("next2 = %q, want exhausted", next2)
+	}
+}

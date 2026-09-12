@@ -35,6 +35,7 @@ type Repo interface {
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
 	CreateRecommendationIdempotent(ctx context.Context, rec storage.AgentRecommendation, idemKey, requestHash string) (string, error)
 	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
+	CreateValidationTestIdempotent(ctx context.Context, t storage.ValidationTest, idemKey, requestHash string) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
 	// The plural reads. Without them an agent can only ever discuss the one test
 	// ActiveValidationTest picks, while the owner is looking at a page of five —
@@ -82,7 +83,6 @@ type Repo interface {
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
-
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification

@@ -37,6 +37,7 @@ type DataSource interface {
 	// Validation test + waitlist (growth_suggest). The pre-product pair: the
 	// agent proposes a threshold and reads the running test back against it.
 	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
+	CreateValidationTestIdempotent(ctx context.Context, t storage.ValidationTest, idemKey, requestHash string) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
 	ValidationTestsForProject(ctx context.Context, projectID string, limit int) ([]storage.ValidationTest, int, error)
 	ValidationTestForProject(ctx context.Context, projectID, id string) (storage.ValidationTest, error)
