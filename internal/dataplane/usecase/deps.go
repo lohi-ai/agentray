@@ -44,6 +44,10 @@ type Repo interface {
 	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
+	// Overview is the deterministic product-overview read behind the shared
+	// `overview` operation (REST /api/op/overview, MCP, and GET /api/overview).
+	// now is injectable so tests can pin the complete-day boundary.
+	Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification

@@ -141,8 +141,8 @@ VALUES ($1, $2, 'owner')`, out.Workspace.ID, out.User.ID); err != nil {
 	own := Project{Role: "owner"}
 	key := "agentray_" + uuid.NewString()
 	if err := tx.QueryRow(ctx, `
-INSERT INTO projects (workspace_id, owner_id, name, api_key)
-VALUES ($1, $2, $3, $4)
+INSERT INTO projects (workspace_id, owner_id, name, api_key, credential_split_at)
+VALUES ($1, $2, $3, $4, now())
 RETURNING id::text, workspace_id::text, name, api_key, created_at`, out.Workspace.ID, out.User.ID, projectName, key).
 		Scan(&own.ID, &own.WorkspaceID, &own.Name, &own.APIKey, &own.CreatedAt); err != nil {
 		return AccountBootstrap{}, err
@@ -476,8 +476,8 @@ func (s *Store) CreateWorkspaceProject(ctx context.Context, userID string, works
 	apiKey := "agentray_" + uuid.NewString()
 	var project Project
 	err := s.pg.QueryRow(ctx, `
-INSERT INTO projects (workspace_id, owner_id, name, api_key)
-VALUES ($1, $2, $3, $4)
+INSERT INTO projects (workspace_id, owner_id, name, api_key, credential_split_at)
+VALUES ($1, $2, $3, $4, now())
 RETURNING id::text, workspace_id::text, name, api_key, created_at`, workspaceID, userID, name, apiKey).
 		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.APIKey, &project.CreatedAt)
 	if err != nil {

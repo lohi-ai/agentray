@@ -1056,6 +1056,10 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateCredentials(ctx); err != nil {
+		return err
+	}
+
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; migrateClickHouse
 	// also calls migrateAgent and is idempotent.
