@@ -68,6 +68,13 @@ type Repo interface {
 	UpdateDashboardIdempotent(ctx context.Context, projectID, dashboardID string, name, description *string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	ArchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	UnarchiveDashboardIdempotent(ctx context.Context, projectID, dashboardID string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	// Chart lifecycle: per-chart revision fences update/archive; the
+	// dashboard revision is the single fence for an atomic board reorder.
+	ListChartsFiltered(ctx context.Context, projectID, dashboardID string, includeArchived bool) ([]storage.Chart, error)
+	UpdateChartIdempotent(ctx context.Context, chart storage.Chart, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	ArchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	UnarchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
+	ReorderChartsIdempotent(ctx context.Context, projectID, dashboardID string, chartIDs []string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
 	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
 
@@ -83,6 +90,12 @@ type Repo interface {
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	// Source archive is reversible: it keeps the connector row and its
+	// credential reference and disables its syncs transactionally; unarchive
+	// resumes exactly the syncs the archive paused.
+	ListDataConnectorsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.DataConnector, error)
+	ArchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	UnarchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification

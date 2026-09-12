@@ -15,9 +15,9 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings},
-	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolCreateSource, ToolUpdateSource},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources},
+	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview, ToolListSources},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
 }
 
@@ -51,6 +51,10 @@ var readTools = map[string]bool{
 	ToolTestSource:    true,
 	ToolPreviewSource: true,
 	ToolSourceStatus:  true,
+	// list_charts / list_sources are reads: they return the board and source
+	// inventory an authoring agent needs before it can fence a write.
+	ToolListCharts:  true,
+	ToolListSources: true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.

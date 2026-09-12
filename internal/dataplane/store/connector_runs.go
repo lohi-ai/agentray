@@ -347,11 +347,15 @@ WHERE (status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < $1))
 // same-project); legacy inline ciphertext still decrypts.
 func (s *Store) ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error) {
 	var ciphertext, credentialID string
+	var archivedAt *time.Time
 	err = s.pg.QueryRow(ctx,
-		`SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, '') FROM data_connectors WHERE id = $1 AND project_id = $2`,
-		connectorID, projectID).Scan(&kind, &ciphertext, &credentialID)
+		`SELECT kind, dsn_ciphertext, COALESCE(credential_id::text, ''), archived_at FROM data_connectors WHERE id = $1 AND project_id = $2`,
+		connectorID, projectID).Scan(&kind, &ciphertext, &credentialID, &archivedAt)
 	if err != nil {
 		return "", "", err
+	}
+	if archivedAt != nil {
+		return "", "", ErrSourceArchived
 	}
 	if credentialID != "" {
 		dsn, err = s.sourceCredentialDSN(ctx, s.pg, projectID, credentialID)
@@ -367,10 +371,12 @@ func (s *Store) ConnectorDSNForProject(ctx context.Context, projectID, connector
 	return kind, dsn, nil
 }
 
-// ListDataConnectorsForProject lists a project's connectors (no DSN material).
+// ListDataConnectorsForProject lists a project's connectors (no DSN
+// material), including archived rows — the operation layer filters by caller
+// intent via ListDataConnectorsFiltered.
 func (s *Store) ListDataConnectorsForProject(ctx context.Context, projectID string) ([]DataConnector, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, kind, dsn_ciphertext <> '', created_at, updated_at
+SELECT `+dataConnectorColumns+`
 FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -379,7 +385,7 @@ FROM data_connectors WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	out := []DataConnector{}
 	for rows.Next() {
 		var c DataConnector
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.HasDSN, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(dataConnectorScanDest(&c)...); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -424,12 +430,16 @@ func (s *Store) ConnectorSyncForProject(ctx context.Context, projectID, syncID s
 func (s *Store) SetConnectorSyncEnabledIdempotent(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64, idemKey, requestHash string) (ConnectorSync, error) {
 	raw, err := s.runIdempotent(ctx, projectID, "pause_source", idemKey, requestHash,
 		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			if enabled {
+				if err := rejectArchivedConnectorForSync(ctx, q, projectID, syncID); err != nil {
+					return nil, err
+				}
+			}
 			var cs ConnectorSync
-			dest := append(syncScanDest(&cs), &cs.Revision)
 			err := q.QueryRow(ctx, `
-UPDATE connector_syncs SET enabled = $3, revision = revision + 1, updated_at = now()
+UPDATE connector_syncs SET enabled = $3, disabled_by_archive = false, revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $4
-RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expectedRevision).Scan(dest...)
+RETURNING `+connectorSyncColumns, syncID, projectID, enabled, expectedRevision).Scan(syncScanDest(&cs)...)
 			if errors.Is(err, pgx.ErrNoRows) {
 				var exists bool
 				if qerr := q.QueryRow(ctx,
@@ -454,16 +464,45 @@ RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expec
 	return cs, nil
 }
 
+// rejectArchivedConnectorForSync fails an enable attempt when the sync's
+// connector is archived — resume path is unarchive_source, which re-enables
+// exactly the syncs the archive paused. A missing sync reports not-found so
+// the revision check below still distinguishes gone from changed.
+func rejectArchivedConnectorForSync(ctx context.Context, q pgQuerier, projectID, syncID string) error {
+	var archived bool
+	var exists bool
+	err := q.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM connector_syncs WHERE id = $1 AND project_id = $2),
+       EXISTS(SELECT 1 FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
+              WHERE cs.id = $1 AND cs.project_id = $2 AND dc.archived_at IS NOT NULL)`,
+		syncID, projectID).Scan(&exists, &archived)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return pgx.ErrNoRows
+	}
+	if archived {
+		return ErrSourceArchived
+	}
+	return nil
+}
+
 // SetConnectorSyncEnabled pauses/resumes a sync with a revision check —
 // pause_source's mutation. Pausing never kills an active run; it only stops
-// future enqueue (EnqueueConnectorRun refuses disabled syncs).
+// future enqueue (EnqueueConnectorRun refuses disabled syncs). Resuming under
+// an archived connector is rejected — unarchive the source instead.
 func (s *Store) SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (ConnectorSync, error) {
+	if enabled {
+		if err := rejectArchivedConnectorForSync(ctx, s.pg, projectID, syncID); err != nil {
+			return ConnectorSync{}, err
+		}
+	}
 	var cs ConnectorSync
-	dest := append(syncScanDest(&cs), &cs.Revision)
 	err := s.pg.QueryRow(ctx, `
-UPDATE connector_syncs SET enabled = $3, revision = revision + 1, updated_at = now()
+UPDATE connector_syncs SET enabled = $3, disabled_by_archive = false, revision = revision + 1, updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $4
-RETURNING `+connectorSyncColumns+`, revision`, syncID, projectID, enabled, expectedRevision).Scan(dest...)
+RETURNING `+connectorSyncColumns, syncID, projectID, enabled, expectedRevision).Scan(syncScanDest(&cs)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if qerr := s.pg.QueryRow(ctx,

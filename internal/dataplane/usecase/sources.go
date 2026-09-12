@@ -448,6 +448,104 @@ func updateSource() opcore.Operation[updateSourceInput, storage.DataConnector] {
 	}
 }
 
+// --- list_sources ---
+
+type listSourcesInput struct {
+	IncludeArchived bool `json:"include_archived" desc:"true also returns archived sources"`
+}
+
+type listSourcesOutput struct {
+	Sources []storage.DataConnector `json:"sources"`
+}
+
+func listSources() opcore.Operation[listSourcesInput, listSourcesOutput] {
+	return opcore.Operation[listSourcesInput, listSourcesOutput]{
+		Name:    "list_sources",
+		Summary: "List the project's data sources (id, name, kind, revision, archive state — never secret material). Pass include_archived for the archived view.",
+		Access:  opcore.AccessSourcesRead,
+		Scope:   "monitor",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in listSourcesInput) (listSourcesOutput, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return listSourcesOutput{}, err
+			}
+			sources, err := d.Repo.ListDataConnectorsFiltered(ctx, cc.ProjectID, in.IncludeArchived)
+			if err != nil {
+				return listSourcesOutput{}, err
+			}
+			return listSourcesOutput{Sources: sources}, nil
+		},
+	}
+}
+
+// --- archive_source ---
+
+type archiveSourceInput struct {
+	ConnectorID    string `json:"connector_id" required:"true" desc:"source to archive (soft — the row, credential reference, and landed data are kept)"`
+	Revision       int64  `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict; an already-archived source returns its current state"`
+	IdempotencyKey string `json:"idempotency_key" desc:"retry key — archiving twice is safe"`
+}
+
+// archive_source is the reversible stop: it marks the connector archived and
+// disables its syncs in one transaction (remembering which it paused), so an
+// archived source can never keep landing rows. Probes and new runs against it
+// fail closed; unarchive_source resumes exactly the syncs the archive paused.
+func archiveSource() opcore.Operation[archiveSourceInput, storage.DataConnector] {
+	return opcore.Operation[archiveSourceInput, storage.DataConnector]{
+		Name:           "archive_source",
+		Summary:        "Archive a source (reversible): keeps the connector, credential reference, and landed data; pauses its syncs transactionally. Repeating is idempotent.",
+		Access:         opcore.AccessSourcesManage,
+		Scope:          "analyze_build",
+		MinSessionRole: "admin",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in archiveSourceInput) (storage.DataConnector, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.DataConnector{}, fmt.Errorf("revision must be the source's current revision (> 0)")
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			return d.Repo.ArchiveDataConnectorIdempotent(ctx, cc.ProjectID, in.ConnectorID, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}
+
+// --- unarchive_source ---
+
+type unarchiveSourceInput struct {
+	ConnectorID    string `json:"connector_id" required:"true" desc:"source to restore from archive"`
+	Revision       int64  `json:"revision" required:"true" desc:"expected current revision — stale revisions conflict; an already-active source returns its current state"`
+	IdempotencyKey string `json:"idempotency_key" desc:"retry key — restoring twice is safe"`
+}
+
+func unarchiveSource() opcore.Operation[unarchiveSourceInput, storage.DataConnector] {
+	return opcore.Operation[unarchiveSourceInput, storage.DataConnector]{
+		Name:           "unarchive_source",
+		Summary:        "Restore an archived source and resume exactly the syncs its archive paused (operator-paused syncs stay paused). Repeating is idempotent.",
+		Access:         opcore.AccessSourcesManage,
+		Scope:          "analyze_build",
+		MinSessionRole: "admin",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in unarchiveSourceInput) (storage.DataConnector, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			if in.Revision <= 0 {
+				return storage.DataConnector{}, fmt.Errorf("revision must be the source's current revision (> 0)")
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.DataConnector{}, err
+			}
+			return d.Repo.UnarchiveDataConnectorIdempotent(ctx, cc.ProjectID, in.ConnectorID, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}
+
 type cancelSourceRunInput struct {
 	RunID string `json:"run_id" required:"true" desc:"run to cancel — queued runs end immediately, running runs stop at the next batch boundary"`
 }
