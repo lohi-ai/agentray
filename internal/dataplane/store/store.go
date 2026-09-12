@@ -154,21 +154,27 @@ type Dashboard struct {
 }
 
 type Chart struct {
-	ID          string    `json:"id"`
-	DashboardID string    `json:"dashboard_id"`
-	ProjectID   string    `json:"project_id"`
-	Name        string    `json:"name"`
-	Kind        string    `json:"kind"`
-	Metric      string    `json:"metric"`
-	EventName   string    `json:"event_name"`
-	EventType   string    `json:"event_type"`
-	SQL         string    `json:"sql"`
-	XField      string    `json:"x_field"`
-	YField      string    `json:"y_field"`
-	SortOrder   int       `json:"sort_order"`
-	ColSpan     int       `json:"col_span"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string `json:"id"`
+	DashboardID string `json:"dashboard_id"`
+	ProjectID   string `json:"project_id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Metric      string `json:"metric"`
+	EventName   string `json:"event_name"`
+	EventType   string `json:"event_type"`
+	SQL         string `json:"sql"`
+	XField      string `json:"x_field"`
+	YField      string `json:"y_field"`
+	SortOrder   int    `json:"sort_order"`
+	ColSpan     int    `json:"col_span"`
+	// Revision is the per-chart optimistic-concurrency counter update_chart
+	// and archive_chart carry — same contract as dashboards. Board order is
+	// fenced by the DASHBOARD's revision (reorder_charts), not this one.
+	Revision int64 `json:"revision"`
+	// ArchivedAt marks a soft-archived chart — reversible, the row is kept.
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 type Event struct {
@@ -1688,8 +1694,10 @@ func (s *Store) DeleteDashboard(ctx context.Context, projectID string, dashboard
 }
 
 func (s *Store) ListCharts(ctx context.Context, projectID string, dashboardID string) ([]Chart, error) {
+	// Returns every chart including archived ones (archived_at marks them);
+	// the operation layer filters by caller intent via ListChartsFiltered.
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, dashboard_id::text, project_id::text, name, kind, metric, event_name, event_type, sql, x_field, y_field, sort_order, col_span, created_at, updated_at
+SELECT `+chartColumns+`
 FROM charts
 WHERE project_id = $1 AND dashboard_id = $2
 ORDER BY sort_order ASC, created_at ASC`, projectID, dashboardID)
@@ -1701,7 +1709,7 @@ ORDER BY sort_order ASC, created_at ASC`, projectID, dashboardID)
 	charts := []Chart{}
 	for rows.Next() {
 		var c Chart
-		if err := rows.Scan(&c.ID, &c.DashboardID, &c.ProjectID, &c.Name, &c.Kind, &c.Metric, &c.EventName, &c.EventType, &c.SQL, &c.XField, &c.YField, &c.SortOrder, &c.ColSpan, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(chartScanDest(&c)...); err != nil {
 			return nil, err
 		}
 		charts = append(charts, c)
@@ -1726,9 +1734,9 @@ func (s *Store) CreateChart(ctx context.Context, chart Chart) (Chart, error) {
 INSERT INTO charts (dashboard_id, project_id, name, kind, metric, event_name, event_type, sql, x_field, y_field, col_span, sort_order)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
 	COALESCE((SELECT MAX(sort_order) + 1 FROM charts WHERE dashboard_id = $1), 0))
-RETURNING id::text, dashboard_id::text, project_id::text, name, kind, metric, event_name, event_type, sql, x_field, y_field, sort_order, col_span, created_at, updated_at`,
+RETURNING `+chartColumns,
 		chart.DashboardID, chart.ProjectID, chart.Name, chart.Kind, chart.Metric, chart.EventName, chart.EventType, chart.SQL, chart.XField, chart.YField, chart.ColSpan).
-		Scan(&c.ID, &c.DashboardID, &c.ProjectID, &c.Name, &c.Kind, &c.Metric, &c.EventName, &c.EventType, &c.SQL, &c.XField, &c.YField, &c.SortOrder, &c.ColSpan, &c.CreatedAt, &c.UpdatedAt)
+		Scan(chartScanDest(&c)...)
 	return c, err
 }
 
@@ -1756,26 +1764,36 @@ func (s *Store) UpdateChart(ctx context.Context, chart Chart) (Chart, error) {
 	}
 	chart.ColSpan = clampSpan(chart.ColSpan)
 	var c Chart
+	// Legacy unfenced write: still bumps revision so a stale operation-layer
+	// caller cannot silently overwrite what this write changed.
 	err := s.pg.QueryRow(ctx, `
 UPDATE charts
-SET name = $3, kind = $4, metric = $5, event_name = $6, event_type = $7, sql = $8, x_field = $9, y_field = $10, col_span = $11, updated_at = now()
+SET name = $3, kind = $4, metric = $5, event_name = $6, event_type = $7, sql = $8, x_field = $9, y_field = $10, col_span = $11,
+    revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
-RETURNING id::text, dashboard_id::text, project_id::text, name, kind, metric, event_name, event_type, sql, x_field, y_field, sort_order, col_span, created_at, updated_at`,
+RETURNING `+chartColumns,
 		chart.ProjectID, chart.ID, chart.Name, chart.Kind, chart.Metric, chart.EventName, chart.EventType, chart.SQL, chart.XField, chart.YField, chart.ColSpan).
-		Scan(&c.ID, &c.DashboardID, &c.ProjectID, &c.Name, &c.Kind, &c.Metric, &c.EventName, &c.EventType, &c.SQL, &c.XField, &c.YField, &c.SortOrder, &c.ColSpan, &c.CreatedAt, &c.UpdatedAt)
+		Scan(chartScanDest(&c)...)
 	return c, err
 }
 
 // ReorderCharts persists a new board order: each chart id in `chartIDs` gets its
 // sort_order set to its index. Scoped to the dashboard + project so a caller can
 // only reorder charts it owns. Runs in one transaction so the board never reads
-// a half-applied order.
+// a half-applied order. The dashboard revision is bumped — it is the optimistic
+// fence reorder_charts and dashboard writes share, so even this legacy unfenced
+// path cannot leave a stale fence value behind.
 func (s *Store) ReorderCharts(ctx context.Context, projectID string, dashboardID string, chartIDs []string) error {
 	tx, err := s.pg.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+UPDATE dashboards SET revision = revision + 1, updated_at = now()
+WHERE project_id = $1 AND id = $2`, projectID, dashboardID); err != nil {
+		return err
+	}
 	for i, id := range chartIDs {
 		if _, err := tx.Exec(ctx, `
 UPDATE charts SET sort_order = $4, updated_at = now()
