@@ -16,8 +16,8 @@ import { EVENTS_COLUMN_NAMES, EVENTS_TABLE } from './events-schema';
 // token-themed so it matches the AgentRay dark cockpit (no CodeMirror default
 // light chrome leaks through).
 
-// ClickHouse is closest to MySQL's backtick-identifier dialect for the editor's
-// tokenizer; we only need keyword/identifier/string highlighting, not exact DDL.
+// DuckDB is closest to standard SQL for the editor's tokenizer; we only need
+// keyword/identifier/string highlighting, not exact DDL.
 const DIALECT = SQLDialect.define({ backslashEscapes: true });
 
 // Dark syntax palette mapped onto our brand tokens so keywords/strings/numbers

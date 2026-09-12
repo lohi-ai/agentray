@@ -131,7 +131,7 @@ export const OSS_FACTS = [
   {
     id: 'base',
     title: 'A complete analytics base',
-    detail: 'Go ingestion, event storage in ClickHouse, PostgreSQL metadata. The charts are not a separate product.',
+    detail: 'Go ingestion, event storage in embedded DuckDB, PostgreSQL metadata. The charts are not a separate product.',
   },
   {
     id: 'posthog',

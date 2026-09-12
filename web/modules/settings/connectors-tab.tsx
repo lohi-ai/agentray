@@ -400,7 +400,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
             ) : null}
             <Text type="supporting" className="mt-2 block">
               Synced rows land in the <span className="font-mono">external_rows</span> table — agents and SQL can read them, e.g.{' '}
-              <span className="font-mono">SELECT JSONExtractString(data, &apos;email&apos;) FROM external_rows WHERE table_name = &apos;{syncs[0]?.source_table ?? 'users'}&apos;</span>.
+              <span className="font-mono">SELECT json_extract_string(data, &apos;$.email&apos;) FROM external_rows WHERE table_name = &apos;{syncs[0]?.source_table ?? 'users'}&apos;</span>.
             </Text>
           </>
         )}
