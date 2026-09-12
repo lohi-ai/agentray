@@ -27,8 +27,17 @@ const (
 	// AccessSourcesManage covers source lifecycle: create, update, pause, run,
 	// cancel. Implies AccessSourcesRead on management credentials.
 	AccessSourcesManage Access = "sources:manage"
-	// AccessGrowthWrite covers recommendation/test/memory/notification writes.
+	// AccessGrowthWrite covers memory and notification writes (remember,
+	// send_notification). It is grantable to management credentials but
+	// broader than the Plans surface needs — see AccessPlansWrite.
 	AccessGrowthWrite Access = "growth:write"
+	// AccessPlansWrite covers the Plans write surface: finding/experiment
+	// creation (submit_recommendation, propose_test), proposed-state edits
+	// (update_test), append-only outcomes (record_outcome) and proposal
+	// abandonment (abandon_test). It is the narrow opt-in scope for
+	// management credentials; memory/notification writes stay on
+	// AccessGrowthWrite.
+	AccessPlansWrite Access = "plans:write"
 )
 
 // CredentialKind names which credential authenticated the request. The app

@@ -15,10 +15,10 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview},
-	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings},
+	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview},
 	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolCreateSource, ToolUpdateSource},
-	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolRemember, ToolSendNotification},
+	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
 }
 
 // readTools classifies which scope-granted tools READ project data, versus the

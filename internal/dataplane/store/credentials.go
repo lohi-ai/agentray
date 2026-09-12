@@ -36,6 +36,7 @@ var ManagementScopes = map[string]bool{
 	"sources:read":     true,
 	"sources:manage":   true,
 	"growth:write":     true,
+	"plans:write":      true,
 }
 
 // ProjectCredential is the non-secret view of a management credential: what

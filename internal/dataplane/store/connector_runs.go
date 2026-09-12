@@ -26,12 +26,12 @@ type ConnectorRun = connector.Run
 
 const connectorRunColumns = `id::text, project_id::text, sync_id::text, connector_id::text,
 	status, idempotency_key, cancel_requested, rows, cursor, cursor_key, error,
-	queued_at, started_at, finished_at`
+	queued_at, started_at, finished_at, landing_seq`
 
 func connectorRunScanDest(r *ConnectorRun) []any {
 	return []any{&r.ID, &r.ProjectID, &r.SyncID, &r.ConnectorID, &r.Status,
 		&r.IdempotencyKey, &r.CancelRequested, &r.Rows, &r.Cursor, &r.CursorKey,
-		&r.Error, &r.QueuedAt, &r.StartedAt, &r.FinishedAt}
+		&r.Error, &r.QueuedAt, &r.StartedAt, &r.FinishedAt, &r.LandingSeq}
 }
 
 func (s *Store) migrateConnectorRuns(ctx context.Context) error {
@@ -56,6 +56,7 @@ func (s *Store) migrateConnectorRuns(ctx context.Context) error {
 )`,
 		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`,
+		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS landing_seq BIGINT NOT NULL DEFAULT 0`,
 		// One active run per sync — the DB-level guarantee that replaces the
 		// engine's in-memory running map for the client contract.
 		`CREATE UNIQUE INDEX IF NOT EXISTS connector_runs_one_active
@@ -159,10 +160,18 @@ VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, projectID, syncID, idemKey, act
 	if !enabled {
 		return ConnectorRun{}, false, ErrSyncPaused
 	}
+	// landing_seq is the per-sync monotonic run sequence feeding the
+	// external_rows version column; it increments once per enqueued run so
+	// batches land in a total order (runs are serialized per sync).
+	var seq int64
+	if serr := tx.QueryRow(ctx, `
+UPDATE connector_syncs SET landing_seq = landing_seq + 1 WHERE id = $1 RETURNING landing_seq`, syncID).Scan(&seq); serr != nil {
+		return ConnectorRun{}, false, serr
+	}
 	err = tx.QueryRow(ctx, `
-INSERT INTO connector_runs (project_id, sync_id, connector_id, idempotency_key)
-VALUES ($1, $2, $3, $4)
-RETURNING `+connectorRunColumns, projectID, syncID, connectorID, idemKey).
+INSERT INTO connector_runs (project_id, sync_id, connector_id, idempotency_key, landing_seq)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING `+connectorRunColumns, projectID, syncID, connectorID, idemKey, seq).
 		Scan(connectorRunScanDest(&run)...)
 	if err != nil {
 		return ConnectorRun{}, false, err
@@ -247,8 +256,9 @@ UPDATE connector_syncs SET
 	cursor = CASE WHEN $2 THEN $3 ELSE cursor END,
 	cursor_key = CASE WHEN $2 THEN $4 ELSE cursor_key END,
 	last_run_at = now(), last_status = $5, last_error = $6, last_rows = $7::int,
+	last_success_at = CASE WHEN $8 THEN now() ELSE last_success_at END,
 	total_rows = total_rows + $7::bigint, revision = revision + 1, updated_at = now()
-WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, legacyStatus, errText, result.Rows); err != nil {
+WHERE id = $1`, syncID, result.AdvanceCursor, result.Cursor, result.CursorKey, legacyStatus, errText, result.Rows, finalStatus == "succeeded"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

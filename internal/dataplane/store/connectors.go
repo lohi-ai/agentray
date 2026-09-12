@@ -50,6 +50,26 @@ type ConnectorSync struct {
 	LastError    string     `json:"last_error"`
 	LastRows     int        `json:"last_rows"`
 	TotalRows    int64      `json:"total_rows"`
+	// LastSuccessAt is the last run whose final status was 'succeeded' —
+	// distinct from LastRunAt, which records the last attempt of any outcome.
+	LastSuccessAt *time.Time `json:"last_success_at"`
+	// JoinKey names the source column holding a person-identity value
+	// (resolved to distinct_id via aliases). Fact-level keys are rejected.
+	JoinKey string `json:"join_key"`
+	// JoinValidated is 'validated' | 'unvalidated' | '' — a bounded
+	// duplicate-key check over the deduped set; fail-closed above the cap.
+	JoinValidated string `json:"join_validated"`
+	// DeletionMode: 'none' (hard deletes unsupported — honest default) or
+	// 'soft_column' (source marks deletions).
+	DeletionMode string `json:"deletion_mode"`
+	// SoftDeleteColumn names the source column carrying the deletion mark.
+	SoftDeleteColumn string `json:"soft_delete_column"`
+	// SoftDeleteSemantics: 'bool_true' (boolean, true = deleted) or
+	// 'non_null' (e.g. deleted_at timestamp, non-NULL = deleted).
+	SoftDeleteSemantics string `json:"soft_delete_semantics"`
+	// LandingSeq is the per-sync monotonic run sequence feeding the
+	// external_rows version column (landing_seq*1e6 + batch_index).
+	LandingSeq int64 `json:"landing_seq"`
 	// Revision is the optimistic-concurrency counter pause/update carry —
 	// same contract as dashboards.
 	Revision  int64     `json:"revision"`
@@ -59,6 +79,7 @@ type ConnectorSync struct {
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
 	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
+	last_success_at, join_key, join_validated, deletion_mode, soft_delete_column, soft_delete_semantics, landing_seq,
 	revision, created_at, updated_at`
 
 func (s *Store) migrateConnectors(ctx context.Context) error {
@@ -95,8 +116,16 @@ func (s *Store) migrateConnectors(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS connector_syncs_project_idx ON connector_syncs (project_id, created_at DESC)`,
 		// cursor_key is the tie-breaking half of the keyset cursor: the key of
 		// the last synced row, so rows sharing one cursor value are never
-		// skipped across a batch boundary.
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS cursor_key TEXT NOT NULL DEFAULT ''`,
+		// Slice-4 dataset contract: join/deletion config and the monotonic
+		// landing sequence feeding the external_rows version column.
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS join_key VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS join_validated VARCHAR(16) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS deletion_mode VARCHAR(16) NOT NULL DEFAULT 'none'`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_column VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_semantics VARCHAR(16) NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS landing_seq BIGINT NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -239,7 +268,6 @@ func (s *Store) ConnectorDSNForUser(ctx context.Context, userID, projectID, conn
 }
 
 // --- sync CRUD ---
-
 // ConnectorSyncInput is the operator-editable subset of a sync config.
 type ConnectorSyncInput struct {
 	SourceTable  string `json:"source_table"`
@@ -247,6 +275,18 @@ type ConnectorSyncInput struct {
 	CursorColumn string `json:"cursor_column"`
 	ScheduleCron string `json:"schedule_cron"`
 	Enabled      bool   `json:"enabled"`
+	// JoinKey names the source column holding a person-identity value
+	// (resolved to distinct_id via aliases). Fact-level keys are rejected by
+	// the usecase layer's join validation.
+	JoinKey string `json:"join_key"`
+	// DeletionMode: 'none' (hard deletes unsupported — honest default) or
+	// 'soft_column' (source marks deletions).
+	DeletionMode string `json:"deletion_mode"`
+	// SoftDeleteColumn names the source column carrying the deletion mark.
+	SoftDeleteColumn string `json:"soft_delete_column"`
+	// SoftDeleteSemantics: 'bool_true' (boolean, true = deleted) or
+	// 'non_null' (e.g. deleted_at timestamp, non-NULL = deleted).
+	SoftDeleteSemantics string `json:"soft_delete_semantics"`
 }
 
 // CreateConnectorSync adds a table sync to a connector (owner/admin only).
@@ -273,10 +313,12 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, schedule_cron, enabled)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, schedule_cron, enabled,
+	join_key, deletion_mode, soft_delete_column, soft_delete_semantics)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING `+connectorSyncColumns,
-		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled).
+		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
+		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
@@ -307,12 +349,15 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	err = s.pg.QueryRow(ctx, `
 UPDATE connector_syncs SET
 	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, schedule_cron = $6, enabled = $7,
+	join_key = $8::text, deletion_mode = $9::text, soft_delete_column = $10::text, soft_delete_semantics = $11::text,
+	join_validated = CASE WHEN join_key IS DISTINCT FROM $8::text THEN '' ELSE join_validated END,
 	cursor = CASE WHEN source_table = $3::text AND cursor_column = $5::text THEN cursor ELSE '' END,
 	cursor_key = CASE WHEN source_table = $3::text AND cursor_column = $5::text AND key_column = $4::text THEN cursor_key ELSE '' END,
 	revision = revision + 1, updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
-		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled).
+		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
+		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
@@ -384,6 +429,21 @@ func validateSyncInput(in ConnectorSyncInput) error {
 	if in.ScheduleCron != "" && len(strings.Fields(in.ScheduleCron)) != 5 {
 		return fmt.Errorf("schedule must be a 5-field cron expression")
 	}
+	switch in.DeletionMode {
+	case "", "none":
+		if in.SoftDeleteColumn != "" || in.SoftDeleteSemantics != "" {
+			return fmt.Errorf("soft_delete_column requires deletion_mode 'soft_column'")
+		}
+	case "soft_column":
+		if strings.TrimSpace(in.SoftDeleteColumn) == "" {
+			return fmt.Errorf("soft_delete_column is required when deletion_mode is 'soft_column'")
+		}
+		if in.SoftDeleteSemantics != "bool_true" && in.SoftDeleteSemantics != "non_null" {
+			return fmt.Errorf("soft_delete_semantics must be 'bool_true' or 'non_null'")
+		}
+	default:
+		return fmt.Errorf("deletion_mode must be 'none' or 'soft_column'")
+	}
 	return nil
 }
 
@@ -394,7 +454,9 @@ func connectorKindKnown(kind string) bool {
 func syncScanDest(cs *ConnectorSync) []any {
 	return []any{&cs.ID, &cs.ConnectorID, &cs.ProjectID, &cs.SourceTable, &cs.KeyColumn,
 		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
-		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.Revision, &cs.CreatedAt, &cs.UpdatedAt}
+		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.LastSuccessAt, &cs.JoinKey, &cs.JoinValidated,
+		&cs.DeletionMode, &cs.SoftDeleteColumn, &cs.SoftDeleteSemantics, &cs.LandingSeq,
+		&cs.Revision, &cs.CreatedAt, &cs.UpdatedAt}
 }
 
 // --- engine surface (connector.Store) ---
@@ -454,7 +516,7 @@ WHERE cs.id = $1`, syncID).
 // The table is a ReplacingMergeTree keyed by (project, connector, table, row),
 // so re-landing the same rows (snapshot mode, retried batches) deduplicates on
 // merge instead of accumulating.
-func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
+func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, version uint64) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -466,13 +528,13 @@ func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, 
 	if err != nil {
 		return err
 	}
-	batch, err := s.ch.PrepareBatch(ctx, `INSERT INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at)`)
+	batch, err := s.ch.PrepareBatch(ctx, `INSERT INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at, version)`)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
 	for _, r := range rows {
-		if err := batch.Append(pid, cid, table, r.Key, r.Cursor, r.DataJSON, now); err != nil {
+		if err := batch.Append(pid, cid, table, r.Key, r.Cursor, r.DataJSON, now, version); err != nil {
 			return err
 		}
 	}

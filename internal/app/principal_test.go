@@ -85,7 +85,7 @@ func TestPrincipalResolution(t *testing.T) {
 	if p.Kind != opcore.CredSession || p.ProjectID != project.ID || p.Role != "owner" {
 		t.Fatalf("session principal = %+v", p)
 	}
-	if len(p.Grants) != 5 {
+	if len(p.Grants) != 6 {
 		t.Fatalf("owner grants = %v", p.Grants)
 	}
 

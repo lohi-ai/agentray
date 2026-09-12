@@ -111,7 +111,8 @@ func managementGrants(scopes []string) []opcore.Access {
 			set[opcore.AccessSourcesManage] = true
 			set[opcore.AccessSourcesRead] = true
 		case opcore.AccessAnalyticsRead, opcore.AccessDashboardsWrite,
-			opcore.AccessSourcesRead, opcore.AccessGrowthWrite:
+			opcore.AccessSourcesRead, opcore.AccessGrowthWrite,
+			opcore.AccessPlansWrite:
 			set[opcore.Access(s)] = true
 		}
 	}
@@ -135,12 +136,13 @@ func sessionGrants(role string) []opcore.Access {
 		return []opcore.Access{
 			opcore.AccessAnalyticsRead, opcore.AccessDashboardsWrite,
 			opcore.AccessSourcesRead, opcore.AccessSourcesManage,
-			opcore.AccessGrowthWrite,
+			opcore.AccessGrowthWrite, opcore.AccessPlansWrite,
 		}
 	case "member":
 		return []opcore.Access{
 			opcore.AccessAnalyticsRead, opcore.AccessDashboardsWrite,
 			opcore.AccessSourcesRead, opcore.AccessGrowthWrite,
+			opcore.AccessPlansWrite,
 		}
 	case "viewer":
 		return []opcore.Access{opcore.AccessAnalyticsRead, opcore.AccessSourcesRead}

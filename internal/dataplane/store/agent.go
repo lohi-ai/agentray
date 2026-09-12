@@ -230,6 +230,8 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		// cannot degrade into a scan of every open row.
 		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1`,
 		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+		// Slice-4: optimistic-concurrency counter for revision-checked writes.
+		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS revision BIGINT`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_title_trgm ON agent_recommendations USING gin (title gin_trgm_ops)`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_open_idx ON agent_recommendations (project_id, status, last_seen_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS agent_sessions (

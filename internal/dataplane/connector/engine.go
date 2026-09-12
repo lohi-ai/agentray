@@ -53,6 +53,9 @@ type SyncJob struct {
 	// CursorKey is the key of the last synced row — the tie-breaking half of
 	// the keyset cursor, so rows sharing one cursor value are never skipped.
 	CursorKey string
+	// LandingSeq is the per-sync monotonic run sequence feeding the
+	// external_rows version column.
+	LandingSeq int64
 }
 
 // LandedRow is one row ready for the ClickHouse landing table.
@@ -81,7 +84,7 @@ type SyncResult struct {
 type Store interface {
 	ListEnabledConnectorSyncs(ctx context.Context) ([]ScheduledSync, error)
 	ConnectorSyncJob(ctx context.Context, syncID string) (SyncJob, error)
-	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
+	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow, version uint64) error
 	EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error)
 	ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error)
 	HeartbeatConnectorRun(ctx context.Context, runID string) (cancelRequested bool, stillRunning bool, err error)
@@ -108,6 +111,9 @@ type Run struct {
 	QueuedAt        time.Time  `json:"queued_at"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	// LandingSeq is the per-sync monotonic run sequence assigned at enqueue;
+	// it feeds the external_rows version column (landing_seq*1e6+batch_index).
+	LandingSeq int64 `json:"landing_seq"`
 }
 
 // Engine schedules and executes connector syncs. It rides the agent
@@ -265,7 +271,7 @@ func (e *Engine) CancelRun(runID string) {
 // timed-out run still records its outcome.
 func (e *Engine) executeRun(runID, syncID string) {
 	ctx := context.Background()
-	_, claimed, err := e.store.ClaimConnectorRun(ctx, runID, e.id)
+	claimedRun, claimed, err := e.store.ClaimConnectorRun(ctx, runID, e.id)
 	if err != nil {
 		log.Printf("connector: claim run %s: %v", runID, err)
 		return
@@ -337,6 +343,7 @@ func (e *Engine) executeRun(runID, syncID string) {
 	if err != nil {
 		result = SyncResult{Err: err.Error()}
 	} else {
+		job.LandingSeq = claimedRun.LandingSeq
 		result = e.pullAndLand(runCtx, job)
 	}
 	cancelled := errors.Is(runCtx.Err(), context.Canceled)
@@ -401,7 +408,7 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 			}
 			landed = append(landed, LandedRow{Key: r.Key, Cursor: r.Cursor, DataJSON: string(data)})
 		}
-		if err := e.store.InsertExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
+		if err := e.store.InsertExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed, uint64(job.LandingSeq)*1_000_000+uint64(batch)); err != nil {
 			return result(fmt.Sprintf("land rows: %v", err))
 		}
 		total += len(pull.Rows)

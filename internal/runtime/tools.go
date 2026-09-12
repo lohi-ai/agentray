@@ -32,6 +32,7 @@ type DataSource interface {
 
 	// Recommendation write (P3, growth_suggest).
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
+	CreateRecommendationIdempotent(ctx context.Context, rec storage.AgentRecommendation, idemKey, requestHash string) (string, error)
 
 	// Validation test + waitlist (growth_suggest). The pre-product pair: the
 	// agent proposes a threshold and reads the running test back against it.
@@ -73,6 +74,17 @@ type DataSource interface {
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+
+	// Plans (slice 4): revision-checked proposed-state edits, append-only
+	// outcomes, proposed→abandoned, keyset-paginated lists, exact-ID finding
+	// reads, and the dataset-semantics preview.
+	UpdateValidationTestIdempotent(ctx context.Context, projectID, id string, in storage.ValidationTestUpdate, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	AppendTestOutcomeIdempotent(ctx context.Context, projectID, id string, entry storage.TestOutcomeEntry, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	AbandonValidationTestIdempotent(ctx context.Context, projectID, id, reason string, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	ListValidationTestsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.ValidationTest, string, error)
+	ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.AgentRecommendation, string, error)
+	RecommendationForProject(ctx context.Context, projectID, id string) (storage.AgentRecommendation, error)
+	DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (storage.DatasetPreview, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -109,4 +121,9 @@ const (
 	ToolCancelSourceRun    = "cancel_source_run"
 	ToolCreateSource       = "create_source"
 	ToolUpdateSource       = "update_source"
+	ToolUpdateTest         = "update_test"
+	ToolRecordOutcome      = "record_outcome"
+	ToolAbandonTest        = "abandon_test"
+	ToolListFindings       = "list_findings"
+	ToolDatasetPreview     = "dataset_preview"
 )

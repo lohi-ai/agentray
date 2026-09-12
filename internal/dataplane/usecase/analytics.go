@@ -45,6 +45,11 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, remember())
 	opcore.Register(r, sendNotification())
 	opcore.Register(r, overview())
+	opcore.Register(r, updateTest())
+	opcore.Register(r, recordOutcome())
+	opcore.Register(r, abandonTest())
+	opcore.Register(r, listFindings())
+	opcore.Register(r, datasetPreview())
 	opcore.Register(r, verifySDK())
 	opcore.Register(r, updateDashboard())
 	opcore.Register(r, archiveDashboard())
@@ -474,6 +479,9 @@ type submitRecInput struct {
 	Rationale   string         `json:"rationale" desc:"why, grounded in the data you saw"`
 	Evidence    map[string]any `json:"evidence" desc:"references to charts/queries/numbers"`
 	ImpactScore float64        `json:"impact_score" desc:"0-100 estimated impact"`
+	// IdempotencyKey makes a retried submit replay the stored receipt instead
+	// of folding into (or duplicating) a finding twice.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type submitRecOutput struct {
@@ -486,7 +494,7 @@ func submitRecommendation() opcore.Operation[submitRecInput, submitRecOutput] {
 		Name:           "submit_recommendation",
 		Summary:        "Submit a final marketing/sales/growth recommendation with supporting evidence. Ends a scheduled/manual run.",
 		Scope:          "growth_suggest",
-		Access:         opcore.AccessGrowthWrite,
+		Access:         opcore.AccessPlansWrite,
 		MinSessionRole: "member",
 		Terminal:       true,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in submitRecInput) (submitRecOutput, error) {
@@ -501,10 +509,20 @@ func submitRecommendation() opcore.Operation[submitRecInput, submitRecOutput] {
 					ev = b
 				}
 			}
-			id, err := d.Repo.CreateRecommendation(ctx, storage.AgentRecommendation{
+			rec := storage.AgentRecommendation{
 				ProjectID: cc.ProjectID, RunID: cc.RunID, Category: in.Category, Title: in.Title,
 				Rationale: in.Rationale, EvidenceJSON: ev, ImpactScore: in.ImpactScore,
-			})
+			}
+			var id string
+			if in.IdempotencyKey != "" {
+				hash, herr := requestHash(in)
+				if herr != nil {
+					return submitRecOutput{}, herr
+				}
+				id, err = d.Repo.CreateRecommendationIdempotent(ctx, rec, strings.TrimSpace(in.IdempotencyKey), hash)
+			} else {
+				id, err = d.Repo.CreateRecommendation(ctx, rec)
+			}
 			if err != nil {
 				return submitRecOutput{}, err
 			}

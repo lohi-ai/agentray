@@ -33,6 +33,7 @@ type Repo interface {
 	CreateDashboard(ctx context.Context, projectID, name, description string) (storage.Dashboard, error)
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
+	CreateRecommendationIdempotent(ctx context.Context, rec storage.AgentRecommendation, idemKey, requestHash string) (string, error)
 	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
 	// The plural reads. Without them an agent can only ever discuss the one test
@@ -41,6 +42,16 @@ type Repo interface {
 	ValidationTestsForProject(ctx context.Context, projectID string, limit int) ([]storage.ValidationTest, int, error)
 	ValidationTestForProject(ctx context.Context, projectID, id string) (storage.ValidationTest, error)
 	ValidationTestProgress(ctx context.Context, t storage.ValidationTest) (storage.TestProgress, error)
+	// Plans (slice 4): revision-checked proposed-state edits, append-only
+	// outcomes, proposed→abandoned, keyset-paginated lists, exact-ID finding
+	// reads, and the dataset-semantics preview.
+	UpdateValidationTestIdempotent(ctx context.Context, projectID, id string, in storage.ValidationTestUpdate, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	AppendTestOutcomeIdempotent(ctx context.Context, projectID, id string, entry storage.TestOutcomeEntry, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	AbandonValidationTestIdempotent(ctx context.Context, projectID, id, reason string, expectedRevision int64, idemKey, requestHash string) (storage.ValidationTest, error)
+	ListValidationTestsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.ValidationTest, string, error)
+	ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.AgentRecommendation, string, error)
+	RecommendationForProject(ctx context.Context, projectID, id string) (storage.AgentRecommendation, error)
+	DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (storage.DatasetPreview, error)
 	CountWaitlistSignups(ctx context.Context, projectID string) (int, error)
 	WorkspaceIDForProject(ctx context.Context, projectID string) (string, error)
 	WorkspaceChannelByName(ctx context.Context, workspaceID, name string) (storage.AlertChannel, error)
