@@ -6,6 +6,8 @@ are siblings on storage-eval-net.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -24,6 +26,7 @@ from .util import (
     dir_bytes,
     dump_json,
     free_gib,
+    load_json,
 )
 
 
@@ -80,6 +83,15 @@ def _run_legs(legs_spec, caps, tag):
         for p in problems:
             print(f"PREFLIGHT FAIL: {p}", file=sys.stderr)
         return 1
+    # Persist the requested run contract: the report's gate ledger and the
+    # published run-metadata can then show what was asked for, not only
+    # what completed.
+    dump_json(WORK / "requested.json", {
+        "tag": tag, "requested_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "legs": legs_spec,
+        "caps": caps,
+    })
     rc = 0
     for spec in legs_spec:
         name = (f"{tag}-{spec['engine']}-s{spec['scale']}"
@@ -119,6 +131,9 @@ def cmd_smoke(args):
 
 def cmd_matrix(args):
     caps = CAPS["matrix"]
+    # Defaults come from the declared coverage dimensions in CAPS so the
+    # report's gate ledger and this command can never disagree about what
+    # "the matrix" is.
     scales = [int(s) for s in args.scales.split(",")]
     readers = [int(r) for r in args.readers.split(",")]
     days = [int(d) for d in args.days.split(",")]
@@ -137,15 +152,36 @@ def cmd_report(args):
     return 0
 
 
-def _archive_prior(dest: Path) -> Path | None:
-    """Move prior published outputs into a unique per-publish archive dir.
-    Successive publications never overwrite each other's evidence; returns
-    the archive dir used, or None when there was nothing to preserve."""
+def _archive_prior(dest: Path, incoming: dict[str, bytes] | None = None) -> Path | None:
+    """Move prior published outputs into a content-addressed archive dir.
+
+    With `incoming` (name -> bytes of the files about to be published) only
+    files that would actually change or disappear are archived — republishing
+    identical results is a no-op, not a duplicate archive. The archive dir is
+    named by a digest of the preserved content: if that exact evidence set is
+    already archived, the prior files are simply removed instead of creating
+    a second copy. Without `incoming` every prior file is preserved.
+    Returns the archive dir used, or None when nothing needed preserving."""
     prior = [p for p in list(dest.glob("*.json")) + [dest / "report.md"]
              if p.exists()]
+    if incoming is not None:
+        prior = [p for p in prior
+                 if incoming.get(p.name) != p.read_bytes()]
     if not prior:
         return None
-    base = dest / "archive" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    h = hashlib.sha256()
+    for p in sorted(prior, key=lambda x: x.name):
+        h.update(p.name.encode())
+        h.update(p.read_bytes())
+    tag = h.hexdigest()[:12]
+    # Content-addressed: the same evidence set is archived exactly once.
+    existing = list((dest / "archive").glob(f"*-{tag}"))
+    if existing:
+        for old in prior:
+            old.unlink()
+        return existing[0]
+    base = dest / "archive" / (
+        f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{tag}")
     target = base
     n = 1
     while target.exists():
@@ -163,20 +199,27 @@ def _publish_durable():
     not just the gitignored work/ scratch."""
     dest = Path(__file__).resolve().parent.parent / "results"
     dest.mkdir(exist_ok=True)
-    # Preserve prior outputs under a unique per-publish archive dir —
-    # successive publications never overwrite each other's evidence.
-    _archive_prior(dest)
     meta = {
         "generated_by": "storage-evaluation harness",
         "duckdb": DUCKDB_VERSION,
         "clickhouse_image": CH_IMAGE,
+        # The driver contract: which image ran the harness and under what
+        # envelope. Env vars are set by the eval wrapper; absent means the
+        # publish ran outside it.
+        "driver_image": os.environ.get("EVAL_DRIVER_IMAGE") or DRIVER_IMAGE,
+        "driver_limits": {
+            "mem": os.environ.get("EVAL_DRIVER_MEM") or "unknown",
+            "cpus": os.environ.get("EVAL_DRIVER_CPUS") or "unknown",
+        },
         "code_digest": None,
         "legs": [],
     }
+    requested = WORK / "requested.json"
+    if requested.exists():
+        meta["requested"] = load_json(requested)
     digests = set()
     for p in sorted(RESULTS.glob("*.json")):
-        leg = report.load_json(p)
-        shutil.copy2(p, dest / p.name)
+        leg = load_json(p)
         prov = leg.get("provenance", {})
         digests.add(prov.get("code_digest"))
         meta["legs"].append({
@@ -188,6 +231,8 @@ def _publish_durable():
             "code_commit": prov.get("code_commit"),
             "code_digest": prov.get("code_digest"),
             "corpus_digest": prov.get("corpus_digest"),
+            "limits": prov.get("limits", "unknown"),
+            "driver_image": prov.get("driver_image"),
             "teardown": leg.get("teardown"),
         })
         # corpus_rows is executed provenance only: recorded by the leg at
@@ -202,9 +247,24 @@ def _publish_durable():
             "code_digest/corpus_digest identify each")
     # The slim driver image has no git; the eval wrapper passes the commit in.
     meta["commit"] = os.environ.get("EVAL_COMMIT") or None
-    if (WORK / "report.md").exists():
-        shutil.copy2(WORK / "report.md", dest / "report.md")
-    dump_json(dest / "run-metadata.json", meta)
+
+    # Stage the full incoming set in memory so archiving can compare
+    # content, not just names: unchanged files are left in place and only
+    # genuinely superseded evidence is preserved under archive/.
+    incoming = {}
+    for p in sorted(RESULTS.glob("*.json")):
+        incoming[p.name] = p.read_bytes()
+    report_path = WORK / "report.md"
+    if report_path.exists():
+        incoming["report.md"] = report_path.read_bytes()
+    # Serialized identically to dump_json so byte comparison is meaningful.
+    incoming["run-metadata.json"] = json.dumps(
+        meta, indent=2, sort_keys=True, default=str).encode()
+    _archive_prior(dest, incoming)
+    for name, content in incoming.items():
+        cur = dest / name
+        if not cur.exists() or cur.read_bytes() != content:
+            cur.write_bytes(content)
 
 
 def main(argv=None):
