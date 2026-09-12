@@ -20,6 +20,11 @@ bench/solutions/
 # Stray vitest cache at the repo root (the web app has its own node_modules)
 /node_modules
 
+# The embedded DuckDB file and its spill dir. DUCKDB_PATH defaults to
+# ./data/agentray.duckdb, so any local `make dev` creates this — runtime state,
+# never source.
+/data/
+
 # SDK build artefacts and installs. Lockfiles ARE committed — CI publishes from
 # them, and an SDK that resolves a different dependency tree than the one its
 # tests ran against is not the artefact that was verified.
