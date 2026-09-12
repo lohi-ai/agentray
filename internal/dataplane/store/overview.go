@@ -429,7 +429,7 @@ SELECT
 	countIf(first_ts >= ? AND first_ts < ?)
 FROM (
 	SELECT `+canonicalID+` AS cid, min(timestamp) AS first_ts,
-		argMin(ifNull(platform, ''), timestamp) AS first_platform
+		argMin(ifNull(platform, ''), (timestamp, event_id)) AS first_platform
 	FROM events
 	WHERE project_id = ? AND `+overviewQualifying+`
 	GROUP BY cid
@@ -557,7 +557,7 @@ SELECT c.id::text, c.name, c.kind,
 FROM data_connectors c
 LEFT JOIN connector_syncs cs
   ON cs.connector_id = c.id AND cs.project_id = c.project_id
-WHERE c.project_id = $1
+WHERE c.project_id = $1 AND c.archived_at IS NULL
 ORDER BY c.created_at DESC, c.id, cs.created_at ASC NULLS LAST, cs.id
 LIMIT $2`, projectID, overviewSourceLimit+1)
 	if err != nil {
@@ -660,7 +660,7 @@ func (s *Store) overviewRetention(ctx context.Context, projectID, platform, time
 SELECT cid, toDate(first_ts, ?) AS cohort_day
 FROM (
 	SELECT ` + canonicalID + ` AS cid, min(timestamp) AS first_ts,
-		argMin(ifNull(platform, ''), timestamp) AS first_platform
+		argMin(ifNull(platform, ''), (timestamp, event_id)) AS first_platform
 	FROM events
 	WHERE project_id = ? AND ` + overviewQualifying + `
 	GROUP BY cid

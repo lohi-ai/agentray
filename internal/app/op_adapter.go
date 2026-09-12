@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/runtime"
@@ -68,29 +67,11 @@ func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
 	return nil
 }
 
-// opError maps the operation layer's typed outcomes onto HTTP statuses:
-// revision and idempotency conflicts are 409, missing rows 404, an archived
-// source 409, and a saturated engine 503 (retryable). Everything else keeps
-// the legacy adapter's 400 default.
+// opError maps the operation layer's typed outcomes onto HTTP statuses for the
+// legacy adapter — the same mapping usecase.MapOpError installs on the
+// registry for /api/op, so both surfaces answer identically.
 func opError(err error) error {
-	var he *echo.HTTPError
-	if errors.As(err, &he) {
-		return he
-	}
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return echo.NewHTTPError(http.StatusNotFound, "not found")
-	case errors.Is(err, storage.ErrRevisionConflict):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, storage.ErrIdempotencyConflict):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, storage.ErrSourceArchived):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, connector.ErrEngineBusy):
-		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
-	default:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
+	return usecase.MapOpError(err)
 }
 
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —
