@@ -13,7 +13,6 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
-import { Selector } from '@astryxdesign/core/Selector';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
 
 // The range control always offers Today plus the complete-day windows. Today
@@ -241,13 +240,15 @@ export function OverviewPage() {
         sub={rangeLabel || 'The last complete days, at a glance.'}
         actions={
           <div className={`flex flex-wrap items-center gap-2 ${TARGET_44}`}>
-            <Selector
-              size="sm"
-              label="Platform"
-              isLabelHidden
-              value={platform || 'all'}
-              onChange={(v) => setPlatform(v === 'all' ? '' : String(v))}
+            {/* Segment, not Selector: the Astryx Selector trigger renders
+                tabindex=-1, so a keyboard user can never reach it. The
+                segmented control is a real radio group — Tab reaches it,
+                arrows move between options — and it wraps on mobile. */}
+            <Segment
               options={[{ value: 'all', label: 'All platforms' }, ...PLATFORM_OPTIONS]}
+              value={platform || 'all'}
+              onChange={(v) => setPlatform(v === 'all' ? '' : v)}
+              label="Platform"
             />
             <Segment options={PERIODS} value={period} onChange={setPeriod} label="Time range" />
           </div>
