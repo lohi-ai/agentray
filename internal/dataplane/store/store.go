@@ -694,9 +694,8 @@ func (s *Store) migrate(ctx context.Context, cfg config.Config) error {
 	}
 	// These were nested under the old engine bootstrap historically but are
 	// all Postgres DDL; they moved here when that bootstrap was removed.
-	if err := s.migrateAgent(ctx); err != nil {
-		return err
-	}
+	// migratePostgres already ran migrateAgent (validation_tests references
+	// agent_runs), so it is not repeated here.
 	if err := s.migrateAgentTrace(ctx); err != nil {
 		return err
 	}

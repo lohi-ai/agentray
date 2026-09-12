@@ -53,7 +53,7 @@ func openProjectSource(ctx context.Context, d *Deps, projectID, connectorID stri
 	kind, dsn, err := d.Repo.ConnectorDSNForProject(ctx, projectID, connectorID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("connector not found")
+			return nil, fmt.Errorf("connector not found: %w", err)
 		}
 		return nil, err
 	}
@@ -291,13 +291,13 @@ func runSource() opcore.Operation[runSourceInput, runSourceOutput] {
 			run, enqueued, err := runner.EnqueueRun(ctx, cc.ProjectID, in.SyncID, strings.TrimSpace(in.IdempotencyKey))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					return runSourceOutput{}, fmt.Errorf("sync not found")
+					return runSourceOutput{}, fmt.Errorf("sync not found: %w", err)
 				}
 				if errors.Is(err, storage.ErrSyncPaused) {
 					return runSourceOutput{}, fmt.Errorf("sync is paused — resume it before running")
 				}
 				if errors.Is(err, connector.ErrEngineBusy) {
-					return runSourceOutput{}, fmt.Errorf("engine at capacity — retry shortly")
+					return runSourceOutput{}, fmt.Errorf("engine at capacity — retry shortly: %w", err)
 				}
 				return runSourceOutput{}, err
 			}
@@ -340,7 +340,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 			case strings.TrimSpace(in.RunID) != "":
 				run, err := d.Repo.ConnectorRunForProject(ctx, cc.ProjectID, in.RunID)
 				if errors.Is(err, pgx.ErrNoRows) {
-					return sourceStatusOutput{}, fmt.Errorf("run not found")
+					return sourceStatusOutput{}, fmt.Errorf("run not found: %w", err)
 				}
 				if err != nil {
 					return sourceStatusOutput{}, err
@@ -350,7 +350,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 			case strings.TrimSpace(in.SyncID) != "":
 				sync, err := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, in.SyncID)
 				if errors.Is(err, pgx.ErrNoRows) {
-					return sourceStatusOutput{}, fmt.Errorf("sync not found")
+					return sourceStatusOutput{}, fmt.Errorf("sync not found: %w", err)
 				}
 				if err != nil {
 					return sourceStatusOutput{}, err
@@ -568,7 +568,7 @@ func cancelSourceRun() opcore.Operation[cancelSourceRunInput, connector.Run] {
 			}
 			run, err := d.Repo.CancelConnectorRun(ctx, cc.ProjectID, in.RunID)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return connector.Run{}, fmt.Errorf("run not found")
+				return connector.Run{}, fmt.Errorf("run not found: %w", err)
 			}
 			if err != nil {
 				return connector.Run{}, err

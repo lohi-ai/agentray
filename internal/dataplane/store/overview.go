@@ -527,6 +527,7 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 		if err != nil {
 			return res, err
 		}
+		res.Content.TopSources = OverviewList{Unit: "pageviews", Rows: sources}
 	}
 
 	return res, nil
