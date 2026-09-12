@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -113,5 +114,80 @@ func TestAdaptersEnforceCredentialContract(t *testing.T) {
 	rec = postJSON(t, e, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, map[string]string{"X-API-Key": project.APIKey})
 	if strings.Contains(rec.Body.String(), `"name"`) {
 		t.Fatalf("tools/list for capture key advertised tools: %s", rec.Body.String())
+	}
+}
+
+func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	e := mountRealAdapters(t, s)
+	registerOverviewRoutes(e, s, nil)
+
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-parity-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	zone := "Asia/Ho_Chi_Minh"
+	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, nil, &zone); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+	headers := map[string]string{"Authorization": "Bearer " + secret}
+
+	type overviewContext struct {
+		Timezone       string `json:"timezone"`
+		TimezoneSource string `json:"timezone_source"`
+		MetricVersion  string `json:"metric_version"`
+	}
+	decode := func(t *testing.T, body string) overviewContext {
+		t.Helper()
+		var out struct {
+			Context overviewContext `json:"context"`
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode overview: %v; body=%s", err, body)
+		}
+		return out.Context
+	}
+	want := overviewContext{Timezone: zone, TimezoneSource: "project", MetricVersion: storage.OverviewMetricVersion}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/overview?period=today&platform=unknown", nil)
+	getReq.Header.Set("Authorization", "Bearer "+secret)
+	getRec := httptest.NewRecorder()
+	e.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET overview: %d %s", getRec.Code, getRec.Body.String())
+	}
+	if got := decode(t, getRec.Body.String()); got != want {
+		t.Fatalf("GET context = %+v, want %+v", got, want)
+	}
+
+	opRec := postJSON(t, e, "/api/op/overview", `{"period":"today","platform":"unknown"}`, headers)
+	if opRec.Code != http.StatusOK {
+		t.Fatalf("/api/op overview: %d %s", opRec.Code, opRec.Body.String())
+	}
+	if got := decode(t, opRec.Body.String()); got != want {
+		t.Fatalf("/api/op context = %+v, want %+v", got, want)
+	}
+
+	mcpRec := postJSON(t, e, "/mcp", mcpCall("overview", `{"period":"today","platform":"unknown"}`), headers)
+	if mcpRec.Code != http.StatusOK {
+		t.Fatalf("MCP overview: %d %s", mcpRec.Code, mcpRec.Body.String())
+	}
+	var rpc struct {
+		Result struct {
+			StructuredContent struct {
+				Context overviewContext `json:"context"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(mcpRec.Body.Bytes(), &rpc); err != nil {
+		t.Fatalf("decode MCP overview: %v; body=%s", err, mcpRec.Body.String())
+	}
+	if got := rpc.Result.StructuredContent.Context; got != want {
+		t.Fatalf("MCP context = %+v, want %+v", got, want)
 	}
 }
