@@ -473,7 +473,9 @@ FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 // run_sql — build their filter from this one function so they can never
 // disagree about which rows are deleted.
 func softDeleteCondition(column, semantics string) string {
-	col := strings.ReplaceAll(column, `'`, `\'`)
+	// chIdentLiteral escapes backslashes before quotes — a column name like
+	// `a\b` or a trailing backslash must not corrupt the literal.
+	col := chIdentLiteral(column)
 	switch semantics {
 	case "bool_true":
 		return `JSONHas(data, '` + col + `') AND JSONExtractBool(data, '` + col + `')`

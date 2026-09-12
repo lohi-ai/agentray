@@ -2,12 +2,15 @@ package ingestion
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -75,11 +78,8 @@ func TestBatcherRetriesThenAcks(t *testing.T) {
 		t.Fatal("want retries recorded")
 	}
 }
-
-// A persistent failure below the redelivery ceiling must NAK (JetStream will
-// redeliver), never drop.
-func TestBatcherNaksBelowMaxDeliver(t *testing.T) {
-	failing := func(_ context.Context, _ []storage.Event) error { return errors.New("clickhouse down") }
+func TestDuckDBRetryNAK(t *testing.T) {
+	failing := func(_ context.Context, _ []storage.Event) error { return errors.New("duckdb I/O down") }
 	b := NewEventBatcher(failing, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour, MaxRetries: 1, MaxDeliver: 5})
 	defer b.Stop()
 
@@ -120,6 +120,126 @@ func TestBatcherDeadLettersAtMaxDeliver(t *testing.T) {
 	defer dlqMu.Unlock()
 	if len(dlq) != 1 || string(dlq[0]) != "poison-body" {
 		t.Fatalf("want body dead-lettered once, got %v", dlq)
+	}
+}
+
+// A durable message is acknowledged only once its DuckDB transaction has
+// committed. The count after the ack proves the consumer never acknowledges a
+// merely buffered or failed batch.
+func TestDuckDBIngestAckAfterCommit(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "analytics.duckdb"))
+	if err != nil {
+		t.Fatalf("OpenDuckDB: %v", err)
+	}
+	defer duck.Close()
+
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour})
+	defer b.Stop()
+	projectID := uuid.NewString()
+	msg := &fakeMsg{deliv: 1}
+	b.AddMsg([]storage.Event{{
+		ProjectID:  projectID,
+		EventID:    uuid.NewString(),
+		DistinctID: "reader",
+		EventName:  "user.signed_up",
+		EventType:  "user",
+		Properties: `{"$set":{"email":"reader@example.com"}}`,
+		Timestamp:  time.Now().UTC(),
+	}}, msg)
+	waitForState(t, msg, func() bool { acked, _, _ := msg.state(); return acked })
+
+	var count int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id = ?`, projectID).Scan(&count)
+	}); err != nil {
+		t.Fatalf("read committed event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("events committed before ack = %d, want 1", count)
+	}
+}
+
+// A structurally invalid batch is poison, not transient: it must go straight
+// to DLQ+term without calling the sink or consuming the retry budget.
+func TestDuckDBPoisonDLQ(t *testing.T) {
+	var sinkCalls atomic.Int32
+	var deadLetters atomic.Int32
+	b := NewEventBatcher(func(context.Context, []storage.Event) error {
+		sinkCalls.Add(1)
+		return nil
+	}, EventBatcherConfig{
+		DeadLetter: func(body []byte) error {
+			if string(body) != "bad-event" {
+				t.Errorf("DLQ body = %q, want bad-event", body)
+			}
+			deadLetters.Add(1)
+			return nil
+		},
+	})
+	defer b.Stop()
+
+	msg := &fakeMsg{deliv: 1, payload: []byte("bad-event")}
+	b.AddMsg([]storage.Event{{ProjectID: "not-a-uuid", EventID: uuid.NewString()}}, msg)
+	waitForState(t, msg, func() bool { _, _, termed := msg.state(); return termed })
+	if got := sinkCalls.Load(); got != 0 {
+		t.Fatalf("sink calls = %d, want 0 for poison", got)
+	}
+	if got := deadLetters.Load(); got != 1 {
+		t.Fatalf("DLQ calls = %d, want 1", got)
+	}
+	if acked, nacked, termed := msg.state(); acked || nacked || !termed {
+		t.Fatalf("want term only, got ack=%v nak=%v term=%v", acked, nacked, termed)
+	}
+}
+
+// Without a configured DLQ, poison preserves the existing durable contract:
+// NAK for redelivery rather than terminating a message with nowhere to replay.
+func TestDuckDBPoisonNaksWithoutDLQ(t *testing.T) {
+	b := NewEventBatcher(func(context.Context, []storage.Event) error {
+		t.Fatal("poison message reached sink")
+		return nil
+	}, EventBatcherConfig{})
+	defer b.Stop()
+
+	msg := &fakeMsg{deliv: 1}
+	b.AddMsg([]storage.Event{{ProjectID: "not-a-uuid", EventID: uuid.NewString()}}, msg)
+	waitForState(t, msg, func() bool { _, nacked, _ := msg.state(); return nacked })
+	if acked, nacked, termed := msg.state(); acked || !nacked || termed {
+		t.Fatalf("want nak only, got ack=%v nak=%v term=%v", acked, nacked, termed)
+	}
+}
+
+// Stop drains accepted durable messages before the DuckDB owner checkpoints
+// and closes. This is the server shutdown boundary: an accepted batch must be
+// committed and acked even when it never reached the timer/size threshold.
+func TestDuckDBShutdownDrain(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "analytics.duckdb"))
+	if err != nil {
+		t.Fatalf("OpenDuckDB: %v", err)
+	}
+	defer duck.Close()
+
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{MaxBatch: 1000, FlushEvery: time.Hour})
+	projectID := uuid.NewString()
+	msg := &fakeMsg{deliv: 1}
+	b.AddMsg([]storage.Event{{
+		ProjectID: projectID, EventID: uuid.NewString(), DistinctID: "reader",
+		EventName: "user.pageview", EventType: "user", Timestamp: time.Now().UTC(),
+	}}, msg)
+	b.Stop()
+	if acked, nacked, termed := msg.state(); !acked || nacked || termed {
+		t.Fatalf("shutdown settlement = ack=%v nak=%v term=%v, want ack only", acked, nacked, termed)
+	}
+	var count int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE project_id = ?`, projectID).Scan(&count)
+	}); err != nil {
+		t.Fatalf("read drained event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("events after drain = %d, want 1", count)
 	}
 }
 

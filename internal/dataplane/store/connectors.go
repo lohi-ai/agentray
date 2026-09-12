@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
 // Data connectors (parent plan bs-eano39vq §1): operator-configured external
@@ -537,31 +535,13 @@ WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 	return job, nil
 }
 
-// InsertExternalRows lands one batch in the ClickHouse external_rows table.
-// The table is a ReplacingMergeTree keyed by (project, connector, table, row),
-// so re-landing the same rows (snapshot mode, retried batches) deduplicates on
-// merge instead of accumulating.
+// InsertExternalRows lands one batch in the DuckDB external_rows table. The
+// (project, connector, table, row_key) primary key makes snapshot re-syncs and
+// retried batches idempotent — replacing the ReplacingMergeTree merge-time
+// dedup with a write-time constraint.
 func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
-	if len(rows) == 0 {
-		return nil
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
 	}
-	pid, err := uuid.Parse(projectID)
-	if err != nil {
-		return err
-	}
-	cid, err := uuid.Parse(connectorID)
-	if err != nil {
-		return err
-	}
-	batch, err := s.ch.PrepareBatch(ctx, `INSERT INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at)`)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	for _, r := range rows {
-		if err := batch.Append(pid, cid, table, r.Key, r.Cursor, r.DataJSON, now); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+	return s.duck.InsertExternalRows(ctx, projectID, connectorID, table, rows)
 }

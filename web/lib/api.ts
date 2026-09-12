@@ -1695,13 +1695,12 @@ function agentQuery(agentID: string): string {
 // for a stale revision or a reused idempotency key, 'not_found' for a missing
 // or foreign id, 'retryable' for a transient engine/server failure. Hooks map
 // the kind to a message instead of parsing text.
+// ApiError extends APIError so the overview's `instanceof APIError` +
+// `status === 403` contract keeps working while lifecycle/plans callers get
+// the typed `kind`. `request` throws this classified subclass.
 export class ApiError extends APIError {
   readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
-  constructor(
-    message: string,
-    status: number,
-    kind: 'conflict' | 'not_found' | 'retryable' | 'error',
-  ) {
+  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error') {
     super(status, message);
     this.name = 'ApiError';
     this.kind = kind;

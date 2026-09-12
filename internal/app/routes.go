@@ -457,7 +457,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name, payload.Timezone)
 		if err != nil {
-			if errors.Is(err, storage.ErrInvalidProjectTimezone) {
+			if errors.Is(err, storage.ErrInvalidProjectTimezone) || errors.Is(err, storage.ErrNoProjectFields) {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 			return echo.NewHTTPError(http.StatusForbidden, "project permission denied")
