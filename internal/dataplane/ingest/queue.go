@@ -138,9 +138,16 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, store *storage.Sto
 	consume, err := cons.Consume(func(msg jetstream.Msg) {
 		var events []storage.Event
 		if err := json.Unmarshal(msg.Data(), &events); err != nil {
-			// Undecodable payload is poison — it will never insert. Terminate so it
-			// leaves the stream instead of redelivering forever.
-			log.Printf("ingestion worker: decode event batch (terminating): %v", err)
+			// Undecodable payload is poison — it will never insert. Dead-letter the
+			// raw body (so an operator can inspect/replay it) and terminate so it
+			// leaves the stream instead of redelivering forever. If the DLQ is
+			// unreachable, NAK instead: one more redelivery beats losing the body.
+			log.Printf("ingestion worker: decode event batch (dead-lettering): %v", err)
+			if derr := dlqPublish(msg.Data()); derr != nil {
+				log.Printf("ingestion worker: dead-letter undecodable batch: %v", derr)
+				_ = msg.NakWithDelay(5 * time.Second)
+				return
+			}
 			_ = msg.Term()
 			return
 		}

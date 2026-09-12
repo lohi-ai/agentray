@@ -13,6 +13,11 @@ type Config struct {
 	ClickHouseDatabase string
 	ClickHouseUser     string
 	ClickHousePassword string
+	// DuckDBPath is the embedded analytics database file. DuckDB owns the
+	// directory: the WAL lands at <path>.wal and spill scratch at <dir>/tmp.
+	// Relative paths resolve against the server working directory; the default
+	// keeps a self-hosted `docker compose up` self-contained.
+	DuckDBPath string
 	// ClickHouseROUser / ClickHouseROPassword name a least-privilege ClickHouse
 	// account used for every agent- or user-authored SELECT (run_sql, /api/sql/run,
 	// saved queries). It is provisioned by migrateClickHouse with GRANT SELECT on the
@@ -160,6 +165,7 @@ func FromEnv() Config {
 		ClickHouseDatabase:           env("CLICKHOUSE_DATABASE", "lohi_analytics"),
 		ClickHouseUser:               env("CLICKHOUSE_USER", "lohi"),
 		ClickHousePassword:           os.Getenv("CLICKHOUSE_PASSWORD"),
+		DuckDBPath:                   env("DUCKDB_PATH", "./data/agentray.duckdb"),
 		ClickHouseROUser:             os.Getenv("CLICKHOUSE_RO_USER"),
 		ClickHouseROPassword:         os.Getenv("CLICKHOUSE_RO_PASSWORD"),
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),

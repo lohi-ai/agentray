@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,26 +23,34 @@ import (
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
+// chConn is the ClickHouse surface the not-yet-ported read paths still compile
+// against (ticket 007 ports them to DuckDB). *Store.ch is always the
+// unavailableCH stub — the engine is gone — so those paths fail fast with a
+// typed error instead of panicking on a nil interface. Live tests that open a
+// real clickhouse.Conn still satisfy this interface.
+type chConn interface {
+	Exec(ctx context.Context, query string, args ...any) error
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) driver.Row
+	PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error)
+	Ping(ctx context.Context) error
+	Close() error
+}
+
 type Store struct {
 	pg *pgxpool.Pool
-	ch clickhouse.Conn
-	// chRO is a least-privilege ClickHouse connection (readonly=2, GRANT SELECT on
-	// the project database only, no table-function grants) used for every
-	// user-/agent-authored SELECT so a table-function bypass cannot exfiltrate.
-	// nil when no RO account is configured (dev), in which case readConn() falls
-	// back to the privileged ch. See migrateClickHouse / provisionReadonlyRole.
-	chRO       clickhouse.Conn
+	// duck is the embedded analytics engine: the event log, alias mirror,
+	// person profiles, and connector landing rows. One instance per Store,
+	// opened in Open and closed in Close (or CloseDuckDB during shutdown).
+	duck *DuckDB
+	// ch is the unavailable stub — see chConn. Retained so the unported
+	// ClickHouse-facing query code keeps compiling until ticket 007.
+	ch chConn
+	// chRO was the least-privilege read connection; with no engine it is the
+	// same stub. readConn() still prefers it so the call sites stay honest.
+	chRO       chConn
 	chDatabase string
 	resolvers  *resolverCache
-
-	// personUpdates carries durably-stored batches to a single background applier
-	// goroutine that maintains the persons profile table off the ingest ack path.
-	// A single consumer preserves the single-writer read-merge-write invariant the
-	// profile merge relies on; nil when the applier isn't running (tests), in which
-	// case SinkEvents falls back to applying inline. See startPersonApplier.
-	personUpdates chan []Event
-	personDone    chan struct{}
-	personWG      sync.WaitGroup
 
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
 	// key inherit it so the first ask works. Zero-value (empty APIKey) = off.
@@ -61,7 +69,7 @@ type Store struct {
 // readConn returns the connection that untrusted SELECTs (run_sql, saved
 // queries, agent SQL) must use: the least-privilege RO connection when
 // configured, otherwise the primary connection.
-func (s *Store) readConn() clickhouse.Conn {
+func (s *Store) readConn() chConn {
 	if s.chRO != nil {
 		return s.chRO
 	}
@@ -634,22 +642,20 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	ch, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{cfg.ClickHouseAddr},
-		Auth: clickhouse.Auth{
-			Database: cfg.ClickHouseDatabase,
-			Username: cfg.ClickHouseUser,
-			Password: cfg.ClickHousePassword,
-		},
-		DialTimeout: 10 * time.Second,
-	})
+	// The embedded analytics engine replaces the ClickHouse connection: one
+	// DuckDB file owns the event log, alias mirror, person profiles, and
+	// connector landing rows. Opened before the JetStream worker starts so the
+	// first consumed batch always has a durable place to land.
+	duck, err := OpenDuckDB(ctx, cfg.DuckDBPath)
 	if err != nil {
 		pg.Close()
 		return nil, err
 	}
 	store := &Store{
 		pg:         pg,
-		ch:         ch,
+		duck:       duck,
+		ch:         unavailableCH{},
+		chRO:       unavailableCH{},
 		chDatabase: cfg.ClickHouseDatabase,
 		resolvers:  newResolverCache(30 * time.Second),
 		hostModel:  HostModelDefaultsFromConfig(cfg),
@@ -674,37 +680,12 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		store.Close()
 		return nil, err
 	}
-	// Maintain person profiles off the ingest ack path: a single background writer
-	// keeps ingest throughput independent of the per-batch profile read-merge-write.
-	store.startPersonApplier()
-	// Open the least-privilege read connection once the RO role exists (created in
-	// migrateClickHouse). Non-fatal: if the account can't be opened we log and fall
-	// back to the privileged conn so a misconfiguration degrades to today's
-	// behavior rather than taking analytics down.
-	if cfg.ClickHouseROUser != "" {
-		ro, err := clickhouse.Open(&clickhouse.Options{
-			Addr: []string{cfg.ClickHouseAddr},
-			Auth: clickhouse.Auth{
-				Database: cfg.ClickHouseDatabase,
-				Username: cfg.ClickHouseROUser,
-				Password: cfg.ClickHouseROPassword,
-			},
-			DialTimeout: 10 * time.Second,
-		})
-		if err != nil {
-			fmt.Printf("warn: open ClickHouse read-only conn: %v\n", err)
-		} else if err := ro.Ping(ctx); err != nil {
-			fmt.Printf("warn: ping ClickHouse read-only conn: %v\n", err)
-			_ = ro.Close()
-		} else {
-			store.chRO = ro
-		}
-	}
-	// Seed the alias dictionary from existing Postgres aliases. Non-fatal:
-	// dual-writes keep it current going forward, and a failure here only means
-	// historical stitches wait for the next boot — never a startup blocker.
-	if err := store.backfillAliasDictionary(ctx); err != nil {
-		fmt.Printf("warn: backfillAliasDictionary: %v\n", err)
+	// Reconcile the DuckDB alias mirror against the Postgres source of truth.
+	// Non-fatal: CreateAlias upserts keep it current going forward, and a
+	// failure here only means historical stitches wait for the next boot —
+	// never a startup blocker.
+	if err := store.reconcileAliases(ctx); err != nil {
+		fmt.Printf("warn: reconcileAliases: %v\n", err)
 	}
 	if err := store.SeedSystemTemplates(ctx); err != nil {
 		// Non-fatal: Templates page shows EmptyState on failure.
@@ -713,10 +694,18 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	return store, nil
 }
 
+// CloseDuckDB checkpoints and closes the embedded engine while leaving
+// Postgres open. Server.Shutdown calls it after the ingest worker drains — so
+// the last acked batch is committed and folded out of the WAL — and before
+// NATS/Redis/Postgres close.
+func (s *Store) CloseDuckDB() {
+	if s.duck != nil {
+		_ = s.duck.Close()
+	}
+}
+
 func (s *Store) Close() {
-	// Drain in-flight person updates before the ClickHouse conn they write through
-	// is closed, so a shutdown doesn't lose the profile side of already-acked events.
-	s.stopPersonApplier()
+	s.CloseDuckDB()
 	if s.pg != nil {
 		s.pg.Close()
 	}
@@ -728,15 +717,38 @@ func (s *Store) Close() {
 	}
 }
 
-// migrate brings both stores up to schema: the relational data in Postgres and
-// the event table in ClickHouse. Split into migratePostgres / migrateClickHouse so
-// each backend can be migrated on its own (a Postgres-only integration test runs
-// the relational half without a ClickHouse connection).
+// migrate brings the control plane up to schema. The analytics schema lives
+// in DuckDB and is created by OpenDuckDB itself, so this is Postgres-only.
 func (s *Store) migrate(ctx context.Context, cfg config.Config) error {
 	if err := s.migratePostgres(ctx, cfg); err != nil {
 		return err
 	}
-	return s.migrateClickHouse(ctx, cfg)
+	// These were nested under migrateClickHouse historically but are all
+	// Postgres DDL; they moved here when the ClickHouse bootstrap was removed.
+	if err := s.migrateAgent(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAgentTrace(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAgentSessionLog(ctx); err != nil {
+		return err
+	}
+	// Spill hangs off the same runs as the session log and shares its lifetime —
+	// a locator only means anything while the log that mentions it exists.
+	if err := s.migrateAgentSpill(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAgentConversations(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateAgentLab(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateTeams(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) migratePostgres(ctx context.Context, cfg config.Config) error {
@@ -1252,32 +1264,10 @@ GROUP BY project_id, session_id, distinct_id`); err != nil {
 	if err := s.migrateRollups(ctx); err != nil {
 		return err
 	}
-	if err := s.migratePersons(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateAgent(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateAgentTrace(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateAgentSessionLog(ctx); err != nil {
-		return err
-	}
-	// Spill hangs off the same runs as the session log and shares its lifetime —
-	// a locator only means anything while the log that mentions it exists.
-	if err := s.migrateAgentSpill(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateAgentConversations(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateAgentLab(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateTeams(ctx); err != nil {
-		return err
-	}
+	// NOTE: the Postgres migrations that used to be nested here (agent, teams,
+	// lab, session log, spill, conversations) moved to migrate() — they were
+	// always Postgres DDL. This function is now ClickHouse-only and uncalled;
+	// ticket 008 deletes it with the rest of the engine surface.
 	// external_rows is the landing table for data-connector syncs: one wide
 	// JSON row per source row, deduplicated on merge by the replacing key so
 	// snapshot re-syncs and retried batches are idempotent. `synced_at`
@@ -2100,79 +2090,27 @@ func (s *Store) SeedProjectFromTemplate(ctx context.Context, projectID string) e
 	return nil
 }
 
+// InsertEvents durably stores a raw event batch in DuckDB (no person
+// projection). Used by pipeline self-metrics; the ingest worker's path is
+// SinkEvents. Idempotent on (project_id, event_id).
 func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
-	batch, err := s.ch.PrepareBatch(ctx, `
-INSERT INTO events (
-	project_id, event_id, distinct_id, session_id, event_name, event_type,
-	properties, agent_id, tool_name, tool_input, tool_output, tokens_input,
-	tokens_output, cost_usd, latency_ms, model_name, is_error, error_message,
-	timestamp, visitor_class, bot_name, referrer_host, referrer_channel, user_agent,
-	insert_id, is_unplanned, platform
-)`)
-	if err != nil {
-		return err
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
 	}
-	for _, event := range events {
-		projectID, err := uuid.Parse(event.ProjectID)
-		if err != nil {
-			return err
-		}
-		eventID, err := uuid.Parse(event.EventID)
-		if err != nil {
-			return err
-		}
-		if err := batch.Append(
-			projectID,
-			eventID,
-			event.DistinctID,
-			event.SessionID,
-			event.EventName,
-			event.EventType,
-			event.Properties,
-			nullableString(event.AgentID),
-			nullableString(event.ToolName),
-			nullableString(event.ToolInput),
-			nullableString(event.ToolOutput),
-			event.TokensInput,
-			event.TokensOutput,
-			event.CostUSD,
-			event.LatencyMS,
-			nullableString(event.ModelName),
-			boolToUInt8(event.IsError),
-			nullableString(event.ErrorMessage),
-			event.Timestamp,
-			event.VisitorClass,
-			nullableString(event.BotName),
-			nullableString(event.ReferrerHost),
-			event.ReferrerChannel,
-			nullableString(event.UserAgent),
-			nullableString(event.InsertID),
-			boolToUInt8(event.IsUnplanned),
-			event.Platform,
-		); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+	return s.duck.InsertEvents(ctx, events)
 }
 
-// SinkEvents is the ingest worker's write path: it durably stores the batch (its
-// error drives the JetStream ack/nak/dead-letter decision) and then, only on
-// success, hands the batch to the background person applier. Profile maintenance
-// runs off this ack path — a failure or dropped hand-off is best-effort and never
-// fails the batch, since profiles self-heal on the next event for that person and
-// blocking the ack on a derived table would risk redelivering already-stored
-// events.
+// SinkEvents is the ingest worker's write path: the batch's events and their
+// person-profile projection commit in ONE DuckDB transaction, and the error
+// drives the JetStream ack/nak/dead-letter decision. Commit-before-ack plus
+// the (project_id, event_id) dedup key makes redelivery a no-op; the profile
+// can no longer be dropped by a saturated background applier the way the old
+// ClickHouse path could.
 func (s *Store) SinkEvents(ctx context.Context, events []Event) error {
-	if err := s.InsertEvents(ctx, events); err != nil {
-		return err
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
 	}
-	// Hand profile maintenance to the background applier so it never adds latency to
-	// this batch's ack. Events are already durable; the profile is a derived,
-	// self-healing view, so a dropped hand-off (saturated applier) or a later apply
-	// failure never costs an event.
-	s.enqueuePersonUpdates(events)
-	return nil
+	return s.duck.SinkEvents(ctx, events)
 }
 
 func (s *Store) CreateAlias(ctx context.Context, projectID, anonymousID, canonicalID string) error {
@@ -2184,45 +2122,25 @@ func (s *Store) CreateAlias(ctx context.Context, projectID, anonymousID, canonic
 	if err != nil {
 		return err
 	}
-	// Postgres is the source of truth; the cached resolver and the ClickHouse
-	// dictionary are derived. Invalidate the cache so a person-scoped filter sees
-	// the new alias immediately, and dual-write into the dictionary's source
-	// table (best effort — the dictionary's LIFETIME refresh and the boot
-	// backfill both re-read Postgres, so a dropped write self-heals).
+	// Postgres is the source of truth; the cached resolver and the DuckDB
+	// aliases mirror are derived. Invalidate the cache so a person-scoped
+	// filter sees the new alias immediately, and upsert into the mirror (best
+	// effort — the boot reconcile re-reads Postgres, so a dropped write
+	// self-heals).
 	s.resolvers.invalidate(projectID)
-	if err := s.insertAliasRows(ctx, [][3]string{{projectID, anonymousID, canonicalID}}); err != nil {
-		log.Printf("storage: dual-write alias to ClickHouse: %v", err)
+	if s.duck != nil {
+		if err := s.duck.UpsertAliases(ctx, [][3]string{{projectID, anonymousID, canonicalID}}); err != nil {
+			log.Printf("storage: mirror alias to duckdb: %v", err)
+		}
 	}
 	return nil
 }
 
-// insertAliasRows writes (project_id, anonymous_id, canonical_id) triples into
-// the ClickHouse aliases table that backs aliases_dict. ReplacingMergeTree makes
-// re-inserts idempotent, so this is safe to call for both dual-writes and the
-// boot backfill.
-func (s *Store) insertAliasRows(ctx context.Context, rows [][3]string) error {
-	if s.ch == nil || len(rows) == 0 {
-		return nil
-	}
-	batch, err := s.ch.PrepareBatch(ctx, "INSERT INTO aliases (project_id, anonymous_id, canonical_id)")
-	if err != nil {
-		return err
-	}
-	for _, r := range rows {
-		if err := batch.Append(r[0], r[1], r[2]); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
-}
-
-// backfillAliasDictionary seeds the ClickHouse aliases table from every existing
-// Postgres alias and reloads the dictionary. Done app-side (not via a ClickHouse
-// postgresql() source) so it never assumes ClickHouse can reach Postgres on the
-// same host the app uses — the two differ between local dev and the container
-// deploy.
-func (s *Store) backfillAliasDictionary(ctx context.Context) error {
-	if s.ch == nil {
+// reconcileAliases loads every Postgres alias and makes the DuckDB mirror
+// match it exactly. Runs at boot after OpenDuckDB; CreateAlias keeps the
+// mirror current between boots.
+func (s *Store) reconcileAliases(ctx context.Context) error {
+	if s.duck == nil {
 		return nil
 	}
 	rows, err := s.pg.Query(ctx, `SELECT project_id::text, anonymous_id, canonical_id FROM aliases`)
@@ -2242,10 +2160,7 @@ func (s *Store) backfillAliasDictionary(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if err := s.insertAliasRows(ctx, triples); err != nil {
-		return err
-	}
-	return s.ch.Exec(ctx, "SYSTEM RELOAD DICTIONARY "+s.chDatabase+".aliases_dict")
+	return s.duck.ReconcileAliases(ctx, triples)
 }
 
 func (s *Store) identityResolver(ctx context.Context, projectID string) (identityResolver, error) {
@@ -3193,21 +3108,23 @@ LIMIT ?`, personArgs...)
 		for i, p := range summary.Persons {
 			ids[i] = p.DistinctID
 		}
-		if profiles, err := s.personProfilesByKeys(ctx, projectID, ids); err == nil {
-			for i := range summary.Persons {
-				prof := profiles[summary.Persons[i].DistinctID]
-				if prof == nil {
-					continue
-				}
-				traits := map[string]json.RawMessage{}
-				for k, v := range prof.OnceProps {
-					traits[k] = v
-				}
-				for k, v := range prof.SetProps {
-					traits[k] = v
-				}
-				if len(traits) > 0 {
-					summary.Persons[i].Traits = traits
+		if s.duck != nil {
+			if profiles, err := s.duck.PersonProfilesByKeys(ctx, projectID, ids); err == nil {
+				for i := range summary.Persons {
+					prof := profiles[summary.Persons[i].DistinctID]
+					if prof == nil {
+						continue
+					}
+					traits := map[string]json.RawMessage{}
+					for k, v := range prof.OnceProps {
+						traits[k] = v
+					}
+					for k, v := range prof.SetProps {
+						traits[k] = v
+					}
+					if len(traits) > 0 {
+						summary.Persons[i].Traits = traits
+					}
 				}
 			}
 		}
