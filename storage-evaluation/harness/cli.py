@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 from . import corpus as corpus_mod
@@ -135,20 +137,35 @@ def cmd_report(args):
     return 0
 
 
+def _archive_prior(dest: Path) -> Path | None:
+    """Move prior published outputs into a unique per-publish archive dir.
+    Successive publications never overwrite each other's evidence; returns
+    the archive dir used, or None when there was nothing to preserve."""
+    prior = [p for p in list(dest.glob("*.json")) + [dest / "report.md"]
+             if p.exists()]
+    if not prior:
+        return None
+    base = dest / "archive" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    target = base
+    n = 1
+    while target.exists():
+        n += 1
+        target = base.with_name(f"{base.name}-{n}")
+    target.mkdir(parents=True)
+    for old in prior:
+        shutil.move(str(old), target / old.name)
+    return target
+
+
 def _publish_durable():
     """Copy report + leg results + run metadata into the committed
     storage-evaluation/results/ directory — the reviewable deliverable,
     not just the gitignored work/ scratch."""
-    import shutil
     dest = Path(__file__).resolve().parent.parent / "results"
     dest.mkdir(exist_ok=True)
-    # Preserve prior outputs in a scoped archive instead of overwriting —
-    # old legs keep their own provenance, never relabeled as current.
-    archive = dest / "archive"
-    for old in list(dest.glob("*.json")) + [dest / "report.md"]:
-        if old.exists():
-            archive.mkdir(exist_ok=True)
-            shutil.move(str(old), archive / old.name)
+    # Preserve prior outputs under a unique per-publish archive dir —
+    # successive publications never overwrite each other's evidence.
+    _archive_prior(dest)
     meta = {
         "generated_by": "storage-evaluation harness",
         "duckdb": DUCKDB_VERSION,
@@ -171,11 +188,12 @@ def _publish_durable():
             "code_commit": prov.get("code_commit"),
             "code_digest": prov.get("code_digest"),
             "corpus_digest": prov.get("corpus_digest"),
+            "teardown": leg.get("teardown"),
         })
-        cd = report.corpus_dir(leg.get("scale", 0), leg.get("seed", 0))
-        oj = cd / "oracle.json"
-        if oj.exists():
-            meta["legs"][-1]["corpus_rows"] = report.load_json(oj).get("total_rows")
+        # corpus_rows is executed provenance only: recorded by the leg at
+        # run time. Legs that predate the field report "unknown" — the
+        # current on-disk oracle is never grafted onto old evidence.
+        meta["legs"][-1]["corpus_rows"] = prov.get("corpus_rows", "unknown")
     mixed = len(digests) > 1
     meta["code_digest"] = "MIXED" if mixed else (digests.pop() if digests else None)
     if mixed:

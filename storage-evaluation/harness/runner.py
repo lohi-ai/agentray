@@ -141,17 +141,45 @@ def generate_bounded(scale: int, seed: int, ingest_rows: int,
             proc.kill()
 
 
-def stop_bounded(eng, timeout_s: float = 30):
-    """Engine teardown bounded by a hard timeout — a wedged shutdown POST
-    must not outlive the leg. The container is force-removed on expiry."""
-    t = threading.Thread(target=lambda: _safe_stop(eng), daemon=True)
+def stop_bounded(eng, stop_s: float = 20, fallback_s: float = 10):
+    """Engine teardown under ONE total deadline (stop_s + fallback_s).
+
+    The graceful eng.stop() gets stop_s; if it hangs or raises, the
+    labeled force-remove fallback gets fallback_s — the whole cleanup path
+    is bounded, not just the graceful half. Returns a status string:
+    'stopped' (graceful ok), 'forced' (fallback removed the container),
+    'failed: ...' (fallback raised), or 'unknown' (deadline expired with
+    cleanup still in flight — a residual live container is possible).
+    Never claims a removal it did not observe."""
+    outcome = {}
+
+    def _graceful():
+        try:
+            eng.stop()
+            outcome["s"] = "stopped"
+        except Exception as e:
+            outcome["s"] = f"stop-failed: {type(e).__name__}: {e}"
+
+    t = threading.Thread(target=_graceful, daemon=True)
     t.start()
-    t.join(timeout_s)
-    if t.is_alive():
+    t.join(stop_s)
+    if not t.is_alive() and outcome.get("s") == "stopped":
+        return "stopped"
+    # Hung or failed graceful stop -> bounded force-remove fallback. The
+    # ownership-label guard lives inside engines.stop_container.
+    def _force():
         try:
             engines.stop_container(eng.container_name)
-        except Exception:
-            pass
+            outcome["s"] = "forced"
+        except Exception as e:
+            outcome["s"] = f"failed: {type(e).__name__}: {e}"
+
+    f = threading.Thread(target=_force, daemon=True)
+    f.start()
+    f.join(fallback_s)
+    if f.is_alive():
+        return "unknown"
+    return outcome.get("s", "unknown")
 
 
 def _safe_stop(eng):
@@ -213,6 +241,10 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         oracle = load_json(corpus_dir / "oracle.json")
         deleted_keys = oracle["checks"]["entity.deleted_still_visible"]["deleted_keys"]
         leg["provenance"]["corpus_digest"] = corpus_digest(corpus_dir)
+        # Executed provenance: the corpus this leg actually ran against,
+        # recorded at run time — never grafted on later from whatever
+        # oracle happens to be on disk at report time.
+        leg["provenance"]["corpus_rows"] = oracle.get("total_rows")
         remaining()
         eng.start(caps)
         sampler.start()
@@ -320,9 +352,9 @@ def run_leg(engine_name: str, scale: int, seed: int, readers: int, days: int,
         if sampler.is_alive() or sampler.ident is not None:
             sampler.join(timeout=5)
         leg["resources"].update(sampler.summary())
-        # Teardown is bounded: a wedged worker shutdown POST must not
-        # outlive the leg; the container is force-removed on expiry.
-        stop_bounded(eng, timeout_s=30)
+        # Teardown is bounded end-to-end (graceful 20s + force-remove
+        # fallback 10s); the outcome is recorded, never assumed.
+        leg["teardown"] = stop_bounded(eng, stop_s=20, fallback_s=10)
     leg["wall_s"] = round(time.monotonic() - t_start, 1)
     return leg
 

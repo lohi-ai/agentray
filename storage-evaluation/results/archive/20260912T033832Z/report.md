@@ -6,8 +6,8 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 
 | engine | scale | readers | days | status | wall_s | load_s | code |
 |---|---|---|---|---|---|---|---|
-| clickhouse | 100000 | 1 | 7 | MEASURED | 12.3 | 1.46 | 3e65ba54 |
-| duckdb | 100000 | 1 | 7 | MEASURED | 7.6 | 1.65 | 3e65ba54 |
+| clickhouse | 100000 | 1 | 7 | MEASURED | 17.5 | 2.87 | bdfd90b3 |
+| duckdb | 100000 | 1 | 7 | MEASURED | 6.9 | 1.25 | bdfd90b3 |
 
 ## Correctness
 
@@ -53,16 +53,16 @@ Synthetic local corpus only. This is a decision input for docs/redesign/strategy
 
 | engine | shape | first p50 | first p95 | repeat p50 | repeat p95 | mem_peak MiB | cpu% peak | disk GiB |
 |---|---|---|---|---|---|---|---|---|
-| clickhouse | aggregate | 21 | 21 | 19 | 19 | 646 | 20.3 | 0.01 |
-| clickhouse | entity_join | 37 | 37 | 65 | 65 | 646 | 20.3 | 0.01 |
-| clickhouse | funnel | 18 | 18 | 31 | 31 | 646 | 20.3 | 0.01 |
-| clickhouse | overview | 23 | 23 | 34 | 34 | 646 | 20.3 | 0.01 |
-| clickhouse | retention | 91 | 91 | 78 | 78 | 646 | 20.3 | 0.01 |
-| duckdb | aggregate | 10 | 10 | 13 | 13 | 332 | 15.4 | 0.11 |
-| duckdb | entity_join | 12 | 12 | 19 | 19 | 332 | 15.4 | 0.11 |
-| duckdb | funnel | 14 | 14 | 21 | 21 | 332 | 15.4 | 0.11 |
-| duckdb | overview | 28 | 28 | 14 | 14 | 332 | 15.4 | 0.11 |
-| duckdb | retention | 15 | 15 | 16 | 16 | 332 | 15.4 | 0.11 |
+| clickhouse | aggregate | 19 | 19 | 31 | 31 | 800 | 29.4 | 0.01 |
+| clickhouse | entity_join | 35 | 35 | 225 | 225 | 800 | 29.4 | 0.01 |
+| clickhouse | funnel | 16 | 16 | 26 | 26 | 800 | 29.4 | 0.01 |
+| clickhouse | overview | 30 | 30 | 52 | 52 | 800 | 29.4 | 0.01 |
+| clickhouse | retention | 74 | 74 | 226 | 226 | 800 | 29.4 | 0.01 |
+| duckdb | aggregate | 25 | 25 | 15 | 15 | 365 | 22.3 | 0.11 |
+| duckdb | entity_join | 26 | 26 | 21 | 21 | 365 | 22.3 | 0.11 |
+| duckdb | funnel | 26 | 26 | 50 | 50 | 365 | 22.3 | 0.11 |
+| duckdb | overview | 36 | 36 | 17 | 17 | 365 | 22.3 | 0.11 |
+| duckdb | retention | 12 | 12 | 23 | 23 | 365 | 22.3 | 0.11 |
 
 Latency columns: `first` is the first timed pass after oracle checks (not a true cold read); `repeat` is two further passes. n=1/2 samples are smoke-scale only. Memory is container cgroup usage, not process RSS.
 
@@ -70,8 +70,8 @@ Latency columns: `first` is the first timed pass after oracle checks (not a true
 
 | engine | rows | ack_s | visibility_lag_s | final_total |
 |---|---|---|---|---|
-| clickhouse | 10000 | 0.1 | 0.12 | 109538 |
-| duckdb | 10000 | 0.11 | 0.11 | 109538 |
+| clickhouse | 10000 | 0.18 | 0.19 | 109538 |
+| duckdb | 10000 | 0.12 | 0.13 | 109538 |
 
 ## Gate ledger
 
