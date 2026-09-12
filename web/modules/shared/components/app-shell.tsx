@@ -4,28 +4,25 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Bot,
-  ClipboardList,
-  CreditCard,
-  Globe,
+  Gauge,
   Languages,
   LayoutDashboard,
   List,
   LogOut,
   Menu,
   MessageSquare,
-  Package,
   Settings,
   Users,
   X,
   Zap,
 } from 'lucide-react';
-import { Eye } from 'lucide-react';
+import { Eye, FlaskConical } from 'lucide-react';
 import { useState, type ComponentType, type ReactNode, type SVGProps } from 'react';
 import { SideNav, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav';
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
-import { childSurfacesFor, matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
+import { CHILD_SURFACES, childSurfacesFor, matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
 import { useAuth, useProjectAccess, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
@@ -35,17 +32,13 @@ import { RelatedSurfacesNav } from '@/modules/shared/components/related-surfaces
 export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'operations';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
-  '/chat': MessageSquare,
-  '/start': ClipboardList,
-  '/operations': Zap,
+  '/overview': Gauge,
   '/agents': Bot,
   '/dashboard': LayoutDashboard,
-  '/web-analytics': Globe,
-  '/product': Package,
   '/settings': Settings,
   '/persons': Users,
   '/events': List,
-  '/pricing': CreditCard,
+  '/prototypes': FlaskConical,
 };
 
 // Small pulsing "live" indicator shown on the Chat item. Uses the --agent token
@@ -211,14 +204,14 @@ export function AppShell({
   // returns null is still a truthy element, so asking `related ? …` there would
   // hand PageShell an aside on every screen and leave a blank 240px column on
   // the ones with no child surfaces.
-  const hasRelated = !hideRelated && childSurfacesFor(current).some((s) => s.href !== pathname);
+  const hasRelated = !hideRelated && childSurfacesFor(current, CHILD_SURFACES, { hosted }).some((s) => s.href !== pathname);
   const asideContent = aside || hasRelated
     ? (
       <>
         {aside}
         {hasRelated ? (
           <AsideSection title="Related">
-            <RelatedSurfacesNav parentHref={current} currentHref={pathname} />
+            <RelatedSurfacesNav parentHref={current} currentHref={pathname} hosted={hosted} />
           </AsideSection>
         ) : null}
       </>

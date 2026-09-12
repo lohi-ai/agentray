@@ -154,6 +154,59 @@ export type ActivitySummary = {
   generated_at: string;
 };
 
+// ---- Product overview (GET /api/overview) ---------------------------------
+// Mirrors internal/dataplane/store/overview.go. Every metric carries its own
+// state so the UI can render "not enough data yet" honestly instead of a
+// fabricated zero.
+export type OverviewMetric = {
+  state: 'ok' | 'no_data' | 'not_ready' | 'unconfigured' | 'unavailable';
+  value?: number;
+  previous?: number;
+  definition: string;
+  notes?: string[];
+};
+
+export type OverviewResult = {
+  context: {
+    project_id: string;
+    timezone: string;
+    timezone_source: string;
+    range: { from: string; to: string; days: number; complete_days: boolean };
+    previous_range: { from: string; to: string; days: number; complete_days: boolean };
+    platform: string;
+    generated_at: string;
+    metric_version: string;
+  };
+  metrics: {
+    active_users: OverviewMetric;
+    new_users: OverviewMetric;
+    sessions: OverviewMetric;
+    activation: OverviewMetric;
+    revenue: OverviewMetric;
+  };
+  trend: Array<{ day: string; active_users: number }>;
+  retention: {
+    cohort_window: string;
+    d1: { state: string; rate: number; returned: number; eligible: number };
+    d7: { state: string; rate: number; returned: number; eligible: number };
+    d30: { state: string; rate: number; returned: number; eligible: number };
+  };
+  content: {
+    top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+  };
+  data_status: {
+    last_event_at?: string;
+    last_received_at?: string;
+    age_seconds?: number;
+    pipeline_lag: string;
+    events_in_range: number;
+    qualifying_in_range: number;
+    ever_received: boolean;
+    state: 'fresh' | 'quiet' | 'no_events';
+  };
+};
+
 export type Dashboard = {
   id: string;
   project_id: string;
@@ -1615,6 +1668,15 @@ export class AgentRayAPI {
 
   activity(filters: Filters) {
     return this.get<{ project: Project; summary: ActivitySummary }>(`/api/activity?${new URLSearchParams(filterParams(filters)).toString()}`);
+  }
+
+  // The product overview is its own contract (GET /api/overview), not a
+  // console-query facet: it has its own period semantics (complete days) and
+  // platform facet, independent of the shared Filters store.
+  overview(period = '7d', platform = '') {
+    const params = new URLSearchParams({ period });
+    if (platform) params.set('platform', platform);
+    return this.get<OverviewResult>(`/api/overview?${params.toString()}`);
   }
 
   insight(type: string, filters: Filters, metric = '', steps: string[] = []) {

@@ -65,6 +65,34 @@ LAYOUT(COMPLEX_KEY_HASHED()) LIFETIME(MIN 30 MAX 60)`); err != nil {
 		t.Fatalf("create dict: %v", err)
 	}
 
+	// Seed a self-contained fixture: a fresh project plus one alias in
+	// Postgres, so the backfill has something to carry and the test neither
+	// depends on nor dirties another project's rows. Cleanup is registered
+	// before the writes and removes only this fixture's records — including
+	// the user/workspace/project seedConvProject creates — on every path.
+	uid, pid := seedConvProject(t, s)
+	// Cleanup is registered immediately after the seed — before the workspace
+	// lookup and the alias insert — so a failure at any later step still
+	// removes the fixture. wsID is resolved lazily inside the deferred func so
+	// a lookup failure cannot skip cleanup.
+	defer func() {
+		var wsID string
+		_ = pg.QueryRow(ctx, `SELECT workspace_id::text FROM projects WHERE id = $1`, pid).Scan(&wsID)
+		_, _ = pg.Exec(ctx, `DELETE FROM aliases WHERE project_id = $1`, pid)
+		_ = ch.Exec(ctx, `ALTER TABLE aliases DELETE WHERE project_id = ? SETTINGS mutations_sync = 2`, pid)
+		_, _ = pg.Exec(ctx, `DELETE FROM projects WHERE id = $1`, pid)
+		if wsID != "" {
+			_, _ = pg.Exec(ctx, `DELETE FROM workspace_members WHERE workspace_id = $1`, wsID)
+			_, _ = pg.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, wsID)
+		}
+		_, _ = pg.Exec(ctx, `DELETE FROM users WHERE id = $1`, uid)
+	}()
+	seedAnon := "seed-anon-" + time.Now().Format("150405.000000")
+	seedCanon := "seed-canon-" + time.Now().Format("150405.000000")
+	if _, err := pg.Exec(ctx, `INSERT INTO aliases (project_id, anonymous_id, canonical_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, pid, seedAnon, seedCanon); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+
 	// Backfill from Postgres through the real code path.
 	if err := s.backfillAliasDictionary(ctx); err != nil {
 		t.Fatalf("backfill: %v", err)
@@ -72,7 +100,6 @@ LAYOUT(COMPLEX_KEY_HASHED()) LIFETIME(MIN 30 MAX 60)`); err != nil {
 
 	// Dual-write a brand-new alias through CreateAlias, then reload so the
 	// dictionary sees it without waiting for LIFETIME.
-	pid := mustScanOne(ctx, t, pg, `SELECT project_id::text FROM aliases LIMIT 1`)
 	anon := "live-anon-" + time.Now().Format("150405.000")
 	canon := "live-canon-" + time.Now().Format("150405.000")
 	if err := s.CreateAlias(ctx, pid, anon, canon); err != nil {

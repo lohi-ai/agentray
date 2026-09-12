@@ -56,6 +56,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, runSource())
 	opcore.Register(r, sourceStatus())
 	opcore.Register(r, cancelSourceRun())
+	opcore.Register(r, overview())
 	r.SetLegacyAllowlist(legacyOperationAllowlist)
 	return r
 }

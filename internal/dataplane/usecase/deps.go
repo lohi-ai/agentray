@@ -67,6 +67,10 @@ type Repo interface {
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (storage.ConnectorRun, error)
 	CreateDataConnectorIdempotent(ctx context.Context, projectID, name, kind, credentialID, idemKey, requestHash string) (storage.DataConnector, error)
 	UpdateDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	// Overview is the deterministic product-overview read behind the shared
+	// `overview` operation (REST /api/op/overview, MCP, and GET /api/overview).
+	// now is injectable so tests can pin the complete-day boundary.
+	Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification
