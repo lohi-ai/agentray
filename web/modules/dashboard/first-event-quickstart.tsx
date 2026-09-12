@@ -82,7 +82,7 @@ export function verificationSnippet(source: Exclude<Source, 'warehouse'>, lang: 
     return [
       `<script>`,
       `const key = ${JSON.stringify(key)};`,
-      `const id = localStorage.getItem("agentray_verify_id") || crypto.randomUUID();`,
+      `const id = localStorage.getItem("agentray_verify_id") || "v-" + Date.now().toString(36) + Math.random().toString(36).slice(2);`,
       `localStorage.setItem("agentray_verify_id", id);`,
       `fetch(${JSON.stringify(`${base}/capture`)}, {`,
       `  method: "POST",`,
@@ -142,7 +142,7 @@ export function FirstEventQuickstart() {
   function copy(text: string, which: 'key' | 'task' = 'key') {
     void navigator.clipboard?.writeText(text);
     setCopied(which);
-    setTimeout(() => setCopied(null), 1500);
+    setTimeout(() => setCopied((current) => (current === which ? null : current)), 1500);
   }
 
   // A self-contained brief for an external coding agent (Claude Code, Cursor,
@@ -183,7 +183,7 @@ export function FirstEventQuickstart() {
   async function checkNow() {
     if (!projectID) return;
     setChecking(projectID);
-    setVerificationError(null);
+    setVerificationError((current) => (current?.projectID === projectID ? null : current));
     try {
       const result = await new AgentRayAPI(projectID).verifySDK();
       if (useAuthStore.getState().project?.id !== projectID) return;
@@ -195,7 +195,7 @@ export function FirstEventQuickstart() {
       ]);
     } catch (error) {
       if (useAuthStore.getState().project?.id !== projectID) return;
-      setVerification(null);
+      setVerification((current) => (current?.projectID === projectID ? null : current));
       setVerificationError({ projectID, message: error instanceof Error ? error.message : 'Could not check whether the verification event arrived.' });
     } finally {
       // Always release the checking flag for the project that started this
