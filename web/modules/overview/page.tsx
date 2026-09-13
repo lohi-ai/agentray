@@ -1,13 +1,13 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type AgentRecommendation, type OverviewMetric, type OverviewResult } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatCompact } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
-import { firstValuePath, settingsPath } from '@/lib/ia';
+import { firstValuePath } from '@/lib/ia';
 import { useEventNames } from '@/modules/app/hooks';
 import { evidenceAvailable, evidenceLine } from '@/modules/plans/lib/plans';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -37,13 +37,13 @@ const PLATFORM_OPTIONS = ['web', 'ios', 'android', 'server', 'unknown'].map((val
 // metricTile renders one headline number honestly: a metric that is not "ok"
 // shows its state, never a fabricated zero. "unconfigured" is an action —
 // the metric is defined but the project has not told us what to measure.
-function metricTile(label: string, m: OverviewMetric): { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } {
+export function metricTile(label: string, m: OverviewMetric): { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } {
   if (m.state !== 'ok' || m.value === undefined) {
     const stateLabel =
       m.state === 'unconfigured' ? 'Set up'
       : m.state === 'not_ready' ? 'Not ready'
       : m.state === 'no_data' ? 'No data'
-      : 'Unavailable';
+      : 'Not available';
     return { label, value: stateLabel };
   }
   const tile: { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } = {
@@ -62,6 +62,19 @@ function retentionLine(label: string, p: { state: string; rate: number; returned
   if (p.state === 'not_ready' || p.eligible === 0) return `${label}: Not ready — not enough mature cohorts yet`;
   if (p.state !== 'ok') return `${label}: ${p.state === 'unconfigured' ? 'Set up' : 'Unavailable'}`;
   return `${label}: ${(p.rate * 100).toFixed(1)}% (${formatCompact(p.returned)} of ${formatCompact(p.eligible)} returned)`;
+}
+
+export function retentionTile(label: string, p: { state: string; rate: number; returned: number; eligible: number }): { label: string; value: string } {
+  if (p.state === 'not_ready' || p.eligible === 0) return { label, value: 'Not ready' };
+  if (p.state !== 'ok') return { label, value: p.state === 'unconfigured' ? 'Set up' : 'Not available' };
+  return { label, value: `${(p.rate * 100).toFixed(1)}%` };
+}
+
+// A local composition, not a shared primitive: every dashboard category needs
+// a real destination or explicit state explanation, while its contents reuse
+// the shipped Panel, StatsStrip, Chart, and BarRows primitives.
+function MetricGroup({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
+  return <section aria-label={title}><Panel title={title} action={action}>{children}</Panel></section>;
 }
 
 // trendMeaning distinguishes "the chart is flat because nothing qualified"
@@ -123,26 +136,49 @@ export function overviewViewState(input: {
   return 'empty';
 }
 
-// The value-first panel has exactly two honest branches. A finding is shown
-// only when it is display-complete — an open row with a title, a rationale
-// (where the comparison lives) and a parseable evidence envelope — because
-// AgentRecommendation carries no typed comparison or next-action field, and
-// inferring one from prose or a bare number would present a guess as evidence.
-// Everything else falls back to a capability explanation, never a fabricated
-// live number.
+// Plans ranks open recommendations by impact. The overview treats a finding
+// as a single high-value action only when its title, observation, and evidence
+// are all readable; otherwise it omits the panel rather than fabricating advice.
 export type NextStep =
   | { kind: 'finding'; title: string; observation: string; evidence: string }
-  | { kind: 'capability'; reason: 'no_finding' | 'incomplete_finding' | 'unavailable' };
+  | { kind: 'none' };
 
-export function bestNextStep(finding: AgentRecommendation | null | undefined, unavailable = false): NextStep {
-  if (unavailable) return { kind: 'capability', reason: 'unavailable' };
-  if (!finding || finding.status !== 'open') return { kind: 'capability', reason: 'no_finding' };
-  const title = finding.title?.trim() ?? '';
-  const observation = finding.rationale?.trim() ?? '';
-  if (!title || !observation || !evidenceAvailable(finding)) {
-    return { kind: 'capability', reason: 'incomplete_finding' };
+function isEvidenceBackedFinding(candidate: AgentRecommendation): boolean {
+  return candidate.status === 'open'
+    && !!candidate.title?.trim()
+    && !!candidate.rationale?.trim()
+    && evidenceAvailable(candidate);
+}
+
+export function bestNextStep(findings: readonly AgentRecommendation[] | undefined, unavailable = false): NextStep {
+  if (unavailable) return { kind: 'none' };
+  // list_findings is open-first and impact-ranked. A malformed legacy row must
+  // not hide the next real, evidence-backed action.
+  const finding = findings?.find(isEvidenceBackedFinding);
+  if (!finding) return { kind: 'none' };
+  return { kind: 'finding', title: finding.title.trim(), observation: finding.rationale.trim(), evidence: evidenceLine(finding) };
+}
+
+// list_findings is keyset-paginated and open-first. Stop as soon as its ranking
+// yields the first display-complete open finding or the settled-history
+// partition; the repeated-cursor guard prevents a broken response from turning
+// the overview read into an infinite client loop.
+export async function firstEvidenceBackedFinding(
+  page: (cursor?: string) => Promise<ListFindingsResult>,
+): Promise<AgentRecommendation | null> {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  for (;;) {
+    const result = await page(cursor);
+    for (const candidate of result.findings ?? []) {
+      if (candidate.status !== 'open') return null;
+      if (isEvidenceBackedFinding(candidate)) return candidate;
+    }
+    if (!result.next_cursor) return null;
+    if (cursors.has(result.next_cursor)) throw new Error('Findings pagination cursor repeated');
+    cursors.add(result.next_cursor);
+    cursor = result.next_cursor;
   }
-  return { kind: 'finding', title, observation, evidence: evidenceLine(finding) };
 }
 
 // The 44px hit-area contract is flow-scoped: shared controls stay compact
@@ -187,12 +223,15 @@ export function OverviewPage() {
   const showNextStep = viewState === 'data' || viewState === 'receipt_only' || viewState === 'empty';
   const findingsQuery = useQuery({
     queryKey: ['overview-findings', projectID],
-    queryFn: () => new AgentRayAPI(projectID!).listFindings({ limit: 1 }),
+    queryFn: () => {
+      const api = new AgentRayAPI(projectID!);
+      return firstEvidenceBackedFinding((cursor) => api.listFindings({ cursor, limit: 50 }));
+    },
     enabled: !!projectID && showNextStep,
     staleTime: 60 * 1000,
     refetchOnWindowFocus: false,
   });
-  const nextStep = bestNextStep(findingsQuery.data?.findings?.[0], findingsQuery.isError);
+  const nextStep = bestNextStep(findingsQuery.data ? [findingsQuery.data] : undefined, findingsQuery.isError);
 
   const freshness = res ? freshnessLabel(res) : null;
   const occurredAt = res?.data_status.last_event_at
@@ -204,10 +243,24 @@ export function OverviewPage() {
   const stats = res
     ? [
         metricTile('Active people', res.metrics.active_users),
-        metricTile('New people', res.metrics.new_users),
         metricTile('Sessions', res.metrics.sessions),
+        metricTile('New people', res.metrics.new_users),
+      ]
+    : [];
+  const monetizationStats = res
+    ? [
+        metricTile('Instrumented revenue', res.metrics.revenue),
+        { label: 'Purchases', value: 'Not available' },
+        { label: 'Subscriptions', value: 'Not available' },
+      ]
+    : [];
+  const usageStats = res
+    ? [
         metricTile('Activation', res.metrics.activation),
-        metricTile('Revenue', res.metrics.revenue),
+        retentionTile('D1 retention', res.retention.d1),
+        retentionTile('D7 retention', res.retention.d7),
+        retentionTile('D30 retention', res.retention.d30),
+        { label: 'Crashes', value: 'Not available' },
       ]
     : [];
 
@@ -380,65 +433,95 @@ export function OverviewPage() {
               </dl>
             </details>
 
-            <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
-              <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
-                <Panel title="Active people per day">
-                  {trendSpec ? (
-                    <>
-                      <Chart spec={trendSpec} />
-                      {/* Textual equivalent: the chart is the shape, this is the data. */}
-                      <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
-                        {res.trend.map((p) => `${p.day.slice(5)}: ${p.active_users}`).join(' · ')}
+            <MetricGroup
+              title="Usage"
+              action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
+            >
+              <div className="flex flex-col gap-4">
+                <StatsStrip stats={usageStats} />
+                <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
+                  <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
+                    <h3 className="mb-2 text-sm font-medium">Active people per day</h3>
+                    {trendSpec ? (
+                      <>
+                        <Chart spec={trendSpec} />
+                        {/* Textual equivalent: the chart is the shape, this is the data. */}
+                        <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                          {res.trend.map((p) => `${p.day.slice(5)}: ${p.active_users}`).join(' · ')}
+                        </p>
+                      </>
+                    ) : trend === 'receipt_only' ? (
+                      <EmptyState
+                        title="Connected — no qualifying activity yet"
+                        detail="Events are arriving, but none count as human product activity in this range (verification pings, bots, and agent events are excluded). The trend draws once real usage lands."
+                      />
+                    ) : (
+                      <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium">Retention details</h3>
+                    <div className="flex flex-col gap-2 text-sm">
+                      <p>{retentionLine('Day 1', res.retention.d1)}</p>
+                      <p>{retentionLine('Day 7', res.retention.d7)}</p>
+                      <p>{retentionLine('Day 30', res.retention.d30)}</p>
+                      <p className="text-xs text-[var(--color-text-secondary)]">
+                        {res.retention.cohort_window === 'lifetime' ? 'Lifetime cohorts — a person counts from their first-ever event, not the selected range.' : `Cohort window: ${res.retention.cohort_window}`}
                       </p>
-                    </>
-                  ) : trend === 'receipt_only' ? (
-                    <EmptyState
-                      title="Connected — no qualifying activity yet"
-                      detail="Events are arriving, but none count as human product activity in this range (verification pings, bots, and agent events are excluded). The trend draws once real usage lands."
-                    />
-                  ) : (
-                    <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
-                  )}
-                </Panel>
-              </div>
-              <Panel title="Retention">
-                <div className="flex flex-col gap-2 text-sm">
-                  <p>{retentionLine('Day 1', res.retention.d1)}</p>
-                  <p>{retentionLine('Day 7', res.retention.d7)}</p>
-                  <p>{retentionLine('Day 30', res.retention.d30)}</p>
-                  <p className="text-xs text-[var(--color-text-secondary)]">
-                    {res.retention.cohort_window === 'lifetime' ? 'Lifetime cohorts — a person counts from their first-ever event, not the selected range.' : `Cohort window: ${res.retention.cohort_window}`}
-                  </p>
+                    </div>
+                  </div>
                 </div>
-              </Panel>
-            </div>
+                <p className="text-xs text-[var(--color-text-secondary)]">Crashes are Not available until AgentRay receives a verified crash event with a normalized app-version contract.</p>
+              </div>
+            </MetricGroup>
 
             <div className="grid grid-cols-2 gap-4 [@media(max-width:980px)]:grid-cols-1">
-              <Panel title="Top pages">
-                <BarRows
-                  rows={res.content.top_pages.rows}
-                  valueHead="Page"
-                  countHead={res.content.top_pages.unit}
-                  mono
-                  empty="No pageviews in this range"
-                />
-              </Panel>
-              <Panel title="Top sources">
-                <BarRows
-                  rows={res.content.top_sources.rows}
-                  valueHead="Source"
-                  countHead={res.content.top_sources.unit}
-                  empty="No attributed sources in this range"
-                />
-              </Panel>
+              <MetricGroup
+                title="Acquisition"
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
+              >
+                <div className="flex flex-col gap-4">
+                  <p className="text-xs text-[var(--color-text-secondary)]">New people is the Overview’s first-observed metric. These ranked pageview lists add its real acquisition context; direct / unknown remains visible.</p>
+                  <div className="grid grid-cols-2 gap-4 [@media(max-width:700px)]:grid-cols-1">
+                    <div>
+                      <h3 className="mb-2 text-sm font-medium">Top pages</h3>
+                      <BarRows
+                        rows={res.content.top_pages.rows}
+                        valueHead="Page"
+                        countHead={res.content.top_pages.unit}
+                        mono
+                        empty="No pageviews in this range"
+                      />
+                    </div>
+                    <div>
+                      <h3 className="mb-2 text-sm font-medium">Top sources</h3>
+                      <BarRows
+                        rows={res.content.top_sources.rows}
+                        valueHead="Source"
+                        countHead={res.content.top_sources.unit}
+                        empty="No attributed sources in this range"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-[var(--color-text-secondary)]">Downloads, store impressions, and store conversion are Not available: AgentRay never infers them from SDK events.</p>
+                </div>
+              </MetricGroup>
+
+              <MetricGroup
+                title="Monetization"
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/events'; }}>Inspect data</Button>}
+              >
+                <div className="flex flex-col gap-3">
+                  <StatsStrip stats={monetizationStats} />
+                  <p className="text-xs text-[var(--color-text-secondary)]">Instrumented revenue requires a trusted, deduplicated server or billing source with a declared currency. Purchases and subscriptions need their own verified project-scoped metric contracts; no SDK event total is shown as money.</p>
+                </div>
+              </MetricGroup>
             </div>
 
-            {dataStatusPanel}
-
-            <Panel title="Best next step">
-              {findingsQuery.isLoading ? (
-                <Loading label="Loading the latest finding…" />
-              ) : nextStep.kind === 'finding' ? (
+            {findingsQuery.isLoading ? (
+              <Panel title="Best next step"><Loading label="Loading the latest finding…" /></Panel>
+            ) : nextStep.kind === 'finding' ? (
+              <Panel title="Best next step">
                 <div className="flex flex-col gap-2">
                   <p className="text-sm font-medium">{nextStep.title}</p>
                   <p className="text-sm text-[var(--color-text-secondary)]">{nextStep.observation}</p>
@@ -450,27 +533,10 @@ export function OverviewPage() {
                     <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask your agent to investigate</Button>
                   </div>
                 </div>
-              ) : (
-                <div className="flex flex-col gap-3">
-                  <p className="text-sm text-[var(--color-text-secondary)]">
-                    {nextStep.reason === 'unavailable'
-                      ? 'Findings are unavailable right now. The numbers above are unaffected.'
-                      : 'No complete finding yet. Once your agent has read enough of this project it files one here — the observation, the comparison behind it, and the evidence line.'}
-                  </p>
-                  {/* A labeled example, never a live number: the panel explains
-                      what a finding looks like without claiming this project
-                      has one. */}
-                  <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
-                    <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Example — not your data</p>
-                    <p className="mt-1 text-sm text-[var(--color-text-secondary)]">“Activation fell 12% week over week, driven by the signup → first-project step.”</p>
-                  </div>
-                  <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
-                    <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
-                    <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
-                  </div>
-                </div>
-              )}
-            </Panel>
+              </Panel>
+            ) : null}
+
+            {dataStatusPanel}
           </>
         ) : null}
       </PageShell>

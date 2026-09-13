@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { APIError, type AgentRecommendation, type OverviewResult } from '@/lib/api';
-import { bestNextStep, freshnessLabel, overviewViewState } from './page';
+import { APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult } from '@/lib/api';
+import { bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, retentionTile } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -114,10 +114,9 @@ describe('overviewViewState', () => {
   });
 });
 
-// bestNextStep is the value-first panel's single decision: show the finding
-// only when it is display-complete, otherwise explain the capability. A row
-// that is missing its evidence envelope or its rationale cannot be presented
-// as an evidence-backed finding — the comparison would be a guess.
+// bestNextStep shows a finding only when it is evidence-complete. A row that
+// lacks its envelope or rationale is omitted rather than converted into a
+// generic CTA or a fabricated recommendation.
 function finding(over: Partial<AgentRecommendation> = {}): AgentRecommendation {
   return {
     id: 'f1',
@@ -139,7 +138,7 @@ function finding(over: Partial<AgentRecommendation> = {}): AgentRecommendation {
 
 describe('bestNextStep', () => {
   it('surfaces the open finding with its comparison and evidence line', () => {
-    const step = bestNextStep(finding());
+    const step = bestNextStep([finding()]);
     expect(step.kind).toBe('finding');
     if (step.kind !== 'finding') return;
     expect(step.title).toBe('Activation fell 12% week over week');
@@ -148,21 +147,79 @@ describe('bestNextStep', () => {
     expect(step.evidence).toContain('metric v3');
   });
 
-  it('falls back to the capability explanation when the finding is not display-complete', () => {
+  it('omits a finding that is not display-complete', () => {
     // A legacy row with no evidence envelope: the provenance line would read
-    // "evidence unavailable", so the panel must not call it a finding.
-    expect(bestNextStep(finding({ evidence_json: '' })).kind).toBe('capability');
-    expect(bestNextStep(finding({ evidence_json: '{not json' })).kind).toBe('capability');
+    // "evidence unavailable", so the dashboard must not call it a finding.
+    expect(bestNextStep([finding({ evidence_json: '' })]).kind).toBe('none');
+    expect(bestNextStep([finding({ evidence_json: '{not json' })]).kind).toBe('none');
     // An envelope full of unrelated keys is not provenance either: evidenceLine
-    // renders "evidence unavailable" for it, and the panel must agree with the
-    // line it would print rather than with the fact that JSON parsed.
-    expect(bestNextStep(finding({ evidence_json: JSON.stringify({ events: 202, sessions: 8, window_hours: 24 }) })).kind).toBe('capability');
-    expect(bestNextStep(finding({ rationale: '   ' })).kind).toBe('capability');
-    expect(bestNextStep(finding({ title: '' })).kind).toBe('capability');
+    // renders "evidence unavailable" for it, and the dashboard must agree.
+    expect(bestNextStep([finding({ evidence_json: JSON.stringify({ events: 202, sessions: 8, window_hours: 24 }) })]).kind).toBe('none');
+    expect(bestNextStep([finding({ rationale: '   ' })]).kind).toBe('none');
+    expect(bestNextStep([finding({ title: '' })]).kind).toBe('none');
     // Only an open finding is a next step; a dismissed one is history.
-    expect(bestNextStep(finding({ status: 'dismissed' })).kind).toBe('capability');
-    expect(bestNextStep(null).kind).toBe('capability');
+    expect(bestNextStep([finding({ status: 'dismissed' })]).kind).toBe('none');
+    expect(bestNextStep(undefined).kind).toBe('none');
     // A failed Plans read degrades this panel alone.
-    expect(bestNextStep(finding(), true)).toEqual({ kind: 'capability', reason: 'unavailable' });
+    expect(bestNextStep([finding()], true)).toEqual({ kind: 'none' });
+    expect(bestNextStep([finding({ evidence_json: '' }), finding({ id: 'f2', impact_score: 8 })]).kind).toBe('finding');
+  });
+});
+
+describe('firstEvidenceBackedFinding', () => {
+  it('follows the keyset cursor past an incomplete finding', async () => {
+    const pages: Record<string, ListFindingsResult> = {
+      first: { findings: [finding({ evidence_json: '' })], next_cursor: 'next' },
+      next: { findings: [finding({ id: 'f2', impact_score: 8 })] },
+    };
+    const calls: string[] = [];
+    const result = await firstEvidenceBackedFinding(async (cursor) => {
+      const key = cursor || 'first';
+      calls.push(key);
+      return pages[key]!;
+    });
+    expect(result?.id).toBe('f2');
+    expect(calls).toEqual(['first', 'next']);
+  });
+
+  it('rejects a repeated cursor instead of looping forever', async () => {
+    await expect(firstEvidenceBackedFinding(async () => ({
+      findings: [finding({ evidence_json: '' })],
+      next_cursor: 'repeat',
+    }))).rejects.toThrow('cursor repeated');
+  });
+
+  it('stops when the open-first ordering reaches settled history', async () => {
+    let calls = 0;
+    await expect(firstEvidenceBackedFinding(async () => {
+      calls += 1;
+      return {
+        findings: [finding({ status: 'accepted', evidence_json: '' })],
+        next_cursor: 'must-not-fetch',
+      };
+    })).resolves.toBeNull();
+    expect(calls).toBe(1);
+  });
+});
+
+describe('metricTile', () => {
+  const metric = (state: OverviewMetric['state'], value?: number): OverviewMetric => ({
+    state,
+    ...(value === undefined ? {} : { value }),
+    definition: 'Measured by AgentRay.',
+  });
+
+  it('keeps configured values and shows honest state labels without fabricating zeroes', () => {
+    expect(metricTile('Revenue', metric('unconfigured')).value).toBe('Set up');
+    expect(metricTile('Purchases', metric('unavailable')).value).toBe('Not available');
+    expect(metricTile('Active people', metric('no_data')).value).toBe('No data');
+    expect(metricTile('Sessions', metric('ok', 42)).value).toBe('42');
+  });
+});
+
+describe('retentionTile', () => {
+  it('keeps a measured zero distinct from an immature cohort', () => {
+    expect(retentionTile('D1 retention', { state: 'ok', rate: 0, returned: 0, eligible: 8 }).value).toBe('0.0%');
+    expect(retentionTile('D7 retention', { state: 'not_ready', rate: 0, returned: 0, eligible: 0 }).value).toBe('Not ready');
   });
 });
