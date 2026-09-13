@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -23,7 +24,6 @@ import (
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
-
 type Store struct {
 	pg *pgxpool.Pool
 	// duck is the embedded analytics engine: the event log, alias mirror,
@@ -33,8 +33,8 @@ type Store struct {
 	// sandboxes owns the per-project in-memory DuckDB instances that untrusted
 	// SQL (run_sql, saved queries, charts, alerts) executes against. See
 	// duckdb_sandbox.go.
-	sandboxes  *sqlSandboxPool
-	resolvers  *resolverCache
+	sandboxes *sqlSandboxPool
+	resolvers *resolverCache
 
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
 	// key inherit it so the first ask works. Zero-value (empty APIKey) = off.
@@ -49,7 +49,6 @@ type Store struct {
 	demoProjectID   string
 	demoWorkspaceID string
 }
-
 
 // resolverCache memoizes the per-project identity resolver. Canonical-id
 // stitching itself now runs in DuckDB through the resolved_events view (a
@@ -627,11 +626,11 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		return nil, err
 	}
 	store := &Store{
-		pg:         pg,
-		duck:       duck,
-		sandboxes:  newSQLSandboxPool(duck),
-		resolvers:  newResolverCache(30 * time.Second),
-		hostModel:  HostModelDefaultsFromConfig(cfg),
+		pg:        pg,
+		duck:      duck,
+		sandboxes: newSQLSandboxPool(duck),
+		resolvers: newResolverCache(30 * time.Second),
+		hostModel: HostModelDefaultsFromConfig(cfg),
 	}
 	// Migrations run on their own single-connection pool with the per-statement
 	// cap lifted: DDL and one-time backfills on grown production tables can
@@ -1099,7 +1098,6 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 
 	return nil
 }
-
 
 type pgQuerier interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -2916,7 +2914,6 @@ func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([
 	return s.sandboxes.query(ctx, projectID, query, args)
 }
 
-
 func (s *Store) filteredTimeline(ctx context.Context, projectID string, filter EventFilter) ([]TimelinePoint, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
@@ -3899,7 +3896,6 @@ ORDER BY cohort_week DESC, period ASC`
 	return result, nil
 }
 
-
 func (s *Store) agentInsightRows(ctx context.Context, projectID string, filter EventFilter) ([]map[string]any, error) {
 	filter.EventType = "agent"
 	resolver, err := s.identityResolver(ctx, projectID)
@@ -4577,12 +4573,65 @@ func normalizeSQLValue(value any) any {
 		// INTERVAL scans as a struct; render it as a duration string so the
 		// JSON answer is readable.
 		return fmt.Sprintf("%d months %d days %d µs", v.Months, v.Days, v.Micros)
-	case []any, map[string]any:
-		// LIST/STRUCT results marshal to JSON as-is.
-		return v
+	case duckdb.Decimal:
+		// DECIMAL scans as a struct holding a *big.Int. Render the exact
+		// decimal text: money and cost columns live here, and a struct is
+		// neither readable nor (before this) encodable across the sandbox.
+		return v.String()
+	case *big.Int:
+		return v.String()
+	case big.Int:
+		return v.String()
+	case duckdb.Map:
+		// MAP scans as a Go map with non-string keys, which neither JSON nor
+		// the frame codec carries; keys become their text form.
+		return stringKeyedMap(v)
+	case duckdb.OrderedMap:
+		return orderedStringKeyedMap(&v)
+	case duckdb.Union:
+		return map[string]any{"tag": v.Tag, "value": normalizeSQLValue(v.Value)}
+	case []any:
+		// LIST/ARRAY results: recurse, because the elements are driver values
+		// too — a LIST of DECIMAL is as unrenderable as a bare DECIMAL, and the
+		// frame codec carries neither.
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = normalizeSQLValue(item)
+		}
+		return out
+	case map[string]any:
+		// STRUCT results: same, one level down.
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			out[k] = normalizeSQLValue(item)
+		}
+		return out
 	default:
 		return v
 	}
+}
+
+// stringKeyedMap renders a DuckDB MAP as a JSON-ready object.
+func stringKeyedMap(m duckdb.Map) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[fmt.Sprint(normalizeSQLValue(k))] = normalizeSQLValue(v)
+	}
+	return out
+}
+
+// orderedStringKeyedMap is the same for the order-preserving form the driver
+// returns by default. Key order is lost, which is inherent to a JSON object.
+func orderedStringKeyedMap(m *duckdb.OrderedMap) map[string]any {
+	keys, values := m.Keys(), m.Values()
+	out := make(map[string]any, len(keys))
+	for i, k := range keys {
+		if i >= len(values) {
+			break
+		}
+		out[fmt.Sprint(normalizeSQLValue(k))] = normalizeSQLValue(values[i])
+	}
+	return out
 }
 
 func firstNonEmpty(values ...string) string {

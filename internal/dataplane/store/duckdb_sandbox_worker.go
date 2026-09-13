@@ -126,7 +126,7 @@ func IsSandboxUnavailable(err error) bool {
 // sandboxRequest is one parent→child message.
 type sandboxRequest struct {
 	Op    string  `json:"op"`    // cursor | delete | insert | query | close
-	Table string  `json:"table"` // delete | insert
+	Table string  `json:"table"` // delete | insert — cursor is events-only
 	Rows  [][]any `json:"rows"`  // insert
 	SQL   string  `json:"sql"`   // query
 	Args  []any   `json:"args"`  // query
@@ -150,7 +150,6 @@ type sandboxResponse struct {
 	// RlimitBytes is the address-space bound the child applied to itself, 0
 	// where the platform has none.
 	RlimitBytes uint64           `json:"rlimit_bytes"`
-	Columns     []string         `json:"columns"`
 	Rows        []map[string]any `json:"rows"`
 	// Count/Watermark/WatermarkID are the child's own event cursor, reported to
 	// the parent so the incremental copy can resume from where the child
@@ -185,20 +184,30 @@ func init() {
 // writeSandboxFrame encodes one message with a length prefix. Untrusted data
 // never reaches this side of the design; the length prefix exists so the reader
 // can refuse an unbounded frame before decoding it.
-func writeSandboxFrame(w io.Writer, msg any) error {
+// encodeSandboxFrame renders one length-prefixed frame, refusing an oversized
+// one before it is written. Encoding is separate from writing so a caller can
+// answer a value it cannot encode with a frame it can, without corrupting a
+// partially written stream.
+func encodeSandboxFrame(msg any) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(msg); err != nil {
-		return fmt.Errorf("sandbox frame encode: %w", err)
+		return nil, fmt.Errorf("sandbox frame encode: %w", err)
 	}
 	if buf.Len() > sandboxFrameMaxBytes {
-		return fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", buf.Len(), sandboxFrameMaxBytes)
+		return nil, fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", buf.Len(), sandboxFrameMaxBytes)
 	}
-	var header [4]byte
-	binary.BigEndian.PutUint32(header[:], uint32(buf.Len()))
-	if _, err := w.Write(header[:]); err != nil {
+	frame := make([]byte, 4+buf.Len())
+	binary.BigEndian.PutUint32(frame[:4], uint32(buf.Len()))
+	copy(frame[4:], buf.Bytes())
+	return frame, nil
+}
+
+func writeSandboxFrame(w io.Writer, msg any) error {
+	frame, err := encodeSandboxFrame(msg)
+	if err != nil {
 		return err
 	}
-	_, err := buf.WriteTo(w)
+	_, err = w.Write(frame)
 	return err
 }
 
@@ -241,14 +250,18 @@ type sandboxWorkerOptions struct {
 }
 
 func parseSandboxWorkerOptions(args []string) sandboxWorkerOptions {
+	// Defaults come from the pool's own table, so a child launched without the
+	// parent's flags (a direct `server sql-sandbox-worker`, a test) still runs
+	// under the envelope the deployment declares.
+	d := defaultSandboxLimits()
 	opts := sandboxWorkerOptions{
-		threads:           1,
-		maxRows:           sandboxMaxRows,
-		maxResultBytes:    sandboxMaxResultBytes,
-		queryTimeout:      sandboxQueryTimeout,
-		memoryLimit:       sandboxMemoryLimit,
-		tempSize:          sandboxTempSize,
-		rlimitBudgetBytes: sandboxRlimitBudget,
+		threads:           d.threads,
+		maxRows:           d.maxRows,
+		maxResultBytes:    d.maxResultBytes,
+		queryTimeout:      d.queryTimeout,
+		memoryLimit:       d.memoryLimit,
+		tempSize:          d.tempSize,
+		rlimitBudgetBytes: d.rlimitBudget,
 	}
 	for _, arg := range args {
 		key, value, ok := strings.Cut(arg, "=")
@@ -339,7 +352,20 @@ func RunSandboxWorker(args []string, stdin io.Reader, stdout io.Writer) error {
 			return nil
 		}
 		resp := engine.handle(ctx, req)
-		if err := writeSandboxFrame(writer, resp); err != nil {
+		frame, err := encodeSandboxFrame(resp)
+		if err != nil {
+			// A value the codec cannot carry is the answer's problem, not the
+			// child's: answer with a frame that always encodes, so a valid query
+			// reports what it could not return instead of taking the tenant's
+			// warm copy down with it. A write failure stays fatal — the pipe is
+			// gone, and no frame would reach the parent.
+			frame, err = encodeSandboxFrame(errResponse(SandboxKindSQL,
+				fmt.Sprintf("result value cannot cross the analytics sandbox boundary: %v", err)))
+			if err != nil {
+				return err
+			}
+		}
+		if _, err := writer.Write(frame); err != nil {
 			return err
 		}
 		if err := writer.Flush(); err != nil {
@@ -367,8 +393,8 @@ func openSandboxEngine(ctx context.Context, opts sandboxWorkerOptions) (*sandbox
 		stmts := []string{"SET TimeZone = 'UTC'"}
 		if opts.tmpDir != "" {
 			stmts = append(stmts,
-				"SET temp_directory = '"+strings.ReplaceAll(opts.tmpDir, "'", "''")+"'",
-				"SET max_temp_directory_size = '"+opts.tempSize+"'")
+				"SET temp_directory = "+sqlQuote(opts.tmpDir),
+				"SET max_temp_directory_size = "+sqlQuote(opts.tempSize))
 		}
 		for _, stmt := range stmts {
 			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
@@ -402,7 +428,7 @@ func openSandboxEngine(ctx context.Context, opts sandboxWorkerOptions) (*sandbox
 	// does — the parent copies rows through the pipe). After this the instance
 	// cannot touch the filesystem or network at all.
 	for _, stmt := range []string{
-		"SET memory_limit = '" + opts.memoryLimit + "'",
+		"SET memory_limit = " + sqlQuote(opts.memoryLimit),
 		fmt.Sprintf("SET threads = %d", opts.threads),
 		"SET enable_external_access = false",
 		"SET lock_configuration = true",
@@ -433,7 +459,7 @@ func (e *sandboxEngine) handle(ctx context.Context, req sandboxRequest) sandboxR
 	case "cursor":
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return e.cursor(ctx, req.Table)
+		return e.eventsCursor(ctx)
 	case "delete":
 		if !sandboxTableNames[req.Table] {
 			return errResponse(SandboxKindChild, fmt.Sprintf("unknown sandbox table %q", req.Table))
@@ -461,21 +487,14 @@ func (e *sandboxEngine) handle(ctx context.Context, req sandboxRequest) sandboxR
 	}
 }
 
-// cursor reports this instance's own high-water mark for the append-only
+// eventsCursor reports this instance's own high-water mark for the append-only
 // events table: the parent resumes its incremental copy from here, so a row
 // that shares a timestamp with the last copied one is not skipped, and a count
-// drift (a delete upstream) is visible as child > main.
-func (e *sandboxEngine) cursor(ctx context.Context, table string) sandboxResponse {
-	if !sandboxTableNames[table] {
-		return errResponse(SandboxKindChild, fmt.Sprintf("unknown sandbox table %q", table))
-	}
+// drift (a delete upstream) is visible as child > main. It is the only cursor
+// there is — aliases and connector rows are small enough to be replaced
+// wholesale on every refresh — so no table name comes off the wire here.
+func (e *sandboxEngine) eventsCursor(ctx context.Context) sandboxResponse {
 	resp := sandboxResponse{Kind: "ok"}
-	if table != "events" {
-		if err := e.feeder.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&resp.Count); err != nil {
-			return errResponse(SandboxKindChild, err.Error())
-		}
-		return resp
-	}
 	if err := e.feeder.QueryRowContext(ctx,
 		`SELECT coalesce(max(inserted_at), TIMESTAMPTZ '1970-01-01') FROM events`).Scan(&resp.Watermark); err != nil {
 		return errResponse(SandboxKindChild, err.Error())
@@ -535,16 +554,19 @@ func (e *sandboxEngine) query(ctx context.Context, req sandboxRequest) sandboxRe
 
 	qctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The parent's deadline bounds the whole request; the child's own timeout is
+	// a maximum on top of it, so a caller that hands over a generous deadline
+	// cannot make one query hold a child — and an admission slot — for longer
+	// than the sandbox promises.
+	limit := time.Now().Add(e.opts.queryTimeout)
 	if req.DeadlineNanos > 0 {
-		deadline := time.Unix(0, req.DeadlineNanos)
-		d, stop := context.WithDeadline(qctx, deadline)
-		defer stop()
-		qctx = d
-	} else {
-		d, stop := context.WithTimeout(qctx, e.opts.queryTimeout)
-		defer stop()
-		qctx = d
+		if d := time.Unix(0, req.DeadlineNanos); d.Before(limit) {
+			limit = d
+		}
 	}
+	dctx, stop := context.WithDeadline(qctx, limit)
+	defer stop()
+	qctx = dctx
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT)
@@ -600,7 +622,7 @@ func (e *sandboxEngine) query(ctx context.Context, req sandboxRequest) sandboxRe
 	if err := rows.Err(); err != nil {
 		return engineErrResponse(qctx, err)
 	}
-	return sandboxResponse{Kind: "rows", Columns: columns, Rows: results}
+	return sandboxResponse{Kind: "rows", Rows: results}
 }
 
 // sandboxValueBytes counts what a cell costs once it is retained: the column
@@ -659,7 +681,7 @@ func (e *sandboxEngine) close() {
 // sandboxTableNames guards the two ops whose table is named by the parent, so a
 // malformed frame cannot turn into an arbitrary identifier.
 var sandboxTableNames = map[string]bool{
-	"events":        true,
-	"aliases":       true,
-	"external_rows": true,
+	DuckDBEventsName:       true,
+	DuckDBAliasesName:      true,
+	DuckDBExternalRowsName: true,
 }

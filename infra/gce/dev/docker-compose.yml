@@ -12,13 +12,15 @@ x-agentray-api: &agentray-api-svc
   env_file:
     - app.env
     - secret.env
-  # 768m is the api's half of the sandbox envelope (duckdb_sandbox.go): GOMEMLIMIT
-  # below, the trusted DuckDB instance, up to two sandbox children and a reserve
-  # have to sum under it. The previous 384m was sized before the engine was
-  # embedded — its measured cgroup peak alone was 344 MiB.
-  mem_limit: 768m
-  environment:
-    GOMEMLIMIT: 256MiB
+  # 1024m is the api's half of the sandbox envelope (duckdb_sandbox.go): the
+  # GOMEMLIMIT declared per colour below (256 MiB), the trusted DuckDB instance
+  # (128 MB), two sandbox children at their measured 192 MiB address-space
+  # budget plus 32 MiB of runtime each, and a 96 MiB reserve for the kernel and
+  # the page cache of a spill. 384m was sized before the engine was embedded
+  # (its measured cgroup peak alone was 344 MiB), and 768m could not hold two
+  # children once the budget they actually need was measured: TestSandboxBudget-
+  # FitsContainer sums exactly these terms and fails if it does not fit.
+  mem_limit: 1024m
   logging:
     driver: json-file
     options:
@@ -57,6 +59,10 @@ services:
     environment:
       DUCKDB_PATH: /data/agentray.duckdb
       INGEST_DURABLE: agentray-ingestors-dev-blue
+      # Declared per colour, not on the x-agentray-api anchor: a service's
+      # `environment:` map REPLACES the anchor's (YAML merge keys are shallow),
+      # so a limit set up there silently never reaches a container.
+      GOMEMLIMIT: 256MiB
     volumes:
       - duckdb-dev-blue:/data
 
@@ -66,6 +72,10 @@ services:
     environment:
       DUCKDB_PATH: /data/agentray.duckdb
       INGEST_DURABLE: agentray-ingestors-dev-green
+      # Declared per colour, not on the x-agentray-api anchor: a service's
+      # `environment:` map REPLACES the anchor's (YAML merge keys are shallow),
+      # so a limit set up there silently never reaches a container.
+      GOMEMLIMIT: 256MiB
     volumes:
       - duckdb-dev-green:/data
 

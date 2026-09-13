@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,60 +27,75 @@ func (d *DuckDB) InsertEvents(ctx context.Context, events []Event) error {
 	})
 }
 
+// insertEventsChunk is how many rows one statement carries. The write path
+// used to execute one prepared INSERT per event, and DuckDB holds a row-group
+// sized buffer per statement inside the transaction until commit: measured at
+// ~1.1 MB per event on this 27-column table (the engine failed at row 108 of a
+// 500-row batch under a 128 MB memory_limit, and a 384 MiB container would have
+// gone down the same way with no sandbox query in play). One statement per
+// chunk keeps the transaction's memory proportional to the chunk instead.
+const insertEventsChunk = 256
+
+// insertEventsTx writes the batch as chunked multi-row INSERT OR IGNORE
+// statements: the (project_id, event_id) primary key stays the dedup contract,
+// and the transaction still covers the whole batch.
 func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	stmt, err := tx.PrepareContext(ctx, `
-INSERT OR IGNORE INTO events (
+	const cols = 27
+	row := "(" + strings.TrimSuffix(strings.Repeat("?,", cols), ",") + ")"
+	prefix := `INSERT OR IGNORE INTO events (
 	project_id, event_id, distinct_id, session_id, event_name, event_type,
 	properties, agent_id, tool_name, tool_input, tool_output, tokens_input,
 	tokens_output, cost_usd, latency_ms, model_name, is_error, error_message,
 	"timestamp", visitor_class, bot_name, referrer_host, referrer_channel,
 	user_agent, insert_id, is_unplanned, platform
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, event := range events {
-		projectID, err := uuid.Parse(event.ProjectID)
-		if err != nil {
-			return fmt.Errorf("event %q: project_id: %w", event.EventID, err)
+) VALUES `
+	for start := 0; start < len(events); start += insertEventsChunk {
+		chunk := events[start:min(start+insertEventsChunk, len(events))]
+		args := make([]any, 0, len(chunk)*cols)
+		for _, event := range chunk {
+			projectID, err := uuid.Parse(event.ProjectID)
+			if err != nil {
+				return fmt.Errorf("event %q: project_id: %w", event.EventID, err)
+			}
+			eventID, err := uuid.Parse(event.EventID)
+			if err != nil {
+				return fmt.Errorf("event_id %q: event_id: %w", event.EventID, err)
+			}
+			args = append(args,
+				projectID,
+				eventID,
+				event.DistinctID,
+				event.SessionID,
+				event.EventName,
+				event.EventType,
+				event.Properties,
+				nullableString(event.AgentID),
+				nullableString(event.ToolName),
+				nullableString(event.ToolInput),
+				nullableString(event.ToolOutput),
+				event.TokensInput,
+				event.TokensOutput,
+				event.CostUSD,
+				event.LatencyMS,
+				nullableString(event.ModelName),
+				event.IsError,
+				nullableString(event.ErrorMessage),
+				event.Timestamp.UTC(),
+				event.VisitorClass,
+				nullableString(event.BotName),
+				nullableString(event.ReferrerHost),
+				event.ReferrerChannel,
+				nullableString(event.UserAgent),
+				nullableString(event.InsertID),
+				event.IsUnplanned,
+				event.Platform,
+			)
 		}
-		eventID, err := uuid.Parse(event.EventID)
-		if err != nil {
-			return fmt.Errorf("event_id %q: %w", event.EventID, err)
-		}
-		if _, err := stmt.ExecContext(ctx,
-			projectID,
-			eventID,
-			event.DistinctID,
-			event.SessionID,
-			event.EventName,
-			event.EventType,
-			event.Properties,
-			nullableString(event.AgentID),
-			nullableString(event.ToolName),
-			nullableString(event.ToolInput),
-			nullableString(event.ToolOutput),
-			event.TokensInput,
-			event.TokensOutput,
-			event.CostUSD,
-			event.LatencyMS,
-			nullableString(event.ModelName),
-			event.IsError,
-			nullableString(event.ErrorMessage),
-			event.Timestamp.UTC(),
-			event.VisitorClass,
-			nullableString(event.BotName),
-			nullableString(event.ReferrerHost),
-			event.ReferrerChannel,
-			nullableString(event.UserAgent),
-			nullableString(event.InsertID),
-			event.IsUnplanned,
-			event.Platform,
-		); err != nil {
+		stmt := prefix + strings.TrimSuffix(strings.Repeat(row+",", len(chunk)), ",")
+		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 			return err
 		}
 	}

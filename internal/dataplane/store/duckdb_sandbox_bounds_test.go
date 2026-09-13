@@ -186,6 +186,74 @@ func TestSandboxAdmissionPrecedesChildCreation(t *testing.T) {
 	}
 }
 
+// A3 — a cold query makes room BEFORE it spawns. With two warm children and two
+// concurrent cold queries for other projects, the two children being replaced
+// must be gone before their replacements open: a pool that counts only its map
+// runs four engines against a two-child budget.
+func TestSandboxColdSpawnMakesRoomFirst(t *testing.T) {
+	d := openTestDuckDB(t)
+	pool, ctx := newTestSandboxPool(t, d, func(l *sandboxLimits) {
+		l.maxProjects = 2
+		l.maxConcurrent = 2
+	})
+	t.Cleanup(pool.closeAll)
+
+	// Two warm children, one per project.
+	warm := []string{uuid.NewString(), uuid.NewString()}
+	for _, projectID := range warm {
+		if _, err := pool.query(ctx, projectID, `SELECT count(*) AS n FROM events`, nil); err != nil {
+			t.Fatalf("warm query: %v", err)
+		}
+	}
+	if got := pool.liveChildren(); got != 2 {
+		t.Fatalf("live children after warming = %d, want 2", got)
+	}
+
+	// Sample the occupancy while the two cold queries run. Sampling can only
+	// miss a violation, never invent one: the assertion is one-sided.
+	stop := make(chan struct{})
+	peak := make(chan int, 1)
+	go func() {
+		most := 0
+		for {
+			select {
+			case <-stop:
+				peak <- most
+				return
+			default:
+			}
+			if n := pool.liveChildren(); n > most {
+				most = n
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := pool.query(ctx, uuid.NewString(), `SELECT count(*) AS n FROM events`, nil); err != nil {
+				t.Errorf("cold query: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	most := <-peak
+
+	if most > 2 {
+		t.Fatalf("live children peaked at %d with maxProjects = 2: a replacement opened beside the child it replaces", most)
+	}
+	if got := pool.reaped.Load(); got != 2 {
+		t.Fatalf("reaped = %d, want 2 (both warm children evicted for the replacements)", got)
+	}
+	if got := pool.liveChildren(); got != 2 {
+		t.Fatalf("live children after the switch = %d, want 2", got)
+	}
+}
+
 // A3 — engines, spill directories and connections are bounded and reclaimable.
 func TestSandboxPoolBoundsAndReclaims(t *testing.T) {
 	d := openTestDuckDB(t)
@@ -360,9 +428,15 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 		// The reserve left for the Go runtime's non-heap memory, the driver's
 		// cgo allocations and the page cache: the sum below must leave it.
 		reserve = 96 << 20
-		// A child's own runtime plus protocol buffers, measured at ~29 MB.
+		// A child's own runtime plus protocol buffers, measured at ~29 MB. It is
+		// added to the rlimit below, not to the engine's memory_limit: the whole
+		// reason this ticket exists is that DuckDB allocates past its own limit,
+		// so the kernel bound is the term a child can actually commit.
 		childOverhead = 32 << 20
 	)
+	// Both colours, in both files: the values have to reach each service, and it
+	// is the per-service map that decides that (see below).
+	services := []string{"agentray-api-blue", "agentray-api-green"}
 
 	for _, env := range []string{"dev", "prod"} {
 		path := repoPath(t, filepath.Join("infra", "gce", env, "docker-compose.yml"))
@@ -370,26 +444,47 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		memLimit, gomemlimit, err := parseAPIBudget(string(raw))
+		memLimit, err := composeAnchorMemLimit(string(raw))
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-		if got := memLimit / (1 << 20); got != 768 {
-			t.Fatalf("%s: api mem_limit = %d MiB, want 768", path, got)
+		if got := memLimit / (1 << 20); got != 1024 {
+			t.Fatalf("%s: api mem_limit = %d MiB, want 1024", path, got)
 		}
-		if got := gomemlimit / (1 << 20); got != 256 {
-			t.Fatalf("%s: GOMEMLIMIT = %d MiB, want 256", path, got)
+		if anchorEnvKey(t, string(raw), "GOMEMLIMIT") {
+			// YAML merge keys are shallow: a service's own `environment:` map
+			// replaces the anchor's, so a limit declared on the anchor reaches no
+			// container at all. This is how the first cut of this ticket shipped
+			// a GOMEMLIMIT that did nothing.
+			t.Errorf("%s: GOMEMLIMIT is on the anchor, where a service's own environment map drops it", path)
 		}
+		blocks := composeServiceBlocks(t, string(raw))
+		for _, name := range services {
+			block, ok := blocks[name]
+			if !ok {
+				t.Fatalf("%s: no %s service", path, name)
+			}
+			gomemlimit, err := environmentValue(block, "GOMEMLIMIT")
+			if err != nil {
+				t.Fatalf("%s %s: %v — the value must be on the service, not the anchor", path, name, err)
+			}
+			if got := gomemlimit / (1 << 20); got != 256 {
+				t.Fatalf("%s %s: GOMEMLIMIT = %d MiB, want 256", path, name, got)
+			}
+		}
+		gomemlimit := int64(256) << 20
 
 		mainEngine := duckdbSizeBytes(t, sandboxMainMemoryLimit)
-		childEngine := duckdbSizeBytes(t, sandboxMemoryLimit)
-		total := gomemlimit + mainEngine + int64(sandboxMaxProjects)*(childEngine+childOverhead) + reserve
+		childAllowance := int64(sandboxRlimitBudget) + childOverhead
+		total := gomemlimit + mainEngine + int64(sandboxMaxProjects)*childAllowance + reserve
 		if total > memLimit {
-			t.Fatalf("%s: envelope %d MiB exceeds mem_limit %d MiB (GOMEMLIMIT + main engine %s + %d children of %s + %d MiB reserve)",
-				path, total/(1<<20), memLimit/(1<<20), sandboxMainMemoryLimit, sandboxMaxProjects, sandboxMemoryLimit, reserve/(1<<20))
+			t.Fatalf("%s: envelope %d MiB exceeds mem_limit %d MiB (GOMEMLIMIT %d + main engine %s + %d children × (%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
+				path, total/(1<<20), memLimit/(1<<20), gomemlimit/(1<<20), sandboxMainMemoryLimit,
+				sandboxMaxProjects, sandboxRlimitBudget/(1<<20), childOverhead/(1<<20), reserve/(1<<20))
 		}
-		t.Logf("%s: %d MiB of %d MiB declared (GOMEMLIMIT + main %s + %d×%s + %d MiB reserve)",
-			path, total/(1<<20), memLimit/(1<<20), sandboxMainMemoryLimit, sandboxMaxProjects, sandboxMemoryLimit, reserve/(1<<20))
+		t.Logf("%s: %d MiB of %d MiB declared (GOMEMLIMIT + main %s + %d×(%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
+			path, total/(1<<20), memLimit/(1<<20), sandboxMainMemoryLimit,
+			sandboxMaxProjects, sandboxRlimitBudget/(1<<20), childOverhead/(1<<20), reserve/(1<<20))
 	}
 
 	// The budget that is claimed is the budget that is set: both engines report
@@ -592,37 +687,116 @@ func TestSandboxChildInheritsNoSecrets(t *testing.T) {
 // parseAPIBudget reads the api service's mem_limit and GOMEMLIMIT out of a
 // compose file. It scans the api anchor rather than the file, so the sibling
 // web service's limit in the same file cannot be mistaken for it.
-func parseAPIBudget(raw string) (memLimit, gomemlimit int64, err error) {
-	lines := strings.Split(raw, "\n")
-	anchor := -1
-	for i, line := range lines {
-		if strings.HasPrefix(line, "x-agentray-api:") {
-			anchor = i
-			break
+// composeAnchorMemLimit reads the api service anchor the blue and green
+// definitions are built from (mem_limit is inherited from it — no service
+// redefines it, so the anchor's value is the one that reaches the container).
+func composeAnchorMemLimit(raw string) (int64, error) {
+	for _, line := range strings.Split(anchorBlockFrom(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "mem_limit:") {
+			return dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, "mem_limit:")))
 		}
 	}
-	if anchor < 0 {
-		return 0, 0, errors.New("no x-agentray-api anchor")
+	return 0, errors.New("the api anchor declares no mem_limit")
+}
+
+// anchorEnvKey reports whether the anchor sets this environment key. It looks
+// for the YAML key, not the word: the anchor's own comment names GOMEMLIMIT.
+func anchorEnvKey(t *testing.T, raw, key string) bool {
+	t.Helper()
+	_ = anchorBlock(t, raw)
+	for _, line := range strings.Split(anchorBlockFrom(raw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), key+":") {
+			return true
+		}
 	}
-	for _, line := range lines[anchor:] {
+	return false
+}
+
+func anchorBlock(t *testing.T, raw string) string {
+	t.Helper()
+	block := anchorBlockFrom(raw)
+	if block == "" {
+		t.Fatal("no x-agentray-api anchor")
+	}
+	return block
+}
+
+func anchorBlockFrom(raw string) string {
+	var b strings.Builder
+	started := false
+	for _, line := range strings.Split(raw, "\n") {
+		switch {
+		case strings.HasPrefix(line, "x-agentray-api:"):
+			started = true
+		case started && line != "" && !strings.HasPrefix(line, " "):
+			return b.String()
+		}
+		if started {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// composeServiceBlocks splits the services section into one block per service.
+// It is deliberately structural rather than a YAML decode: the property under
+// test is *which* service a key lands in, which is exactly what a flat scan of
+// the file cannot see.
+func composeServiceBlocks(t *testing.T, raw string) map[string]string {
+	t.Helper()
+	blocks := map[string]string{}
+	var b strings.Builder
+	name := ""
+	flush := func() {
+		if name != "" {
+			blocks[name] = b.String()
+		}
+		b.Reset()
+	}
+	inServices := false
+	for _, line := range strings.Split(raw, "\n") {
+		switch {
+		case line == "services:":
+			inServices = true
+			continue
+		case !inServices:
+			continue
+		case line != "" && !strings.HasPrefix(line, " "):
+			flush()
+			name = ""
+			inServices = false
+			continue
+		case strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(line, ":"):
+			flush()
+			name = strings.TrimSuffix(strings.TrimSpace(line), ":")
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	flush()
+	return blocks
+}
+
+// environmentValue reports the value of one key in a service's `environment:`
+// map — the map that reaches the container.
+func environmentValue(block, key string) (int64, error) {
+	inEnv := false
+	for _, line := range strings.Split(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(trimmed, "mem_limit:"):
-			memLimit, err = dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, "mem_limit:")))
-			if err != nil {
-				return 0, 0, err
-			}
-		case strings.HasPrefix(trimmed, "GOMEMLIMIT:"):
-			gomemlimit, err = dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, "GOMEMLIMIT:")))
-			if err != nil {
-				return 0, 0, err
-			}
-		}
-		if memLimit > 0 && gomemlimit > 0 {
-			return memLimit, gomemlimit, nil
+		case trimmed == "environment:":
+			inEnv = true
+			continue
+		case inEnv && strings.HasPrefix(trimmed, key+":"):
+			return dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, key+":")))
+		case inEnv && strings.HasSuffix(line, ":") && strings.HasPrefix(line, "    "):
+			inEnv = false
 		}
 	}
-	return 0, 0, errors.New("api mem_limit/GOMEMLIMIT not both declared")
+	return 0, fmt.Errorf("no %s in the service's environment map", key)
 }
 
 // dockerSizeBytes parses the compose/Dockerfile size form: "768m" is MiB,

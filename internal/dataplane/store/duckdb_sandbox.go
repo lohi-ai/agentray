@@ -86,6 +86,14 @@ const (
 	sandboxIdleTTL = 5 * time.Minute
 	// sandboxCopyBatch is the row count per insert frame during refresh.
 	sandboxCopyBatch = 2048
+	// sandboxInsertBatchBytes is the size at which a half-built insert frame is
+	// sent. sandboxCopyBatch alone bounds nothing when rows are fat: 2,048 rows
+	// of tool output is not a batch, it is the API's heap.
+	sandboxInsertBatchBytes = 4 << 20
+	// sandboxMaxRowBytes refuses a single row no frame could carry. It sits
+	// above the batch threshold and well below sandboxFrameMaxBytes, so a full
+	// batch (a threshold's worth plus one row) always fits a frame.
+	sandboxMaxRowBytes = 16 << 20
 	// sandboxMaxRows caps materialized result rows.
 	sandboxMaxRows = 10_000
 	// sandboxMaxResultBytes caps materialized result bytes. Row count alone is
@@ -95,7 +103,18 @@ const (
 	// sandboxTempSize caps one sandbox's spill directory.
 	sandboxTempSize = "256MB"
 	// sandboxRlimitBudget is the address space a child may allocate above its
-	// own virtual size at engine open (Linux).
+	// own virtual size at engine open (Linux). It is the per-child allowance the
+	// container arithmetic spends: DuckDB's own memory_limit does not bound a
+	// scalar, so the kernel bound — not the engine one — is what a child can
+	// actually commit. TestSandboxBudgetFitsContainer sums this term.
+	//
+	// It is measured, not chosen: at 96 MiB the child dies before it answers
+	// anything (the engine's own virtual mappings for a 96 MB memory_limit plus
+	// its spill file exceed the budget — "sandbox did not start: EOF" at
+	// warm-up, and a sibling child's schema creation fails with a DuckDB bad
+	// allocation), while 192 MiB runs the whole hostile set with the containment
+	// intact: the hostile query fails under a cap and the trusted writer keeps
+	// committing.
 	sandboxRlimitBudget = 192 << 20
 	// sandboxKillGrace is how long a child has to honour SIGINT/close before it
 	// is killed outright.
@@ -327,27 +346,30 @@ func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sql
 		}
 		op := &sandboxOpen{done: make(chan struct{})}
 		p.opening[projectID] = op
+		// Make room BEFORE spawning. A child holds its engine and spill the
+		// moment it opens, so counting only the entries already in the map would
+		// let two concurrent cold queries run alongside the two warm children
+		// they are about to replace — four children against a two-child budget.
+		// The opener counts itself through p.opening.
+		victims := p.evictLocked()
 		p.mu.Unlock()
+		for _, victim := range victims {
+			victim.close()
+		}
 
 		sb, err := spawnSQLSandbox(ctx, p, projectID)
 		p.spawns.Add(1)
 
 		p.mu.Lock()
 		delete(p.opening, projectID)
-		var victims []*sqlSandbox
 		if err == nil {
 			sb.lease()
 			p.sandboxes[projectID] = sb
 			p.lru = append([]string{projectID}, p.lru...)
-			victims = p.evictLocked()
 		}
 		op.err = err
 		close(op.done)
 		p.mu.Unlock()
-
-		for _, victim := range victims {
-			victim.close()
-		}
 		return sb, err
 	}
 }
@@ -359,7 +381,12 @@ func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sql
 // p.mu.
 func (p *sqlSandboxPool) evictLocked() []*sqlSandbox {
 	var victims []*sqlSandbox
-	for len(p.lru) > p.limits.maxProjects {
+	// In-flight opens hold memory too, so they count against the cap: without
+	// them a burst of cold queries overshoots maxProjects by its own width. Only
+	// entries in the map can be evicted — two opens racing for one slot leave
+	// the second over the cap for as long as neither has registered, which is
+	// what maxConcurrent, not this loop, bounds.
+	for len(p.lru) > 0 && len(p.lru)+len(p.opening) > p.limits.maxProjects {
 		victim := p.lru[len(p.lru)-1]
 		sb, ok := p.sandboxes[victim]
 		if !ok {
@@ -452,6 +479,9 @@ func (p *sqlSandboxPool) liveChildren() int {
 	return len(p.sandboxes)
 }
 
+// sandboxDirSeq names each child's spill directory uniquely.
+var sandboxDirSeq atomic.Uint64
+
 // sqlSandbox is one project's isolated in-memory DuckDB, as a child process.
 type sqlSandbox struct {
 	projectID string
@@ -516,7 +546,11 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 	// duckdb_temp_storage-* and two instances sharing one directory collide.
 	tmpDir := ""
 	if base := pool.main.tmpDir(); base != "" {
-		tmpDir = filepath.Join(base, "sandbox-"+projectID)
+		// One directory per child, not per project: drop() removes the
+		// directory after reaping, and a replacement for the same project can
+		// already be running by then — sharing the path would delete a live
+		// child's spill out from under it.
+		tmpDir = filepath.Join(base, fmt.Sprintf("sandbox-%s-%d", projectID, sandboxDirSeq.Add(1)))
 		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 			return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
 				fmt.Sprintf("analytics sandbox tmp dir: %v", err))
@@ -620,7 +654,7 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 // that share the timestamp of the last copied row. A count drift (a delete
 // in the main file — not possible today) rebuilds the table.
 func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
-	cursor, err := sb.call(ctx, sandboxRequest{Op: "cursor", Table: "events"})
+	cursor, err := sb.call(ctx, sandboxRequest{Op: "cursor"})
 	if err != nil {
 		return err
 	}
@@ -662,6 +696,7 @@ func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string,
 // batches. The child never sees the file — only values.
 func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int) error {
 	batch := make([][]any, 0, sandboxCopyBatch)
+	batchBytes := 0
 	err := sb.pool.main.Read(ctx, func(conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
@@ -683,6 +718,7 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 				return err
 			}
 			batch = batch[:0]
+			batchBytes = 0
 			return nil
 		}
 		for rows.Next() {
@@ -694,11 +730,28 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 				return err
 			}
 			row := make([]any, nCols)
+			size := 0
 			for i := range dest {
 				row[i] = gobSafeValue(*(dest[i].(*any)))
+				size += frameValueBytes(row[i])
+			}
+			if size > sandboxMaxRowBytes {
+				return sandboxError(SandboxKindBytes, ErrSandboxBytes,
+					fmt.Sprintf("one %s row is %d bytes, above the %d-byte sandbox row limit", table, size, sandboxMaxRowBytes))
+			}
+			// Flush before the row that would push the frame past what the child
+			// will read, so the row itself only has to fit on its own.
+			if batchBytes > 0 && batchBytes+size > sandboxFrameMaxBytes-sandboxMaxRowBytes {
+				if err := flush(); err != nil {
+					return err
+				}
 			}
 			batch = append(batch, row)
-			if len(batch) == sandboxCopyBatch {
+			batchBytes += size
+			// Bytes as well as rows: this batch is built in the API's own heap,
+			// so a tenant whose rows carry fat JSON could otherwise make the
+			// trusted process — not the sandbox — the one that dies.
+			if len(batch) == sandboxCopyBatch || batchBytes >= sandboxInsertBatchBytes {
 				if err := flush(); err != nil {
 					return err
 				}
@@ -732,9 +785,6 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 	resp, err := sb.call(ctx, sandboxRequest{Op: "query", SQL: query, Args: safeArgs, DeadlineNanos: deadline})
 	if err != nil {
 		return nil, err
-	}
-	if resp.Kind == "err" {
-		return nil, sandboxError(resp.ErrorKind, sandboxSentinel(resp.ErrorKind), resp.Message)
 	}
 	if resp.Rows == nil {
 		// gob does not carry the nil/empty distinction, and the JSON surface
@@ -781,6 +831,13 @@ func (sb *sqlSandbox) call(ctx context.Context, req sandboxRequest) (sandboxResp
 			sb.markDead()
 			return sandboxResponse{}, sandboxError(SandboxKindChild, ErrSandboxUnavailable,
 				fmt.Sprintf("analytics sandbox stopped responding: %v", r.err))
+		}
+		// Every op converts its error frame here, not at one call site: a
+		// refused cursor, delete or insert is a failed refresh, and a refresh
+		// that reports success while its copy did not happen hands the caller
+		// answers built from a stale or half-copied sandbox.
+		if r.resp.Kind == "err" {
+			return sandboxResponse{}, sandboxError(r.resp.ErrorKind, sandboxSentinel(r.resp.ErrorKind), r.resp.Message)
 		}
 		return r.resp, nil
 	case <-ctx.Done():
@@ -843,6 +900,31 @@ func (sb *sqlSandbox) closeLocked() {
 	sb.pool.reaped.Add(1)
 	if sb.tmpDir != "" {
 		_ = os.RemoveAll(sb.tmpDir)
+	}
+}
+
+// frameValueBytes is the dominant term of one value's encoded size — its text.
+// It approximates what the frame will cost, which is all a batch budget needs.
+func frameValueBytes(v any) int {
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	case []byte:
+		return len(x)
+	case []any:
+		total := 0
+		for _, item := range x {
+			total += frameValueBytes(item)
+		}
+		return total
+	case map[string]any:
+		total := 0
+		for k, item := range x {
+			total += len(k) + frameValueBytes(item)
+		}
+		return total
+	default:
+		return 16
 	}
 }
 
