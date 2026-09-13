@@ -1,8 +1,21 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { init } from '../index';
 
+/** One request the SDK made, as the suite reads it back. */
+interface CapturedCall {
+  path: string;
+  body: {
+    batch: Array<{
+      event: string;
+      distinct_id: string;
+      properties: Record<string, unknown>;
+    }>;
+    [field: string]: unknown;
+  };
+}
+
 function stubFetch() {
-  const calls: Array<{ path: string; body: any }> = [];
+  const calls: CapturedCall[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string | URL | Request, opts?: RequestInit) => {
@@ -71,7 +84,7 @@ describe('init()', () => {
     await ar.flush();
 
     const batch = calls.find((c) => c.path === '/batch')!.body.batch;
-    const pageview = batch.find((e: any) => e.event === 'user.pageview');
+    const pageview = batch.find((e) => e.event === 'user.pageview')!;
     expect(pageview).toBeTruthy();
     expect(pageview.properties.platform).toBe('web');
   });
@@ -85,7 +98,7 @@ describe('init()', () => {
     await ar.flush();
 
     const batch = calls.find((c) => c.path === '/batch')!.body.batch;
-    const click = batch.find((e: any) => e.event === '$autocapture');
+    const click = batch.find((e) => e.event === '$autocapture')!;
     expect(click.properties).toMatchObject({ tag: 'button', label: 'Start trial' });
   });
 
@@ -117,5 +130,62 @@ describe('init()', () => {
     await ar.flush();
 
     expect(calls.filter((c) => c.path === '/batch')).toHaveLength(0);
+  });
+
+  it('applies an init-time clickAllowlist to immediate autocapture', async () => {
+    const calls = stubFetch();
+    document.body.innerHTML = '<button>Plain</button><button data-track="Chosen">Chosen</button>';
+    const ar = init({
+      ...base,
+      autocapture: { pageviews: false },
+      captureConfig: { clickAllowlist: '[data-track]' },
+    });
+
+    document.querySelectorAll('button')[0].click();
+    document.querySelectorAll('button')[1].click();
+    await ar.flush();
+
+    const batch = calls.find((c) => c.path === '/batch')!.body.batch;
+    const labels = batch
+      .filter((e) => e.event === '$autocapture')
+      .map((e) => e.properties.label);
+    // A consumer that constrains click capture must not have to reach past
+    // init() and call installAutocapture itself to do it.
+    expect(labels).toEqual(['Chosen']);
+  });
+
+  it('normalizes a referrer from init-time internalHosts, and keeps an external one', async () => {
+    const calls = stubFetch();
+    const referrer = vi.spyOn(document, 'referrer', 'get');
+
+    referrer.mockReturnValue('https://lohi2.com/doc/truyen/1');
+    let ar = init({ ...base, autocapture: true, captureConfig: { internalHosts: ['lohi2.com'] } });
+    await ar.flush();
+    let pageview = calls.find((c) => c.path === '/batch')!.body.batch.find((e) => e.event === 'user.pageview')!;
+    expect(pageview.properties.$referrer).toBe('');
+
+    calls.length = 0;
+    referrer.mockReturnValue('https://google.com/');
+    ar = init({ ...base, autocapture: true, captureConfig: { internalHosts: ['lohi2.com'] } });
+    await ar.flush();
+    pageview = calls.find((c) => c.path === '/batch')!.body.batch.find((e) => e.event === 'user.pageview')!;
+    expect(pageview.properties.$referrer).toBe('https://google.com/');
+  });
+
+  it('lets an explicit autocapture config override the init default', async () => {
+    const calls = stubFetch();
+    document.body.innerHTML = '<button>Plain</button>';
+    const ar = init({
+      ...base,
+      autocapture: { pageviews: false },
+      captureConfig: { clickAllowlist: '[data-track]' },
+    });
+
+    ar.autocapture({ pageviews: false }, { clickAllowlist: 'button' });
+    document.querySelector('button')!.click();
+    await ar.flush();
+
+    const batch = calls.find((c) => c.path === '/batch')!.body.batch;
+    expect(batch.filter((e) => e.event === '$autocapture')).toHaveLength(1);
   });
 });

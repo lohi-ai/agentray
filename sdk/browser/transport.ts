@@ -30,6 +30,16 @@ export interface TransportOptions {
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * Bounded exponential backoff between delivery attempts, shared by both lanes
+ * so an event batch and an alias wait the same way. Deliberately the promise
+ * constructor rather than `Promise.withResolvers`: this bundle targets ES2018
+ * and ships to browsers we do not get to choose.
+ */
+function backoffDelay(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 8000)));
+}
+
 export class BatchTransport {
   private readonly host: string;
   private readonly apiKey: string;
@@ -37,6 +47,13 @@ export class BatchTransport {
   private readonly flushIntervalMs: number;
   private readonly maxRetries: number;
   private readonly fetchImpl: typeof fetch;
+
+  /**
+   * The identity lane. `identify`/`alias` are not events, so they get their own
+   * queue with the same retry and unload-beacon durability as a batch, while
+   * staying on the endpoints the server actually stitches identity on.
+   */
+  readonly identity: IdentityQueue;
 
   private queue: BatchEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -48,6 +65,12 @@ export class BatchTransport {
     this.flushIntervalMs = opts.flushIntervalMs ?? 3000;
     this.maxRetries = opts.maxRetries ?? 3;
     this.fetchImpl = opts.fetchImpl ?? ((...a) => fetch(...a));
+    this.identity = new IdentityQueue({
+      host: this.host,
+      apiKey: this.apiKey,
+      maxRetries: this.maxRetries,
+      fetchImpl: this.fetchImpl,
+    });
     this.installUnloadFlush();
   }
 
@@ -89,8 +112,7 @@ export class BatchTransport {
       throw new Error(`status ${res.status}`);
     } catch (err) {
       if (attempt + 1 >= this.maxRetries) return; // give up; drop rather than loop
-      const backoff = Math.min(1000 * 2 ** attempt, 8000);
-      await new Promise((r) => setTimeout(r, backoff));
+      await backoffDelay(attempt);
       await this.deliver(batch, attempt + 1);
     }
   }
@@ -116,5 +138,288 @@ export class BatchTransport {
       if (document.visibilityState === 'hidden') beaconFlush();
     });
     window.addEventListener('pagehide', beaconFlush);
+  }
+}
+
+/**
+ * Link an anonymous id to the account it belongs to.
+ *
+ * `/batch` cannot carry this. Batch items have no operation discriminator, the
+ * batch handler never merges a top-level `$set` into event properties, and only
+ * `POST /alias` writes the alias row that identity reads stitch through — so an
+ * `$alias`/`$identify` batch item would be accepted with a 200 and stitch
+ * nothing, silently orphaning the anonymous history it was meant to save.
+ */
+export interface AliasOperation {
+  kind: 'alias';
+  anonymousId: string;
+  distinctId: string;
+}
+
+/** Set traits on the identified person. */
+export interface IdentifyOperation {
+  kind: 'identify';
+  distinctId: string;
+  traits: Record<string, unknown>;
+  timestamp: string;
+}
+
+export type IdentityOperation = AliasOperation | IdentifyOperation;
+
+/** An operation with its wire form already fixed — see `IdentityQueue.encode`. */
+interface QueuedOperation {
+  op: IdentityOperation;
+  path: string;
+  body: string;
+}
+
+export interface IdentityQueueOptions {
+  /** Base URL of the AgentRay server (no trailing slash needed). */
+  host: string;
+  /** Project API key. */
+  apiKey: string;
+  /** Max delivery attempts per operation before it waits for the next flush (default 3). */
+  maxRetries?: number;
+  /** Injected for tests; defaults to the global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Where unconfirmed aliases wait out a page load. One key per alias, named for
+ * the project that owns it, holding ids only — never traits.
+ *
+ * One key per alias rather than one list per origin, for two reasons that both
+ * come down to what a shared blob cannot do. `setItem` and `removeItem` are
+ * atomic for a single key, so two tabs cannot lose each other's alias the way a
+ * read-modify-write of one list can. And the project is part of the name, so a
+ * second AgentRay project on the same origin can never replay — or clear — the
+ * first project's pending link, which would send one tenant's anonymous id to
+ * the other's endpoint and drop the link it was meant to save.
+ */
+const PENDING_ALIAS_PREFIX = 'agentray_pending_alias.';
+
+/**
+ * Most unconfirmed aliases replayed for one project. A login is one alias, and
+ * `identify()` only issues one per `reset()`, so this bound is only reached by a
+ * page stuck in a loop; it keeps that loop from filling the origin's storage.
+ */
+const MAX_PENDING_ALIASES = 8;
+
+type DeliveryOutcome = 'ok' | 'terminal' | 'unsent';
+
+interface PendingAlias {
+  anonymousId: string;
+  distinctId: string;
+  /** Enqueue time, so a replay keeps the order the logins happened in. */
+  at: number;
+}
+
+/** Every unconfirmed alias this project left on this origin, oldest first. */
+function readPendingAliases(apiKey: string): PendingAlias[] {
+  const prefix = `${PENDING_ALIAS_PREFIX}${apiKey}.`;
+  const pending: PendingAlias[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key === null || !key.startsWith(prefix)) continue;
+      const stored = JSON.parse(localStorage.getItem(key) ?? 'null') as {
+        distinctId?: unknown;
+        at?: unknown;
+      } | null;
+      if (typeof stored?.distinctId !== 'string') continue;
+      pending.push({
+        anonymousId: key.slice(prefix.length),
+        distinctId: stored.distinctId,
+        at: typeof stored.at === 'number' ? stored.at : 0,
+      });
+    }
+  } catch {
+    return [];
+  }
+  return pending.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * The identity lane of the transport: a FIFO queue that delivers `alias` and
+ * `identify` operations to their own endpoints, retries transient failures, and
+ * beacons whatever is still unconfirmed when the document goes away.
+ *
+ * It is deliberately not a generic "POST to any path" sender — the two
+ * operations above are the whole surface, so a snippet that ships to someone
+ * else's site cannot be pointed at another endpoint.
+ */
+export class IdentityQueue {
+  private readonly host: string;
+  private readonly apiKey: string;
+  private readonly maxRetries: number;
+  private readonly fetchImpl: typeof fetch;
+
+  /**
+   * The head stays queued while it is in flight, so an unload beacon still
+   * carries it: `sendBeacon` returning true means the browser accepted the
+   * request, not that the server answered it.
+   */
+  private queue: QueuedOperation[] = [];
+  private pumping: Promise<void> | null = null;
+
+  /**
+   * Called once `/alias` is confirmed by a 2xx. Beacons and retries never call
+   * it — acting on those would drop local identity state for a request nobody
+   * has acknowledged.
+   */
+  onAliasConfirmed?: (op: AliasOperation) => void;
+
+  constructor(opts: IdentityQueueOptions) {
+    this.host = opts.host.replace(/\/$/, '');
+    this.apiKey = opts.apiKey;
+    this.maxRetries = opts.maxRetries ?? 3;
+    this.fetchImpl = opts.fetchImpl ?? ((...a) => fetch(...a));
+    this.installUnloadBeacon();
+  }
+
+  /** Queue an operation and start delivering it. */
+  enqueue(op: IdentityOperation): void {
+    if (op.kind === 'alias') {
+      // A single atomic write, so a second tab writing its own alias at the
+      // same moment cannot make this one disappear.
+      try {
+        localStorage.setItem(
+          `${PENDING_ALIAS_PREFIX}${this.apiKey}.${op.anonymousId}`,
+          JSON.stringify({ distinctId: op.distinctId, at: Date.now() }),
+        );
+      } catch {}
+    }
+    this.queue.push({ op, ...this.encode(op) });
+    void this.pump();
+  }
+
+  /**
+   * Re-queue every alias that an earlier page load stored and never got
+   * acknowledged, oldest first. Safe to replay: the server's alias write is
+   * idempotent on `(project_id, anonymous_id)`.
+   */
+  restorePendingAlias(): void {
+    const pending = readPendingAliases(this.apiKey);
+    for (const stale of pending.slice(0, -MAX_PENDING_ALIASES)) {
+      try {
+        localStorage.removeItem(`${PENDING_ALIAS_PREFIX}${this.apiKey}.${stale.anonymousId}`);
+      } catch {}
+    }
+    for (const alias of pending.slice(-MAX_PENDING_ALIASES)) {
+      const alreadyQueued = this.queue.some(
+        (queued) =>
+          queued.op.kind === 'alias' && queued.op.anonymousId === alias.anonymousId,
+      );
+      if (alreadyQueued) continue;
+      this.enqueue({
+        kind: 'alias',
+        anonymousId: alias.anonymousId,
+        distinctId: alias.distinctId,
+      });
+    }
+  }
+
+  /** Deliver what is queued; resolves when every operation has settled or stalled. */
+  flush(): Promise<void> {
+    return this.pump();
+  }
+
+  private pump(): Promise<void> {
+    if (this.pumping !== null) return this.pumping;
+    this.pumping = this.drain().finally(() => {
+      this.pumping = null;
+    });
+    return this.pumping;
+  }
+
+  private async drain(): Promise<void> {
+    while (this.queue.length > 0) {
+      const queued = this.queue[0];
+      const outcome = await this.deliver(queued, 0);
+      // Still unacknowledged: keep it for the next flush or the unload beacon
+      // rather than dropping the only record of how two ids are related.
+      if (outcome === 'unsent') return;
+      this.queue.shift();
+      const { op } = queued;
+      if (op.kind !== 'alias') continue;
+      // Only this project's own key, and only after it settled: a 4xx can never
+      // be fixed by replaying it, and another project's marker is not ours.
+      try {
+        localStorage.removeItem(`${PENDING_ALIAS_PREFIX}${this.apiKey}.${op.anonymousId}`);
+      } catch {}
+      if (outcome === 'ok') this.onAliasConfirmed?.(op);
+    }
+  }
+
+  private async deliver(queued: QueuedOperation, attempt: number): Promise<DeliveryOutcome> {
+    try {
+      const res = await this.fetchImpl(`${this.host}${queued.path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: queued.body,
+        // Deliberately no `keepalive`: it caps a request body near 64 KiB and
+        // `/identify` carries caller-authored traits of arbitrary size. Unload
+        // durability is the beacon's job, not this flag's.
+      });
+      // 4xx (bad key, malformed) is not retryable — retrying can't fix it.
+      if (res.ok) return 'ok';
+      if (res.status >= 400 && res.status < 500) return 'terminal';
+      throw new Error(`status ${res.status}`);
+    } catch {
+      if (attempt + 1 >= this.maxRetries) return 'unsent';
+      await backoffDelay(attempt);
+      return this.deliver(queued, attempt + 1);
+    }
+  }
+
+  /**
+   * The wire form of an operation, serialized the moment it is enqueued. Doing
+   * it here rather than at send time is what makes a retry, a deferred send
+   * behind a slow alias, and a beacon all carry the values the caller passed —
+   * a caller that reuses a traits object can no longer change what ships.
+   */
+  private encode(op: IdentityOperation): { path: string; body: string } {
+    if (op.kind === 'alias') {
+      return {
+        path: '/alias',
+        body: JSON.stringify({
+          api_key: this.apiKey,
+          anonymous_id: op.anonymousId,
+          distinct_id: op.distinctId,
+        }),
+      };
+    }
+    return {
+      path: '/identify',
+      body: JSON.stringify({
+        api_key: this.apiKey,
+        distinct_id: op.distinctId,
+        $set: op.traits,
+        timestamp: op.timestamp,
+      }),
+    };
+  }
+
+  /**
+   * On page hide/unload, beacon every unconfirmed operation to its own endpoint.
+   * Nothing is cleared here: a beacon has no acknowledgement, so the page that
+   * comes back from bfcache still has to deliver and confirm it.
+   */
+  private installUnloadBeacon(): void {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    const beaconAll = () => {
+      if (this.queue.length === 0) return;
+      if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return;
+      for (const queued of this.queue) {
+        navigator.sendBeacon(
+          `${this.host}${queued.path}`,
+          new Blob([queued.body], { type: 'application/json' }),
+        );
+      }
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') beaconAll();
+    });
+    window.addEventListener('pagehide', beaconAll);
   }
 }

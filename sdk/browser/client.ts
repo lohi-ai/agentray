@@ -18,6 +18,7 @@
  */
 
 import { DEFAULT_PLATFORM, withPlatform } from './platform';
+import { IdentityQueue, type AliasOperation } from './transport';
 
 const ANON_ID_KEY = 'agentray_anon_id';
 
@@ -53,12 +54,19 @@ export interface AgentRayConfig {
    * running inside the iOS app, which should report `"ios"`.
    */
   platform?: string;
+  /**
+   * Delivery lane for `identify`/`alias`. `init()` passes the transport's lane
+   * so identity work shares one queue with the session; a standalone client
+   * gets its own.
+   */
+  identity?: IdentityQueue;
 }
 
 export class AgentRayClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly platform: string;
+  private readonly identity: IdentityQueue;
   private distinctId: string;
   private anonId: string | null;
 
@@ -69,6 +77,11 @@ export class AgentRayClient {
     const anon = getOrCreateAnonId();
     this.anonId = anon;
     this.distinctId = anon;
+    this.identity =
+      config.identity ?? new IdentityQueue({ host: this.apiUrl, apiKey: this.apiKey });
+    this.identity.onAliasConfirmed = (op) => this.forgetAliasedAnonymousId(op);
+    // An alias that never got a 2xx is replayed before any new identity work.
+    this.identity.restorePendingAlias();
   }
 
   /**
@@ -87,24 +100,25 @@ export class AgentRayClient {
   /**
    * Identify the current user. If a prior anonymous session existed, links it
    * to the user ID via POST /alias so history is not lost.
+   *
+   * Both requests go through the identity queue: a transient failure retries,
+   * and anything still unconfirmed rides the unload beacon instead of being
+   * lost with the tab.
    */
   identify(userId: string, traits: Record<string, unknown> = {}): void {
     if (this.anonId !== null && this.anonId !== userId) {
-      this.post('/alias', {
-        api_key: this.apiKey,
-        anonymous_id: this.anonId,
-        distinct_id: userId,
+      this.identity.enqueue({
+        kind: 'alias',
+        anonymousId: this.anonId,
+        distinctId: userId,
       });
-      try {
-        localStorage.removeItem(ANON_ID_KEY);
-      } catch {}
     }
     this.anonId = null;
     this.distinctId = userId;
-    this.post('/identify', {
-      api_key: this.apiKey,
-      distinct_id: userId,
-      $set: traits,
+    this.identity.enqueue({
+      kind: 'identify',
+      distinctId: userId,
+      traits,
       timestamp: new Date().toISOString(),
     });
   }
@@ -114,16 +128,16 @@ export class AgentRayClient {
    * Prefer `identify()` — this is for advanced cases where you manage IDs yourself.
    */
   alias(anonymousId: string, canonicalId: string): void {
-    this.post('/alias', {
-      api_key: this.apiKey,
-      anonymous_id: anonymousId,
-      distinct_id: canonicalId,
-    });
+    this.identity.enqueue({ kind: 'alias', anonymousId, distinctId: canonicalId });
   }
 
   /**
    * Reset to a new anonymous session. Call on logout so the next visitor on
    * this device gets a fresh ID and doesn't inherit the logged-out user's history.
+   *
+   * Purely local: it neither sends anything nor cancels identity work already
+   * issued, because dropping a pending alias here would unlink the history of
+   * the user who just left.
    */
   reset(): void {
     const newAnon = generateId();
@@ -137,6 +151,22 @@ export class AgentRayClient {
   /** Returns the current distinct ID (anonymous UUID or identified user ID). */
   getDistinctId(): string {
     return this.distinctId;
+  }
+
+  /**
+   * Drop the local anonymous id once the server has confirmed the alias. The
+   * compare-and-delete matters: `reset()` may already have minted the next
+   * visitor's id, and that one is not ours to erase.
+   */
+  private forgetAliasedAnonymousId(op: AliasOperation): void {
+    let current: string | null = null;
+    try {
+      current = localStorage.getItem(ANON_ID_KEY);
+    } catch {}
+    if (current === null || current !== op.anonymousId) return;
+    try {
+      localStorage.removeItem(ANON_ID_KEY);
+    } catch {}
   }
 
   private post(path: string, body: unknown): void {
