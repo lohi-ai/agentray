@@ -115,6 +115,13 @@ ar.identify('user-123', { email: 'alice@example.com', name: 'Alice' });
 // All subsequent capture() calls use 'user-123'.
 ```
 
+The link is durable, not fire-and-forget: `identify()` sends `POST /alias` then
+`POST /identify` on the SDK's identity lane, which retries a transient failure
+and beacons whatever is still unconfirmed on page hide. An alias that never got
+a `2xx` is replayed on the next page load, and the anonymous ID is kept until
+the server confirms it — that ID is the only thing that can still join the two
+histories.
+
 ### Reset on logout
 
 ```ts
@@ -128,6 +135,27 @@ Use `alias()` when you manage IDs yourself and want to link them explicitly.
 ```ts
 ar.alias('anon-uuid-from-cookie', 'user-123');
 ```
+
+### Privacy: honoring DNT and GPC
+
+`respectDoNotTrack` is **off by default**: importing the SDK does not make a
+site start discarding events because of a browser header nobody asked it to
+read. Opt in when the product has promised the visitor an answer:
+
+```ts
+const ar = init({ host, apiKey, respectDoNotTrack: true });
+```
+
+With it on, `init()` reads the signal before constructing anything and returns
+an inert facade when `navigator.globalPrivacyControl === true`, or
+`navigator.doNotTrack` is `'1'` or `'yes'`. Suppressed means zero network — no
+`fetch`, no `sendBeacon` on page hide — no anonymous ID minted or read, no
+listeners or timers installed, and nothing written to `localStorage`.
+`getDistinctId()` returns `''`, `flush()` resolves immediately, and every method
+remains safe to call on a page that expects analytics to be running. `null`,
+`undefined`, `'0'`, `'no'`, and a missing `navigator` (SSR, prerender, worker)
+assert no preference and collect normally. The option is read once per
+`init()`; a changed preference needs a new `init()`.
 
 ### Which app an event came from
 
