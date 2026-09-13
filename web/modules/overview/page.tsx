@@ -503,7 +503,7 @@ export function OverviewPage() {
                       />
                     </div>
                   </div>
-                  <p className="text-xs text-[var(--color-text-secondary)]">Downloads, store impressions, and store conversion are Not available: AgentRay never infers them from SDK events.</p>
+                  <p className="text-xs text-[var(--color-text-secondary)]">Unverified acquisition metrics are Not available: AgentRay shows only project-scoped pageviews and attributed sources.</p>
                 </div>
               </MetricGroup>
 
