@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentRay · Overview states — design concept</title>
+<link rel="stylesheet" href="../../web/app/globals.css">
+<style>
+/* Disposable design artifact. Tokens consumed from ../../web/app/globals.css (linked above).
+   Mapping: AppShell/SideNav, PageShell, Panel, StatsStrip, Chart, BarRows,
+   Callout, EmptyState, Segment, StatusPill, Button. No production behavior or
+   external assets. Every figure on this page is illustrative sample data. */
+*{box-sizing:border-box}
+body{margin:0;background:var(--background);color:var(--foreground);font:var(--fs-sm)/1.6 var(--font-sans,sans-serif)}
+a{color:inherit;text-decoration:none}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--primary);outline-offset:4px}
+a:hover{background:var(--surface-3)}
+.skip{position:fixed;top:-100px;left:var(--space-4);z-index:3;padding:var(--space-3);background:var(--surface-2)}
+.skip:focus{top:var(--space-4)}
+.shell{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:100vh}
+.sidebar{padding:var(--space-6) var(--space-4);border-right:1px solid var(--border);position:sticky;top:0;height:100vh}
+.brand{font-size:var(--fs-lg);font-weight:650;margin-bottom:var(--space-6)}
+.project{padding:var(--space-3);background:var(--surface-2);border-radius:var(--radius-md);margin-bottom:var(--space-6)}
+nav{display:grid;gap:var(--space-1)}
+nav a{min-height:44px;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md)}
+nav a[aria-current]{background:var(--surface-3);color:var(--primary)}
+nav .sub{padding-left:var(--space-6);font-size:var(--fs-xs);min-height:44px;white-space:nowrap}
+nav .sub2{padding-left:var(--space-8,40px);color:var(--muted-foreground);display:flex;align-items:center;min-height:44px}
+nav .off{color:var(--muted-foreground)}
+.navgroup{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground);padding:var(--space-3) var(--space-3) var(--space-1)}
+main{max-width:1400px;width:100%;padding:var(--space-6);min-width:0}
+.muted,small{color:var(--muted-foreground)}
+small{font-size:var(--fs-xs)}
+.unavail{color:var(--muted-foreground)}
+h1,h2,h3,p{margin:0}
+h1{font-size:var(--fs-lg)}
+h2{font-size:var(--fs-md)}
+h3{font-size:var(--fs-sm)}
+.stack{display:grid;gap:var(--space-4)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);flex-wrap:wrap}
+.label{font-size:var(--fs-xs);color:var(--muted-foreground)}
+.notice{padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-md)}
+.panel{padding:var(--space-4);border-radius:var(--radius-lg);background:var(--surface-1);min-width:0}
+.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));background:var(--surface-1);border-radius:var(--radius-lg)}
+.stats3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.stats4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.stat{padding:var(--space-4);display:grid;gap:var(--space-1);align-content:start}
+.value{font-size:var(--fs-lg);font-weight:650;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:var(--space-4)}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--space-4)}
+.button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:var(--space-2) var(--space-4);border-radius:var(--radius-md);border:1px solid var(--border);font-weight:550;background:none;color:inherit;font:inherit;cursor:pointer}
+.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+.primary:hover{background:var(--primary);filter:brightness(1.1)}
+.tag{color:var(--data);font-size:var(--fs-xs);white-space:nowrap}
+.warn{color:var(--warning)}
+.pill{display:inline-flex;align-items:center;gap:var(--space-2);border-radius:20px;background:var(--surface-2);padding:var(--space-1) var(--space-2);font-size:var(--fs-xs)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success)}
+.dot.warn{background:var(--warning)}
+.dot.err{background:var(--danger)}
+.dot.off{background:var(--muted-foreground)}
+.callout{padding:var(--space-4);border-radius:var(--radius-lg);background:var(--surface-1);border-left:3px solid var(--warning)}
+.callout .clabel{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--muted-foreground)}
+.callout .ctitle{font-size:var(--fs-sm);font-weight:600}
+.callout .cdetail{font-size:var(--fs-xs);color:var(--muted-foreground)}
+.seg{display:inline-flex;gap:2px;background:var(--surface-2);border-radius:var(--radius-md);padding:2px;flex-wrap:wrap}
+.seg a,.seg button{min-height:44px;display:inline-flex;align-items:center;padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);font-size:var(--fs-xs);background:none;border:0;color:inherit;font:inherit;cursor:pointer}
+.seg a[aria-current],.seg button[aria-current]{background:var(--surface-4);color:var(--foreground)}
+[hidden]{display:none!important}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+th,td{text-align:left;padding:var(--space-3) var(--space-2);border-bottom:1px solid var(--border)}
+th{color:var(--muted-foreground);font-weight:500}
+td:last-child,th:last-child{text-align:right}
+.table-wrap{overflow:auto}
+svg{width:100%;height:auto}
+svg text{font-family:var(--font-sans,sans-serif);font-size:var(--fs-xs);fill:var(--muted-foreground)}
+.steps{display:grid;gap:var(--space-3);padding-left:var(--space-6);margin:0}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:var(--space-2) 0;border-bottom:1px solid var(--border)}
+.bar:last-child{border-bottom:0}
+.bar .track{height:6px;border-radius:3px;background:color-mix(in srgb,var(--data) 55%,transparent);display:inline-block;vertical-align:middle;margin-right:var(--space-2)}
+.mono{font-family:var(--font-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums}
+details{font-size:var(--fs-xs);color:var(--muted-foreground)}
+summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.state{display:none}
+.state.on{display:grid;gap:var(--space-4)}
+.statelist{display:flex;flex-wrap:wrap;gap:var(--space-2)}
+.statelist a{min-height:44px;display:inline-flex;align-items:center;padding:var(--space-2) var(--space-3);border:1px solid var(--border);border-radius:var(--radius-md);font-size:var(--fs-xs)}
+.statelist a[aria-current]{background:var(--surface-3);border-color:var(--primary);color:var(--primary)}
+.footer{padding-block:var(--space-6)}
+@media(max-width:900px){
+  .shell{grid-template-columns:1fr}
+  .sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--border);padding:var(--space-4)}
+  .brand,.project{margin-bottom:var(--space-3)}
+  nav{display:flex;flex-wrap:wrap}
+  nav a{padding:var(--space-2) var(--space-3)}
+  .navgroup{width:100%;padding-top:var(--space-2)}
+  main{padding:var(--space-4)}
+  .grid,.grid2{grid-template-columns:1fr}
+  .stats,.stats3,.stats4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand">AgentRay</div>
+  <div class="project"><strong>Sample product</strong><br><small>Website + iOS app</small></div>
+  <nav aria-label="Product navigation">
+    <div class="navgroup">Product</div>
+    <a href="#overview" aria-current="location">Overview</a>
+    <div class="navgroup">Understand</div>
+    <a href="#analytics">Analytics</a>
+    <span class="sub sub2">Acquisition <span class="tag">· Coming soon</span></span>
+    <span class="sub sub2">Monetization <span class="tag">· Coming soon</span></span>
+    <span class="sub sub2">Usage <span class="tag">· Coming soon</span></span>
+    <a href="#people">People</a>
+    <a href="#data">Data</a>
+    <div class="navgroup">Work</div>
+    <a href="#plans">Plans</a>
+    <a href="#agents">Agents</a>
+    <div class="navgroup">Workspace</div>
+    <a href="#settings">Settings</a>
+  </nav>
+</aside>
+<main id="content" class="stack">
+<div class="notice"><strong>Design concept · every figure is illustrative sample data</strong><br>
+<small>Pick a state to review. Nothing here is connected; no action runs. In production a metric with no verified source renders its state label — never a number.</small></div>
+
+<div class="statelist" role="group" aria-label="Overview states">
+  <a href="#state-populated" data-state="populated">Populated</a>
+  <a href="#state-grouped" data-state="grouped">Grouped metrics</a>
+  <a href="#state-firstrun" data-state="firstrun">First run</a>
+  <a href="#state-nodata" data-state="nodata">No data</a>
+  <a href="#state-stale" data-state="stale">Stale</a>
+  <a href="#state-error" data-state="error">Error</a>
+  <a href="#state-uninstrumented" data-state="uninstrumented">Uninstrumented monetization</a>
+</div>
+
+<!-- ================= POPULATED ================= -->
+<section class="state" id="state-populated" aria-label="Populated overview">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
+    <div class="row" role="group" aria-label="Overview controls">
+      <span class="seg" role="group" aria-label="Platform"><a href="#state-populated" aria-current="true">All platforms</a><a href="#state-populated">Web</a><a href="#state-populated">iOS</a></span>
+      <span class="seg" role="group" aria-label="Time range"><a href="#state-populated">Today</a><a href="#state-populated" aria-current="true">7 days</a><a href="#state-populated">30 days</a></span>
+    </div>
+  </header>
+  <div class="row"><small>All platforms · project timezone</small><span class="pill"><span class="dot"></span>Data fresh · last event received 2 min ago</span></div>
+
+  <div class="stats" role="group" aria-label="Headline metrics">
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>▲ 12% vs previous 7 days</small></div>
+    <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
+    <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
+    <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible · within 24h</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
+  </div>
+
+  <details><summary>How these numbers are computed</summary>
+    <p>Active people: distinct canonical people with qualifying human product activity; bot, test, internal and server-only background events excluded. New people: first observed qualifying activity across retained history — not signup or download. Sessions: one versioned session rule across SDK and server. Activation: project-chosen activation event within 24 hours of first activity. Revenue: requires a trusted billing source; unconfigured shows “Set up”, never zero.</p>
+  </details>
+
+  <div class="grid">
+    <article class="panel stack"><div class="row"><h2>Active people per day</h2><a class="button" href="#analytics">Explore</a></div>
+      <svg viewBox="0 0 600 225" role="img" aria-labelledby="t1 t2"><title id="t1">Daily active people, Sep 5–11</title><desc id="t2">180, 240, 220, 290, 280, 350, 410 active people per day. The weekly distinct count is 1,240; daily counts overlap.</desc><g stroke="var(--border)"><path d="M48 24H580M48 99H580M48 174H580"/></g><text x="5" y="28">500</text><text x="5" y="103">250</text><text x="25" y="178">0</text><path d="M48 120L136 102L224 108L312 87L400 90L488 69L576 51" fill="none" stroke="var(--data)" stroke-width="3"/><g><text x="32" y="206">Sep 5</text><text x="296" y="206">Sep 8</text><text x="542" y="206">Sep 11</text></g></svg>
+      <small>Daily: 180 · 240 · 220 · 290 · 280 · 350 · 410. Weekly people are deduplicated across days — daily counts cannot be summed.</small>
+    </article>
+    <article class="panel stack"><h2>Retention</h2>
+      <p><strong>Day 1: 41%</strong><br><small>132 of 320 returned</small></p>
+      <p><strong>Day 7: 24%</strong><br><small>48 of 200 in the mature Aug 29–Sep 4 cohort</small></p>
+      <p><strong>Day 30: <span class="unavail">Not ready</span></strong><br><small>No cohort has matured 30 days yet</small></p>
+      <small>Lifetime cohorts — a person counts from their first-ever event, not the selected range.</small>
+    </article>
+  </div>
+
+  <div class="grid2">
+    <article class="panel"><h2>Top pages</h2>
+      <div class="bar"><span><span class="track" style="width:88px"></span><span class="mono">/pricing</span></span><span class="mono">612</span></div>
+      <div class="bar"><span><span class="track" style="width:64px"></span><span class="mono">/docs/getting-started</span></span><span class="mono">448</span></div>
+      <div class="bar"><span><span class="track" style="width:40px"></span><span class="mono">/</span></span><span class="mono">281</span></div>
+      <small>Unit: pageviews</small>
+    </article>
+    <article class="panel"><h2>Top sources</h2>
+      <div class="bar"><span><span class="track" style="width:88px"></span>Direct / unknown</span><span class="mono">540</span></div>
+      <div class="bar"><span><span class="track" style="width:52px"></span>google</span><span class="mono">318</span></div>
+      <div class="bar"><span><span class="track" style="width:30px"></span>newsletter</span><span class="mono">184</span></div>
+      <small>Unit: sessions · “Direct / unknown” is shown explicitly, never dropped</small>
+    </article>
+  </div>
+
+  <article class="panel stack"><div class="row"><h2>Best next step</h2><span class="tag">From Plans · evidence-backed</span></div>
+    <p><strong>Help new users finish their first project.</strong> 80 of 320 new users activated within 24 hours this week — down from 31% the previous period.</p>
+    <p class="muted"><small>Evidence: activation metric v3 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago. Observation, not a tested cause.</small></p>
+    <div class="row"><a class="button primary" href="#plans">Open the finding</a><a class="button" href="#agents">Ask your agent to investigate</a></div>
+  </article>
+
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 2 min ago</small></div>
+    <div class="row" style="justify-content:flex-start;gap:var(--space-6)">
+      <span>8,412 events in range</span><span>6,930 qualifying</span>
+      <span class="muted">Last occurred Sep 11 23:58</span><span class="muted">Pipeline lag: not measured yet</span>
+    </div>
+    <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>PostgreSQL</td><td>Accounts, subscriptions</td><td><span class="pill"><span class="dot"></span>Synced 5 min ago</span></td></tr>
+    </tbody></table>
+  </article>
+</section>
+
+<!-- ================= GROUPED METRICS (AgentRay data only) ================= -->
+<section class="state" id="state-grouped" aria-label="Overview with grouped AgentRay metrics">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
+    <div class="row" role="group" aria-label="Overview controls">
+      <span class="seg" role="group" aria-label="Platform"><a href="#state-grouped" aria-current="true">All platforms</a><a href="#state-grouped">Web</a><a href="#state-grouped">iOS</a><a href="#state-grouped">Android</a></span>
+      <span class="seg" role="group" aria-label="Time range"><a href="#state-grouped">Today</a><a href="#state-grouped" aria-current="true">7 days</a><a href="#state-grouped">30 days</a></span>
+    </div>
+  </header>
+  <div class="stats" role="group" aria-label="Headline metrics">
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Follows the platform filter</small></div>
+    <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
+    <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
+    <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
+  </div>
+  <div class="callout"><span class="clabel">Provenance</span>
+    <p class="cdetail">Every figure below comes from this project’s own events, on the project timezone. Each group names its metric version, range, coverage and freshness; a metric with no verified source shows its state label rather than a number. Sample values shown for design review.</p>
+  </div>
+
+  <div id="grouped-groups" class="stack">
+  <article class="panel stack"><div class="row"><h2>Acquisition</h2><a class="button" href="#analytics">See more</a></div>
+    <div class="stats stats3">
+      <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity · project timezone</small></div>
+      <div class="stat"><span class="label">Top source</span><span class="value">google</span><small>318 sessions · “Direct / unknown” shown explicitly</small></div>
+      <div class="stat"><span class="label">Top landing page</span><span class="value mono">/pricing</span><small>612 pageviews</small></div>
+      <div class="stat"><span class="label">Activation rate</span><span class="value">25%</span><small>80 of 320 eligible · within 24h of first activity</small></div>
+    </div>
+    <small>All four tiles are derived from this project’s own events. Nothing here is a store metric — no downloads, impressions or store conversion exist in this product.</small>
+    <small class="muted">Provenance: acquisition metric v2 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago</small>
+  </article>
+
+  <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button" href="#analytics">See more</a></div>
+    <div class="stats stats3">
+      <div class="stat"><span class="label">Instrumented revenue</span><span class="value unavail">Set up</span><small>No trusted billing source connected</small></div>
+      <div class="stat"><span class="label">Paying people</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchases</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchase→repeat</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+    </div>
+    <small>One currency per figure; unlike currencies are never summed. With no billing source every tile shows <em>Set up</em> with the required instrumentation named — never zero, never a sample number.</small>
+    <small class="muted">Provenance: monetization metric v1 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago</small>
+  </article>
+
+  <article class="panel stack"><div class="row"><h2>Usage</h2><a class="button" href="#analytics">See more</a></div>
+    <div class="stats stats4">
+      <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Weekly distinct · follows the platform filter</small></div>
+      <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
+      <div class="stat"><span class="label">Retention D1</span><span class="value">41%</span><small>132 of 320 returned</small></div>
+      <div class="stat"><span class="label">Retention D7</span><span class="value">24%</span><small>Mature Aug 29–Sep 4 cohort</small></div>
+      <div class="stat"><span class="label">Retention D30</span><span class="value unavail">Not ready</span><small>No cohort has matured 30 days yet</small></div>
+      <div class="stat"><span class="label">Top action</span><span class="value mono">project_created</span><small>412 events</small></div>
+    </div>
+    <small>Retention is lifetime-cohort based — a person counts from their first-ever event, not the selected range. An immature cohort shows <em>Not ready</em>, never a partial number.</small>
+    <small class="muted">Provenance: usage metric v4 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago</small>
+  </article>
+
+  <article class="panel stack"><div class="row"><h2>Best next step</h2><span class="tag">From Plans · evidence-backed</span></div>
+    <p><strong>Help new users finish their first project.</strong> 80 of 320 new users activated within 24 hours this week — down from 31% the previous period.</p>
+    <p class="muted"><small>Evidence: activation metric v3 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago. Observation, not a tested cause.</small></p>
+    <div class="row"><a class="button primary" href="#plans">Open the finding</a><a class="button" href="#agents">Ask your agent to investigate</a></div>
+  </article>
+
+  </div>
+
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 2 min ago</small></div>
+    <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>PostgreSQL</td><td>Accounts, subscriptions</td><td><span class="pill"><span class="dot"></span>Synced 5 min ago</span></td></tr>
+    </tbody></table>
+    <small>One day-boundary convention: the project timezone. Every label above uses it.</small>
+  </article>
+</section>
+
+<!-- ================= FIRST RUN ================= -->
+<section class="state" id="state-firstrun" aria-label="First run — no events yet">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Your product’s numbers appear here once events arrive.</p></div></header>
+  <article class="panel stack"><h2>Send your first event</h2>
+    <ol class="steps">
+      <li><strong>Choose your platform</strong> — Web or App — and install the SDK, or copy a ready-made setup task for your coding agent.</li>
+      <li><strong>Open your app or site</strong> and verify the test event arrives with the right platform and identity.</li>
+      <li><strong>Come back here</strong> — the overview fills in once real usage lands. Test events never count toward these numbers.</li>
+    </ol>
+    <div class="row"><a class="button primary" href="#data">Set up the SDK</a><a class="button" href="#agents">Copy an agent setup task</a></div>
+  </article>
+  <article class="panel stack"><h2>What this overview will show you</h2>
+    <p class="muted">Once events arrive, this page answers three questions without any setup: who is arriving, whether they activate, and whether they come back. When a pattern is worth acting on, a <strong>Best next step</strong> panel appears here with the evidence behind it — the metric, its range, and its freshness.</p>
+    <p class="muted"><small><strong>Example — not your data.</strong> “Activation fell from 31% to 25% this week; 80 of 320 new users finished setup.” A real finding replaces this once your data lands.</small></p>
+  </article>
+  <article class="panel"><h2>Data status</h2><p class="muted">No connected data sources yet. Capture keys are write-only; management credentials stay with you.</p></article>
+</section>
+
+<!-- ================= NO DATA ================= -->
+<section class="state" id="state-nodata" aria-label="No data in range">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
+    <span class="seg" role="group" aria-label="Platform"><a href="#state-nodata">All platforms</a><a href="#state-nodata">Web</a><a href="#state-nodata" aria-current="true">iOS</a></span>
+  </header>
+  <article class="panel stack" style="text-align:center;padding-block:var(--space-6)">
+    <h2>No events match this filter</h2>
+    <p class="muted">Nothing arrived for iOS in the selected range. Events are arriving on other platforms.</p>
+    <div class="row" style="justify-content:center"><a class="button" href="#state-nodata">Reset to all platforms, 7 days</a></div>
+  </article>
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 4 min ago</small></div>
+    <p>1,204 events in range on other platforms · 0 matching the active filter.</p>
+  </article>
+</section>
+
+<!-- ================= STALE ================= -->
+<section class="state" id="state-stale" aria-label="Stale — source gone quiet">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div></header>
+  <div class="callout"><span class="clabel">Data freshness</span>
+    <p class="ctitle">Last event received 3 days ago</p>
+    <p class="cdetail">Numbers below cover the selected range but the source has gone quiet — check that events are still being sent. Last-known figures stay on screen with their timestamp; they are not re-labeled as current.</p>
+  </div>
+  <div class="stats" role="group" aria-label="Headline metrics">
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small class="warn">As of Sep 8 · source quiet</small></div>
+    <div class="stat"><span class="label">New people</span><span class="value">320</span><small class="warn">As of Sep 8</small></div>
+    <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small class="warn">As of Sep 8</small></div>
+    <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small class="warn">As of Sep 8</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
+  </div>
+  <article class="panel"><div class="row"><h2>Data status</h2><span class="pill"><span class="dot warn"></span>Quiet — nothing received for 3 days</span></div>
+    <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot warn"></span>Quiet since Sep 8</span></td></tr>
+      <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot warn"></span>Quiet since Sep 8</span></td></tr>
+    </tbody></table>
+  </article>
+</section>
+
+<!-- ================= ERROR ================= -->
+<section class="state" id="state-error" aria-label="Error — overview unavailable">
+  <header class="row"><div><h1>Overview</h1><p class="muted">The last complete days, at a glance.</p></div></header>
+  <div class="callout" role="status"><span class="clabel">Overview unavailable</span>
+    <p class="ctitle">Could not load the overview</p>
+    <p class="cdetail">The overview request failed. Your data is unchanged — this is a read problem, not a data problem.</p>
+    <p style="margin-top:var(--space-3)"><a class="button" href="#state-error">Retry</a></p>
+  </div>
+  <article class="panel"><h2>Data status</h2><p class="muted">Source health is unavailable while the overview cannot load.</p></article>
+</section>
+
+<!-- ================= UNINSTRUMENTED MONETIZATION ================= -->
+<section class="state" id="state-uninstrumented" aria-label="Uninstrumented monetization">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
+    <span class="seg" role="group" aria-label="Platform"><a href="#state-uninstrumented">All platforms</a><a href="#state-uninstrumented">Web</a><a href="#state-uninstrumented" aria-current="true">iOS</a></span>
+  </header>
+  <div class="stats" role="group" aria-label="Headline metrics">
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Follows the platform filter</small></div>
+    <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
+    <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
+    <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible</small></div>
+    <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
+  </div>
+
+  <article class="panel stack">
+    <div class="row"><h2>Monetization</h2><span class="tag">Instrumentation needed</span></div>
+    <div class="stats stats3">
+      <div class="stat"><span class="label">Instrumented revenue</span><span class="value unavail">Set up</span><small>Requires a trusted billing source</small></div>
+      <div class="stat"><span class="label">Paying people</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchases</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchase→repeat</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+    </div>
+    <p class="muted">Revenue, paying people and purchases need a trusted billing source — a server-side purchase event or a billing integration AgentRay can verify. Until one is connected these tiles stay <em>Set up</em>; they are never estimated from page views, sessions or any other event.</p>
+    <p class="muted"><small><strong>Example — not your data.</strong> “Instrumented revenue rose from 1,240 to 1,480 LT while paying people held flat.” This is what a finding looks like once billing is instrumented; it is not a projection of your results.</small></p>
+    <div class="row"><a class="button primary" href="#data">Set up billing instrumentation</a><a class="button" href="#agents">Ask your agent to set it up</a></div>
+  </article>
+
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 2 min ago</small></div>
+    <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
+      <tr><td>Billing source</td><td>Revenue, paying people, purchases</td><td><span class="pill"><span class="dot off"></span>Not connected</span></td></tr>
+    </tbody></table>
+  </article>
+</section>
+
+<footer class="footer"><small>Proposal only. Contracts in docs/redesign/strategy.md; spec in docs/redesign/overview-dashboard.md. App Store Connect was a layout/IA reference only — no store integration, Apple metric, credential flow or iOS-only gating is part of this product.</small></footer>
+</main></div>
+<script>
+var STATES=['populated','grouped','firstrun','nodata','stale','error','uninstrumented'];
+
+function apply(){
+  var h=(location.hash||'').replace('#state-','');
+  if(STATES.indexOf(h)<0)h='populated';
+  STATES.forEach(function(s){
+    var el=document.getElementById('state-'+s);
+    if(el)el.classList.toggle('on',s===h);
+  });
+  document.querySelectorAll('.statelist a').forEach(function(a){
+    if(a.getAttribute('data-state')===h)a.setAttribute('aria-current','true');
+    else a.removeAttribute('aria-current');
+  });
+}
+addEventListener('hashchange',apply);apply();
+</script>
+</body></html>

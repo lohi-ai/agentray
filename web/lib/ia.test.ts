@@ -6,6 +6,7 @@ import {
   NAV_ITEMS,
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
+  isLinkedSurface,
   firstSessionNotice,
   firstValuePath,
   formatAgentError,
@@ -95,6 +96,19 @@ describe('nav grouping', () => {
     );
     expect(childSurfacesFor('/events').map((s) => s.href)).toEqual(
       expect.arrayContaining(['/replay', '/start']),
+    );
+  });
+
+  it('names the App Store analytics groups as non-linked Coming soon affordances', () => {
+    // The IA should make the product's shape legible before the pages exist.
+    // A coming-soon surface therefore carries no href at all: a placeholder
+    // URL would be a link the router cannot serve.
+    const comingSoon = childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s));
+    expect(comingSoon.map((s) => s.label)).toEqual(['Acquisition', 'Monetization', 'App Usage']);
+    expect(comingSoon.every((s) => s.href === undefined)).toBe(true);
+    // The linked Analytics surfaces are untouched by the addition.
+    expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(
+      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
     );
   });
 });

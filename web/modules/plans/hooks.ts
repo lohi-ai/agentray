@@ -3,6 +3,7 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AgentRayAPI, newIdempotencyKey } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
+import { invalidateRecommendationQueries } from '@/lib/recommendation-cache';
 
 // hooks.ts — /plans reads findings through the list_findings op (keyset pages,
 // so the full history is resumable) and experiments through the existing
@@ -17,7 +18,7 @@ function useInvalidatePlans(projectID?: string) {
   const queryClient = useQueryClient();
   return () => {
     queryClient.invalidateQueries({ queryKey: [PLANS_KEY, projectID] });
-    queryClient.invalidateQueries({ queryKey: [FINDINGS_KEY, projectID] });
+    invalidateRecommendationQueries(queryClient, projectID);
     // /prototypes and /start read the same validation_tests rows — leaving
     // them stale means committing here and watching the other surfaces keep
     // asking for a commitment already made.
