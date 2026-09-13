@@ -819,6 +819,14 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		rows, err := store.RunSQL(c.Request().Context(), project.ID, payload.SQL)
 		if err != nil {
+			// A sandbox that could not run the query is not the author's fault,
+			// and must not read as bad SQL: answer 503 (retryable) for that case
+			// only. Everything else is the engine's answer to the query, which
+			// the SQL screen shows inline so users can fix it.
+			if storage.IsSandboxUnavailable(err) {
+				c.Response().Header().Set("Retry-After", "5")
+				return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+			}
 			// Surface the underlying SQL error (e.g. DuckDB syntax/column
 			// errors) to the author instead of Echo's generic 500 — the SQL
 			// screen shows this message inline so users can fix their query.

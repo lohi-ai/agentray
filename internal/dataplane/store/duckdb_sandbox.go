@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -64,9 +65,9 @@ const (
 	// purpose: every live child holds a full in-memory copy of its project's
 	// rows, so this is the term that decides whether tenant count can multiply
 	// memory.
-	sandboxMaxProjects = 8
+	sandboxMaxProjects = 2
 	// sandboxMemoryLimit caps each child instance's engine memory.
-	sandboxMemoryLimit = "128MB"
+	sandboxMemoryLimit = "96MB"
 	// sandboxThreads caps each child instance's worker threads.
 	sandboxThreads = 1
 	// sandboxMaxConcurrent bounds queries executing across ALL children —
@@ -79,15 +80,10 @@ const (
 	// refresh and execution — so a query can never ride an unbounded request
 	// context through the slow phases. Zero disables the extra deadline (the
 	// child's own query timeout still applies).
-	sandboxRequestTimeout = 0
-	// sandboxRefreshTimeout bounds the copy phase: a project whose events
-	// take longer than this to mirror fails the query rather than holding
-	// the sandbox mutex (and its lease) indefinitely. Superseded by
-	// sandboxRequestTimeout when that is set.
-	sandboxRefreshTimeout = 60 * time.Second
+	sandboxRequestTimeout = 60 * time.Second
 	// sandboxIdleTTL evicts a child that has not been used for this long, so a
 	// tenant that stops querying stops holding a copy of its events.
-	sandboxIdleTTL = 0
+	sandboxIdleTTL = 5 * time.Minute
 	// sandboxCopyBatch is the row count per insert frame during refresh.
 	sandboxCopyBatch = 2048
 	// sandboxMaxRows caps materialized result rows.
@@ -95,12 +91,12 @@ const (
 	// sandboxMaxResultBytes caps materialized result bytes. Row count alone is
 	// not a bound: `SELECT properties FROM events` over fat JSON is 10k rows and
 	// can be gigabytes.
-	sandboxMaxResultBytes = 0
+	sandboxMaxResultBytes = 8 << 20
 	// sandboxTempSize caps one sandbox's spill directory.
-	sandboxTempSize = "512MB"
+	sandboxTempSize = "256MB"
 	// sandboxRlimitBudget is the address space a child may allocate above its
 	// own virtual size at engine open (Linux).
-	sandboxRlimitBudget = 0
+	sandboxRlimitBudget = 192 << 20
 	// sandboxKillGrace is how long a child has to honour SIGINT/close before it
 	// is killed outright.
 	sandboxKillGrace = 2 * time.Second
@@ -125,7 +121,6 @@ type sandboxLimits struct {
 	maxResultBytes int64
 	queryTimeout   time.Duration
 	requestTimeout time.Duration
-	refreshTimeout time.Duration
 	idleTTL        time.Duration
 	rlimitBudget   int64
 	killGrace      time.Duration
@@ -142,7 +137,6 @@ func defaultSandboxLimits() sandboxLimits {
 		maxResultBytes: sandboxMaxResultBytes,
 		queryTimeout:   sandboxQueryTimeout,
 		requestTimeout: sandboxRequestTimeout,
-		refreshTimeout: sandboxRefreshTimeout,
 		idleTTL:        sandboxIdleTTL,
 		rlimitBudget:   sandboxRlimitBudget,
 		killGrace:      sandboxKillGrace,
@@ -183,9 +177,13 @@ type sqlSandboxPool struct {
 	// for one new project doesn't start N children and discard N-1.
 	opening map[string]*sandboxOpen
 
-	// spawns counts children started, for tests that assert admission precedes
-	// creation.
-	spawns atomic.Int64
+	// spawns counts children started; inFlight/peakInFlight and reaped expose
+	// the admission and reaping invariants to tests without reaching into the
+	// pool's internals.
+	spawns       atomic.Int64
+	inFlight     atomic.Int64
+	peakInFlight atomic.Int64
+	reaped       atomic.Int64
 
 	// done stops the idle janitor.
 	done      chan struct{}
@@ -255,6 +253,13 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 			"the analytics sandbox is busy; try again or narrow the query")
 	}
 
+	// Admission is now accounted: everything below — spawning, refreshing,
+	// executing — rides this one slot.
+	if n := p.inFlight.Add(1); n > p.peakInFlight.Load() {
+		p.peakInFlight.CompareAndSwap(p.peakInFlight.Load(), n)
+	}
+	defer p.inFlight.Add(-1)
+
 	sb, err := p.sandboxFor(rctx, projectID)
 	if err != nil {
 		return nil, err
@@ -263,13 +268,7 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	// between lookup and this query starting.
 	defer sb.release()
 
-	refreshCtx := rctx
-	if p.limits.refreshTimeout > 0 {
-		var cancel context.CancelFunc
-		refreshCtx, cancel = context.WithTimeout(rctx, p.limits.refreshTimeout)
-		defer cancel()
-	}
-	if err := sb.refresh(refreshCtx); err != nil {
+	if err := sb.refresh(rctx); err != nil {
 		p.drop(sb)
 		return nil, err
 	}
@@ -564,6 +563,12 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 	resp, err := sb.readFrame(ctx)
 	if err != nil || resp.Kind != "ready" {
 		sb.close()
+		// A cold start cut short by the caller's budget is a timeout — the same
+		// query may well work in a moment — not an unavailable sandbox.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, sandboxError(SandboxKindTimeout, ErrSandboxTimeout,
+				"timed out starting the analytics sandbox; try again")
+		}
 		if err == nil {
 			err = fmt.Errorf("sandbox handshake failed: %s", resp.Kind)
 		}
@@ -734,6 +739,16 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 	return resp.Rows, nil
 }
 
+// readCapBytes is the largest reply this sandbox will decode. It is the result
+// cap plus protocol headroom, so a child that answered with something larger
+// than it was allowed to build is refused before the parent allocates for it.
+func (sb *sqlSandbox) readCapBytes() int {
+	if sb.pool.limits.maxResultBytes <= 0 {
+		return sandboxFrameMaxBytes
+	}
+	return int(sb.pool.limits.maxResultBytes) + (1 << 20)
+}
+
 // call writes one request and waits for its reply under ctx. A child that does
 // not answer in time is interrupted, then killed: a wedged sandbox must never
 // hold an admission slot or a caller's request open.
@@ -749,7 +764,7 @@ func (sb *sqlSandbox) call(ctx context.Context, req sandboxRequest) (sandboxResp
 			return
 		}
 		var resp sandboxResponse
-		if err := readSandboxFrame(sb.stdout, &resp); err != nil {
+		if err := readSandboxFrame(sb.stdout, &resp, sb.readCapBytes()); err != nil {
 			ch <- frameResult{err: err}
 			return
 		}
@@ -782,7 +797,7 @@ func (sb *sqlSandbox) readFrame(ctx context.Context) (sandboxResponse, error) {
 	ch := make(chan frameResult, 1)
 	go func() {
 		var resp sandboxResponse
-		err := readSandboxFrame(sb.stdout, &resp)
+		err := readSandboxFrame(sb.stdout, &resp, sb.readCapBytes())
 		ch <- frameResult{resp: resp, err: err}
 	}()
 	select {
@@ -820,6 +835,7 @@ func (sb *sqlSandbox) closeLocked() {
 	_ = writeSandboxFrame(sb.stdin, sandboxRequest{Op: "close"})
 	_ = sb.stdin.Close()
 	stopChild(sb.cmd, sb.pool.limits.killGrace)
+	sb.pool.reaped.Add(1)
 	if sb.tmpDir != "" {
 		_ = os.RemoveAll(sb.tmpDir)
 	}

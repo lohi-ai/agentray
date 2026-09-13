@@ -87,6 +87,13 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
 		for _, stmt := range []string{
 			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
+			// The cgroup is the real ceiling, but DuckDB does not know that: with
+			// no limit of its own it treats the whole container as its budget.
+			// This instance is the trusted writer and the dashboard reader, so it
+			// gets its share of the envelope and spills the rest to disk — see
+			// the sandbox budget in duckdb_sandbox.go.
+			"SET memory_limit = '" + sandboxMainMemoryLimit + "'",
+			"SET max_temp_directory_size = '" + sandboxMainTempSize + "'",
 			"SET TimeZone = 'UTC'",
 		} {
 			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {

@@ -52,9 +52,8 @@ import (
 // TestMain (see duckdb_sandbox_worker_test.go).
 const SandboxWorkerArgv = "sql-sandbox-worker"
 
-// sandboxFrameMaxBytes bounds one encoded frame in either direction. The result
-// cap is the useful limit; this is the transport's own backstop, sized above it
-// so a legitimate maximum-size result still fits.
+// sandboxFrameMaxBytes bounds one encoded frame the child will read. The parent
+// never sends more than one copy batch, so this is pure headroom.
 const sandboxFrameMaxBytes = 64 << 20
 
 // Sandbox error kinds. The parent maps these to the operator-visible answer;
@@ -205,14 +204,14 @@ func writeSandboxFrame(w io.Writer, msg any) error {
 
 // readSandboxFrame reads one length-prefixed message, refusing a frame larger
 // than the cap before allocating for it.
-func readSandboxFrame(r *bufio.Reader, msg any) error {
+func readSandboxFrame(r *bufio.Reader, msg any, maxBytes int) error {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return err
 	}
 	n := binary.BigEndian.Uint32(header[:])
-	if int(n) > sandboxFrameMaxBytes {
-		return fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", n, sandboxFrameMaxBytes)
+	if int(n) > maxBytes {
+		return fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", n, maxBytes)
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(r, payload); err != nil {
@@ -330,7 +329,7 @@ func RunSandboxWorker(args []string, stdin io.Reader, stdout io.Writer) error {
 	reader := bufio.NewReader(stdin)
 	for {
 		var req sandboxRequest
-		if err := readSandboxFrame(reader, &req); err != nil {
+		if err := readSandboxFrame(reader, &req, sandboxFrameMaxBytes); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil
 			}

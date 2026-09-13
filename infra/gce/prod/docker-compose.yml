@@ -12,7 +12,13 @@ x-agentray-api: &agentray-api-svc
   env_file:
     - app.env
     - secret.env
-  mem_limit: 384m
+  # 768m is the api's half of the sandbox envelope (duckdb_sandbox.go): GOMEMLIMIT
+  # below, the trusted DuckDB instance, up to two sandbox children and a reserve
+  # have to sum under it. The previous 384m was sized before the engine was
+  # embedded — its measured cgroup peak alone was 344 MiB.
+  mem_limit: 768m
+  environment:
+    GOMEMLIMIT: 256MiB
   logging:
     driver: json-file
     options:
