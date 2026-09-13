@@ -84,6 +84,11 @@ type Repo interface {
 	// Source lifecycle (slice 2): project-scoped connector probes and the
 	// persistent run contract.
 	ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error)
+	// DataConnectorForProject is the project-scoped connector existence read.
+	// source_status needs it to tell "a connector that has never synced" (a
+	// real empty answer) from "no such connector" (not-found) — listing a
+	// missing connector's syncs returns an empty slice for both.
+	DataConnectorForProject(ctx context.Context, projectID, connectorID string) (storage.DataConnector, error)
 	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
 	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
 	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)

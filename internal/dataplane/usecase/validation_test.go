@@ -29,6 +29,15 @@ type fakeValidationRepo struct {
 	list    []storage.ValidationTest
 	readErr error
 	total   int
+	// page / pageNext back the keyset walk: the fake returns whatever page it
+	// is given, so the test controls the continuation independently of the
+	// total the capped read reports.
+	page     []storage.ValidationTest
+	pageNext string
+}
+
+func (f *fakeValidationRepo) ListValidationTestsPage(_ context.Context, _ string, _ string, _ int) ([]storage.ValidationTest, string, error) {
+	return f.page, f.pageNext, nil
 }
 
 func (f *fakeValidationRepo) ValidationTestsForProject(_ context.Context, _ string, _ int) ([]storage.ValidationTest, int, error) {
@@ -388,5 +397,49 @@ func TestFailedVerdictNoteNamesTheThreeCauses(t *testing.T) {
 		if !strings.Contains(note, want) {
 			t.Errorf("a failed test must not be read as dead demand by default; missing %q in %q", want, note)
 		}
+	}
+}
+
+// The paged walk is the resume path for work older than the first page, so it
+// must report the same total and truncation the capped list does. It used to
+// return total 0 / truncated false on every page — an agent resuming a
+// 40-prototype project was told it had none.
+func TestListTestsPageReportsTruthfulTotalAndTruncation(t *testing.T) {
+	repo := &fakeValidationRepo{
+		list:  []storage.ValidationTest{{ID: "t1", Status: storage.TestCommitted}},
+		total: 40,
+		page: []storage.ValidationTest{
+			{ID: "t1", Status: storage.TestCommitted, Hypothesis: "one", MetricEvent: "e", TargetCount: 1},
+			{ID: "t2", Status: storage.TestProposed, Hypothesis: "two", MetricEvent: "e", TargetCount: 2},
+		},
+		pageNext: "v2|0|2026-01-02T00:00:00Z|t2",
+	}
+	out := invokeOp(t, repo, "list_tests", `{"limit":2}`)
+
+	if out["total"].(float64) != 40 {
+		t.Fatalf("paged total = %v, want the 40 that exist", out["total"])
+	}
+	if out["truncated"] != true {
+		t.Fatalf("a page with a continuation must read as truncated: %v", out)
+	}
+	if out["next_cursor"] != "v2|0|2026-01-02T00:00:00Z|t2" {
+		t.Fatalf("next_cursor = %v", out["next_cursor"])
+	}
+	if len(out["tests"].([]any)) != 2 {
+		t.Fatalf("paged tests = %v, want the two rows the page carried", out["tests"])
+	}
+
+	// The last page: no continuation, so it is not truncated — but the total is
+	// still the project's, not the page's length.
+	repo.pageNext = ""
+	out = invokeOp(t, repo, "list_tests", `{"cursor":"v2|0|2026-01-02T00:00:00Z|t2"}`)
+	if out["truncated"] != false || out["total"].(float64) != 40 {
+		t.Fatalf("exhausted page = total %v truncated %v, want 40/false", out["total"], out["truncated"])
+	}
+
+	// Empty project: zero, and honestly not truncated.
+	empty := invokeOp(t, &fakeValidationRepo{}, "list_tests", `{"limit":2}`)
+	if empty["total"].(float64) != 0 || empty["truncated"] != false {
+		t.Fatalf("empty paged list = %v", empty)
 	}
 }

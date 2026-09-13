@@ -133,8 +133,8 @@ func TestScopedReadonlySQLAppliesSoftDeleteRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scopedReadonlySQL returned error: %v", err)
 	}
-	wantUsers := "AND NOT (connector_id = 'connector-users' AND table_name = 'users' AND try_cast(json_extract_string(data, 'is_deleted') AS BOOLEAN))"
-	wantOrders := "AND NOT (connector_id = 'connector-orders' AND table_name = 'orders' AND json_extract(data, 'deleted_at') IS NOT NULL)"
+	wantUsers := "AND NOT (connector_id = 'connector-users' AND table_name = 'users' AND coalesce(try_cast(json_extract_string(data, 'is_deleted') AS BOOLEAN), false))"
+	wantOrders := "AND NOT (connector_id = 'connector-orders' AND table_name = 'orders' AND json_extract_string(data, 'deleted_at') IS NOT NULL)"
 	if !strings.Contains(query, wantUsers) || !strings.Contains(query, wantOrders) {
 		t.Fatalf("scoped CTE missing connector-specific soft-delete predicates: %s", query)
 	}
