@@ -247,9 +247,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// tick, sharing one clock with scheduled runs instead of standing up more
 	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
+	// Event retention rides the same minute tick for ADMISSION only — it starts
+	// at most one daily sweep, on its own goroutine, because a multi-minute
+	// delete must not hold the clock alert evaluation and connector syncs share.
+	retention := storage.NewRetention(store, cfg.EventRetentionDays)
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)
+		retention.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
 		store.Close()

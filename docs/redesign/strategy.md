@@ -96,6 +96,17 @@ Start with the existing PostgreSQL connector. Support bounded snapshot and incre
 
 ## Storage recommendation
 
+> **Decision (shipped 2026-09-13).** DuckDB is the store. The ClickHouse runtime,
+> config and docs were removed in `d9cc85a` and the analytics reads moved to
+> DuckDB in `c881f6e`. Everything below is the proposal as written *before* that
+> port: its present-tense evidence — `infra/gce/infra/docker-compose.yml` pinning
+> ClickHouse 24.12, the SQL operation promising ClickHouse dialect — describes the
+> 2026-09-11 checkout, not this one, and the dual-write rollback window it assumes
+> no longer exists. Event retention, which the ClickHouse schema enforced as
+> `TTL toDateTime(timestamp) + INTERVAL 1 YEAR`, is restored as
+> `EVENT_RETENTION_DAYS` (default 365 days, `0` keeps every event) — see
+> [ARCHITECT-API.md](../ARCHITECT-API.md#event-retention-internaldataplanestorageretentiongo).
+
 **Evaluate DuckDB as the preferred small-deployment candidate; do not declare it better or migrate production until the workload test passes.** Keep PostgreSQL for transactional metadata. Retain ClickHouse as the migration fallback, not an indefinite promise to maintain every feature on two engines.
 
 Evidence from this checkout: `infra/gce/infra/docker-compose.yml` pins ClickHouse 24.12, caps it at 2 GB and shares it across dev/prod; Redis is capped at 128 MB and NATS at 256 MB. The ingest code already batches and supports durable JetStream acknowledgements. `store.go` contains ClickHouse-specific identity dictionaries, materialized views, rollups, `windowFunnel`, deduplication and SQL guards. This is a substantial adapter migration, not a driver substitution. These are configuration/code observations, not measurements of the running deployment.
@@ -128,7 +139,7 @@ Provisional acceptance targets, to adjust to the owner's workload: at least 30% 
 
 Correctness gates: exact fixture parity for identities, sessionization, deduplication, late events, ordered funnel/window rules, mature retention cohorts, entity updates/deletes and currency; explain tolerances only where current metrics are explicitly approximate. Include cross-project and SQL isolation tests, backup restore, replay after commit-before-ack failure, and query cancellation.
 
-Rollout: extract an analytics-engine boundary behind existing usecases → backfill DuckDB at a recorded watermark → feed both stores through independent durable consumers → compare shadow reads → switch one project → expand. Keep ClickHouse ingestion caught up throughout the rollback window so reverting reads is immediate. Inventory and translate saved SQL/charts explicitly; unsupported queries block that project's switch. Retire old storage only after parity, restore testing, stable operation and completion of the rollback window.
+Rollout: extract an analytics-engine boundary behind existing usecases → backfill DuckDB at a recorded watermark → feed both stores through independent durable consumers → compare shadow reads → switch one project → expand. There is no ClickHouse ingestion to keep current — that runtime and its config were removed in `d9cc85a` — so the rollback path is the one the deploy already has: a blue-green colour flip, where the incoming colour replays the durable stream on first boot, bounded by that stream's `MaxAge` (30 days, `internal/dataplane/ingest/jetstream.go`). Inventory and translate saved SQL/charts explicitly; unsupported queries block that project's switch. Retire the old storage only after parity, restore testing and stable operation.
 
 ## Delivery sequence (L initiative, independently verifiable slices)
 
@@ -145,7 +156,7 @@ Product validation: observe whether a builder can install the SDK, explain the o
 - Audience, workload and freshness budget: awaiting user context; do not select engine capacity from event count alone.
 - Derived, identity/metric parity: [storage implementation](../../internal/dataplane/store/store.go) and commit `063c947` contain session/platform behaviors that must survive the migration.
 - Derived, permission migration: [MCP routes](../../internal/app/mcp_routes.go) reuse project keys; audit existing key distribution and grant behavior before tightening access.
-- Derived, historical compatibility: [SQL operation](../../internal/dataplane/usecase/analytics.go) explicitly promises ClickHouse dialect; saved SQL needs inventory and per-query disposition.
+- Derived, historical compatibility: [SQL operation](../../internal/dataplane/usecase/analytics.go) declared ClickHouse dialect before the port and declares DuckDB dialect now; saved SQL written for the old dialect needs inventory and per-query disposition.
 - Derived, product direction: [current DESIGN.md](../../DESIGN.md) requires chat-first and architecture-layer navigation; this proposal deliberately changes those rules while keeping its component/token system.
 
 See [execution plan](plan.md), [UI concept specification](design.md), and the [interactive architecture diagram](architecture.html) ([source](architecture.json), [delivery receipt](architecture.receipt.json)).

@@ -400,8 +400,8 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 
 // refreshEvents appends only what arrived since the last refresh. The cursor
 // is (inserted_at, event_id) — a bare inserted_at high-water mark skips rows
-// that share the timestamp of the last copied row. A count drift (a delete
-// in the main file — not possible today) rebuilds the table.
+// that share the timestamp of the last copied row. A count drift (rows deleted
+// in the main file — the retention sweep does exactly that) rebuilds the table.
 func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 	var highWater time.Time
 	var highWaterID string

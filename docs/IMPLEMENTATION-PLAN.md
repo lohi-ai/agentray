@@ -1,5 +1,12 @@
 # AgentRay Roadmap — Implementation Plan
 
+> **Historical (superseded 2026-09-13).** This plan was written against the
+> ClickHouse-era stack. DuckDB replaced it (`c881f6e`), the ClickHouse runtime,
+> config and docs were removed (`d9cc85a`), and the paths named below no longer
+> exist — including the §5a least-privilege role instruction, which now asks for
+> a service that is gone. Kept as the decision record; the shipped storage
+> contract lives in [ARCHITECT-API.md](ARCHITECT-API.md).
+
 **Updated:** 2026-07-02 · implements [`../ROADMAP.md`](../ROADMAP.md), informed
 by [PRODUCT-REVIEW.md](PRODUCT-REVIEW.md).
 

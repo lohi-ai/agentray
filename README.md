@@ -439,7 +439,10 @@ AGENTRAY_E2E_INFRA_HOST=host.docker.internal \
 
 The storage model is tuned for the roadmap without overbuilding the MVP:
 
-- Raw events stay append-only in DuckDB.
+- Raw events stay append-only in DuckDB, and a daily sweep deletes events
+  older than `EVENT_RETENTION_DAYS` (default 365; `0` keeps every event) so the
+  file has a ceiling. The default restores the window the pre-DuckDB ClickHouse
+  schema enforced.
 - A `sessions` view rolls session aggregates forward as events
   arrive, which keeps common session analytics cheap.
 - PostgreSQL keeps relational metadata and adds indexes for the read paths that
