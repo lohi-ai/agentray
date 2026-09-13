@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentRayAPI, ApiError, apiErrorMessage, newIdempotencyKey } from './api';
+import { AgentRayAPI, APIError, apiErrorMessage, newIdempotencyKey } from './api';
 
 // Lifecycle consumer evidence: the web client is one adapter over the same
 // reversible-archive contract. These tests pin the wire shape the hooks rely
@@ -98,16 +98,16 @@ describe('typed error mapping', () => {
   ] as const)('maps HTTP %i to kind %s', async (status, kind) => {
     mockFetch(status, { message: 'server said no' });
     const err = await new AgentRayAPI('p1').updateDashboard('d1', 'n', 'd').catch((e) => e);
-    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toBeInstanceOf(APIError);
     expect(err.kind).toBe(kind);
     expect(err.status).toBe(status);
   });
 
   it('renders actionable copy for the typed kinds', () => {
-    expect(apiErrorMessage(new ApiError('x', 409, 'conflict'), 'f')).toContain('refresh');
-    expect(apiErrorMessage(new ApiError('x', 404, 'not_found'), 'f')).toContain('no longer exists');
-    expect(apiErrorMessage(new ApiError('x', 503, 'retryable'), 'f')).toContain('busy');
-    expect(apiErrorMessage(new ApiError('x', 400, 'error'), 'f')).toBe('x');
+    expect(apiErrorMessage(new APIError(409, 'x', '', 'conflict'), 'f')).toContain('refresh');
+    expect(apiErrorMessage(new APIError(404, 'x', '', 'not_found'), 'f')).toContain('no longer exists');
+    expect(apiErrorMessage(new APIError(503, 'x', '', 'retryable'), 'f')).toContain('busy');
+    expect(apiErrorMessage(new APIError(400, 'x', '', 'error'), 'f')).toBe('x');
     expect(apiErrorMessage('not an error', 'f')).toBe('f');
   });
 });

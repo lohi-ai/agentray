@@ -34,7 +34,7 @@ function retentionTone(rate: number): string {
 // avgRate averages a single period column, but only over cohorts whose week-N
 // window has actually elapsed (mature), and counts a mature cohort with no
 // week-N row as 0% — not as missing. The SQL emits no (cohort, period) row when
-// uniqExact is 0, so without the mature/zero handling a fully-churned cohort
+// the count is 0, so without the mature/zero handling a fully-churned cohort
 // would silently drop out of the denominator and inflate the average upward.
 function avgRate(rows: CohortRow[], period: number): number | null {
   const cutoff = Date.now() - (period + 1) * WEEK_MS;

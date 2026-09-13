@@ -26,18 +26,20 @@ Companion docs: [ARCHITECT-API.md](ARCHITECT-API.md) (service layout),
 └──────────────┬───────────────────────────────────────────────────────────┘
                ▼  batched INSERT
 ┌─ STORE ──────────────────────────────────────────────────────────────────┐
-│ ClickHouse                                                               │
-│   events        MergeTree · PARTITION toYYYYMM · ORDER BY (project_id,   │
-│                 event_name, timestamp, distinct_id) · TTL 1y ·           │
-│                 properties = String(JSON) · insert_id read-time dedup    │
-│   aliases       ReplacingMergeTree (synced from PG: dual-write + boot    │
-│                 backfill) + aliases_dict dictionary → dictGet canonical- │
-│                 id stitching in every query                              │
-│   sessions_mv   AggregatingMergeTree (session start/end, counts,         │
-│                 tokens, cost)                                            │
-│   migrations    idempotent CREATE/ALTER at boot (no version ledger)      │
-│   chRO user     readonly=2 CONST + GRANT SELECT on app DB only — the     │
-│                 run_sql surface (blocks DDL + table-function SSRF)       │
+│ DuckDB (embedded in the API process, one file per deploy colour)         │
+│   events        PRIMARY KEY (project_id, event_id) — ingest dedup is     │
+│                 enforced by the engine via INSERT OR IGNORE              │
+│   aliases       mirror of the PG source of truth (reconciled at boot,    │
+│                 upserted on write); resolved_events view joins through   │
+│                 it for canonical-id stitching in every query             │
+│   persons       merged trait profile, one row per (project, canonical    │
+│                 id), maintained inside the ingest transaction            │
+│   sessions      view over events (session start/end, counts, tokens,     │
+│                 cost)                                                    │
+│   external_rows connector landing rows, INSERT OR REPLACE per row_key    │
+│   migrations    idempotent CREATE at boot + schema_meta version ledger   │
+│   run_sql       per-project sandboxed read path: denylisted table        │
+│                 functions + project-scoped CTEs (blocks SSRF/file reads) │
 │ PostgreSQL — source of truth for everything non-event: users/sessions/   │
 │   workspaces/projects(API keys), dashboards, charts, saved queries,      │
 │   cohort audiences, subscription mappings, templates, query feedback,    │
@@ -49,7 +51,7 @@ Companion docs: [ARCHITECT-API.md](ARCHITECT-API.md) (service layout),
 ┌─ ANALYTICS & PRESENTATION ───────────────────────────────────────────────┐
 │ opcore Operations (single definition → REST /api/op/*, in-process agent  │
 │ tool, CLI command, MCP tool): activity_summary, recent_events, persons,  │
-│ explore_events, run_sql (chRO), run_insight, list_dashboards,            │
+│ explore_events, run_sql (sandboxed), run_insight, list_dashboards,       │
 │ create_dashboard, create_chart, send_notification,                       │
 │ submit_recommendation, remember                                          │
 │ Legacy web-only reads in app/routes.go (web-analytics, cohorts, …)       │
@@ -74,21 +76,26 @@ Companion docs: [ARCHITECT-API.md](ARCHITECT-API.md) (service layout),
 
 ### Why it is shaped this way
 
-- **NATS between HTTP and ClickHouse** so ingestion returns before the OLAP
-  write and bursts never block the HTTP layer; the **batcher** exists because
-  ClickHouse wants few large inserts (part-count explosion otherwise).
-- **Identity stitching via dictionary** (`aliases_dict`) replaced shipping
-  N-sized `transform()` arrays into every query — O(1) in-memory `dictGet`,
-  PG stays source of truth, ≤60 s staleness.
+- **NATS between HTTP and DuckDB** so ingestion returns before the OLAP
+  write and bursts never block the HTTP layer; the **batcher** exists to
+  coalesce small publishes into few large inserts.
+- **Identity stitching via the aliases mirror** (`resolved_events` view)
+  replaced shipping N-sized id arrays into every query — PG stays source of
+  truth and the mirror is reconciled at boot plus upserted on write.
 - **opcore single-definition operations** are the load-bearing governance
   choice: one schema/permission/handler serves web, CLI, in-house agents and
   external MCP clients, so surfaces cannot drift and agents can never reach
   infra directly.
-- **`run_sql` on a dedicated `readonly=2` CH user** (not keyword denylisting
-  alone) closes the table-function SSRF / cross-tenant class by privilege,
-  not by parsing.
+- **`run_sql` runs on a per-project sandboxed read path** — denylisted table
+  functions plus project-scoped CTEs close the table-function SSRF /
+  cross-tenant class without a separate database account.
 
-### Honest weaknesses (evidence-cited)
+### Honest weaknesses (evidence-cited, pre-DuckDB snapshot)
+
+> The table below and Part 2 were written against the ClickHouse build and
+> are kept as the decision record. W1/W2 (JetStream + pipeline self-metrics),
+> W4 (persons table), W5 (schema_meta ledger), and W7 (sandboxed run_sql)
+> have since shipped in the DuckDB form described above.
 
 | # | Weakness | Evidence |
 |---|---|---|

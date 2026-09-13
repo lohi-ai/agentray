@@ -32,7 +32,7 @@ const sessionCacheMax = 200_000
 // In-process and per-instance, matching catalogGuard: at one API instance this is
 // exact, and if the deploy ever fans out, the failure mode is a session split
 // across instances — an undercount of session *length*, never a lost event. The
-// alternative, a lookup per event against ClickHouse, puts a read on the ingest
+// alternative, a lookup per event against DuckDB, puts a read on the ingest
 // hot path for a derived convenience field.
 type sessionizer struct {
 	window time.Duration

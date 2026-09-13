@@ -819,7 +819,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		rows, err := store.RunSQL(c.Request().Context(), project.ID, payload.SQL)
 		if err != nil {
-			// Surface the underlying SQL error (e.g. ClickHouse syntax/column
+			// Surface the underlying SQL error (e.g. DuckDB syntax/column
 			// errors) to the author instead of Echo's generic 500 — the SQL
 			// screen shows this message inline so users can fix their query.
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())

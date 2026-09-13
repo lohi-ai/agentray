@@ -13,7 +13,7 @@ const openExprFixture = "(event_name = 'sub_start' OR event_name = 'sub_renew')"
 // audience while having paying subscribers.
 func TestPaidEventExprConsumesTheConfiguredAmountProperty(t *testing.T) {
 	got := paidEventExpr(SubscriptionMapping{AmountProp: "lt_cost"}, openExprFixture)
-	if !strings.Contains(got, "'lt_cost'") {
+	if !strings.Contains(got, `"lt_cost"`) {
 		t.Errorf("configured amount property never reached the predicate: %s", got)
 	}
 	if !strings.Contains(got, openExprFixture) {
@@ -33,7 +33,7 @@ func TestPaidEventExprAlwaysKeepsTheSDKShape(t *testing.T) {
 	}
 	for _, m := range mappings {
 		got := paidEventExpr(m, openExprFixture)
-		if !strings.Contains(got, "event_name = 'revenue'") || !strings.Contains(got, "JSONExtractFloat(properties, 'amount') > 0") {
+		if !strings.Contains(got, "event_name = 'revenue'") || !strings.Contains(got, "json_extract_string(properties, '$.amount')") {
 			t.Errorf("SDK-shaped payment detection dropped for %+v: %s", m, got)
 		}
 	}
@@ -55,10 +55,10 @@ func TestPaidEventExprIgnoresBlankConfiguration(t *testing.T) {
 // every other mapped token rather than concatenated raw.
 func TestPaidEventExprEscapesTheAmountProperty(t *testing.T) {
 	got := paidEventExpr(SubscriptionMapping{AmountProp: "am'ount"}, openExprFixture)
-	if strings.Contains(got, "'am'ount'") {
+	if strings.Contains(got, `"am'ount"`) {
 		t.Errorf("amount property was not escaped: %s", got)
 	}
-	if !strings.Contains(got, chStringLit("am'ount")) {
-		t.Errorf("expected chStringLit escaping in: %s", got)
+	if !strings.Contains(got, `"am''ount"`) {
+		t.Errorf("expected '' escaping inside the JSON path literal in: %s", got)
 	}
 }

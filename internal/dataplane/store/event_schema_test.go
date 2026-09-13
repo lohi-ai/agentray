@@ -2,7 +2,6 @@ package storage
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -31,13 +30,14 @@ func TestEventSchemaSeparatesVolumeFromPeople(t *testing.T) {
 	}
 }
 
-// TestEventSchemaQueryIsHumanFilteredAndStitched checks the SQL text that
+// TestEventSchemaQueryIsHumanFilteredAndStitched checks the column that
 // produces People. A crawler is not a person and a logged-in visitor is not two
 // people — the same rule Persons, the funnel and the plan meter are held to.
+// Stitching is the resolved_events view's canonical_distinct_id column.
 func TestEventSchemaQueryIsHumanFilteredAndStitched(t *testing.T) {
-	expr, args := identityResolver{database: "lohi_analytics"}.canonicalExpr("distinct_id")
-	if !strings.Contains(expr, "aliases_dict") {
-		t.Fatalf("canonical expression must stitch through the dictionary, got %q", expr)
+	expr, args := identityResolver{}.canonicalExpr("distinct_id")
+	if expr != "canonical_distinct_id" {
+		t.Fatalf("canonical expression must read the stitched view column, got %q", expr)
 	}
 	if len(args) != 0 {
 		t.Fatalf("canonical expression must bind no arguments; it is interpolated ahead of the WHERE clause and %d placeholder(s) would shift every later bind", len(args))

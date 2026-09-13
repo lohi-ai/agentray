@@ -15,9 +15,9 @@ func TestPlatformClause(t *testing.T) {
 	}{
 		{"empty filter adds nothing", "", "", nil, false},
 		{"whitespace adds nothing", "   ", "", nil, false},
-		{"unknown selects the undetermined rows", "unknown", "ifNull(platform, '') = ''", nil, true},
-		{"a named platform binds", "ios", "ifNull(platform, '') = ?", "ios", true},
-		{"case folded", "IOS", "ifNull(platform, '') = ?", "ios", true},
+		{"unknown selects the undetermined rows", "unknown", "coalesce(platform, '') = ''", nil, true},
+		{"a named platform binds", "ios", "coalesce(platform, '') = ?", "ios", true},
+		{"case folded", "IOS", "coalesce(platform, '') = ?", "ios", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -30,13 +30,13 @@ func TestPlatformClause(t *testing.T) {
 	}
 }
 
-// The clause and its argument have to travel together: ClickHouse binds ? by
+// The clause and its argument have to travel together: DuckDB binds ? by
 // position, so a platform arg appended without its clause (or the other way
 // round) silently filters a different column instead of erroring.
 func TestFilteredWhereCarriesPlatform(t *testing.T) {
 	where, args := filteredWhereWithDefault("11111111-1111-1111-1111-111111111111",
 		EventFilter{Platform: "ios", EventName: "user.pageview"}, false)
-	if !strings.Contains(where, "ifNull(platform, '') = ?") {
+	if !strings.Contains(where, "coalesce(platform, '') = ?") {
 		t.Fatalf("where clause missing platform: %s", where)
 	}
 	if strings.Count(where, "?") != len(args) {
@@ -52,7 +52,7 @@ func TestFilteredWhereCarriesPlatform(t *testing.T) {
 func TestFilteredWhereUnknownPlatformBindsNoArg(t *testing.T) {
 	where, args := filteredWhereWithDefault("11111111-1111-1111-1111-111111111111",
 		EventFilter{Platform: PlatformUnknown}, false)
-	if !strings.Contains(where, "ifNull(platform, '') = ''") {
+	if !strings.Contains(where, "coalesce(platform, '') = ''") {
 		t.Fatalf("where clause missing unknown-platform test: %s", where)
 	}
 	if strings.Count(where, "?") != len(args) {
@@ -63,7 +63,7 @@ func TestFilteredWhereUnknownPlatformBindsNoArg(t *testing.T) {
 func TestWorkspaceFilteredWhereCarriesPlatform(t *testing.T) {
 	where, args := workspaceFilteredWhere([]string{"11111111-1111-1111-1111-111111111111"},
 		EventFilter{Platform: "android"}, false)
-	if !strings.Contains(where, "ifNull(platform, '') = ?") {
+	if !strings.Contains(where, "coalesce(platform, '') = ?") {
 		t.Fatalf("where clause missing platform: %s", where)
 	}
 	if strings.Count(where, "?") != len(args) {

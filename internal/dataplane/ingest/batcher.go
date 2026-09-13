@@ -17,7 +17,7 @@ func logBatchError(err error) {
 
 // msgHandle is the acknowledgement surface the batcher needs from a durable
 // (JetStream) message. The JetStream worker supplies a real one so a batch is
-// acked only after its ClickHouse insert succeeds and NAK'd (redelivered) or
+// acked only after its DuckDB insert succeeds and NAK'd (redelivered) or
 // dead-lettered otherwise. The legacy core-NATS path supplies no handle
 // (fire-and-forget: a failed insert is logged and dropped, as before).
 type msgHandle interface {
@@ -29,7 +29,7 @@ type msgHandle interface {
 }
 
 // queued pairs a decoded message's events with its (optional) ack handle so the
-// batcher can coalesce events from many messages into one ClickHouse insert yet
+// batcher can coalesce events from many messages into one DuckDB insert yet
 // still acknowledge each source message correctly.
 type queued struct {
 	events []storage.Event
@@ -37,7 +37,7 @@ type queued struct {
 }
 
 // EventBatcher coalesces events arriving from many small NATS messages into
-// larger inserts before they reach ClickHouse. ClickHouse is an OLAP store that
+// larger inserts before they reach DuckDB. DuckDB is an OLAP store that
 // wants few, large inserts: every INSERT creates a part, and a flood of
 // single-row inserts (one per browser `capture`) explodes the part count and
 // the background-merge load. The worker hands every decoded message to Add/AddMsg;
@@ -248,7 +248,7 @@ func (b *EventBatcher) loop() {
 	}
 }
 
-// flush inserts every buffered message's events in one ClickHouse write and then
+// flush inserts every buffered message's events in one DuckDB write and then
 // settles each source message (ack on success; NAK or dead-letter on failure).
 func (b *EventBatcher) flush(items []queued) {
 	total := 0
@@ -312,7 +312,7 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 }
 
 // sinkWithRetry does a few quick, bounded retries with exponential backoff to ride
-// out a transient ClickHouse blip without a full redelivery cycle. On a longer
+// out a transient DuckDB blip without a full redelivery cycle. On a longer
 // outage it gives up and returns the error so the caller NAKs (JetStream then owns
 // the slower redelivery/backoff).
 func (b *EventBatcher) sinkWithRetry(events []storage.Event) error {

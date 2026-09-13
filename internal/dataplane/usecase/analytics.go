@@ -213,7 +213,7 @@ func exploreEvents() opcore.Operation[windowInput, storage.EventExplorer] {
 const exploreSampleSize = 20
 
 type runSQLInput struct {
-	SQL string `json:"sql" desc:"a single read-only SELECT statement, ClickHouse dialect" required:"true"`
+	SQL string `json:"sql" desc:"a single read-only SELECT statement, DuckDB dialect" required:"true"`
 }
 
 type runSQLOutput struct {
@@ -224,20 +224,20 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 	return opcore.Operation[runSQLInput, runSQLOutput]{
 		Name: "run_sql",
 		Summary: "Run a read-only (SELECT-only) SQL query against the project's event store. " +
-			"The store is ClickHouse: extract JSON properties with JSONExtractString(properties, 'key'), " +
-			"not JSON_EXTRACT_STRING; the table is `events`. To count or retain unique users, use the " +
+			"The store is DuckDB: extract JSON properties with json_extract_string(properties, '$.key'), " +
+			"not JSON_EXTRACT; the table is `events`. To count or retain unique users, use the " +
 			"`canonical_id` column (identity-stitched: a visitor's anonymous events are folded onto the " +
-			"user they later logged in as) — uniqExact(distinct_id) double-counts anyone who logged in. " +
+			"user they later logged in as) — count(DISTINCT distinct_id) double-counts anyone who logged in. " +
 			"Use raw `distinct_id` only for exact-match filters on a specific id. " +
 			"For any user/acquisition/retention metric, exclude crawlers with " +
-			"WHERE ifNull(visitor_class, 'human') = 'human' — search-bot and ai-platform rows are not people. " +
+			"WHERE coalesce(visitor_class, 'human') = 'human' — search-bot and ai-platform rows are not people. " +
 			"A project may ship more than one app: the `platform` column says which one an event came from " +
 			"('web', 'ios', 'android', 'server'; '' when undetermined). Split by it before comparing " +
 			"platforms — do NOT read platform out of properties, and never state a product-wide rate as if " +
 			"it described one app when more than one platform is present. " +
 			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
-			"JSONExtractString(data, 'column') (JSONExtractInt/Float for numbers); row_key is the source row's " +
+			"json_extract_string(data, '$.column') (json_extract for numbers); row_key is the source row's " +
 			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key) and " +
 			"each row is CURRENT state, not history — a re-sync replaces the row, it does not append. " +
 			"Rows the source marked deleted (the sync's soft-delete column) are already excluded; rows the " +
@@ -252,7 +252,7 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			if err != nil {
 				return runSQLOutput{}, err
 			}
-			rows, err := d.Repo.RunSQL(ctx, cc.ProjectID, normalizeSQL(in.SQL)) // read-only enforced in storage
+			rows, err := d.Repo.RunSQL(ctx, cc.ProjectID, in.SQL) // read-only enforced in storage
 			if err != nil {
 				return runSQLOutput{}, err
 			}
@@ -261,17 +261,6 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 	}
 }
 
-// normalizeSQL translates the JSON helpers the model most often reaches for
-// (MySQL/Postgres flavored) into the ClickHouse equivalent, so a query that is
-// otherwise correct doesn't fail on dialect alone. The system prompt documents
-// the right names; this is the safety net behind it.
-func normalizeSQL(s string) string {
-	repl := strings.NewReplacer(
-		"JSON_EXTRACT_STRING(", "JSONExtractString(",
-		"json_extract_string(", "JSONExtractString(",
-	)
-	return repl.Replace(s)
-}
 
 // --- Authoring operations (analyze_build) ---
 
@@ -432,7 +421,7 @@ func createChart() opcore.Operation[createChartInput, storage.Chart] {
 			return d.Repo.CreateChart(ctx, storage.Chart{
 				DashboardID: in.DashboardID, ProjectID: cc.ProjectID, Name: in.Name, Kind: in.Kind,
 				Metric: in.Metric, EventName: in.EventName, EventType: in.EventType,
-				SQL: normalizeSQL(in.SQL), XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
+				SQL: in.SQL, XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
 			})
 		},
 	}

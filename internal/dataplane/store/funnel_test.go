@@ -62,7 +62,7 @@ func TestFunnelStepsFromDepthsAreMonotoneAndBounded(t *testing.T) {
 	}
 }
 
-// ClickHouse binds ? by position, so a mismatch between the argument slice and
+// DuckDB binds ? by position, so a mismatch between the argument slice and
 // the order the placeholders appear in the SQL text does not error — it funnels
 // the wrong events. This pins the correspondence.
 func TestBuildFunnelQueryBindsArgumentsInSQLTextOrder(t *testing.T) {
@@ -70,18 +70,20 @@ func TestBuildFunnelQueryBindsArgumentsInSQLTextOrder(t *testing.T) {
 	where := "project_id = ? AND timestamp >= ? AND timestamp <= ?"
 	whereArgs := []any{"proj-1", "from", "to"}
 
-	query, args := buildFunnelQuery(steps, 3600, where, whereArgs, "canonical(distinct_id)", nil)
+	query, args := buildFunnelQuery(steps, 3600, where, whereArgs, "canonical_distinct_id", nil)
 
 	if got := strings.Count(query, "?"); got != len(args) {
 		t.Fatalf("query has %d placeholders but %d args\n%s", got, len(args), query)
 	}
 	want := []any{
-		// windowFunnel conditions, in the SELECT
-		"signup", "checkout", "paid",
-		// the WHERE
+		// the WHERE inside the ev CTE
 		"proj-1", "from", "to",
 		// the event_name IN list
 		"signup", "checkout", "paid",
+		// the anchor step
+		"signup",
+		// one bind per subsequent step's correlated subquery
+		"checkout", "paid",
 	}
 	if len(args) != len(want) {
 		t.Fatalf("got %d args, want %d: %v", len(args), len(want), args)
@@ -91,18 +93,18 @@ func TestBuildFunnelQueryBindsArgumentsInSQLTextOrder(t *testing.T) {
 			t.Errorf("arg %d = %v, want %v", i, args[i], want[i])
 		}
 	}
-	if !strings.Contains(query, "windowFunnel(3600)(toDateTime(timestamp)") {
-		t.Errorf("window seconds or the DateTime64 cast is missing:\n%s", query)
+	if !strings.Contains(query, "INTERVAL '3600 seconds'") {
+		t.Errorf("window seconds missing from the step chain:\n%s", query)
 	}
-	if !strings.Contains(query, "GROUP BY canonical(distinct_id)") {
+	if !strings.Contains(query, "canonical_distinct_id AS cid") {
 		t.Errorf("funnel must group by the stitched identity, not the raw distinct_id:\n%s", query)
 	}
 }
 
 func TestBuildFunnelQueryAppendsCanonicalArgsLast(t *testing.T) {
-	_, args := buildFunnelQuery([]string{"a"}, 60, "project_id = ?", []any{"p"}, "dictGet(?, distinct_id)", []any{"dict"})
-	if got, want := args[len(args)-1], any("dict"); got != want {
-		t.Errorf("last arg = %v, want %v — the GROUP BY placeholder is last in the SQL text", got, want)
+	_, args := buildFunnelQuery([]string{"a"}, 60, "project_id = ?", []any{"p"}, "canonical_distinct_id", nil)
+	if got, want := args[len(args)-1], any("a"); got != want {
+		t.Errorf("last arg = %v, want %v — the anchor step bind is last in the SQL text", got, want)
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 // Legacy REST ↔ shared-operation adapter tests: the legacy URLs keep their
 // envelopes while the mutation runs through the registry — revision fencing,
 // idempotent replay, reversible archive, and typed error mapping. Needs the
-// compose Postgres + ClickHouse; skips without them.
+// compose Postgres + DuckDB; skips without them.
 
 // storeRunner is the minimal SourceRunner for tests: it delegates to the real
 // store enqueue path so the archived-source admission guard is exercised.

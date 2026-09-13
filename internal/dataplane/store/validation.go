@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ import (
 //     in Postgres rather than the event store because it is a contact list: it
 //     must be exportable, deletable and deduped per person, none of which a
 //     1-year-TTL append-only MergeTree does. The matching EVENT is still written
-//     to ClickHouse, so funnels, persons and every agent tool see it without a
+//     to DuckDB, so funnels, persons and every agent tool see it without a
 //     new read path.
 
 // ValidationTest is one falsifiable experiment: a hypothesis, the event that
@@ -274,7 +275,7 @@ LIMIT 1`, projectID)
 // validationListCap bounds one read of the list.
 //
 // It is not a display preference. Every row that has been committed is measured
-// against the event store to produce its counts, and that is one ClickHouse
+// against the event store to produce its counts, and that is one DuckDB
 // aggregation per row — so an uncapped list is a page whose cost grows with the
 // project's whole history of ideas rather than with what is on screen. The cap
 // is paired with the total in the response, so a project past it is TOLD it is
@@ -561,27 +562,22 @@ func (s *Store) ValidationTestProgress(ctx context.Context, t ValidationTest) (T
 	if p.DaysLeft < 0 {
 		p.DaysLeft = 0
 	}
-	if s.ch == nil {
+	if s.duck == nil {
 		return p, nil
 	}
 	names := []string{t.MetricEvent}
 	if t.BaselineEvent != "" {
 		names = append(names, t.BaselineEvent)
 	}
-	rows, err := s.ch.Query(ctx, `
-SELECT event_name, uniqExact(distinct_id) AS people
+	err := s.duckQuery(ctx, `
+SELECT event_name, count(DISTINCT distinct_id) AS people
 FROM events
-WHERE project_id = ? AND event_name IN (?) AND timestamp >= ? AND timestamp < ?
-GROUP BY event_name`, t.ProjectID, names, from, until)
-	if err != nil {
-		return p, err
-	}
-	defer rows.Close()
-	for rows.Next() {
+WHERE project_id = ? AND event_name IN `+placeholders(len(names))+` AND "timestamp" >= ? AND "timestamp" < ?
+GROUP BY event_name`, append([]any{t.ProjectID}, append(anySlice(names), from, until)...), func(rows *sql.Rows) error {
 		var name string
 		var people uint64
 		if err := rows.Scan(&name, &people); err != nil {
-			return p, err
+			return err
 		}
 		switch name {
 		case t.MetricEvent:
@@ -589,8 +585,9 @@ GROUP BY event_name`, t.ProjectID, names, from, until)
 		case t.BaselineEvent:
 			p.Baseline = int(people)
 		}
-	}
-	return p, rows.Err()
+		return nil
+	})
+	return p, err
 }
 
 // Verdict reads a progress as the decision it implies, and is the reason the

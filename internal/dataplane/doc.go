@@ -1,10 +1,10 @@
 // Package dataplane is the AgentRay data layer: event capture, external
 // source plugins, and the persistence those two write into.
 //
-//	capture (ingest)  →  NATS  →  ClickHouse
-//	connector plugin  →  Engine  →  ClickHouse landing tables
+//	capture (ingest)  →  NATS  →  DuckDB
+//	connector plugin  →  Engine  →  DuckDB landing tables
 //
-// Subpackages: ingest, connector, store (Postgres+ClickHouse), usecase
+// Subpackages: ingest, connector, store (Postgres+DuckDB), usecase
 // (analytics operations), alerting (threshold/anomaly → outbound notify).
 //
 // Import rules: this package (and its subpackages) must not import

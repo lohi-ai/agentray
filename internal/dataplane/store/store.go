@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,19 +23,6 @@ import (
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
-// chConn is the ClickHouse surface the not-yet-ported read paths still compile
-// against (ticket 007 ports them to DuckDB). *Store.ch is always the
-// unavailableCH stub — the engine is gone — so those paths fail fast with a
-// typed error instead of panicking on a nil interface. Live tests that open a
-// real clickhouse.Conn still satisfy this interface.
-type chConn interface {
-	Exec(ctx context.Context, query string, args ...any) error
-	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
-	QueryRow(ctx context.Context, query string, args ...any) driver.Row
-	PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error)
-	Ping(ctx context.Context) error
-	Close() error
-}
 
 type Store struct {
 	pg *pgxpool.Pool
@@ -43,13 +30,10 @@ type Store struct {
 	// person profiles, and connector landing rows. One instance per Store,
 	// opened in Open and closed in Close (or CloseDuckDB during shutdown).
 	duck *DuckDB
-	// ch is the unavailable stub — see chConn. Retained so the unported
-	// ClickHouse-facing query code keeps compiling until ticket 007.
-	ch chConn
-	// chRO was the least-privilege read connection; with no engine it is the
-	// same stub. readConn() still prefers it so the call sites stay honest.
-	chRO       chConn
-	chDatabase string
+	// sandboxes owns the per-project in-memory DuckDB instances that untrusted
+	// SQL (run_sql, saved queries, charts, alerts) executes against. See
+	// duckdb_sandbox.go.
+	sandboxes  *sqlSandboxPool
 	resolvers  *resolverCache
 
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
@@ -66,24 +50,15 @@ type Store struct {
 	demoWorkspaceID string
 }
 
-// readConn returns the connection that untrusted SELECTs (run_sql, saved
-// queries, agent SQL) must use: the least-privilege RO connection when
-// configured, otherwise the primary connection.
-func (s *Store) readConn() chConn {
-	if s.chRO != nil {
-		return s.chRO
-	}
-	return s.ch
-}
 
-// resolverCache memoizes the per-project identity resolver. canonical-id
-// stitching itself now runs in ClickHouse via the aliases_dict dictionary, but
-// person-scoped filters still need the in-memory alias pairs
-// (relatedDistinctIDs). Without this cache every analytics call and every
-// run_sql re-read the whole alias table from Postgres — a hot-path round trip an
-// agent firing many queries pays repeatedly. A short TTL bounds staleness; new
-// aliases also invalidate the entry explicitly on write, so a freshly-identified
-// user stitches immediately for filtering.
+// resolverCache memoizes the per-project identity resolver. Canonical-id
+// stitching itself now runs in DuckDB through the resolved_events view (a
+// LEFT JOIN on the aliases mirror), but person-scoped filters still need the
+// in-memory alias pairs (relatedDistinctIDs). Without this cache every
+// analytics call re-reads the whole alias table from Postgres — a hot-path
+// round trip an agent firing many queries pays repeatedly. A short TTL bounds
+// staleness; new aliases also invalidate the entry explicitly on write, so a
+// freshly-identified user stitches immediately for filtering.
 type resolverCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
@@ -405,7 +380,7 @@ type CohortAnalysis struct {
 // ProjectAudience is a user-defined cohort audience scoped to one project. It is
 // a structured rule, not raw SQL: Kind is "paid" (anyone who ever paid) or
 // "plan" (Plans lists the matching `plan` values). compilePredicate turns it
-// into a safe ClickHouse boolean — the single place a custom audience becomes
+// into a safe DuckDB boolean — the single place a custom audience becomes
 // SQL — so projects can add their own paid/premium-style groups (the planned
 // external-DB source plugs in at the same per-person attribute layer).
 type ProjectAudience struct {
@@ -515,7 +490,6 @@ type Alias struct {
 }
 
 type identityResolver struct {
-	database     string // ClickHouse database that holds aliases_dict
 	anonymousIDs []string
 	canonicalIDs []string
 }
@@ -642,8 +616,8 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The embedded analytics engine replaces the ClickHouse connection: one
-	// DuckDB file owns the event log, alias mirror, person profiles, and
+	// The embedded analytics engine: one DuckDB file owns the event log,
+	// alias mirror, person profiles, and
 	// connector landing rows. Opened before the JetStream worker starts so the
 	// first consumed batch always has a durable place to land.
 	duck, err := OpenDuckDB(ctx, cfg.DuckDBPath)
@@ -654,9 +628,7 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	store := &Store{
 		pg:         pg,
 		duck:       duck,
-		ch:         unavailableCH{},
-		chRO:       unavailableCH{},
-		chDatabase: cfg.ClickHouseDatabase,
+		sandboxes:  newSQLSandboxPool(duck),
 		resolvers:  newResolverCache(30 * time.Second),
 		hostModel:  HostModelDefaultsFromConfig(cfg),
 	}
@@ -699,6 +671,9 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 // the last acked batch is committed and folded out of the WAL — and before
 // NATS/Redis/Postgres close.
 func (s *Store) CloseDuckDB() {
+	if s.sandboxes != nil {
+		s.sandboxes.closeAll()
+	}
 	if s.duck != nil {
 		_ = s.duck.Close()
 	}
@@ -709,12 +684,6 @@ func (s *Store) Close() {
 	if s.pg != nil {
 		s.pg.Close()
 	}
-	if s.ch != nil {
-		_ = s.ch.Close()
-	}
-	if s.chRO != nil {
-		_ = s.chRO.Close()
-	}
 }
 
 // migrate brings the control plane up to schema. The analytics schema lives
@@ -723,11 +692,10 @@ func (s *Store) migrate(ctx context.Context, cfg config.Config) error {
 	if err := s.migratePostgres(ctx, cfg); err != nil {
 		return err
 	}
-	// These were nested under migrateClickHouse historically but are all
-	// Postgres DDL; they moved here when the ClickHouse bootstrap was removed.
-	if err := s.migrateAgent(ctx); err != nil {
-		return err
-	}
+	// These were nested under the old engine bootstrap historically but are
+	// all Postgres DDL; they moved here when that bootstrap was removed.
+	// migratePostgres already ran migrateAgent (validation_tests references
+	// agent_runs), so it is not repeated here.
 	if err := s.migrateAgentTrace(ctx); err != nil {
 		return err
 	}
@@ -1102,8 +1070,7 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	}
 
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
-	// here so a PG-only boot still creates the tables; migrateClickHouse
-	// also calls migrateAgent and is idempotent.
+	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
 		return err
 	}
@@ -1116,9 +1083,9 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	}
 
 	// The plan column and upgrade_requests are Postgres DDL, and the auth path
-	// now selects w.plan on every login — so it must not sit behind the
-	// ClickHouse migration. A CH outage or schema conflict there returns early,
-	// and this column missing turns "analytics are down" into "nobody can log in".
+	// now selects w.plan on every login — so it must not sit behind an engine
+	// migration. An outage or schema conflict there returns early, and this
+	// column missing turns "analytics are down" into "nobody can log in".
 	if err := s.migrateWorkspacePlan(ctx); err != nil {
 		return err
 	}
@@ -1132,396 +1099,6 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	return nil
 }
 
-// chIdentLiteral escapes a value for inclusion inside a single-quoted ClickHouse
-// string literal (used when building the aliases_dict DDL from config-supplied
-// credentials). Backslash first, then the quote.
-func chIdentLiteral(v string) string {
-	v = strings.ReplaceAll(v, `\`, `\\`)
-	return strings.ReplaceAll(v, `'`, `\'`)
-}
-
-// chIdentBacktick quotes a ClickHouse identifier (database/table/user) with
-// backticks, doubling any embedded backtick. Use for object names in DDL where a
-// string literal would be wrong (e.g. GRANT SELECT ON `db`.*).
-func chIdentBacktick(v string) string {
-	return "`" + strings.ReplaceAll(v, "`", "``") + "`"
-}
-
-func (s *Store) migrateClickHouse(ctx context.Context, cfg config.Config) error {
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS events (
-	project_id UUID,
-	event_id UUID DEFAULT generateUUIDv4(),
-	distinct_id String,
-	session_id String,
-	event_name LowCardinality(String),
-	event_type LowCardinality(String),
-	properties String,
-	agent_id Nullable(String),
-	tool_name Nullable(String),
-	tool_input Nullable(String),
-	tool_output Nullable(String),
-	tokens_input Nullable(UInt32),
-	tokens_output Nullable(UInt32),
-	cost_usd Nullable(Float32),
-	latency_ms Nullable(UInt32),
-	model_name Nullable(String),
-	is_error UInt8 DEFAULT 0,
-	error_message Nullable(String),
-	timestamp DateTime64(3, 'UTC'),
-	inserted_at DateTime64(3, 'UTC') DEFAULT now64()
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (project_id, event_name, timestamp, distinct_id)
-TTL toDateTime(timestamp) + INTERVAL 1 YEAR`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS visitor_class LowCardinality(String) DEFAULT 'human'`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS bot_name Nullable(String)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS referrer_host Nullable(String)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS referrer_channel LowCardinality(String) DEFAULT ''`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS user_agent Nullable(String)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS insert_id Nullable(String)`); err != nil {
-		return err
-	}
-	// platform is derived at ingest (explicit property, else user agent). Additive
-	// and defaulted, so rows written before it existed read back as '' (unknown)
-	// without a rewrite.
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS platform LowCardinality(String) DEFAULT ''`); err != nil {
-		return err
-	}
-	// is_unplanned tags events whose name was absent from the project's established
-	// event catalog at capture time (typo'd / untracked names). Advisory, never
-	// rejected — the tracking.unplanned_event digest and Growth agent watch it.
-	if err := s.ch.Exec(ctx, `ALTER TABLE events ADD COLUMN IF NOT EXISTS is_unplanned UInt8 DEFAULT 0`); err != nil {
-		return err
-	}
-	// Identity alias map + dictionary. canonical-id stitching used to ship two
-	// N-sized arrays into a transform() on every analytics query and every
-	// run_sql (N = aliases in the project) — unbounded query payload plus a
-	// per-row scan. The dictionary turns that into an in-memory keyed lookup:
-	// dictGet by (project_id, distinct_id). Source is this local
-	// ReplacingMergeTree, which the app keeps in sync from Postgres (the source
-	// of truth) via dual-write + boot backfill; LIFETIME bounds staleness for a
-	// brand-new identity to ~1 min.
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS aliases (
-	project_id UUID,
-	anonymous_id String,
-	canonical_id String,
-	version DateTime64(3, 'UTC') DEFAULT now64()
-)
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (project_id, anonymous_id)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, fmt.Sprintf(`
-CREATE DICTIONARY IF NOT EXISTS aliases_dict (
-	project_id UUID,
-	anonymous_id String,
-	canonical_id String
-)
-PRIMARY KEY project_id, anonymous_id
-SOURCE(CLICKHOUSE(TABLE 'aliases' DB '%s' USER '%s' PASSWORD '%s'))
-LAYOUT(COMPLEX_KEY_HASHED())
-LIFETIME(MIN 30 MAX 60)`,
-		chIdentLiteral(cfg.ClickHouseDatabase),
-		chIdentLiteral(cfg.ClickHouseUser),
-		chIdentLiteral(cfg.ClickHousePassword))); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `
-CREATE MATERIALIZED VIEW IF NOT EXISTS sessions_mv
-ENGINE = AggregatingMergeTree()
-ORDER BY (project_id, session_id, distinct_id)
-AS SELECT
-	project_id,
-	session_id,
-	distinct_id,
-	minState(timestamp) AS session_start,
-	maxState(timestamp) AS session_end,
-	countState() AS event_count,
-	sumState(toUInt64(ifNull(tokens_input, toUInt32(0)))) AS total_tokens_in,
-	sumState(toUInt64(ifNull(tokens_output, toUInt32(0)))) AS total_tokens_out,
-	sumState(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS total_cost_usd,
-	maxState(timestamp) AS last_event_at
-FROM events
-WHERE session_id != ''
-GROUP BY project_id, session_id, distinct_id`); err != nil {
-		return err
-	}
-	if err := s.migrateRollups(ctx); err != nil {
-		return err
-	}
-	// NOTE: the Postgres migrations that used to be nested here (agent, teams,
-	// lab, session log, spill, conversations) moved to migrate() — they were
-	// always Postgres DDL. This function is now ClickHouse-only and uncalled;
-	// ticket 008 deletes it with the rest of the engine surface.
-	// external_rows is the landing table for data-connector syncs: one wide
-	// JSON row per source row, deduplicated on merge by the replacing key so
-	// snapshot re-syncs and retried batches are idempotent. `synced_at`
-	// versions the replacement so the newest pull of a row wins; run_sql
-	// reaches this table through the scoped_external_rows rewrite
-	// (scopedReadonlySQL) and the readonly role's database-wide SELECT grant
-	// already covers it.
-	//
-	// Known limit, stated honestly: synced_at is wall-clock per batch, so two
-	// batches landing in the same millisecond tie on the version column and
-	// FINAL picks an arbitrary row. A deterministic landing version
-	// (per-sync sequence + batch index) is designed but deferred — it needs
-	// an engine change that cannot be applied in place.
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS external_rows (
-	project_id UUID,
-	connector_id UUID,
-	table_name LowCardinality(String),
-	row_key String,
-	cursor String,
-	data String,
-	synced_at DateTime64(3, 'UTC') DEFAULT now64()
-)
-ENGINE = ReplacingMergeTree(synced_at)
-ORDER BY (project_id, connector_id, table_name, row_key)`); err != nil {
-		return err
-	}
-	if err := s.provisionReadonlyRole(ctx, cfg); err != nil {
-		return err
-	}
-	return nil
-}
-
-// The rollup aggregation bodies are shared verbatim between the materialized view
-// (which maintains the table going forward) and the one-time history backfill, so
-// the two can never silently diverge (a divergence is a wrong-number bug: the
-// pre-MV history would aggregate differently from post-MV rows). The MV prepends
-// `CREATE MATERIALIZED VIEW ... TO <table> AS`, the backfill prepends
-// `INSERT INTO <table>` — everything after is identical.
-const eventsDailySelect = `
-SELECT
-	project_id,
-	toDate(timestamp) AS day,
-	event_type,
-	event_name,
-	visitor_class,
-	referrer_channel,
-	countState() AS events,
-	uniqState(distinct_id) AS uniq_users,
-	sumState(toUInt64(ifNull(tokens_input, toUInt32(0)))) AS tokens_in,
-	sumState(toUInt64(ifNull(tokens_output, toUInt32(0)))) AS tokens_out,
-	sumState(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS cost_usd
-FROM events
-GROUP BY project_id, day, event_type, event_name, visitor_class, referrer_channel`
-
-const agentUsageDailySelect = `
-SELECT
-	project_id,
-	toDate(timestamp) AS day,
-	ifNull(agent_id, 'unknown') AS agent_id,
-	ifNull(model_name, 'unknown') AS model_name,
-	countState() AS events,
-	sumState(toUInt64(ifNull(tokens_input, toUInt32(0)))) AS tokens_in,
-	sumState(toUInt64(ifNull(tokens_output, toUInt32(0)))) AS tokens_out,
-	sumState(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS cost_usd,
-	sumState(toFloat64(ifNull(latency_ms, toUInt32(0)))) AS latency_sum,
-	sumState(toUInt64(is_error)) AS errors
-FROM events
-WHERE event_type = 'agent'
-GROUP BY project_id, day, agent_id, model_name`
-
-// migrateRollups provisions the daily rollup tables + materialized views that let
-// dashboard/agent reads answer common time-series and agent-usage questions from a
-// small pre-aggregated table instead of re-scanning raw `events` every request
-// (the raw table grows linearly with volume). It also applies compression codecs
-// to the two fat/monotonic columns and backfills history exactly once.
-//
-// Pattern: an explicit target table (AggregatingMergeTree) plus a `TO`
-// materialized view, so history can be backfilled with a plain INSERT … SELECT.
-// The MV only sees rows inserted after its creation; the one-time backfill covers
-// everything already stored. This runs during boot migration, before the ingest
-// worker starts, so there are no concurrent inserts to double-count — and a marker
-// row makes the backfill idempotent across restarts (the W5 "silent undercount"
-// trap the design calls out).
-func (s *Store) migrateRollups(ctx context.Context) error {
-	// Compression codecs on the two columns that dominate on-disk size / scan cost:
-	// the JSON properties blob (ZSTD) and the monotonic timestamp (Delta+ZSTD).
-	// MODIFY COLUMN only re-encodes new parts (old parts recompress on merge), so
-	// this is safe and idempotent on every boot.
-	for _, ddl := range []string{
-		`ALTER TABLE events MODIFY COLUMN properties String CODEC(ZSTD(3))`,
-		`ALTER TABLE events MODIFY COLUMN timestamp DateTime64(3, 'UTC') CODEC(Delta, ZSTD)`,
-	} {
-		if err := s.ch.Exec(ctx, ddl); err != nil {
-			return fmt.Errorf("apply events codec: %w", err)
-		}
-	}
-
-	// Small marker table so one-shot data migrations (backfills) run exactly once.
-	// Doubles as the seed of a future migration ledger (P5).
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS schema_markers (
-	name String,
-	applied_at DateTime64(3, 'UTC') DEFAULT now64()
-)
-ENGINE = MergeTree()
-ORDER BY name`); err != nil {
-		return err
-	}
-
-	// events_daily: per-day volume broken down by the dimensions dashboards group
-	// on (event, type, human/bot class, acquisition channel). uniq_users is over
-	// the raw distinct_id (pre-identity-stitch) — a fast daily-active approximation;
-	// exact canonical DAU still comes from the identity-resolved raw path.
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS events_daily (
-	project_id UUID,
-	day Date,
-	event_type LowCardinality(String),
-	event_name LowCardinality(String),
-	visitor_class LowCardinality(String),
-	referrer_channel LowCardinality(String),
-	events AggregateFunction(count),
-	uniq_users AggregateFunction(uniq, String),
-	tokens_in AggregateFunction(sum, UInt64),
-	tokens_out AggregateFunction(sum, UInt64),
-	cost_usd AggregateFunction(sum, Float64)
-)
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (project_id, day, event_type, event_name, visitor_class, referrer_channel)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `CREATE MATERIALIZED VIEW IF NOT EXISTS events_daily_mv TO events_daily AS`+eventsDailySelect); err != nil {
-		return err
-	}
-
-	// agent_usage_daily: per-day agent cost/latency keyed exactly as agentInsightRows
-	// groups (agent_id, model_name), restricted to agent events. latency_sum + events
-	// reproduce the raw avg(coalesce(latency,0)) exactly, so the rollup answer equals
-	// the raw answer for a day-aligned window.
-	if err := s.ch.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS agent_usage_daily (
-	project_id UUID,
-	day Date,
-	agent_id String,
-	model_name String,
-	events AggregateFunction(count),
-	tokens_in AggregateFunction(sum, UInt64),
-	tokens_out AggregateFunction(sum, UInt64),
-	cost_usd AggregateFunction(sum, Float64),
-	latency_sum AggregateFunction(sum, Float64),
-	errors AggregateFunction(sum, UInt64)
-)
-ENGINE = AggregatingMergeTree()
-PARTITION BY toYYYYMM(day)
-ORDER BY (project_id, day, agent_id, model_name)`); err != nil {
-		return err
-	}
-	if err := s.ch.Exec(ctx, `CREATE MATERIALIZED VIEW IF NOT EXISTS agent_usage_daily_mv TO agent_usage_daily AS`+agentUsageDailySelect); err != nil {
-		return err
-	}
-
-	if err := s.backfillRollups(ctx); err != nil {
-		return err
-	}
-	// Recover the platform of everything captured before the column existed. Runs
-	// after schema_markers is created (above) and, like backfillRollups, exactly
-	// once.
-	return s.backfillPlatform(ctx)
-}
-
-// backfillRollups seeds the rollup tables from all pre-existing events, once. The
-// marker guard makes it a no-op on subsequent boots (re-running would double-count,
-// since post-creation rows already flow in via the materialized views).
-func (s *Store) backfillRollups(ctx context.Context) error {
-	const marker = "backfill_rollups_v1"
-	var applied uint64
-	if err := s.ch.QueryRow(ctx, `SELECT count() FROM schema_markers WHERE name = ?`, marker).Scan(&applied); err != nil {
-		return fmt.Errorf("check rollup backfill marker: %w", err)
-	}
-	if applied > 0 {
-		return nil
-	}
-	if err := s.ch.Exec(ctx, `INSERT INTO events_daily`+eventsDailySelect); err != nil {
-		return fmt.Errorf("backfill events_daily: %w", err)
-	}
-	if err := s.ch.Exec(ctx, `INSERT INTO agent_usage_daily`+agentUsageDailySelect); err != nil {
-		return fmt.Errorf("backfill agent_usage_daily: %w", err)
-	}
-	if err := s.ch.Exec(ctx, `INSERT INTO schema_markers (name) VALUES (?)`, marker); err != nil {
-		return fmt.Errorf("record rollup backfill marker: %w", err)
-	}
-	return nil
-}
-
-// provisionReadonlyRole creates the least-privilege ClickHouse account that every
-// untrusted SELECT runs as. The security property is not the SQL denylist (which
-// a table function in a subquery can slip past) but ClickHouse's own grant model:
-//   - readonly=2 profile: SELECT + SET only, no DDL/DML, no SYSTEM.
-//   - GRANT SELECT on <database>.* only: no other database, no table functions
-//     (url/remote/mysql/postgresql/file/s3 require CREATE TEMPORARY TABLE +
-//     per-function grants that we never issue), so `SELECT * FROM url(...)` fails
-//     with a grant error instead of performing SSRF / cross-tenant reads.
-//
-// No-op when no RO user is configured (dev). Idempotent: IF NOT EXISTS + repeated
-// GRANT are safe to run on every boot.
-func (s *Store) provisionReadonlyRole(ctx context.Context, cfg config.Config) error {
-	if cfg.ClickHouseROUser == "" {
-		return nil
-	}
-	// CREATE USER with an explicit readonly=2 settings profile constraint. The
-	// password is set via IDENTIFIED WITH plaintext_password; empty password uses
-	// no_password (trusted local CH only).
-	identified := "IDENTIFIED WITH no_password"
-	if cfg.ClickHouseROPassword != "" {
-		identified = fmt.Sprintf("IDENTIFIED WITH plaintext_password BY '%s'", chIdentLiteral(cfg.ClickHouseROPassword))
-	}
-	// Resource caps so a single untrusted SELECT can't monopolise CPU/RAM/IO and
-	// starve ingestion inserts. These ride on the same readonly=2 settings profile.
-	// MAX constraints (not CONST) let a query lower a limit but never raise it above
-	// the ceiling. Values are sized for the shared 2 GB-capped ClickHouse box.
-	//   - max_execution_time 30s: kill runaway scans.
-	//   - max_rows_to_read 1e9 / read_overflow_mode throw: bound work before it runs.
-	//   - max_result_rows 1e6 + result_overflow_mode throw: cap payload back to the agent.
-	//   - max_memory_usage 2 GiB: hard per-query RAM ceiling under the server cap.
-	//   - max_bytes_before_external_group_by 1 GiB: spill big GROUP BYs to disk
-	//     instead of OOM-killing the query (and the server with it).
-	settings := strings.Join([]string{
-		"readonly = 2 CONST",
-		"max_execution_time = 30 MAX 30",
-		"max_rows_to_read = 1000000000 MAX 1000000000",
-		"read_overflow_mode = 'throw'",
-		"max_result_rows = 1000000 MAX 1000000",
-		"result_overflow_mode = 'throw'",
-		"max_memory_usage = 2147483648 MAX 2147483648",
-		"max_bytes_before_external_group_by = 1073741824",
-	}, ", ")
-	roUser := chIdentBacktick(cfg.ClickHouseROUser)
-	stmts := []string{
-		fmt.Sprintf(`CREATE USER IF NOT EXISTS %s %s SETTINGS %s`, roUser, identified, settings),
-		// Ensure the profile settings stick even if the user pre-existed.
-		fmt.Sprintf(`ALTER USER %s SETTINGS %s`, roUser, settings),
-		// SELECT on the project database only. No GRANT on system table functions,
-		// no other database, no CREATE TEMPORARY TABLE — table functions stay denied.
-		fmt.Sprintf(`GRANT SELECT ON %s.* TO %s`, chIdentBacktick(cfg.ClickHouseDatabase), roUser),
-	}
-	for _, stmt := range stmts {
-		if err := s.ch.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("provision readonly CH role: %w", err)
-		}
-	}
-	return nil
-}
 
 type pgQuerier interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -1539,21 +1116,21 @@ func seedStarterDashboard(ctx context.Context, q pgQuerier, projectID string) er
 		{
 			Name:   "Traffic: human / bot / AI",
 			Kind:   "pie",
-			SQL:    `SELECT ifNull(visitor_class, 'human') AS class, count() AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`,
+			SQL:    `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`,
 			XField: "class",
 			YField: "count",
 		},
 		{
 			Name:   "Visitors: guest vs identified",
 			Kind:   "bar",
-			SQL:    `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`,
+			SQL:    `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`,
 			XField: "user_type",
 			YField: "visitors",
 		},
 		{
 			Name:   "Visitor retention",
 			Kind:   "bar",
-			SQL:    `SELECT if(visits > 1, 'Returning', 'First-time') AS visitor_type, count() AS visitors FROM (SELECT canonical_id, count() AS visits FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY canonical_id) GROUP BY visitor_type ORDER BY visitors DESC`,
+			SQL:    `SELECT if(visits > 1, 'Returning', 'First-time') AS visitor_type, count(*) AS visitors FROM (SELECT canonical_id, count(*) AS visits FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY canonical_id) GROUP BY visitor_type ORDER BY visitors DESC`,
 			XField: "visitor_type",
 			YField: "visitors",
 		},
@@ -1815,14 +1392,14 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Product Overview",
 			description: "Starter board with DAU, MAU, traffic breakdowns, and visitor identification.",
 			charts: []TemplateChart{
-				{Name: "DAU", Kind: "line", SQL: `SELECT toDate(timestamp) AS day, uniqExact(distinct_id) AS dau FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "dau", SortOrder: 0},
-				{Name: "MAU", Kind: "line", SQL: `SELECT toStartOfMonth(timestamp) AS month, uniqExact(distinct_id) AS mau FROM events GROUP BY month ORDER BY month ASC LIMIT 12`, XField: "month", YField: "mau", SortOrder: 1},
+				{Name: "DAU", Kind: "line", SQL: `SELECT CAST("timestamp" AS DATE) AS day, count(DISTINCT distinct_id) AS dau FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "dau", SortOrder: 0},
+				{Name: "MAU", Kind: "line", SQL: `SELECT date_trunc('month', "timestamp") AS month, count(DISTINCT distinct_id) AS mau FROM events GROUP BY month ORDER BY month ASC LIMIT 12`, XField: "month", YField: "mau", SortOrder: 1},
 				{Name: "Event trend", Kind: "line", Metric: "events", SortOrder: 2},
 				{Name: "Sessions", Kind: "stat", Metric: "sessions", SortOrder: 3},
 				{Name: "Top events", Kind: "bar", Metric: "event_breakdown", SortOrder: 4},
 				{Name: "AI cost", Kind: "stat", Metric: "cost", EventType: "agent", SortOrder: 5},
-				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT ifNull(visitor_class, 'human') AS class, count() AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 6},
-				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 7},
+				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 6},
+				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 7},
 			},
 		},
 		{
@@ -1862,10 +1439,10 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Growth & Retention",
 			description: "Acquisition, activation, and how well readers come back week over week.",
 			charts: []TemplateChart{
-				{Name: "New vs returning (daily)", Kind: "line", SQL: `SELECT toDate(timestamp) AS day, uniqExactIf(distinct_id, is_first) AS new_readers, uniqExactIf(distinct_id, NOT is_first) AS returning_readers FROM (SELECT distinct_id, timestamp, min(timestamp) OVER (PARTITION BY distinct_id) = timestamp AS is_first FROM events) GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "returning_readers", SortOrder: 0},
-				{Name: "WAU", Kind: "line", SQL: `SELECT toStartOfWeek(timestamp) AS week, uniqExact(distinct_id) AS wau FROM events GROUP BY week ORDER BY week ASC LIMIT 12`, XField: "week", YField: "wau", SortOrder: 1},
+				{Name: "New vs returning (daily)", Kind: "line", SQL: `SELECT CAST("timestamp" AS DATE) AS day, count(DISTINCT distinct_id) FILTER (WHERE is_first) AS new_readers, count(DISTINCT distinct_id) FILTER (WHERE NOT is_first) AS returning_readers FROM (SELECT distinct_id, "timestamp", min("timestamp") OVER (PARTITION BY distinct_id) = "timestamp" AS is_first FROM events) GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "returning_readers", SortOrder: 0},
+				{Name: "WAU", Kind: "line", SQL: `SELECT date_trunc('week', "timestamp") AS week, count(DISTINCT distinct_id) AS wau FROM events GROUP BY week ORDER BY week ASC LIMIT 12`, XField: "week", YField: "wau", SortOrder: 1},
 				{Name: "Active readers (7d)", Kind: "stat", Metric: "sessions", SortOrder: 2},
-				{Name: "Reading depth (events/reader)", Kind: "bar", SQL: `SELECT toDate(timestamp) AS day, round(count() / uniqExact(distinct_id), 1) AS events_per_reader FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "events_per_reader", SortOrder: 3},
+				{Name: "Reading depth (events/reader)", Kind: "bar", SQL: `SELECT CAST("timestamp" AS DATE) AS day, round(count(*) / count(DISTINCT distinct_id), 1) AS events_per_reader FROM events GROUP BY day ORDER BY day ASC LIMIT 30`, XField: "day", YField: "events_per_reader", SortOrder: 3},
 				{Name: "Top events", Kind: "bar", Metric: "event_breakdown", SortOrder: 4},
 			},
 		},
@@ -1874,9 +1451,9 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			name:        "Marketing & Acquisition",
 			description: "Traffic sources, the visit→read→subscribe funnel, and guest-to-identified conversion.",
 			charts: []TemplateChart{
-				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT ifNull(visitor_class, 'human') AS class, count() AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 0},
-				{Name: "Top referrers", Kind: "bar", SQL: `SELECT ifNull(nullIf(JSONExtractString(properties, 'referrer'), ''), 'direct') AS referrer, count() AS visits FROM events WHERE event_name = 'user.pageview' GROUP BY referrer ORDER BY visits DESC LIMIT 10`, XField: "referrer", YField: "visits", SortOrder: 1},
-				{Name: "Guest vs identified", Kind: "bar", SQL: `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 2},
+				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 0},
+				{Name: "Top referrers", Kind: "bar", SQL: `SELECT coalesce(nullif(json_extract_string(properties, '$.referrer'), ''), 'direct') AS referrer, count(*) AS visits FROM events WHERE event_name = 'user.pageview' GROUP BY referrer ORDER BY visits DESC LIMIT 10`, XField: "referrer", YField: "visits", SortOrder: 1},
+				{Name: "Guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 2},
 				{Name: "Pageviews trend", Kind: "line", Metric: "events", EventName: "user.pageview", SortOrder: 3},
 				{Name: "Conversions", Kind: "bar", Metric: "event_breakdown", EventName: "user.conversion", SortOrder: 4},
 			},
@@ -2103,9 +1680,8 @@ func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
 // SinkEvents is the ingest worker's write path: the batch's events and their
 // person-profile projection commit in ONE DuckDB transaction, and the error
 // drives the JetStream ack/nak/dead-letter decision. Commit-before-ack plus
-// the (project_id, event_id) dedup key makes redelivery a no-op; the profile
-// can no longer be dropped by a saturated background applier the way the old
-// ClickHouse path could.
+// the (project_id, event_id) dedup key makes redelivery a no-op, and the
+// profile commits atomically with the batch.
 func (s *Store) SinkEvents(ctx context.Context, events []Event) error {
 	if s.duck == nil {
 		return errors.New("storage: duckdb not open")
@@ -2173,7 +1749,7 @@ func (s *Store) identityResolver(ctx context.Context, projectID string) (identit
 	}
 	defer rows.Close()
 
-	resolver := identityResolver{database: s.chDatabase}
+	resolver := identityResolver{}
 	for rows.Next() {
 		var anonymousID, canonicalID string
 		if err := rows.Scan(&anonymousID, &canonicalID); err != nil {
@@ -2189,28 +1765,27 @@ func (s *Store) identityResolver(ctx context.Context, projectID string) (identit
 	return resolver, nil
 }
 
-// canonicalExpr returns a ClickHouse scalar that maps a distinct-id column to its
-// stitched canonical id. It resolves through the aliases_dict dictionary —
-// dictGet by (project_id, column) — so the alias map lives in ClickHouse memory
-// instead of being shipped as per-query transform() arrays. Unknown ids fall back
-// to themselves. project_id must be in scope (it always is: every events /
-// sessions_mv / scoped_events query is project-keyed). Returns no bind args.
+// canonicalExpr returns the resolved_events column that carries the stitched
+// canonical id for a distinct-id column. The DuckDB resolved_events view does
+// the job aliases_dict did: a LEFT JOIN on the aliases mirror keyed by
+// (project_id, anonymous_id), falling back to the raw distinct id. Callers
+// must therefore read FROM resolved_events (or an equivalent aliases join),
+// not bare events. Returns no bind args.
 func (r identityResolver) canonicalExpr(column string) (string, []any) {
-	dict := "aliases_dict"
-	if r.database != "" {
-		dict = r.database + ".aliases_dict"
-	}
-	return "dictGetOrDefault('" + dict + "', 'canonical_id', (project_id, " + column + "), " + column + ")", nil
+	// The view exposes exactly one stitched column; the argument only carries
+	// the caller's table alias (e.g. "e.distinct_id" -> "e.canonical_distinct_id").
+	return strings.ReplaceAll(column, "distinct_id", "canonical_distinct_id"), nil
 }
 
 // workspaceCanonicalExpr is canonicalExpr for a query that spans a whole
 // workspace, where there is no single project to resolve. It is safe because
-// canonicalExpr resolves entirely through the ClickHouse dictionary, keyed on
-// (project_id, distinct_id) — it reads only the database name. The Postgres
-// alias list identityResolver loads serves the *other* resolver methods
-// (relatedDistinctIDs, canonicalID), which a workspace-wide query does not use.
+// the resolved_events view resolves through the aliases mirror keyed on
+// (project_id, distinct_id) — identity namespaces stay per-project. The
+// Postgres alias list identityResolver loads serves the *other* resolver
+// methods (relatedDistinctIDs, canonicalID), which a workspace-wide query
+// does not use.
 func (s *Store) workspaceCanonicalExpr(column string) string {
-	expr, _ := identityResolver{database: s.chDatabase}.canonicalExpr(column)
+	expr, _ := identityResolver{}.canonicalExpr(column)
 	return expr
 }
 
@@ -2256,42 +1831,34 @@ func (s *Store) EventNames(ctx context.Context, projectID string, limit int) ([]
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	resolver, err := s.identityResolver(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
 	// The catalog is read by autocomplete *and* by the first-run written opinion,
 	// which speaks in people. So it carries both numbers, and the people number
 	// is stitched (one human who logged in mid-session is one person) and
-	// human-only (a crawler is not a person).
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	args := append([]any{projectID}, canonicalArgs...)
-	args = append(args, limit)
-	rows, err := s.ch.Query(ctx, `
+	// human-only (a crawler is not a person). resolved_events supplies the
+	// stitched canonical_distinct_id.
+	entries := []EventCatalogEntry{}
+	err := s.duckQuery(ctx, `
 SELECT event_name,
-       any(event_type) AS event_type,
-       count() AS cnt,
-       uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human') AS users,
-       max(timestamp) AS last_seen
-FROM events
-WHERE project_id = ? AND event_name != ''
+       any_value(event_type) AS event_type,
+       count(*) AS cnt,
+       count(DISTINCT canonical_distinct_id) FILTER (WHERE coalesce(visitor_class, 'human') = 'human') AS users,
+       max("timestamp") AS last_seen
+FROM resolved_events
+WHERE project_id = ? AND event_name <> ''
 GROUP BY event_name
 ORDER BY cnt DESC
-LIMIT ?`, args...)
+LIMIT ?`, []any{projectID, limit}, func(rows *sql.Rows) error {
+		var e EventCatalogEntry
+		if err := rows.Scan(&e.EventName, &e.EventType, &e.Count, &e.Users, &e.LastSeen); err != nil {
+			return err
+		}
+		entries = append(entries, e)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	entries := []EventCatalogEntry{}
-	for rows.Next() {
-		var e EventCatalogEntry
-		if err := rows.Scan(&e.EventName, &e.EventType, &e.Count, &e.Users, &e.LastSeen); err != nil {
-			return nil, err
-		}
-		entries = append(entries, e)
-	}
-	return entries, rows.Err()
+	return entries, nil
 }
 
 // EventNameSet returns every distinct event name for a project with no volume cap,
@@ -2300,43 +1867,36 @@ LIMIT ?`, args...)
 // established but low-volume name that fell outside the slice as "unplanned"
 // forever. Event names are low-cardinality, so the full set stays small.
 func (s *Store) EventNameSet(ctx context.Context, projectID string) (map[string]struct{}, error) {
-	rows, err := s.ch.Query(ctx, `
+	out := map[string]struct{}{}
+	err := s.duckQuery(ctx, `
 SELECT DISTINCT event_name
 FROM events
-WHERE project_id = ? AND event_name != ''`, projectID)
+WHERE project_id = ? AND event_name <> ''`, []any{projectID}, func(rows *sql.Rows) error {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		out[name] = struct{}{}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := map[string]struct{}{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out[name] = struct{}{}
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) RecentEvents(ctx context.Context, projectID string, limit int) ([]Event, error) {
-	rows, err := s.ch.Query(ctx, `
+	events := []Event{}
+	err := s.duckQuery(ctx, `
 SELECT
-	project_id::String, event_id::String, distinct_id, session_id, event_name,
-	event_type, properties, is_error, timestamp, inserted_at, platform
+	project_id::VARCHAR, event_id::VARCHAR, distinct_id, session_id, event_name,
+	event_type, properties, is_error, "timestamp", inserted_at, platform
 FROM events
 WHERE project_id = ?
 ORDER BY inserted_at DESC
-LIMIT ?`, projectID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	events := []Event{}
-	for rows.Next() {
+LIMIT ?`, []any{projectID, limit}, func(rows *sql.Rows) error {
 		var event Event
-		var isError uint8
+		var isError bool
 		var inserted time.Time
 		if err := rows.Scan(
 			&event.ProjectID,
@@ -2351,46 +1911,42 @@ LIMIT ?`, projectID, limit)
 			&inserted,
 			&event.Platform,
 		); err != nil {
-			return nil, err
+			return err
 		}
-		event.IsError = isError == 1
+		event.IsError = isError
 		event.InsertedAt = &inserted
 		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 func (s *Store) RecentSessions(ctx context.Context, projectID string, limit int) ([]Session, error) {
-	resolver, err := s.identityResolver(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	args := append(append([]any{}, canonicalArgs...), projectID, limit)
-	rows, err := s.ch.Query(ctx, `
-SELECT
-	project_id::String,
-	session_id,
-	`+canonicalID+` AS canonical_distinct_id,
-	minMerge(session_start) AS session_start,
-	maxMerge(session_end) AS session_end,
-	countMerge(event_count) AS event_count,
-	sumMerge(total_tokens_in) AS total_tokens_in,
-	sumMerge(total_tokens_out) AS total_tokens_out,
-	sumMerge(total_cost_usd) AS total_cost_usd,
-	maxMerge(last_event_at) AS last_event_at
-FROM sessions_mv
-WHERE project_id = ?
-GROUP BY project_id, session_id, canonical_distinct_id
-ORDER BY last_event_at DESC
-LIMIT ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	// sessions is the ingest-derived view (the sessions_mv replacement); the
+	// canonical id stitches through the aliases mirror, same as resolved_events.
 	sessions := []Session{}
-	for rows.Next() {
+	err := s.duckQuery(ctx, `
+SELECT
+	s.project_id::VARCHAR,
+	s.session_id,
+	coalesce(a.canonical_id, s.distinct_id) AS canonical_distinct_id,
+	min(s.session_start) AS session_start,
+	max(s.session_end) AS session_end,
+	sum(s.event_count) AS event_count,
+	sum(s.total_tokens_in) AS total_tokens_in,
+	sum(s.total_tokens_out) AS total_tokens_out,
+	sum(s.total_cost_usd) AS total_cost_usd,
+	max(s.last_event_at) AS last_event_at
+FROM sessions s
+LEFT JOIN aliases a
+	ON a.project_id = s.project_id AND a.anonymous_id = s.distinct_id
+WHERE s.project_id = ?
+GROUP BY s.project_id, s.session_id, canonical_distinct_id
+ORDER BY last_event_at DESC
+LIMIT ?`, []any{projectID, limit}, func(rows *sql.Rows) error {
 		var session Session
 		var lastEventAt time.Time
 		if err := rows.Scan(
@@ -2405,38 +1961,41 @@ LIMIT ?`, args...)
 			&session.TotalCostUSD,
 			&lastEventAt,
 		); err != nil {
-			return nil, err
+			return err
 		}
 		session.LastEventAt = &lastEventAt
 		sessions = append(sessions, session)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return sessions, rows.Err()
+	return sessions, nil
 }
 
 // distinctPlatforms lists the apps that sent events in the window, busiest
 // first. Bounded by the column's cardinality (LowCardinality, a handful of
 // values), so no LIMIT is needed for it to stay cheap.
 func (s *Store) distinctPlatforms(ctx context.Context, where string, args []any) ([]string, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT if(ifNull(platform, '') = '', 'unknown', platform) AS platform, count() AS events
+	result := []string{}
+	err := s.duckQuery(ctx, `
+SELECT if(coalesce(platform, '') = '', 'unknown', platform) AS platform, count(*) AS events
 FROM events
 WHERE `+where+`
 GROUP BY platform
-ORDER BY events DESC`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []string{}
-	for rows.Next() {
+ORDER BY events DESC`, args, func(rows *sql.Rows) error {
 		var platform string
 		var events uint64
 		if err := rows.Scan(&platform, &events); err != nil {
-			return nil, err
+			return err
 		}
 		result = append(result, platform)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter EventFilter) (ActivitySummary, error) {
@@ -2451,8 +2010,6 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 		return summary, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	summaryArgs := append(append([]any{}, canonicalArgs...), args...)
 
 	// DistinctUsers renders as "People" on the dashboard, so it counts humans —
 	// the same rule Persons and the funnel already apply. It is filtered inside
@@ -2460,31 +2017,30 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 	// numbers on this row (EventCount, the per-type breakdowns, tokens, cost) are
 	// ingestion and spend figures: a crawler's events were still ingested and
 	// still cost money, and hiding them would make the dashboard disagree with
-	// the bill.
-	err = s.ch.QueryRow(ctx, `
+	// the bill. resolved_events supplies the stitched canonical_distinct_id.
+	err = s.duckQueryRow(ctx, `
 	SELECT
-		count(),
-		countIf(event_type = 'user'),
-	countIf(event_type = 'agent'),
-	countIf(event_type = 'system'),
-	uniqExactIf(session_id, session_id != ''),
-	uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human'),
-	sum(toUInt64(ifNull(tokens_input, toUInt32(0)))),
-	sum(toUInt64(ifNull(tokens_output, toUInt32(0)))),
-		sum(toFloat64(ifNull(cost_usd, toFloat32(0))))
-	FROM events
-	WHERE `+where, summaryArgs...).
-		Scan(
-			&summary.EventCount,
-			&summary.UserEvents,
-			&summary.AgentEvents,
-			&summary.SystemEvents,
-			&summary.Sessions,
-			&summary.DistinctUsers,
-			&summary.TotalTokensIn,
-			&summary.TotalTokensOut,
-			&summary.TotalCostUSD,
-		)
+		count(*),
+		count(*) FILTER (WHERE event_type = 'user'),
+		count(*) FILTER (WHERE event_type = 'agent'),
+		count(*) FILTER (WHERE event_type = 'system'),
+		count(DISTINCT session_id) FILTER (WHERE session_id <> ''),
+		count(DISTINCT canonical_distinct_id) FILTER (WHERE coalesce(visitor_class, 'human') = 'human'),
+		coalesce(sum(tokens_input), 0),
+		coalesce(sum(tokens_output), 0),
+		coalesce(sum(cost_usd), 0)
+	FROM resolved_events
+	WHERE `+where, args,
+		&summary.EventCount,
+		&summary.UserEvents,
+		&summary.AgentEvents,
+		&summary.SystemEvents,
+		&summary.Sessions,
+		&summary.DistinctUsers,
+		&summary.TotalTokensIn,
+		&summary.TotalTokensOut,
+		&summary.TotalCostUSD,
+	)
 	if err != nil {
 		return summary, err
 	}
@@ -2537,109 +2093,94 @@ func (s *Store) ActivitySummary(ctx context.Context, projectID string, filter Ev
 }
 
 func (s *Store) eventCounts(ctx context.Context, where string, args []any) ([]EventCount, error) {
-	rows, err := s.ch.Query(ctx, `
-	SELECT event_name, count() AS count
+	counts := []EventCount{}
+	err := s.duckQuery(ctx, `
+	SELECT event_name, count(*) AS count
 	FROM events
 	WHERE `+where+`
 	GROUP BY event_name
 	ORDER BY count DESC
-	LIMIT 20`, args...)
+	LIMIT 20`, args, func(rows *sql.Rows) error {
+		var item EventCount
+		if err := rows.Scan(&item.EventName, &item.Count); err != nil {
+			return err
+		}
+		counts = append(counts, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	counts := []EventCount{}
-	for rows.Next() {
-		var item EventCount
-		if err := rows.Scan(&item.EventName, &item.Count); err != nil {
-			return nil, err
-		}
-		counts = append(counts, item)
-	}
-	return counts, rows.Err()
+	return counts, nil
 }
 
 func (s *Store) timeline(ctx context.Context, where string, args []any) ([]TimelinePoint, error) {
-	rows, err := s.ch.Query(ctx, `
-	SELECT toStartOfHour(timestamp) AS hour, count() AS count
+	points := []TimelinePoint{}
+	err := s.duckQuery(ctx, `
+	SELECT date_trunc('hour', "timestamp") AS hour, count(*) AS count
 	FROM events
 	WHERE `+where+`
 	GROUP BY hour
-	ORDER BY hour ASC`, args...)
+	ORDER BY hour ASC`, args, func(rows *sql.Rows) error {
+		var point TimelinePoint
+		if err := rows.Scan(&point.Hour, &point.Count); err != nil {
+			return err
+		}
+		points = append(points, point)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	points := []TimelinePoint{}
-	for rows.Next() {
-		var point TimelinePoint
-		if err := rows.Scan(&point.Hour, &point.Count); err != nil {
-			return nil, err
-		}
-		points = append(points, point)
-	}
-	return points, rows.Err()
+	return points, nil
 }
 
 func (s *Store) topAgents(ctx context.Context, where string, args []any) ([]AgentMetric, error) {
-	rows, err := s.ch.Query(ctx, `
+	agents := []AgentMetric{}
+	err := s.duckQuery(ctx, `
 	SELECT
-		ifNull(agent_id, 'unknown') AS agent_id,
-	count() AS event_count,
-	sum(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS total_cost_usd,
-		avg(toFloat64(ifNull(latency_ms, toUInt32(0)))) AS avg_latency_ms
+		coalesce(agent_id, 'unknown') AS agent_id,
+		count(*) AS event_count,
+		coalesce(sum(cost_usd), 0) AS total_cost_usd,
+		coalesce(avg(coalesce(latency_ms, 0)::DOUBLE), 0) AS avg_latency_ms
 	FROM events
 	WHERE `+where+` AND event_type = 'agent'
 	GROUP BY agent_id
 	ORDER BY total_cost_usd DESC, event_count DESC
-	LIMIT 10`, args...)
+	LIMIT 10`, args, func(rows *sql.Rows) error {
+		var agent AgentMetric
+		if err := rows.Scan(&agent.AgentID, &agent.EventCount, &agent.TotalCostUSD, &agent.AvgLatencyMS); err != nil {
+			return err
+		}
+		agents = append(agents, agent)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	agents := []AgentMetric{}
-	for rows.Next() {
-		var agent AgentMetric
-		if err := rows.Scan(&agent.AgentID, &agent.EventCount, &agent.TotalCostUSD, &agent.AvgLatencyMS); err != nil {
-			return nil, err
-		}
-		agents = append(agents, agent)
-	}
-	return agents, rows.Err()
+	return agents, nil
 }
 
 func (s *Store) recentSessions(ctx context.Context, resolver identityResolver, where string, args []any, limit int) ([]Session, error) {
-	queryArgs := append([]any{}, args...)
-	queryArgs = append(queryArgs, limit)
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	queryArgs = append(append([]any{}, canonicalArgs...), queryArgs...)
-	rows, err := s.ch.Query(ctx, `
+	queryArgs := append(append([]any{}, args...), limit)
+	sessions := []Session{}
+	err := s.duckQuery(ctx, `
 	SELECT
-		project_id::String,
+		project_id::VARCHAR,
 		session_id,
-		any(`+canonicalID+`) AS session_distinct_id,
-		min(timestamp) AS session_start,
-		max(timestamp) AS session_end,
-		count() AS event_count,
-		sum(toUInt64(ifNull(tokens_input, toUInt32(0)))) AS total_tokens_in,
-		sum(toUInt64(ifNull(tokens_output, toUInt32(0)))) AS total_tokens_out,
-		sum(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS total_cost_usd,
-		max(timestamp) AS last_event_at
-	FROM events
-	WHERE `+where+` AND session_id != ''
+		any_value(canonical_distinct_id) AS session_distinct_id,
+		min("timestamp") AS session_start,
+		max("timestamp") AS session_end,
+		count(*) AS event_count,
+		coalesce(sum(tokens_input), 0) AS total_tokens_in,
+		coalesce(sum(tokens_output), 0) AS total_tokens_out,
+		coalesce(sum(cost_usd), 0) AS total_cost_usd,
+		max("timestamp") AS last_event_at
+	FROM resolved_events
+	WHERE `+where+` AND session_id <> ''
 	GROUP BY project_id, session_id
 	ORDER BY last_event_at DESC
-	LIMIT ?`, queryArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	sessions := []Session{}
-	for rows.Next() {
+	LIMIT ?`, queryArgs, func(rows *sql.Rows) error {
 		var session Session
 		var lastEventAt time.Time
 		if err := rows.Scan(
@@ -2654,12 +2195,16 @@ func (s *Store) recentSessions(ctx context.Context, resolver identityResolver, w
 			&session.TotalCostUSD,
 			&lastEventAt,
 		); err != nil {
-			return nil, err
+			return err
 		}
 		session.LastEventAt = &lastEventAt
 		sessions = append(sessions, session)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return sessions, rows.Err()
+	return sessions, nil
 }
 
 func (s *Store) RunInsight(ctx context.Context, projectID string, insightType string, metric string, steps []string, filter EventFilter) (InsightResult, error) {
@@ -2719,16 +2264,14 @@ func (s *Store) WebAnalytics(ctx context.Context, projectID string, filter Event
 		return web, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	webArgs := append(append([]any{}, canonicalArgs...), args...)
-	err = s.ch.QueryRow(ctx, `
+	err = s.duckQueryRow(ctx, `
 SELECT
-	uniqExact(`+canonicalID+`),
-	countIf(event_name = 'user.pageview'),
-	uniqExactIf(session_id, session_id != ''),
-	countIf(event_name IN ('user.conversion', 'user.signup'))
-FROM events
-WHERE `+where, webArgs...).Scan(&web.Visitors, &web.Pageviews, &web.Sessions, &web.Conversions)
+	count(DISTINCT canonical_distinct_id),
+	count(*) FILTER (WHERE event_name = 'user.pageview'),
+	count(DISTINCT session_id) FILTER (WHERE session_id <> ''),
+	count(*) FILTER (WHERE event_name IN ('user.conversion', 'user.signup'))
+FROM resolved_events
+WHERE `+where, args, &web.Visitors, &web.Pageviews, &web.Sessions, &web.Conversions)
 	if err != nil {
 		return web, err
 	}
@@ -2801,25 +2344,24 @@ WHERE `+where, webArgs...).Scan(&web.Visitors, &web.Pageviews, &web.Sessions, &w
 }
 
 func (s *Store) trafficByClass(ctx context.Context, where string, args []any) ([]TrafficClass, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT ifNull(visitor_class, 'human') AS class, count() AS count
+	result := []TrafficClass{}
+	err := s.duckQuery(ctx, `
+SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count
 FROM events
 WHERE `+where+` AND event_name = 'user.pageview'
 GROUP BY class
-ORDER BY count DESC`, args...)
+ORDER BY count DESC`, args, func(rows *sql.Rows) error {
+		var item TrafficClass
+		if err := rows.Scan(&item.Class, &item.Count); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []TrafficClass{}
-	for rows.Next() {
-		var item TrafficClass
-		if err := rows.Scan(&item.Class, &item.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // trafficByPlatform splits the audience by which app the events came from. It
@@ -2827,173 +2369,160 @@ ORDER BY count DESC`, args...)
 // one visitor on each platform and not two humans overall — the same identity
 // resolution every other people metric uses.
 func (s *Store) trafficByPlatform(ctx context.Context, resolver identityResolver, where string, args []any) ([]PlatformSplit, error) {
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	// Positional binding: the canonical-id expression sits in the SELECT, ahead of
-	// the WHERE, so its args go first — same order as trafficByProvider.
-	queryArgs := append(append([]any{}, canonicalArgs...), args...)
-	rows, err := s.ch.Query(ctx, `
+	result := []PlatformSplit{}
+	err := s.duckQuery(ctx, `
 SELECT
-	if(ifNull(platform, '') = '', 'unknown', platform) AS platform,
-	uniqExact(`+canonicalID+`) AS visitors,
-	countIf(event_name = 'user.pageview') AS pageviews,
-	count() AS events
-FROM events
+	if(coalesce(platform, '') = '', 'unknown', platform) AS platform,
+	count(DISTINCT canonical_distinct_id) AS visitors,
+	count(*) FILTER (WHERE event_name = 'user.pageview') AS pageviews,
+	count(*) AS events
+FROM resolved_events
 WHERE `+where+`
 GROUP BY platform
-ORDER BY visitors DESC, events DESC`, queryArgs...)
+ORDER BY visitors DESC, events DESC`, args, func(rows *sql.Rows) error {
+		var item PlatformSplit
+		if err := rows.Scan(&item.Platform, &item.Visitors, &item.Pageviews, &item.Events); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []PlatformSplit{}
-	for rows.Next() {
-		var item PlatformSplit
-		if err := rows.Scan(&item.Platform, &item.Visitors, &item.Pageviews, &item.Events); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) trafficByProvider(ctx context.Context, resolver identityResolver, where string, args []any) ([]TrafficProvider, error) {
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	queryArgs := append(append([]any{}, canonicalArgs...), args...)
-	rows, err := s.ch.Query(ctx, `
+	result := []TrafficProvider{}
+	err := s.duckQuery(ctx, `
 SELECT
 	class,
 	provider,
-	uniqExact(`+canonicalID+`) AS visitors,
-	count() AS pageviews
+	count(DISTINCT canonical_distinct_id) AS visitors,
+	count(*) AS pageviews
 FROM (
 	SELECT
 		project_id,
-		distinct_id,
-		ifNull(visitor_class, 'human') AS class,
-		multiIf(
-			ifNull(bot_name, '') != '', ifNull(bot_name, ''),
-			referrer_channel = 'ai-referral' AND ifNull(referrer_host, '') != '', ifNull(referrer_host, ''),
-			ifNull(visitor_class, 'human')
-		) AS provider
-	FROM events
+		canonical_distinct_id,
+		coalesce(visitor_class, 'human') AS class,
+		CASE
+			WHEN coalesce(bot_name, '') <> '' THEN coalesce(bot_name, '')
+			WHEN referrer_channel = 'ai-referral' AND coalesce(referrer_host, '') <> '' THEN coalesce(referrer_host, '')
+			ELSE coalesce(visitor_class, 'human')
+		END AS provider
+	FROM resolved_events
 	WHERE `+where+` AND event_name = 'user.pageview'
 )
 GROUP BY class, provider
 ORDER BY pageviews DESC, visitors DESC
-LIMIT 20`, queryArgs...)
+LIMIT 20`, args, func(rows *sql.Rows) error {
+		var item TrafficProvider
+		if err := rows.Scan(&item.Class, &item.Provider, &item.Visitors, &item.Pageviews); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []TrafficProvider{}
-	for rows.Next() {
-		var item TrafficProvider
-		if err := rows.Scan(&item.Class, &item.Provider, &item.Visitors, &item.Pageviews); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) aiTopPaths(ctx context.Context, where string, args []any) ([]PathCount, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT value, count() AS count
+	result := []PathCount{}
+	err := s.duckQuery(ctx, `
+SELECT value, count(*) AS count
 FROM (
-	SELECT ifNull(JSONExtractString(properties, 'path'), '') AS value
+	SELECT coalesce(json_extract_string(properties, '$.path'), '') AS value
 	FROM events
 	WHERE `+where+` AND event_name = 'user.pageview'
 		AND (visitor_class = 'ai-platform' OR referrer_channel = 'ai-referral')
 )
-WHERE value != ''
+WHERE value <> ''
 GROUP BY value
 ORDER BY count DESC
-LIMIT 10`, args...)
+LIMIT 10`, args, func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []PathCount{}
-	for rows.Next() {
-		var item PathCount
-		if err := rows.Scan(&item.Value, &item.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) externalReferrers(ctx context.Context, where string, args []any) ([]PathCount, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT ifNull(referrer_host, '') AS value, count() AS count
+	result := []PathCount{}
+	err := s.duckQuery(ctx, `
+SELECT coalesce(referrer_host, '') AS value, count(*) AS count
 FROM events
 WHERE `+where+` AND event_name = 'user.pageview'
 	AND referrer_channel NOT IN ('', 'direct', 'internal')
-	AND referrer_host != '' AND isNotNull(referrer_host)
+	AND referrer_host IS NOT NULL AND referrer_host <> ''
 GROUP BY value
 ORDER BY count DESC
-LIMIT 20`, args...)
+LIMIT 20`, args, func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []PathCount{}
-	for rows.Next() {
-		var item PathCount
-		if err := rows.Scan(&item.Value, &item.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) referrersByChannel(ctx context.Context, where string, args []any) ([]PathCount, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT ifNull(referrer_channel, '') AS channel, count() AS count
+	result := []PathCount{}
+	err := s.duckQuery(ctx, `
+SELECT coalesce(referrer_channel, '') AS channel, count(*) AS count
 FROM events
 WHERE `+where+` AND event_name = 'user.pageview'
-	AND referrer_channel != '' AND referrer_channel != 'direct' AND referrer_channel != 'internal'
+	AND referrer_channel <> '' AND referrer_channel <> 'direct' AND referrer_channel <> 'internal'
 GROUP BY channel
-ORDER BY count DESC`, args...)
+ORDER BY count DESC`, args, func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := []PathCount{}
-	for rows.Next() {
-		var item PathCount
-		if err := rows.Scan(&item.Value, &item.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) guestVsUser(ctx context.Context, resolver identityResolver, where string, args []any) (GuestUser, error) {
 	var gv GuestUser
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	queryArgs := append(append([]any{}, canonicalArgs...), args...)
-	err := s.ch.QueryRow(ctx, `
+	err := s.duckQueryRow(ctx, `
 SELECT
-	countIf(has_traits) AS users,
-	countIf(NOT has_traits) AS guests
+	count(*) FILTER (WHERE has_traits) AS users,
+	count(*) FILTER (WHERE NOT has_traits) AS guests
 FROM (
 	SELECT
 		canonical_distinct_id,
-		max(email_trait != '' OR name_trait != '') AS has_traits
+		max(email_trait <> '' OR name_trait <> '') AS has_traits
 	FROM (
 		SELECT
-			`+canonicalID+` AS canonical_distinct_id,
-			if(JSONExtractString(properties, 'email') != '', JSONExtractString(properties, 'email'), JSONExtractString(properties, '$set', 'email')) AS email_trait,
-			if(JSONExtractString(properties, 'name') != '', JSONExtractString(properties, 'name'), JSONExtractString(properties, '$set', 'name')) AS name_trait
-		FROM events
+			canonical_distinct_id,
+			coalesce(nullif(json_extract_string(properties, '$.email'), ''), json_extract_string(properties, '$."$set".email'), '') AS email_trait,
+			coalesce(nullif(json_extract_string(properties, '$.name'), ''), json_extract_string(properties, '$."$set".name'), '') AS name_trait
+		FROM resolved_events
 		WHERE `+where+`
 	)
 	GROUP BY canonical_distinct_id
-)`, queryArgs...).Scan(&gv.Users, &gv.Guests)
+)`, args, &gv.Users, &gv.Guests)
 	return gv, err
 }
 
@@ -3015,87 +2544,78 @@ func (s *Store) Persons(ctx context.Context, projectID string, filter EventFilte
 		return summary, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
 
 	traitSource := `
 SELECT
-	` + canonicalID + ` AS canonical_distinct_id, session_id, event_name, timestamp, platform,
-	if(JSONExtractString(properties, 'email') != '', JSONExtractString(properties, 'email'), JSONExtractString(properties, '$set', 'email')) AS email_trait,
-	if(JSONExtractString(properties, 'name') != '', JSONExtractString(properties, 'name'), JSONExtractString(properties, '$set', 'name')) AS name_trait
-FROM events
+	canonical_distinct_id, session_id, event_name, "timestamp", platform,
+	coalesce(nullif(json_extract_string(properties, '$.email'), ''), json_extract_string(properties, '$."$set".email'), '') AS email_trait,
+	coalesce(nullif(json_extract_string(properties, '$.name'), ''), json_extract_string(properties, '$."$set".name'), '') AS name_trait
+FROM resolved_events
 WHERE ` + where
-	traitArgs := append(append([]any{}, canonicalArgs...), args...)
 
-	if err := s.ch.QueryRow(ctx, `
+	if err := s.duckQueryRow(ctx, `
 SELECT
-	count(),
-	countIf(has_traits)
+	count(*),
+	count(*) FILTER (WHERE has_traits)
 FROM (
 	SELECT
 		canonical_distinct_id,
-		max(email_trait != '' OR name_trait != '') AS has_traits
+		max(email_trait <> '' OR name_trait <> '') AS has_traits
 	FROM (`+traitSource+`)
 	GROUP BY canonical_distinct_id
-)`, traitArgs...).Scan(&summary.Total, &summary.Identified); err != nil {
+)`, args, &summary.Total, &summary.Identified); err != nil {
 		return summary, err
 	}
 	summary.Anonymous = summary.Total - summary.Identified
 
-	activeArgs := append(append([]any{}, canonicalArgs...), args...)
-	activeRows, err := s.ch.Query(ctx, `
-SELECT toStartOfHour(timestamp) AS hour, uniqExact(`+canonicalID+`) AS users
-FROM events
+	err = s.duckQuery(ctx, `
+SELECT date_trunc('hour', "timestamp") AS hour, count(DISTINCT canonical_distinct_id) AS users
+FROM resolved_events
 WHERE `+where+`
 GROUP BY hour
-ORDER BY hour ASC`, activeArgs...)
-	if err != nil {
-		return summary, err
-	}
-	defer activeRows.Close()
-	for activeRows.Next() {
+ORDER BY hour ASC`, args, func(rows *sql.Rows) error {
 		var point TimelinePoint
-		if err := activeRows.Scan(&point.Hour, &point.Count); err != nil {
-			return summary, err
+		if err := rows.Scan(&point.Hour, &point.Count); err != nil {
+			return err
 		}
 		summary.ActiveTimeline = append(summary.ActiveTimeline, point)
-	}
-	if err := activeRows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return summary, err
 	}
 
-	personArgs := append(append([]any{}, traitArgs...), filter.Limit)
-	personRows, err := s.ch.Query(ctx, `
+	personArgs := append(append([]any{}, args...), filter.Limit)
+	err = s.duckQuery(ctx, `
 SELECT
 	canonical_distinct_id,
-	argMaxIf(email_trait, timestamp, email_trait != '') AS email,
-	argMaxIf(name_trait, timestamp, name_trait != '') AS name,
-	min(timestamp) AS first_seen,
-	max(timestamp) AS last_seen,
-	count() AS event_count,
-	uniqExactIf(session_id, session_id != '') AS sessions,
-	argMax(event_name, timestamp) AS last_event_name,
-	arraySort(groupUniqArrayIf(platform, platform != '')) AS platforms
+	coalesce(arg_max(email_trait, "timestamp") FILTER (WHERE email_trait <> ''), '') AS email,
+	coalesce(arg_max(name_trait, "timestamp") FILTER (WHERE name_trait <> ''), '') AS name,
+	min("timestamp") AS first_seen,
+	max("timestamp") AS last_seen,
+	count(*) AS event_count,
+	count(DISTINCT session_id) FILTER (WHERE session_id <> '') AS sessions,
+	coalesce(arg_max(event_name, "timestamp"), '') AS last_event_name,
+	list_sort(list_distinct(list_filter(array_agg(platform), p -> p <> ''))) AS platforms
 FROM (`+traitSource+`)
 GROUP BY canonical_distinct_id
-ORDER BY (email != '' OR name != '') DESC, last_seen DESC
-LIMIT ?`, personArgs...)
-	if err != nil {
-		return summary, err
-	}
-	defer personRows.Close()
-	for personRows.Next() {
+ORDER BY (email <> '' OR name <> '') DESC, last_seen DESC
+LIMIT ?`, personArgs, func(rows *sql.Rows) error {
 		var person Person
-		if err := personRows.Scan(
+		var platforms any
+		if err := rows.Scan(
 			&person.DistinctID, &person.Email, &person.Name,
 			&person.FirstSeen, &person.LastSeen,
 			&person.EventCount, &person.Sessions, &person.LastEventName,
-			&person.Platforms,
+			&platforms,
 		); err != nil {
-			return summary, err
+			return err
 		}
+		person.Platforms = duckList(platforms)
 		summary.Persons = append(summary.Persons, person)
-	}
-	if err := personRows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return summary, err
 	}
 
@@ -3153,33 +2673,28 @@ func (s *Store) exploreEvents(ctx context.Context, projectID string, filter Even
 	// query below, and appending the row limit onto its backing array would bind
 	// that limit as a WHERE argument there.
 	args := append(append([]any{}, whereArgs...), filter.Limit)
-	rows, err := s.ch.Query(ctx, `
+	explorer := EventExplorer{Schema: []EventSchemaEntry{}, Events: []Event{}, Timeline: []Event{}, Generated: time.Now().UTC()}
+	err = s.duckQuery(ctx, `
 SELECT
-	project_id::String, event_id::String, distinct_id, session_id, event_name,
-	event_type, properties, ifNull(agent_id, ''), ifNull(tool_name, ''),
-	ifNull(tool_input, ''), ifNull(tool_output, ''),
-	ifNull(tokens_input, toUInt32(0)), ifNull(tokens_output, toUInt32(0)),
-	toFloat64(ifNull(cost_usd, toFloat32(0))), ifNull(latency_ms, toUInt32(0)),
-	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned,
+	project_id::VARCHAR, event_id::VARCHAR, distinct_id, session_id, event_name,
+	event_type, properties, coalesce(agent_id, ''), coalesce(tool_name, ''),
+	coalesce(tool_input, ''), coalesce(tool_output, ''),
+	coalesce(tokens_input, 0), coalesce(tokens_output, 0),
+	coalesce(cost_usd, 0)::DOUBLE, coalesce(latency_ms, 0),
+	coalesce(model_name, ''), is_error, coalesce(error_message, ''), "timestamp", inserted_at, is_unplanned,
 	platform
 FROM events
 WHERE `+where+`
-ORDER BY timestamp DESC
-LIMIT ?`, args...)
-	if err != nil {
-		return EventExplorer{}, err
-	}
-	defer rows.Close()
-
-	explorer := EventExplorer{Schema: []EventSchemaEntry{}, Events: []Event{}, Timeline: []Event{}, Generated: time.Now().UTC()}
-	for rows.Next() {
+ORDER BY "timestamp" DESC
+LIMIT ?`, args, func(rows *sql.Rows) error {
 		event, err := scanEvent(rows)
 		if err != nil {
-			return explorer, err
+			return err
 		}
 		explorer.Events = append(explorer.Events, event)
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return explorer, err
 	}
 
@@ -3195,31 +2710,27 @@ LIMIT ?`, args...)
 		timelineFilter.Search = ""
 		timelineWhere, timelineArgs := filteredWhereWithDistinctIDs(projectID, timelineFilter, defaultTimeWindow, resolver.relatedDistinctIDs(timelineFilter.DistinctID))
 		timelineArgs = append(timelineArgs, timelineFilter.Limit)
-		timelineRows, err := s.ch.Query(ctx, `
+		err := s.duckQuery(ctx, `
 SELECT
-	project_id::String, event_id::String, distinct_id, session_id, event_name,
-	event_type, properties, ifNull(agent_id, ''), ifNull(tool_name, ''),
-	ifNull(tool_input, ''), ifNull(tool_output, ''),
-	ifNull(tokens_input, toUInt32(0)), ifNull(tokens_output, toUInt32(0)),
-	toFloat64(ifNull(cost_usd, toFloat32(0))), ifNull(latency_ms, toUInt32(0)),
-	ifNull(model_name, ''), is_error, ifNull(error_message, ''), timestamp, inserted_at, is_unplanned,
+	project_id::VARCHAR, event_id::VARCHAR, distinct_id, session_id, event_name,
+	event_type, properties, coalesce(agent_id, ''), coalesce(tool_name, ''),
+	coalesce(tool_input, ''), coalesce(tool_output, ''),
+	coalesce(tokens_input, 0), coalesce(tokens_output, 0),
+	coalesce(cost_usd, 0)::DOUBLE, coalesce(latency_ms, 0),
+	coalesce(model_name, ''), is_error, coalesce(error_message, ''), "timestamp", inserted_at, is_unplanned,
 	platform
 FROM events
 WHERE `+timelineWhere+`
-ORDER BY timestamp ASC
-LIMIT ?`, timelineArgs...)
-		if err != nil {
-			return explorer, err
-		}
-		defer timelineRows.Close()
-		for timelineRows.Next() {
-			event, err := scanEvent(timelineRows)
+ORDER BY "timestamp" ASC
+LIMIT ?`, timelineArgs, func(rows *sql.Rows) error {
+			event, err := scanEvent(rows)
 			if err != nil {
-				return explorer, err
+				return err
 			}
 			explorer.Timeline = append(explorer.Timeline, event)
-		}
-		if err := timelineRows.Err(); err != nil {
+			return nil
+		})
+		if err != nil {
 			return explorer, err
 		}
 	}
@@ -3242,39 +2753,35 @@ const eventSchemaKeyLimit = 25
 // a schema for a different window would be worse than none, because it would be
 // believed.
 func (s *Store) eventSchema(ctx context.Context, resolver identityResolver, where string, whereArgs []any) ([]EventSchemaEntry, error) {
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	// ClickHouse binds positionally, so arguments follow SQL text order: the
-	// canonical expression is in the SELECT list, ahead of the WHERE clause.
-	args := append(append([]any{}, canonicalArgs...), whereArgs...)
-	args = append(args, eventSchemaLimit)
-	rows, err := s.ch.Query(ctx, `
+	args := append(append([]any{}, whereArgs...), eventSchemaLimit)
+	out := []EventSchemaEntry{}
+	err := s.duckQuery(ctx, `
 SELECT
 	event_name,
-	any(event_type) AS event_type,
-	count() AS events,
-	uniqExactIf(`+canonicalID+`, ifNull(visitor_class, 'human') = 'human') AS people,
-	min(timestamp) AS first_seen,
-	max(timestamp) AS last_seen,
-	arraySlice(arraySort(groupUniqArrayArray(JSONExtractKeys(properties))), 1, `+strconv.Itoa(eventSchemaKeyLimit)+`) AS property_keys
-FROM events
+	any_value(event_type) AS event_type,
+	count(*) AS events,
+	count(DISTINCT canonical_distinct_id) FILTER (WHERE coalesce(visitor_class, 'human') = 'human') AS people,
+	min("timestamp") AS first_seen,
+	max("timestamp") AS last_seen,
+	list_sort(list_distinct(flatten(array_agg(json_keys(properties)))))[1:`+strconv.Itoa(eventSchemaKeyLimit)+`] AS property_keys
+FROM resolved_events
 WHERE `+where+`
 GROUP BY event_name
 ORDER BY events DESC
-LIMIT ?`, args...)
+LIMIT ?`, args, func(rows *sql.Rows) error {
+		var e EventSchemaEntry
+		var keys any
+		if err := rows.Scan(&e.EventName, &e.EventType, &e.Events, &e.People, &e.FirstSeen, &e.LastSeen, &keys); err != nil {
+			return err
+		}
+		e.PropertyKeys = duckList(keys)
+		out = append(out, e)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []EventSchemaEntry{}
-	for rows.Next() {
-		var e EventSchemaEntry
-		if err := rows.Scan(&e.EventName, &e.EventType, &e.Events, &e.People, &e.FirstSeen, &e.LastSeen, &e.PropertyKeys); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) AgentReplay(ctx context.Context, projectID string, sessionID string) (AgentReplay, error) {
@@ -3386,55 +2893,28 @@ RETURNING id::text, project_id::text, natural_language, generated_sql, verified,
 }
 
 func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error) {
-	resolver, err := s.identityResolver(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
 	// Soft-delete rules only matter when the query reads external_rows — skip
 	// the Postgres round-trip for the common events-only query.
 	var rules []softDeleteRule
 	if externalSourcePattern.MatchString(sqlText) {
+		var err error
 		if rules, err = s.softDeleteRulesForProject(ctx, projectID); err != nil {
 			return nil, err
 		}
 	}
-	query, args, err := scopedReadonlySQL(sqlText, projectID, resolver, rules)
+	query, args, err := scopedReadonlySQL(sqlText, projectID, rules)
 	if err != nil {
 		return nil, err
 	}
 	if !strings.Contains(strings.ToLower(query), "limit") {
 		query += " LIMIT 100"
 	}
-	// Untrusted SQL runs on the least-privilege connection so a table-function
-	// bypass fails with a grant error rather than the denylist being the only line.
-	rows, err := s.readConn().Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	columns := rows.Columns()
-	columnTypes := rows.ColumnTypes()
-	results := []map[string]any{}
-	for rows.Next() {
-		valuePtrs := make([]any, len(columns))
-		for i := range columns {
-			scanType := columnTypes[i].ScanType()
-			if scanType == nil {
-				scanType = reflect.TypeOf("")
-			}
-			valuePtrs[i] = reflect.New(scanType).Interface()
-		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, err
-		}
-		item := map[string]any{}
-		for i, column := range columns {
-			item[column] = normalizeSQLValue(valuePtrs[i])
-		}
-		results = append(results, item)
-	}
-	return results, rows.Err()
+	// Untrusted SQL runs inside the project's sandbox: an in-memory DuckDB
+	// holding only this project's rows, on a locked-down connection. See
+	// duckdb_sandbox.go.
+	return s.sandboxes.query(ctx, projectID, query, args)
 }
+
 
 func (s *Store) filteredTimeline(ctx context.Context, projectID string, filter EventFilter) ([]TimelinePoint, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
@@ -3442,25 +2922,24 @@ func (s *Store) filteredTimeline(ctx context.Context, projectID string, filter E
 		return nil, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	rows, err := s.ch.Query(ctx, `
-SELECT toStartOfHour(timestamp) AS hour, count() AS count
+	points := []TimelinePoint{}
+	err = s.duckQuery(ctx, `
+SELECT date_trunc('hour', "timestamp") AS hour, count(*) AS count
 FROM events
 WHERE `+where+`
 GROUP BY hour
-ORDER BY hour ASC`, args...)
+ORDER BY hour ASC`, args, func(rows *sql.Rows) error {
+		var point TimelinePoint
+		if err := rows.Scan(&point.Hour, &point.Count); err != nil {
+			return err
+		}
+		points = append(points, point)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	points := []TimelinePoint{}
-	for rows.Next() {
-		var point TimelinePoint
-		if err := rows.Scan(&point.Hour, &point.Count); err != nil {
-			return nil, err
-		}
-		points = append(points, point)
-	}
-	return points, rows.Err()
+	return points, nil
 }
 
 // funnel computes a genuinely sequential funnel: the users counted at step N are
@@ -3475,14 +2954,12 @@ ORDER BY hour ASC`, args...)
 // conversion" — the Product page, run_insight/run_funnel, and the agents that
 // pick a weakest link from them — was reading that number as passage.
 //
-// ClickHouse's windowFunnel does the ordering in one pass: it returns, per user,
-// the depth of the longest prefix of the step list they completed in order inside
-// the window. Users at step N are then everyone whose depth is >= N, which is
-// monotonically non-increasing by construction.
-//
-// The timestamp is cast: the column is DateTime64(3, 'UTC') and windowFunnel
-// accepts only Date, DateTime or an unsigned number. Millisecond precision is not
-// meaningful for step ordering here, so second resolution is the right trade.
+// DuckDB has no windowFunnel; the ordering runs as a correlated earliest-match
+// chain (the shape proven in storage-evaluation/harness/queries.py): per user,
+// t1 is each step-1 event and tN is the earliest step-N event at or after
+// t(N-1) and inside t1 + window. The user's depth is the longest prefix whose
+// chain completed. Users at step N are then everyone whose depth is >= N,
+// which is monotonically non-increasing by construction.
 func (s *Store) funnel(ctx context.Context, projectID string, steps []string, filter EventFilter) ([]FunnelStep, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
@@ -3510,62 +2987,90 @@ func (s *Store) funnel(ctx context.Context, projectID string, steps []string, fi
 
 	query, args := buildFunnelQuery(cleanSteps, funnelWindowSeconds(filter), where, whereArgs, canonicalID, canonicalArgs)
 
-	rows, err := s.ch.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	// depthCounts[d] = users whose longest in-order prefix was exactly d steps.
 	depthCounts := make([]uint64, len(cleanSteps)+1)
-	for rows.Next() {
-		var level uint8
+	err = s.duckQuery(ctx, query, args, func(rows *sql.Rows) error {
+		var level int
 		var people uint64
 		if err := rows.Scan(&level, &people); err != nil {
-			return nil, err
+			return err
 		}
-		if int(level) < len(depthCounts) {
+		if level < len(depthCounts) {
 			depthCounts[level] += people
 		}
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
 	return funnelStepsFromDepths(cleanSteps, depthCounts), nil
 }
 
-// buildFunnelQuery assembles the windowFunnel query and its arguments. The two
-// have to agree positionally: ClickHouse binds ? by position, so the args are
-// appended in the order the placeholders appear in the SQL *text* — the
-// windowFunnel conditions in the SELECT, then the WHERE, then the event_name IN
-// list, then whatever the canonical-ID expression in the GROUP BY needs. Getting
-// that order wrong does not error, it silently funnels the wrong events, which is
-// why this is a separate function with a test rather than inline.
+// buildFunnelQuery assembles the ordered-funnel query and its arguments.
+// DuckDB binds ? by position, so the args are appended in the order the
+// placeholders appear in the SQL *text*: the WHERE clause inside the ev CTE,
+// then the event_name IN list, then the anchor step, then one bind per
+// subsequent step's correlated subquery. Getting that order wrong does not
+// error, it silently funnels the wrong events, which is why this is a
+// separate function with a test rather than inline.
+//
+// The chain is greedy-earliest: tN is the earliest step-N event at or after
+// t(N-1) within t1 + windowSeconds of the anchor. That matches windowFunnel's
+// reachability semantics — the earliest achievable prefix is the longest one.
 func buildFunnelQuery(cleanSteps []string, windowSeconds int64, where string, whereArgs []any, canonicalID string, canonicalArgs []any) (string, []any) {
-	conds := make([]string, 0, len(cleanSteps))
-	args := make([]any, 0, len(cleanSteps)*2+len(whereArgs)+len(canonicalArgs))
+	args := make([]any, 0, len(whereArgs)+2*len(cleanSteps)+len(canonicalArgs))
+	args = append(args, whereArgs...)
+	inList := strings.TrimSuffix(strings.Repeat("?, ", len(cleanSteps)), ", ")
 	for _, eventName := range cleanSteps {
-		conds = append(conds, "event_name = ?")
 		args = append(args, eventName)
 	}
-	args = append(args, whereArgs...)
-	for _, eventName := range cleanSteps {
+	args = append(args, cleanSteps[0])
+	for _, eventName := range cleanSteps[1:] {
 		args = append(args, eventName)
 	}
 	args = append(args, canonicalArgs...)
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(cleanSteps)), ", ")
-	query := `
-SELECT level, count() AS people FROM (
-	SELECT windowFunnel(` + strconv.FormatInt(windowSeconds, 10) + `)(toDateTime(timestamp), ` + strings.Join(conds, ", ") + `) AS level
-	FROM events
-	WHERE ` + where + ` AND event_name IN (` + placeholders + `)
-	GROUP BY ` + canonicalID + `
-)
-WHERE level > 0
-GROUP BY level`
-	return query, args
+	var b strings.Builder
+	b.WriteString(`WITH ev AS (
+	SELECT ` + canonicalID + ` AS cid, event_name, "timestamp" FROM resolved_events
+	WHERE ` + where + ` AND event_name IN (` + inList + `)),
+anchors AS (
+	SELECT cid, "timestamp" AS t1 FROM ev WHERE event_name = ?)`)
+	// Each step is its own CTE so the correlated subquery can reference the
+	// previous step's column — DuckDB does not let a SELECT expression read a
+	// sibling alias (a.t2 inside t3's subquery is a binder error).
+	prev := "anchors"
+	for i := 2; i <= len(cleanSteps); i++ {
+		fmt.Fprintf(&b, `,
+step%d AS (
+	SELECT p.*,
+		(SELECT min("timestamp") FROM ev e%d
+			WHERE e%d.cid = p.cid AND e%d.event_name = ?
+			  AND e%d."timestamp" >= p.t%d
+			  AND e%d."timestamp" <= p.t1 + INTERVAL '%d seconds') AS t%d
+	FROM %s p)`,
+			i, i, i, i, i, i-1, i, windowSeconds, i, prev)
+		prev = fmt.Sprintf("step%d", i)
+	}
+	if len(cleanSteps) == 1 {
+		// A bare CASE with no WHEN is invalid; one step means every anchor is
+		// depth 1 by definition.
+		b.WriteString(`,
+lvl AS (SELECT cid, 1 AS level FROM anchors)
+SELECT level, count(*) AS people FROM lvl GROUP BY level`)
+		return b.String(), args
+	}
+	b.WriteString(`,
+lvl AS (
+	SELECT cid, max(CASE`)
+	for i := 2; i <= len(cleanSteps); i++ {
+		fmt.Fprintf(&b, ` WHEN t%d IS NULL THEN %d`, i, i-1)
+	}
+	fmt.Fprintf(&b, ` ELSE %d END) AS level
+	FROM %s GROUP BY cid)
+SELECT level, count(*) AS people FROM lvl WHERE level > 0 GROUP BY level`, len(cleanSteps), prev)
+	return b.String(), args
 }
 
 // funnelStepsFromDepths turns windowFunnel's per-user depth histogram into the
@@ -3636,19 +3141,17 @@ func (s *Store) retention(ctx context.Context, projectID string, firstEvent stri
 		filter.From = filter.To.Add(-time.Duration(retentionWeeks+1) * retentionPeriod)
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	canonicalID, canonicalArgs := resolver.canonicalExpr("distinct_id")
-	canonicalEventID := strings.ReplaceAll(canonicalID, "distinct_id", "e.distinct_id")
 	firstWhere := where + " AND event_name = ?"
 	firstArgs := append(append([]any{}, args...), firstEvent)
 	// cohortStart is when the *earliest* member of this cohort was acquired. It
 	// decides which periods are old enough to have a rate, and it must come from
 	// the data, not from the window: a nine-week window over a project with two
 	// days of events still has a two-day-old cohort, and every weekly period is
-	// in the future for all of them.
+	// in the future for all of them. min() over an empty set is NULL in DuckDB,
+	// so cohortStart scans into a nullable time.
 	var base uint64
-	var cohortStart time.Time
-	baseArgs := append(append([]any{}, canonicalArgs...), firstArgs...)
-	if err := s.ch.QueryRow(ctx, `SELECT uniqExact(`+canonicalID+`), min(timestamp) FROM events WHERE `+firstWhere, baseArgs...).Scan(&base, &cohortStart); err != nil {
+	var cohortStart sql.NullTime
+	if err := s.duckQueryRow(ctx, `SELECT count(DISTINCT canonical_distinct_id), min("timestamp") FROM resolved_events WHERE `+firstWhere, firstArgs, &base, &cohortStart); err != nil {
 		return nil, err
 	}
 	// Bracketed weekly cohort retention: week W counts cohort users active during
@@ -3663,24 +3166,20 @@ func (s *Store) retention(ctx context.Context, projectID string, firstEvent stri
 		upperHours := (week + 1) * retentionPeriodHours
 		query := `
 WITH firsts AS (
-	SELECT ` + canonicalID + ` AS canonical_distinct_id, min(timestamp) AS first_ts
-	FROM events
+	SELECT canonical_distinct_id, min("timestamp") AS first_ts
+	FROM resolved_events
 	WHERE ` + firstWhere + `
 	GROUP BY canonical_distinct_id
 )
-SELECT uniqExact(` + canonicalEventID + `)
-FROM events e
-INNER JOIN firsts f ON ` + canonicalEventID + ` = f.canonical_distinct_id
+SELECT count(DISTINCT e.canonical_distinct_id)
+FROM resolved_events e
+INNER JOIN firsts f ON e.canonical_distinct_id = f.canonical_distinct_id
 WHERE e.project_id = ?
-	AND e.timestamp >= f.first_ts + INTERVAL ` + fmt.Sprint(lowerHours) + ` HOUR
-	AND e.timestamp <  f.first_ts + INTERVAL ` + fmt.Sprint(upperHours) + ` HOUR`
-		queryArgs := append([]any{}, canonicalArgs...)
-		queryArgs = append(queryArgs, firstArgs...)
-		queryArgs = append(queryArgs, canonicalArgs...)
-		queryArgs = append(queryArgs, canonicalArgs...)
-		queryArgs = append(queryArgs, projectID)
+	AND e."timestamp" >= f.first_ts + INTERVAL '` + fmt.Sprint(lowerHours) + ` hours'
+	AND e."timestamp" <  f.first_ts + INTERVAL '` + fmt.Sprint(upperHours) + ` hours'`
+		queryArgs := append(append([]any{}, firstArgs...), projectID)
 		var retained uint64
-		if err := s.ch.QueryRow(ctx, query, queryArgs...).Scan(&retained); err != nil {
+		if err := s.duckQueryRow(ctx, query, queryArgs, &retained); err != nil {
 			return nil, err
 		}
 		rate := 0.0
@@ -3691,7 +3190,7 @@ WHERE e.project_id = ?
 			Period: fmt.Sprintf("Week %d", week),
 			Users:  retained,
 			Rate:   rate,
-			Mature: retentionPeriodMature(cohortStart, filter.To, week),
+			Mature: retentionPeriodMature(cohortStart.Time, filter.To, week),
 		})
 	}
 	return points, nil
@@ -3733,7 +3232,7 @@ const cohortWindowWeeks = retentionWeeks + 4
 // keeps the most recent cohorts.
 const maxCohortRows = 16
 
-// audienceSegment is one named slice of the audience. Predicate is a ClickHouse
+// audienceSegment is one named slice of the audience. Predicate is a DuckDB
 // boolean over the per-person aggregate columns the cohort rollup exposes under
 // the `f.` alias (has_traits, is_paid, plan); "" means the whole population. New
 // audiences are added here as config rows — no new query branch — which is the
@@ -3894,16 +3393,21 @@ func defaultSubscriptionMapping(projectID string) SubscriptionMapping {
 // carrying no amount is a tracking defect to report, not a number to invent.
 //
 // openExpr is the caller's already-validated "subscription opened" predicate;
-// the amount property is escaped through chStringLit like every other mapped
-// token, so none of this is a raw-SQL surface.
+// the amount property is interpolated as a quoted JSON path like every other
+// mapped token, so none of this is a raw-SQL surface.
 func paidEventExpr(mapping SubscriptionMapping, openExpr string) string {
-	sdkShaped := "(event_name = 'revenue' AND JSONExtractFloat(properties, 'amount') > 0)"
+	// JSONExtractFloat(p,'k') > 0 -> a missing/non-numeric key extracts 0 and
+	// never matches; try_cast + coalesce reproduces that exactly.
+	sdkShaped := "(event_name = 'revenue' AND coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0) > 0)"
 	amountProp := strings.TrimSpace(mapping.AmountProp)
 	if amountProp == "" || strings.TrimSpace(openExpr) == "" {
 		return sdkShaped
 	}
+	// The property name lands inside a single-quoted JSON path literal —
+	// escape it like every other interpolated token.
+	escaped := strings.ReplaceAll(strings.ReplaceAll(amountProp, `\`, `\\`), `'`, `''`)
 	return "(" + sdkShaped + " OR (" + openExpr +
-		" AND JSONExtractFloat(properties, " + chStringLit(amountProp) + ") > 0))"
+		" AND coalesce(try_cast(json_extract_string(properties, '$.\"" + escaped + "\"') AS DOUBLE), 0) > 0))"
 }
 
 // statusCapable reports whether the mapping can assert active/expired status —
@@ -3927,16 +3431,6 @@ var subscriptionTokenRe = regexp.MustCompile(`^[A-Za-z0-9_.$:-]*$`)
 
 func validSubscriptionToken(s string) bool {
 	return len(s) <= 64 && subscriptionTokenRe.MatchString(s)
-}
-
-// chStringLit renders a Go string as a ClickHouse single-quoted literal with
-// backslash escaping. Mapping tokens are validated by validSubscriptionToken
-// before they get here; this is defense in depth so interpolated config can
-// never break out of its literal.
-func chStringLit(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `'`, `\'`)
-	return "'" + s + "'"
 }
 
 // GetSubscriptionMapping returns the project's saved mapping, or Stripe-shaped
@@ -3996,7 +3490,7 @@ RETURNING project_id::text, start_event, renew_event, cancel_event, plan_prop, a
 	return got, nil
 }
 
-// compilePredicate turns a structured audience rule into a ClickHouse boolean
+// compilePredicate turns a structured audience rule into a DuckDB boolean
 // over the per-person aggregate columns the cohort rollup exposes (f.is_paid,
 // f.plan). It is the only place a custom audience becomes SQL: plan values are
 // lower-cased (the column is lower()'d at read time) and single-quote escaped,
@@ -4269,7 +3763,6 @@ func (s *Store) Cohorts(ctx context.Context, projectID string, filter EventFilte
 		return result, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	canonicalID, _ := resolver.canonicalExpr("distinct_id")
 
 	segmentClause := ""
 	if predicate != "" {
@@ -4277,26 +3770,28 @@ func (s *Store) Cohorts(ctx context.Context, projectID string, filter EventFilte
 	}
 
 	// base is scanned twice (firsts derives the cohort anchor + per-person
-	// attributes from it, the outer query measures activity against it); ClickHouse
-	// inlines the CTE so this is two event scans, the same trade-off Persons
-	// accepts. period is cast to Int32 so the driver scans it cleanly. The paid /
-	// plan attributes come off the `revenue` event (amount/plan in properties) —
+	// attributes from it, the outer query measures activity against it) — two
+	// event scans, the same trade-off Persons accepts. The paid / plan
+	// attributes come off the `revenue` event (amount/plan in properties) —
 	// the documented revenue convention — and aggregate to one flag per person.
-	periodExpr := "toInt32(intDiv(dateDiff('hour', f.first_ts, b.timestamp), " + fmt.Sprint(retentionPeriodHours) + "))"
+	// resolved_events supplies the stitched canonical id (the aliases_dict job).
+	periodExpr := "(date_diff('hour', f.first_ts, b.\"timestamp\") // " + fmt.Sprint(retentionPeriodHours) + ")::INTEGER"
 
 	// Subscription projection literals, compiled from the per-project mapping. The
-	// tokens are validated (validSubscriptionToken) and escaped (chStringLit) so
+	// tokens are validated (validSubscriptionToken) and escaped (sqlQuote) so
 	// none of this is a raw-SQL surface. An event a product never emits simply
 	// matches nothing, leaving sub_status = 'none'. See DESIGN-SUBSCRIPTION-AUDIENCES.md.
-	startLit := chStringLit(mapping.StartEvent)
-	renewLit := chStringLit(mapping.RenewEvent)
-	cancelLit := chStringLit(mapping.CancelEvent)
-	planLit := chStringLit(mapping.PlanProp)
-	periodLit := chStringLit(mapping.PeriodEndProp)
+	startLit := sqlQuote(mapping.StartEvent)
+	renewLit := sqlQuote(mapping.RenewEvent)
+	cancelLit := sqlQuote(mapping.CancelEvent)
 	openExpr := "(event_name = " + startLit + " OR event_name = " + renewLit + ")"
-	trialExpr := "toUInt8(0)"
+	// JSON paths use the quoted-key form ($."prop") so a mapped property whose
+	// name contains a dot still reads one top-level key, matching DuckDB's
+	// literal-key JSONExtractString semantics. The token charset
+	// (validSubscriptionToken) excludes quotes, so the path cannot break out.
+	trialExpr := "false"
 	if strings.TrimSpace(mapping.TrialProp) != "" {
-		trialExpr = "toUInt8(JSONExtractBool(properties, " + chStringLit(mapping.TrialProp) + "))"
+		trialExpr = "coalesce(try_cast(json_extract(properties, '$.\"" + mapping.TrialProp + "\"') AS BOOLEAN), false)"
 	}
 	paidExpr := paidEventExpr(mapping, openExpr)
 	grace := fmt.Sprint(mapping.GraceDays)
@@ -4304,76 +3799,72 @@ func (s *Store) Cohorts(ctx context.Context, projectID string, filter EventFilte
 	query := `
 WITH base AS (
 	SELECT
-		` + canonicalID + ` AS cid,
-		timestamp,
-		(if(JSONExtractString(properties, 'email') != '', JSONExtractString(properties, 'email'), JSONExtractString(properties, '$set', 'email')) != ''
-		 OR if(JSONExtractString(properties, 'name') != '', JSONExtractString(properties, 'name'), JSONExtractString(properties, '$set', 'name')) != '') AS identified,
+		canonical_distinct_id AS cid,
+		"timestamp",
+		(coalesce(nullif(json_extract_string(properties, '$.email'), ''), json_extract_string(properties, '$."$set".email'), '') <> ''
+		 OR coalesce(nullif(json_extract_string(properties, '$.name'), ''), json_extract_string(properties, '$."$set".name'), '') <> '') AS identified,
 		` + paidExpr + ` AS paid_event,
-		if(event_name = 'revenue', lowerUTF8(JSONExtractString(properties, 'plan')), '') AS plan_value,
-		toUInt8(` + openExpr + `) AS is_sub_open,
-		toUInt8(event_name = ` + cancelLit + `) AS is_sub_cancel,
-		if(` + openExpr + `, lowerUTF8(JSONExtractString(properties, ` + planLit + `)), '') AS sub_plan_value,
-		if(` + openExpr + `, parseDateTimeBestEffortOrNull(JSONExtractString(properties, ` + periodLit + `)), NULL) AS sub_period_end,
-		if(` + openExpr + `, ` + trialExpr + `, toUInt8(0)) AS sub_is_trial
-	FROM events
+		if(event_name = 'revenue', lower(json_extract_string(properties, '$.plan')), '') AS plan_value,
+		` + openExpr + ` AS is_sub_open,
+		(event_name = ` + cancelLit + `) AS is_sub_cancel,
+		if(` + openExpr + `, lower(json_extract_string(properties, '$."` + mapping.PlanProp + `"')), '') AS sub_plan_value,
+		if(` + openExpr + `, coalesce(
+			try_cast(json_extract_string(properties, '$."` + mapping.PeriodEndProp + `"') AS TIMESTAMPTZ),
+			to_timestamp(try_cast(json_extract_string(properties, '$."` + mapping.PeriodEndProp + `"') AS DOUBLE))), NULL) AS sub_period_end,
+		if(` + openExpr + `, ` + trialExpr + `, false) AS sub_is_trial
+	FROM resolved_events
 	WHERE ` + where + `
 ),
 firsts AS (
 	SELECT
 		cid,
-		min(timestamp) AS first_ts,
+		min("timestamp") AS first_ts,
 		max(identified) AS has_traits,
 		max(paid_event) AS is_paid,
-		argMaxIf(plan_value, timestamp, plan_value != '') AS plan,
-		countIf(is_sub_open = 1) AS sub_open_count,
-		maxIf(timestamp, is_sub_open = 1) AS last_open_ts,
-		maxIf(timestamp, is_sub_cancel = 1) AS last_cancel_ts,
-		argMaxIf(sub_period_end, timestamp, is_sub_open = 1) AS sub_period_end,
-		argMaxIf(sub_plan_value, timestamp, is_sub_open = 1 AND sub_plan_value != '') AS sub_plan,
-		argMaxIf(sub_is_trial, timestamp, is_sub_open = 1) AS sub_is_trial
+		arg_max(plan_value, "timestamp") FILTER (WHERE plan_value <> '') AS plan,
+		count(*) FILTER (WHERE is_sub_open) AS sub_open_count,
+		max("timestamp") FILTER (WHERE is_sub_open) AS last_open_ts,
+		max("timestamp") FILTER (WHERE is_sub_cancel) AS last_cancel_ts,
+		arg_max(sub_period_end, "timestamp") FILTER (WHERE is_sub_open) AS sub_period_end,
+		arg_max(sub_plan_value, "timestamp") FILTER (WHERE is_sub_open AND sub_plan_value <> '') AS sub_plan,
+		arg_max(sub_is_trial, "timestamp") FILTER (WHERE is_sub_open) AS sub_is_trial
 	FROM base
 	GROUP BY cid
 ),
 people AS (
 	SELECT
 		*,
-		multiIf(
-			sub_open_count = 0, 'none',
-			last_cancel_ts > last_open_ts, 'churned',
-			sub_period_end IS NULL, 'none',
-			sub_period_end + INTERVAL ` + grace + ` DAY < now(), 'churned',
-			sub_is_trial = 1, 'trialing',
-			'active') AS sub_status
+		CASE
+			WHEN sub_open_count = 0 THEN 'none'
+			WHEN last_cancel_ts > last_open_ts THEN 'churned'
+			WHEN sub_period_end IS NULL THEN 'none'
+			WHEN sub_period_end + INTERVAL '` + grace + ` days' < now() THEN 'churned'
+			WHEN sub_is_trial THEN 'trialing'
+			ELSE 'active' END AS sub_status
 	FROM firsts
 )
 SELECT
-	toStartOfWeek(f.first_ts, 1) AS cohort_week,
+	date_trunc('week', timezone('UTC', f.first_ts)) AS cohort_week,
 	` + periodExpr + ` AS period,
-	uniqExact(b.cid) AS users
+	count(DISTINCT b.cid) AS users
 FROM base b
 INNER JOIN people f ON b.cid = f.cid
-WHERE b.timestamp >= f.first_ts` + segmentClause + `
+WHERE b."timestamp" >= f.first_ts` + segmentClause + `
 	AND ` + periodExpr + ` <= ?
 GROUP BY cohort_week, period
 ORDER BY cohort_week DESC, period ASC`
 
 	queryArgs := append(append([]any{}, args...), retentionWeeks)
-	rows, err := s.ch.Query(ctx, query, queryArgs...)
-	if err != nil {
-		return result, err
-	}
-	defer rows.Close()
-
 	// Bucket cells by cohort week, preserving the newest-first scan order so the
 	// row cap keeps the most recent cohorts.
 	byCohort := map[string]*CohortRow{}
 	order := []string{}
-	for rows.Next() {
+	err = s.duckQuery(ctx, query, queryArgs, func(rows *sql.Rows) error {
 		var cohortWeek time.Time
 		var period int32
 		var users uint64
 		if err := rows.Scan(&cohortWeek, &period, &users); err != nil {
-			return result, err
+			return err
 		}
 		key := cohortWeek.Format("2006-01-02")
 		row := byCohort[key]
@@ -4386,8 +3877,9 @@ ORDER BY cohort_week DESC, period ASC`
 			row.Size = users
 		}
 		row.Cells = append(row.Cells, CohortCell{Period: int(period), Users: users})
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return result, err
 	}
 
@@ -4406,67 +3898,35 @@ ORDER BY cohort_week DESC, period ASC`
 	return result, nil
 }
 
-// agentRollupWindow reports whether filter is a plain per-(agent,model) aggregate
-// over a day-aligned window with no per-row predicates, and if so returns the
-// half-open [from, to) day bounds the pre-aggregated agent_usage_daily can serve
-// exactly. Any row-level filter (distinct id, session, search, error-only, a
-// specific event/agent/model) or a non-midnight boundary falls back to raw events,
-// because the rollup only stores day-grained (agent, model) totals.
-func agentRollupWindow(filter EventFilter) (from, to time.Time, ok bool) {
-	if filter.DistinctID != "" || filter.SessionID != "" || filter.Search != "" ||
-		filter.EventName != "" || filter.AgentID != "" || filter.ModelName != "" || filter.ErrorOnly {
-		return time.Time{}, time.Time{}, false
-	}
-	from, to = filter.From.UTC(), filter.To.UTC()
-	if from.IsZero() || to.IsZero() || !to.After(from) {
-		return time.Time{}, time.Time{}, false
-	}
-	if !from.Equal(from.Truncate(24*time.Hour)) || !to.Equal(to.Truncate(24*time.Hour)) {
-		return time.Time{}, time.Time{}, false
-	}
-	return from, to, true
-}
 
 func (s *Store) agentInsightRows(ctx context.Context, projectID string, filter EventFilter) ([]map[string]any, error) {
 	filter.EventType = "agent"
-	if from, to, ok := agentRollupWindow(filter); ok {
-		if out, err := s.agentInsightRowsRollup(ctx, projectID, from, to); err == nil {
-			return out, nil
-		}
-		// Rollup read failed (e.g. table not yet migrated on an old deploy) — fall
-		// through to the always-correct raw path rather than surface an error.
-	}
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	rows, err := s.ch.Query(ctx, `
+	out := []map[string]any{}
+	err = s.duckQuery(ctx, `
 SELECT
-	ifNull(agent_id, 'unknown') AS agent_id,
-	ifNull(model_name, 'unknown') AS model_name,
-	count() AS events,
-	sum(toUInt64(ifNull(tokens_input, toUInt32(0)))) AS tokens_in,
-	sum(toUInt64(ifNull(tokens_output, toUInt32(0)))) AS tokens_out,
-	sum(toFloat64(ifNull(cost_usd, toFloat32(0)))) AS cost_usd,
-	avg(toFloat64(ifNull(latency_ms, toUInt32(0)))) AS avg_latency_ms,
-	countIf(is_error = 1) AS errors
+	coalesce(agent_id, 'unknown') AS agent_id,
+	coalesce(model_name, 'unknown') AS model_name,
+	count(*) AS events,
+	coalesce(sum(tokens_input), 0) AS tokens_in,
+	coalesce(sum(tokens_output), 0) AS tokens_out,
+	coalesce(sum(cost_usd), 0) AS cost_usd,
+	coalesce(avg(coalesce(latency_ms, 0)::DOUBLE), 0) AS avg_latency_ms,
+	count(*) FILTER (WHERE is_error) AS errors
 FROM events
 WHERE `+where+`
 GROUP BY agent_id, model_name
 ORDER BY cost_usd DESC, events DESC
-LIMIT 50`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
+LIMIT 50`, args, func(rows *sql.Rows) error {
 		var agentID, modelName string
 		var events, tokensIn, tokensOut, errors uint64
 		var cost, latency float64
 		if err := rows.Scan(&agentID, &modelName, &events, &tokensIn, &tokensOut, &cost, &latency, &errors); err != nil {
-			return nil, err
+			return err
 		}
 		out = append(out, map[string]any{
 			"agent_id":       agentID,
@@ -4478,53 +3938,12 @@ LIMIT 50`, args...)
 			"avg_latency_ms": latency,
 			"errors":         errors,
 		})
-	}
-	return out, rows.Err()
-}
-
-// agentInsightRowsRollup answers the same shape as agentInsightRows from the
-// pre-aggregated agent_usage_daily table. avg_latency_ms = sum(latency)/count(),
-// reproducing the raw avg(coalesce(latency,0)) exactly for a day-aligned window.
-func (s *Store) agentInsightRowsRollup(ctx context.Context, projectID string, from, to time.Time) ([]map[string]any, error) {
-	rows, err := s.ch.Query(ctx, `
-SELECT
-	agent_id,
-	model_name,
-	countMerge(events) AS events,
-	sumMerge(tokens_in) AS tokens_in,
-	sumMerge(tokens_out) AS tokens_out,
-	sumMerge(cost_usd) AS cost_usd,
-	sumMerge(latency_sum) / greatest(countMerge(events), 1) AS avg_latency_ms,
-	toUInt64(sumMerge(errors)) AS errors
-FROM agent_usage_daily
-WHERE project_id = ? AND day >= toDate(?) AND day < toDate(?)
-GROUP BY agent_id, model_name
-ORDER BY cost_usd DESC, events DESC
-LIMIT 50`, projectID, from.Format("2006-01-02"), to.Format("2006-01-02"))
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
-		var agentID, modelName string
-		var events, tokensIn, tokensOut, errCount uint64
-		var cost, latency float64
-		if err := rows.Scan(&agentID, &modelName, &events, &tokensIn, &tokensOut, &cost, &latency, &errCount); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]any{
-			"agent_id":       agentID,
-			"model_name":     modelName,
-			"events":         events,
-			"tokens_in":      tokensIn,
-			"tokens_out":     tokensOut,
-			"cost_usd":       cost,
-			"avg_latency_ms": latency,
-			"errors":         errCount,
-		})
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) sessionQuality(ctx context.Context, projectID string, filter EventFilter) (float64, float64, error) {
@@ -4535,18 +3954,18 @@ func (s *Store) sessionQuality(ctx context.Context, projectID string, filter Eve
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
 	var duration float64
 	var bounceRate float64
-	err = s.ch.QueryRow(ctx, `
-WITH sessions AS (
+	err = s.duckQueryRow(ctx, `
+WITH per_session AS (
 	SELECT
 		session_id,
-		dateDiff('second', min(timestamp), max(timestamp)) AS duration_seconds,
-		count() AS events
+		date_diff('second', min("timestamp"), max("timestamp")) AS duration_seconds,
+		count(*) AS events
 	FROM events
-	WHERE `+where+` AND session_id != ''
+	WHERE `+where+` AND session_id <> ''
 	GROUP BY session_id
 )
-SELECT ifNull(avg(duration_seconds), 0), ifNull(avg(if(events <= 1, 1, 0)), 0)
-FROM sessions`, args...).Scan(&duration, &bounceRate)
+SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0)
+FROM per_session`, args, &duration, &bounceRate)
 	return duration, bounceRate, err
 }
 
@@ -4557,26 +3976,25 @@ func (s *Store) propertyCounts(ctx context.Context, projectID string, filter Eve
 		return nil, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
-	rows, err := s.ch.Query(ctx, `
-SELECT ifNull(JSONExtractString(properties, ?), '') AS value, count() AS count
+	out := []PathCount{}
+	err = s.duckQuery(ctx, `
+SELECT coalesce(json_extract_string(properties, '$.' || ?), '') AS value, count(*) AS count
 FROM events
-WHERE `+where+` AND value != ''
+WHERE `+where+` AND value <> ''
 GROUP BY value
 ORDER BY count DESC
-LIMIT 20`, append([]any{property}, args...)...)
+LIMIT 20`, append([]any{property}, args...), func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		out = append(out, item)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []PathCount{}
-	for rows.Next() {
-		var item PathCount
-		if err := rows.Scan(&item.Value, &item.Count); err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func filteredWhereWithDefault(projectID string, filter EventFilter, defaultTimeWindow bool) (string, []any) {
@@ -4595,11 +4013,11 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 		to = time.Now().UTC()
 	}
 	if !from.IsZero() {
-		clauses = append(clauses, "timestamp >= ?")
+		clauses = append(clauses, `"timestamp" >= ?`)
 		args = append(args, from)
 	}
 	if !to.IsZero() {
-		clauses = append(clauses, "timestamp <= ?")
+		clauses = append(clauses, `"timestamp" <= ?`)
 		args = append(args, to)
 	}
 	if filter.EventType != "" {
@@ -4615,7 +4033,7 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 			clauses = append(clauses, "distinct_id = ?")
 			args = append(args, filter.DistinctID)
 		} else {
-			clauses = append(clauses, "distinct_id IN ("+placeholders(len(relatedDistinctIDs))+")")
+			clauses = append(clauses, "distinct_id IN "+placeholders(len(relatedDistinctIDs)))
 			for _, id := range relatedDistinctIDs {
 				args = append(args, id)
 			}
@@ -4626,18 +4044,18 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 		args = append(args, filter.SessionID)
 	}
 	if filter.AgentID != "" {
-		clauses = append(clauses, "ifNull(agent_id, '') = ?")
+		clauses = append(clauses, "coalesce(agent_id, '') = ?")
 		args = append(args, filter.AgentID)
 	}
 	if filter.ModelName != "" {
-		clauses = append(clauses, "ifNull(model_name, '') = ?")
+		clauses = append(clauses, "coalesce(model_name, '') = ?")
 		args = append(args, filter.ModelName)
 	}
 	if filter.ErrorOnly {
-		clauses = append(clauses, "is_error = 1")
+		clauses = append(clauses, "is_error")
 	}
 	if filter.HumansOnly {
-		clauses = append(clauses, "ifNull(visitor_class, 'human') = 'human'")
+		clauses = append(clauses, "coalesce(visitor_class, 'human') = 'human'")
 	}
 	if clause, arg, ok := platformClause(filter.Platform); ok {
 		clauses = append(clauses, clause)
@@ -4646,14 +4064,14 @@ func filteredWhereWithDistinctIDs(projectID string, filter EventFilter, defaultT
 		}
 	}
 	if filter.Search != "" {
-		clauses = append(clauses, "(positionCaseInsensitive(event_name, ?) > 0 OR positionCaseInsensitive(distinct_id, ?) > 0 OR positionCaseInsensitive(session_id, ?) > 0 OR positionCaseInsensitive(properties, ?) > 0)")
+		clauses = append(clauses, "(strpos(lower(event_name), lower(?)) > 0 OR strpos(lower(distinct_id), lower(?)) > 0 OR strpos(lower(session_id), lower(?)) > 0 OR strpos(lower(properties), lower(?)) > 0)")
 		args = append(args, filter.Search, filter.Search, filter.Search, filter.Search)
 	}
 	return strings.Join(clauses, " AND "), args
 }
 
 func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTimeWindow bool) (string, []any) {
-	clauses := []string{"project_id IN (" + placeholders(len(projectIDs)) + ")"}
+	clauses := []string{"project_id IN " + placeholders(len(projectIDs))}
 	args := make([]any, 0, len(projectIDs)+8)
 	for _, projectID := range projectIDs {
 		args = append(args, projectID)
@@ -4667,11 +4085,11 @@ func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTime
 		to = time.Now().UTC()
 	}
 	if !from.IsZero() {
-		clauses = append(clauses, "timestamp >= ?")
+		clauses = append(clauses, `"timestamp" >= ?`)
 		args = append(args, from)
 	}
 	if !to.IsZero() {
-		clauses = append(clauses, "timestamp <= ?")
+		clauses = append(clauses, `"timestamp" <= ?`)
 		args = append(args, to)
 	}
 	if filter.EventType != "" {
@@ -4699,10 +4117,10 @@ func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTime
 		args = append(args, filter.ModelName)
 	}
 	if filter.ErrorOnly {
-		clauses = append(clauses, "is_error = 1")
+		clauses = append(clauses, "is_error")
 	}
 	if filter.HumansOnly {
-		clauses = append(clauses, "ifNull(visitor_class, 'human') = 'human'")
+		clauses = append(clauses, "coalesce(visitor_class, 'human') = 'human'")
 	}
 	if clause, arg, ok := platformClause(filter.Platform); ok {
 		clauses = append(clauses, clause)
@@ -4716,6 +4134,15 @@ func workspaceFilteredWhere(projectIDs []string, filter EventFilter, defaultTime
 		args = append(args, search, search, search)
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// anySlice boxes a string slice for variadic arg lists.
+func anySlice(values []string) []any {
+	out := make([]any, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
 }
 
 // PlatformUnknown is the filter value that selects rows whose platform could not
@@ -4732,18 +4159,19 @@ func platformClause(platform string) (string, any, bool) {
 	case "":
 		return "", nil, false
 	case PlatformUnknown:
-		return "ifNull(platform, '') = ''", nil, true
+		return "coalesce(platform, '') = ''", nil, true
 	default:
-		return "ifNull(platform, '') = ?", platform, true
+		return "coalesce(platform, '') = ?", platform, true
 	}
 }
 
+// placeholders renders a parenthesized IN-list of ? binds — "(?, ?, ?)".
 func placeholders(count int) string {
 	out := make([]string, count)
 	for i := range out {
 		out[i] = "?"
 	}
-	return strings.Join(out, ", ")
+	return "(" + strings.Join(out, ", ") + ")"
 }
 
 func emptySinceHours(filter EventFilter) int {
@@ -4772,8 +4200,8 @@ type eventScanner interface {
 func scanEvent(rows eventScanner) (Event, error) {
 	var event Event
 	var inserted time.Time
-	var isError uint8
-	var isUnplanned uint8
+	var isError bool
+	var isUnplanned bool
 	var tokensIn uint32
 	var tokensOut uint32
 	var cost float64
@@ -4804,8 +4232,8 @@ func scanEvent(rows eventScanner) (Event, error) {
 	); err != nil {
 		return event, err
 	}
-	event.IsError = isError == 1
-	event.IsUnplanned = isUnplanned == 1
+	event.IsError = isError
+	event.IsUnplanned = isUnplanned
 	event.InsertedAt = &inserted
 	if tokensIn > 0 {
 		event.TokensInput = &tokensIn
@@ -4857,7 +4285,7 @@ var (
 	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
 )
 
-func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolver, rules []softDeleteRule) (string, []any, error) {
+func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule) (string, []any, error) {
 	// Normalize: strip trailing semicolons before validation and query building.
 	sqlText = strings.TrimRight(strings.TrimSpace(sqlText), ";")
 	if err := validateReadonlySQL(sqlText); err != nil {
@@ -4866,8 +4294,8 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 	if strings.Contains(sqlText, "?") {
 		return "", nil, fmt.Errorf("SQL parameters are not supported; use {project_id}")
 	}
-	// JOIN events is always rejected — only the FROM position is rewritten to
-	// the scoped CTE, so a joined bare `events` would read cross-tenant.
+	// JOIN events is still rejected — the contract predates the sandbox and
+	// stays so saved queries and agent SQL keep one supported shape.
 	if eventsJoinPattern.MatchString(sqlText) {
 		return "", nil, fmt.Errorf("SQL-lite does not support joining the events table")
 	}
@@ -4889,7 +4317,9 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 		query = externalSourcePattern.ReplaceAllString(query, "${1} scoped_external_rows")
 	}
 	// Fail closed: any reference the rewrite did not catch (comma join, quoted
-	// identifier, second occurrence) would hit the raw multi-tenant table.
+	// identifier, second occurrence) is rejected rather than rewritten —
+	// inside the sandbox it could only ever see this project's rows, but the
+	// contract is that the two names appear exactly where the rewrite expects.
 	if residualSourcePattern.MatchString(sqlStringLiteral.ReplaceAllString(query, "''")) {
 		return "", nil, fmt.Errorf("the events and external_rows tables may only be referenced directly after FROM or JOIN (comma joins and quoted table names are not supported)")
 	}
@@ -4905,30 +4335,27 @@ func scopedReadonlySQL(sqlText string, projectID string, resolver identityResolv
 		// folded onto the identified user they later aliased to. Raw `distinct_id` is
 		// left untouched for exact-match filters; counts of unique users / retention
 		// should read `canonical_id` so a visitor who later logs in is one person, not
-		// two.
-		canonicalExpr, canonicalArgs := resolver.canonicalExpr("distinct_id")
-		args = append(args, canonicalArgs...)
+		// two. The stitch is the resolved_events view's LEFT JOIN on the aliases mirror.
 		args = append(args, projectID)
-		ctes = append(ctes, "scoped_events AS (SELECT *, "+canonicalExpr+" AS canonical_id FROM events WHERE project_id = ?)")
+		ctes = append(ctes, "scoped_events AS (SELECT *, canonical_distinct_id AS canonical_id FROM resolved_events WHERE project_id = ?)")
 	}
 	if hasExternal {
-		// FINAL collapses the ReplacingMergeTree versions at query time, so a
-		// re-synced row reads as one row even before background merges run.
-		// The per-connector/table soft-delete predicate rides the same CTE so a
-		// row the source marked deleted reads as gone here exactly as it does in
-		// dataset_preview — one contract, one predicate (softDeleteCondition).
-		// Hard deletes are still invisible: a row removed in the source
-		// without a deletion mark stays, which the preview warnings state.
+		// external_rows is keyed by (project, connector, table, row_key) with
+		// INSERT OR REPLACE on write, so the newest sync's row is the only row —
+		// the job FINAL did on ReplacingMergeTree. The per-connector/table
+		// soft-delete predicate rides the same CTE so a row the source marked
+		// deleted reads as gone here exactly as it does in dataset_preview —
+		// one contract, one predicate (softDeleteCondition). Hard deletes are
+		// still invisible: a row removed in the source without a deletion mark
+		// stays, which the preview warnings state.
 		externalFilter := ""
 		for _, r := range rules {
 			if cond := softDeleteCondition(r.Column, r.Semantics); cond != "" {
-				connector := strings.ReplaceAll(r.ConnectorID, `'`, `\'`)
-				table := strings.ReplaceAll(r.Table, `'`, `\'`)
-				externalFilter += ` AND NOT (connector_id = '` + connector + `' AND table_name = '` + table + `' AND ` + cond + `)`
+				externalFilter += ` AND NOT (connector_id = ` + sqlQuote(r.ConnectorID) + ` AND table_name = ` + sqlQuote(r.Table) + ` AND ` + cond + `)`
 			}
 		}
 		args = append(args, projectID)
-		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows FINAL WHERE project_id = ?"+externalFilter+")")
+		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows WHERE project_id = ?"+externalFilter+")")
 	}
 	for i := 0; i < projectPlaceholders; i++ {
 		args = append(args, projectID)
@@ -4966,21 +4393,37 @@ func validateReadonlySQL(sqlText string) error {
 		return fmt.Errorf("forbidden SQL keyword: %s", keyword)
 	}
 	// Defense-in-depth against the table-function bypass. The primary security
-	// property is the least-privilege ClickHouse role (no table-function grants),
-	// but the RO account is optional in dev, so also reject the known SSRF /
-	// cross-tenant read table functions here regardless of where they appear
-	// (including inside a subquery, which the old events-source guard did not
-	// cover). Comments are stripped first, because ClickHouse treats a comment as
-	// whitespace between the name and its paren (e.g. `url/**/('…')`), which would
-	// otherwise slip past the `name(` match. Matched as `name(` so a column
-	// literally named `url` is unaffected.
-	if fn := forbiddenTableFunction(stripSQLComments(sqlText)); fn != "" {
+	// property is the sandbox itself — a per-project in-memory instance whose
+	// runner connection has enable_external_access=false and a locked
+	// configuration — but the denylist stays so a known SSRF / file-read
+	// function name fails with a clear error instead of an engine one, and so
+	// the guard still holds if the query ever runs outside the sandbox.
+	// Comments are stripped first, because a comment is whitespace between the
+	// name and its paren (e.g. `read_csv/**/('…')`), which would otherwise slip
+	// past the `name(` match. Matched as `name(` so a column literally named
+	// `url` is unaffected.
+	//
+	// Both checks run on literal-masked SQL: a string literal is data, so
+	// `WHERE event_name = 'query(foo)'` must not trip the table-function
+	// check, and `FROM 'checkout'` inside a literal must not trip the
+	// file-read check. The mask keeps the quote characters, so a real
+	// `FROM 'x.csv'` still matches `from\s*'`.
+	masked := maskSQLLiterals(stripSQLComments(sqlText))
+	if fn := forbiddenTableFunction(masked); fn != "" {
 		return fmt.Errorf("forbidden table function: %s", fn)
+	}
+	// DuckDB reads a bare string after FROM/JOIN as a file path ('data.csv',
+	// 's3://…'). The sandbox's enable_external_access=false would already refuse
+	// it; rejecting here returns the clearer error and keeps the guard honest
+	// outside the sandbox too. Single quotes only — a double-quoted token is
+	// an identifier, not a path.
+	if fromStringLiteralPattern.MatchString(masked) {
+		return fmt.Errorf("reading a file or URL as a table is not allowed")
 	}
 	return nil
 }
 
-// sqlCommentPattern matches ClickHouse SQL comments: `/* … */` blocks (including
+// sqlCommentPattern matches SQL comments: `/* … */` blocks (including
 // across newlines) and `-- …` / `# …` line comments to end of line.
 var sqlCommentPattern = regexp.MustCompile(`(?s)/\*.*?\*/|--[^\n]*|#[^\n]*`)
 
@@ -4994,19 +4437,30 @@ func stripSQLComments(sqlText string) string {
 	return sqlCommentPattern.ReplaceAllString(sqlText, " ")
 }
 
-// tableFunctionPattern matches a ClickHouse table function call — an identifier
+// tableFunctionPattern matches a table function call — an identifier
 // immediately followed by `(`, tolerant of whitespace between name and paren.
 var tableFunctionPattern = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*)\s*\(`)
 
-// forbiddenTableFunctions are ClickHouse table functions that read outside the
-// project database: network egress (SSRF), cross-tenant/other-server reads, and
-// local filesystem access. run_sql must never reach them.
+// forbiddenTableFunctions are table functions that read outside the sandbox:
+// network egress (SSRF), file reads, other-database scans, and dynamic
+// SQL/table access. run_sql must never reach them; names from other engines
+// stay listed so a query written for a different dialect fails loudly here
+// rather than being reinterpreted.
 var forbiddenTableFunctions = map[string]bool{
 	"url": true, "urlcluster": true, "remote": true, "remotesecure": true,
 	"mysql": true, "postgresql": true, "mongodb": true, "redis": true,
 	"file": true, "s3": true, "s3cluster": true, "hdfs": true, "hdfscluster": true,
 	"jdbc": true, "odbc": true, "sqlite": true, "azureblobstorage": true, "deltalake": true,
 	"iceberg": true, "gcs": true, "dictionary": true, "cluster": true, "clusterallreplicas": true,
+	// DuckDB file/network readers and dynamic-SQL escapes.
+	"read_csv": true, "read_csv_auto": true, "read_parquet": true, "read_json": true,
+	"read_json_auto": true, "read_ndjson": true, "read_text": true, "read_blob": true,
+	"parquet_scan": true, "csv_scan": true, "json_scan": true, "ndjson_scan": true,
+	"glob": true, "sqlite_scan": true, "postgres_scan": true, "mysql_scan": true,
+	"query": true, "query_table": true, "parquet_metadata": true, "parquet_schema": true,
+	"parquet_file_metadata": true, "parquet_kv_metadata": true, "parquet_bloom_probe": true,
+	"delta_scan": true, "iceberg_scan": true, "iceberg_metadata": true, "iceberg_snapshots": true,
+	"excel_text": true, "read_xlsx": true, "st_read": true, "http_request": true,
 }
 
 func forbiddenTableFunction(sqlText string) string {
@@ -5021,8 +4475,17 @@ func forbiddenTableFunction(sqlText string) string {
 // forbiddenKeywordPattern matches a statement keyword only as a whole token, so
 // an identifier that merely contains one (created_at, insert_id, updated_at,
 // subscription_granted) is left alone. Go's \b breaks on [0-9A-Za-z_], which is
-// exactly the SQL identifier alphabet.
-var forbiddenKeywordPattern = regexp.MustCompile(`(?i)\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|SYSTEM|GRANT|REVOKE)\b`)
+// exactly the SQL identifier alphabet. The DuckDB additions (ATTACH, SET,
+// PRAGMA, COPY, INSTALL, LOAD, CALL, PREPARE, EXECUTE, USE, CHECKPOINT,
+// VACUUM, ANALYZE, EXPORT, IMPORT, PIVOT is allowed) cover the statements a
+// SELECT/WITH prefix would already reject at position 0 — the list is
+// belt-and-suspenders for a keyword smuggled inside a subquery or CTE body.
+var forbiddenKeywordPattern = regexp.MustCompile(`(?i)\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|SYSTEM|GRANT|REVOKE|ATTACH|DETACH|USE|SET|PRAGMA|INSTALL|LOAD|COPY|EXPORT|IMPORT|CALL|PREPARE|EXECUTE|CHECKPOINT|VACUUM|ANALYZE|RESET)\b`)
+
+// fromStringLiteralPattern catches DuckDB's file-read sugar — `FROM 'x.csv'` —
+// which needs no function name to escape the sandbox's data. Single-quoted
+// only: a double-quoted token is an identifier, not a path.
+var fromStringLiteralPattern = regexp.MustCompile(`(?i)\b(from|join)\s*'`)
 
 // forbiddenKeyword returns the first statement keyword appearing as a bare token
 // in sqlText, or "". Callers pass SQL with comments and quoted spans already
@@ -5038,7 +4501,7 @@ func forbiddenKeyword(sqlText string) string {
 // keeping the quotes and the original length so offsets and token boundaries
 // still line up. Data is not a statement: an event named 'order_created' or a
 // property named 'updated_at' must not read as DDL to the denylist. Handles the
-// two escape forms ClickHouse accepts inside a literal -- a doubled quote and a
+// two escape forms accepted inside a literal -- a doubled quote and a
 // backslash escape.
 func maskSQLLiterals(sqlText string) string {
 	var b strings.Builder
@@ -5094,6 +4557,13 @@ func normalizeSQLValue(value any) any {
 		return string(v)
 	case time.Time:
 		return v.UTC()
+	case duckdb.Interval:
+		// INTERVAL scans as a struct; render it as a duration string so the
+		// JSON answer is readable.
+		return fmt.Sprintf("%d months %d days %d µs", v.Months, v.Days, v.Micros)
+	case []any, map[string]any:
+		// LIST/STRUCT results marshal to JSON as-is.
+		return v
 	default:
 		return v
 	}
@@ -5110,11 +4580,4 @@ func firstNonEmpty(values ...string) string {
 
 func nullableString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
-}
-
-func boolToUInt8(value bool) uint8 {
-	if value {
-		return 1
-	}
-	return 0
 }

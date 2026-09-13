@@ -1,51 +1,19 @@
 # AgentRay shared infrastructure — ONE instance serves both dev and prod.
-# Env separation: ClickHouse database (agentray_dev / agentray_prod), Redis DB
-# index (0 / 1), NATS subject suffix (.dev / .prod). Postgres is NOT here — it
-# lives in the existing Cloud SQL instance.
-#
-# CLICKHOUSE_PASSWORD comes from secret.env (written by ../fetch-secrets.sh).
-# Note: the CLICKHOUSE_* env vars only take effect on first volume init;
-# deploy.sh ensures the per-env database exists on every roll.
+# Env separation: Redis DB index (0 / 1) and NATS subject suffix (.dev /
+# .prod). Postgres is NOT here — it lives in the existing Cloud SQL instance;
+# DuckDB is embedded in the API container, one file per colour (see
+# ../dev/docker-compose.yml).
 #
 # LOG ROTATION IS PER-SERVICE HERE ON PURPOSE. /etc/docker/daemon.json sets the
 # same caps as a daemon default, but the daemon only reads it at start and
 # dockerd is never restarted on this box (that would drop every container), so
-# the default does not reach anything already running. These three are the
+# the default does not reach anything already running. These two are the
 # longest-lived containers on the VM — a deploy never recreates them — which
 # makes them the ones most able to fill the 30 GB root volume unnoticed. The
 # cap has to be declared here, and it only binds once the container is
 # recreated.
 
 services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.12-alpine
-    container_name: agentray-clickhouse
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-    env_file:
-      - secret.env
-    environment:
-      CLICKHOUSE_DB: agentray_dev
-      CLICKHOUSE_USER: agentray
-    # e2-standard-2 has 8 GB shared with the docai stack — cap ClickHouse.
-    # It reads the cgroup limit and sizes max_server_memory_usage from it.
-    mem_limit: 2g
-    networks:
-      - edge
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    volumes:
-      - clickhouse-data:/var/lib/clickhouse
-      - ./clickhouse-config.d/system-log-retention.xml:/etc/clickhouse-server/config.d/system-log-retention.xml:ro
-
   redis:
     image: redis:7-alpine
     container_name: agentray-redis
@@ -85,7 +53,6 @@ services:
       - nats-data:/data
 
 volumes:
-  clickhouse-data:
   nats-data:
 
 networks:

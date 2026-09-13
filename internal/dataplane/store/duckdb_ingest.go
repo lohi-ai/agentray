@@ -10,8 +10,8 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
-// This file is the DuckDB write edge: everything that used to land in
-// ClickHouse through PrepareBatch lands here inside one gated transaction.
+// This file is the DuckDB write edge: every captured batch lands here inside
+// one gated transaction.
 // The dedup contract is the events PRIMARY KEY — (project_id, event_id) —
 // enforced by INSERT OR IGNORE, so a redelivered JetStream batch re-commits as
 // a no-op instead of double-counting.
@@ -93,9 +93,8 @@ INSERT OR IGNORE INTO events (
 // the (project_id, event_id) dedup key and the person merge re-applies
 // idempotently (mergePersonDelta's freshness guard makes the re-fold a no-op).
 //
-// This replaces the old two-phase shape (ClickHouse insert, then a best-effort
-// background applier that could drop a saturated hand-off): the profile can no
-// longer be lost once the batch is acked.
+// The person projection commits in the same transaction as the events, so the
+// profile can no longer be lost once the batch is acked.
 func (d *DuckDB) SinkEvents(ctx context.Context, events []Event) error {
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		if err := insertEventsTx(ctx, tx, events); err != nil {
@@ -109,34 +108,23 @@ func (d *DuckDB) SinkEvents(ctx context.Context, events []Event) error {
 // the caller's transaction. Canonical-id resolution reads the DuckDB aliases
 // mirror (not Postgres) so the projection never leaves the write transaction.
 func (d *DuckDB) applyPersonUpdatesTx(ctx context.Context, tx *sql.Tx, events []Event) error {
-	// Load the alias map once per project touched by the batch; the resolver
-	// closure then answers in-memory like the old Postgres-backed resolver did.
-	projects := map[string]struct{}{}
-	for _, e := range events {
-		projects[e.ProjectID] = struct{}{}
-	}
+	// Load the alias map for every project the batch touches, up front: the
+	// resolver closure then answers in-memory like the old Postgres-backed
+	// resolver did. A failed read is fatal — folding a profile under a raw
+	// distinct_id would silently split one person into two rows.
 	aliasMaps := map[string]map[string]string{}
-	loadAliases := func(projectID string) map[string]string {
-		m, ok := aliasMaps[projectID]
-		if !ok {
-			m = map[string]string{}
-			rows, err := tx.QueryContext(ctx,
-				`SELECT anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, projectID)
-			if err == nil {
-				for rows.Next() {
-					var anon, canon string
-					if rows.Scan(&anon, &canon) == nil {
-						m[anon] = canon
-					}
-				}
-				_ = rows.Close()
-			}
-			aliasMaps[projectID] = m
+	for _, e := range events {
+		if _, ok := aliasMaps[e.ProjectID]; ok {
+			continue
 		}
-		return m
+		m, err := loadAliasMap(ctx, tx, e.ProjectID)
+		if err != nil {
+			return err
+		}
+		aliasMaps[e.ProjectID] = m
 	}
 	resolve := func(projectID, distinctID string) string {
-		if canon, ok := loadAliases(projectID)[distinctID]; ok {
+		if canon, ok := aliasMaps[projectID][distinctID]; ok {
 			return canon
 		}
 		return distinctID
@@ -194,6 +182,27 @@ ON CONFLICT (project_id, distinct_id) DO UPDATE SET
 	return nil
 }
 
+// loadAliasMap reads one project's anonymous→canonical alias pairs inside the
+// caller's transaction. The rows are drained and closed before returning, so
+// the transaction is free for the next statement.
+func loadAliasMap(ctx context.Context, tx *sql.Tx, projectID string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	for rows.Next() {
+		var anon, canon string
+		if err := rows.Scan(&anon, &canon); err != nil {
+			return nil, err
+		}
+		m[anon] = canon
+	}
+	return m, rows.Err()
+}
+
 // duckQueryer is the query surface shared by *sql.Tx (inside the write gate)
 // and *sql.Conn (inside the read gate) so person reads work on either.
 type duckQueryer interface {
@@ -215,7 +224,7 @@ func personProfilesByKeysTx(ctx context.Context, q duckQueryer, projectID string
 	rows, err := q.QueryContext(ctx, `
 SELECT distinct_id, properties, properties_once, email, name, first_seen, last_seen
 FROM persons
-WHERE project_id = ? AND distinct_id IN (`+placeholders(len(distinctIDs))+`)`, args...)
+WHERE project_id = ? AND distinct_id IN `+placeholders(len(distinctIDs)), args...)
 	if err != nil {
 		return nil, err
 	}

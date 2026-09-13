@@ -67,7 +67,7 @@ func bodyMsgID(body []byte) string {
 // the ingest stream's Duplicates window instead of re-inserting the batch.
 func BodyMsgID(body []byte) string { return bodyMsgID(body) }
 
-// EventWorker consumes queued events and writes them to ClickHouse via the
+// EventWorker consumes queued events and writes them to DuckDB via the
 // batcher. It holds either a legacy core-NATS subscription or a JetStream consume
 // context, plus the metrics emitter on the durable path.
 type EventWorker struct {
@@ -90,7 +90,7 @@ func StartEventWorker(nc *nats.Conn, subject string, store *storage.Store) (*Eve
 		return nil, err
 	}
 
-	// Coalesce events across messages into larger ClickHouse inserts instead of
+	// Coalesce events across messages into larger DuckDB inserts instead of
 	// one insert per message (which explodes the part count under load).
 	batcher := NewEventBatcher(store.SinkEvents, EventBatcherConfig{})
 
@@ -109,7 +109,7 @@ func StartEventWorker(nc *nats.Conn, subject string, store *storage.Store) (*Eve
 }
 
 // StartJetStreamWorker wires the durable consumer: a durable, explicit-ack
-// consumer feeds the batcher, which acks each message only after its ClickHouse
+// consumer feeds the batcher, which acks each message only after its DuckDB
 // insert lands and NAKs / dead-letters it otherwise. metrics may be nil.
 func StartJetStreamWorker(ctx context.Context, ss *StreamSet, store *storage.Store, metrics *PipelineMetrics) (*EventWorker, error) {
 	dlqPublish := func(body []byte) error {
@@ -124,8 +124,12 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, store *storage.Sto
 		Metrics:    metrics,
 	})
 
+	durable := ss.Durable
+	if durable == "" {
+		durable = "agentray-ingestors"
+	}
 	cons, err := ss.Ingest.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       "agentray-ingestors",
+		Durable:       durable,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       120 * time.Second,
 		MaxAckPending: 8192,

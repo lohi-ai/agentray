@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -368,35 +369,31 @@ func (s *Store) RecentEventsForVerification(ctx context.Context, projectID strin
 	if limit <= 0 || limit > 50 {
 		limit = 50
 	}
-	rows, err := s.ch.Query(ctx, `
+	events := []Event{}
+	err := s.duckQuery(ctx, `
 SELECT
-	project_id::String, event_id::String, distinct_id, session_id, event_name,
-	event_type, properties, is_error, timestamp, inserted_at, platform
+	project_id::VARCHAR, event_id::VARCHAR, distinct_id, session_id, event_name,
+	event_type, properties, is_error, "timestamp", inserted_at, platform
 FROM events
 WHERE project_id = ? AND inserted_at >= ?
 ORDER BY inserted_at DESC
-LIMIT ?`, projectID, since, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	events := []Event{}
-	for rows.Next() {
+LIMIT ?`, []any{projectID, since, limit}, func(rows *sql.Rows) error {
 		var event Event
-		var isError uint8
+		var isError bool
 		var inserted time.Time
 		if err := rows.Scan(
 			&event.ProjectID, &event.EventID, &event.DistinctID, &event.SessionID,
 			&event.EventName, &event.EventType, &event.Properties, &isError,
 			&event.Timestamp, &inserted, &event.Platform,
 		); err != nil {
-			return nil, err
+			return err
 		}
-		event.IsError = isError == 1
+		event.IsError = isError
 		event.InsertedAt = &inserted
 		events = append(events, event)
-	}
-	return events, rows.Err()
+		return nil
+	})
+	return events, err
 }
 
 // --- chart lifecycle ---

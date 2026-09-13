@@ -14,7 +14,7 @@ import (
 
 // replayDLQ drains the dead-letter stream and republishes each batch onto the
 // ingest subject so the durable worker retries it. Run it as an operator after
-// fixing whatever made a batch poison (e.g. a ClickHouse schema mismatch):
+// fixing whatever made a batch poison (e.g. a schema mismatch):
 //
 //	agentray-server replay-dlq
 //

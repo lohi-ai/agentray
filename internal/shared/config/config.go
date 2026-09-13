@@ -9,32 +9,19 @@ import (
 type Config struct {
 	HTTPAddr           string
 	PostgresURL        string
-	ClickHouseAddr     string
-	ClickHouseDatabase string
-	ClickHouseUser     string
-	ClickHousePassword string
 	// DuckDBPath is the embedded analytics database file. DuckDB owns the
 	// directory: the WAL lands at <path>.wal and spill scratch at <dir>/tmp.
 	// Relative paths resolve against the server working directory; the default
 	// keeps a self-hosted `docker compose up` self-contained.
 	DuckDBPath string
-	// ClickHouseROUser / ClickHouseROPassword name a least-privilege ClickHouse
-	// account used for every agent- or user-authored SELECT (run_sql, /api/sql/run,
-	// saved queries). It is provisioned by migrateClickHouse with GRANT SELECT on the
-	// project database only and a readonly=2 profile, so a table-function bypass
-	// (`SELECT * FROM url(...)`) fails with a grant error instead of exfiltrating.
-	// Empty user = fall back to the primary connection (dev convenience); production
-	// sets it. Password may be empty for a trusted local CH.
-	ClickHouseROUser     string
-	ClickHouseROPassword string
 	RedisURL             string
 	NATSURL              string
 	IngestSubject        string
 	// IngestJetStream turns the event pipeline durable. When true (default) the
 	// ingest subject is backed by a file-storage JetStream stream: publishes wait
 	// for a broker ack (HTTP 200 means "durably queued") and the worker acks each
-	// message only after the ClickHouse insert succeeds, so a worker crash, server
-	// restart, or ClickHouse outage redelivers instead of dropping events. Set
+	// message only after the DuckDB insert succeeds, so a worker crash, server
+	// restart, or engine outage redelivers instead of dropping events. Set
 	// false to fall back to fire-and-forget core NATS (dev/tests without a JS-
 	// enabled broker).
 	IngestJetStream bool
@@ -45,6 +32,11 @@ type Config struct {
 	IngestDLQSubject string
 	// IngestMaxDeliver bounds redelivery attempts before a batch is dead-lettered.
 	IngestMaxDeliver int
+	// IngestDurable names the JetStream durable consumer. Blue-green deploys
+	// give each colour its own durable (e.g. agentray-ingestors-blue) so both
+	// colours receive every message — a shared durable would split the stream
+	// between them and the two DuckDB files would diverge.
+	IngestDurable string
 	// PipelineMetricsProjectAPIKey names the project that pipeline self-metrics
 	// (system.pipeline.* events: flush size, insert failures, dead-letters, ingest
 	// lag) are written to, so the existing alerting/dashboards observe the pipeline
@@ -161,13 +153,7 @@ func FromEnv() Config {
 	return Config{
 		HTTPAddr:                     env("HTTP_ADDR", ":8080"),
 		PostgresURL:                  env("POSTGRES_URL", "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"),
-		ClickHouseAddr:               env("CLICKHOUSE_ADDR", "localhost:9000"),
-		ClickHouseDatabase:           env("CLICKHOUSE_DATABASE", "lohi_analytics"),
-		ClickHouseUser:               env("CLICKHOUSE_USER", "lohi"),
-		ClickHousePassword:           os.Getenv("CLICKHOUSE_PASSWORD"),
 		DuckDBPath:                   env("DUCKDB_PATH", "./data/agentray.duckdb"),
-		ClickHouseROUser:             os.Getenv("CLICKHOUSE_RO_USER"),
-		ClickHouseROPassword:         os.Getenv("CLICKHOUSE_RO_PASSWORD"),
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),
 		NATSURL:                      env("NATS_URL", "nats://localhost:4223"),
 		IngestSubject:                env("INGEST_SUBJECT", "agentray.events.ingest"),
@@ -175,6 +161,7 @@ func FromEnv() Config {
 		IngestStreamName:             env("INGEST_STREAM_NAME", "AGENTRAY_EVENTS"),
 		IngestDLQSubject:             env("INGEST_DLQ_SUBJECT", "agentray.events.dlq"),
 		IngestMaxDeliver:             envInt("INGEST_MAX_DELIVER", 5),
+		IngestDurable:                env("INGEST_DURABLE", "agentray-ingestors"),
 		PipelineMetricsProjectAPIKey: env("PIPELINE_METRICS_PROJECT_API_KEY", env("DEFAULT_PROJECT_API_KEY", "lohi_dev_project_token")),
 		RateLimitPerMinute:           envInt("RATE_LIMIT_PER_MINUTE", 600),
 		DefaultProjectName:           env("DEFAULT_PROJECT_NAME", "AgentRay local"),

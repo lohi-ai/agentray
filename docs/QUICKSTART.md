@@ -11,7 +11,7 @@ git clone <repo> && cd agentray
 docker compose up
 ```
 
-`docker compose up` starts the API, web app, ClickHouse, Postgres, Redis, and
+`docker compose up` starts the API, web app, Postgres, Redis, and
 NATS. On first boot it seeds a default project — and nothing else. The dashboards
 are empty until you send real events (step 2), because inventing numbers to fill
 them is how a tool teaches you to distrust it. Open <http://localhost:3200>.

@@ -165,21 +165,20 @@ def cmd_report(args):
     return 0
 
 
-def _archive_prior(dest: Path, incoming: dict[str, bytes] | None = None) -> Path | None:
+def _archive_prior(dest: Path, incoming: dict[str, bytes]) -> Path | None:
     """Move prior published outputs into a content-addressed archive dir.
 
-    With `incoming` (name -> bytes of the files about to be published) only
+    `incoming` maps name -> bytes of the files about to be published; only
     files that would actually change or disappear are archived — republishing
     identical results is a no-op, not a duplicate archive. The archive dir is
     named by a digest of the preserved content: if that exact evidence set is
     already archived, the prior files are simply removed instead of creating
-    a second copy. Without `incoming` every prior file is preserved.
+    a second copy.
     Returns the archive dir used, or None when nothing needed preserving."""
     prior = [p for p in list(dest.glob("*.json")) + [dest / "report.md"]
              if p.exists()]
-    if incoming is not None:
-        prior = [p for p in prior
-                 if incoming.get(p.name) != p.read_bytes()]
+    prior = [p for p in prior
+             if incoming.get(p.name) != p.read_bytes()]
     if not prior:
         return None
     h = hashlib.sha256()

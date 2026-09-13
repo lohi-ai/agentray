@@ -53,7 +53,7 @@ func openProjectSource(ctx context.Context, d *Deps, projectID, connectorID stri
 	kind, dsn, err := d.Repo.ConnectorDSNForProject(ctx, projectID, connectorID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("connector not found")
+			return nil, opcore.NotFound("connector not found")
 		}
 		return nil, err
 	}

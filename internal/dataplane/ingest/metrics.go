@@ -18,7 +18,7 @@ type metricsSink interface {
 }
 
 // PipelineMetrics counts what the ingest pipeline does and periodically writes it
-// back into ClickHouse as `system.pipeline.stats` events, so the *existing*
+// back into DuckDB as `system.pipeline.stats` events, so the *existing*
 // alerting evaluator and dashboards observe the pipeline itself — no new alert
 // machinery. Counters are cumulative; each emit reports the delta since the last
 // emit (directly alertable: "insert_failures over the last minute > 0"). All
@@ -169,9 +169,9 @@ func (m *PipelineMetrics) emit() {
 		Timestamp:    now,
 		VisitorClass: "system",
 	}
-	// Best-effort: if this insert fails (e.g. ClickHouse is the very thing that is
+	// Best-effort: if this insert fails (e.g. DuckDB is the very thing that is
 	// down), skip it — real events are safely NAK'd for redelivery, and metrics
-	// resume once ClickHouse recovers.
+	// resume once DuckDB recovers.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := m.sink.InsertEvents(ctx, []storage.Event{ev}); err != nil {

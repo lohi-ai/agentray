@@ -70,7 +70,7 @@ func sqlConsoleScopes() map[string]bool {
 // dataAnalystPreset is the config-only agent behind the SQL console and dashboard
 // "Ask AI" surfaces. It owns no bespoke backend code: it is the generic agent
 // runtime, scoped to run_sql/explore/create_chart, with a skill that teaches the
-// events schema and the ClickHouse SQL-lite rules. The SQL page and dashboard link
+// events schema and the DuckDB SQL-lite rules. The SQL page and dashboard link
 // to a chat with this agent (/chat?agent=…) instead of calling a special endpoint.
 func dataAnalystPreset() Pack {
 	return Pack{
@@ -79,13 +79,13 @@ func dataAnalystPreset() Pack {
 		Category:    "data",
 		Icon:        "database",
 		Tagline:     "Writes the SQL for you, runs it, and turns the answer into a chart.",
-		Description: "Your hands-on SQL companion. Describe what you want to know in plain language and it writes the ClickHouse query, runs it, explains the result, and can pin it to a dashboard as a chart. Pairs with the SQL console and dashboards.",
+		Description: "Your hands-on SQL companion. Describe what you want to know in plain language and it writes the DuckDB query, runs it, explains the result, and can pin it to a dashboard as a chart. Pairs with the SQL console and dashboards.",
 		Scopes:      sqlConsoleScopes(),
 		SoulMD: `# Data Analyst
 
 You are a precise, friendly data analyst who lives next to the SQL console. People
 come to you when they know the question but not the query — your job is to turn a
-plain-language ask into correct ClickHouse SQL, run it, and explain what came back
+plain-language ask into correct DuckDB SQL, run it, and explain what came back
 in one or two clear sentences. No jargon unless they ask for it.
 
 You are happiest handing back a result the person can trust and act on. When a
@@ -106,13 +106,13 @@ in the stream, then write the query against reality.`,
 3. **Build the chart when asked.** To turn a query into a chart, first ` + "`run_sql`" + `
    it to confirm it returns data, then ` + "`create_chart`" + ` (creating a
    ` + "`create_dashboard`" + ` first if there is nowhere to pin it).
-4. **ClickHouse dialect.** The event store is ClickHouse. Extract JSON properties
-   with ` + "`JSONExtractString(properties, 'key')`" + ` (never JSON_EXTRACT_STRING),
+4. **DuckDB dialect.** The event store is DuckDB. Extract JSON properties
+   with ` + "`json_extract_string(properties, '$.key')`" + ` (never JSON_EXTRACT),
    query the ` + "`events`" + ` table, and keep every query SELECT-only.` + analystGuardrails,
 		Skills: []Skill{
 			{
 				Name:        "write-sql",
-				Description: "Turn a plain-language question into a correct, runnable ClickHouse query over the events table.",
+				Description: "Turn a plain-language question into a correct, runnable DuckDB query over the events table.",
 				Body: `When asked to write or fix a query:
 
 The only queryable table is ` + "`events`" + `, one row per tracked event:
@@ -121,27 +121,27 @@ The only queryable table is ` + "`events`" + `, one row per tracked event:
   (identity-stitched id — use this to count or retain *unique users*, it folds a
   visitor's anonymous events onto the user they later logged in as),
   ` + "`session_id`" + `, ` + "`timestamp`" + ` (DateTime)
-- ` + "`properties`" + ` (a JSON String — read fields with
-  ` + "`JSONExtractString(properties, 'key')`" + ` / ` + "`JSONExtractInt`" + ` / ` + "`JSONExtractFloat`" + `)
+- ` + "`properties`" + ` (a JSON string — read fields with
+  ` + "`json_extract_string(properties, '$.key')`" + ` / ` + "`json_extract`" + ` for numbers)
 - agent telemetry: ` + "`agent_id`" + `, ` + "`tool_name`" + `, ` + "`model_name`" + `,
   ` + "`tokens_input`" + `, ` + "`tokens_output`" + `, ` + "`cost_usd`" + `, ` + "`latency_ms`" + `,
   ` + "`is_error`" + ` (1 = error), ` + "`error_message`" + `
 - ` + "`insert_id`" + ` (idempotency key on server-sent events). Revenue is sent
   server-side as the ` + "`revenue`" + ` event (amount/currency/plan in
   ` + "`properties`" + `); webhooks retry, so for money totals dedup first:
-  ` + "`GROUP BY insert_id`" + ` with ` + "`argMax(metric, timestamp)`" + ` before you sum.
+  ` + "`GROUP BY insert_id`" + ` with ` + "`arg_max(metric, \"timestamp\")`" + ` before you sum.
 - ` + "`visitor_class`" + ` (` + "`human`" + ` | ` + "`search-bot`" + ` |
   ` + "`ai-platform`" + `) and ` + "`referrer_channel`" + ` (acquisition channel).
   When counting *people* (users, signups, retention), add
-  ` + "`WHERE ifNull(visitor_class, 'human') = 'human'`" + ` so crawler traffic
+  ` + "`WHERE coalesce(visitor_class, 'human') = 'human'`" + ` so crawler traffic
   does not inflate the number.
 
 Rules that keep a query runnable:
 1. SELECT or WITH only — never DROP/DELETE/INSERT/UPDATE/ALTER/CREATE.
 2. Read FROM ` + "`events`" + ` exactly once; do not join events to itself.
 3. Do NOT filter by project_id — the console scopes every query automatically.
-4. Use ClickHouse functions: ` + "`count()`" + `, ` + "`uniqExact()`" + `,
-   ` + "`toStartOfDay(timestamp)`" + `, ` + "`now() - INTERVAL 7 DAY`" + `.
+4. Use DuckDB functions: ` + "`count(*)`" + `, ` + "`count(DISTINCT x)`" + `,
+   ` + "`date_trunc('day', \"timestamp\")`" + `, ` + "`now() - INTERVAL '7 days'`" + `.
 5. Add a small LIMIT for raw-row queries; aggregates usually need none.
 
 Always ` + "`run_sql`" + ` the query before you present it, so you answer from real rows.`,
@@ -277,10 +277,10 @@ Your procedure must be self-contained. Every cycle:
    so the team sees the cycle without opening the app. A cycle that measured and
    decided but told no one is an unfinished cycle.
 
-# ClickHouse dialect
+# DuckDB dialect
 
-The event store is ClickHouse; extract JSON props with
-` + "`JSONExtractString(properties, 'key')`" + ` and query the ` + "`events`" + `
+The event store is DuckDB; extract JSON props with
+` + "`json_extract_string(properties, '$.key')`" + ` and query the ` + "`events`" + `
 table. Always SELECT-only. Count unique users on ` + "`canonical_id`" + `, not
 ` + "`distinct_id`" + `: it is identity-stitched, so a visitor who later logs in
 is one user across the funnel and the retention curve, not two.
@@ -327,12 +327,12 @@ activation → purchase):
 				Description: "Refresh the canonical acquisition/activation/retention scorecard and read the retention curve for a PMF verdict.",
 				Body: `When establishing or refreshing the PMF picture:
 
-1. **Acquisition** — ` + "`run_sql`" + ` new ` + "`uniqExact(canonical_id)`" + ` per
+1. **Acquisition** — ` + "`run_sql`" + ` new ` + "`count(DISTINCT canonical_id)`" + ` per
    day over the last 4–8 weeks, broken down by source where available. Count on
    ` + "`canonical_id`" + `, not ` + "`distinct_id`" + `: it folds a visitor's
    anonymous events onto the user they later logged in as, so one person is
    counted once rather than twice across the login boundary. Exclude crawlers with
-   ` + "`WHERE ifNull(visitor_class, 'human') = 'human'`" + ` — a Googlebot or
+   ` + "`WHERE coalesce(visitor_class, 'human') = 'human'`" + ` — a Googlebot or
    GPTBot crawl is not a new user. (The ` + "`funnel`" + ` and ` + "`retention`" + `
    insights already drop bots for you; raw acquisition SQL must do it explicitly.)
 2. **Activation** — ` + "`run_insight`" + ` type ` + "`funnel`" + ` for *this*
@@ -380,12 +380,12 @@ activation → purchase):
 				Body: `A percentage is not a priority until it is money. To size a leak:
 
 1. **Per-step counts** — ` + "`run_insight`" + ` type ` + "`funnel`" + ` (or
-   ` + "`run_sql`" + ` with ` + "`uniqExact(canonical_id)`" + ` per step) along the
+   ` + "`run_sql`" + ` with ` + "`count(DISTINCT canonical_id)`" + ` per step) along the
    paid path, ending at the money event. Record users entering and users passing
    each step.
 2. **Value of one conversion — from the money event, never from a guess.**
    ` + "`run_sql`" + ` the average amount it carries, e.g.
-   ` + "`avg(toFloat64OrNull(JSONExtractString(properties,'amount')))`" + ` (use
+   ` + "`avg(try_cast(json_extract_string(properties,'$.amount') AS DOUBLE))`" + ` (use
    whichever of ` + "`amount`" + ` / ` + "`value`" + ` / ` + "`price`" + ` /
    ` + "`*_cost`" + ` this product actually sends), together with its currency or
    unit property. If the money event carries no amount, **stop**: nothing here is
@@ -581,7 +581,7 @@ Each run:
 				Body: `When auditing what's being tracked:
 
 1. ` + "`run_sql`" + ` the event catalog:
-   ` + "`SELECT event_name, count() AS n, uniqExact(distinct_id) AS users, max(timestamp) AS last_seen FROM events GROUP BY event_name ORDER BY n DESC`" + `.
+   ` + "`SELECT event_name, count(*) AS n, count(DISTINCT distinct_id) AS users, max(\"timestamp\") AS last_seen FROM events GROUP BY event_name ORDER BY n DESC`" + `.
 2. Flag **naming issues**: near-duplicates that differ only by case or separator
    (signup / sign_up / SignUp), and any deviation from the dominant convention
    (pick the convention the majority of events follow).
@@ -603,13 +603,13 @@ instead of "no tracking". Check all six, every run:
    ` + "`*_cost`" + `, ` + "`*_lt`" + `, ` + "`*_vnd`" + `, or ` + "`currency`" + `.
    Name-matching alone misses the ones the team named after the product.
 2. **Zero-volume money event — highest severity.** ` + "`run_sql`" + ` a count per
-   candidate over the window. ` + "`count() = 0`" + ` on a money event means every
+   candidate over the window. ` + "`count(*) = 0`" + ` on a money event means every
    revenue figure the workspace has ever shown is silently fabricated zero. File
    it as urgent, naming the surface that should emit it.
 3. **Booking/reversal asymmetry.** A reversal that carries an amount whose
    booking counterpart does not makes net revenue *structurally negative*:
 
-   ` + "`SELECT event_name, count() AS n, countIf(JSONExtractString(properties,'<amount_prop>') != '') AS with_amount FROM events WHERE event_name IN ('<booking>','<reversal>') GROUP BY event_name`" + `
+   ` + "`SELECT event_name, count(*) AS n, count(*) FILTER (WHERE json_extract_string(properties,'$.<amount_prop>') != '') AS with_amount FROM events WHERE event_name IN ('<booking>','<reversal>') GROUP BY event_name`" + `
 
    If the booking row shows ` + "`with_amount = 0`" + ` and the reversal does not,
    then "net = sum(booked) − sum(refunded)" can only ever return a negative
@@ -618,7 +618,7 @@ instead of "no tracking". Check all six, every run:
    its reversal carries.
 4. **Unit mixing and casing splits.** One quantity must be one property name in
    one unit. Compare the property keys per event
-   (` + "`JSONExtractKeys(properties)`" + `) and flag ` + "`ltCost`" + ` (client)
+   (` + "`json_keys(properties)`" + `) and flag ` + "`ltCost`" + ` (client)
    vs ` + "`lt_cost`" + ` (server) for the same field, or an amount arriving as an
    internal token on one side and real currency on the other — a funnel query
    spanning both sides silently misses half its rows. Require one name, one unit,
@@ -640,7 +640,7 @@ instead of "no tracking". Check all six, every run:
 				Body: `When checking for silent breakage:
 
 1. ` + "`run_sql`" + ` per-event daily volume over the last ~14 days
-   (` + "`toStartOfDay(timestamp)`" + `, ` + "`count()`" + ` grouped by
+   (` + "`date_trunc('day', \"timestamp\")`" + `, ` + "`count(*)`" + ` grouped by
    ` + "`event_name`" + `).
 2. For each core event compare the most recent day(s) to the prior baseline.
    Flag a **drop to zero or a steep fall** (likely a broken tag or a shipped
@@ -673,7 +673,7 @@ instead of "no tracking". Check all six, every run:
 1. For the core events, ` + "`run_sql`" + ` the share of rows that are missing
    what analysis needs: empty/blank ` + "`distinct_id`" + ` (breaks per-user
    metrics), empty ` + "`properties`" + `, or a key field absent
-   (` + "`JSONExtractString(properties,'key') = ''`" + `).
+   (` + "`json_extract_string(properties,'$.key') = ''`" + `).
 2. Check **type/shape drift**: a property that used to be numeric now arriving as
    a string, or a value set that suddenly changed — compare recent vs older rows.
 3. Report each event with its missing-data %, and which downstream metric the gap
@@ -1126,7 +1126,7 @@ already in it.`,
 // and the alerting evaluator already *detects* on four of them
 // (event_volume_hourly, error_rate_hourly, minutes_since_last_event,
 // latency_p95_hourly). What nothing did was **explain**: an alert fires into a
-// Slack channel and a human still has to open ClickHouse to learn what broke,
+// Slack channel and a human still has to open the event store to learn what broke,
 // for whom, since when. Every foundation preset was granted the `monitor` scope
 // and not one of them ever mentioned `activity_summary` or `recent_events`, so
 // the capability shipped invisible.
@@ -1264,23 +1264,23 @@ threshold to set, so a human can arm it in Alerts.
 
 2. **Is the stream alive?** A silent stream is the incident that hides every
    other one:
-   ` + "`SELECT dateDiff('minute', max(timestamp), now()) AS mins_since_last FROM events`" + `.
+   ` + "`SELECT date_diff('minute', max(\"timestamp\"), now()) AS mins_since_last FROM events`" + `.
    More than a couple of hours of silence on a live product is SEV1 — ingestion
    or the client SDK is down, and every other number below is meaningless.
 
 3. **Errors, by blast radius:**
-   ` + "`SELECT event_name, count() AS n, uniqExact(canonical_id) AS users, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM events WHERE is_error = 1 AND timestamp > now() - INTERVAL 24 HOUR GROUP BY event_name ORDER BY users DESC LIMIT 20`" + `.
+   ` + "`SELECT event_name, count(*) AS n, count(DISTINCT canonical_id) AS users, min(\"timestamp\") AS first_seen, max(\"timestamp\") AS last_seen FROM events WHERE is_error AND \"timestamp\" > now() - INTERVAL '24 hours' GROUP BY event_name ORDER BY users DESC LIMIT 20`" + `.
    Sort by **users**, not by count. Hand anything material to the
    ` + "`error-triage`" + ` skill.
 
 4. **Did a core flow stop?** Compare each core event's last hours against its own
    prior baseline:
-   ` + "`SELECT event_name, countIf(timestamp > now() - INTERVAL 3 HOUR) AS recent, countIf(timestamp <= now() - INTERVAL 3 HOUR) / 7 AS baseline_per_3h FROM events WHERE timestamp > now() - INTERVAL 24 HOUR AND ifNull(visitor_class,'human') = 'human' GROUP BY event_name ORDER BY baseline_per_3h DESC LIMIT 20`" + `.
+   ` + "`SELECT event_name, count(*) FILTER (WHERE \"timestamp\" > now() - INTERVAL '3 hours') AS recent, count(*) FILTER (WHERE \"timestamp\" <= now() - INTERVAL '3 hours') / 7 AS baseline_per_3h FROM events WHERE \"timestamp\" > now() - INTERVAL '24 hours' AND coalesce(visitor_class,'human') = 'human' GROUP BY event_name ORDER BY baseline_per_3h DESC LIMIT 20`" + `.
    A core event at or near zero against a healthy baseline is SEV1. Exclude
    crawlers (` + "`visitor_class`" + `) or a bot wave will mask a real drop.
 
 5. **Latency.** p95 by surface, recent vs baseline:
-   ` + "`SELECT event_name, quantile(0.95)(latency_ms) AS p95, count() AS n FROM events WHERE latency_ms IS NOT NULL AND timestamp > now() - INTERVAL 24 HOUR GROUP BY event_name HAVING n > 20 ORDER BY p95 DESC LIMIT 15`" + `.
+   ` + "`SELECT event_name, quantile(latency_ms, 0.95) AS p95, count(*) AS n FROM events WHERE latency_ms IS NOT NULL AND \"timestamp\" > now() - INTERVAL '24 hours' GROUP BY event_name HAVING n > 20 ORDER BY p95 DESC LIMIT 15`" + `.
    A p95 that doubled against the remembered baseline is SEV2 unless users are
    failing because of it.
 
@@ -1290,9 +1290,9 @@ threshold to set, so a human can arm it in Alerts.
 7. **Business operations (only when a data connector is synced).** Operational
    tables land in ` + "`external_rows`" + `. Check for a stalled pipeline — work
    that arrived but never completed, or a table that stopped syncing:
-   ` + "`SELECT table_name, count() AS rows, max(synced_at) AS last_sync FROM external_rows GROUP BY table_name ORDER BY last_sync ASC`" + `.
+   ` + "`SELECT table_name, count(*) AS row_count, max(synced_at) AS last_sync FROM external_rows GROUP BY table_name ORDER BY last_sync ASC`" + `.
    A table whose ` + "`last_sync`" + ` is far behind the others is a broken sync.
-   Read business fields with ` + "`JSONExtractString(data,'column')`" + ` to check
+   Read business fields with ` + "`json_extract_string(data,'$.column')`" + ` to check
    queues and statuses (pending orders, unfinished jobs) against normal.
 
 8. ` + "`remember`" + ` the new baselines: normal hourly volume, error rate, p95,
@@ -1304,7 +1304,7 @@ threshold to set, so a human can arm it in Alerts.
 				Body: `A list of errors is not a diagnosis. To turn one into a call:
 
 1. **Group by signature, not by row.** Distinct messages are distinct bugs:
-   ` + "`SELECT event_name, error_message, count() AS n, uniqExact(canonical_id) AS users, min(timestamp) AS first_seen, max(timestamp) AS last_seen FROM events WHERE is_error = 1 AND timestamp > now() - INTERVAL 24 HOUR GROUP BY event_name, error_message ORDER BY users DESC LIMIT 20`" + `.
+   ` + "`SELECT event_name, error_message, count(*) AS n, count(DISTINCT canonical_id) AS users, min(\"timestamp\") AS first_seen, max(\"timestamp\") AS last_seen FROM events WHERE is_error AND \"timestamp\" > now() - INTERVAL '24 hours' GROUP BY event_name, error_message ORDER BY users DESC LIMIT 20`" + `.
 
 2. **New or known?** ` + "`first_seen`" + ` inside this window on a signature you
    don't have in memory means **new breakage** — almost always the most recent
@@ -1312,7 +1312,7 @@ threshold to set, so a human can arm it in Alerts.
    present in memory at a similar rate is known noise: do not re-page it.
 
 3. **Size the blast radius.** users affected ÷ active users in the same window
-   (` + "`uniqExact(canonical_id)`" + ` over all events) is the number that sets
+   (` + "`count(DISTINCT canonical_id)`" + ` over all events) is the number that sets
    severity. State it as a percentage — "3.1% of active users" lands where "412
    errors" does not.
 
@@ -1336,7 +1336,7 @@ threshold to set, so a human can arm it in Alerts.
 error rate:
 
 1. **Daily cost by agent and model:**
-   ` + "`SELECT toStartOfDay(timestamp) AS day, agent_id, model_name, sum(cost_usd) AS cost, sum(tokens_input) AS tok_in, sum(tokens_output) AS tok_out, count() AS calls FROM events WHERE event_type = 'agent' AND timestamp > now() - INTERVAL 14 DAY GROUP BY day, agent_id, model_name ORDER BY day DESC, cost DESC`" + `.
+   ` + "`SELECT date_trunc('day', \"timestamp\") AS day, agent_id, model_name, sum(cost_usd) AS cost, sum(tokens_input) AS tok_in, sum(tokens_output) AS tok_out, count(*) AS calls FROM events WHERE event_type = 'agent' AND \"timestamp\" > now() - INTERVAL '14 days' GROUP BY day, agent_id, model_name ORDER BY day DESC, cost DESC`" + `.
 
 2. **Flag a runaway.** A day multiples above that agent's own 14-day norm is
    SEV1 when it is still climbing — the signature is calls rising much faster
@@ -1432,7 +1432,7 @@ Each scheduled run produces one digest:
 3. **Retention.** ` + "`run_retention`" + ` on the core returning event and report
    whether stickiness improved or slipped.
 4. **Data-quality watch.** ` + "`run_sql`" + ` the unplanned-event tally
-   (` + "`SELECT event_name, count() AS n FROM events WHERE is_unplanned = 1 AND timestamp > now() - INTERVAL 7 DAY GROUP BY event_name ORDER BY n DESC`" + `).
+   (` + "`SELECT event_name, count(*) AS n FROM events WHERE is_unplanned AND \"timestamp\" > now() - INTERVAL '7 days' GROUP BY event_name ORDER BY n DESC`" + `).
    Newly-appearing names are usually typos or untracked events — list the top few
    so instrumentation drift gets caught early.
 5. **Deliver.** Format the four sections into a tight readout (a headline line +
@@ -1469,11 +1469,11 @@ Each scheduled run produces one digest:
 				Name:        "unplanned-event-watch",
 				Description: "Summarize event names flagged is_unplanned (absent from the established catalog) so instrumentation drift is caught.",
 				Body: `The ingest layer tags events whose name was not in the project's established
-catalog with ` + "`is_unplanned = 1`" + ` — typically typos or newly-shipped,
+catalog with ` + "`is_unplanned`" + ` — typically typos or newly-shipped,
 untracked events. To include a data-quality note in the digest:
 
 1. ` + "`run_sql`" + `:
-   ` + "`SELECT event_name, count() AS n, uniqExact(distinct_id) AS users, max(timestamp) AS last_seen FROM events WHERE is_unplanned = 1 AND timestamp > now() - INTERVAL 7 DAY GROUP BY event_name ORDER BY n DESC LIMIT 10`" + `.
+   ` + "`SELECT event_name, count(*) AS n, count(DISTINCT distinct_id) AS users, max(\"timestamp\") AS last_seen FROM events WHERE is_unplanned AND \"timestamp\" > now() - INTERVAL '7 days' GROUP BY event_name ORDER BY n DESC LIMIT 10`" + `.
 2. If the list is empty, note "no unplanned events" in one line — that is a good
    sign worth stating.
 3. Otherwise list the top offenders. A high-volume unplanned name is likely a
@@ -1893,15 +1893,15 @@ planned (a typo'd event name is the most common way a first test dies silently),
 then the rate per variant:
 
 ` + "```sql" + `
-SELECT JSONExtractString(properties, 'variant') AS variant,
-       uniqExact(distinct_id) AS visitors,
-       uniqExactIf(distinct_id, event_name = 'waitlist.joined') AS signups
+SELECT json_extract_string(properties, '$.variant') AS variant,
+       count(DISTINCT distinct_id) AS visitors,
+       count(DISTINCT distinct_id) FILTER (WHERE event_name = 'waitlist.joined') AS signups
 FROM events
-WHERE timestamp > now() - INTERVAL 7 DAY
+WHERE "timestamp" > now() - INTERVAL '7 days'
 GROUP BY variant ORDER BY visitors DESC
 ` + "```" + `
 
-Count **people** (` + "`uniqExact(distinct_id)`" + `), never rows: one excited
+Count **people** (` + "`count(DISTINCT distinct_id)`" + `), never rows: one excited
 visitor reloading the page is not thirty interested customers, and a threshold a
 single person can clear measures nothing.
 

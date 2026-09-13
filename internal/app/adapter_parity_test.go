@@ -172,11 +172,20 @@ func restInvoker(e *echo.Echo, secret string) opInvoker {
 		if rec.Code == http.StatusOK {
 			return opOutcome{class: "ok", raw: rec.Body.Bytes()}
 		}
+		// A handler failure arrives as the typed envelope {error, code}; an
+		// admission failure (auth, authorize) is still echo's {"message": …}.
+		// Read both — the class vocabulary below distinguishes archived from
+		// conflict, which the wire `code` alone collapses.
 		var env struct {
+			Error   string `json:"error"`
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &env)
-		return opOutcome{class: classifyOpError(env.Message)}
+		msg := env.Error
+		if msg == "" {
+			msg = env.Message
+		}
+		return opOutcome{class: classifyOpError(msg)}
 	}
 }
 
@@ -457,7 +466,7 @@ func sourceJourney(t *testing.T, adapter string, s *storage.Store, userID, proje
 // replay, different-payload conflict, missing and foreign ids, reversible
 // archive/restore, and archived-source run fencing — and must produce the same
 // typed outcome class and the same receipts. Needs the compose Postgres +
-// ClickHouse; skips without them.
+// DuckDB; skips without them.
 func TestLifecycleParityAcrossAdapters(t *testing.T) {
 	t.Setenv("AGENT_KEY_ENC_SECRET", "lifecycle-parity-test-secret")
 	s := openAppTestStore(t)

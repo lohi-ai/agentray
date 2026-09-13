@@ -1,14 +1,21 @@
 // APIError carries the HTTP status alongside the message. Callers that need
 // to distinguish "forbidden" from "failed" (the overview's missing-access
 // state) must not parse the message text — the status is the contract.
+// `kind` carries the typed outcome the lifecycle adapter returns: 'conflict'
+// for a stale revision or a reused idempotency key, 'not_found' for a missing
+// or foreign id, 'retryable' for a transient engine/server failure. Hooks map
+// the kind to a message instead of parsing text; unclassified throws keep the
+// 'error' default.
 export class APIError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, message: string, code = '') {
+  readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
+  constructor(status: number, message: string, code = '', kind: 'conflict' | 'not_found' | 'retryable' | 'error' = 'error') {
     super(message);
     this.name = 'APIError';
     this.status = status;
     this.code = code;
+    this.kind = kind;
   }
 }
 
@@ -1717,22 +1724,6 @@ function agentQuery(agentID: string): string {
   return agentID ? `?agent=${encodeURIComponent(agentID)}` : '';
 }
 
-// ApiError carries the typed outcome the lifecycle adapter returns: 'conflict'
-// for a stale revision or a reused idempotency key, 'not_found' for a missing
-// or foreign id, 'retryable' for a transient engine/server failure. Hooks map
-// the kind to a message instead of parsing text.
-// ApiError extends APIError so the overview's `instanceof APIError` +
-// `status === 403` contract keeps working while lifecycle/plans callers get
-// the typed `kind`. `request` throws this classified subclass.
-export class ApiError extends APIError {
-  readonly kind: 'conflict' | 'not_found' | 'retryable' | 'error';
-  constructor(message: string, status: number, kind: 'conflict' | 'not_found' | 'retryable' | 'error', code = '') {
-    super(status, message, code);
-    this.name = 'ApiError';
-    this.kind = kind;
-  }
-}
-
 // newIdempotencyKey mints one key per user intent; the caller holds it for the
 // life of that intent so a retried mutation replays instead of applying twice.
 export function newIdempotencyKey(): string {
@@ -1743,7 +1734,7 @@ export function newIdempotencyKey(): string {
 // not-found outcomes get an actionable message; anything else falls back to
 // the server's own text.
 export function apiErrorMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) {
+  if (err instanceof APIError) {
     if (err.kind === 'conflict') return 'This changed elsewhere — refresh and try again.';
     if (err.kind === 'not_found') return 'It no longer exists — refresh to see the current state.';
     if (err.kind === 'retryable') return 'The server is busy — try again in a moment.';
@@ -3005,7 +2996,7 @@ export class AgentRayAPI {
           : response.status === 404 ? 'not_found'
           : response.status === 429 || response.status >= 500 ? 'retryable'
           : 'error';
-      throw new ApiError(message, response.status, kind, wireKind);
+      throw new APIError(response.status, message, wireKind, kind);
     }
     return payload as T;
   }

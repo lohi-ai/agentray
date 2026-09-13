@@ -285,7 +285,7 @@ func updateChart() opcore.Operation[updateChartInput, storage.Chart] {
 			return d.Repo.UpdateChartIdempotent(ctx, storage.Chart{
 				ID: in.ChartID, ProjectID: cc.ProjectID, Name: in.Name, Kind: in.Kind,
 				Metric: in.Metric, EventName: in.EventName, EventType: in.EventType,
-				SQL: normalizeSQL(in.SQL), XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
+				SQL: in.SQL, XField: in.XField, YField: in.YField, ColSpan: in.ColSpan,
 			}, in.Revision, strings.TrimSpace(in.IdempotencyKey), hash)
 		},
 	}
