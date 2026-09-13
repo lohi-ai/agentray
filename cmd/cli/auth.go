@@ -367,6 +367,7 @@ func cmdKey(base string, cfg cliConfig, args []string) error {
 	cfg.APIKey = chosen.APIKey // capture key — for SDK use, not ops
 	// Reuse the stored management credential when it is already bound to this
 	// project — minting on every invocation would proliferate live keys.
+	var fresh mintedCredential
 	if cfg.ManagementKey == "" {
 		cred, mintErr := mintManagementCredential(client, chosen.ID, chosen.Role)
 		if mintErr != nil {
@@ -374,12 +375,20 @@ func cmdKey(base string, cfg cliConfig, args []string) error {
 			// credential the role may not mint must not fail the command.
 			fmt.Fprintf(os.Stderr, "warning: %s\n", credentialNotice(mintErr, chosen.Name))
 		} else {
+			fresh = cred
 			cfg.ManagementKey = cred.secret
 			cfg.ManagementKeyID = cred.id
 			cfg.ManagementKeyProject = chosen.ID
 		}
 	}
 	if err := saveConfig(cfg); err != nil {
+		// A credential that cannot be persisted must not be left live and
+		// untracked — revoke it best-effort before reporting the failure.
+		if fresh.secret != "" {
+			if revErr := revokeManagedCredential(client, chosen.ID, fresh.id, fresh.secret); revErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not revoke the untracked credential: %v\n", revErr)
+			}
+		}
 		return err
 	}
 	// Bare CAPTURE key on stdout: `export AGENTRAY_API_KEY=$(agentray key)` is
@@ -660,17 +669,26 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 	// project — a re-login must not mint another live key. Born-split projects
 	// make the project key capture-only, so the credential is what carries
 	// operations; it lives only in this local config.
+	var fresh mintedCredential
 	if cfg.ManagementKey == "" {
 		cred, err := mintManagementCredential(client, payload.Project.ID, payload.Project.Role)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", credentialNotice(err, payload.Project.Name))
 		} else {
+			fresh = cred
 			cfg.ManagementKey = cred.secret
 			cfg.ManagementKeyID = cred.id
 			cfg.ManagementKeyProject = payload.Project.ID
 		}
 	}
 	if err := saveConfig(cfg); err != nil {
+		// A credential that cannot be persisted must not be left live and
+		// untracked — revoke it best-effort before reporting the failure.
+		if fresh.secret != "" {
+			if revErr := revokeManagedCredential(client, payload.Project.ID, fresh.id, fresh.secret); revErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not revoke the untracked credential: %v\n", revErr)
+			}
+		}
 		return err
 	}
 	if cfg.ManagementKey != "" {

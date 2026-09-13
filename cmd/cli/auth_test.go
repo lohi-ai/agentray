@@ -799,3 +799,25 @@ func TestLogoutPreservesCredentialsOnRevokeFailure(t *testing.T) {
 		t.Fatal("the session must stay valid until the credential is revoked")
 	}
 }
+
+// A credential minted during login that cannot be persisted must not be left
+// live and untracked: the CLI revokes it before reporting the save failure.
+func TestLoginRevokesMintedCredentialWhenConfigSaveFails(t *testing.T) {
+	srv := fakeServer(t)
+	dir := withTempConfig(t)
+	// config.json as a directory makes every saveConfig fail.
+	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil {
+		t.Fatalf("seed unwritable config: %v", err)
+	}
+
+	err := runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil {
+		t.Fatal("login must report the failed save")
+	}
+	if srv.mintedCount() != 1 {
+		t.Fatalf("mint attempts = %d, want 1", srv.mintedCount())
+	}
+	if deleted := srv.deleted(); len(deleted) != 1 || deleted[0] != "cred-proj-1" {
+		t.Fatalf("the unpersisted credential must be revoked, not orphaned: %v", deleted)
+	}
+}
