@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -174,19 +175,61 @@ func TestAbandonValidationTestProposedOnly(t *testing.T) {
 	}
 }
 
-func TestListValidationTestsPageResumesOldWork(t *testing.T) {
+// The page is the agent's resume entry point: open states first (proposed,
+// then committed), decided last, newest first inside each group — and the
+// keyset has to carry that order across the group boundary without skipping
+// or repeating a row.
+func TestListValidationTestsPageOrdersOpenBeforeDecidedNewestFirst(t *testing.T) {
 	s := plansTestStore(t)
 	ctx := context.Background()
-	_, projectID := seedConvProject(t, s)
+	userID, projectID := seedConvProject(t, s)
 
-	// More rows than one small page so the cursor must walk.
-	for i := range 5 {
-		if _, err := s.CreateValidationTest(ctx, ValidationTest{
-			ProjectID: projectID, Hypothesis: "idea", MetricEvent: "e", TargetCount: 10,
-		}); err != nil {
-			t.Fatalf("create %d: %v", i, err)
+	mk := func(hyp string) string {
+		id, err := s.CreateValidationTest(ctx, ValidationTest{
+			ProjectID: projectID, Hypothesis: hyp, MetricEvent: "e", TargetCount: 10,
+		})
+		if err != nil {
+			t.Fatalf("create %q: %v", hyp, err)
+		}
+		return id
+	}
+	// created_at is pinned per row — now() ties are not the ordering under
+	// test here; the tie case has its own test below.
+	setAge := func(id, ts string) {
+		if _, err := s.pg.Exec(ctx,
+			`UPDATE validation_tests SET created_at = $2::timestamptz WHERE id = $1`,
+			id, ts); err != nil {
+			t.Fatalf("setAge %s: %v", id, err)
 		}
 	}
+
+	oldProp := mk("old proposed")
+	newProp := mk("new proposed")
+	committedNew := mk("committed newer")
+	committedOld := mk("committed older")
+	decided := mk("decided")
+	if err := s.CommitValidationTest(ctx, userID, projectID, committedNew); err != nil {
+		t.Fatalf("commit newer: %v", err)
+	}
+	if err := s.CommitValidationTest(ctx, userID, projectID, committedOld); err != nil {
+		t.Fatalf("commit older: %v", err)
+	}
+	if err := s.CommitValidationTest(ctx, userID, projectID, decided); err != nil {
+		t.Fatalf("commit decided: %v", err)
+	}
+	if err := s.DecideValidationTest(ctx, userID, projectID, decided, TestPassed, "shipped"); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	// Give the decided row the newest timestamp of all: group rank, not
+	// recency, must keep it behind every open row. Two committed rows put a
+	// page boundary inside rank 1, so the cursor minted on a committed row is
+	// followed — the minting switch and the same-rank predicate at rank ≥ 1
+	// are exercised, not just rank 0.
+	setAge(oldProp, "2026-01-01T00:00:00Z")
+	setAge(newProp, "2026-01-04T00:00:00Z")
+	setAge(committedNew, "2026-01-03T00:00:00Z")
+	setAge(committedOld, "2026-01-02T00:00:00Z")
+	setAge(decided, "2026-01-05T00:00:00Z")
 
 	page1, next, err := s.ListValidationTestsPage(ctx, projectID, "", 2)
 	if err != nil {
@@ -195,18 +238,89 @@ func TestListValidationTestsPageResumesOldWork(t *testing.T) {
 	if len(page1) != 2 || next == "" {
 		t.Fatalf("page1 = %d rows, next %q", len(page1), next)
 	}
+	if page1[0].ID != newProp || page1[1].ID != oldProp {
+		t.Fatalf("page1 = %s,%s want new proposed then old proposed",
+			page1[0].ID, page1[1].ID)
+	}
+	// Page 2 crosses into rank 1 and ends on a committed row, so the emitted
+	// cursor carries rank 1 — page 3 must resume inside that group.
 	page2, next2, err := s.ListValidationTestsPage(ctx, projectID, next, 2)
 	if err != nil {
 		t.Fatalf("page2: %v", err)
 	}
-	if len(page2) != 2 {
-		t.Fatalf("page2 = %d rows", len(page2))
+	if len(page2) != 2 || page2[0].ID != committedNew || page2[1].ID != committedOld {
+		t.Fatalf("page2 = %+v, want committed newer then committed older", page2)
 	}
-	// Pages must not overlap — the cursor is a real keyset, not an offset.
-	if page1[0].ID == page2[0].ID || page1[1].ID == page2[0].ID {
-		t.Fatal("pages overlap — cursor is not a keyset")
+	if next2 == "" {
+		t.Fatal("next2 empty — the decided row is still owed")
 	}
-	_ = next2
+	// Page 3 resumes from a rank-1 cursor: the newest row overall — decided —
+	// trails the whole list, and the walk is exhausted.
+	page3, next3, err := s.ListValidationTestsPage(ctx, projectID, next2, 2)
+	if err != nil {
+		t.Fatalf("page3: %v", err)
+	}
+	if len(page3) != 1 || page3[0].ID != decided {
+		t.Fatalf("page3 = %+v, want the decided row", page3)
+	}
+	if next3 != "" {
+		t.Fatalf("next3 = %q, want exhausted", next3)
+	}
+}
+
+// Equal created_at values are real — createValidationTest never sets the
+// column, so rows inserted inside one now() tick tie. id DESC is the
+// tiebreaker and the keyset must not skip or repeat a tied row.
+func TestListValidationTestsPageTiesBreakByID(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+
+	ids := make([]string, 0, 3)
+	for i := range 3 {
+		id, err := s.CreateValidationTest(ctx, ValidationTest{
+			ProjectID: projectID, Hypothesis: "tied", MetricEvent: "e", TargetCount: 10,
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE validation_tests SET created_at = '2026-01-01T00:00:00Z' WHERE project_id = $1`,
+		projectID); err != nil {
+		t.Fatalf("tie timestamps: %v", err)
+	}
+
+	// Expected order: id descending — the ORDER BY's uuid tiebreaker.
+	want := slices.Clone(ids)
+	slices.Sort(want)
+	slices.Reverse(want)
+
+	var got []string
+	cursor := ""
+	for range 4 { // 3 rows at limit 1 → 3 pages, then the loop must have stopped
+		page, next, err := s.ListValidationTestsPage(ctx, projectID, cursor, 1)
+		if err != nil {
+			t.Fatalf("page %d: %v", len(got), err)
+		}
+		if len(page) != 1 {
+			t.Fatalf("page %d = %d rows, want 1", len(got), len(page))
+		}
+		got = append(got, page[0].ID)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(got) != len(want) {
+		t.Fatalf("walked %d rows, want %d — keyset skipped or repeated", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d = %s, want %s (id DESC tiebreak)", i, got[i], want[i])
+		}
+	}
 }
 
 func TestRecommendationForProjectExactRead(t *testing.T) {
