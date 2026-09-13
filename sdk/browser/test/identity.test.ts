@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { AgentRayClient } from '../client';
+import { IdentityQueue } from '../transport';
 import { deferred } from './deferred';
 
 /** Captures what would have gone over the wire. */
@@ -116,6 +117,61 @@ describe('AgentRayClient identity', () => {
     await vi.waitFor(() => expect(localStorage.getItem('agentray_anon_id')).toBeNull());
   });
 
+  it('recovers every alias an unresponsive page left unconfirmed, not just the newest', async () => {
+    // A page that never answers: two logins, then the tab closes. The second
+    // marker must not overwrite the first, or the first visitor's history is
+    // orphaned permanently — the exact loss this queue exists to prevent.
+    const queue = new IdentityQueue({
+      host: config.apiUrl,
+      apiKey: config.apiKey,
+      maxRetries: 1,
+      fetchImpl: async () => {
+        throw new Error('offline');
+      },
+    });
+    const firstPage = new AgentRayClient({ ...config, identity: queue });
+    const firstVisitor = firstPage.getDistinctId();
+    firstPage.identify('user_a');
+    firstPage.reset();
+    const secondVisitor = firstPage.getDistinctId();
+    firstPage.identify('user_b');
+
+    // The next page load replays both, in the order they were issued.
+    const calls = stubFetch();
+    new AgentRayClient(config);
+
+    await vi.waitFor(() => expect(calls.filter((c) => c.path === '/alias')).toHaveLength(2));
+    expect(calls.filter((c) => c.path === '/alias').map((c) => c.body.anonymous_id)).toEqual([
+      firstVisitor,
+      secondVisitor,
+    ]);
+  });
+
+  it('sends the traits the caller passed, even when the object is reused afterwards', async () => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const aliasInFlight = deferred<void>();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        calls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) });
+        if (path === '/alias') await aliasInFlight.promise;
+        return new Response('', { status: 200 });
+      }),
+    );
+    const client = new AgentRayClient(config);
+    const traits = { plan: 'pro' };
+    client.identify('user_123', traits);
+
+    // Delivery waits behind the alias, so the payload has to have been fixed
+    // when the call was made — the one-shot implementation serialized here.
+    traits.plan = 'enterprise';
+    aliasInFlight.resolve();
+
+    await vi.waitFor(() => expect(calls.find((c) => c.path === '/identify')).toBeTruthy());
+    expect(calls.find((c) => c.path === '/identify')?.body.$set).toEqual({ plan: 'pro' });
+  });
+
   it('keeps the anonymous id when the alias is rejected', async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
@@ -165,7 +221,7 @@ describe('AgentRayClient identity', () => {
     localStorage.setItem('agentray_anon_id', 'anon-from-last-page');
     localStorage.setItem(
       'agentray_pending_alias',
-      JSON.stringify({ anonymousId: 'anon-from-last-page', distinctId: 'user_123' }),
+      JSON.stringify([{ anonymousId: 'anon-from-last-page', distinctId: 'user_123' }]),
     );
 
     new AgentRayClient(config);

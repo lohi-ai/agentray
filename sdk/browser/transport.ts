@@ -166,6 +166,13 @@ export interface IdentifyOperation {
 
 export type IdentityOperation = AliasOperation | IdentifyOperation;
 
+/** An operation with its wire form already fixed — see `IdentityQueue.encode`. */
+interface QueuedOperation {
+  op: IdentityOperation;
+  path: string;
+  body: string;
+}
+
 export interface IdentityQueueOptions {
   /** Base URL of the AgentRay server (no trailing slash needed). */
   host: string;
@@ -177,8 +184,15 @@ export interface IdentityQueueOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** Where an unconfirmed alias waits out a page load. Holds ids only — never traits. */
+/** Where unconfirmed aliases wait out a page load. Holds ids only — never traits. */
 const PENDING_ALIAS_KEY = 'agentray_pending_alias';
+
+/**
+ * Most unconfirmed aliases carried across a page load. One login is one alias;
+ * the cap only stops a page that calls `identify()` in a loop from growing the
+ * marker without bound.
+ */
+const MAX_PENDING_ALIASES = 8;
 
 type DeliveryOutcome = 'ok' | 'terminal' | 'unsent';
 
@@ -187,31 +201,37 @@ interface PendingAlias {
   distinctId: string;
 }
 
-function readPendingAlias(): PendingAlias | null {
+function readPendingAliases(): PendingAlias[] {
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(PENDING_ALIAS_KEY);
   } catch {
-    return null;
+    return [];
   }
-  if (!raw) return null;
+  if (!raw) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const { anonymousId, distinctId } = parsed as Partial<PendingAlias>;
-    if (typeof anonymousId !== 'string' || typeof distinctId !== 'string') return null;
-    return { anonymousId, distinctId };
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is PendingAlias => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const { anonymousId, distinctId } = entry as Partial<PendingAlias>;
+      return typeof anonymousId === 'string' && typeof distinctId === 'string';
+    });
   } catch {
-    return null;
+    return [];
   }
 }
 
-function clearPendingAlias(anonymousId: string): void {
-  const pending = readPendingAlias();
-  // A newer identify owns the slot by now; leave its marker alone.
-  if (pending === null || pending.anonymousId !== anonymousId) return;
+/**
+ * Read-modify-write the marker through one path, so a blocked storage costs
+ * identity continuity and never a thrown error into the host page — and a
+ * marker with nothing left in it is dropped rather than left behind empty.
+ */
+function updatePendingAliases(update: (pending: PendingAlias[]) => PendingAlias[]): void {
+  const next = update(readPendingAliases());
   try {
-    localStorage.removeItem(PENDING_ALIAS_KEY);
+    if (next.length === 0) localStorage.removeItem(PENDING_ALIAS_KEY);
+    else localStorage.setItem(PENDING_ALIAS_KEY, JSON.stringify(next));
   } catch {}
 }
 
@@ -235,7 +255,7 @@ export class IdentityQueue {
    * carries it: `sendBeacon` returning true means the browser accepted the
    * request, not that the server answered it.
    */
-  private queue: IdentityOperation[] = [];
+  private queue: QueuedOperation[] = [];
   private pumping: Promise<void> | null = null;
 
   /**
@@ -256,33 +276,38 @@ export class IdentityQueue {
   /** Queue an operation and start delivering it. */
   enqueue(op: IdentityOperation): void {
     if (op.kind === 'alias') {
-      try {
-        localStorage.setItem(
-          PENDING_ALIAS_KEY,
-          JSON.stringify({ anonymousId: op.anonymousId, distinctId: op.distinctId }),
-        );
-      } catch {}
+      // Every unconfirmed pair is kept, not just the newest: `identify` →
+      // `reset` → `identify` with the tab closing before either is answered
+      // would otherwise strand the first visitor's history for good.
+      updatePendingAliases((pending) =>
+        [...pending.filter((p) => p.anonymousId !== op.anonymousId), {
+          anonymousId: op.anonymousId,
+          distinctId: op.distinctId,
+        }].slice(-MAX_PENDING_ALIASES),
+      );
     }
-    this.queue.push(op);
+    this.queue.push({ op, ...this.encode(op) });
     void this.pump();
   }
 
   /**
-   * Re-queue an alias that was stored by an earlier page load and never
+   * Re-queue every alias that an earlier page load stored and never got
    * acknowledged. Safe to replay: the server's alias write is idempotent on
    * `(project_id, anonymous_id)`.
    */
   restorePendingAlias(): void {
-    const pending = readPendingAlias();
-    if (pending === null) return;
-    if (this.queue.some((op) => op.kind === 'alias' && op.anonymousId === pending.anonymousId)) {
-      return;
+    for (const pending of readPendingAliases()) {
+      const alreadyQueued = this.queue.some(
+        (queued) =>
+          queued.op.kind === 'alias' && queued.op.anonymousId === pending.anonymousId,
+      );
+      if (alreadyQueued) continue;
+      this.enqueue({
+        kind: 'alias',
+        anonymousId: pending.anonymousId,
+        distinctId: pending.distinctId,
+      });
     }
-    this.enqueue({
-      kind: 'alias',
-      anonymousId: pending.anonymousId,
-      distinctId: pending.distinctId,
-    });
   }
 
   /** Deliver what is queued; resolves when every operation has settled or stalled. */
@@ -300,26 +325,28 @@ export class IdentityQueue {
 
   private async drain(): Promise<void> {
     while (this.queue.length > 0) {
-      const op = this.queue[0];
-      const outcome = await this.deliver(op, 0);
+      const queued = this.queue[0];
+      const outcome = await this.deliver(queued, 0);
       // Still unacknowledged: keep it for the next flush or the unload beacon
       // rather than dropping the only record of how two ids are related.
       if (outcome === 'unsent') return;
       this.queue.shift();
+      const { op } = queued;
       if (op.kind !== 'alias') continue;
-      clearPendingAlias(op.anonymousId);
+      updatePendingAliases((pending) => pending.filter((p) => p.anonymousId !== op.anonymousId));
       if (outcome === 'ok') this.onAliasConfirmed?.(op);
     }
   }
 
-  private async deliver(op: IdentityOperation, attempt: number): Promise<DeliveryOutcome> {
-    const { path, body } = this.encode(op);
+  private async deliver(queued: QueuedOperation, attempt: number): Promise<DeliveryOutcome> {
     try {
-      const res = await this.fetchImpl(`${this.host}${path}`, {
+      const res = await this.fetchImpl(`${this.host}${queued.path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        keepalive: true,
+        body: queued.body,
+        // Deliberately no `keepalive`: it caps a request body near 64 KiB and
+        // `/identify` carries caller-authored traits of arbitrary size. Unload
+        // durability is the beacon's job, not this flag's.
       });
       // 4xx (bad key, malformed) is not retryable — retrying can't fix it.
       if (res.ok) return 'ok';
@@ -328,29 +355,35 @@ export class IdentityQueue {
     } catch {
       if (attempt + 1 >= this.maxRetries) return 'unsent';
       await backoffDelay(attempt);
-      return this.deliver(op, attempt + 1);
+      return this.deliver(queued, attempt + 1);
     }
   }
 
-  private encode(op: IdentityOperation): { path: string; body: Record<string, unknown> } {
+  /**
+   * The wire form of an operation, serialized the moment it is enqueued. Doing
+   * it here rather than at send time is what makes a retry, a deferred send
+   * behind a slow alias, and a beacon all carry the values the caller passed —
+   * a caller that reuses a traits object can no longer change what ships.
+   */
+  private encode(op: IdentityOperation): { path: string; body: string } {
     if (op.kind === 'alias') {
       return {
         path: '/alias',
-        body: {
+        body: JSON.stringify({
           api_key: this.apiKey,
           anonymous_id: op.anonymousId,
           distinct_id: op.distinctId,
-        },
+        }),
       };
     }
     return {
       path: '/identify',
-      body: {
+      body: JSON.stringify({
         api_key: this.apiKey,
         distinct_id: op.distinctId,
         $set: op.traits,
         timestamp: op.timestamp,
-      },
+      }),
     };
   }
 
@@ -364,11 +397,10 @@ export class IdentityQueue {
     const beaconAll = () => {
       if (this.queue.length === 0) return;
       if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return;
-      for (const op of this.queue) {
-        const { path, body } = this.encode(op);
+      for (const queued of this.queue) {
         navigator.sendBeacon(
-          `${this.host}${path}`,
-          new Blob([JSON.stringify(body)], { type: 'application/json' }),
+          `${this.host}${queued.path}`,
+          new Blob([queued.body], { type: 'application/json' }),
         );
       }
     };

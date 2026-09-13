@@ -173,6 +173,28 @@ describe('IdentityQueue', () => {
     });
   });
 
+  it('sends identity without fetch keepalive, which caps a body near 64 KiB', async () => {
+    const inits: Array<RequestInit | undefined> = [];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      inits.push(init);
+      return new Response('', { status: 200 });
+    });
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    // Traits are the caller's to size; under keepalive a body this big is
+    // rejected outright, so the payload would retry and then never land.
+    queue.enqueue({
+      kind: 'identify',
+      distinctId: 'user_1',
+      traits: { bio: 'x'.repeat(70_000) },
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+    await queue.flush();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(inits[0]?.keepalive).toBeUndefined();
+  });
+
   it('retries a 5xx before giving up on an alias', async () => {
     vi.useFakeTimers();
     const fetchImpl = vi
