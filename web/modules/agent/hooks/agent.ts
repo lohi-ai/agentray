@@ -10,6 +10,7 @@ import {
   type AgentChatTurn,
 } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
+import { invalidateRecommendationQueries } from '@/lib/recommendation-cache';
 
 export function useAgent() {
   const projectID = useAuthStore((s) => s.project?.id);
@@ -126,7 +127,7 @@ export function useAgent() {
   const ack = useMutation({
     mutationFn: (vars: { id: string; status: 'accepted' | 'dismissed'; note?: string }) =>
       client().ackRecommendation(vars.id, vars.status, vars.note),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['agent-recs', projectID] }),
+    onSuccess: () => invalidateRecommendationQueries(queryClient, projectID),
     onError: (e: Error) => setError(e.message),
   });
 
