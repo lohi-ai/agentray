@@ -48,7 +48,7 @@ func TestAliasedSeriesStillProducesACard(t *testing.T) {
 // TestIsNamedColumnRejectsRawSQL pins the rule itself: a column named after an
 // expression was never named at all.
 func TestIsNamedColumnRejectsRawSQL(t *testing.T) {
-	for _, raw := range []string{"count()", "uniqExact(canonical_id)", "count(*)", "", "   "} {
+	for _, raw := range []string{"count()", "count(DISTINCT canonical_id)", "count(*)", "", "   "} {
 		if isNamedColumn(raw) {
 			t.Fatalf("%q is raw SQL, not a label", raw)
 		}
