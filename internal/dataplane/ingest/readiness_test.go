@@ -2,12 +2,14 @@ package ingestion
 
 import (
 	"testing"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // The readiness predicate decides whether a blue-green deploy may point traffic
 // at a colour, so every branch is pinned here: the two ways to be caught up, the
-// two ways to be behind, the branch that must never converge, and the two ways
-// the broker's own configuration disqualifies the rest of the arithmetic.
+// two ways to be behind, the branch that must never converge, and the ways the
+// broker's own configuration disqualifies the rest of the arithmetic.
 func TestEvaluateReplay(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -43,10 +45,11 @@ func TestEvaluateReplay(t *testing.T) {
 			wantReason: ReplayCaughtUp,
 		},
 		{
-			name: "stream shared with another env: head counts foreign sequences, filter has no work left",
-			// applied < head, but nothing matches this consumer's filter — the
-			// sequence comparison can never come true here, and refusing would
-			// block every deploy on the shipped dev/prod topology.
+			name: "shared stream, filter has no work left: the pending proof carries the verdict",
+			// applied < head and head counts the other env's sequences, but this
+			// consumer has nothing outstanding. Pinned as the shape the pending
+			// shortcut must keep answering ready on a stream that is not this
+			// colour's own.
 			applied:    7,
 			head:       900,
 			first:      1,
@@ -57,9 +60,9 @@ func TestEvaluateReplay(t *testing.T) {
 		},
 		{
 			name: "another env's sequences age out on the shared stream: not this colour's loss",
-			// Same shape as the purged-gap case below, but the stream carries
+			// The same shape as the purged-gap case below, but the stream carries
 			// subjects this consumer is not offered, so the purge frontier says
-			// nothing about this colour's rows. Latching a refusal here would
+			// nothing this consumer can act on. Latching a refusal here would
 			// wedge every deploy for the life of the process.
 			applied:    7,
 			head:       140,
@@ -121,8 +124,9 @@ func TestEvaluateReplay(t *testing.T) {
 		},
 		{
 			name: "fresh durable over a purged prefix is not a gap for that colour",
-			// applied == 0: it has no history to lose, so the retained window is
-			// its whole history and it just replays it.
+			// applied == 0 and there are still retained messages: it has no
+			// history to lose, so the retained window is its whole history and it
+			// just replays it.
 			applied:    0,
 			head:       140,
 			first:      100,
@@ -131,6 +135,22 @@ func TestEvaluateReplay(t *testing.T) {
 			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayBehind,
+		},
+		{
+			name: "fresh durable over a stream with nothing retained cannot catch up",
+			// The exemption's edge: there is nothing left to replay and nothing to
+			// catch up to, so a colour that has applied nothing would serve an
+			// empty file beside a sibling holding the history. The pending proof
+			// would call this caught-up; the purge floor is the only number that
+			// sees it.
+			applied:    0,
+			head:       30000,
+			first:      30001,
+			wired:      true,
+			dedicated:  true,
+			wantReady:  false,
+			wantReason: ReplayPurgedGap,
+			wantMiss:   30000,
 		},
 		{
 			name:       "purged exactly up to the applied mark is not a gap",
@@ -230,15 +250,49 @@ func TestStreamCarries(t *testing.T) {
 			wantDedicated:  true,
 		},
 		{
-			name:           "a wildcard on either side cannot be expanded, so neither claim is made",
+			name:           "a wildcard over this colour's subjects still covers them",
 			streamSubjects: []string{"agentray.events.>"},
 			filterSubjects: dev,
 			wantWired:      true,
 			wantDedicated:  false,
 		},
 		{
-			name:           "wildcard filter is not treated as provably unwired",
+			name: "a wildcard that does not cover them is a mismatch, not an unknown",
+			// The literal side decides this one: `agentray.events.prod.>` can
+			// never deliver `agentray.events.ingest.dev`, so the consumer is
+			// offered nothing and the pending counts stay vacuously zero.
+			streamSubjects: []string{"agentray.events.prod.>"},
+			filterSubjects: dev,
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name:           "a wildcard filter that covers every stream subject is dedicated",
 			streamSubjects: dev,
+			filterSubjects: []string{"agentray.events.ingest.>"},
+			wantWired:      true,
+			wantDedicated:  true,
+		},
+		{
+			name:           "two patterns cannot be compared, so neither claim is made",
+			streamSubjects: []string{"agentray.events.>"},
+			filterSubjects: []string{"agentray.events.ingest.>"},
+			wantWired:      true,
+			wantDedicated:  false,
+		},
+		{
+			name: "two patterns that provably cannot overlap are a mismatch, not an unknown",
+			// A differing token on both sides is decidable: `other.>` can never
+			// deliver `agentray.events.ingest.>`'s subjects, so calling it wired
+			// would green-light a dead pipeline.
+			streamSubjects: []string{"other.>"},
+			filterSubjects: []string{"agentray.events.ingest.>"},
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name:           "a pattern that might overlap stays wired",
+			streamSubjects: []string{"agentray.>"},
 			filterSubjects: []string{"agentray.events.ingest.>"},
 			wantWired:      true,
 			wantDedicated:  false,
@@ -251,6 +305,80 @@ func TestStreamCarries(t *testing.T) {
 			if wired != tt.wantWired || dedicated != tt.wantDedicated {
 				t.Fatalf("streamCarries(%v, %v) = wired=%v dedicated=%v, want %v/%v",
 					tt.streamSubjects, tt.filterSubjects, wired, dedicated, tt.wantWired, tt.wantDedicated)
+			}
+		})
+	}
+}
+
+// The NATS subject grammar the two questions above are decided with.
+func TestSubjectMatches(t *testing.T) {
+	tests := []struct {
+		pattern string
+		subject string
+		want    bool
+	}{
+		{pattern: "a.b.c", subject: "a.b.c", want: true},
+		{pattern: "a.b.c", subject: "a.b.d", want: false},
+		{pattern: "a.b.c", subject: "a.b", want: false},
+		{pattern: "a.b", subject: "a.b.c", want: false},
+		{pattern: "a.*.c", subject: "a.b.c", want: true},
+		{pattern: "a.*.c", subject: "a.b.d", want: false},
+		{pattern: "a.*", subject: "a.b", want: true},
+		{pattern: "a.*", subject: "a.b.c", want: false},
+		{pattern: "a.>", subject: "a.b", want: true},
+		{pattern: "a.>", subject: "a.b.c", want: true},
+		{pattern: "a.>", subject: "a", want: false},
+		{pattern: ">", subject: "a", want: true},
+		{pattern: "agentray.events.>", subject: "agentray.events.ingest.dev", want: true},
+		{pattern: "agentray.events.prod.>", subject: "agentray.events.ingest.dev", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := subjectMatches(tt.pattern, tt.subject); got != tt.want {
+			t.Errorf("subjectMatches(%q, %q) = %v, want %v", tt.pattern, tt.subject, got, tt.want)
+		}
+	}
+}
+
+// A durable created by an older single-filter binary reports FilterSubject
+// rather than FilterSubjects. Reading it as "no filter" would claim the consumer
+// is offered the whole stream and re-enable the stream-wide comparisons the
+// wiring questions exist to suppress.
+func TestConsumerFilterSubjects(t *testing.T) {
+	tests := []struct {
+		name string
+		info jetstream.ConsumerInfo
+		want []string
+	}{
+		{
+			name: "multi-filter",
+			info: jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{
+				FilterSubjects: []string{"a", "b"},
+			}},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "single-filter fallback",
+			info: jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{FilterSubject: "a"}},
+			want: []string{"a"},
+		},
+		{
+			name: "filterless consumer",
+			info: jetstream.ConsumerInfo{Config: jetstream.ConsumerConfig{}},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := consumerFilterSubjects(&tt.info)
+			if len(got) != len(tt.want) {
+				t.Fatalf("consumerFilterSubjects = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("consumerFilterSubjects = %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}

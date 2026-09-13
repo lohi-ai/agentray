@@ -39,6 +39,13 @@ x-agentray-api: &agentray-api-svc
     # for the rest. The declared window must stay above the default
     # GATE_TIMEOUT (240s) so an ordinary deploy is decided by the gate and not
     # by Docker.
+    #
+    # One passing probe is all the gate needs and one failing probe is not a
+    # verdict: Docker marks the container healthy on the first probe that
+    # succeeds, and a busy process can answer 503 while it cannot read the broker
+    # (those reads are bounded) before the next probe clears it. What the window
+    # has to outlast is the REPLAY, because a colour that has not caught up
+    # refuses every probe.
     test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/readyz"]
     interval: 30s
     timeout: 5s

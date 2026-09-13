@@ -30,8 +30,8 @@ const readyzTimeout = 5 * time.Second
 // reach /readyz by construction, because this is the surface an operator reads
 // when the gate refuses and a field-by-field copy is exactly what goes stale.
 // Zero values are omitted, so a caught-up colour answers
-// {"ready":true,"pipeline":"jetstream"} and the sequence numbers appear exactly
-// when they are the diagnosis.
+// {"ready":true,"reason":"caught-up","pipeline":"jetstream"} and the sequence
+// numbers appear exactly when they are the diagnosis.
 type readyzBody struct {
 	ingestion.ReplayVerdict
 	Pipeline string `json:"pipeline"`
@@ -58,7 +58,7 @@ func readyzHandler(probe readinessProbe) echo.HandlerFunc {
 		verdict, err := probe.ReplayStatus(ctx)
 		if err != nil {
 			return c.JSON(http.StatusServiceUnavailable, readyzBody{
-				ReplayVerdict: ingestion.ReplayVerdict{Reason: "unavailable"},
+				ReplayVerdict: ingestion.ReplayVerdict{Reason: ingestion.ReplayUnavailable},
 				Pipeline:      "jetstream",
 				Error:         err.Error(),
 			})

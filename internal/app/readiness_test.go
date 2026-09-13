@@ -88,3 +88,52 @@ func TestReadyz(t *testing.T) {
 		})
 	}
 }
+
+// The compose healthcheck is `wget --spider`, which sends HEAD. A GET-only route
+// answers that 405, so the probe exits non-zero for every colour and the
+// blue-green gate can never see a healthy container — the deploy fails whether
+// or not the colour is ready. Pinned through the REAL registration, because a
+// test that mounts its own routes cannot catch this.
+func TestHealthRoutesAnswerHead(t *testing.T) {
+	tests := []struct {
+		name   string
+		ready  readinessProbe
+		path   string
+		status int
+	}{
+		{
+			name:   "caught up: the probe that decides the switch is OK",
+			ready:  stubProbe{verdict: ingestion.ReplayVerdict{Ready: true, Reason: ingestion.ReplayCaughtUp}},
+			path:   "/readyz",
+			status: http.StatusOK,
+		},
+		{
+			name:   "behind: the probe refuses, and still answers",
+			ready:  stubProbe{verdict: ingestion.ReplayVerdict{Reason: ingestion.ReplayBehind, Pending: 3}},
+			path:   "/readyz",
+			status: http.StatusServiceUnavailable,
+		},
+		{
+			name:   "liveness is unaffected",
+			ready:  stubProbe{verdict: ingestion.ReplayVerdict{Reason: ingestion.ReplayBehind}},
+			path:   "/healthz",
+			status: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := echo.New()
+			registerHealthRoutes(e, tt.ready)
+			req := httptest.NewRequest(http.MethodHead, tt.path, nil)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("HEAD %s answered 405: `wget --spider` would fail for every colour", tt.path)
+			}
+			if rec.Code != tt.status {
+				t.Fatalf("HEAD %s = %d, want %d", tt.path, rec.Code, tt.status)
+			}
+		})
+	}
+}

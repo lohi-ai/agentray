@@ -35,7 +35,16 @@ set -euo pipefail
 #     never clears (messages were purged before this colour applied them and no
 #     amount of waiting recovers them), and `stream-mismatch` means the stream
 #     does not carry this env's subjects at all, so the colour will never be
-#     offered another row: fix the stream's subject list, do not re-run.
+#     offered another row. Both envs default INGEST_STREAM_NAME to the SAME
+#     stream on the shared broker and EnsureStreams rewrites that stream's
+#     subject list to the booting env's on EVERY boot, so the env that restarted
+#     last owns it and the other one is unwired — including for publishing, which
+#     fails with "no response from stream". The durable fix is a stream per env
+#     (`INGEST_STREAM_NAME: AGENTRAY_EVENTS_PROD` / `_DEV` in that env's app.env,
+#     next to the subjects it already sets); a hand-edited subject list is only a
+#     stop-gap, because the next boot of either env rewrites it, and re-running
+#     this env's deploy clears this env's refusal by handing the same one to its
+#     sibling.
 #
 # Schema migrations are automatic: the API creates/updates Postgres and
 # DuckDB tables at startup. Redis/NATS are shared single instances (infra/)

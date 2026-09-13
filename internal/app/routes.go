@@ -44,6 +44,28 @@ func (s publicCollectSet) collect(e *echo.Echo, method, path string, handler ech
 
 func (s publicCollectSet) has(path string) bool { return s[path] }
 
+// registerHealthRoutes mounts the two probes. They answer HEAD as well as GET:
+// the compose healthcheck is `wget --spider`, and spider mode sends HEAD — a
+// GET-only route answers that 405, the probe exits non-zero for every colour,
+// and the blue-green gate then never sees a healthy container at all. RFC 9110
+// says HEAD is GET without the body, which is exactly what a probe wants.
+//
+// /healthz is the static liveness answer and stays what it always was. /readyz
+// is the data-coherence probe the deploy gate reads through that healthcheck
+// (see readyzHandler): 503 until this colour has applied everything the durable
+// stream offers it.
+func registerHealthRoutes(e *echo.Echo, ready readinessProbe) {
+	liveness := func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
+	}
+	e.GET("/healthz", liveness)
+	e.HEAD("/healthz", liveness)
+
+	readyz := readyzHandler(ready)
+	e.GET("/readyz", readyz)
+	e.HEAD("/readyz", readyz)
+}
+
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
@@ -51,14 +73,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
-	e.GET("/healthz", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
-	})
-
-	// Liveness above, data coherence here: /readyz is 503 until this colour has
-	// applied everything on the durable stream, which is what the blue-green
-	// healthcheck gates the traffic switch on (see readyzHandler).
-	e.GET("/readyz", readyzHandler(ready))
+	registerHealthRoutes(e, ready)
 
 	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)

@@ -207,18 +207,12 @@ func chunkRows(rows []connector.LandedRow, maxBytes int) [][]ExternalRow {
 }
 
 // bodyMsgID is a stable id for a marshaled batch, used as the JetStream
-// deduplication key.
+// deduplication key when a batch is first published.
 func bodyMsgID(body []byte) string {
 	h := fnv.New64a()
 	_, _ = h.Write(body)
 	return strconv.FormatUint(h.Sum64(), 16)
 }
-
-// BodyMsgID exposes the same batch-body dedup key to the DLQ replay path (in the
-// server binary) so a re-queued dead-letter carries the original message's
-// deduplication id — making an interrupted or repeated replay idempotent within
-// the ingest stream's Duplicates window instead of re-inserting the batch.
-func BodyMsgID(body []byte) string { return bodyMsgID(body) }
 
 // EventWorker consumes queued events and writes them to DuckDB via the
 // batcher. It holds either a legacy core-NATS subscription or a JetStream consume

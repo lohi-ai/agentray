@@ -422,9 +422,10 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 // produce and the one a green healthcheck hides best: EnsureStreams rewrites the
 // shared stream's subject list to its own env's on every boot, so an env that
 // booted earlier keeps a durable whose filter the stream no longer carries. It
-// is offered nothing, NumPending and NumAckPending are vacuously zero, and the
-// pending proof alone would report a colour caught-up that will never receive
-// another row. The gate must refuse on the broker's own configuration instead.
+// will never be offered another row — the counts can even read zero, and any
+// backlog still retained under the old subjects makes them non-zero instead —
+// and the pending proof alone would report a colour caught-up that is done
+// receiving. The gate must refuse on the broker's own configuration instead.
 func TestBlueGreenStreamMismatchRefusesReady(t *testing.T) {
 	url := startBroker(t)
 	ctx := context.Background()
@@ -496,6 +497,53 @@ func TestFreshColourIsNotHeldToAnotherColoursGap(t *testing.T) {
 	}
 	if got := fresh.externalRowKeys(t, parityTable); len(got) != 1 || got[0] != "k2" {
 		t.Fatalf("fresh colour rows = %v, want only what the stream still holds", got)
+	}
+}
+
+// TestBootLatchesNeverMaskALiveDiagnosis pins how far a latch may go. The latch
+// exists for the moment the live reading goes ready — the loss it records is
+// invisible once the replay catches up — so it may DOWNGRADE a ready verdict,
+// never replace one that already refuses: while a colour is replaying, "wait" is
+// the answer that tells the operator to do nothing destructive, and a wiring
+// mismatch is the one whose remedy actually unblocks the deploy. With two
+// latches set, the specific diagnosis outranks the vague one.
+func TestBootLatchesNeverMaskALiveDiagnosis(t *testing.T) {
+	url := startBroker(t)
+	ctx := context.Background()
+
+	green := newColour(t, url, testConfig("colour-green"))
+	green.serve(t)
+	if v := green.waitReady(t, 20*time.Second); v.Reason != ReplayCaughtUp {
+		t.Fatalf("verdict before the latches = %+v, want caught-up", v)
+	}
+
+	// A boot sample the broker could not answer: whether this colour lost rows
+	// could not be established, so it must not take traffic, and only a restart
+	// re-samples.
+	green.ss.bootUnverified.Store(true)
+	if v := mustVerdict(t, green.ss); v.Ready || v.Reason != ReplayUnverified {
+		t.Fatalf("verdict = %+v, want a %q refusal", v, ReplayUnverified)
+	}
+
+	// A latched gap is the more specific diagnosis, so it wins.
+	green.ss.bootGap.Store(417)
+	if v := mustVerdict(t, green.ss); v.Ready || v.Reason != ReplayPurgedGap || v.Missing < 417 {
+		t.Fatalf("verdict = %+v, want %q naming at least the latched 417", v, ReplayPurgedGap)
+	}
+
+	// A live refusal survives both: publish with no worker consuming and the
+	// honest answer is "replaying". Reporting the latch here would tell the
+	// operator to restart — a remedy that destroys a deploy cycle and, for the
+	// retry, re-rolls the same dice.
+	green.ss.bootGap.Store(0)
+	green.park()
+	queue := NewJetStreamQueue(green.ss.JS, green.ss.Subject, green.ss.ConnectorSubject)
+	if err := queue.InsertEvents(ctx, []storage.Event{parityEvent(1)}); err != nil {
+		t.Fatalf("publish with no consumer running: %v", err)
+	}
+	v := waitVerdict(t, green.ss, 20*time.Second, func(v ReplayVerdict) bool { return !v.Ready })
+	if v.Reason != ReplayBehind {
+		t.Fatalf("verdict = %+v, want %q rather than the latched %q", v, ReplayBehind, ReplayUnverified)
 	}
 }
 
