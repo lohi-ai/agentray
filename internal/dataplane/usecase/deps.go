@@ -162,9 +162,12 @@ func MapOpError(err error) error {
 	if errors.As(err, &he) {
 		return he
 	}
-	// classifyOpError owns the sentinel→kind mapping; here we only render the
-	// resulting kind as an HTTP status.
-	err = classifyOpError(err)
+	// classifyOpError owns the sentinel→kind mapping; explicit OpErrors always
+	// win (the same rule Registry.classifyError applies), so only untyped
+	// errors are classified. Here we only render the kind as an HTTP status.
+	if opcore.KindOf(err) == "" {
+		err = classifyOpError(err)
+	}
 	var oe *opcore.OpError
 	if errors.As(err, &oe) {
 		switch oe.Kind {
