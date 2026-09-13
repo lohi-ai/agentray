@@ -153,6 +153,10 @@ describe('bestNextStep', () => {
     // "evidence unavailable", so the panel must not call it a finding.
     expect(bestNextStep(finding({ evidence_json: '' })).kind).toBe('capability');
     expect(bestNextStep(finding({ evidence_json: '{not json' })).kind).toBe('capability');
+    // An envelope full of unrelated keys is not provenance either: evidenceLine
+    // renders "evidence unavailable" for it, and the panel must agree with the
+    // line it would print rather than with the fact that JSON parsed.
+    expect(bestNextStep(finding({ evidence_json: JSON.stringify({ events: 202, sessions: 8, window_hours: 24 }) })).kind).toBe('capability');
     expect(bestNextStep(finding({ rationale: '   ' })).kind).toBe('capability');
     expect(bestNextStep(finding({ title: '' })).kind).toBe('capability');
     // Only an open finding is a next step; a dismissed one is history.

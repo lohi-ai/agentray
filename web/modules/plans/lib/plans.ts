@@ -23,34 +23,17 @@ export function outcomeEntries(json: string | undefined): TestOutcomeEntry[] {
   }
 }
 
-// evidenceAvailable reports whether a finding's evidence envelope is present
-// and parseable. evidenceLine() renders "evidence unavailable" for a legacy or
-// malformed row; a caller deciding whether a finding is display-complete needs
-// the boolean, not the rendered string.
-export function evidenceAvailable(rec: { evidence_json?: string }): boolean {
+// evidenceParts parses a finding's evidence envelope into the provenance
+// fields the reader can check. The envelope is the typed contract the ops
+// document — {query_ref, metric_version, dataset_version, range, filters,
+// timezone, watermark, warnings}. A row that predates the envelope, or whose
+// envelope carries none of those fields, yields no parts.
+function evidenceParts(rec: { evidence_json?: string }): string[] {
   const raw = rec.evidence_json?.trim();
-  if (!raw) return false;
-  try {
-    const env = JSON.parse(raw);
-    return !!env && typeof env === 'object' && !Array.isArray(env) && Object.keys(env).length > 0;
-  } catch {
-    return false;
-  }
-}
-
-// evidenceLine renders a finding's evidence envelope in one line. The
-// envelope is the typed contract the ops document — {query_ref,
-// metric_version, dataset_version, range, filters, timezone, watermark,
-// warnings} — and every field it carries renders here, because a provenance
-// field that disappears is a claim the reader cannot check. Rows written
-// before the envelope existed carry no evidence_json — the honest read is
-// "evidence unavailable" with the recording date, never an invented summary.
-export function evidenceLine(rec: { evidence_json?: string; created_at: string }): string {
-  const raw = rec.evidence_json?.trim();
-  const unavailable = `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
-  if (!raw) return unavailable;
+  if (!raw) return [];
   try {
     const env = JSON.parse(raw) as Record<string, unknown>;
+    if (!env || typeof env !== 'object' || Array.isArray(env)) return [];
     const parts: string[] = [];
     const ref = env.query_ref ?? env.query_id;
     if (ref && typeof ref === 'object') {
@@ -72,10 +55,28 @@ export function evidenceLine(rec: { evidence_json?: string; created_at: string }
         if (typeof w === 'string' && w) parts.push(`warning: ${w}`);
       }
     }
-    return parts.length ? parts.join(' · ') : unavailable;
+    return parts;
   } catch {
-    return unavailable;
+    return [];
   }
+}
+
+// evidenceAvailable reports whether a finding carries provenance a reader can
+// check. It is the same parse evidenceLine renders, so a caller deciding
+// whether a finding is display-complete can never disagree with the line the
+// panel would print: an envelope full of unrelated keys is not evidence.
+export function evidenceAvailable(rec: { evidence_json?: string }): boolean {
+  return evidenceParts(rec).length > 0;
+}
+
+// evidenceLine renders a finding's evidence envelope in one line. Every field
+// it carries renders here, because a provenance field that disappears is a
+// claim the reader cannot check. Rows written before the envelope existed
+// carry no evidence_json — the honest read is "evidence unavailable" with the
+// recording date, never an invented summary.
+export function evidenceLine(rec: { evidence_json?: string; created_at: string }): string {
+  const parts = evidenceParts(rec);
+  return parts.length ? parts.join(' · ') : `evidence unavailable — recorded ${formatDate(rec.created_at) || 'earlier'}`;
 }
 
 // baselineLine is the "baseline → target" readout for one experiment: the
