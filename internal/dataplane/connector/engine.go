@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,7 @@ type Store interface {
 	ConnectorSyncJob(ctx context.Context, syncID string) (SyncJob, error)
 	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 	EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error)
+	ConnectorRunByIdempotencyKey(ctx context.Context, projectID, syncID, idemKey string) (run Run, found bool, err error)
 	ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error)
 	HeartbeatConnectorRun(ctx context.Context, runID string) (cancelRequested bool, stillRunning bool, err error)
 	FinishConnectorRun(ctx context.Context, runID, syncID, owner string, result SyncResult, cancelled bool) error
@@ -174,9 +176,9 @@ const queuedCancelTimeout = 5 * time.Second
 const maxPendingRuns = maxConcurrentRuns
 
 // ErrEngineBusy rejects an enqueue when every worker slot and every pending
-// slot is taken. It is typed and retryable: no run row is created, so a
-// retry with the same idempotency key is a fresh claim, not a replay of an
-// abandoned one.
+// slot is taken AND the caller's idempotency key resolves to no existing run.
+// It is typed and retryable: no run row is created, so a retry with the same
+// key is a fresh claim rather than a replay of an abandoned one.
 var ErrEngineBusy = errors.New("connector engine at capacity — retry shortly")
 
 func NewEngine(store Store) *Engine {
@@ -248,8 +250,25 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 	// never be recorded — an orphaned queued row would be fenced stale and a
 	// same-key retry would replay the failure instead of running.
 	e.mu.Lock()
-	if e.closed || e.pending >= maxPendingRuns {
+	if e.closed {
 		e.mu.Unlock()
+		return Run{}, false, ErrEngineBusy
+	}
+	if e.pending >= maxPendingRuns {
+		e.mu.Unlock()
+		// Capacity bounds NEW work. A retry carrying a key this sync already
+		// resolved is a receipt read — refusing it as busy would hide the run
+		// the caller asked about — and it dispatches nothing, so it consumes
+		// no slot. A key with no prior run is still refused.
+		if strings.TrimSpace(idemKey) != "" {
+			existing, found, lerr := e.store.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, idemKey)
+			if lerr != nil {
+				return Run{}, false, lerr
+			}
+			if found {
+				return existing, false, nil
+			}
+		}
 		return Run{}, false, ErrEngineBusy
 	}
 	e.pending++

@@ -176,6 +176,22 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 	return *r, true, nil
 }
 
+// ConnectorRunByIdempotencyKey mirrors the store's read-only resolution: the
+// key stamped on a run, never a live-scan of active runs.
+func (f *fakeStore) ConnectorRunByIdempotencyKey(ctx context.Context, projectID, syncID, idemKey string) (Run, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.TrimSpace(idemKey) == "" {
+		return Run{}, false, nil
+	}
+	for _, r := range f.runs {
+		if r.SyncID == syncID && r.IdempotencyKey == idemKey {
+			return *r, true, nil
+		}
+	}
+	return Run{}, false, nil
+}
+
 func (f *fakeStore) ConnectorRunForProject(ctx context.Context, projectID, runID string) (Run, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -671,5 +687,53 @@ func TestEnqueueBusyRejectsThenExecutesOnce(t *testing.T) {
 	engine.Wait()
 	if got := len(store.finished); got != maxConcurrentRuns+1 {
 		t.Fatalf("finished %d runs, want %d", got, maxConcurrentRuns+1)
+	}
+}
+
+// Capacity gates NEW work only. A retry whose idempotency key already resolved
+// to a run must be answered with that run's receipt instead of ErrEngineBusy,
+// while a key with no prior run is still refused at the same capacity — and
+// the replay dispatches nothing and consumes no slot.
+func TestEnqueueBusyReplaysExistingKey(t *testing.T) {
+	block := make(chan struct{})
+	src := &fakeSource{blockCh: block}
+	useFakeSource(src, nil)
+	store := newFakeStore(incrementalJob())
+	engine := NewEngine(store)
+
+	first, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s1", "k1")
+	if err != nil || !enqueued {
+		t.Fatalf("first enqueue: %v enqueued=%v", err, enqueued)
+	}
+	// Fill the remaining capacity with runs blocked in PullRows.
+	for i := range maxConcurrentRuns - 1 {
+		syncID := fmt.Sprintf("s%d", i+2)
+		if _, enqueued, err := engine.EnqueueRun(context.Background(), "p1", syncID, ""); err != nil || !enqueued {
+			t.Fatalf("enqueue %s: %v enqueued=%v", syncID, err, enqueued)
+		}
+	}
+
+	replay, again, err := engine.EnqueueRun(context.Background(), "p1", "s1", "k1")
+	if err != nil {
+		t.Fatalf("busy replay err = %v, want the original receipt", err)
+	}
+	if again || replay.ID != first.ID {
+		t.Fatalf("busy replay = id %s enqueued=%v, want id %s enqueued=false", replay.ID, again, first.ID)
+	}
+	// Same capacity, a key with no prior run: still typed busy.
+	if _, _, err := engine.EnqueueRun(context.Background(), "p1", "s2", "k9"); !errors.Is(err, ErrEngineBusy) {
+		t.Fatalf("fresh key at capacity err = %v, want ErrEngineBusy", err)
+	}
+
+	close(block)
+	engine.Wait()
+	if got := len(store.finished); got != maxConcurrentRuns {
+		t.Fatalf("finished %d runs, want %d — a replay must not dispatch work", got, maxConcurrentRuns)
+	}
+	store.mu.Lock()
+	rows := len(store.runs)
+	store.mu.Unlock()
+	if rows != maxConcurrentRuns {
+		t.Fatalf("created %d run rows, want %d", rows, maxConcurrentRuns)
 	}
 }

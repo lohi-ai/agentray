@@ -209,3 +209,38 @@ func TestReconcileFencesOnlyStale(t *testing.T) {
 		t.Fatalf("stale run status = %q, want failed", got.Status)
 	}
 }
+
+// The engine's capacity path asks this read-only question instead of running
+// the enqueue transaction, so it must resolve both the run's own stamp and the
+// alias a retry bound to an already-active run — and must not invent a receipt
+// for a key it never saw.
+func TestConnectorRunByIdempotencyKeyResolvesReceipt(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+
+	run, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "k1")
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue = %+v %v %v", run, enqueued, err)
+	}
+	found, ok, err := s.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, "k1")
+	if err != nil || !ok || found.ID != run.ID {
+		t.Fatalf("resolve stamped key = %+v %v %v", found, ok, err)
+	}
+	// A retry under a fresh key observes the active run and binds its key to
+	// that run; resolution must follow the alias.
+	active, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "k2")
+	if err != nil || enqueued || active.ID != run.ID {
+		t.Fatalf("aliased enqueue = %+v %v %v", active, enqueued, err)
+	}
+	found, ok, err = s.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, "k2")
+	if err != nil || !ok || found.ID != run.ID {
+		t.Fatalf("resolve aliased key = %+v %v %v", found, ok, err)
+	}
+	if _, ok, err := s.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, "never-seen"); err != nil || ok {
+		t.Fatalf("unknown key = %v %v", ok, err)
+	}
+	if _, ok, err := s.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, "   "); err != nil || ok {
+		t.Fatalf("blank key = %v %v", ok, err)
+	}
+}
