@@ -23,6 +23,25 @@ export function outcomeEntries(json: string | undefined): TestOutcomeEntry[] {
   }
 }
 
+// queryRefPart renders one query_ref — the reproducible spec
+// {kind: saved_query|metric|sql, id_or_definition, version} (store/validation.go)
+// — as the identity a reader can re-run. A bare id that can rot is not
+// provenance, and neither is a truncated definition: the identifier or SQL is
+// printed verbatim, untruncated, so "which query produced this number" has an
+// answer that still resolves later.
+function queryRefPart(ref: unknown): string | null {
+  if (typeof ref === 'string') return ref || null;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return null;
+  const { kind, id_or_definition: definition, version } = ref as Record<string, unknown>;
+  const identity: string[] = [];
+  if (typeof kind === 'string' && kind) identity.push(kind.replace(/_/g, ' '));
+  if (typeof definition === 'string' && definition) identity.push(definition);
+  else if (typeof definition === 'number') identity.push(String(definition));
+  if (typeof version === 'string' && version) identity.push(`v${version}`);
+  else if (typeof version === 'number') identity.push(`v${version}`);
+  return identity.length ? identity.join(' ') : null;
+}
+
 // evidenceParts parses a finding's evidence envelope into the provenance
 // fields the reader can check. The envelope is the typed contract the ops
 // document — {query_ref, metric_version, dataset_version, range, filters,
@@ -35,13 +54,8 @@ function evidenceParts(rec: { evidence_json?: string }): string[] {
     const env = JSON.parse(raw) as Record<string, unknown>;
     if (!env || typeof env !== 'object' || Array.isArray(env)) return [];
     const parts: string[] = [];
-    const ref = env.query_ref ?? env.query_id;
-    if (ref && typeof ref === 'object') {
-      const kind = (ref as Record<string, unknown>).kind;
-      if (typeof kind === 'string' && kind) parts.push(kind.replace(/_/g, ' '));
-    } else if (typeof ref === 'string' && ref) {
-      parts.push(ref);
-    }
+    const ref = queryRefPart(env.query_ref ?? env.query_id);
+    if (ref) parts.push(ref);
     if (typeof env.range === 'string' && env.range) parts.push(env.range);
     if (typeof env.metric_version === 'string' && env.metric_version) parts.push(`metric ${env.metric_version}`);
     if (typeof env.dataset_version === 'string' && env.dataset_version) parts.push(`dataset ${env.dataset_version}`);

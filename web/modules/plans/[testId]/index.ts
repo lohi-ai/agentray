@@ -1,0 +1,1 @@
+export { PlanDetailPage } from './page';

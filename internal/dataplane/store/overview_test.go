@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -180,5 +181,29 @@ func TestFirstPlatformClause(t *testing.T) {
 	}
 	if got := firstPlatformClause(PlatformUnknown); got != " AND first_platform = ''" {
 		t.Fatalf("unknown: %q", got)
+	}
+}
+
+// The ranked acquisition lists count pageviews, but a crawler walking the site
+// is not a landing page or a source. They therefore compile the same qualifying
+// population every people metric uses — event_type='user' and the human visitor
+// class — so Top pages and Top sources can never be two populations under one
+// heading.
+func TestOverviewAcquisitionCountsHumanUserPageviews(t *testing.T) {
+	r, err := overviewRange("7d", time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	where, _ := filteredWhereWithDefault("project-1", overviewAcquisitionFilter(r, ""), false)
+	if !strings.Contains(where, "event_type = ?") {
+		t.Fatalf("acquisition must count user events only: %s", where)
+	}
+	if !strings.Contains(where, "coalesce(visitor_class, 'human') = 'human'") {
+		t.Fatalf("acquisition must exclude crawler traffic: %s", where)
+	}
+	// The pageview window is half-open like every other Overview range: an
+	// inclusive upper bound would pull the next local midnight into the range.
+	if !strings.Contains(where, `"timestamp" <= ?`) || !strings.Contains(where, `"timestamp" >= ?`) {
+		t.Fatalf("acquisition window must stay bounded: %s", where)
 	}
 }

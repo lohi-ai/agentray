@@ -3947,6 +3947,21 @@ LIMIT 50`, args, func(rows *sql.Rows) error {
 	return out, nil
 }
 
+// overviewAcquisitionFilter is the population the ranked acquisition lists
+// count: real user pageviews from humans, the same qualifying activity every
+// people metric uses. A crawler that walks the site is not a landing page or a
+// source, and counting it here while New people excludes it would put two
+// different populations under one group heading.
+func overviewAcquisitionFilter(r OverviewRange, platform string) EventFilter {
+	return EventFilter{
+		From:       r.From,
+		To:         r.To.Add(-time.Nanosecond),
+		EventType:  "user",
+		HumansOnly: true,
+		Platform:   platform,
+	}
+}
+
 func (s *Store) sessionQuality(ctx context.Context, projectID string, filter EventFilter) (float64, float64, error) {
 	resolver, err := s.identityResolver(ctx, projectID)
 	if err != nil {

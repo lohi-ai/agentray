@@ -70,6 +70,126 @@ export function retentionTile(label: string, p: { state: string; rate: number; r
   return { label, value: `${(p.rate * 100).toFixed(1)}%` };
 }
 
+// --- Per-tile provenance -------------------------------------------------
+// The hard contract in docs/redesign/overview-dashboard.md: every tile carries
+// a visible line naming the metric version, the range, the project timezone,
+// the coverage and the freshness. Composed here from served fields only.
+
+// A tile's input population. Provenance names what the tile actually measured —
+// one blanket percentage across the page would be a claim no tile can support.
+export type TileInput =
+  | { kind: 'metric'; metric: OverviewMetric }
+  | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
+  | { kind: 'unserved' };
+
+// A calendar date in the project timezone.
+type LocalDate = { year: number; month: number; day: number };
+
+// localDate reads a served instant as its calendar date in the project
+// timezone. The product has exactly one day-boundary convention, and slicing a
+// UTC string names the wrong day for any project east or west of it.
+function localDate(iso: string, timezone: string): LocalDate {
+  const parts = new Intl.DateTimeFormat('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: timezone })
+    .formatToParts(new Date(iso));
+  const at = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return { year: at('year'), month: at('month'), day: at('day') };
+}
+
+// dayBefore steps one calendar day back over the calendar parts, never by
+// subtracting 24 hours: a DST transition makes a local day 23 or 25 hours long,
+// and a fixed subtraction prints a span that contradicts the day count beside
+// it ("Mar 2–7 · 7 complete days" for a window that ends Mar 8).
+function dayBefore({ year, month, day }: LocalDate): LocalDate {
+  const at = new Date(Date.UTC(year, month - 1, day));
+  at.setUTCDate(at.getUTCDate() - 1);
+  return { year: at.getUTCFullYear(), month: at.getUTCMonth() + 1, day: at.getUTCDate() };
+}
+
+// monthDayLabel renders one calendar date's month and day. The date is already
+// a project-calendar date, so it is formatted in UTC — a second conversion
+// would move it again.
+function monthDayLabel(d: LocalDate): { month: string; day: string } {
+  const parts = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+    .formatToParts(new Date(Date.UTC(d.year, d.month - 1, d.day)));
+  const at = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return { month: at('month'), day: at('day') };
+}
+
+// tileRange is the tile's own window. Retention runs over lifetime cohorts, so
+// stamping the selected range on D1/D7/D30 would be a false claim; the served
+// range is half-open, so its last covered day is the one before `to`.
+function tileRange(res: OverviewResult, input: TileInput): string {
+  if (input.kind === 'retention') {
+    return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
+  }
+  const { range, timezone } = res.context;
+  if (!range.complete_days) return 'Today so far';
+  // The served range is half-open — `to` is the first instant after it — so the
+  // tile's last covered day is the calendar day before `to` in the project zone.
+  const from = localDate(range.from, timezone);
+  const to = dayBefore(localDate(range.to, timezone));
+  const start = monthDayLabel(from);
+  const end = monthDayLabel(to);
+  // Within one month the end day alone reads unambiguously: "Sep 5–11".
+  const sameMonth = from.year === to.year && from.month === to.month;
+  return `${start.month} ${start.day}–${sameMonth ? end.day : `${end.month} ${end.day}`} · ${range.days} complete days`;
+}
+
+// tileCoverage is the tile's own input population — the qualifying events the
+// metric was computed from, the matured members behind a retention rate, the
+// served reason a metric is unconfigured, and an explicit "not instrumented"
+// for a tile the operation does not serve at all. A number is never borrowed
+// from another tile's coverage.
+function tileCoverage(res: OverviewResult, input: TileInput): string {
+  if (input.kind === 'unserved') return 'not instrumented — no served metric';
+  if (input.kind === 'retention') {
+    return input.point.eligible === 0
+      ? `no mature ${input.day}-day cohort yet`
+      : `coverage ${formatCompact(input.point.eligible)} mature members`;
+  }
+  const m = input.metric;
+  if (m.state === 'ok') {
+    return `coverage ${formatCompact(res.data_status.qualifying_in_range)} of ${formatCompact(res.data_status.events_in_range)} events in range`;
+  }
+  if (m.state === 'no_data') {
+    return res.data_status.ever_received ? 'no qualifying events in range' : 'no events received yet';
+  }
+  if (m.state === 'unconfigured') return m.notes?.[0] || 'no verified source configured';
+  return 'not measured yet';
+}
+
+// tileProvenance renders the five contract fields in order, from served fields
+// only: `metric <version> · <range> · <timezone> · <coverage> · <freshness>`.
+// The version is the single one the operation serves (never a per-group guess),
+// and freshness is the absolute receipt time — never a relative "refreshed 2
+// min ago", which a cached figure cannot honestly claim.
+export function tileProvenance(res: OverviewResult, input: TileInput): string {
+  const timezone = res.context.timezone_source === 'fallback'
+    ? 'UTC fallback — no project timezone set'
+    : res.context.timezone;
+  return [
+    `metric ${res.context.metric_version}`,
+    tileRange(res, input),
+    timezone,
+    tileCoverage(res, input),
+    freshnessLabel(res).text,
+  ].join(' · ');
+}
+
+// Tile composers: a tile and its provenance are built together, so no tile can
+// reach a StatsStrip without one.
+function metricStat(res: OverviewResult, label: string, m: OverviewMetric) {
+  return { ...metricTile(label, m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+}
+
+function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number }) {
+  return { ...retentionTile(label, p), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
+}
+
+function unservedStat(res: OverviewResult, label: string) {
+  return { label, value: 'Not available', provenance: tileProvenance(res, { kind: 'unserved' }) };
+}
+
 // A local composition, not a shared primitive: every dashboard category needs
 // a real destination or explicit state explanation, while its contents reuse
 // the shipped Panel, StatsStrip, Chart, and BarRows primitives.
@@ -216,11 +336,11 @@ export function OverviewPage() {
     period,
   });
 
-  // The value-first panel renders only in the data states, so the findings read
-  // is gated on them: a project with no access or no data should not spend a
-  // request on a panel it will not show. A Plans failure degrades this panel
-  // alone — the numbers above come from a separate read.
-  const showNextStep = viewState === 'data' || viewState === 'receipt_only' || viewState === 'empty';
+  // The value-first panel belongs to the grouped state, so the findings read is
+  // gated on it: a project with no access or no qualifying activity should not
+  // spend a request on a panel it will not show. A Plans failure degrades this
+  // panel alone — the numbers above come from a separate read.
+  const showNextStep = viewState === 'data';
   const findingsQuery = useQuery({
     queryKey: ['overview-findings', projectID],
     queryFn: () => {
@@ -242,25 +362,25 @@ export function OverviewPage() {
     : 'not available';
   const stats = res
     ? [
-        metricTile('Active people', res.metrics.active_users),
-        metricTile('Sessions', res.metrics.sessions),
-        metricTile('New people', res.metrics.new_users),
+        metricStat(res, 'Active people', res.metrics.active_users),
+        metricStat(res, 'Sessions', res.metrics.sessions),
+        metricStat(res, 'New people', res.metrics.new_users),
       ]
     : [];
   const monetizationStats = res
     ? [
-        metricTile('Instrumented revenue', res.metrics.revenue),
-        { label: 'Purchases', value: 'Not available' },
-        { label: 'Subscriptions', value: 'Not available' },
+        metricStat(res, 'Instrumented revenue', res.metrics.revenue),
+        unservedStat(res, 'Purchases'),
+        unservedStat(res, 'Subscriptions'),
       ]
     : [];
   const usageStats = res
     ? [
-        metricTile('Activation', res.metrics.activation),
-        retentionTile('D1 retention', res.retention.d1),
-        retentionTile('D7 retention', res.retention.d7),
-        retentionTile('D30 retention', res.retention.d30),
-        { label: 'Crashes', value: 'Not available' },
+        metricStat(res, 'Activation', res.metrics.activation),
+        retentionStat(res, 'D1 retention', 1, res.retention.d1),
+        retentionStat(res, 'D7 retention', 7, res.retention.d7),
+        retentionStat(res, 'D30 retention', 30, res.retention.d30),
+        unservedStat(res, 'Crashes'),
       ]
     : [];
 
@@ -325,6 +445,70 @@ export function OverviewPage() {
     </Panel>
   ) : null;
 
+  // A refetch that fails while earlier data is cached is not an error state —
+  // the read keeps the last good figures — but it must not be invisible either.
+  // The figures stay, stamped with the moment they were computed, and the
+  // failure (with the missing role on a 403) is named with a retry.
+  const refetchError = res ? query.error : null;
+  const refetchStamp = res ? new Date(res.context.generated_at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '';
+  const refetchForbidden = refetchError instanceof APIError && refetchError.status === 403;
+  const refetchCallout = refetchError ? (
+    <Callout
+      tone="warn"
+      icon={<AlertTriangle size={16} />}
+      label="Refresh failed"
+      title={refetchForbidden ? 'You no longer have analytics-read access' : 'Could not refresh the overview'}
+      detail={
+        refetchForbidden
+          ? `The latest request was refused because this account is missing the analytics-read role on this workspace. The figures below are the last successful read, as of ${refetchStamp}.`
+          : `${refetchError instanceof Error ? refetchError.message : 'The overview request failed'}. The figures below are the last successful read, as of ${refetchStamp}.`
+      }
+      action={<Button variant="outline" size="sm" className="min-h-[44px]" icon={<RefreshCw size={14} />} onClick={() => void query.refetch()}>Retry</Button>}
+    />
+  ) : null;
+
+  const freshnessCallout = freshness?.stale ? (
+    <Callout
+      tone="warn"
+      icon={<Clock size={16} />}
+      label="Data freshness"
+      title={freshness.text}
+      detail="Numbers below cover the selected range but the source has gone quiet — check that events are still being sent."
+    />
+  ) : null;
+
+  // Trust metadata: every metric's definition and notes stay one disclosure
+  // away — the numbers are only as honest as what they exclude.
+  const definitions = res ? (
+    <details className="text-xs text-[var(--color-text-secondary)]">
+      <summary className="cursor-pointer select-none py-3">How these numbers are computed</summary>
+      <dl className="mt-2 flex flex-col gap-2">
+        {([
+          ['Active people', res.metrics.active_users],
+          ['New people', res.metrics.new_users],
+          ['Sessions', res.metrics.sessions],
+          ['Activation', res.metrics.activation],
+          ['Revenue', res.metrics.revenue],
+        ] as Array<[string, OverviewMetric]>).map(([label, m]) => (
+          <div key={label}>
+            <dt className="font-medium text-[var(--color-text-primary)]">{label}</dt>
+            <dd>{m.definition}</dd>
+            {m.notes?.map((n) => <dd key={n} className="text-[var(--color-text-disabled)]">· {n}</dd>)}
+          </div>
+        ))}
+      </dl>
+    </details>
+  ) : null;
+
+  // The unified empty the receipt_only/empty states share: the chart slot says
+  // why it is flat without pretending a group of state tiles is a measurement.
+  const noQualifyingActivity = (
+    <EmptyState
+      title="Connected — no qualifying activity yet"
+      detail="Events are arriving, but none count as human product activity in this range (verification pings, bots, and agent events are excluded). The trend draws once real usage lands."
+    />
+  );
+
   return (
     <AppShell>
       <PageShell
@@ -375,10 +559,15 @@ export function OverviewPage() {
           />
         ) : null}
 
+        {refetchCallout}
+
         {viewState === 'first_run' ? (
           <>
             <FirstEventQuickstart />
-            {res?.data_status.ever_received ? dataStatusPanel : null}
+            {/* A first-run project with a result still gets its data status:
+                "nothing has arrived" is a receipt fact worth showing, not a
+                panel to hide behind the quickstart. */}
+            {dataStatusPanel}
           </>
         ) : null}
 
@@ -397,41 +586,34 @@ export function OverviewPage() {
           </>
         ) : null}
 
-        {(viewState === 'data' || viewState === 'receipt_only' || viewState === 'empty') && res ? (
+        {/* The three metric groups are the `grouped_metrics` modifier: they
+            render only when qualifying activity exists. receipt_only keeps its
+            "no qualifying activity" panel and empty keeps an honest empty,
+            rather than three groups of state tiles that look like metrics. */}
+        {viewState === 'receipt_only' && res ? (
           <>
-            {freshness?.stale ? (
-              <Callout
-                tone="warn"
-                icon={<Clock size={16} />}
-                label="Data freshness"
-                title={freshness.text}
-                detail="Numbers below cover the selected range but the source has gone quiet — check that events are still being sent."
-              />
-            ) : null}
+            {freshnessCallout}
+            <StatsStrip stats={stats} />
+            {definitions}
+            <Panel title="Active people per day">{noQualifyingActivity}</Panel>
+            {dataStatusPanel}
+          </>
+        ) : null}
+
+        {viewState === 'empty' && res ? (
+          <>
+            <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
+            {dataStatusPanel}
+          </>
+        ) : null}
+
+        {viewState === 'data' && res ? (
+          <>
+            {freshnessCallout}
 
             <StatsStrip stats={stats} />
 
-            {/* Trust metadata: every metric's definition and notes stay one
-                disclosure away — the numbers are only as honest as what they
-                exclude. */}
-            <details className="text-xs text-[var(--color-text-secondary)]">
-              <summary className="cursor-pointer select-none py-3">How these numbers are computed</summary>
-              <dl className="mt-2 flex flex-col gap-2">
-                {([
-                  ['Active people', res.metrics.active_users],
-                  ['New people', res.metrics.new_users],
-                  ['Sessions', res.metrics.sessions],
-                  ['Activation', res.metrics.activation],
-                  ['Revenue', res.metrics.revenue],
-                ] as Array<[string, OverviewMetric]>).map(([label, m]) => (
-                  <div key={label}>
-                    <dt className="font-medium text-[var(--color-text-primary)]">{label}</dt>
-                    <dd>{m.definition}</dd>
-                    {m.notes?.map((n) => <dd key={n} className="text-[var(--color-text-disabled)]">· {n}</dd>)}
-                  </div>
-                ))}
-              </dl>
-            </details>
+            {definitions}
 
             <MetricGroup
               title="Usage"
@@ -451,10 +633,7 @@ export function OverviewPage() {
                         </p>
                       </>
                     ) : trend === 'receipt_only' ? (
-                      <EmptyState
-                        title="Connected — no qualifying activity yet"
-                        detail="Events are arriving, but none count as human product activity in this range (verification pings, bots, and agent events are excluded). The trend draws once real usage lands."
-                      />
+                      noQualifyingActivity
                     ) : (
                       <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
                     )}

@@ -65,7 +65,13 @@ export function useConnectorSyncs(connectorID: string | null) {
         : false,
   });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
+    // The preview is a separate query with its own 30s staleTime. A landed run,
+    // a re-pointed key/cursor column or a pause all change what it would show,
+    // and without this it keeps serving the rows from before the change.
+    queryClient.invalidateQueries({ queryKey: ['dataset-preview', projectID] });
+  };
 
   const create = useMutation({
     mutationFn: (input: ConnectorSyncInput) => new AgentRayAPI(projectID!).createConnectorSync(connectorID!, input),
