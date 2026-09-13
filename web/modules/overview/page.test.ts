@@ -234,6 +234,9 @@ function servedRes(over: {
   events?: number;
   everReceived?: boolean;
   timezoneSource?: string;
+  timezone?: string;
+  rangeFrom?: string;
+  rangeTo?: string;
   cohortWindow?: string;
   d7Eligible?: number;
   completeDays?: boolean;
@@ -242,10 +245,15 @@ function servedRes(over: {
   return {
     context: {
       project_id: 'p1',
-      timezone: 'Asia/Ho_Chi_Minh',
+      timezone: over.timezone ?? 'Asia/Ho_Chi_Minh',
       timezone_source: over.timezoneSource ?? 'project',
       // Sep 5–11 in the project timezone: the UTC instants are the previous day.
-      range: { from: '2026-09-04T17:00:00Z', to: '2026-09-11T17:00:00Z', days: 7, complete_days: over.completeDays ?? true },
+      range: {
+        from: over.rangeFrom ?? '2026-09-04T17:00:00Z',
+        to: over.rangeTo ?? '2026-09-11T17:00:00Z',
+        days: 7,
+        complete_days: over.completeDays ?? true,
+      },
       previous_range: { from: '2026-08-28T17:00:00Z', to: '2026-09-04T17:00:00Z', days: 7, complete_days: true },
       platform: '',
       generated_at: '2026-09-12T10:00:00Z',
@@ -295,6 +303,20 @@ describe('tileProvenance', () => {
     const line = tileProvenance(servedRes(), { kind: 'metric', metric: { state: 'ok', definition: '' } });
     expect(line).toContain('Sep 5–11');
     expect(line).not.toContain('Sep 4');
+  });
+
+  it('steps back one calendar day, not 24 hours, across a DST transition', () => {
+    // New York springs forward on 2026-03-08, so that local day is 23 hours
+    // long. `to` minus a fixed 24h is Mar 7 23:00 local, which would print
+    // "Mar 2–7 · 7 complete days" — a six-day span claiming seven.
+    const r = servedRes({
+      timezone: 'America/New_York',
+      rangeFrom: '2026-03-02T05:00:00Z',
+      rangeTo: '2026-03-09T04:00:00Z',
+    });
+    const line = tileProvenance(r, { kind: 'metric', metric: { state: 'ok', definition: '' } });
+    expect(line).toContain('Mar 2–8 · 7 complete days');
+    expect(line).not.toContain('Mar 7');
   });
 
   it('never claims relative freshness', () => {

@@ -82,15 +82,37 @@ export type TileInput =
   | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
   | { kind: 'unserved' };
 
-// localParts reads a served instant as its calendar parts in the project
+// A calendar date in the project timezone.
+type LocalDate = { year: number; month: number; day: number };
+
+// localDate reads a served instant as its calendar date in the project
 // timezone. The product has exactly one day-boundary convention, and slicing a
 // UTC string names the wrong day for any project east or west of it.
-function localParts(iso: string, timezone: string): { month: string; day: string; year: string } {
-  const at = (type: string) =>
-    new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: timezone })
-      .formatToParts(new Date(iso))
-      .find((p) => p.type === type)?.value ?? '';
-  return { month: at('month'), day: at('day'), year: at('year') };
+function localDate(iso: string, timezone: string): LocalDate {
+  const parts = new Intl.DateTimeFormat('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: timezone })
+    .formatToParts(new Date(iso));
+  const at = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return { year: at('year'), month: at('month'), day: at('day') };
+}
+
+// dayBefore steps one calendar day back over the calendar parts, never by
+// subtracting 24 hours: a DST transition makes a local day 23 or 25 hours long,
+// and a fixed subtraction prints a span that contradicts the day count beside
+// it ("Mar 2–7 · 7 complete days" for a window that ends Mar 8).
+function dayBefore({ year, month, day }: LocalDate): LocalDate {
+  const at = new Date(Date.UTC(year, month - 1, day));
+  at.setUTCDate(at.getUTCDate() - 1);
+  return { year: at.getUTCFullYear(), month: at.getUTCMonth() + 1, day: at.getUTCDate() };
+}
+
+// monthDayLabel renders one calendar date's month and day. The date is already
+// a project-calendar date, so it is formatted in UTC — a second conversion
+// would move it again.
+function monthDayLabel(d: LocalDate): { month: string; day: string } {
+  const parts = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+    .formatToParts(new Date(Date.UTC(d.year, d.month - 1, d.day)));
+  const at = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return { month: at('month'), day: at('day') };
 }
 
 // tileRange is the tile's own window. Retention runs over lifetime cohorts, so
@@ -102,12 +124,15 @@ function tileRange(res: OverviewResult, input: TileInput): string {
   }
   const { range, timezone } = res.context;
   if (!range.complete_days) return 'Today so far';
-  const lastDay = new Date(Date.parse(range.to) - 24 * 60 * 60 * 1000).toISOString();
-  const from = localParts(range.from, timezone);
-  const to = localParts(lastDay, timezone);
+  // The served range is half-open — `to` is the first instant after it — so the
+  // tile's last covered day is the calendar day before `to` in the project zone.
+  const from = localDate(range.from, timezone);
+  const to = dayBefore(localDate(range.to, timezone));
+  const start = monthDayLabel(from);
+  const end = monthDayLabel(to);
   // Within one month the end day alone reads unambiguously: "Sep 5–11".
-  const end = from.month === to.month && from.year === to.year ? to.day : `${to.month} ${to.day}`;
-  return `${from.month} ${from.day}–${end} · ${range.days} complete days`;
+  const sameMonth = from.year === to.year && from.month === to.month;
+  return `${start.month} ${start.day}–${sameMonth ? end.day : `${end.month} ${end.day}`} · ${range.days} complete days`;
 }
 
 // tileCoverage is the tile's own input population — the qualifying events the
