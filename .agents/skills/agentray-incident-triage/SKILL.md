@@ -21,7 +21,7 @@ AgentRay MCP connection — see the `agentray-analytics` skill for setup.
 - `explore_events`: see which event names carry the errors and whether a specific
   property (model, route, agent) concentrates them.
 - `run_sql` (SELECT-only): slice the spike — group errors by
-  `JSONExtractString(properties, 'key')` (e.g. `error`, `model_name`, `agent_id`,
+  `json_extract_string(properties, '$.key')` (e.g. `error`, `model_name`, `agent_id`,
   `route`) over the `events` table to localize the cause.
 
 ## Workflow

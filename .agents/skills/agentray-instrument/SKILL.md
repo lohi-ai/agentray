@@ -71,13 +71,13 @@ The four consumer surfaces, and what each demands of the event:
   funnel leaking?" and "what's week-1 retention?" — if the agent can't answer
   from the plan's events, the plan is missing a step, not the agent.
 - **SQL** (SQL page in the web app; `run_sql` over MCP; SELECT-only). Ad-hoc
-  slicing via `JSONExtractString(properties, 'plan')` etc. — which is why
+  slicing via `json_extract_string(properties, '$.plan')` etc. — which is why
   properties must be flat, typed values, not prose. Revenue reads de-duplicate
   by `insert_id`:
 
   ```sql
-  SELECT sum(amount) FROM (
-    SELECT argMax(JSONExtractFloat(properties, 'amount'), timestamp) AS amount
+  SELECT sum(amount) AS revenue FROM (
+    SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
     FROM events WHERE event_name = 'revenue' GROUP BY insert_id
   )
   ```
