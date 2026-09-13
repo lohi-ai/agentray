@@ -3,12 +3,13 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type OverviewMetric, type OverviewResult } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type OverviewMetric, type OverviewResult } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatCompact } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
 import { firstValuePath, settingsPath } from '@/lib/ia';
 import { useEventNames } from '@/modules/app/hooks';
+import { evidenceAvailable, evidenceLine } from '@/modules/plans/lib/plans';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
@@ -122,6 +123,28 @@ export function overviewViewState(input: {
   return 'empty';
 }
 
+// The value-first panel has exactly two honest branches. A finding is shown
+// only when it is display-complete — an open row with a title, a rationale
+// (where the comparison lives) and a parseable evidence envelope — because
+// AgentRecommendation carries no typed comparison or next-action field, and
+// inferring one from prose or a bare number would present a guess as evidence.
+// Everything else falls back to a capability explanation, never a fabricated
+// live number.
+export type NextStep =
+  | { kind: 'finding'; title: string; observation: string; evidence: string }
+  | { kind: 'capability'; reason: 'no_finding' | 'incomplete_finding' | 'unavailable' };
+
+export function bestNextStep(finding: AgentRecommendation | null | undefined, unavailable = false): NextStep {
+  if (unavailable) return { kind: 'capability', reason: 'unavailable' };
+  if (!finding || finding.status !== 'open') return { kind: 'capability', reason: 'no_finding' };
+  const title = finding.title?.trim() ?? '';
+  const observation = finding.rationale?.trim() ?? '';
+  if (!title || !observation || !evidenceAvailable(finding)) {
+    return { kind: 'capability', reason: 'incomplete_finding' };
+  }
+  return { kind: 'finding', title, observation, evidence: evidenceLine(finding) };
+}
+
 // The 44px hit-area contract is flow-scoped: shared controls stay compact
 // elsewhere, so the overview wraps its controls and raises the interactive
 // descendants rather than resizing every consumer of Button/Segment/Selector.
@@ -156,6 +179,20 @@ export function OverviewPage() {
     platform,
     period,
   });
+
+  // The value-first panel renders only in the data states, so the findings read
+  // is gated on them: a project with no access or no data should not spend a
+  // request on a panel it will not show. A Plans failure degrades this panel
+  // alone — the numbers above come from a separate read.
+  const showNextStep = viewState === 'data' || viewState === 'receipt_only' || viewState === 'empty';
+  const findingsQuery = useQuery({
+    queryKey: ['overview-findings', projectID],
+    queryFn: () => new AgentRayAPI(projectID!).listFindings({ limit: 1 }),
+    enabled: !!projectID && showNextStep,
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const nextStep = bestNextStep(findingsQuery.data?.findings?.[0], findingsQuery.isError);
 
   const freshness = res ? freshnessLabel(res) : null;
   const occurredAt = res?.data_status.last_event_at
@@ -398,13 +435,41 @@ export function OverviewPage() {
 
             {dataStatusPanel}
 
-            <Panel title="Next step">
-              <div className={`flex flex-wrap items-center gap-3 text-sm ${TARGET_44}`}>
-                <span className="text-[var(--color-text-secondary)]">Dig into what changed, or point your coding agent at this project over MCP.</span>
-                <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
-                <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
-                <Button variant="ghost" size="sm" onClick={() => { window.location.href = '/events'; }}>Browse events</Button>
-              </div>
+            <Panel title="Best next step">
+              {findingsQuery.isLoading ? (
+                <Loading label="Loading the latest finding…" />
+              ) : nextStep.kind === 'finding' ? (
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-medium">{nextStep.title}</p>
+                  <p className="text-sm text-[var(--color-text-secondary)]">{nextStep.observation}</p>
+                  {/* Provenance: the envelope behind the claim, rendered by the
+                      same helper /plans uses so the two never drift. */}
+                  <p className="font-mono text-xs text-[var(--color-text-secondary)]">{nextStep.evidence}</p>
+                  <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+                    <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = '/plans'; }}>Open the finding</Button>
+                    <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask your agent to investigate</Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <p className="text-sm text-[var(--color-text-secondary)]">
+                    {nextStep.reason === 'unavailable'
+                      ? 'Findings are unavailable right now. The numbers above are unaffected.'
+                      : 'No complete finding yet. Once your agent has read enough of this project it files one here — the observation, the comparison behind it, and the evidence line.'}
+                  </p>
+                  {/* A labeled example, never a live number: the panel explains
+                      what a finding looks like without claiming this project
+                      has one. */}
+                  <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
+                    <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Example — not your data</p>
+                    <p className="mt-1 text-sm text-[var(--color-text-secondary)]">“Activation fell 12% week over week, driven by the signup → first-project step.”</p>
+                  </div>
+                  <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+                    <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
+                    <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
+                  </div>
+                </div>
+              )}
             </Panel>
           </>
         ) : null}

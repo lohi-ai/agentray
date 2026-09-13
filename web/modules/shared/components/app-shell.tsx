@@ -22,7 +22,7 @@ import { SideNav, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav
 import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
-import { CHILD_SURFACES, childSurfacesFor, matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
+import { CHILD_SURFACES, childSurfacesFor, isLinkedSurface, matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
 import { useAuth, useProjectAccess, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
@@ -204,7 +204,7 @@ export function AppShell({
   // returns null is still a truthy element, so asking `related ? …` there would
   // hand PageShell an aside on every screen and leave a blank 240px column on
   // the ones with no child surfaces.
-  const hasRelated = !hideRelated && childSurfacesFor(current, CHILD_SURFACES, { hosted }).some((s) => s.href !== pathname);
+  const hasRelated = !hideRelated && childSurfacesFor(current, CHILD_SURFACES, { hosted }).some((s) => !isLinkedSurface(s) || s.href !== pathname);
   const asideContent = aside || hasRelated
     ? (
       <>

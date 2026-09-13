@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { AgentRayAPI, type Agent, type AudienceInput, type Filters, type SubscriptionMappingInput } from '@/lib/api';
 import { buildIdentityMap } from '@/lib/identity';
 import { useAuthStore, useFiltersStore, useUIStore } from '@/lib/app-state';
+import { invalidateRecommendationQueries } from '@/lib/recommendation-cache';
 
 export function useConsoleQuery() {
   const projectID = useAuthStore((s) => s.project?.id);
@@ -424,7 +425,7 @@ export function useDailyReadout() {
   const ackMutation = useMutation({
     mutationFn: ({ id, status, note }: { id: string; status: 'accepted' | 'dismissed'; note?: string }) =>
       new AgentRayAPI(projectID!).ackRecommendation(id, status, note ?? ''),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['daily-readout', projectID] }),
+    onSuccess: () => invalidateRecommendationQueries(queryClient, projectID),
   });
 
   const runs = query.data?.runs ?? [];
