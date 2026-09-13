@@ -50,12 +50,12 @@ call), payments must be retryable, and every event carries an idempotency key.
 
 Revenue webhooks retry, so the same payment can arrive several times. Pass the
 provider's event id as `idempotencyKey`; it is sent as `$insert_id` and stored on
-the event's `insert_id` column. De-duplicate at read time, e.g.:
+the event's `insert_id` column. De-duplicate at read time — one row per payment
+even if the webhook fired twice:
 
 ```sql
--- one row per payment even if the webhook fired twice
 SELECT sum(amount) AS revenue FROM (
-  SELECT argMax(JSONExtractFloat(properties, 'amount'), timestamp) AS amount
+  SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
   FROM events WHERE event_name = 'revenue' GROUP BY insert_id
 )
 ```
