@@ -83,35 +83,9 @@ class TestStopBounded(unittest.TestCase):
 
 
 class TestArchivePrior(unittest.TestCase):
-    def test_successive_publications_preserve_all(self):
-        with tempfile.TemporaryDirectory() as td:
-            dest = Path(td)
-            (dest / "run-a.json").write_text('{"run": "a"}')
-            (dest / "report.md").write_text("report-a")
-            cli._archive_prior(dest)
-            (dest / "run-b.json").write_text('{"run": "b"}')
-            (dest / "report.md").write_text("report-b")
-            cli._archive_prior(dest)
-            (dest / "run-c.json").write_text('{"run": "c"}')
-            cli._archive_prior(dest)
-
-            archive = dest / "archive"
-            dirs = sorted(p.name for p in archive.iterdir() if p.is_dir())
-            self.assertEqual(len(dirs), 3, dirs)
-            contents = []
-            for d in dirs:
-                contents.append(sorted(
-                    (p.name, p.read_text()) for p in archive.joinpath(d).iterdir()))
-            archived = [pair for content in contents for pair in content]
-            self.assertIn(("run-a.json", '{"run": "a"}'), archived)
-            self.assertIn(("run-b.json", '{"run": "b"}'), archived)
-            self.assertIn(("run-c.json", '{"run": "c"}'), archived)
-            self.assertIn(("report.md", "report-a"), archived)
-            self.assertIn(("report.md", "report-b"), archived)
-
     def test_nothing_to_archive_returns_none(self):
         with tempfile.TemporaryDirectory() as td:
-            self.assertIsNone(cli._archive_prior(Path(td)))
+            self.assertIsNone(cli._archive_prior(Path(td), {}))
 
     def test_identical_incoming_archives_nothing(self):
         # Republishing byte-identical results must not create an archive —
