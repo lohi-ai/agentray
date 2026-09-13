@@ -18,6 +18,10 @@ function useInvalidatePlans(projectID?: string) {
   return () => {
     queryClient.invalidateQueries({ queryKey: [PLANS_KEY, projectID] });
     queryClient.invalidateQueries({ queryKey: [FINDINGS_KEY, projectID] });
+    // Overview reads the server-ranked top open finding through a separate
+    // 60-second query. An acknowledgement must invalidate both views, or
+    // client-side navigation can keep displaying the now-settled row as open.
+    queryClient.invalidateQueries({ queryKey: ['overview-findings', projectID] });
     // /prototypes and /start read the same validation_tests rows — leaving
     // them stale means committing here and watching the other surfaces keep
     // asking for a commitment already made.
