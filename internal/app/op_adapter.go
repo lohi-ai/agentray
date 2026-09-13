@@ -54,7 +54,7 @@ func (a *opAdapter) invoke(c echo.Context, principal opcore.Principal, opName st
 	cc := opcore.CallContext{ProjectID: principal.ProjectID, Deps: a.deps, Principal: principal}
 	out, err := spec.OpInvoke(c.Request().Context(), cc, string(body))
 	if err != nil {
-		return nil, opError(err)
+		return nil, usecase.MapOpError(err)
 	}
 	return json.RawMessage(out), nil
 }
@@ -65,13 +65,6 @@ func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
 		return echo.NewHTTPError(http.StatusForbidden, "credential may not invoke "+opName)
 	}
 	return nil
-}
-
-// opError maps the operation layer's typed outcomes onto HTTP statuses for the
-// legacy adapter — the same mapping usecase.MapOpError installs on the
-// registry for /api/op, so both surfaces answer identically.
-func opError(err error) error {
-	return usecase.MapOpError(err)
 }
 
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —

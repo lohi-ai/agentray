@@ -14,10 +14,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -164,6 +162,9 @@ func MapOpError(err error) error {
 	if errors.As(err, &he) {
 		return he
 	}
+	// classifyOpError owns the sentinel→kind mapping; here we only render the
+	// resulting kind as an HTTP status.
+	err = classifyOpError(err)
 	var oe *opcore.OpError
 	if errors.As(err, &oe) {
 		switch oe.Kind {
@@ -175,20 +176,7 @@ func MapOpError(err error) error {
 			return echo.NewHTTPError(http.StatusServiceUnavailable, oe.Message)
 		}
 	}
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return echo.NewHTTPError(http.StatusNotFound, "not found")
-	case errors.Is(err, storage.ErrRevisionConflict):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, storage.ErrIdempotencyConflict):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, storage.ErrSourceArchived):
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
-	case errors.Is(err, connector.ErrEngineBusy):
-		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
-	default:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
+	return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 }
 
 // recentFilter returns the default look-back filter used when an operation takes

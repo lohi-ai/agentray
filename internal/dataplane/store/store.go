@@ -4581,4 +4581,3 @@ func firstNonEmpty(values ...string) string {
 func nullableString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
-

@@ -66,4 +66,3 @@ func TestClassifyPlatform(t *testing.T) {
 		})
 	}
 }
-

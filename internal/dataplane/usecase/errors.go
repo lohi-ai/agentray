@@ -24,6 +24,7 @@ func classifyOpError(err error) error {
 		return &opcore.OpError{Kind: opcore.ErrNotFound, Message: "not found", Err: err}
 	case errors.Is(err, storage.ErrRevisionConflict),
 		errors.Is(err, storage.ErrIdempotencyConflict),
+		errors.Is(err, storage.ErrSourceArchived),
 		errors.Is(err, storage.ErrSyncPaused):
 		return &opcore.OpError{Kind: opcore.ErrConflict, Message: err.Error(), Err: err}
 	case errors.Is(err, connector.ErrEngineBusy):

@@ -147,4 +147,3 @@ func normalizeOS(value string) string {
 		return ""
 	}
 }
-
