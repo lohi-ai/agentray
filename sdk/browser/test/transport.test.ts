@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
-import { BatchTransport, type BatchEvent } from '../transport';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { BatchTransport, IdentityQueue, type BatchEvent } from '../transport';
+import { deferred } from './deferred';
 
 function event(name: string): BatchEvent {
   return { event: name, distinct_id: 'anon-1', properties: {} };
@@ -136,5 +137,105 @@ describe('BatchTransport', () => {
     transport.enqueue(event('a'));
     await expect(vi.advanceTimersByTimeAsync(30_000)).resolves.not.toThrow();
     vi.useRealTimers();
+  });
+});
+
+describe('IdentityQueue', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('sends identity operations to their own endpoints, never to /batch', async () => {
+    const paths: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      paths.push(new URL(String(url)).pathname);
+      return new Response('', { status: 200 });
+    });
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    queue.enqueue({
+      kind: 'identify',
+      distinctId: 'user_1',
+      traits: { plan: 'pro' },
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+    await queue.flush();
+
+    // /batch has no operation discriminator and never merges a top-level $set,
+    // so an alias sent there is acknowledged and stitches nothing.
+    expect(paths).toEqual(['/alias', '/identify']);
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      api_key: 'agentray_test',
+      distinct_id: 'user_1',
+      $set: { plan: 'pro' },
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('retries a 5xx before giving up on an alias', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValue(new Response('', { status: 200 }));
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('keeps an unacknowledged alias for a later flush instead of dropping it', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn(async () => new Response('', { status: 500 }));
+    const queue = new IdentityQueue({ ...base, maxRetries: 2, fetchImpl });
+
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // A dropped alias orphans the anonymous history for good; the queue is the
+    // only place left that knows the two ids belong together.
+    fetchImpl.mockResolvedValue(new Response('', { status: 200 }));
+    await queue.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it('beacons unconfirmed operations on pagehide without treating that as delivery', async () => {
+    const sendBeacon = vi.fn((_url: string | URL, _data?: BodyInit | null) => true);
+    vi.stubGlobal('navigator', { ...navigator, sendBeacon });
+    const aliasInFlight = deferred<void>();
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (new URL(String(url)).pathname === '/alias') await aliasInFlight.promise;
+      return new Response('', { status: 200 });
+    });
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    queue.enqueue({
+      kind: 'identify',
+      distinctId: 'user_1',
+      traits: { plan: 'pro' },
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+    window.dispatchEvent(new Event('pagehide'));
+
+    // The in-flight alias is included: nothing is confirmed yet, so it is
+    // still the only thing that can save this session's anonymous history.
+    expect(sendBeacon).toHaveBeenCalledTimes(2);
+    expect(String(sendBeacon.mock.calls[0][0])).toBe('https://agentray.test/alias');
+    expect(String(sendBeacon.mock.calls[1][0])).toBe('https://agentray.test/identify');
+    expect((sendBeacon.mock.calls[0][1] as Blob).type).toBe('application/json');
+
+    window.dispatchEvent(new Event('pagehide'));
+    // Accepted by the browser is not answered by the server, so the queue still
+    // holds both, and a bfcache restore can deliver them for real.
+    expect(sendBeacon).toHaveBeenCalledTimes(4);
+    aliasInFlight.resolve();
+    vi.unstubAllGlobals();
   });
 });
