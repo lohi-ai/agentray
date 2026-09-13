@@ -33,7 +33,11 @@ set -euo pipefail
 #     waiver, not just a speed switch: traffic can land on a colour that is
 #     behind. Read /readyz's body first — it names the reason. `purged-gap`
 #     never clears (messages were purged before this colour applied them and no
-#     amount of waiting recovers them), and `stream-mismatch` means the stream
+#     amount of waiting recovers them — the colour writes the loss down beside
+#     its DuckDB file, so restarting it, or redeploying, does not clear it
+#     either; to ACCEPT the loss and let that colour serve without those rows,
+#     delete `<DUCKDB_PATH>.ingest-loss` inside the container's volume, then
+#     deploy again), and `stream-mismatch` means the stream
 #     does not carry this env's subjects at all, so the colour will never be
 #     offered another row. Both envs default INGEST_STREAM_NAME to the SAME
 #     stream on the shared broker and EnsureStreams rewrites that stream's

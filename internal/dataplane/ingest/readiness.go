@@ -2,8 +2,10 @@ package ingestion
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -348,6 +350,58 @@ func consumerFilterSubjects(cinfo *jetstream.ConsumerInfo) []string {
 // would not fix. Past the retries the sample is treated as unreadable.
 const bootSampleAttempts = 3
 
+// ingestLoss is the on-disk record of a proven retention loss: what was missing
+// when it was found, and when. Small on purpose — it is a refusal, not a repair.
+type ingestLoss struct {
+	Missing    uint64 `json:"missing"`
+	DetectedAt string `json:"detected_at"`
+	Durable    string `json:"durable,omitempty"`
+}
+
+// readLatch returns a loss recorded by an earlier process of this colour, so a
+// restart cannot forget one. A marker that cannot be read is logged and ignored:
+// it is a refusal, and refusing a colour over an unreadable file would be its own
+// outage — the boot sample below still runs and still catches what it can.
+func (ss *StreamSet) readLatch() (uint64, bool) {
+	if ss.LossMarkerPath == "" {
+		return 0, false
+	}
+	raw, err := os.ReadFile(ss.LossMarkerPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("ingestion: retention loss marker %s unreadable: %v", ss.LossMarkerPath, err)
+		}
+		return 0, false
+	}
+	var loss ingestLoss
+	if err := json.Unmarshal(raw, &loss); err != nil {
+		log.Printf("ingestion: retention loss marker %s malformed: %v", ss.LossMarkerPath, err)
+		return 0, false
+	}
+	return loss.Missing, loss.Missing > 0
+}
+
+// recordLatch writes the loss next to this colour's DuckDB file. A write that
+// fails leaves the in-process latch standing (this process still refuses); it is
+// logged because the NEXT process will not know.
+func (ss *StreamSet) recordLatch(missing uint64) {
+	if ss.LossMarkerPath == "" {
+		return
+	}
+	body, err := json.Marshal(ingestLoss{
+		Missing:    missing,
+		DetectedAt: time.Now().UTC().Format(time.RFC3339),
+		Durable:    ss.Durable,
+	})
+	if err != nil {
+		log.Printf("ingestion: cannot encode retention loss: %v", err)
+		return
+	}
+	if err := os.WriteFile(ss.LossMarkerPath, append(body, '\n'), 0o644); err != nil {
+		log.Printf("ingestion: cannot record retention loss at %s: %v — reset the stream's consumers or delete the colour's volume", ss.LossMarkerPath, err)
+	}
+}
+
 // latchBootGap is a loss this colour detected when it booted: sequences above
 // its applied mark that are no longer in the stream. It is latched because the
 // live signal is only visible while the colour is behind — once it applies the
@@ -356,8 +410,10 @@ const bootSampleAttempts = 3
 // floor is even advanced over the purged range). Sampling once at boot is the
 // moment the question is well posed: "what had I applied, and what is still
 // here?". A colour that lost rows must never be switched to, so the latch keeps
-// the refusal for the life of the process instead of letting it evaporate as
-// the replay progresses.
+// the refusal instead of letting it evaporate as the replay progresses — and
+// because the operator's next move after a refusal is usually a restart, the
+// loss is also written beside this colour's DuckDB file, where it survives the
+// process that found it. A restart re-samples, and can still find nothing.
 //
 // A sample that cannot be read at all latches ReplayUnverified rather than
 // returning: the one reading that can prove a loss is gone forever once the
@@ -367,6 +423,11 @@ const bootSampleAttempts = 3
 // environment's purge as this colour's loss, permanently, which is the opposite
 // of fail-safe.
 func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consumer) {
+	if missing, ok := ss.readLatch(); ok {
+		ss.bootGap.Store(missing)
+		log.Printf("ingestion: this colour recorded a retention loss of %d message(s) at %s; /readyz refuses until an operator accepts it (see infra/gce/deploy.sh)", missing, ss.LossMarkerPath)
+		return
+	}
 	for attempt := 1; ; attempt++ {
 		cinfo, err := consumer.Info(ctx)
 		if err != nil {
@@ -391,24 +452,28 @@ func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consum
 		if _, dedicated := streamCarries(sinfo.Config.Subjects, consumerFilterSubjects(cinfo)); !dedicated {
 			return
 		}
-		if cinfo.AckFloor.Stream == 0 {
+		missing := uint64(0)
+		switch {
+		case cinfo.AckFloor.Stream == 0:
 			// A durable that has applied nothing has no history to lose, so a
 			// purge frontier above its mark is not its loss — UNLESS the stream
 			// has already lost everything it ever held (first past last): then
 			// there is nothing retained for this colour to replay and nothing to
 			// catch up to, and a colour that has applied nothing would serve an
 			// empty file beside a sibling holding the history. Latched for the
-			// same reason the gap above is: the live predicate sees a caught-up
+			// same reason the gap below is: the live predicate sees a caught-up
 			// colour the moment the first new message is applied (its mark then
-			// covers the whole retained window), so a refusal that lived only in
-			// the live branch would clear itself.
+			// covers the whole retained window).
 			if sinfo.State.LastSeq > 0 && sinfo.State.FirstSeq > sinfo.State.LastSeq {
-				ss.bootGap.Store(sinfo.State.LastSeq)
+				missing = sinfo.State.LastSeq
 			}
-			return
+		case sinfo.State.FirstSeq > cinfo.AckFloor.Stream+1:
+			missing = sinfo.State.FirstSeq - cinfo.AckFloor.Stream - 1
 		}
-		if sinfo.State.FirstSeq > cinfo.AckFloor.Stream+1 {
-			ss.bootGap.Store(sinfo.State.FirstSeq - cinfo.AckFloor.Stream - 1)
+		if missing > 0 {
+			ss.bootGap.Store(missing)
+			ss.recordLatch(missing)
+			log.Printf("ingestion: retention loss: %d message(s) this colour never applied are no longer in %s; /readyz refuses until an operator accepts it", missing, ss.Ingest.CachedInfo().Config.Name)
 		}
 		return
 	}

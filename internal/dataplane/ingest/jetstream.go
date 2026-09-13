@@ -29,6 +29,14 @@ type StreamSet struct {
 	// Durable names this process's consumer. Blue-green colours each get
 	// their own so both receive every message.
 	Durable string
+	// LossMarkerPath is where a proven retention loss is written down, beside
+	// this colour's DuckDB file. The boot sample can only prove the loss once:
+	// after the colour applies what the stream still holds, its applied mark
+	// moves past the purge frontier and the broker reports nothing wrong, so a
+	// restart would forget — and a restart is exactly what an operator does when
+	// a deploy is refused. Persisting it in the colour's own volume is what makes
+	// the refusal outlive the process that found it.
+	LossMarkerPath string
 	// bootGap latches a retention loss detected when this process booted, see
 	// latchBootGap. Atomic because the HTTP healthcheck reads it while the
 	// boot path writes it.
@@ -38,6 +46,17 @@ type StreamSet struct {
 	// prove a retention loss is gone once the replay advances, so "I could not
 	// tell" is as disqualifying as "I lost rows".
 	bootUnverified atomic.Bool
+}
+
+// lossMarkerPath is where a colour records a retention loss it has proven: beside
+// its DuckDB file, which is a per-colour volume on both deployed environments.
+// A deployment that does not pin DUCKDB_PATH gets no marker, and the refusal then
+// lasts only for the process that found it.
+func lossMarkerPath(duckDBPath string) string {
+	if duckDBPath == "" {
+		return ""
+	}
+	return duckDBPath + ".ingest-loss"
 }
 
 // EnsureStreams connects a JetStream context on nc and idempotently provisions
@@ -87,5 +106,6 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		MaxDeliv:         maxDeliv,
 		ConnectorSubject: cfg.IngestConnectorSubject,
 		Durable:          cfg.IngestDurable,
+		LossMarkerPath:   lossMarkerPath(cfg.DuckDBPath),
 	}, nil
 }

@@ -343,6 +343,10 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create stream: %v", err)
 	}
+	// The marker lives beside this colour's DuckDB file, as it does in
+	// production (EnsureStreams derives it from DUCKDB_PATH), so every instance
+	// the deploy starts sees the same one.
+	marker := filepath.Join(t.TempDir(), "blue.duckdb.ingest-loss")
 	newStreamSet := func() *StreamSet {
 		return &StreamSet{
 			JS: js, Ingest: st,
@@ -351,6 +355,7 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 			DLQSubj:          "agentray.events.dlq.retention",
 			MaxDeliv:         3,
 			Durable:          "colour-blue",
+			LossMarkerPath:   marker,
 		}
 	}
 	queue := NewJetStreamQueue(js, subjects[0], subjects[1])
@@ -391,7 +396,7 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart worker: %v", err)
 	}
-	defer worker.Stop()
+	defer func() { _ = worker.Stop() }()
 
 	v, err := restarted.ReplayStatus(ctx)
 	if err != nil {
@@ -415,6 +420,23 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	}
 	if got := duckRowKeys(t, duck, parityTable); len(got) != 4 {
 		t.Fatalf("rows = %v, want the 3 it applied plus the one retained message", got)
+	}
+
+	// And a RESTART must not forget. This is what the operator does next after a
+	// refusal, and by now the live signal is gone for good: the colour has applied
+	// everything the stream still holds, so its applied mark covers the retained
+	// window and the broker reports nothing wrong. The loss is only knowable from
+	// what the previous process wrote down.
+	if err := worker.Stop(); err != nil {
+		t.Fatalf("stop worker: %v", err)
+	}
+	again := newStreamSet()
+	worker, err = StartJetStreamWorker(ctx, again, duck, nil)
+	if err != nil {
+		t.Fatalf("restart worker: %v", err)
+	}
+	if v := mustVerdict(t, again); v.Ready || v.Reason != ReplayPurgedGap || v.Missing == 0 {
+		t.Fatalf("verdict after a restart = %+v, want the recorded loss to keep refusing", v)
 	}
 }
 
