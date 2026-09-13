@@ -83,6 +83,27 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 	}, nil
 }
 
+// projectForPrincipal is the single place the app decides whether a caller may
+// see a project's capture key, and it is applied by both resolvers that hand a
+// project to a legacy REST handler (projectFromRequest, principalAndProject).
+//
+// The key is an ingest credential: whoever holds it can write events into the
+// project. Handing it back over a response body would undo the credential split
+// — a management credential minted with analytics:read alone would return
+// holding the project's write key, and could then inject anything it liked.
+// store.Project.redactAPIKeyForRole already blanks the key for a membership that
+// may not hold it; this is the same rule stated over credentials instead of
+// roles. Only a session resolved a membership that may hold the key, and a
+// management credential never had it. A legacy project key authenticates with
+// the key itself, so withholding it there leaks nothing and grants nothing.
+// Capture principals never reach here — both resolvers refuse them first.
+func projectForPrincipal(project storage.Project, principal opcore.Principal) storage.Project {
+	if principal.Kind != opcore.CredSession {
+		project.APIKey = ""
+	}
+	return project
+}
+
 // bearerToken extracts an Authorization: Bearer token. present is false only
 // when no Bearer header was sent at all; a Bearer header carrying a non-agm_
 // or empty token returns present=true with an empty token so the caller

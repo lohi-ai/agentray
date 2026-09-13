@@ -38,14 +38,26 @@ func newOpAdapter(store *storage.Store, notifier usecase.Notifier, runner usecas
 	}
 }
 
-// invoke runs one registered operation under the resolved principal. The
-// caller decides admission first (legacy routes keep their own auth contract);
-// invoke itself only scopes and executes, exactly like MountHTTP's handler
-// after its Authorize step.
+// invoke runs one registered operation under the resolved principal, and is
+// where the legacy REST surface makes the access-class decision.
+//
+// It is the choke point on purpose: every adapter route that executes an
+// operation reaches the registry through this function, so a route added
+// tomorrow inherits the check instead of having to remember it — which is
+// exactly how the nine dashboard/chart routes came to run as any credential
+// that could reach the project. The check is the same Registry.Authorize
+// MountHTTP and MCP run, and the refusal is the same one they return, so a
+// credential refused on /api/op is refused here.
+//
+// Admission — whether this credential may address the project at all — stays
+// with the caller's resolver (projectFromRequest / principalAndProject).
 func (a *opAdapter) invoke(c echo.Context, principal opcore.Principal, opName string, input any) (json.RawMessage, error) {
 	spec, ok := a.reg.Get(opName)
 	if !ok {
 		return nil, echo.NewHTTPError(http.StatusInternalServerError, "operation "+opName+" not registered")
+	}
+	if err := a.authorize(principal, opName); err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -59,7 +71,9 @@ func (a *opAdapter) invoke(c echo.Context, principal opcore.Principal, opName st
 	return json.RawMessage(out), nil
 }
 
-// authorize mirrors MountHTTP's access-class check for adapters that adopt it.
+// authorize is the legacy REST surface's access-class decision — the same
+// Registry.Authorize call MountHTTP makes on /api/op — and it answers with the
+// same refusal those adapters return, so the two cannot drift apart.
 func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
 	if !a.reg.Authorize(principal, opName) {
 		return echo.NewHTTPError(http.StatusForbidden, "credential may not invoke "+opName)
@@ -93,7 +107,9 @@ func readOptionalMutationBody(c echo.Context) (optionalMutationBody, error) {
 
 // principalAndProject resolves the caller and loads the project it names,
 // refusing capture credentials — the same admission projectFromRequest has
-// always applied — while keeping the principal for the operation call.
+// always applied — while keeping the principal for the operation call. The
+// project comes back through projectForPrincipal, so a non-session caller never
+// receives the capture key.
 func principalAndProject(c echo.Context, store *storage.Store) (opcore.Principal, storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {
@@ -106,7 +122,7 @@ func principalAndProject(c echo.Context, store *storage.Store) (opcore.Principal
 	if err != nil {
 		return opcore.Principal{}, storage.Project{}, err
 	}
-	return principal, project, nil
+	return principal, projectForPrincipal(project, principal), nil
 }
 
 // sessionPrincipal builds the session principal for the session-only

@@ -648,3 +648,185 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 		t.Fatalf("MCP context = %+v, want %+v", got, want)
 	}
 }
+
+// --- Legacy REST ↔ registry authorization parity ---
+
+// legacyRESTAndRegistry wires the two surfaces this matrix compares for the SAME
+// operation and the SAME credential: the legacy dashboard/chart REST block, and
+// the registry's own POST /api/op mount. Both resolve the caller through the real
+// principalFromRequest and both run one registry + deps bundle, so any divergence
+// in the authorization answer is a divergence between the adapters themselves.
+func legacyRESTAndRegistry(t *testing.T, s *storage.Store) *echo.Echo {
+	t.Helper()
+	e := echo.New()
+	ops := newOpAdapter(s, nil, storeRunner{s})
+	mountDashboardLifecycle(e, s, ops)
+	opcore.MountHTTP(e.Group("/api/op"), ops.reg, ops.deps, func(c echo.Context) (opcore.Principal, error) {
+		return principalFromRequest(c, s)
+	})
+	return e
+}
+
+// bearer builds the management-credential header. A project key travels as
+// ?api_key= instead: a Bearer that is not an agm_ credential is rejected outright
+// rather than falling through to a weaker identity.
+func bearer(secret string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + secret}
+}
+
+// callREST drives one legacy request carrying a bearer credential or a session.
+func callREST(t *testing.T, e *echo.Echo, method, path, body, secret string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	if secret != "" {
+		req.Header.Set(echo.HeaderAuthorization, "Bearer "+secret)
+	}
+	for _, ck := range cookies {
+		req.AddCookie(ck)
+	}
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	return rec
+}
+
+// dashboardNames lists the active dashboard names a credential can see, through
+// the registry adapter — the surface both callers above share.
+func dashboardNames(t *testing.T, e *echo.Echo, secret string) map[string]bool {
+	t.Helper()
+	rec := postJSON(t, e, "/api/op/list_dashboards", `{}`, bearer(secret))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list_dashboards: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Dashboards []storage.Dashboard `json:"dashboards"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("list_dashboards body: %v (%s)", err, rec.Body.String())
+	}
+	names := make(map[string]bool, len(body.Dashboards))
+	for _, d := range body.Dashboards {
+		names[d.Name] = true
+	}
+	return names
+}
+
+// TestLegacyRESTAuthorizationParity is the regression for the nine dashboard and
+// chart routes that used to reach the registry without ever being authorized: a
+// credential scoped to analytics:read alone could create, update, archive and
+// reorder over REST while /api/op refused the identical call. Every row asserts
+// the same decision on both surfaces, so reopening that gap fails here.
+func TestLegacyRESTAuthorizationParity(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := t.Context()
+	e := legacyRESTAndRegistry(t, s)
+
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("rest-parity-%d@test.local", time.Now().UnixNano()), "RP", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	project := boot.Project
+	captureKey := project.APIKey
+
+	_, reader, err := s.CreateProjectCredential(ctx, boot.User.ID, project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("reader credential: %v", err)
+	}
+	_, author, err := s.CreateProjectCredential(ctx, boot.User.ID, project.ID, "author", []string{"analytics:read", "dashboards:write"})
+	if err != nil {
+		t.Fatalf("author credential: %v", err)
+	}
+
+	// Refused with the wrong scope — and refused identically, because the answer
+	// is the registry's own and not one the legacy adapter invents.
+	legacyDenied := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"denied"}`, reader)
+	opDenied := postJSON(t, e, "/api/op/create_dashboard", `{"name":"denied"}`, bearer(reader))
+	if legacyDenied.Code != http.StatusForbidden || opDenied.Code != http.StatusForbidden {
+		t.Fatalf("analytics:read create_dashboard: legacy %d %s | /api/op %d %s; want 403 on both",
+			legacyDenied.Code, legacyDenied.Body.String(), opDenied.Code, opDenied.Body.String())
+	}
+	if legacyDenied.Body.String() != opDenied.Body.String() {
+		t.Fatalf("refusal bodies differ: legacy %q, /api/op %q", legacyDenied.Body.String(), opDenied.Body.String())
+	}
+	if names := dashboardNames(t, e, reader); names["denied"] {
+		t.Fatalf("a refused create_dashboard persisted a row: %v", names)
+	}
+
+	// Allowed with the right scope — both operations, both surfaces.
+	if rec := callREST(t, e, http.MethodGet, "/api/dashboards", "", reader); rec.Code != http.StatusOK {
+		t.Fatalf("analytics:read list via REST: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postJSON(t, e, "/api/op/list_dashboards", `{}`, bearer(reader)); rec.Code != http.StatusOK {
+		t.Fatalf("analytics:read list_dashboards via /api/op: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"Parity REST board"}`, author); rec.Code != http.StatusCreated {
+		t.Fatalf("dashboards:write create via REST: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postJSON(t, e, "/api/op/create_dashboard", `{"name":"Parity op board"}`, bearer(author)); rec.Code != http.StatusOK {
+		t.Fatalf("dashboards:write create_dashboard via /api/op: %d %s", rec.Code, rec.Body.String())
+	}
+	if names := dashboardNames(t, e, author); !names["Parity REST board"] || !names["Parity op board"] {
+		t.Fatalf("authorized creates did not persist: %v", names)
+	}
+
+	// The capture key never reaches a non-session caller; the session, the one
+	// credential that resolved a membership, still owns it.
+	readerBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", reader).Body.String()
+	if strings.Contains(readerBody, captureKey) {
+		t.Fatalf("management credential received the project capture key: %s", readerBody)
+	}
+	if !strings.Contains(readerBody, `"api_key":""`) {
+		t.Fatalf("management credential response does not redact api_key: %s", readerBody)
+	}
+	sessionBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", "", sessionCookieFor(t, s, boot.User.ID)).Body.String()
+	if !strings.Contains(sessionBody, captureKey) {
+		t.Fatalf("the session lost the capture key it owns: %s", sessionBody)
+	}
+
+	// The capture key is still refused before any operation runs.
+	if rec := doJSON(t, e, http.MethodGet, "/api/dashboards?api_key="+captureKey, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("capture key on the read route: %d %s, want 403", rec.Code, rec.Body.String())
+	}
+
+	// An unsplit legacy project key keeps exactly the frozen allowlist: the two
+	// dashboard writes it always had, and nothing registered after the freeze.
+	legacy, err := s.CreateProject(ctx, "rest-parity-legacy")
+	if err != nil {
+		t.Fatalf("legacy project: %v", err)
+	}
+	created := doJSON(t, e, http.MethodPost, "/api/dashboards?api_key="+legacy.APIKey, `{"name":"Legacy board"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("legacy key create_dashboard (allowlisted): %d %s", created.Code, created.Body.String())
+	}
+	var legacyBody struct {
+		Dashboard storage.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &legacyBody); err != nil {
+		t.Fatalf("legacy create response: %v", err)
+	}
+	legacyCharts := doJSON(t, e, http.MethodGet, "/api/dashboards/"+legacyBody.Dashboard.ID+"/charts?api_key="+legacy.APIKey, "")
+	opCharts := postJSON(t, e, "/api/op/list_charts", fmt.Sprintf(`{"dashboard_id":%q}`, legacyBody.Dashboard.ID), map[string]string{"X-API-Key": legacy.APIKey})
+	if legacyCharts.Code != http.StatusForbidden || opCharts.Code != http.StatusForbidden {
+		t.Fatalf("legacy key list_charts (outside the allowlist): legacy %d %s | /api/op %d %s; want 403 on both",
+			legacyCharts.Code, legacyCharts.Body.String(), opCharts.Code, opCharts.Body.String())
+	}
+	if legacyCharts.Body.String() != opCharts.Body.String() {
+		t.Fatalf("legacy refusal bodies differ: legacy %q, /api/op %q", legacyCharts.Body.String(), opCharts.Body.String())
+	}
+
+	// A read-only session keeps its role floor on the legacy surface too.
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("rest-parity-viewer-%d@test.local", time.Now().UnixNano()), "V", "password-123", "ws-v", "proj-v")
+	if err != nil {
+		t.Fatalf("viewer account: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	viewerCookie := sessionCookieFor(t, s, viewer.User.ID)
+	if rec := callREST(t, e, http.MethodGet, "/api/dashboards?project_id="+project.ID, "", "", viewerCookie); rec.Code != http.StatusOK {
+		t.Fatalf("viewer list_dashboards: %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec := callREST(t, e, http.MethodPost, "/api/dashboards?project_id="+project.ID, `{"name":"viewer board"}`, "", viewerCookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer create via REST: %d %s, want 403 (MinSessionRole member)", rec.Code, rec.Body.String())
+	}
+}
