@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,11 +81,41 @@ func TestSandboxIsolationHostileQuery(t *testing.T) {
 		}
 	}()
 
-	for _, hostile := range []string{
+	// The kernel bound is only real where the kernel has one: on Linux the child
+	// caps its own address space, and this is the assertion that the cap was
+	// actually applied rather than merely intended.
+	if _, err := pool.query(ctx, victim, `SELECT count(*) AS n FROM events`, nil); err != nil {
+		t.Fatalf("warm-up query: %v", err)
+	}
+	pool.mu.Lock()
+	warm := pool.sandboxes[victim]
+	pool.mu.Unlock()
+	if warm == nil {
+		t.Fatal("no sandbox for the warmed project")
+	}
+	if runtime.GOOS == "linux" && warm.rlimitBytes == 0 {
+		t.Fatal("sandbox child reports no address-space limit on linux")
+	}
+	if runtime.GOOS == "linux" {
+		t.Logf("child address-space limit = %d MiB (own virtual size at open = %d MiB, budget = %d MiB)",
+			warm.rlimitBytes>>20, (warm.rlimitBytes-uint64(sandboxRlimitBudget))>>20, sandboxRlimitBudget>>20)
+	}
+	if runtime.GOOS != "linux" && warm.rlimitBytes != 0 {
+		t.Fatalf("sandbox child claims an address-space limit of %d on %s", warm.rlimitBytes, runtime.GOOS)
+	}
+
+	hostileQueries := []string{
 		`SELECT repeat('x', 50000000) AS s`,
 		`SELECT lpad('x', 40000000, 'y') AS s`,
 		`SELECT string_agg(repeat('x', 1000), '') FROM range(200000)`,
-	} {
+	}
+	if runtime.GOOS == "linux" {
+		// The exact query the parent review measured: half a gigabyte minted
+		// against a 122 MiB engine limit. With no address-space cap it took the
+		// whole container down; with one it must fail inside the child.
+		hostileQueries = append(hostileQueries, `SELECT repeat('x', 500000000) AS s`)
+	}
+	for _, hostile := range hostileQueries {
 		rows, err := pool.query(ctx, victim, hostile, nil)
 		if err == nil {
 			t.Fatalf("hostile query %q was answered with %d rows", hostile, len(rows))
@@ -98,6 +129,7 @@ func TestSandboxIsolationHostileQuery(t *testing.T) {
 		if !IsSandboxLimit(err) && !IsSandboxUnavailable(err) {
 			t.Fatalf("hostile query %q error kind = %q, want a limit or an unavailable sandbox", hostile, se.Kind)
 		}
+		t.Logf("hostile %q -> kind=%s: %v", hostile, se.Kind, err)
 	}
 
 	// Another tenant's work is untouched.
@@ -261,8 +293,11 @@ func TestSandboxRequestDeadlineCoversAllPhases(t *testing.T) {
 	d := openTestDuckDB(t)
 
 	// Cold project: the spawn and the copy must not ride an unbounded context.
+	// The budget is deliberately below a process spawn — opening the engine
+	// alone measured ~200ms — so the assertion cannot depend on how loaded the
+	// machine is: with a cold project there is no way to answer inside 25ms.
 	pool, ctx := newTestSandboxPool(t, d, func(l *sandboxLimits) {
-		l.requestTimeout = 150 * time.Millisecond
+		l.requestTimeout = 25 * time.Millisecond
 	})
 	start := time.Now()
 	_, err := pool.query(ctx, uuid.NewString(), `SELECT count(*) AS n FROM events`, nil)
@@ -298,6 +333,27 @@ func TestSandboxRequestDeadlineCoversAllPhases(t *testing.T) {
 	}
 }
 
+// repoPath resolves a repo-relative file from this test file's own location, so
+// the assertion holds wherever the checkout happens to be mounted.
+func repoPath(t *testing.T, rel string) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	for dir := filepath.Dir(file); ; {
+		candidate := filepath.Join(dir, rel)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("cannot locate %s from %s", rel, file)
+		}
+		dir = parent
+	}
+}
+
 // A6 — the envelope is the one that is declared, and it fits the container.
 func TestSandboxBudgetFitsContainer(t *testing.T) {
 	const (
@@ -309,7 +365,7 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 	)
 
 	for _, env := range []string{"dev", "prod"} {
-		path := filepath.Join("..", "..", "..", "infra", "gce", env, "docker-compose.yml")
+		path := repoPath(t, filepath.Join("infra", "gce", env, "docker-compose.yml"))
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -428,6 +484,11 @@ func TestSandboxErrorSurfacesUnchanged(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("empty result rows = %v, want none", rows)
+	}
+	if rows == nil {
+		// gob carries no nil/empty distinction; the JSON surface does, and a
+		// zero-row answer is `rows: []` today, not `rows: null`.
+		t.Fatal("empty result is a nil slice: the API would render rows:null where it rendered rows:[]")
 	}
 
 	// A child that died is the API's problem to retry, never the author's SQL.

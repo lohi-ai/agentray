@@ -736,6 +736,11 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 	if resp.Kind == "err" {
 		return nil, sandboxError(resp.ErrorKind, sandboxSentinel(resp.ErrorKind), resp.Message)
 	}
+	if resp.Rows == nil {
+		// gob does not carry the nil/empty distinction, and the JSON surface
+		// does: a zero-row answer is `rows: []` today, not `rows: null`.
+		return []map[string]any{}, nil
+	}
 	return resp.Rows, nil
 }
 
