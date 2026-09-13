@@ -400,8 +400,9 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 
 // refreshEvents appends only what arrived since the last refresh. The cursor
 // is (inserted_at, event_id) — a bare inserted_at high-water mark skips rows
-// that share the timestamp of the last copied row. A count drift (rows deleted
-// in the main file — the retention sweep does exactly that) rebuilds the table.
+// that share the timestamp of the last copied row. A delete in the main file —
+// the retention sweep does exactly that — shows up as the sandbox holding more
+// rows than the main file has at or below that cursor, and rebuilds the table.
 func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 	var highWater time.Time
 	var highWaterID string
@@ -413,17 +414,24 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		`SELECT coalesce(max(event_id::VARCHAR), '') FROM events WHERE inserted_at = ?`, highWater).Scan(&highWaterID); err != nil {
 		return err
 	}
-	var sandboxCount, mainCount int64
+	var sandboxCount, mainAtOrBelowHighWater int64
 	if err := sb.feeder.QueryRowContext(ctx, `SELECT count(*) FROM events`).Scan(&sandboxCount); err != nil {
 		return err
 	}
 	if err := sb.main.Read(ctx, func(conn *sql.Conn) error {
+		// Count only what the sandbox should already hold — everything at or
+		// below its cursor. Comparing against the whole table instead lets an
+		// equal number of newly arrived rows hide a delete: the sweep removing
+		// D events while D new ones land leaves the two totals agreeing, and
+		// the sandbox keeps answering queries with rows the main store deleted.
 		return conn.QueryRowContext(ctx,
-			`SELECT count(*) FROM events WHERE project_id = ?`, sb.projectID).Scan(&mainCount)
+			`SELECT count(*) FROM events WHERE project_id = ?
+			 AND (inserted_at < ? OR (inserted_at = ? AND event_id::VARCHAR <= ?))`,
+			sb.projectID, highWater, highWater, highWaterID).Scan(&mainAtOrBelowHighWater)
 	}); err != nil {
 		return err
 	}
-	if sandboxCount > mainCount {
+	if sandboxCount > mainAtOrBelowHighWater {
 		// Rows vanished from the main file; rebuild rather than probe per row.
 		if _, err := sb.feeder.ExecContext(ctx, `DELETE FROM events`); err != nil {
 			return err

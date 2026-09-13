@@ -51,6 +51,11 @@ type Retention struct {
 	mu       sync.Mutex
 	running  bool
 	lastDone time.Time
+	// cancel and done belong to the sweep in flight: Stop cancels it and waits
+	// on done, which is what keeps a multi-minute delete from outliving the
+	// store it deletes from.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewRetention builds the sweep policy for a retention window in days. days
@@ -95,36 +100,80 @@ func (r *Retention) Tick(ctx context.Context, now time.Time) {
 		r.mu.Unlock()
 		return
 	}
+	// The sweep must outlive the tick that admitted it: a hook whose context is
+	// cancelled on return would abort the delete it just asked for. The budget,
+	// not the caller, bounds the work — and Stop, not the tick, ends it early.
+	budget := r.budget
+	sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+	done := make(chan struct{})
 	r.running = true
+	r.cancel, r.done = cancel, done
 	r.mu.Unlock()
 
 	go func() {
-		// The sweep must outlive the tick that admitted it: a hook whose
-		// context is cancelled on return would abort the delete it just asked
-		// for. The budget, not the caller, bounds the work.
-		sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.budget)
+		defer close(done)
 		defer cancel()
 
 		removed, err := r.PruneOnce(sweepCtx, now)
+		halved := 0
 
 		r.mu.Lock()
 		r.running = false
-		if err == nil {
+		r.cancel, r.done = nil, nil
+		switch {
+		case err == nil:
 			r.lastDone = now
+		case removed == 0 && errors.Is(sweepCtx.Err(), context.DeadlineExceeded):
+			// The budget expired while the first batch was still scanning, so
+			// its transaction rolled back and this sweep deleted nothing. The
+			// next tick would re-issue the identical statement and hold the
+			// writer gate for the same five minutes all over again; halving the
+			// batch means a store that cannot commit one batch inside the
+			// budget still converges instead of livelocking.
+			if r.batch > 1 {
+				r.batch /= 2
+				halved = r.batch
+			}
 		}
 		r.mu.Unlock()
 
 		cutoff := r.cutoff(now).Format(time.RFC3339)
 		switch {
 		case err == nil && removed == 0:
+			// Logged even when there was nothing to do: a missing line is how an
+			// operator tells "retention ran and found nothing" from "retention
+			// is not running at all".
+			log.Printf("retention: nothing older than %s to delete", cutoff)
 		case err == nil:
 			log.Printf("retention: deleted %d events older than %s", removed, cutoff)
 		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
-			log.Printf("retention: sweep reached its %s budget after %d events older than %s — continuing on the next tick", r.budget, removed, cutoff)
+			log.Printf("retention: sweep reached its %s budget after %d events older than %s — continuing on the next tick", budget, removed, cutoff)
+			if halved > 0 {
+				log.Printf("retention: a batch did not commit inside the budget; the next sweep deletes %d events at a time", halved)
+			}
 		default:
 			log.Printf("retention: sweep failed after %d events older than %s: %v", removed, cutoff, err)
 		}
 	}()
+}
+
+// Stop ends the sweep in flight and waits for its goroutine to exit. It is what
+// lets a server close its DuckDB handle without a delete landing in a closed
+// pool: the sweep's own budget can be minutes away, and shutdown cannot wait
+// that long. Safe to call when nothing is running, and safe to call twice.
+func (r *Retention) Stop() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	cancel, done := r.cancel, r.done
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 // PruneOnce runs one sweep and reports how many events it deleted. It is
@@ -133,15 +182,20 @@ func (r *Retention) Tick(ctx context.Context, now time.Time) {
 //
 // The loop stops when nothing expired is left, when ctx is done, or on error;
 // a partial result is returned with that error rather than discarded, so an
-// interrupted sweep still reports its progress.
+// interrupted sweep still reports its progress. Only committed batches count:
+// a batch that is cut off rolls back, which is why Tick shrinks the batch when
+// a sweep expires without removing anything.
 func (r *Retention) PruneOnce(ctx context.Context, now time.Time) (int64, error) {
 	if !r.Enabled() {
 		return 0, nil
 	}
+	r.mu.Lock()
+	batch := r.batch
+	r.mu.Unlock()
 	cutoff := r.cutoff(now)
 	var removed int64
 	for {
-		n, err := r.store.DeleteEventsBefore(ctx, cutoff, r.batch)
+		n, err := r.store.DeleteEventsBefore(ctx, cutoff, batch)
 		removed += n
 		if err != nil {
 			return removed, err

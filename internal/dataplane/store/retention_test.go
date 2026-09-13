@@ -39,6 +39,27 @@ func waitForEvents(t *testing.T, d *DuckDB, want int) {
 	}
 }
 
+// waitForSweep blocks until the admitted sweep has finished and stamped its
+// interval. waitForEvents watches the row count, which reaches its final value
+// before the sweep returns; a test that reseeds on the count alone can race the
+// still-running sweep, which then deletes the freshly inserted row.
+func waitForSweep(t *testing.T, r *Retention) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r.mu.Lock()
+		finished := !r.running && !r.lastDone.IsZero()
+		r.mu.Unlock()
+		if finished {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the admitted sweep did not finish and stamp its interval")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestPruneRemovesOnlyExpiredEvents pins the boundary the retention window
 // promises: strictly older than the cutoff goes, everything else stays.
 func TestPruneRemovesOnlyExpiredEvents(t *testing.T) {
@@ -157,6 +178,56 @@ func TestRetentionSweepsABacklogInBatches(t *testing.T) {
 	}
 }
 
+// TestPruneKeepsTheBatchesThatCommittedWhenTheBudgetExpires: the budget is
+// enforced per sweep, not per statement, so a sweep cut off mid-backlog must
+// hand back the batches that already committed — a rolled-back batch would make
+// a slow store delete nothing at all, forever.
+func TestPruneKeepsTheBatchesThatCommittedWhenTheBudgetExpires(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	now := time.Now().UTC().Truncate(time.Second)
+	project := uuid.NewString()
+
+	const seeded = 500
+	for i := range seeded {
+		retentionEvent(t, d, project, now.AddDate(0, 0, -400-i))
+	}
+	retentionEvent(t, d, project, now) // never expired
+
+	r := NewRetention(s, 365)
+	r.batch = 1 // one transaction per event, so the sweep cannot outrun the cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type outcome struct {
+		removed int64
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		removed, err := r.PruneOnce(ctx, now)
+		done <- outcome{removed, err}
+	}()
+
+	// Cancel as soon as the first batch has landed, which leaves a known-committed
+	// prefix and a known-remaining backlog.
+	for eventCount(t, d) == seeded+1 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	got := <-done
+	if got.err == nil {
+		t.Fatal("a sweep cut off mid-backlog must report the interruption")
+	}
+	if got.removed <= 0 || got.removed >= seeded {
+		t.Fatalf("removed = %d, want the committed prefix (0 < n < %d)", got.removed, seeded)
+	}
+	if left := eventCount(t, d); left != seeded+1-int(got.removed) {
+		t.Errorf("event log has %d rows, want %d left by an interrupted sweep", left, seeded+1-int(got.removed))
+	}
+}
+
 // TestPruneStopsWhenItsContextIsDone: the budget is enforced by the context,
 // and an interrupted sweep reports what it removed instead of losing it.
 func TestPruneStopsWhenItsContextIsDone(t *testing.T) {
@@ -203,6 +274,7 @@ func TestRetentionTickSweepsOncePerInterval(t *testing.T) {
 	r := NewRetention(s, 365)
 	r.Tick(ctx, now)
 	waitForEvents(t, d, 0)
+	waitForSweep(t, r)
 
 	// Same interval: the tick must not sweep again.
 	retentionEvent(t, d, project, now.AddDate(0, 0, -400))
@@ -235,5 +307,98 @@ func TestRetentionTickDoesNotStackOnAnInFlightSweep(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := eventCount(t, d); got != 1 {
 		t.Fatalf("a tick while a sweep was in flight deleted to %d rows, want 1", got)
+	}
+}
+
+// TestRetentionStopEndsTheSweepInFlight: the sweep detaches from the tick that
+// admitted it, so nothing else can end it before its own budget — and a server
+// closing DuckDB cannot wait five minutes. Stop cancels it and waits.
+func TestRetentionStopEndsTheSweepInFlight(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	project := uuid.NewString()
+
+	const seeded = 500
+	for i := range seeded {
+		retentionEvent(t, d, project, now.AddDate(0, 0, -400-i))
+	}
+
+	r := NewRetention(s, 365)
+	r.batch = 1
+	r.budget = time.Hour // Stop, not the budget, is what has to end this sweep
+	r.Tick(ctx, now)
+	for eventCount(t, d) == seeded {
+		time.Sleep(time.Millisecond)
+	}
+
+	stopped := make(chan struct{})
+	go func() { r.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop did not return while a sweep was in flight")
+	}
+
+	r.mu.Lock()
+	running := r.running
+	r.mu.Unlock()
+	if running {
+		t.Fatal("Stop returned with the sweep still marked in flight")
+	}
+	before := eventCount(t, d)
+	time.Sleep(100 * time.Millisecond)
+	if after := eventCount(t, d); after != before {
+		t.Errorf("the event log moved from %d to %d rows after Stop returned", before, after)
+	}
+}
+
+// TestRetentionHalvesABatchThatCannotCommitInsideTheBudget: a batch whose
+// transaction rolls back deletes nothing, and lastDone stays unset so the next
+// tick retries. Retrying the identical statement would hold the writer gate for
+// another full budget every minute, so the batch has to shrink until it commits.
+func TestRetentionHalvesABatchThatCannotCommitInsideTheBudget(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	now := time.Now().UTC().Truncate(time.Second)
+	retentionEvent(t, d, uuid.NewString(), now.AddDate(0, 0, -400))
+
+	r := NewRetention(s, 365)
+	r.batch = 64
+	r.budget = time.Nanosecond // no batch can commit inside this budget
+	r.Tick(context.Background(), now)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		r.mu.Lock()
+		running, batch, lastDone := r.running, r.batch, r.lastDone
+		r.mu.Unlock()
+		if !running {
+			if batch != 32 {
+				t.Errorf("batch = %d, want 32 — a batch that committed nothing must halve", batch)
+			}
+			if !lastDone.IsZero() {
+				t.Error("a sweep that deleted nothing must not stamp the interval")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sweep did not return")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := eventCount(t, d); got != 1 {
+		t.Fatalf("event log has %d rows, want the expired event kept (1)", got)
+	}
+	// The next sweep runs on the smaller batch and does the work.
+	r.budget = 5 * time.Second
+	removed, err := r.PruneOnce(context.Background(), now)
+	if err != nil {
+		t.Fatalf("PruneOnce after the batch shrank: %v", err)
+	}
+	if removed != 1 || eventCount(t, d) != 0 {
+		t.Errorf("removed = %d with %d rows left, want the expired event gone", removed, eventCount(t, d))
 	}
 }

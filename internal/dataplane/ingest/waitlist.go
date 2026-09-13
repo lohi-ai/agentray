@@ -109,7 +109,8 @@ func (h Handler) Waitlist(c echo.Context) error {
 		// the person profile and put it in the event store for good.
 		//
 		// The event store is append-only with a bounded retention window
-		// (`EVENT_RETENTION_DAYS`, default one year); the contact table is
+		// (`EVENT_RETENTION_DAYS`, default one year — an operator can set
+		// it to 0, which keeps every event forever); the contact table is
 		// not. Writing the address to both would mean DeleteWaitlistSignup
 		// removes the row the owner can see and leaves the copy they cannot,
 		// which turns "remove my data" into a lie the product tells on the
