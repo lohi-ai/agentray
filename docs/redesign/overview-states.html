@@ -110,10 +110,9 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
     <a href="#overview" aria-current="location">Overview</a>
     <div class="navgroup">Understand</div>
     <a href="#analytics">Analytics</a>
-    <a href="#analytics" class="sub">App analytics <span class="tag" id="appnav-tag">· Apple connected</span></a>
     <span class="sub sub2">Acquisition <span class="tag">· Coming soon</span></span>
     <span class="sub sub2">Monetization <span class="tag">· Coming soon</span></span>
-    <span class="sub sub2">App Usage <span class="tag">· Coming soon</span></span>
+    <span class="sub sub2">Usage <span class="tag">· Coming soon</span></span>
     <a href="#people">People</a>
     <a href="#data">Data</a>
     <div class="navgroup">Work</div>
@@ -129,12 +128,12 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
 
 <div class="statelist" role="group" aria-label="Overview states">
   <a href="#state-populated" data-state="populated">Populated</a>
-  <a href="#state-appview" data-state="appview">Default · Apple connected</a>
+  <a href="#state-grouped" data-state="grouped">Grouped metrics</a>
   <a href="#state-firstrun" data-state="firstrun">First run</a>
   <a href="#state-nodata" data-state="nodata">No data</a>
   <a href="#state-stale" data-state="stale">Stale</a>
   <a href="#state-error" data-state="error">Error</a>
-  <a href="#state-nosource" data-state="nosource">Source not connected</a>
+  <a href="#state-uninstrumented" data-state="uninstrumented">Uninstrumented monetization</a>
 </div>
 
 <!-- ================= POPULATED ================= -->
@@ -206,89 +205,73 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
   </article>
 </section>
 
-<!-- ================= APP VIEW (Apple source connected) ================= -->
-<section class="state" id="state-appview" aria-label="App overview with Apple source connected">
-  <header class="row"><div><h1>Overview</h1><p class="muted" id="appview-range">Sep 5–11 · 7 complete days · All platforms</p></div>
+<!-- ================= GROUPED METRICS (AgentRay data only) ================= -->
+<section class="state" id="state-grouped" aria-label="Overview with grouped AgentRay metrics">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
     <div class="row" role="group" aria-label="Overview controls">
-      <span class="seg" role="group" aria-label="Platform" id="appview-platform">
-        <button type="button" data-platform="all" aria-current="true">All platforms</button>
-        <button type="button" data-platform="web">Web</button>
-        <button type="button" data-platform="ios">iOS</button>
-        <button type="button" data-platform="android">Android</button>
-      </span>
-      <span class="seg" role="group" aria-label="Time range"><a href="#state-appview">Today</a><a href="#state-appview" aria-current="true">7 days</a><a href="#state-appview">30 days</a></span>
+      <span class="seg" role="group" aria-label="Platform"><a href="#state-grouped" aria-current="true">All platforms</a><a href="#state-grouped">Web</a><a href="#state-grouped">iOS</a><a href="#state-grouped">Android</a></span>
+      <span class="seg" role="group" aria-label="Time range"><a href="#state-grouped">Today</a><a href="#state-grouped" aria-current="true">7 days</a><a href="#state-grouped">30 days</a></span>
     </div>
   </header>
   <div class="stats" role="group" aria-label="Headline metrics">
-    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>SDK events · follows the platform filter</small></div>
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Follows the platform filter</small></div>
     <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
     <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
     <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible</small></div>
     <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
   </div>
   <div class="callout"><span class="clabel">Provenance</span>
-    <p class="cdetail">Store metrics below come from the connected App Store Connect source and are reported on Apple’s UTC-bounded days — they are not SDK event counts and are never derived from them. Usage and crash figures cover opt-in devices only. Sample values shown for design review.</p>
+    <p class="cdetail">Every figure below comes from this project’s own events, on the project timezone. Each group names its metric version, range, coverage and freshness; a metric with no verified source shows its state label rather than a number. Sample values shown for design review.</p>
   </div>
 
-  <div id="appview-groups" class="stack">
+  <div id="grouped-groups" class="stack">
   <article class="panel stack"><div class="row"><h2>Acquisition</h2><a class="button" href="#analytics">See more</a></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">First-time downloads</span><span class="value">412</span><small>App Store Connect · UTC days</small></div>
-      <div class="stat"><span class="label">Redownloads</span><span class="value">58</span><small>App Store Connect · UTC days</small></div>
-      <div class="stat"><span class="label">Conversion rate</span><span class="value">4.1%</span><small>Downloads + pre-orders ÷ unique-device impressions · App Store Connect</small></div>
-      <div class="stat"><span class="label">Impressions / day</span><span class="value">1,430</span><small>Daily average · App Store Connect</small></div>
-      <div class="stat"><span class="label">Product page views</span><span class="value">9,980</span><small>App Store Connect · UTC days</small></div>
-      <div class="stat"><span class="label">Updates</span><span class="value">1,120</span><small>App Store Connect · UTC days</small></div>
+      <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity · project timezone</small></div>
+      <div class="stat"><span class="label">Top source</span><span class="value">google</span><small>318 sessions · “Direct / unknown” shown explicitly</small></div>
+      <div class="stat"><span class="label">Top landing page</span><span class="value mono">/pricing</span><small>612 pageviews</small></div>
+      <div class="stat"><span class="label">Activation rate</span><span class="value">25%</span><small>80 of 320 eligible · within 24h of first activity</small></div>
     </div>
-    <small>Conversion rate uses Apple’s definition — (first-time downloads + redownloads + pre-orders) ÷ unique-device impressions, with a pre-order not counted again once it converts to a download. It stays <em>Not available</em> until the source exposes every input.</small>
+    <small>All four tiles are derived from this project’s own events. Nothing here is a store metric — no downloads, impressions or store conversion exist in this product.</small>
   </article>
 
   <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button" href="#analytics">See more</a></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">Proceeds</span><span class="value">$1,284</span><small>USD · estimated customer price less applicable tax and Apple’s commission · refunds reported separately</small></div>
-      <div class="stat"><span class="label">Paying users</span><span class="value">96</span><small>App Store Connect · UTC days</small></div>
-      <div class="stat"><span class="label">In-app purchases / day</span><span class="value">18</span><small>Daily average · App Store Connect</small></div>
-      <div class="stat"><span class="label">Download→paid D1</span><span class="value">2.9%</span><small>12 of 412 first-time downloads</small></div>
-      <div class="stat"><span class="label">Download→paid D7</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
-      <div class="stat"><span class="label">Download→paid D35</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Instrumented revenue</span><span class="value unavail">Set up</span><small>No trusted billing source connected</small></div>
+      <div class="stat"><span class="label">Paying people</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchases</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchase→repeat</span><span class="value unavail">Not ready</span><small>Needs a mature cohort</small></div>
     </div>
-    <small>One currency per figure; unlike currencies are never summed.</small>
+    <small>One currency per figure; unlike currencies are never summed. With no billing source every tile shows <em>Set up</em> with the required instrumentation named — never zero, never a sample number.</small>
   </article>
 
-  <article class="panel stack"><div class="row"><h2>App usage</h2><a class="button" href="#analytics">See more</a></div>
+  <article class="panel stack"><div class="row"><h2>Usage</h2><a class="button" href="#analytics">See more</a></div>
     <div class="stats stats4">
-      <div class="stat"><span class="label">Avg retention D1</span><span class="value">38%</span><small>Opt-in devices only</small></div>
-      <div class="stat"><span class="label">Avg retention D7</span><span class="value">21%</span><small>Opt-in devices only</small></div>
-      <div class="stat"><span class="label">Avg retention D14</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
-      <div class="stat"><span class="label">Avg retention D28</span><span class="value unavail">Not ready</span><small>Cohort not mature</small></div>
+      <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Weekly distinct · follows the platform filter</small></div>
+      <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
+      <div class="stat"><span class="label">Retention D1</span><span class="value">41%</span><small>132 of 320 returned</small></div>
+      <div class="stat"><span class="label">Retention D7</span><span class="value">24%</span><small>Mature Aug 29–Sep 4 cohort</small></div>
+      <div class="stat"><span class="label">Retention D30</span><span class="value unavail">Not ready</span><small>No cohort has matured 30 days yet</small></div>
+      <div class="stat"><span class="label">Top action</span><span class="value mono">project_created</span><small>412 events</small></div>
     </div>
-    <div class="table-wrap"><table><thead><tr><th>Crashes by app version</th><th>Crashes</th><th>Devices</th></tr></thead><tbody>
-      <tr><td class="mono">1.4.2</td><td class="mono">34</td><td class="mono">1,920</td></tr>
-      <tr><td class="mono">1.4.1</td><td class="mono">12</td><td class="mono">410</td></tr>
-    </tbody></table></div>
-    <small>Crash and usage figures cover devices that opted in to sharing; they undercount the full install base and are labeled as such. Apple also withholds low-volume rows — a version or day below the reporting threshold shows <em>Not available</em>, never zero.</small>
+    <small>Retention is lifetime-cohort based — a person counts from their first-ever event, not the selected range. An immature cohort shows <em>Not ready</em>, never a partial number.</small>
   </article>
 
   <article class="panel stack"><div class="row"><h2>Best next step</h2><span class="tag">From Plans · evidence-backed</span></div>
-    <p><strong>Your App Store conversion is falling while product-page views hold.</strong> Conversion moved from 5.2% to 4.1% this week; product page views are flat, so the drop is downstream of discovery.</p>
-    <p class="muted"><small>Evidence: app conversion metric v1 · Sep 5–11 · App Store Connect UTC days · coverage 100% of eligible impressions · refreshed 2 min ago. Observation, not a tested cause.</small></p>
+    <p><strong>Help new users finish their first project.</strong> 80 of 320 new users activated within 24 hours this week — down from 31% the previous period.</p>
+    <p class="muted"><small>Evidence: activation metric v3 · Sep 5–11 · Asia/Ho_Chi_Minh · coverage 100% of qualifying events · refreshed 2 min ago. Observation, not a tested cause.</small></p>
     <div class="row"><a class="button primary" href="#plans">Open the finding</a><a class="button" href="#agents">Ask your agent to investigate</a></div>
   </article>
 
   </div>
 
-  <div id="appview-android-note" class="callout" hidden>
-    <span class="clabel">iOS only</span>
-    <p class="ctitle">App Store metrics are iOS-only</p>
-    <p class="cdetail">Downloads, impressions, proceeds and crashes come from App Store Connect and describe the iOS app. They are not shown as Android data. Switch to <strong>All platforms</strong> or <strong>iOS</strong> to see them; the Android figures above are SDK events only.</p>
-  </div>
-
-  <article class="panel"><div class="row"><h2>Data status</h2><small>Mixed freshness per source</small></div>
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 2 min ago</small></div>
     <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
       <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
-      <tr><td>App Store Connect</td><td>Downloads, impressions, proceeds, crashes</td><td><span class="pill"><span class="dot warn"></span>Delayed — Apple reports on a lag; latest complete day Sep 10</span></td></tr>
+      <tr><td>PostgreSQL</td><td>Accounts, subscriptions</td><td><span class="pill"><span class="dot"></span>Synced 5 min ago</span></td></tr>
     </tbody></table>
-    <small>AgentRay SDK metrics use project timezone; App Store Connect metrics use UTC days. Both labels stay visible.</small>
+    <small>One day-boundary convention: the project timezone. Every label above uses it.</small>
   </article>
 </section>
 
@@ -358,112 +341,45 @@ summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
   <article class="panel"><h2>Data status</h2><p class="muted">Source health is unavailable while the overview cannot load.</p></article>
 </section>
 
-<!-- ================= SOURCE NOT CONNECTED ================= -->
-<section class="state" id="state-nosource" aria-label="App view — source not connected">
-  <header class="row"><div><h1>Overview</h1><p class="muted" id="nosource-range">Sep 5–11 · 7 complete days · All platforms</p></div>
-    <span class="seg" role="group" aria-label="Platform" id="nosource-platform">
-      <button type="button" data-platform="all" aria-current="true">All platforms</button>
-      <button type="button" data-platform="ios">iOS</button>
-      <button type="button" data-platform="android">Android</button>
-    </span>
+<!-- ================= UNINSTRUMENTED MONETIZATION ================= -->
+<section class="state" id="state-uninstrumented" aria-label="Uninstrumented monetization">
+  <header class="row"><div><h1>Overview</h1><p class="muted">Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh</p></div>
+    <span class="seg" role="group" aria-label="Platform"><a href="#state-uninstrumented">All platforms</a><a href="#state-uninstrumented">Web</a><a href="#state-uninstrumented" aria-current="true">iOS</a></span>
   </header>
   <div class="stats" role="group" aria-label="Headline metrics">
-    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>SDK events · still useful without a store source</small></div>
+    <div class="stat"><span class="label">Active people</span><span class="value">1,240</span><small>Follows the platform filter</small></div>
     <div class="stat"><span class="label">New people</span><span class="value">320</span><small>First observed activity</small></div>
     <div class="stat"><span class="label">Sessions</span><span class="value">2,860</span><small>Web 1,940 · iOS 920</small></div>
     <div class="stat"><span class="label">Activation</span><span class="value">25%</span><small>80 of 320 eligible</small></div>
     <div class="stat"><span class="label">Revenue</span><span class="value unavail">Set up</span><small>No billing source connected</small></div>
   </div>
 
-  <article id="nosource-compact" class="panel stack">
-    <div class="row"><h2>What connecting App Store Connect adds</h2><span class="tag">Source needed</span></div>
-    <p class="muted">Your SDK already tells you what people do inside the app. Connecting App Store Connect adds what happens <em>before</em> they install — impressions, product page views, downloads, pre-orders — and what Apple pays you, so a drop in activation can be traced back to a drop in conversion rather than guessed at. Downloads, impressions, proceeds, purchases, App Clip and benchmark data come only from Apple; they cannot be derived from SDK events.</p>
-    <p class="muted"><small><strong>Example — not your data.</strong> “Conversion fell from 5.2% to 4.1% while product page views held flat.” This is what a finding looks like once the source is connected; it is not a projection of your results.</small></p>
-    <div class="row"><a class="button primary" href="#data">Connect App Store Connect</a><a class="button" href="#agents">Ask your agent to set it up</a></div>
-  </article>
-
-  <div id="nosource-android-note" class="callout" hidden>
-    <span class="clabel">iOS only</span>
-    <p class="ctitle">App Store metrics are iOS-only</p>
-    <p class="cdetail">App Store Connect describes the iOS app, so its metrics are not shown as Android data. Switch to <strong>All platforms</strong> or <strong>iOS</strong> to connect the source and see them.</p>
-  </div>
-
-  <div id="nosource-grid" class="stack" hidden>
-  <article class="panel stack"><div class="row"><h2>Acquisition</h2><a class="button" href="#data">Connect source</a></div>
+  <article class="panel stack">
+    <div class="row"><h2>Monetization</h2><span class="tag">Instrumentation needed</span></div>
     <div class="stats stats3">
-      <div class="stat"><span class="label">First-time downloads</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Redownloads</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Conversion rate</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Impressions / day</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Product page views</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Updates</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
+      <div class="stat"><span class="label">Instrumented revenue</span><span class="value unavail">Set up</span><small>Requires a trusted billing source</small></div>
+      <div class="stat"><span class="label">Paying people</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchases</span><span class="value unavail">Set up</span><small>Requires a billing source</small></div>
+      <div class="stat"><span class="label">Purchase→repeat</span><span class="value unavail">Not ready</span><small>Needs a mature cohort</small></div>
     </div>
+    <p class="muted">Revenue, paying people and purchases need a trusted billing source — a server-side purchase event or a billing integration AgentRay can verify. Until one is connected these tiles stay <em>Set up</em>; they are never estimated from page views, sessions or any other event.</p>
+    <p class="muted"><small><strong>Example — not your data.</strong> “Instrumented revenue rose from 1,240 to 1,480 LT while paying people held flat.” This is what a finding looks like once billing is instrumented; it is not a projection of your results.</small></p>
+    <div class="row"><a class="button primary" href="#data">Set up billing instrumentation</a><a class="button" href="#agents">Ask your agent to set it up</a></div>
   </article>
 
-  <article class="panel stack"><div class="row"><h2>Monetization</h2><a class="button" href="#data">Connect source</a></div>
-    <div class="stats stats3">
-      <div class="stat"><span class="label">Proceeds</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Paying users</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">In-app purchases / day</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-      <div class="stat"><span class="label">Download→paid D1/D7/D35</span><span class="value unavail">Not available</span><small>Requires App Store Connect</small></div>
-    </div>
-  </article>
-
-  <article class="panel stack"><div class="row"><h2>App usage</h2><a class="button" href="#data">Connect source</a></div>
-    <div class="stats stats4">
-      <div class="stat"><span class="label">Avg retention D1–D28</span><span class="value unavail">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
-      <div class="stat"><span class="label">Crashes by version</span><span class="value unavail">Not available</span><small>Requires App Store Connect · opt-in devices only</small></div>
-    </div>
-    <small>SDK-derived sessions and active people still work — see the generic overview. Only Apple-sourced metrics are gated.</small>
-  </article>
-
-  </div>
-
-
-  <article class="panel"><div class="row"><h2>Data status</h2></div>
+  <article class="panel"><div class="row"><h2>Data status</h2><small>Last event received 2 min ago</small></div>
     <table><thead><tr><th>Source</th><th>What it brings</th><th>Status</th></tr></thead><tbody>
+      <tr><td>Website SDK</td><td>Pages, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
       <tr><td>iOS SDK</td><td>Screens, sessions, key actions</td><td><span class="pill"><span class="dot"></span>Healthy</span></td></tr>
-      <tr><td>App Store Connect</td><td>Downloads, impressions, proceeds, crashes</td><td><span class="pill"><span class="dot off"></span>Not connected</span></td></tr>
+      <tr><td>Billing source</td><td>Revenue, paying people, purchases</td><td><span class="pill"><span class="dot off"></span>Not connected</span></td></tr>
     </tbody></table>
   </article>
 </section>
 
-<footer class="footer"><small>Proposal only. Contracts in docs/redesign/strategy.md; spec in docs/redesign/overview-dashboard.md.</small></footer>
+<footer class="footer"><small>Proposal only. Contracts in docs/redesign/strategy.md; spec in docs/redesign/overview-dashboard.md. App Store Connect was a layout/IA reference only — no store integration, Apple metric, credential flow or iOS-only gating is part of this product.</small></footer>
 </main></div>
 <script>
-var STATES=['populated','appview','firstrun','nodata','stale','error','nosource'];
-var PLATFORM_LABEL={all:'All platforms',web:'Web',ios:'iOS',android:'Android'};
-
-// The App Store groups are iOS/App Store facts. They render on All platforms
-// and iOS; on Android (or Web/Server/Unknown) they are withheld with an
-// explicit "iOS only" note — never re-labeled as that platform's data.
-function applyPlatform(stateId,platform){
-  var groups=document.getElementById(stateId+'-groups');
-  var note=document.getElementById(stateId+'-android-note');
-  var grid=document.getElementById(stateId+'-grid');
-  var compact=document.getElementById(stateId+'-compact');
-  var range=document.getElementById(stateId+'-range');
-  var applePlatform=platform==='all'||platform==='ios';
-  var android=platform==='android';
-  if(groups)groups.hidden=!applePlatform;
-  if(note)note.hidden=!android;
-  if(grid)grid.hidden=platform!=='ios';
-  if(compact)compact.hidden=platform!=='all';
-  if(range)range.textContent='Sep 5–11 · 7 complete days · '+(PLATFORM_LABEL[platform]||'All platforms');
-  var seg=document.getElementById(stateId+'-platform');
-  if(seg)seg.querySelectorAll('button').forEach(function(b){
-    if(b.getAttribute('data-platform')===platform)b.setAttribute('aria-current','true');
-    else b.removeAttribute('aria-current');
-  });
-}
-
-function wirePlatform(stateId){
-  var seg=document.getElementById(stateId+'-platform');
-  if(!seg)return;
-  seg.querySelectorAll('button').forEach(function(b){
-    b.addEventListener('click',function(){applyPlatform(stateId,b.getAttribute('data-platform'));});
-  });
-}
+var STATES=['populated','grouped','firstrun','nodata','stale','error','uninstrumented'];
 
 function apply(){
   var h=(location.hash||'').replace('#state-','');
@@ -476,18 +392,7 @@ function apply(){
     if(a.getAttribute('data-state')===h)a.setAttribute('aria-current','true');
     else a.removeAttribute('aria-current');
   });
-  // Platform-only nav affordance: the App analytics sub-item is reachable only
-  // when the Apple source is connected; otherwise it reads "Not connected".
-  var tag=document.getElementById('appnav-tag');
-  if(tag){
-    if(h==='nosource'){tag.textContent='· Not connected';tag.parentElement.classList.add('off');}
-    else{tag.textContent='· Apple connected';tag.parentElement.classList.remove('off');}
-  }
-  // Re-entering a state resets its platform filter to the default view.
-  if(h==='appview')applyPlatform('appview','all');
-  if(h==='nosource')applyPlatform('nosource','all');
 }
-wirePlatform('appview');wirePlatform('nosource');
 addEventListener('hashchange',apply);apply();
 </script>
 </body></html>

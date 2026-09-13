@@ -44,7 +44,7 @@ Installation success means a known test event is visible with correct platform a
 
 ### Default Product Overview
 
-Borrow App Store Connect's quick overview and drill-down pattern, while defining AgentRay's own metric semantics. Store impressions, downloads and Apple proceeds require an Apple data integration and must not be inferred from SDK events. Apple's usage metrics also have collection/consent qualifications; SDK counts should not be presented as identical to Apple counts. [Apple dashboard reference](https://developer.apple.com/help/app-store-connect-analytics/overview/analytics-dashboard).
+Borrow the quick-overview and drill-down *pattern* from a store analytics dashboard — the scan order, the grouped KPI tiles, the See more affordance — while defining AgentRay's own metric semantics from AgentRay's own events. That screen was a layout and information-hierarchy reference only: there is no store integration, no store credential, no store metric and no store provenance anywhere in this product, and no store figure is ever inferred from SDK events. A metric AgentRay cannot verify from its own data stays `Not available` / `Set up` with the required instrumentation named.
 
 | Block | Definition / prerequisite |
 |---|---|
