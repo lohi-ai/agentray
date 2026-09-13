@@ -20,7 +20,8 @@ import (
 //     two years. The event store is append-only with a bounded retention
 //     window (`EVENT_RETENTION_DAYS`, default one year — an operator can set it
 //     to 0, which makes a list kept there permanent instead of merely short);
-//     a contact list kept there is one that quietly expires.
+//     with a window configured, a contact list kept there is one that quietly
+//     expires.
 //  2. An EVENT — `waitlist.joined`, written down the normal ingest path with the
 //     same enrichment (referrer → channel, UA → visitor class) every other event
 //     gets. That is what makes the signup show up in funnels, in dashboards, and

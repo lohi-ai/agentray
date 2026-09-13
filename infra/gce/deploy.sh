@@ -20,7 +20,9 @@ set -euo pipefail
 # agentray-db-url-<env>); DuckDB is embedded in the API container, one file
 # per colour, and a daily sweep deletes events older than EVENT_RETENTION_DAYS
 # (default 365 — the bound the pre-DuckDB ClickHouse schema enforced; 0 keeps
-# every event) so the per-colour file has a ceiling.
+# every event). That bounds event AGE, not the file: in-window volume and the
+# tables the sweep never touches (persons, aliases, connector rows) still set
+# the disk requirement, so keep monitoring free space per colour.
 
 PROJECT_ID="lohi-dev-lohi"
 ZONE="asia-southeast1-a"

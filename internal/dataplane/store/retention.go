@@ -123,6 +123,13 @@ func (r *Retention) Tick(ctx context.Context, now time.Time) {
 		switch {
 		case err == nil:
 			r.lastDone = now
+			// A completed sweep is evidence the current batch fits the store, so
+			// the size climbs back toward the default. Without this the halving
+			// below would be a one-way ratchet: one slow sweep would leave the
+			// next month of sweeps deleting a handful of rows per transaction.
+			if r.batch < retentionBatch {
+				r.batch = min(r.batch*2, retentionBatch)
+			}
 		case removed == 0 && errors.Is(sweepCtx.Err(), context.DeadlineExceeded):
 			// The budget expired while the first batch was still scanning, so
 			// its transaction rolled back and this sweep deleted nothing. The
@@ -146,7 +153,12 @@ func (r *Retention) Tick(ctx context.Context, now time.Time) {
 			log.Printf("retention: nothing older than %s to delete", cutoff)
 		case err == nil:
 			log.Printf("retention: deleted %d events older than %s", removed, cutoff)
-		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		case errors.Is(err, context.Canceled):
+			// Only Stop cancels: the tick's own context is detached, so this is
+			// a shutdown, not a budget. Saying "continuing on the next tick"
+			// here would promise a retry that cannot happen.
+			log.Printf("retention: sweep stopped after %d events older than %s (shutdown)", removed, cutoff)
+		case errors.Is(err, context.DeadlineExceeded):
 			log.Printf("retention: sweep reached its %s budget after %d events older than %s — continuing on the next tick", budget, removed, cutoff)
 			if halved > 0 {
 				log.Printf("retention: a batch did not commit inside the budget; the next sweep deletes %d events at a time", halved)

@@ -210,8 +210,20 @@ func TestPruneKeepsTheBatchesThatCommittedWhenTheBudgetExpires(t *testing.T) {
 	}()
 
 	// Cancel as soon as the first batch has landed, which leaves a known-committed
-	// prefix and a known-remaining backlog.
+	// prefix and a known-remaining backlog. The poll is bounded and watches the
+	// sweep's own result, so a sweep that errors before its first delete, or
+	// finishes before the test can interrupt it, fails instead of hanging.
+	deadline := time.Now().Add(30 * time.Second)
 	for eventCount(t, d) == seeded+1 {
+		select {
+		case early := <-done:
+			t.Fatalf("the sweep finished (removed=%d err=%v) before the test could interrupt it", early.removed, early.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("the sweep never committed a batch inside 30s")
+		}
 		time.Sleep(time.Millisecond)
 	}
 	cancel()

@@ -398,20 +398,53 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	return nil
 }
 
-// refreshEvents appends only what arrived since the last refresh. The cursor
-// is (inserted_at, event_id) — a bare inserted_at high-water mark skips rows
-// that share the timestamp of the last copied row. A delete in the main file —
-// the retention sweep does exactly that — shows up as the sandbox holding more
-// rows than the main file has at or below that cursor, and rebuilds the table.
-func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
+// sandboxEventCopy selects the rows above the sandbox's cursor that it has not
+// taken yet: strictly newer than (inserted_at, event_id), ordered so the cursor
+// can advance monotonically.
+const sandboxEventCopy = `SELECT * FROM events WHERE project_id = ?
+	 AND (inserted_at > ? OR (inserted_at = ? AND event_id::VARCHAR > ?))
+	 ORDER BY inserted_at, event_id`
+
+// eventCursor is the sandbox's high-water mark — the newest (inserted_at,
+// event_id) pair it holds. The copy resumes above it, and the drift check
+// compares the main file against it.
+func (sb *sqlSandbox) eventCursor(ctx context.Context) (time.Time, string, error) {
 	var highWater time.Time
 	var highWaterID string
 	if err := sb.feeder.QueryRowContext(ctx,
 		`SELECT coalesce(max(inserted_at), TIMESTAMPTZ '1970-01-01') FROM events`).Scan(&highWater); err != nil {
-		return err
+		return time.Time{}, "", err
 	}
 	if err := sb.feeder.QueryRowContext(ctx,
 		`SELECT coalesce(max(event_id::VARCHAR), '') FROM events WHERE inserted_at = ?`, highWater).Scan(&highWaterID); err != nil {
+		return time.Time{}, "", err
+	}
+	return highWater, highWaterID, nil
+}
+
+// refreshEvents appends only what arrived since the last refresh — the cursor
+// is (inserted_at, event_id), because a bare inserted_at high-water mark skips
+// rows that share the timestamp of the last copied row — and then checks
+// whether anything the sandbox now holds has left the main file. The retention
+// sweep deletes events, and this copy only appends, so a delete is invisible to
+// it except as a count drift.
+//
+// The drift check runs AFTER the copy, against the cursor the copy produced.
+// Checking before it left a window: a sweep that deleted a row between the
+// count and the copy passed the check, and the copy cannot remove a row it
+// already holds, so that query served an event the main store had deleted.
+func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
+	highWater, highWaterID, err := sb.eventCursor(ctx)
+	if err != nil {
+		return err
+	}
+	if err := sb.copyRows(ctx, sandboxEventCopy,
+		[]any{sb.projectID, highWater, highWater, highWaterID}, "events", 28); err != nil {
+		return err
+	}
+
+	highWater, highWaterID, err = sb.eventCursor(ctx)
+	if err != nil {
 		return err
 	}
 	var sandboxCount, mainAtOrBelowHighWater int64
@@ -419,11 +452,10 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		return err
 	}
 	if err := sb.main.Read(ctx, func(conn *sql.Conn) error {
-		// Count only what the sandbox should already hold — everything at or
-		// below its cursor. Comparing against the whole table instead lets an
-		// equal number of newly arrived rows hide a delete: the sweep removing
-		// D events while D new ones land leaves the two totals agreeing, and
-		// the sandbox keeps answering queries with rows the main store deleted.
+		// Count only what the sandbox should hold — everything at or below its
+		// cursor. Counting the whole main table instead lets an equal number of
+		// newly arrived rows hide a delete: the sweep removing D events while D
+		// new ones land leaves the two totals agreeing.
 		return conn.QueryRowContext(ctx,
 			`SELECT count(*) FROM events WHERE project_id = ?
 			 AND (inserted_at < ? OR (inserted_at = ? AND event_id::VARCHAR <= ?))`,
@@ -436,15 +468,10 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		if _, err := sb.feeder.ExecContext(ctx, `DELETE FROM events`); err != nil {
 			return err
 		}
-		highWater = time.Time{}
-		highWaterID = ""
+		return sb.copyRows(ctx, sandboxEventCopy,
+			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 28)
 	}
-	return sb.copyRows(ctx,
-		`SELECT * FROM events WHERE project_id = ?
-		 AND (inserted_at > ? OR (inserted_at = ? AND event_id::VARCHAR > ?))
-		 ORDER BY inserted_at, event_id`,
-		[]any{sb.projectID, highWater, highWater, highWaterID},
-		"events", 28)
+	return nil
 }
 
 // refreshTable reconciles a small table wholesale: delete-then-copy so a row
