@@ -479,12 +479,14 @@ FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 // --- dataset preview ---
 
 // softDeleteCondition renders the positive "this row is deleted" predicate for
-// one sync's soft-delete contract, applied AFTER FINAL so the newest version
-// of a row decides whether it is deleted. bool_true reads a JSON boolean;
+// one sync's soft-delete contract, applied to the landed row: external_rows
+// keeps one row per row_key — a re-sync replaces it in place — so there is no
+// duplicate version left for a read to collapse. bool_true reads a JSON boolean;
 // non_null treats any present non-null value (e.g. a deleted_at timestamp) as
-// deleted — JSONExtractRaw returns a non-Nullable String, so isNull() on it is
-// constant-false and deleted_at:null would hide a live row; comparing the raw
-// text works because JSON null extracts to 'null' and a real value does not.
+// deleted — the pre-DuckDB extractor returned a non-nullable string, so testing
+// it for SQL NULL was constant-false and deleted_at:null would hide a live row;
+// comparing the extracted value works because JSON null reads as 'null' and a
+// real value does not.
 // Both read paths — dataset_preview and the scoped_external_rows CTE behind
 // run_sql — build their filter from this one function so they can never
 // disagree about which rows are deleted.
@@ -566,9 +568,10 @@ type DatasetPreviewRow struct {
 	SyncedAt string `json:"synced_at"`
 }
 
-// DatasetPreview is the dataset-semantics read: rows through the deduped
-// FINAL view with the soft-delete filter applied, plus the freshness block
-// the UI and agents need to trust or distrust what they see.
+// DatasetPreview is the dataset-semantics read: the landed rows — one per
+// row_key, replaced in place by a re-sync — with the soft-delete filter applied,
+// plus the freshness block the UI and agents need to trust or distrust what
+// they see.
 type DatasetPreview struct {
 	Sync ConnectorSync       `json:"sync"`
 	Rows []DatasetPreviewRow `json:"rows"`
@@ -584,8 +587,8 @@ type DatasetPreview struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// DatasetPreviewForProject reads one sync's landed rows through FINAL +
-// soft-delete filter, project-scoped. The scoped_external_rows CTE behind
+// DatasetPreviewForProject reads one sync's landed rows with the soft-delete
+// filter applied, project-scoped. The scoped_external_rows CTE behind
 // run_sql applies the same predicate (softDeleteCondition), so the preview
 // and SQL can never disagree about which rows are deleted.
 func (s *Store) DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (DatasetPreview, error) {

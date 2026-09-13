@@ -193,15 +193,16 @@ type Event struct {
 	// "unknown" rather than folded into web.
 	Platform string `json:"platform,omitempty"`
 	// InsertID is the caller-supplied idempotency key ($insert_id). It is captured
-	// and stored so a future read-time de-dup (argMax(...) GROUP BY insert_id) can be
-	// layered on if a money path ever needs one. NOTE: no read path de-dups on it
-	// today. The one money-adjacent read — the retention "ever paid" flag — is
-	// duplicate-safe by construction (it aggregates with max()/argMaxIf, so a
-	// re-inserted `revenue` event can't change the boolean). Cost/token *sums* in the
-	// daily rollups and raw agent reads are not de-duped; the pipeline keeps the
-	// practical duplicate rate near zero (ack-after-insert + the JetStream duplicate
-	// window), which the data-architecture doc explicitly accepts for count/sum
-	// metrics. Do not describe a de-dup guard here that the code does not implement.
+	// and stored so a future read-time de-dup (arg_max(amount, "timestamp") GROUP BY
+	// insert_id) can be layered on if a money path ever needs one. NOTE: no read path
+	// de-dups on it today. The one money-adjacent read — the retention "ever paid"
+	// flag — is duplicate-safe by construction (it aggregates the paid flag with
+	// max(), so a re-inserted `revenue` event can't change the boolean). Cost/token
+	// *sums* in the daily rollups and raw agent reads are not de-duped; the pipeline
+	// keeps the practical duplicate rate near zero (ack-after-insert + the JetStream
+	// duplicate window), which the data-architecture doc explicitly accepts for
+	// count/sum metrics. Do not describe a de-dup guard here that the code does not
+	// implement.
 	InsertID string `json:"insert_id,omitempty"`
 	// IsUnplanned marks an event whose name was not in the project's established
 	// catalog when captured (P4 tracking-plan signal). Advisory only.
@@ -1790,10 +1791,10 @@ func (s *Store) workspaceCanonicalExpr(column string) string {
 }
 
 // canonicalID resolves a raw distinct id to its stitched canonical id, mirroring
-// the read-path dictGetOrDefault('aliases_dict','canonical_id',(project,id), id):
+// the read path's resolved_events view (coalesce(aliases.canonical_id, distinct_id)):
 // an id that appears as an anonymous alias maps to its canonical, everything else
 // (including canonical ids themselves) maps to itself. Single-hop, matching the
-// dictionary; used by the person-profile write path to key by canonical id.
+// view; used by the person-profile write path to key by canonical id.
 func (r identityResolver) canonicalID(distinctID string) string {
 	for i, anonymousID := range r.anonymousIDs {
 		if anonymousID == distinctID {
@@ -1974,8 +1975,8 @@ LIMIT ?`, []any{projectID, limit}, func(rows *sql.Rows) error {
 }
 
 // distinctPlatforms lists the apps that sent events in the window, busiest
-// first. Bounded by the column's cardinality (LowCardinality, a handful of
-// values), so no LIMIT is needed for it to stay cheap.
+// first. Bounded by the column's small value set (a handful of apps), so no
+// LIMIT is needed for it to stay cheap.
 func (s *Store) distinctPlatforms(ctx context.Context, where string, args []any) ([]string, error) {
 	result := []string{}
 	err := s.duckQuery(ctx, `
@@ -3396,8 +3397,8 @@ func defaultSubscriptionMapping(projectID string) SubscriptionMapping {
 // the amount property is interpolated as a quoted JSON path like every other
 // mapped token, so none of this is a raw-SQL surface.
 func paidEventExpr(mapping SubscriptionMapping, openExpr string) string {
-	// JSONExtractFloat(p,'k') > 0 -> a missing/non-numeric key extracts 0 and
-	// never matches; try_cast + coalesce reproduces that exactly.
+	// Historical, pre-DuckDB: JSONExtractFloat(p,'k') > 0 -> a missing/non-numeric
+	// key extracts 0 and never matches; try_cast + coalesce reproduces that exactly.
 	sdkShaped := "(event_name = 'revenue' AND coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0) > 0)"
 	amountProp := strings.TrimSpace(mapping.AmountProp)
 	if amountProp == "" || strings.TrimSpace(openExpr) == "" {
@@ -3786,8 +3787,8 @@ func (s *Store) Cohorts(ctx context.Context, projectID string, filter EventFilte
 	cancelLit := sqlQuote(mapping.CancelEvent)
 	openExpr := "(event_name = " + startLit + " OR event_name = " + renewLit + ")"
 	// JSON paths use the quoted-key form ($."prop") so a mapped property whose
-	// name contains a dot still reads one top-level key, matching DuckDB's
-	// literal-key JSONExtractString semantics. The token charset
+	// name contains a dot still reads one top-level key — DuckDB json_extract_string
+	// treats the quoted segment as a literal key. The token charset
 	// (validSubscriptionToken) excludes quotes, so the path cannot break out.
 	trialExpr := "false"
 	if strings.TrimSpace(mapping.TrialProp) != "" {
@@ -4342,7 +4343,7 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 	if hasExternal {
 		// external_rows is keyed by (project, connector, table, row_key) with
 		// INSERT OR REPLACE on write, so the newest sync's row is the only row —
-		// the job FINAL did on ReplacingMergeTree. The per-connector/table
+		// there is no duplicate left for a read to collapse. The per-connector/table
 		// soft-delete predicate rides the same CTE so a row the source marked
 		// deleted reads as gone here exactly as it does in dataset_preview —
 		// one contract, one predicate (softDeleteCondition). Hard deletes are
