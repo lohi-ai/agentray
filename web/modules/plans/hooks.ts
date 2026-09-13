@@ -199,9 +199,11 @@ export function useExperiment(id: string) {
     committing: commit.isPending,
     decide: (status: string, note: string) => decide.mutate({ status, note }),
     deciding: decide.isPending,
-    abandon: (reason: string) => abandon.mutate({ reason }),
+    abandon: (reason: string) => abandon.mutateAsync({ reason }),
     abandoning: abandon.isPending,
-    recordOutcome: (v: { value: number; unit: string; window: string; evidence_ref: string }) => recordOutcome.mutate(v),
+    // Promise-returning so the detail page closes its dialog only after the
+    // write resolves: a failed write keeps the dialog and what was typed.
+    recordOutcome: (v: { value: number; unit: string; window: string; evidence_ref: string }) => recordOutcome.mutateAsync(v),
     recording: recordOutcome.isPending,
   };
 }

@@ -25,6 +25,34 @@ describe('evidenceLine', () => {
   it('does not invent provenance for malformed evidence', () => {
     expect(evidenceLine({ created_at: '2026-09-12T00:00:00Z', evidence_json: '{not json' })).toContain('evidence unavailable');
   });
+
+  // An object query_ref is a reproducible spec, not a label: the identifier (or
+  // the SQL itself) and the version are what make the number re-checkable. A
+  // line that prints only the kind cannot be re-run.
+  it('renders the object query_ref identity and version', () => {
+    expect(
+      evidenceLine({
+        created_at: '2026-09-12T00:00:00Z',
+        evidence_json: JSON.stringify({ query_ref: { kind: 'saved_query', id_or_definition: 'activation_funnel', version: 3 } }),
+      }),
+    ).toBe('saved query activation_funnel v3');
+  });
+
+  it('prints a sql definition verbatim, never truncated', () => {
+    const definition = "select count(*) from events where event_name = 'user.pageview' and platform = 'ios'";
+    const line = evidenceLine({
+      created_at: '2026-09-12T00:00:00Z',
+      evidence_json: JSON.stringify({ query_ref: { kind: 'sql', id_or_definition: definition, version: 1 } }),
+    });
+    expect(line).toBe(`sql ${definition} v1`);
+  });
+
+  it('keeps the bare-string form and an identity-less object honest', () => {
+    expect(evidenceLine({ created_at: '2026-09-12T00:00:00Z', evidence_json: JSON.stringify({ query_ref: 'activation_funnel' }) })).toBe('activation_funnel');
+    // No id and no version: the kind alone is all the envelope carries, so the
+    // line stops there rather than inventing an identity.
+    expect(evidenceLine({ created_at: '2026-09-12T00:00:00Z', evidence_json: JSON.stringify({ query_ref: { kind: 'metric' } }) })).toBe('metric');
+  });
 });
 
 describe('evidenceAvailable', () => {
@@ -34,6 +62,7 @@ describe('evidenceAvailable', () => {
   it('agrees with evidenceLine on what counts as provenance', () => {
     const rows = [
       { created_at: '2026-09-12T00:00:00Z', evidence_json: JSON.stringify({ query_ref: 'activation_funnel' }) },
+      { created_at: '2026-09-12T00:00:00Z', evidence_json: JSON.stringify({ query_ref: { kind: 'metric', id_or_definition: 'activation', version: 2 } }) },
       { created_at: '2026-09-12T00:00:00Z', evidence_json: JSON.stringify({ events: 202, sessions: 8 }) },
       { created_at: '2026-09-12T00:00:00Z', evidence_json: '{}' },
       { created_at: '2026-09-12T00:00:00Z', evidence_json: '{not json' },

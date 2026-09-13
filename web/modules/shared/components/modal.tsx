@@ -30,7 +30,7 @@ export type PromptOption = { value: string; label: string };
 // PromptDialog replaces window.prompt: a single text field, plus an optional
 // select (for choosing from a known set like chart metrics). Enter submits.
 export function PromptDialog({
-  title, label, placeholder, defaultValue = '', submitLabel = 'Save', selectLabel, options, eventNameForChoices, eventNameLabel = 'Event name', onSubmit, onClose,
+  title, label, placeholder, defaultValue = '', submitLabel = 'Save', selectLabel, options, eventNameForChoices, eventNameLabel = 'Event name', onSubmit, onClose, closeOnSubmit = true,
 }: {
   title: string;
   label?: string;
@@ -44,8 +44,13 @@ export function PromptDialog({
   // down a single event name pick it from the catalog instead of typing it blind.
   eventNameForChoices?: string[];
   eventNameLabel?: string;
-  onSubmit: (value: string, choice: string, eventName: string) => void;
+  onSubmit: (value: string, choice: string, eventName: string) => void | Promise<unknown>;
   onClose: () => void;
+  // A write that can fail must not close the dialog before it settles, or the
+  // text just typed is gone with nothing recorded: pass false and close after
+  // the promise resolves. The default keeps every fire-and-forget caller
+  // closing immediately, exactly as before.
+  closeOnSubmit?: boolean;
 }) {
   const [value, setValue] = useState(defaultValue);
   const [choice, setChoice] = useState(options?.[0]?.value ?? '');
@@ -55,10 +60,17 @@ export function PromptDialog({
 
   const showEventName = !!eventNameForChoices?.includes(choice);
 
-  function submit() {
-    if (!value.trim()) return;
-    onSubmit(value.trim(), choice, showEventName ? eventName.trim() : '');
-    onClose();
+  async function submit() {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    try {
+      await onSubmit(trimmed, choice, showEventName ? eventName.trim() : '');
+    } catch {
+      // The caller's mutation owns the error surface; the dialog stays open
+      // with the entered value so the write can be retried.
+      return;
+    }
+    if (closeOnSubmit) onClose();
   }
 
   return (

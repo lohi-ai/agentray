@@ -16,8 +16,8 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { Modal, PromptDialog } from '@/modules/shared/components/modal';
 import { Button, Callout, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { chatHref, isRecorded, progressPct, stateOf, STATE_LABEL, STATE_PILL, STATE_TONE } from '@/modules/prototypes/lib/prototype';
-import { useExperiment } from './hooks';
-import { baselineLine, evidenceLine, outcomeEntries } from './lib/plans';
+import { useExperiment } from '../hooks';
+import { baselineLine, evidenceLine, outcomeEntries } from '../lib/plans';
 
 // /plans/[testId] — one experiment in full: the terms, every resumable field
 // the row carries, the append-only outcome list, and the owner acts. The
@@ -98,8 +98,12 @@ export function PlanDetailPage() {
           label="Why is it being closed?"
           placeholder="e.g. the idea changed before we committed"
           submitLabel={abandoning ? 'Abandoning…' : 'Abandon proposal'}
-          onSubmit={(reason) => {
-            abandon(reason.trim() || 'Closed before commitment');
+          // The write can fail (a revision conflict reloads the row), so the
+          // dialog closes only once it has actually landed — the reason the
+          // owner typed is not thrown away by a failed submission.
+          closeOnSubmit={false}
+          onSubmit={async (reason) => {
+            await abandon(reason.trim() || 'Closed before commitment');
             setAbandoningOpen(false);
           }}
           onClose={() => setAbandoningOpen(false)}
@@ -108,8 +112,8 @@ export function PlanDetailPage() {
       {outcomeOpen ? (
         <OutcomeDialog
           busy={recording}
-          onSubmit={(v) => {
-            recordOutcome(v);
+          onSubmit={async (v) => {
+            await recordOutcome(v);
             setOutcomeOpen(false);
           }}
           onClose={() => setOutcomeOpen(false)}
@@ -366,7 +370,7 @@ function OutcomeDialog({
   onClose,
 }: {
   busy: boolean;
-  onSubmit: (v: { value: number; unit: string; window: string; evidence_ref: string }) => void;
+  onSubmit: (v: { value: number; unit: string; window: string; evidence_ref: string }) => void | Promise<unknown>;
   onClose: () => void;
 }) {
   const [value, setValue] = useState('');
@@ -376,6 +380,18 @@ function OutcomeDialog({
 
   const parsed = Number(value);
   const valid = value.trim() !== '' && Number.isFinite(parsed);
+
+  // The dialog closes only after the append lands (the page does that once the
+  // promise resolves). A rejection is the page's error to surface; swallowing
+  // it here keeps the entered observation on screen to retry.
+  async function submit() {
+    if (!valid) return;
+    try {
+      await onSubmit({ value: parsed, unit: unit.trim(), window: window_.trim(), evidence_ref: evidenceRef.trim() });
+    } catch {
+      return;
+    }
+  }
 
   return (
     <Modal title="Record an outcome" onClose={onClose}>
@@ -395,7 +411,7 @@ function OutcomeDialog({
         />
         <HStack gap={2} justify="end">
           <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="sm" disabled={!valid || busy} onClick={() => onSubmit({ value: parsed, unit: unit.trim(), window: window_.trim(), evidence_ref: evidenceRef.trim() })}>
+          <Button variant="primary" size="sm" disabled={!valid || busy} onClick={() => void submit()}>
             {busy ? 'Recording…' : 'Record outcome'}
           </Button>
         </HStack>

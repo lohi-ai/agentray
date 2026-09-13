@@ -20,6 +20,7 @@ import {
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { formatCompact, formatRelative } from '@/lib/format';
 import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview } from '@/modules/app/hooks/connectors';
+import { previewProjection } from './dataset-preview';
 import { ConfirmDialog, Modal, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/signal-primitives';
@@ -759,59 +760,29 @@ function EditSyncDialog({ connectorID, sync, onSubmit, onClose }: {
   );
 }
 
-// previewColumns derives the table's columns from the union of keys across the
-// preview rows — landed rows are schemaless JSON, so the table shows what is
-// actually there rather than the source's declared columns.
-function previewColumns(rows: { data: string }[]): string[] {
-  const seen = new Set<string>();
-  for (const r of rows) {
-    try {
-      const obj = JSON.parse(r.data) as Record<string, unknown>;
-      for (const k of Object.keys(obj)) {
-        if (seen.size < 8) seen.add(k);
-      }
-    } catch {
-      // A row that is not an object still renders its raw JSON in the data cell.
-    }
-  }
-  return [...seen];
-}
-
+// The dialog renders the landed rows plus the sync's own landing metadata.
+// `previewProjection` owns the column keys, so a source column named row_key
+// can neither overwrite that metadata nor duplicate a column.
 function DatasetPreviewDialog({ sync, onClose }: { sync: ConnectorSync; onClose: () => void }) {
   const { preview, loading, error } = useDatasetPreview(sync.id);
   const rows = useMemo(() => preview?.rows ?? [], [preview]);
-  const cols = useMemo(() => previewColumns(rows), [rows]);
-
-  const previewData = useMemo(
-    () =>
-      rows.map((r) => {
-        let obj: Record<string, unknown> = {};
-        try {
-          const parsed = JSON.parse(r.data);
-          if (parsed && typeof parsed === 'object') obj = parsed as Record<string, unknown>;
-        } catch {
-          obj = { data: r.data };
-        }
-        return { row_key: r.row_key, cursor: r.cursor, synced_at: r.synced_at, ...obj } as Record<string, unknown>;
-      }),
-    [rows],
-  );
+  const projection = useMemo(() => previewProjection(rows), [rows]);
 
   const tableColumns = useMemo<DataColumn<Record<string, unknown>>[]>(() => [
     { key: 'row_key', header: 'Row', width: { type: 'proportional', value: 1, minWidth: 90 }, renderCell: (r) => <span className="font-mono text-[var(--color-text-secondary)]">{String(r.row_key ?? '')}</span> },
-    ...cols.map((c) => ({
-      key: c,
+    ...projection.sourceKeys.map((c) => ({
+      key: projection.sourceKeyMap[c],
       header: c,
       sortable: false,
       width: { type: 'proportional' as const, value: 1, minWidth: 90 },
       renderCell: (r: Record<string, unknown>) => {
-        const v = r[c];
+        const v = r[projection.sourceKeyMap[c]];
         const text = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
         return <span className="font-mono text-[var(--color-text-secondary)]">{text}</span>;
       },
     })),
     { key: 'synced_at', header: 'Synced', width: { type: 'proportional', value: 1, minWidth: 80 }, renderCell: (r) => <span className="text-[var(--color-text-secondary)]">{formatRelative(String(r.synced_at ?? ''))}</span> },
-  ], [cols]);
+  ], [projection]);
 
   const s = preview?.sync ?? sync;
 
@@ -879,7 +850,7 @@ function DatasetPreviewDialog({ sync, onClose }: { sync: ConnectorSync; onClose:
               {formatCompact(preview?.total_rows ?? 0)} rows in the deduped dataset
               {s.deletion_mode === 'soft_column' ? ' (soft-deleted rows excluded)' : ''} — showing the {rows.length} most recent.
             </Text>
-            <DataTable columns={tableColumns} data={previewData} pageSize={10} />
+            <DataTable columns={tableColumns} data={projection.rows} pageSize={10} />
           </>
         )}
       </VStack>

@@ -99,12 +99,13 @@ describe('nav grouping', () => {
     );
   });
 
-  it('names the App Store analytics groups as non-linked Coming soon affordances', () => {
+  it('names the AgentRay metric groups as non-linked Coming soon affordances', () => {
     // The IA should make the product's shape legible before the pages exist.
     // A coming-soon surface therefore carries no href at all: a placeholder
-    // URL would be a link the router cannot serve.
+    // URL would be a link the router cannot serve. These are AgentRay's own
+    // metric groups — there is no store source behind any of them.
     const comingSoon = childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s));
-    expect(comingSoon.map((s) => s.label)).toEqual(['Acquisition', 'Monetization', 'App Usage']);
+    expect(comingSoon.map((s) => s.label)).toEqual(['Acquisition', 'Monetization', 'Usage']);
     expect(comingSoon.every((s) => s.href === undefined)).toBe(true);
     // The linked Analytics surfaces are untouched by the addition.
     expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(

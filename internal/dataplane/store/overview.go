@@ -501,9 +501,11 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 	}
 
 	// --- content: top pages + sources (pageview units, declared) ---
+	//
+	// Acquisition is the same population as every people metric: real user
+	// pageviews from humans — see overviewAcquisitionFilter and qualWhere.
 	{
-		pageFilter := EventFilter{From: r.From, To: r.To.Add(-time.Nanosecond), Platform: platform}
-		pages, err := s.propertyCounts(ctx, projectID, pageFilter, "path", "user.pageview")
+		pages, err := s.propertyCounts(ctx, projectID, overviewAcquisitionFilter(r, platform), "path", "user.pageview")
 		if err != nil {
 			return res, err
 		}
@@ -513,7 +515,7 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 		err = s.duckQuery(ctx, `
 SELECT if(coalesce(referrer_channel, '') = '', 'unknown', referrer_channel) AS channel, count(*) AS count
 FROM events
-WHERE `+where+` AND event_name = 'user.pageview'
+WHERE `+qualWhere+` AND event_name = 'user.pageview'
 GROUP BY channel
 ORDER BY count DESC
 LIMIT 20`, args, func(rows *sql.Rows) error {

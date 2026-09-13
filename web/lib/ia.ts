@@ -129,12 +129,13 @@ export const CHILD_SURFACES: readonly ChildSurface[] = [
   { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
   { href: '/replay', label: 'Replay', parentHref: '/events' },
-  // App Store analytics groups. The IA names them so the product's shape is
-  // legible, but their pages do not exist yet — a non-linked "Coming soon"
-  // affordance, never a dead link. The sourced UI ticket fills them in.
+  // The three AgentRay metric groups the Overview's grouped state renders.
+  // The IA names them so the product's shape is legible, but their pages do
+  // not exist yet — a non-linked "Coming soon" affordance, never a dead link.
+  // Nothing here depends on an external source: the metrics are AgentRay's own.
   { label: 'Acquisition', parentHref: '/dashboard', comingSoon: true },
   { label: 'Monetization', parentHref: '/dashboard', comingSoon: true },
-  { label: 'App Usage', parentHref: '/dashboard', comingSoon: true },
+  { label: 'Usage', parentHref: '/dashboard', comingSoon: true },
 ];
 
 // Third-party channels the product will grow. Not CHANNEL_CATALOG kinds —

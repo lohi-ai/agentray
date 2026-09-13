@@ -78,7 +78,7 @@ export function ContextChips({ range, extra }: { range: string; extra?: ReactNod
 // value (≈ the prototype's 21px metric). Semantic tones aren't in Text's color
 // enum, so toned values keep a token-backed inline color; deltas use the
 // success/danger brand tokens, which stay constant across light/dark by design.
-export function StatsStrip({ stats }: { stats: Array<{ label: string; value: string; tone?: Tone; delta?: string; deltaTone?: 'up' | 'down' }> }) {
+export function StatsStrip({ stats }: { stats: Array<{ label: string; value: string; tone?: Tone; delta?: string; deltaTone?: 'up' | 'down'; provenance?: string }> }) {
   return (
     <Card padding={1}>
       <AutoGrid min={140} max={6} gap={0}>
@@ -91,6 +91,13 @@ export function StatsStrip({ stats }: { stats: Array<{ label: string; value: str
                 {stat.deltaTone === 'down' ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
                 <Text type="supporting" color="inherit">{stat.delta}</Text>
               </HStack>
+            ) : null}
+            {/* The tile's own provenance, from the surface that owns the tile:
+                the operation serves one identity/dataset/range/coverage set per
+                tile and the caller composes it. Meaningful text, so it carries
+                --color-text-secondary — never --faint (see design.md WCAG note). */}
+            {stat.provenance ? (
+              <Text type="supporting" className="leading-snug" style={{ color: 'var(--color-text-secondary)' }}>{stat.provenance}</Text>
             ) : null}
           </VStack>
         ))}
