@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sort"
 	"testing"
 	"time"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lohi-ai/agentray/internal/shared/config"
@@ -174,19 +174,53 @@ func TestAbandonValidationTestProposedOnly(t *testing.T) {
 	}
 }
 
-func TestListValidationTestsPageResumesOldWork(t *testing.T) {
+// The page is the agent's resume entry point: open states first (proposed,
+// then committed), decided last, newest first inside each group — and the
+// keyset has to carry that order across the group boundary without skipping
+// or repeating a row.
+func TestListValidationTestsPageOrdersOpenBeforeDecidedNewestFirst(t *testing.T) {
 	s := plansTestStore(t)
 	ctx := context.Background()
-	_, projectID := seedConvProject(t, s)
+	userID, projectID := seedConvProject(t, s)
 
-	// More rows than one small page so the cursor must walk.
-	for i := range 5 {
-		if _, err := s.CreateValidationTest(ctx, ValidationTest{
-			ProjectID: projectID, Hypothesis: "idea", MetricEvent: "e", TargetCount: 10,
-		}); err != nil {
-			t.Fatalf("create %d: %v", i, err)
+	mk := func(hyp string) string {
+		id, err := s.CreateValidationTest(ctx, ValidationTest{
+			ProjectID: projectID, Hypothesis: hyp, MetricEvent: "e", TargetCount: 10,
+		})
+		if err != nil {
+			t.Fatalf("create %q: %v", hyp, err)
+		}
+		return id
+	}
+	// created_at is pinned per row — now() ties are not the ordering under
+	// test here; the tie case has its own test below.
+	setAge := func(id, ts string) {
+		if _, err := s.pg.Exec(ctx,
+			`UPDATE validation_tests SET created_at = $2::timestamptz WHERE id = $1`,
+			id, ts); err != nil {
+			t.Fatalf("setAge %s: %v", id, err)
 		}
 	}
+
+	oldProp := mk("old proposed")
+	newProp := mk("new proposed")
+	committed := mk("committed")
+	decided := mk("decided")
+	if err := s.CommitValidationTest(ctx, userID, projectID, committed); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := s.CommitValidationTest(ctx, userID, projectID, decided); err != nil {
+		t.Fatalf("commit decided: %v", err)
+	}
+	if err := s.DecideValidationTest(ctx, userID, projectID, decided, TestPassed, "shipped"); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	// Give the decided row the newest timestamp of all: group rank, not
+	// recency, must keep it behind every open row.
+	setAge(oldProp, "2026-01-01T00:00:00Z")
+	setAge(newProp, "2026-01-04T00:00:00Z")
+	setAge(committed, "2026-01-03T00:00:00Z")
+	setAge(decided, "2026-01-05T00:00:00Z")
 
 	page1, next, err := s.ListValidationTestsPage(ctx, projectID, "", 2)
 	if err != nil {
@@ -195,18 +229,76 @@ func TestListValidationTestsPageResumesOldWork(t *testing.T) {
 	if len(page1) != 2 || next == "" {
 		t.Fatalf("page1 = %d rows, next %q", len(page1), next)
 	}
+	if page1[0].ID != newProp || page1[1].ID != oldProp {
+		t.Fatalf("page1 = %q,%q want new proposed then old proposed",
+			page1[0].Hypothesis, page1[1].Hypothesis)
+	}
+	// Page 2 crosses the open/decided boundary: committed (rank 1) leads,
+	// then the newest row overall — decided — trails the whole list.
 	page2, next2, err := s.ListValidationTestsPage(ctx, projectID, next, 2)
 	if err != nil {
 		t.Fatalf("page2: %v", err)
 	}
-	if len(page2) != 2 {
-		t.Fatalf("page2 = %d rows", len(page2))
+	if len(page2) != 2 || page2[0].ID != committed || page2[1].ID != decided {
+		t.Fatalf("page2 = %+v, want committed then decided", page2)
 	}
-	// Pages must not overlap — the cursor is a real keyset, not an offset.
-	if page1[0].ID == page2[0].ID || page1[1].ID == page2[0].ID {
-		t.Fatal("pages overlap — cursor is not a keyset")
+	if next2 != "" {
+		t.Fatalf("next2 = %q, want exhausted", next2)
 	}
-	_ = next2
+}
+
+// Equal created_at values are real — createValidationTest never sets the
+// column, so rows inserted inside one now() tick tie. id DESC is the
+// tiebreaker and the keyset must not skip or repeat a tied row.
+func TestListValidationTestsPageTiesBreakByID(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+
+	ids := make([]string, 0, 3)
+	for i := range 3 {
+		id, err := s.CreateValidationTest(ctx, ValidationTest{
+			ProjectID: projectID, Hypothesis: "tied", MetricEvent: "e", TargetCount: 10,
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE validation_tests SET created_at = '2026-01-01T00:00:00Z' WHERE project_id = $1`,
+		projectID); err != nil {
+		t.Fatalf("tie timestamps: %v", err)
+	}
+
+	// Expected order: id::text descending — the ORDER BY's tiebreaker.
+	want := append([]string(nil), ids...)
+	sort.Sort(sort.Reverse(sort.StringSlice(want)))
+
+	var got []string
+	cursor := ""
+	for range 4 { // 3 rows at limit 1 → 3 pages, then the loop must have stopped
+		page, next, err := s.ListValidationTestsPage(ctx, projectID, cursor, 1)
+		if err != nil {
+			t.Fatalf("page %d: %v", len(got), err)
+		}
+		if len(page) != 1 {
+			t.Fatalf("page %d = %d rows, want 1", len(got), len(page))
+		}
+		got = append(got, page[0].ID)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(got) != len(want) {
+		t.Fatalf("walked %d rows, want %d — keyset skipped or repeated", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d = %s, want %s (id DESC tiebreak)", i, got[i], want[i])
+		}
+	}
 }
 
 func TestRecommendationForProjectExactRead(t *testing.T) {

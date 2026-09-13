@@ -301,7 +301,10 @@ func (s *Store) ListValidationTestsPage(ctx context.Context, projectID, cursor s
 		limit = 50
 	}
 	// Keyset on (group_rank, created_at, id): group_rank orders open before
-	// decided; the (created_at, id) pair paginates within and across groups.
+	// decided; the (created_at, id) pair walks newest first within a group.
+	// Mixed directions mean one tuple comparison cannot express "after the
+	// cursor", so the predicate expands: a later group, or the same group
+	// with an older (created_at, id) pair.
 	var cursorTime time.Time
 	var cursorID string
 	var cursorRank int
@@ -325,10 +328,11 @@ SELECT `+validationTestCols+`
 FROM validation_tests
 WHERE project_id = $1
   AND ($2::text = '' OR
-       (CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END,
-        created_at, id::text) > ($3, $4::timestamptz, $5))
+       CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END > $3
+       OR (CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END = $3
+           AND (created_at, id::text) < ($4::timestamptz, $5)))
 ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END,
-         created_at ASC, id ASC
+         created_at DESC, id DESC
 LIMIT $6`,
 		projectID, cursor, cursorRank, cursorTime, cursorID, limit+1)
 	if err != nil {
