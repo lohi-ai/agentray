@@ -65,6 +65,9 @@ func TestSandboxExoticResultTypes(t *testing.T) {
 		{`SELECT {'amount': 1.5::DECIMAL(10,2), 'when': INTERVAL 1 DAY} AS n`,
 			map[string]any{"amount": "1.5", "when": "0 months 1 days 0 µs"}},
 		{`SELECT [{'amount': 1.5::DECIMAL(10,2)}] AS n`, []any{map[string]any{"amount": "1.5"}}},
+		// BIT: the driver rewrites a top-level BIT to its string form, but not
+		// one nested in a LIST, and gob cannot carry the named type.
+		{`SELECT ['101'::BIT] AS n`, []any{"101"}},
 	} {
 		rows, err := pool.query(ctx, projectID, tc.sql, nil)
 		if err != nil {

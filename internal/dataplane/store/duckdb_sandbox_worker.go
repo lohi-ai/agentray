@@ -190,16 +190,19 @@ func init() {
 // partially written stream.
 func encodeSandboxFrame(msg any) ([]byte, error) {
 	var buf bytes.Buffer
+	// The length prefix is reserved in the same buffer the payload is encoded
+	// into: a frame is up to 64 MiB, and a second slice of that size per frame
+	// is exactly the allocation this boundary exists to avoid.
+	buf.Write(make([]byte, 4))
 	if err := gob.NewEncoder(&buf).Encode(msg); err != nil {
 		return nil, fmt.Errorf("sandbox frame encode: %w", err)
 	}
-	if buf.Len() > sandboxFrameMaxBytes {
-		return nil, fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", buf.Len(), sandboxFrameMaxBytes)
+	payload := buf.Len() - 4
+	if payload > sandboxFrameMaxBytes {
+		return nil, fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", payload, sandboxFrameMaxBytes)
 	}
-	frame := make([]byte, 4+buf.Len())
-	binary.BigEndian.PutUint32(frame[:4], uint32(buf.Len()))
-	copy(frame[4:], buf.Bytes())
-	return frame, nil
+	binary.BigEndian.PutUint32(buf.Bytes()[:4], uint32(payload))
+	return buf.Bytes(), nil
 }
 
 func writeSandboxFrame(w io.Writer, msg any) error {
@@ -222,11 +225,9 @@ func readSandboxFrame(r *bufio.Reader, msg any, maxBytes int) error {
 	if int(n) > maxBytes {
 		return fmt.Errorf("sandbox frame of %d bytes exceeds the %d-byte cap", n, maxBytes)
 	}
-	payload := make([]byte, n)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return err
-	}
-	return gob.NewDecoder(bytes.NewReader(payload)).Decode(msg)
+	// Decode straight off the reader: the frame is already bounded by maxBytes,
+	// so materializing it a second time only doubles the peak.
+	return gob.NewDecoder(io.LimitReader(r, int64(n))).Decode(msg)
 }
 
 // sandboxWorkerOptions is the child's configuration, all of it owned by the
@@ -517,11 +518,6 @@ func (e *sandboxEngine) insertRows(ctx context.Context, table string, rows [][]a
 	}
 	nCols := len(rows[0])
 	placeholder := "(" + strings.TrimSuffix(strings.Repeat("?,", nCols), ",") + ")"
-	single, err := e.feeder.PrepareContext(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, placeholder))
-	if err != nil {
-		return err
-	}
-	defer single.Close()
 	for _, row := range rows {
 		if len(row) != nCols {
 			return fmt.Errorf("row has %d columns, want %d", len(row), nCols)
@@ -531,12 +527,10 @@ func (e *sandboxEngine) insertRows(ctx context.Context, table string, rows [][]a
 	for _, row := range rows {
 		flat = append(flat, row...)
 	}
-	if len(rows) == 1 {
-		_, err := single.ExecContext(ctx, flat...)
-		return err
-	}
+	// One multi-row statement for every size, including one row: preparing a
+	// single-row statement first would plan a statement a batch never uses.
 	batchPlaceholder := strings.TrimSuffix(strings.Repeat(placeholder+",", len(rows)), ",")
-	_, err = e.feeder.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, batchPlaceholder), flat...)
+	_, err := e.feeder.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, batchPlaceholder), flat...)
 	return err
 }
 

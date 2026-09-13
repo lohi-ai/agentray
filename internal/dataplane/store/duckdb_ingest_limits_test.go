@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
 // A full ingest batch must fit inside the trusted engine's own memory_limit.
@@ -40,13 +41,49 @@ func TestIngestBatchFitsTheMainEngineLimit(t *testing.T) {
 	if err := d.SinkEvents(ctx, events); err != nil {
 		t.Fatalf("SinkEvents with a full batch: %v", err)
 	}
+	// The fold writes one row per identity-bearing distinct id, so a batch of
+	// identity updates is the same shape: every event here carries traits and
+	// its own distinct id.
+	identified := make([]Event, 0, 500)
+	for i := range cap(identified) {
+		identified = append(identified, Event{
+			ProjectID: projectID, EventID: uuid.NewString(), EventName: "$identify",
+			DistinctID: fmt.Sprintf("person-%d", i), SessionID: "s1",
+			Properties: `{"$set":{"plan":"pro","note":"` + strings.Repeat("x", 120) + `"}}`,
+			Timestamp:  time.Now().UTC(), EventType: "user",
+		})
+	}
+	if err := d.SinkEvents(ctx, identified); err != nil {
+		t.Fatalf("SinkEvents with 500 distinct identities: %v", err)
+	}
+	// The connector landing path takes up to 1,000 rows per batch.
+	landed := make([]connector.LandedRow, 0, 1000)
+	for i := range cap(landed) {
+		landed = append(landed, connector.LandedRow{
+			Key:      fmt.Sprintf("row-%d", i),
+			Cursor:   fmt.Sprintf("cursor-%d", i),
+			DataJSON: `{"note":"` + strings.Repeat("x", 200) + `"}`,
+		})
+	}
+	if err := d.InsertExternalRows(ctx, projectID, uuid.NewString(), "landed", landed); err != nil {
+		t.Fatalf("InsertExternalRows with a full connector batch: %v", err)
+	}
 	var n int
 	if err := d.Read(ctx, func(conn *sql.Conn) error {
 		return conn.QueryRowContext(ctx, `SELECT count(*) FROM events`).Scan(&n)
 	}); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if n != len(events) {
-		t.Fatalf("stored %d rows, want %d (the re-sink must dedup on the primary key)", n, len(events))
+	if n != len(events)+len(identified) {
+		t.Fatalf("stored %d rows, want %d (the re-sink must dedup on the primary key)", n, len(events)+len(identified))
+	}
+	var landedRows int
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM external_rows`).Scan(&landedRows)
+	}); err != nil {
+		t.Fatalf("count external_rows: %v", err)
+	}
+	if landedRows != len(landed) {
+		t.Fatalf("landed %d connector rows, want %d", landedRows, len(landed))
 	}
 }

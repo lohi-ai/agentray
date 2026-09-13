@@ -369,8 +369,10 @@ func TestSandboxRequestDeadlineCoversAllPhases(t *testing.T) {
 	})
 	start := time.Now()
 	_, err := pool.query(ctx, uuid.NewString(), `SELECT count(*) AS n FROM events`, nil)
-	if !errors.Is(err, ErrSandboxTimeout) {
-		t.Fatalf("cold-start deadline error = %v, want ErrSandboxTimeout", err)
+	// Capacity, not the author's SQL: a cold start that ran out of budget is
+	// retryable (503), which is why it is unavailable rather than a limit.
+	if !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("cold-start deadline error = %v, want ErrSandboxUnavailable", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("cold-start deadline took %s, want ~the 150ms budget", elapsed)
@@ -390,8 +392,8 @@ func TestSandboxRequestDeadlineCoversAllPhases(t *testing.T) {
 	start = time.Now()
 	_, err = queued.query(ctx2, uuid.NewString(), `SELECT count(*) AS n FROM events`, nil)
 	<-queued.sem
-	if !errors.Is(err, ErrSandboxTimeout) {
-		t.Fatalf("queued-admission error = %v, want ErrSandboxTimeout", err)
+	if !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("queued-admission error = %v, want ErrSandboxUnavailable", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("queued admission took %s, want ~the 150ms budget", elapsed)
@@ -854,5 +856,104 @@ func assertEngineLimit(t *testing.T, who, reported, want string, tolerance int64
 	expected := duckdbSizeBytes(t, want)
 	if diff := got - expected; diff > tolerance || diff < -tolerance {
 		t.Fatalf("%s reports memory_limit %q (%d bytes), want %s (%d bytes)", who, reported, got, want, expected)
+	}
+}
+
+// A published child already holds the project's rows. The pool used to publish
+// a spawned child before its first refresh, so a second cold caller could lease
+// an empty child, block on its mutex, and — giving up on its own deadline —
+// mark that shared child dead, killing the first caller's still-valid query.
+func TestSandboxPublishesOnlyRefreshedChildren(t *testing.T) {
+	d := openTestDuckDB(t)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	projectID := uuid.NewString()
+	seedProject(t, d, projectID, 3)
+
+	sb, err := pool.sandboxFor(ctx, projectID)
+	if err != nil {
+		t.Fatalf("sandboxFor: %v", err)
+	}
+	defer sb.release()
+	// No refresh here: whatever the child holds is what the opener copied.
+	rows, err := sb.run(ctx, `SELECT count(*) AS n FROM events`, nil)
+	if err != nil {
+		t.Fatalf("query on the published child: %v", err)
+	}
+	if got := rows[0]["n"]; got != int64(3) {
+		t.Fatalf("published child sees %v events, want 3 — it was published before its first refresh", got)
+	}
+}
+
+// A caller that gives up waiting for another caller's query must not kill the
+// child that caller is using.
+func TestSandboxWaiterTimeoutDoesNotKillTheChild(t *testing.T) {
+	d := openTestDuckDB(t)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	projectID := uuid.NewString()
+	seedProject(t, d, projectID, 3)
+
+	sb, err := pool.sandboxFor(ctx, projectID)
+	if err != nil {
+		t.Fatalf("sandboxFor: %v", err)
+	}
+	defer sb.release()
+
+	// Hold the child's mutex the way an in-flight query does, then ask a second
+	// caller with a budget it cannot meet.
+	sb.mu.Lock()
+	expired, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	_, err = sb.run(expired, `SELECT count(*) AS n FROM events`, nil)
+	sb.mu.Unlock()
+	if !errors.Is(err, ErrSandboxUnavailable) {
+		t.Fatalf("waiter error = %v, want ErrSandboxUnavailable", err)
+	}
+	if sb.dead.Load() {
+		t.Fatal("a waiter that gave up marked the shared child dead")
+	}
+	if _, err := sb.run(ctx, `SELECT count(*) AS n FROM events`, nil); err != nil {
+		t.Fatalf("the child did not survive a timed-out waiter: %v", err)
+	}
+}
+
+// Each child gets its own spill directory, and a stale directory from an
+// earlier process is never handed to a new child: the counter that used to name
+// them restarts at 1 after an unclean exit.
+func TestSandboxSpillDirectoriesAreUnique(t *testing.T) {
+	d := openTestDuckDB(t)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	projectID := uuid.NewString()
+	seedProject(t, d, projectID, 1)
+
+	// A leftover from a previous process, exactly where a counter would land.
+	stale := filepath.Join(d.tmpDir(), fmt.Sprintf("sandbox-%s-1", projectID))
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatalf("seed stale dir: %v", err)
+	}
+
+	first, err := pool.sandboxFor(ctx, projectID)
+	if err != nil {
+		t.Fatalf("sandboxFor: %v", err)
+	}
+	firstDir := first.tmpDir
+	first.release()
+	pool.drop(first)
+
+	second, err := pool.sandboxFor(ctx, projectID)
+	if err != nil {
+		t.Fatalf("sandboxFor (second): %v", err)
+	}
+	defer second.release()
+	if second.tmpDir == "" {
+		t.Fatal("child has no spill directory")
+	}
+	if second.tmpDir == stale {
+		t.Fatalf("child reused the stale spill directory %s", stale)
+	}
+	if second.tmpDir == firstDir {
+		t.Fatalf("two children share the spill directory %s", firstDir)
+	}
+	if !filepath.IsAbs(second.tmpDir) {
+		t.Fatalf("spill directory %q is relative, but the child runs in %s", second.tmpDir, os.TempDir())
 	}
 }

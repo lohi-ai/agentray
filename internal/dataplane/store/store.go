@@ -4580,6 +4580,11 @@ func normalizeSQLValue(value any) any {
 		return v.String()
 	case *big.Int:
 		return v.String()
+	case duckdb.Bit:
+		// The driver rewrites a TOP-LEVEL BIT to its string form in rows.Next,
+		// but not one nested in a LIST or STRUCT, and gob cannot carry the
+		// named type: `SELECT ['101'::BIT]` would fail the whole query.
+		return v.String()
 	case big.Int:
 		return v.String()
 	case duckdb.Map:

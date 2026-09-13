@@ -245,9 +245,18 @@ func (p *sqlSandboxPool) closeAll() {
 	p.sandboxes = map[string]*sqlSandbox{}
 	p.lru = nil
 	p.mu.Unlock()
+	// Each close may wait out the kill grace, and the waits are independent:
+	// reaping them one at a time would bound shutdown by N graces instead of
+	// one.
+	var wg sync.WaitGroup
 	for _, sb := range sandboxes {
-		sb.close()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sb.close()
+		}()
 	}
+	wg.Wait()
 }
 
 // query runs sqlText (already rewritten by scopedReadonlySQL) inside the
@@ -268,8 +277,10 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	case p.sem <- struct{}{}:
 		defer func() { <-p.sem }()
 	case <-rctx.Done():
-		return nil, sandboxError(SandboxKindTimeout, ErrSandboxTimeout,
-			"the analytics sandbox is busy; try again or narrow the query")
+		// Waiting behind other tenants is not the author's SQL being wrong: it
+		// is capacity, so it is retryable (503), not a limit refusal (400).
+		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+			"the analytics sandbox is busy; retry shortly")
 	}
 
 	// Admission is now accounted: everything below — spawning, refreshing,
@@ -289,7 +300,10 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 
 	if err := sb.refresh(rctx); err != nil {
 		p.drop(sb)
-		return nil, err
+		// A refresh reads the TRUSTED store, so its failures are the sandbox's,
+		// not the author's: without this wrap a driver or deadline error from
+		// the copy reaches the client as "bad SQL" (400).
+		return nil, sandboxRefreshError(err)
 	}
 	rows, err := sb.run(rctx, query, args)
 	if err != nil && sb.dead.Load() {
@@ -298,6 +312,19 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 		p.drop(sb)
 	}
 	return rows, err
+}
+
+// sandboxRefreshError classifies a failure from the copy phase. Anything the
+// sandbox already typed keeps its kind; a raw driver/context error from the
+// trusted store becomes an unavailable sandbox, because the author's SQL never
+// ran.
+func sandboxRefreshError(err error) error {
+	var se *SandboxError
+	if errors.As(err, &se) {
+		return err
+	}
+	return sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+		fmt.Sprintf("analytics sandbox could not copy this project's rows: %v", err))
 }
 
 // drop removes a broken sandbox from the pool and reaps it. Callers must not
@@ -340,8 +367,10 @@ func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sql
 				// ended and allowed eviction before this waiter woke.
 				continue
 			case <-ctx.Done():
-				return nil, sandboxError(SandboxKindTimeout, ErrSandboxTimeout,
-					"timed out waiting for the analytics sandbox to start")
+				// Waiting for another caller's cold start is capacity, not the
+				// author's SQL: retryable, like the admission wait above.
+				return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+					"timed out waiting for the analytics sandbox to start; retry shortly")
 			}
 		}
 		op := &sandboxOpen{done: make(chan struct{})}
@@ -359,6 +388,16 @@ func (p *sqlSandboxPool) sandboxFor(ctx context.Context, projectID string) (*sql
 
 		sb, err := spawnSQLSandbox(ctx, p, projectID)
 		p.spawns.Add(1)
+		if err == nil {
+			// The child is published only once it holds the project's rows. A
+			// waiter that leased an empty child would otherwise race this
+			// refresh, and a waiter that gives up while waiting on the child's
+			// mutex must not be able to kill a child another caller is using.
+			if rerr := sb.refresh(ctx); rerr != nil {
+				sb.close()
+				err = sandboxRefreshError(rerr)
+			}
+		}
 
 		p.mu.Lock()
 		delete(p.opening, projectID)
@@ -479,9 +518,6 @@ func (p *sqlSandboxPool) liveChildren() int {
 	return len(p.sandboxes)
 }
 
-// sandboxDirSeq names each child's spill directory uniquely.
-var sandboxDirSeq atomic.Uint64
-
 // sqlSandbox is one project's isolated in-memory DuckDB, as a child process.
 type sqlSandbox struct {
 	projectID string
@@ -508,6 +544,26 @@ type sqlSandbox struct {
 }
 
 func (sb *sqlSandbox) lease() { sb.refs.Add(1) }
+
+// lockCtx takes the sandbox mutex, giving up when ctx ends. Waiting for another
+// caller's query is not a reason to touch the child: `call` marks a child dead
+// on an expired context, so a waiter that simply gave up would kill a child
+// that is serving someone else.
+func (sb *sqlSandbox) lockCtx(ctx context.Context) error {
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if sb.mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+				"timed out waiting for the analytics sandbox; retry shortly")
+		case <-tick.C:
+		}
+	}
+}
 
 func (sb *sqlSandbox) release() {
 	sb.usedAt.Store(time.Now().UnixNano())
@@ -549,9 +605,20 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 		// One directory per child, not per project: drop() removes the
 		// directory after reaping, and a replacement for the same project can
 		// already be running by then — sharing the path would delete a live
-		// child's spill out from under it.
-		tmpDir = filepath.Join(base, fmt.Sprintf("sandbox-%s-%d", projectID, sandboxDirSeq.Add(1)))
-		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		// child's spill out from under it. MkdirTemp, not a process-local
+		// counter: after an unclean exit the counter restarts while the old
+		// directory is still on disk, and MkdirAll would silently hand a new
+		// child the dead one's spill.
+		dir, err := os.MkdirTemp(base, "sandbox-"+projectID+"-")
+		if err != nil {
+			return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+				fmt.Sprintf("analytics sandbox tmp dir: %v", err))
+		}
+		// The child runs with its working directory in os.TempDir(), so a
+		// relative spill path would resolve somewhere else entirely.
+		tmpDir, err = filepath.Abs(dir)
+		if err != nil {
+			_ = os.RemoveAll(dir)
 			return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
 				fmt.Sprintf("analytics sandbox tmp dir: %v", err))
 		}
@@ -600,8 +667,8 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 		// A cold start cut short by the caller's budget is a timeout — the same
 		// query may well work in a moment — not an unavailable sandbox.
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, sandboxError(SandboxKindTimeout, ErrSandboxTimeout,
-				"timed out starting the analytics sandbox; try again")
+			return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+				"timed out starting the analytics sandbox; retry shortly")
 		}
 		if err == nil {
 			err = fmt.Errorf("sandbox handshake failed: %s", resp.Kind)
@@ -630,7 +697,9 @@ func sandboxChildEnv() []string {
 // removed from the main file is removed here too — the count check keeps the
 // common refresh cheap.
 func (sb *sqlSandbox) refresh(ctx context.Context) error {
-	sb.mu.Lock()
+	if err := sb.lockCtx(ctx); err != nil {
+		return err
+	}
 	defer sb.mu.Unlock()
 	if sb.closed {
 		return sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, "analytics sandbox is closed")
@@ -729,11 +798,13 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 			if err := rows.Scan(dest...); err != nil {
 				return err
 			}
-			row := make([]any, nCols)
+			// Normalize in place: dest is this row's own scratch slice, so a
+			// second same-sized slice per row would be pure copy on the cold
+			// path that copies a tenant's whole event set.
 			size := 0
 			for i := range dest {
-				row[i] = gobSafeValue(*(dest[i].(*any)))
-				size += frameValueBytes(row[i])
+				dest[i] = gobSafeValue(*(dest[i].(*any)))
+				size += frameValueBytes(dest[i])
 			}
 			if size > sandboxMaxRowBytes {
 				return sandboxError(SandboxKindBytes, ErrSandboxBytes,
@@ -746,7 +817,7 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 					return err
 				}
 			}
-			batch = append(batch, row)
+			batch = append(batch, dest)
 			batchBytes += size
 			// Bytes as well as rows: this batch is built in the API's own heap,
 			// so a tenant whose rows carry fat JSON could otherwise make the
@@ -769,7 +840,9 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 // run executes one already-validated, already-rewritten SELECT in the child
 // under the caller's deadline and returns the rows it framed back.
 func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[string]any, error) {
-	sb.mu.Lock()
+	if err := sb.lockCtx(ctx); err != nil {
+		return nil, err
+	}
 	defer sb.mu.Unlock()
 	if sb.closed {
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, "analytics sandbox is closed")

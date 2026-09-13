@@ -772,6 +772,13 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		// rows without touching the cache.
 		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), !readOnlyCaller(c))
 		if err != nil {
+			// Same contract as /api/sql/run: a sandbox that could not run the
+			// query is retryable capacity, not a 500 — the identical query
+			// answered 503 there.
+			if storage.IsSandboxUnavailable(err) {
+				c.Response().Header().Set("Retry-After", "5")
+				return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+			}
 			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]any{"result": result})
