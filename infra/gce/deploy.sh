@@ -120,7 +120,7 @@ $(bg_validate)
 sudo docker compose -f ~/gce/caddy/docker-compose.yml up -d
 sudo docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true
 sudo bash ~/gce/agentray/fetch-secrets.sh '${ENV}'
-sudo docker compose -f ~/gce/agentray/infra/docker-compose.yml up -d
+sudo docker compose -f ~/gce/agentray/infra/docker-compose.yml up -d --remove-orphans
 
 $(bg_pick "$UPSTREAM")
 BG_NEW_API=${ENV}-agentray-api-\$BG_COLOR
