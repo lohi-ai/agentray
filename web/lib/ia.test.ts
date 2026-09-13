@@ -24,7 +24,6 @@ import {
   matchActiveHref,
   navItemsFor,
   shouldStartDocksOpen,
-  navGroupForPath,
   navGroups,
   shouldShowFirstEventGuide,
   signedInLandingTarget,
@@ -135,7 +134,7 @@ describe('matchActiveHref', () => {
 
   it.each(cases)('%s → href %s in %s', (pathname, href, group) => {
     expect(matchActiveHref(pathname)).toBe(href);
-    expect(navGroupForPath(pathname)).toBe(group);
+    expect(NAV_ITEMS.find((item) => item.href === href)?.group ?? '').toBe(group);
   });
 });
 

@@ -149,11 +149,6 @@ export function matchActiveHref(pathname: string, items: readonly NavItemDef[] =
   return best;
 }
 
-export function navGroupForPath(pathname: string, items: readonly NavItemDef[] = NAV_ITEMS): NavGroupId | '' {
-  const href = matchActiveHref(pathname, items);
-  return items.find((item) => item.href === href)?.group ?? '';
-}
-
 export function childSurfacesFor(parentHref: string, surfaces: readonly ChildSurface[] = CHILD_SURFACES, opts: { hosted?: boolean } = {}): ChildSurface[] {
   // hostedOnly children (billing) follow the same rule as hostedOnly nav
   // items: a self-host operator never sees a surface they cannot use.
