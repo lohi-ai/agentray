@@ -95,6 +95,37 @@ const (
 	TestAbandoned = "abandoned"
 )
 
+// validationOpenStates is the one definition of "the owner has not closed this
+// test": a proposal AND a committed test are the same open partition — one is
+// waiting for agreement, the other is running — and every decided state trails
+// both. The capped list, the paged keyset and the active-test read all order
+// (or select) from it, so they cannot drift into disagreeing about which tests
+// are still open.
+const validationOpenStates = `status IN ('committed', 'proposed')`
+
+// validationGroupRankSQL ranks a test for ordering: 0 for the open partition,
+// 1 for decided history. It is the SQL half of validationGroupRank.
+const validationGroupRankSQL = `CASE WHEN ` + validationOpenStates + ` THEN 0 ELSE 1 END`
+
+// validationGroupRank is the Go half of validationGroupRankSQL, used to mint a
+// page cursor: the rank the next page resumes inside. Two representations of
+// one rule is a drift risk, so they sit together and the pagination tests walk
+// the boundary between them.
+func validationGroupRank(status string) int {
+	switch status {
+	case TestCommitted, TestProposed:
+		return 0
+	}
+	return 1
+}
+
+// validationCursorVersion prefixes every keyset cursor. The group ranks
+// changed meaning in this contract — `committed` used to page as its own rank
+// between `proposed` and decided — so a cursor minted before the change would
+// resume at the wrong boundary. The version makes that an explicit
+// "invalid cursor" (the client restarts the walk) instead of a silent reorder.
+const validationCursorVersion = "v2"
+
 // WaitlistSignup is one person who asked to hear when the product ships.
 type WaitlistSignup struct {
 	ID        string `json:"id"`
@@ -255,7 +286,7 @@ func (s *Store) ActiveValidationTest(ctx context.Context, projectID string) (*Va
 	rows, err := s.pg.Query(ctx, `
 SELECT `+validationTestCols+`
 FROM validation_tests
-WHERE project_id = $1 AND status IN ('committed','proposed')
+WHERE project_id = $1 AND `+validationOpenStates+`
 ORDER BY (status = 'committed') DESC, created_at DESC
 LIMIT 1`, projectID)
 	if err != nil {
@@ -283,9 +314,9 @@ LIMIT 1`, projectID)
 const validationListCap = 25
 
 // ListValidationTests returns a page of the project's tests: the open ones
-// (proposed, then committed) before the decided ones, each group newest first.
-// The second return value is how many exist in total, so the caller can say so
-// when the page is short of it.
+// (proposed and committed are one partition) before the decided ones, newest
+// first with the id as a total tiebreak. The second return value is how many
+// exist in total, so the caller can say so when the page is short of it.
 //
 // The ordering is the screen's, not the table's: a proposal nobody has agreed to
 // is the one state where the product is blocked on the human, and burying it
@@ -310,7 +341,7 @@ SELECT `+validationTestCols+`,
        count(*) OVER () AS total
 FROM validation_tests
 WHERE project_id = $1
-ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END, created_at DESC
+ORDER BY `+validationGroupRankSQL+`, created_at DESC, id DESC
 LIMIT $2`, projectID, limit)
 	if err != nil {
 		return nil, 0, err

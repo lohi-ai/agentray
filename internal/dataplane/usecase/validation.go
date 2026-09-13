@@ -351,7 +351,16 @@ func listTests() opcore.Operation[listTestsInput, listTestsOutput] {
 				if perr != nil {
 					return listTestsOutput{}, perr
 				}
-				out := listTestsOutput{Tests: make([]listedTest, 0, len(page)), NextCursor: next}
+				// Total is the authoritative window count from the same capped
+				// read the unpaged list uses, so a page can never report a
+				// number the list contract would not; Truncated is whether a
+				// continuation was minted, not a guess from the page length.
+				_, total, terr := d.Repo.ValidationTestsForProject(ctx, cc.ProjectID, 1)
+				if terr != nil {
+					return listTestsOutput{}, terr
+				}
+				out := listTestsOutput{Tests: make([]listedTest, 0, len(page)), NextCursor: next,
+					Total: total, Truncated: next != ""}
 				for _, t := range page {
 					out.Tests = append(out.Tests, listedTest{
 						TestID: t.ID, Hypothesis: t.Hypothesis, Status: t.Status, MetricEvent: t.MetricEvent,

@@ -366,6 +366,14 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				out.Syncs = []syncStatus{entry}
 				return out, nil
 			case strings.TrimSpace(in.ConnectorID) != "":
+				// Existence first: an unknown connector id must be not-found,
+				// not an empty syncs success — "this connector has no syncs"
+				// and "there is no such connector" are different answers.
+				if _, err := d.Repo.DataConnectorForProject(ctx, cc.ProjectID, in.ConnectorID); errors.Is(err, pgx.ErrNoRows) {
+					return sourceStatusOutput{}, opcore.NotFound("connector not found")
+				} else if err != nil {
+					return sourceStatusOutput{}, err
+				}
 				syncs, err := d.Repo.ListConnectorSyncsForProject(ctx, cc.ProjectID, in.ConnectorID)
 				if err != nil {
 					return sourceStatusOutput{}, err

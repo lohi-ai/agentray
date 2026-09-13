@@ -770,7 +770,7 @@ SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, r
        evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
        coalesce(revision, 1)
 FROM agent_recommendations WHERE project_id = $1
-ORDER BY (status = 'open') DESC, impact_score DESC, last_seen_at DESC
+ORDER BY `+recommendationsPageOrder+`
 LIMIT $2`, project.ID, recommendationListLimit)
 	if err != nil {
 		return nil, err

@@ -640,7 +640,7 @@ var sandboxSchema = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS external_rows (
 		project_id UUID NOT NULL,
-		connector_id VARCHAR NOT NULL,
+		connector_id UUID NOT NULL,
 		table_name VARCHAR NOT NULL,
 		row_key VARCHAR NOT NULL,
 		cursor VARCHAR,
