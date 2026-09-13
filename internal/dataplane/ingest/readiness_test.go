@@ -1,10 +1,13 @@
 package ingestion
 
-import "testing"
+import (
+	"testing"
+)
 
 // The readiness predicate decides whether a blue-green deploy may point traffic
 // at a colour, so every branch is pinned here: the two ways to be caught up, the
-// two ways to be behind, and the branch that must never converge.
+// two ways to be behind, the branch that must never converge, and the two ways
+// the broker's own configuration disqualifies the rest of the arithmetic.
 func TestEvaluateReplay(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -13,6 +16,8 @@ func TestEvaluateReplay(t *testing.T) {
 		first      uint64
 		pending    uint64
 		ackPending int
+		wired      bool
+		dedicated  bool
 		wantReady  bool
 		wantReason string
 		wantMiss   uint64
@@ -22,6 +27,8 @@ func TestEvaluateReplay(t *testing.T) {
 			applied:    0,
 			head:       0,
 			first:      0,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  true,
 			wantReason: ReplayCaughtUp,
 		},
@@ -30,6 +37,8 @@ func TestEvaluateReplay(t *testing.T) {
 			applied:    40,
 			head:       40,
 			first:      1,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  true,
 			wantReason: ReplayCaughtUp,
 		},
@@ -41,6 +50,22 @@ func TestEvaluateReplay(t *testing.T) {
 			applied:    7,
 			head:       900,
 			first:      1,
+			wired:      true,
+			dedicated:  false,
+			wantReady:  true,
+			wantReason: ReplayCaughtUp,
+		},
+		{
+			name: "another env's sequences age out on the shared stream: not this colour's loss",
+			// Same shape as the purged-gap case below, but the stream carries
+			// subjects this consumer is not offered, so the purge frontier says
+			// nothing about this colour's rows. Latching a refusal here would
+			// wedge every deploy for the life of the process.
+			applied:    7,
+			head:       140,
+			first:      100,
+			wired:      true,
+			dedicated:  false,
 			wantReady:  true,
 			wantReason: ReplayCaughtUp,
 		},
@@ -50,6 +75,8 @@ func TestEvaluateReplay(t *testing.T) {
 			head:       40,
 			first:      1,
 			pending:    33,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayBehind,
 		},
@@ -59,6 +86,8 @@ func TestEvaluateReplay(t *testing.T) {
 			head:       40,
 			first:      1,
 			ackPending: 3,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayBehind,
 		},
@@ -70,6 +99,8 @@ func TestEvaluateReplay(t *testing.T) {
 			head:       140,
 			first:      100,
 			pending:    41,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayPurgedGap,
 			wantMiss:   92,
@@ -82,6 +113,8 @@ func TestEvaluateReplay(t *testing.T) {
 			applied:    3,
 			head:       6,
 			first:      7,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayPurgedGap,
 			wantMiss:   3,
@@ -94,6 +127,8 @@ func TestEvaluateReplay(t *testing.T) {
 			head:       140,
 			first:      100,
 			pending:    41,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayBehind,
 		},
@@ -103,14 +138,39 @@ func TestEvaluateReplay(t *testing.T) {
 			head:       140,
 			first:      100,
 			pending:    41,
+			wired:      true,
+			dedicated:  true,
 			wantReady:  false,
 			wantReason: ReplayBehind,
+		},
+		{
+			name: "stream does not carry this colour's subjects: nothing it reports can make it ready",
+			// The consumer is offered nothing, so pending/ackPending are vacuously
+			// zero. Reporting caught-up here is a green healthcheck in front of a
+			// pipeline that will never deliver another row.
+			applied:    7,
+			head:       900,
+			first:      1,
+			wired:      false,
+			dedicated:  false,
+			wantReady:  false,
+			wantReason: ReplayStreamMismatch,
+		},
+		{
+			name:       "unwired refuses even when the numbers look caught up",
+			applied:    40,
+			head:       40,
+			first:      1,
+			wired:      false,
+			dedicated:  false,
+			wantReady:  false,
+			wantReason: ReplayStreamMismatch,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EvaluateReplay(tt.applied, tt.head, tt.first, tt.pending, tt.ackPending)
+			got := EvaluateReplay(tt.applied, tt.head, tt.first, tt.pending, tt.ackPending, tt.wired, tt.dedicated)
 			if got.Ready != tt.wantReady || got.Reason != tt.wantReason {
 				t.Fatalf("verdict = %+v, want ready=%v reason=%q", got, tt.wantReady, tt.wantReason)
 			}
@@ -118,5 +178,94 @@ func TestEvaluateReplay(t *testing.T) {
 				t.Fatalf("missing = %d, want %d", got.Missing, tt.wantMiss)
 			}
 		})
+	}
+}
+
+// streamCarries is what stops the predicate reading a stream-wide number as if
+// it were the colour's own: a consumer is filter-scoped and the stream is not.
+func TestStreamCarries(t *testing.T) {
+	dev := []string{"agentray.events.ingest.dev", "agentray.events.ingest.dev.connectors"}
+	prod := []string{"agentray.events.ingest.prod", "agentray.events.ingest.prod.connectors"}
+
+	tests := []struct {
+		name           string
+		streamSubjects []string
+		filterSubjects []string
+		wantWired      bool
+		wantDedicated  bool
+	}{
+		{
+			name:           "shipped shape: the stream holds exactly what the colour consumes",
+			streamSubjects: dev,
+			filterSubjects: dev,
+			wantWired:      true,
+			wantDedicated:  true,
+		},
+		{
+			name:           "another environment rewrote the stream's subjects",
+			streamSubjects: prod,
+			filterSubjects: dev,
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name:           "one env's connector subject is missing from the stream",
+			streamSubjects: []string{dev[0]},
+			filterSubjects: dev,
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name:           "shared stream still carries this colour's events: wired, not dedicated",
+			streamSubjects: append(append([]string{}, dev...), prod...),
+			filterSubjects: dev,
+			wantWired:      true,
+			wantDedicated:  false,
+		},
+		{
+			name:           "a consumer with no filter is offered the whole stream",
+			streamSubjects: dev,
+			filterSubjects: nil,
+			wantWired:      true,
+			wantDedicated:  true,
+		},
+		{
+			name:           "a wildcard on either side cannot be expanded, so neither claim is made",
+			streamSubjects: []string{"agentray.events.>"},
+			filterSubjects: dev,
+			wantWired:      true,
+			wantDedicated:  false,
+		},
+		{
+			name:           "wildcard filter is not treated as provably unwired",
+			streamSubjects: dev,
+			filterSubjects: []string{"agentray.events.ingest.>"},
+			wantWired:      true,
+			wantDedicated:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wired, dedicated := streamCarries(tt.streamSubjects, tt.filterSubjects)
+			if wired != tt.wantWired || dedicated != tt.wantDedicated {
+				t.Fatalf("streamCarries(%v, %v) = wired=%v dedicated=%v, want %v/%v",
+					tt.streamSubjects, tt.filterSubjects, wired, dedicated, tt.wantWired, tt.wantDedicated)
+			}
+		})
+	}
+}
+
+// streamCarries' verdicts feed EvaluateReplay, so the end-to-end shape of the
+// shared-stream false refusal is pinned too: dev's two subjects, prod's on the
+// same stream, nothing of dev's left to deliver, and a purge frontier that
+// belongs entirely to prod.
+func TestSharedStreamIsNotReadAsLoss(t *testing.T) {
+	dev := []string{"agentray.events.ingest.dev", "agentray.events.ingest.dev.connectors"}
+	prod := []string{"agentray.events.ingest.prod", "agentray.events.ingest.prod.connectors"}
+	wired, dedicated := streamCarries(append(append([]string{}, dev...), prod...), dev)
+	v := EvaluateReplay(7, 140, 100, 0, 0, wired, dedicated)
+	if !v.Ready || v.Reason != ReplayCaughtUp {
+		t.Fatalf("verdict = %+v, want caught-up: a foreign purge is not this colour's loss", v)
 	}
 }

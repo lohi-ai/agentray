@@ -95,6 +95,15 @@ type Store interface {
 // return nil until the batch is durably accepted: the run's cursor advances
 // only after it, and the cursor is the shared source high-water mark, so a
 // batch that was merely handed to a socket would be skipped forever.
+//
+// That guarantee is the DURABLE implementation's; the fire-and-forget core-NATS
+// fallback (INGEST_JETSTREAM=false) can only flush to the socket, and there the
+// cursor can outrun a batch the worker never lands — the same at-most-once
+// contract that mode already had for events (see StartEventWorker). It is also
+// only a promise about DELIVERY to the stream, not about landing: a batch that
+// no colour can insert dead-letters to the DLQ after IngestMaxDeliver attempts
+// while this run has already reported success, so the DLQ depth — replayed with
+// `agentray-server replay-dlq` — is the operator's signal for that case.
 // ingestion.EventQueue implements it.
 type RowPublisher interface {
 	PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error

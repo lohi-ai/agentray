@@ -21,13 +21,21 @@ set -euo pipefail
 # consequences the operator owns:
 #   * A legitimately long replay (a long quiet period, a broker outage that
 #     backed events up, or a large connector table) can outrun --gate-timeout.
-#     Raise it: `--gate-timeout 900`. The refusal is safe — bg_wait removes the
-#     new colour and Caddy is never repointed, so the old colour keeps serving.
+#     Raise it: `--gate-timeout 900`. That is necessary but NOT sufficient: the
+#     wait is bounded by the compose healthcheck's own window
+#     (start_period + interval × retries, 330s in infra/gce/<env>/docker-compose.yml),
+#     because Docker's `unhealthy` verdict is terminal for bg_wait — it removes
+#     the new colour instead of waiting the deadline out. A replay expected to
+#     outlast that window needs `retries` raised to cover it as well. The refusal
+#     either way is safe: bg_wait removes the new colour and Caddy is never
+#     repointed, so the old colour keeps serving.
 #   * `--no-gate` skips that wait entirely and is therefore a data-coherence
 #     waiver, not just a speed switch: traffic can land on a colour that is
-#     behind. Also check /readyz's body (applied/head/lag) before reaching for
-#     it — a `purged-gap` colour will never become ready, because messages were
-#     purged before it applied them and no amount of waiting recovers them.
+#     behind. Read /readyz's body first — it names the reason. `purged-gap`
+#     never clears (messages were purged before this colour applied them and no
+#     amount of waiting recovers them), and `stream-mismatch` means the stream
+#     does not carry this env's subjects at all, so the colour will never be
+#     offered another row: fix the stream's subject list, do not re-run.
 #
 # Schema migrations are automatic: the API creates/updates Postgres and
 # DuckDB tables at startup. Redis/NATS are shared single instances (infra/)
@@ -54,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=true; shift ;;
     --no-gate)      GATE=false; shift ;;
     --gate-timeout) GATE_TIMEOUT="$2"; shift 2 ;;
-    -h|--help)    sed -n '3,30p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
+    -h|--help)    sed -n '3,39p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done

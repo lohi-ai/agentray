@@ -418,6 +418,53 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	}
 }
 
+// TestBlueGreenStreamMismatchRefusesReady is the hazard the shipped topology can
+// produce and the one a green healthcheck hides best: EnsureStreams rewrites the
+// shared stream's subject list to its own env's on every boot, so an env that
+// booted earlier keeps a durable whose filter the stream no longer carries. It
+// is offered nothing, NumPending and NumAckPending are vacuously zero, and the
+// pending proof alone would report a colour caught-up that will never receive
+// another row. The gate must refuse on the broker's own configuration instead.
+func TestBlueGreenStreamMismatchRefusesReady(t *testing.T) {
+	url := startBroker(t)
+	ctx := context.Background()
+
+	blue := newColour(t, url, testConfig("colour-blue"))
+	blue.serve(t)
+	if v := blue.waitReady(t, 20*time.Second); v.Reason != ReplayCaughtUp {
+		t.Fatalf("verdict before the rewrite = %+v, want caught-up", v)
+	}
+
+	// The other environment boots against the same broker with the same
+	// (default) stream name and its OWN subjects — the production sequence, run
+	// through the real EnsureStreams rather than a hand-written subject update.
+	other := testConfig("colour-other-env")
+	other.IngestSubject = "agentray.events.ingest.other"
+	other.IngestConnectorSubject = "agentray.events.ingest.other.connectors"
+	otherNC, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect other env: %v", err)
+	}
+	defer otherNC.Close()
+	if _, err := EnsureStreams(ctx, otherNC, other); err != nil {
+		t.Fatalf("other env ensure streams: %v", err)
+	}
+
+	v, err := blue.ss.ReplayStatus(ctx)
+	if err != nil {
+		t.Fatalf("replay status: %v", err)
+	}
+	if v.Ready || v.Reason != ReplayStreamMismatch {
+		t.Fatalf("verdict = %+v, want a stream-mismatch refusal: the stream no longer carries this colour's subjects", v)
+	}
+
+	// It is a property of the broker's configuration, not a transient: a second
+	// read must refuse identically.
+	if again := mustVerdict(t, blue.ss); again.Ready || again.Reason != ReplayStreamMismatch {
+		t.Fatalf("second verdict = %+v, want the refusal to hold", again)
+	}
+}
+
 // TestFreshColourIsNotHeldToAnotherColoursGap keeps the exemption honest: a
 // colour whose durable has never consumed has no history to lose, so it replays
 // the retained window and serves.

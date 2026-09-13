@@ -33,6 +33,11 @@ type StreamSet struct {
 	// latchBootGap. Atomic because the HTTP healthcheck reads it while the
 	// boot path writes it.
 	bootGap atomic.Uint64
+	// bootUnverified latches a boot sample the broker could not answer. It
+	// refuses readiness for the life of the process: the one reading that can
+	// prove a retention loss is gone once the replay advances, so "I could not
+	// tell" is as disqualifying as "I lost rows".
+	bootUnverified atomic.Bool
 }
 
 // EnsureStreams connects a JetStream context on nc and idempotently provisions

@@ -84,7 +84,11 @@ type ExternalRowsBatch struct {
 	Rows        []ExternalRow `json:"rows"`
 }
 
-// ExternalRow is one landed source row on the wire.
+// ExternalRow is one landed source row on the wire. The split from
+// connector.LandedRow is deliberate — Data is json.RawMessage so the body
+// neither gets re-encoded on the way out nor re-parsed on the way in — which
+// means a field added to LandedRow must be added HERE too or it vanishes on the
+// wire with no compile error and no test failure.
 type ExternalRow struct {
 	Key    string          `json:"key"`
 	Cursor string          `json:"cursor"`
@@ -160,7 +164,11 @@ func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connecto
 			return fmt.Errorf("encode connector batch: %w", err)
 		}
 		if q.js != nil {
-			if _, err := q.js.Publish(ctx, q.connectorSubject, body); err != nil {
+			// Same dedup key as the event path: a publish whose broker ack was
+			// lost to a timeout is retried by the engine, and the stream should
+			// collapse the identical body instead of storing a second copy that
+			// every colour has to re-apply.
+			if _, err := q.js.Publish(ctx, q.connectorSubject, body, jetstream.WithMsgID(bodyMsgID(body))); err != nil {
 				return fmt.Errorf("publish connector batch: %w", err)
 			}
 			continue
@@ -257,8 +265,16 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink even
 					log.Printf("ingestion worker: decode connector batch: %v", err)
 					continue
 				}
-				if err := sink.InsertExternalRows(context.Background(), batch.ProjectID, batch.ConnectorID, batch.Table, batch.LandedRows()); err != nil {
-					log.Printf("ingestion worker: insert connector batch: %v", err)
+				// Bounded like the durable path's insert: this goroutine also
+				// drains event messages, so an unbounded write would stall all
+				// ingestion behind one connector batch. Failure is still logged
+				// and dropped — that is this mode's contract (see
+				// StartEventWorker), and it is why the durable path exists.
+				insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
+				insertErr := sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, batch.LandedRows())
+				cancel()
+				if insertErr != nil {
+					log.Printf("ingestion worker: insert connector batch: %v", insertErr)
 				}
 				continue
 			}
@@ -323,7 +339,7 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, me
 	// Sample the retention gap now, before this process consumes anything: once
 	// the replay advances the applied mark past the purge frontier the loss is no
 	// longer visible in the broker's state (see latchBootGap).
-	ss.latchBootGap(ctx)
+	ss.latchBootGap(ctx, cons)
 	consume, err := cons.Consume(func(msg jetstream.Msg) {
 		if msg.Subject() == ss.ConnectorSubject {
 			settler.settle(msg)
@@ -387,10 +403,13 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 		return
 	}
 
+	// Decoded once: the batch is immutable from here, and the retry path should
+	// not re-allocate and re-copy every row payload per attempt.
+	landed := batch.LandedRows()
 	var err error
 	for attempt := range connectorInsertAttempts {
 		insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, batch.LandedRows())
+		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed)
 		cancel()
 		if err == nil {
 			if ackErr := handle.ack(); ackErr != nil {

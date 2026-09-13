@@ -24,11 +24,21 @@ x-agentray-api: &agentray-api-svc
     # /readyz, not /healthz: the deploy gate must wait for this colour to have
     # applied the whole durable stream (events AND connector rows) before Caddy
     # is pointed at it — a colour still replaying would serve stale data behind
-    # a static 200. retries is deliberately above the deploy's own gate window
-    # (GATE_TIMEOUT, 240s) so a replay that is still progressing is not declared
-    # dead at ~120s: the gate's --gate-timeout is the single decision point, and
-    # --no-gate / --gate-timeout are the operator's escape hatches when a
-    # legitimately long replay outruns it.
+    # a static 200. /healthz stays the static-200 liveness answer for everything
+    # else.
+    #
+    # This window and the deploy's --gate-timeout are two timers, not one.
+    # Docker reports `starting` through start_period and `unhealthy` after
+    # `retries` consecutive failures, i.e. start_period + interval × retries =
+    # 330s here; bg_wait treats `unhealthy` as TERMINAL (it removes the new
+    # colour rather than waiting the deadline out, which is what keeps a
+    # genuinely broken colour from burning the whole gate). So a replay that
+    # outlives 330s must be met by widening THIS window too, not only by
+    # `--gate-timeout`: raise retries to cover the wait, or accept the refusal
+    # — it is safe, the old colour keeps serving — and see deploy.sh's header
+    # for the rest. The declared window must stay above the default
+    # GATE_TIMEOUT (240s) so an ordinary deploy is decided by the gate and not
+    # by Docker.
     test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/readyz"]
     interval: 30s
     timeout: 5s
