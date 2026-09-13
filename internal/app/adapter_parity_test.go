@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -694,5 +695,58 @@ func TestOverviewAdaptersShareTypedErrorStatus(t *testing.T) {
 	}
 	if opRec.Code != getRec.Code {
 		t.Fatalf("GET %d vs /api/op %d — the adapters disagree on a typed error", getRec.Code, opRec.Code)
+	}
+}
+
+// fakeTierReader is the workspace-tier read the authoring helper depends on.
+type fakeTierReader struct {
+	cfg  storage.WorkspaceModelTiers
+	keys map[string]string
+	err  error
+}
+
+func (f fakeTierReader) WorkspaceTiersForRun(ctx context.Context, workspaceID string) (storage.WorkspaceModelTiers, map[string]string, error) {
+	return f.cfg, f.keys, f.err
+}
+
+// Both authoring endpoints resolve their provider through one helper now, so
+// the fallback chain has to be pinned here: an unconfigured pro tier inherits
+// the flash default (including its key), a workspace with nothing configured is
+// an ordinary configuration error — never the typed init one the definition
+// route turns into a 502 — and a provider the factory rejects is typed.
+func TestAuthoringProviderUsesFlashFallback(t *testing.T) {
+	ctx := context.Background()
+
+	reader := fakeTierReader{
+		cfg:  storage.WorkspaceModelTiers{Provider: "openai", Model: "gpt-5-mini"},
+		keys: map[string]string{"flash": "sk-flash"},
+	}
+	provider, model, err := authoringProvider(ctx, reader, "ws-1")
+	if err != nil || provider == nil {
+		t.Fatalf("flash fallback = provider %v model %q err %v", provider, model, err)
+	}
+	if model != "gpt-5-mini" {
+		t.Fatalf("resolved model = %q, want the flash default", model)
+	}
+
+	_, _, err = authoringProvider(ctx, fakeTierReader{}, "ws-1")
+	if err == nil {
+		t.Fatal("an unconfigured workspace resolved a provider")
+	}
+	var initErr *authoringProviderInitError
+	if errors.As(err, &initErr) {
+		t.Fatalf("unconfigured tier classified as a provider-init failure: %v", err)
+	}
+
+	unbuildable := fakeTierReader{
+		cfg:  storage.WorkspaceModelTiers{Provider: "mystery-router", Model: "m", BaseURL: ""},
+		keys: map[string]string{"flash": "sk-flash"},
+	}
+	_, _, err = authoringProvider(ctx, unbuildable, "ws-1")
+	if err == nil {
+		t.Fatal("an unbuildable provider resolved without error")
+	}
+	if !errors.As(err, &initErr) {
+		t.Fatalf("unbuildable provider err = %v, want the typed init error", err)
 	}
 }
