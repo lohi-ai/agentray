@@ -88,6 +88,8 @@ type Store interface {
 	HeartbeatConnectorRun(ctx context.Context, runID string) (cancelRequested bool, stillRunning bool, err error)
 	FinishConnectorRun(ctx context.Context, runID, syncID, owner string, result SyncResult, cancelled bool) error
 	ReconcileConnectorRuns(ctx context.Context, staleBefore time.Time) (int, error)
+	ConnectorRunForProject(ctx context.Context, projectID, runID string) (Run, error)
+	CancelConnectorRun(ctx context.Context, projectID, runID string) (Run, error)
 }
 
 // Run is one durable sync-run record — the client-visible contract for
@@ -158,6 +160,12 @@ const maxHeartbeatFailures = 3
 // heartbeatCallTimeout bounds ONE lease RPC: a hung query must not ride the
 // 10-minute run context past the 2-minute lease.
 const heartbeatCallTimeout = 15 * time.Second
+
+// queuedCancelTimeout bounds the terminal write a cancelled, not-yet-claimed
+// worker makes for its own queued receipt — the write must survive the
+// cancellation that caused it, and must not outlive the shutdown waiting on
+// the run.
+const queuedCancelTimeout = 5 * time.Second
 
 // maxPendingRuns bounds goroutines parked on the run semaphore. Runs beyond
 // it are refused BEFORE a durable row exists — a queued row with no worker
@@ -274,7 +282,7 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 		}()
 		e.sem <- struct{}{}
 		defer func() { <-e.sem }()
-		e.executeRun(run.ID, run.SyncID)
+		e.executeRun(run.ID, run.SyncID, run.ProjectID)
 	}()
 	return run, true, nil
 }
@@ -294,10 +302,43 @@ func (e *Engine) CancelRun(runID string) {
 // both the run row and the sync's last_* columns. The whole run is bounded by
 // syncRunTimeout; the finish write rides an independent bounded context so a
 // timed-out run still records its outcome.
-func (e *Engine) executeRun(runID, syncID string) {
+func (e *Engine) executeRun(runID, syncID, projectID string) {
 	ctx := context.Background()
-	_, claimed, err := e.store.ClaimConnectorRun(ctx, runID, e.id)
+	runCtx, cancel := context.WithTimeout(ctx, syncRunTimeout)
+
+	// Register this run's cancel BEFORE the claim. Shutdown sweeps e.cancels
+	// under e.mu, so a worker that registers after that sweep must observe
+	// e.closed here and cancel itself — otherwise a run admitted just before
+	// shutdown would keep pulling (and keep e.wg incremented) for up to
+	// syncRunTimeout while Shutdown waits on e.wg.
+	e.mu.Lock()
+	shuttingDown := e.closed
+	e.cancels[runID] = cancel
+	e.mu.Unlock()
+	if shuttingDown {
+		cancel()
+	}
+
+	heartbeatDone := make(chan struct{})
+	heartbeatRunning := false
+	defer func() {
+		cancel()
+		if heartbeatRunning {
+			<-heartbeatDone
+		}
+		e.mu.Lock()
+		delete(e.cancels, runID)
+		e.mu.Unlock()
+	}()
+
+	_, claimed, err := e.store.ClaimConnectorRun(runCtx, runID, e.id)
 	if err != nil {
+		if errors.Is(runCtx.Err(), context.Canceled) {
+			// Cancelled between admission and the claim: no worker will ever
+			// finish this row, so record the terminal state here rather than
+			// leaving a live-looking queued receipt for stale-run reconcile.
+			e.cancelQueuedRun(projectID, runID)
+		}
 		log.Printf("connector: claim run %s: %v", runID, err)
 		return
 	}
@@ -305,16 +346,11 @@ func (e *Engine) executeRun(runID, syncID string) {
 		return // cancelled while queued, or claimed elsewhere
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, syncRunTimeout)
-	e.mu.Lock()
-	e.cancels[runID] = cancel
-	e.mu.Unlock()
-
 	// The heartbeat does two jobs in one write: it keeps the lease fresh so a
 	// peer process's boot reconcile cannot fence this live run, and it reads
 	// back cancel_requested so a cancel issued against another process still
 	// lands here.
-	heartbeatDone := make(chan struct{})
+	heartbeatRunning = true
 	go func() {
 		defer close(heartbeatDone)
 		tick := time.NewTicker(e.heartbeatEvery)
@@ -355,14 +391,6 @@ func (e *Engine) executeRun(runID, syncID string) {
 		}
 	}()
 
-	defer func() {
-		cancel()
-		<-heartbeatDone
-		e.mu.Lock()
-		delete(e.cancels, runID)
-		e.mu.Unlock()
-	}()
-
 	job, err := e.store.ConnectorSyncJob(runCtx, syncID)
 	var result SyncResult
 	if err != nil {
@@ -375,6 +403,27 @@ func (e *Engine) executeRun(runID, syncID string) {
 	defer finishCancel()
 	if err := e.store.FinishConnectorRun(finishCtx, runID, syncID, e.id, result, cancelled); err != nil {
 		log.Printf("connector: finish run %s: %v", runID, err)
+	}
+}
+
+// cancelQueuedRun records the terminal cancelled state for a run this process
+// admitted but could not claim because shutdown cancelled it mid-claim. The
+// write rides its own bounded context — it must survive the cancellation that
+// caused it — and only touches a row that is still queued, so a shutdown can
+// never cancel a run another process already owns.
+func (e *Engine) cancelQueuedRun(projectID, runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), queuedCancelTimeout)
+	defer cancel()
+	run, err := e.store.ConnectorRunForProject(ctx, projectID, runID)
+	if err != nil {
+		log.Printf("connector: read run %s for cancellation: %v", runID, err)
+		return
+	}
+	if run.Status != "queued" {
+		return
+	}
+	if _, err := e.store.CancelConnectorRun(ctx, projectID, runID); err != nil {
+		log.Printf("connector: cancel queued run %s: %v", runID, err)
 	}
 }
 

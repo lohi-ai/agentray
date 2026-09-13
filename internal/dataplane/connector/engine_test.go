@@ -95,6 +95,22 @@ type fakeStore struct {
 	// heartbeatBlock, when non-nil, makes HeartbeatConnectorRun wait on it —
 	// a hung lease RPC for the bounded-call test.
 	heartbeatBlock chan struct{}
+	// claimBlock, when non-nil, holds ClaimConnectorRun until it is closed or
+	// the claim context is cancelled — the window in which a run admitted
+	// just before Shutdown is still unclaimed. claimEntered is signalled once
+	// the worker is parked inside that window.
+	claimBlock   chan struct{}
+	claimEntered chan struct{}
+}
+
+func (f *fakeStore) enteredClaim() {
+	if f.claimEntered == nil {
+		return
+	}
+	select {
+	case f.claimEntered <- struct{}{}:
+	default:
+	}
 }
 
 func newFakeStore(job SyncJob) *fakeStore {
@@ -142,6 +158,14 @@ func (f *fakeStore) EnqueueConnectorRun(ctx context.Context, projectID, syncID, 
 }
 
 func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error) {
+	if f.claimBlock != nil {
+		f.enteredClaim()
+		select {
+		case <-f.claimBlock:
+		case <-ctx.Done():
+			return Run{}, false, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := f.runs[runID]
@@ -150,6 +174,37 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 	}
 	r.Status = "running"
 	return *r, true, nil
+}
+
+func (f *fakeStore) ConnectorRunForProject(ctx context.Context, projectID, runID string) (Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.runs[runID]
+	if r == nil {
+		return Run{}, fmt.Errorf("run %s not found in project %s", runID, projectID)
+	}
+	return *r, nil
+}
+
+// CancelConnectorRun mirrors the real store's semantics: a queued row is
+// terminal immediately, a running row only gets the flag.
+func (f *fakeStore) CancelConnectorRun(ctx context.Context, projectID, runID string) (Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.runs[runID]
+	if r == nil {
+		return Run{}, fmt.Errorf("run %s not found in project %s", runID, projectID)
+	}
+	switch r.Status {
+	case "queued", "running":
+		r.CancelRequested = true
+		if r.Status == "queued" {
+			r.Status = "cancelled"
+			now := time.Now()
+			r.FinishedAt = &now
+		}
+	}
+	return *r, nil
 }
 
 func (f *fakeStore) HeartbeatConnectorRun(ctx context.Context, runID string) (bool, bool, error) {
@@ -209,6 +264,15 @@ func (f *fakeStore) requestCancel(runID string) {
 	if r := f.runs[runID]; r != nil {
 		r.CancelRequested = true
 	}
+}
+
+func (f *fakeStore) runStatus(runID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r := f.runs[runID]; r != nil {
+		return r.Status
+	}
+	return ""
 }
 
 func incrementalJob() SyncJob {
@@ -411,6 +475,48 @@ func TestRunSyncObservesPersistedCancel(t *testing.T) {
 	}
 	if store.runs[run.ID].Status != "cancelled" {
 		t.Fatalf("status = %q, want cancelled", store.runs[run.ID].Status)
+	}
+}
+
+// A run admitted just before shutdown can still be parked in
+// ClaimConnectorRun when Shutdown snapshots the cancel map. It must be
+// cancelled anyway: Shutdown returns promptly instead of waiting out
+// syncRunTimeout, and the queued receipt it will never claim ends cancelled
+// rather than looking live until a peer reconciles it.
+func TestShutdownCancelsRunAdmittedDuringClaim(t *testing.T) {
+	store := newFakeStore(incrementalJob())
+	store.claimBlock = make(chan struct{})
+	store.claimEntered = make(chan struct{}, 1)
+	engine := NewEngine(store)
+
+	run, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s1", "")
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue: %v enqueued=%v", err, enqueued)
+	}
+	select {
+	case <-store.claimEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never reached the claim barrier")
+	}
+
+	shutdown := make(chan struct{})
+	go func() { engine.Shutdown(); close(shutdown) }()
+	select {
+	case <-shutdown:
+	case <-time.After(5 * time.Second):
+		close(store.claimBlock) // release the parked worker so the test can exit
+		t.Fatalf("Shutdown blocked on a run admitted before it (syncRunTimeout = %s)", syncRunTimeout)
+	}
+	close(store.claimBlock)
+
+	if got := store.runStatus(run.ID); got != "cancelled" {
+		t.Fatalf("run %s after shutdown = %q, want cancelled", run.ID, got)
+	}
+	store.mu.Lock()
+	finished := len(store.finished)
+	store.mu.Unlock()
+	if finished != 0 {
+		t.Fatalf("finished %d runs, want 0 — the cancelled run never started", finished)
 	}
 }
 
