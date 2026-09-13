@@ -220,8 +220,8 @@ describe('AgentRayClient identity', () => {
     const calls = stubFetch();
     localStorage.setItem('agentray_anon_id', 'anon-from-last-page');
     localStorage.setItem(
-      'agentray_pending_alias',
-      JSON.stringify([{ anonymousId: 'anon-from-last-page', distinctId: 'user_123' }]),
+      `agentray_pending_alias.${config.apiKey}.anon-from-last-page`,
+      JSON.stringify({ distinctId: 'user_123', at: 1 }),
     );
 
     new AgentRayClient(config);
@@ -234,9 +234,43 @@ describe('AgentRayClient identity', () => {
       distinct_id: 'user_123',
     });
     await vi.waitFor(() =>
-      expect(localStorage.getItem('agentray_pending_alias')).toBeNull(),
+      expect(localStorage.getItem(`agentray_pending_alias.${config.apiKey}.anon-from-last-page`)).toBeNull(),
     );
     expect(calls.filter((c) => c.path === '/identify')).toHaveLength(0);
+  });
+
+  it('never replays or clears another project\u2019s pending alias', async () => {
+    // Project A logs in while offline, so its alias stays unconfirmed and only
+    // its marker remembers the link.
+    const offlineA = new IdentityQueue({
+      host: config.apiUrl,
+      apiKey: config.apiKey,
+      maxRetries: 1,
+      fetchImpl: async () => {
+        throw new Error('offline');
+      },
+    });
+    const clientA = new AgentRayClient({ ...config, identity: offlineA });
+    const anonA = clientA.getDistinctId();
+    clientA.identify('user_of_a');
+
+    // Found by id rather than by name, so the assertion is about the link
+    // surviving, not about how the marker happens to be keyed.
+    const markers = Object.keys(localStorage).filter((key) => key.includes(anonA));
+    expect(markers).toHaveLength(1);
+
+    // A second AgentRay project on the same origin: same localStorage, its own
+    // api key.
+    const calls = stubFetch();
+    const otherQueue = new IdentityQueue({ host: config.apiUrl, apiKey: 'other_project_key' });
+    new AgentRayClient({ ...config, apiKey: 'other_project_key', identity: otherQueue });
+    await otherQueue.flush();
+
+    // Nothing sent, and project A's marker is still there for project A to
+    // replay — sending it to another tenant's endpoint would both leak the id
+    // and destroy the link it was kept for.
+    expect(calls.filter((c) => c.path === '/alias')).toHaveLength(0);
+    expect(localStorage.getItem(markers[0])).not.toBeNull();
   });
 
   it('lets a logout reset win the race against its own in-flight alias', async () => {

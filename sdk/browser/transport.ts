@@ -184,13 +184,24 @@ export interface IdentityQueueOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** Where unconfirmed aliases wait out a page load. Holds ids only — never traits. */
-const PENDING_ALIAS_KEY = 'agentray_pending_alias';
+/**
+ * Where unconfirmed aliases wait out a page load. One key per alias, named for
+ * the project that owns it, holding ids only — never traits.
+ *
+ * One key per alias rather than one list per origin, for two reasons that both
+ * come down to what a shared blob cannot do. `setItem` and `removeItem` are
+ * atomic for a single key, so two tabs cannot lose each other's alias the way a
+ * read-modify-write of one list can. And the project is part of the name, so a
+ * second AgentRay project on the same origin can never replay — or clear — the
+ * first project's pending link, which would send one tenant's anonymous id to
+ * the other's endpoint and drop the link it was meant to save.
+ */
+const PENDING_ALIAS_PREFIX = 'agentray_pending_alias.';
 
 /**
- * Most unconfirmed aliases carried across a page load. One login is one alias;
- * the cap only stops a page that calls `identify()` in a loop from growing the
- * marker without bound.
+ * Most unconfirmed aliases replayed for one project. A login is one alias, and
+ * `identify()` only issues one per `reset()`, so this bound is only reached by a
+ * page stuck in a loop; it keeps that loop from filling the origin's storage.
  */
 const MAX_PENDING_ALIASES = 8;
 
@@ -199,40 +210,33 @@ type DeliveryOutcome = 'ok' | 'terminal' | 'unsent';
 interface PendingAlias {
   anonymousId: string;
   distinctId: string;
+  /** Enqueue time, so a replay keeps the order the logins happened in. */
+  at: number;
 }
 
-function readPendingAliases(): PendingAlias[] {
-  let raw: string | null = null;
+/** Every unconfirmed alias this project left on this origin, oldest first. */
+function readPendingAliases(apiKey: string): PendingAlias[] {
+  const prefix = `${PENDING_ALIAS_PREFIX}${apiKey}.`;
+  const pending: PendingAlias[] = [];
   try {
-    raw = localStorage.getItem(PENDING_ALIAS_KEY);
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key === null || !key.startsWith(prefix)) continue;
+      const stored = JSON.parse(localStorage.getItem(key) ?? 'null') as {
+        distinctId?: unknown;
+        at?: unknown;
+      } | null;
+      if (typeof stored?.distinctId !== 'string') continue;
+      pending.push({
+        anonymousId: key.slice(prefix.length),
+        distinctId: stored.distinctId,
+        at: typeof stored.at === 'number' ? stored.at : 0,
+      });
+    }
   } catch {
     return [];
   }
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry): entry is PendingAlias => {
-      if (typeof entry !== 'object' || entry === null) return false;
-      const { anonymousId, distinctId } = entry as Partial<PendingAlias>;
-      return typeof anonymousId === 'string' && typeof distinctId === 'string';
-    });
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Read-modify-write the marker through one path, so a blocked storage costs
- * identity continuity and never a thrown error into the host page — and a
- * marker with nothing left in it is dropped rather than left behind empty.
- */
-function updatePendingAliases(update: (pending: PendingAlias[]) => PendingAlias[]): void {
-  const next = update(readPendingAliases());
-  try {
-    if (next.length === 0) localStorage.removeItem(PENDING_ALIAS_KEY);
-    else localStorage.setItem(PENDING_ALIAS_KEY, JSON.stringify(next));
-  } catch {}
+  return pending.sort((a, b) => a.at - b.at);
 }
 
 /**
@@ -276,15 +280,14 @@ export class IdentityQueue {
   /** Queue an operation and start delivering it. */
   enqueue(op: IdentityOperation): void {
     if (op.kind === 'alias') {
-      // Every unconfirmed pair is kept, not just the newest: `identify` →
-      // `reset` → `identify` with the tab closing before either is answered
-      // would otherwise strand the first visitor's history for good.
-      updatePendingAliases((pending) =>
-        [...pending.filter((p) => p.anonymousId !== op.anonymousId), {
-          anonymousId: op.anonymousId,
-          distinctId: op.distinctId,
-        }].slice(-MAX_PENDING_ALIASES),
-      );
+      // A single atomic write, so a second tab writing its own alias at the
+      // same moment cannot make this one disappear.
+      try {
+        localStorage.setItem(
+          `${PENDING_ALIAS_PREFIX}${this.apiKey}.${op.anonymousId}`,
+          JSON.stringify({ distinctId: op.distinctId, at: Date.now() }),
+        );
+      } catch {}
     }
     this.queue.push({ op, ...this.encode(op) });
     void this.pump();
@@ -292,20 +295,26 @@ export class IdentityQueue {
 
   /**
    * Re-queue every alias that an earlier page load stored and never got
-   * acknowledged. Safe to replay: the server's alias write is idempotent on
-   * `(project_id, anonymous_id)`.
+   * acknowledged, oldest first. Safe to replay: the server's alias write is
+   * idempotent on `(project_id, anonymous_id)`.
    */
   restorePendingAlias(): void {
-    for (const pending of readPendingAliases()) {
+    const pending = readPendingAliases(this.apiKey);
+    for (const stale of pending.slice(0, -MAX_PENDING_ALIASES)) {
+      try {
+        localStorage.removeItem(`${PENDING_ALIAS_PREFIX}${this.apiKey}.${stale.anonymousId}`);
+      } catch {}
+    }
+    for (const alias of pending.slice(-MAX_PENDING_ALIASES)) {
       const alreadyQueued = this.queue.some(
         (queued) =>
-          queued.op.kind === 'alias' && queued.op.anonymousId === pending.anonymousId,
+          queued.op.kind === 'alias' && queued.op.anonymousId === alias.anonymousId,
       );
       if (alreadyQueued) continue;
       this.enqueue({
         kind: 'alias',
-        anonymousId: pending.anonymousId,
-        distinctId: pending.distinctId,
+        anonymousId: alias.anonymousId,
+        distinctId: alias.distinctId,
       });
     }
   }
@@ -333,7 +342,11 @@ export class IdentityQueue {
       this.queue.shift();
       const { op } = queued;
       if (op.kind !== 'alias') continue;
-      updatePendingAliases((pending) => pending.filter((p) => p.anonymousId !== op.anonymousId));
+      // Only this project's own key, and only after it settled: a 4xx can never
+      // be fixed by replaying it, and another project's marker is not ours.
+      try {
+        localStorage.removeItem(`${PENDING_ALIAS_PREFIX}${this.apiKey}.${op.anonymousId}`);
+      } catch {}
       if (outcome === 'ok') this.onAliasConfirmed?.(op);
     }
   }
