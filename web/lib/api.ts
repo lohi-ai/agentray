@@ -867,7 +867,7 @@ export type DatasetPreviewRow = {
   synced_at: string;
 };
 
-// DatasetPreview is the dataset_preview op output: deduped FINAL rows with
+// DatasetPreview is the dataset_preview op output: deduped rows with
 // the soft-delete filter applied, plus the freshness block and the standing
 // warnings. landed_watermark is the max cursor actually present in the
 // landing table — it can lag the resume cursor when a run failed mid-pull.
