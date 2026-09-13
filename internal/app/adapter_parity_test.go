@@ -759,8 +759,15 @@ func TestLegacyRESTAuthorizationParity(t *testing.T) {
 	if rec := postJSON(t, e, "/api/op/list_dashboards", `{}`, bearer(reader)); rec.Code != http.StatusOK {
 		t.Fatalf("analytics:read list_dashboards via /api/op: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"Parity REST board"}`, author); rec.Code != http.StatusCreated {
-		t.Fatalf("dashboards:write create via REST: %d %s", rec.Code, rec.Body.String())
+	restBoard := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"Parity REST board"}`, author)
+	if restBoard.Code != http.StatusCreated {
+		t.Fatalf("dashboards:write create via REST: %d %s", restBoard.Code, restBoard.Body.String())
+	}
+	var parityBoard struct {
+		Dashboard storage.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(restBoard.Body.Bytes(), &parityBoard); err != nil {
+		t.Fatalf("REST create body: %v (%s)", err, restBoard.Body.String())
 	}
 	if rec := postJSON(t, e, "/api/op/create_dashboard", `{"name":"Parity op board"}`, bearer(author)); rec.Code != http.StatusOK {
 		t.Fatalf("dashboards:write create_dashboard via /api/op: %d %s", rec.Code, rec.Body.String())
@@ -768,15 +775,71 @@ func TestLegacyRESTAuthorizationParity(t *testing.T) {
 	if names := dashboardNames(t, e, author); !names["Parity REST board"] || !names["Parity op board"] {
 		t.Fatalf("authorized creates did not persist: %v", names)
 	}
+	restChart := callREST(t, e, http.MethodPost, "/api/dashboards/"+parityBoard.Dashboard.ID+"/charts", `{"name":"Parity chart","kind":"line","metric":"events"}`, author)
+	if restChart.Code != http.StatusCreated {
+		t.Fatalf("dashboards:write create chart via REST: %d %s", restChart.Code, restChart.Body.String())
+	}
+	var parityChart struct {
+		Chart storage.Chart `json:"chart"`
+	}
+	if err := json.Unmarshal(restChart.Body.Bytes(), &parityChart); err != nil {
+		t.Fatalf("REST chart body: %v (%s)", err, restChart.Body.String())
+	}
+
+	// Every dashboard/chart handler is covered, not only the two above: each
+	// independently registered route must answer its own operation's refusal, so
+	// one rewritten to skip ops.invoke fails here instead of silently reopening
+	// the gap. The rows run against rows the author's credential just created, so
+	// the revision lookup that precedes invoke cannot answer for them.
+	boardID, chartID := parityBoard.Dashboard.ID, parityChart.Chart.ID
+	for _, row := range []struct {
+		name         string
+		method, path string
+		body         string
+		op, opBody   string
+	}{
+		{"update_dashboard", http.MethodPut, "/api/dashboards/" + boardID, `{"name":"nope"}`,
+			"update_dashboard", fmt.Sprintf(`{"dashboard_id":%q,"name":"nope"}`, boardID)},
+		{"archive_dashboard", http.MethodDelete, "/api/dashboards/" + boardID, "",
+			"archive_dashboard", fmt.Sprintf(`{"dashboard_id":%q}`, boardID)},
+		{"create_chart", http.MethodPost, "/api/dashboards/" + boardID + "/charts", `{"name":"nope","kind":"line","metric":"events"}`,
+			"create_chart", fmt.Sprintf(`{"dashboard_id":%q,"name":"nope"}`, boardID)},
+		{"update_chart", http.MethodPut, "/api/charts/" + chartID, `{"name":"nope"}`,
+			"update_chart", fmt.Sprintf(`{"chart_id":%q,"name":"nope"}`, chartID)},
+		{"archive_chart", http.MethodDelete, "/api/charts/" + chartID, "",
+			"archive_chart", fmt.Sprintf(`{"chart_id":%q}`, chartID)},
+		{"reorder_charts", http.MethodPut, "/api/dashboards/" + boardID + "/charts/order", `{"chart_ids":[]}`,
+			"reorder_charts", fmt.Sprintf(`{"dashboard_id":%q,"chart_ids":[]}`, boardID)},
+	} {
+		legacy := callREST(t, e, row.method, row.path, row.body, reader)
+		opCall := postJSON(t, e, "/api/op/"+row.op, row.opBody, bearer(reader))
+		if legacy.Code != http.StatusForbidden || opCall.Code != http.StatusForbidden {
+			t.Fatalf("analytics:read %s: legacy %d %s | /api/op %d %s; want 403 on both",
+				row.name, legacy.Code, legacy.Body.String(), opCall.Code, opCall.Body.String())
+		}
+		if legacy.Body.String() != opCall.Body.String() {
+			t.Fatalf("%s refusal bodies differ: legacy %q, /api/op %q", row.name, legacy.Body.String(), opCall.Body.String())
+		}
+	}
+	// A refused mutation touched nothing: the board is still active.
+	if names := dashboardNames(t, e, author); !names["Parity REST board"] {
+		t.Fatalf("a refused mutation archived the dashboard: %v", names)
+	}
 
 	// The capture key never reaches a non-session caller; the session, the one
-	// credential that resolved a membership, still owns it.
+	// credential that resolved a membership that may write, still owns it.
 	readerBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", reader).Body.String()
 	if strings.Contains(readerBody, captureKey) {
 		t.Fatalf("management credential received the project capture key: %s", readerBody)
 	}
-	if !strings.Contains(readerBody, `"api_key":""`) {
-		t.Fatalf("management credential response does not redact api_key: %s", readerBody)
+	var readerProject struct {
+		Project storage.Project `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(readerBody), &readerProject); err != nil {
+		t.Fatalf("management credential body: %v (%s)", err, readerBody)
+	}
+	if readerProject.Project.ID != project.ID || readerProject.Project.APIKey != "" {
+		t.Fatalf("management credential body project = %+v, want %s with a blanked key", readerProject.Project, project.ID)
 	}
 	sessionBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", "", sessionCookieFor(t, s, boot.User.ID)).Body.String()
 	if !strings.Contains(sessionBody, captureKey) {
@@ -823,8 +886,15 @@ func TestLegacyRESTAuthorizationParity(t *testing.T) {
 		t.Fatalf("add viewer: %v", err)
 	}
 	viewerCookie := sessionCookieFor(t, s, viewer.User.ID)
-	if rec := callREST(t, e, http.MethodGet, "/api/dashboards?project_id="+project.ID, "", "", viewerCookie); rec.Code != http.StatusOK {
-		t.Fatalf("viewer list_dashboards: %d %s, want 200", rec.Code, rec.Body.String())
+	viewerList := callREST(t, e, http.MethodGet, "/api/dashboards?project_id="+project.ID, "", "", viewerCookie)
+	if viewerList.Code != http.StatusOK {
+		t.Fatalf("viewer list_dashboards: %d %s, want 200", viewerList.Code, viewerList.Body.String())
+	}
+	// The viewer may read the list but not hold the ingest key: the resolvers
+	// load the row through the role-blind ProjectByID, so the echoed project is
+	// withheld unless the resolved role may write.
+	if strings.Contains(viewerList.Body.String(), captureKey) {
+		t.Fatalf("viewer session received the capture key: %s", viewerList.Body.String())
 	}
 	if rec := callREST(t, e, http.MethodPost, "/api/dashboards?project_id="+project.ID, `{"name":"viewer board"}`, "", viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer create via REST: %d %s, want 403 (MinSessionRole member)", rec.Code, rec.Body.String())

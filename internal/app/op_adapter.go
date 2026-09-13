@@ -41,13 +41,15 @@ func newOpAdapter(store *storage.Store, notifier usecase.Notifier, runner usecas
 // invoke runs one registered operation under the resolved principal, and is
 // where the legacy REST surface makes the access-class decision.
 //
-// It is the choke point on purpose: every adapter route that executes an
+// It is the choke point on purpose: every opAdapter route that executes an
 // operation reaches the registry through this function, so a route added
 // tomorrow inherits the check instead of having to remember it — which is
 // exactly how the nine dashboard/chart routes came to run as any credential
-// that could reach the project. The check is the same Registry.Authorize
-// MountHTTP and MCP run, and the refusal is the same one they return, so a
-// credential refused on /api/op is refused here.
+// that could reach the project. The hand-rolled adapters — MountHTTP on
+// /api/op, MountMCP on /mcp, and overview_routes.go — call spec.OpInvoke
+// themselves and run their own Registry.Authorize first. The check is the same
+// Registry.Authorize MountHTTP and MCP run, and the refusal is the same one
+// they return, so a credential refused on /api/op is refused here.
 //
 // Admission — whether this credential may address the project at all — stays
 // with the caller's resolver (projectFromRequest / principalAndProject).

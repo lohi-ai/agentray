@@ -2,13 +2,11 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -205,9 +203,6 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	if got.APIKey != "" {
 		t.Fatalf("management credential received the capture key: %q", got.APIKey)
 	}
-	if body, err := json.Marshal(got); err != nil || strings.Contains(string(body), project.APIKey) {
-		t.Fatalf("project response body carries the capture key: %s (%v)", body, err)
-	}
 	other, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-other-%d@test.local", time.Now().UnixNano()), "Other", "password-123", "other-ws", "other-proj")
 	if err != nil {
 		t.Fatalf("create other account: %v", err)
@@ -226,10 +221,35 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	if err != nil || got.ID != project.ID {
 		t.Fatalf("session project = %+v, %v; want %s", got, err, project.ID)
 	}
-	// A session is the one credential that resolved a membership, so it keeps
-	// the key the web app reveals and pastes into the install snippet.
+	// A session whose role may write is the credential that keeps the key the web
+	// app reveals and pastes into the install snippet.
 	if got.APIKey != project.APIKey {
 		t.Fatalf("session capture key = %q, want %q", got.APIKey, project.APIKey)
+	}
+
+	// A viewer's session is admitted to the project but may not hold its ingest
+	// key (RoleMayWrite), so the key is withheld here too. These resolvers load
+	// the row through the role-blind store.ProjectByID, so without the role check
+	// every project-echoing response would hand a viewer the write key.
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-viewer-%d@test.local", time.Now().UnixNano()), "Viewer", "password-123", "viewer-ws", "viewer-proj")
+	if err != nil {
+		t.Fatalf("create viewer account: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("create viewer session: %v", err)
+	}
+	viewerReq := httptest.NewRequest(http.MethodGet, "/api/dashboards?project_id="+project.ID, nil)
+	viewerReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: viewerToken})
+	got, err = projectFromRequest(e.NewContext(viewerReq, httptest.NewRecorder()), s)
+	if err != nil || got.ID != project.ID {
+		t.Fatalf("viewer session project = %+v, %v; want %s", got, err, project.ID)
+	}
+	if got.APIKey != "" {
+		t.Fatalf("viewer session received the capture key: %q", got.APIKey)
 	}
 }
 

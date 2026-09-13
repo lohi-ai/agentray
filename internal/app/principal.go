@@ -93,12 +93,19 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 // holding the project's write key, and could then inject anything it liked.
 // store.Project.redactAPIKeyForRole already blanks the key for a membership that
 // may not hold it; this is the same rule stated over credentials instead of
-// roles. Only a session resolved a membership that may hold the key, and a
-// management credential never had it. A legacy project key authenticates with
-// the key itself, so withholding it there leaks nothing and grants nothing.
-// Capture principals never reach here — both resolvers refuse them first.
+// roles. A management credential never had the key, and a legacy project key
+// authenticates with the key itself, so withholding it there leaks nothing and
+// grants nothing. Capture principals never reach here — both resolvers refuse
+// them first.
+//
+// A session keeps the key only when its resolved role may write. That is not
+// redundant with the kind check: these resolvers load the row through
+// store.ProjectByID, which is role-blind, so a viewer's session would otherwise
+// come back holding the project's ingest key — the escalation
+// redactAPIKeyForRole already refuses on every path that loads through
+// ProjectByIDForUser.
 func projectForPrincipal(project storage.Project, principal opcore.Principal) storage.Project {
-	if principal.Kind != opcore.CredSession {
+	if principal.Kind != opcore.CredSession || !storage.RoleMayWrite(principal.Role) {
 		project.APIKey = ""
 	}
 	return project
