@@ -47,7 +47,8 @@ type SyncJob struct {
 	KeyColumn   string
 	// CursorColumn empty = snapshot mode: the key column orders the pull and
 	// the cursor is never persisted, so every run re-lands the whole table
-	// (deduped by the landing table's ReplacingMergeTree key).
+	// (deduped by the landing table's (project, connector, table, row_key)
+	// primary key — INSERT OR REPLACE overwrites the previous row in place).
 	CursorColumn string
 	Cursor       string
 	// CursorKey is the key of the last synced row — the tie-breaking half of

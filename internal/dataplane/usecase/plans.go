@@ -258,8 +258,9 @@ type datasetPreviewInput struct {
 	Limit  int    `json:"limit" desc:"rows to preview, max 50"`
 }
 
-// dataset_preview is the dataset-semantics read: deduped FINAL rows with the
-// soft-delete filter applied, plus the freshness block and standing warnings.
+// dataset_preview is the dataset-semantics read: the landed rows — one per
+// row_key — with the soft-delete filter applied, plus the freshness block and
+// standing warnings.
 // run_sql applies the same soft-delete predicate inside scoped_external_rows;
 // this op adds the sync metadata, watermark and warnings around the rows.
 func datasetPreview() opcore.Operation[datasetPreviewInput, storage.DatasetPreview] {

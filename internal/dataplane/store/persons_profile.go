@@ -12,7 +12,7 @@ import (
 // $set / $set_once traits arrive inside each event's `properties` JSON and, until
 // now, were only ever reconstructed ad hoc at query time for the two hard-coded
 // traits email + name — every other custom trait was effectively write-only. This
-// adds a first-class person profile: a ReplacingMergeTree keyed by
+// adds a first-class person profile: a persons table keyed by
 // (project_id, distinct_id) — where distinct_id is the *identity-stitched
 // canonical id*, so an anonymous session's traits fold into the same profile once
 // it aliases to a logged-in id — holding the *merged* trait maps, maintained
@@ -22,12 +22,13 @@ import (
 //   - $set     → last-write-wins  (newest event's value for a key wins)
 //   - $set_once → first-write-wins (a key, once set, is never overwritten)
 //
-// ReplacingMergeTree(version) collapses duplicate (project_id, distinct_id) rows
-// to the highest version (= last_seen in ms). Each write carries the full merged
-// profile, so the surviving row is always the most complete one under the
-// single-writer ingest model agentray runs today. (A future scale-out to
-// concurrent ingest writers would need per-key CRDT columns; called out in the
-// data-architecture doc.)
+// The (project_id, distinct_id) primary key plus the transactional
+// read-merge-write upsert (INSERT ... ON CONFLICT DO UPDATE, version = last_seen
+// in ms) keeps exactly one row per person — there is no duplicate for a merge to
+// collapse later. Each write carries the full merged profile, so that row is
+// always the most complete one under the single-writer ingest model agentray
+// runs today. (A future scale-out to concurrent ingest writers would need
+// per-key CRDT columns; called out in the data-architecture doc.)
 
 // personKey identifies one profile.
 type personKey struct {
