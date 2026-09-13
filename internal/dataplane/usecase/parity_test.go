@@ -30,6 +30,16 @@ type parityRepo struct {
 	cancelErr  error
 	verifyRows []storage.Event
 	linked     bool
+	// connectorErr is the connector-existence answer source_status reads
+	// before it lists syncs: pgx.ErrNoRows makes the id unknown.
+	connectorErr error
+}
+
+func (f *parityRepo) DataConnectorForProject(context.Context, string, string) (storage.DataConnector, error) {
+	if f.connectorErr != nil {
+		return storage.DataConnector{}, f.connectorErr
+	}
+	return storage.DataConnector{ID: "connector-1"}, nil
 }
 
 func (f *parityRepo) ConnectorRunForProject(context.Context, string, string) (storage.ConnectorRun, error) {
@@ -64,6 +74,12 @@ type batchStatusRepo struct {
 	syncs      []storage.ConnectorSync
 	runs       map[string]storage.ConnectorRun
 	batchCalls [][]string
+}
+
+// DataConnectorForProject answers the existence read source_status performs
+// before listing; the connector exists unless a test says otherwise.
+func (f *batchStatusRepo) DataConnectorForProject(context.Context, string, string) (storage.DataConnector, error) {
+	return storage.DataConnector{ID: "connector-1"}, nil
 }
 
 func (f *batchStatusRepo) ListConnectorSyncsForProject(context.Context, string, string) ([]storage.ConnectorSync, error) {
@@ -404,5 +420,33 @@ func TestSourceStatusBatchesLatestRuns(t *testing.T) {
 	}
 	if len(result.Syncs) != 3 || result.Syncs[1].LatestRun == nil || result.Syncs[1].LatestRun.ID != "run-2" {
 		t.Fatalf("source_status result = %+v", result)
+	}
+}
+
+// An unknown connector id is not-found on every adapter. "This connector has
+// no syncs" and "there is no such connector" are different answers, and only
+// the connector existence read can tell them apart — before this, a typo
+// returned an empty success the agent reported as a healthy source.
+func TestSourceStatusUnknownConnectorIsNotFound(t *testing.T) {
+	deps := &Deps{Repo: &parityRepo{connectorErr: pgx.ErrNoRows}, Runner: &fakeRunner{}}
+	e := parityAdapters(t, deps)
+
+	rec := opPost(t, e, "/api/op/source_status", `{"connector_id":"00000000-0000-0000-0000-000000000000"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("REST status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if code, msg := restError(t, rec); code != "not_found" || !strings.Contains(msg, "connector not found") {
+		t.Fatalf("REST body code=%q msg=%q", code, msg)
+	}
+
+	result := mcpToolCall(t, e, "source_status", `{"connector_id":"00000000-0000-0000-0000-000000000000"}`)
+	if result["isError"] != true {
+		t.Fatalf("MCP isError missing: %v", result)
+	}
+	if got := mcpErrorCode(result); got != "not_found" {
+		t.Fatalf("MCP error_code = %q", got)
+	}
+	if !strings.Contains(mcpErrorText(result), "not_found: connector not found") {
+		t.Fatalf("MCP text = %q", mcpErrorText(result))
 	}
 }

@@ -100,8 +100,12 @@ func TestAdaptersEnforceCredentialContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("src cred: %v", err)
 	}
+	// sources:read may probe/status but not run. The connector id does not
+	// exist, so the answer is the typed not-found — 404 proves the credential
+	// was authorized (a refusal would be 403) AND that an unknown connector is
+	// no longer an empty success.
 	rec = postJSON(t, e, "/api/op/source_status", `{"connector_id":"00000000-0000-0000-0000-000000000000"}`, map[string]string{"Authorization": "Bearer " + srcSecret})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusNotFound {
 		t.Fatalf("sources:read source_status: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = postJSON(t, e, "/api/op/run_source", `{"sync_id":"00000000-0000-0000-0000-000000000000"}`, map[string]string{"Authorization": "Bearer " + srcSecret})

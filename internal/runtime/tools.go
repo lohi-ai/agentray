@@ -73,6 +73,10 @@ type DataSource interface {
 	// Source lifecycle (slice 2): project-scoped connector probes and the
 	// persistent run contract.
 	ConnectorDSNForProject(ctx context.Context, projectID, connectorID string) (kind, dsn string, err error)
+	// DataConnectorForProject mirrors usecase.Repo: source_status resolves the
+	// connector before listing its syncs, so an unknown connector id is
+	// not-found on every adapter instead of an empty success.
+	DataConnectorForProject(ctx context.Context, projectID, connectorID string) (storage.DataConnector, error)
 	ListConnectorSyncsForProject(ctx context.Context, projectID, connectorID string) ([]storage.ConnectorSync, error)
 	ConnectorSyncForProject(ctx context.Context, projectID, syncID string) (storage.ConnectorSync, error)
 	SetConnectorSyncEnabled(ctx context.Context, projectID, syncID string, enabled bool, expectedRevision int64) (storage.ConnectorSync, error)

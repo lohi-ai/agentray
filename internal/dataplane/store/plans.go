@@ -296,6 +296,10 @@ func scanValidationTestDest(t *ValidationTest) []any {
 // open states first, then decided, each newest first — plus the cursor for
 // the next page. Unlike the capped list, this walks the full history so an
 // agent can resume work older than the first page.
+//
+// The order is validationGroupRankSQL's, the same rank the capped list uses:
+// `proposed` and `committed` are one open partition, so a committed test from
+// yesterday never sorts behind a months-old proposal.
 func (s *Store) ListValidationTestsPage(ctx context.Context, projectID, cursor string, limit int) ([]ValidationTest, string, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
@@ -309,21 +313,21 @@ func (s *Store) ListValidationTestsPage(ctx context.Context, projectID, cursor s
 	var cursorID string
 	var cursorRank int
 	if cursor != "" {
-		parts := strings.SplitN(cursor, "|", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(cursor, "|", 4)
+		if len(parts) != 4 || parts[0] != validationCursorVersion {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		rank, rerr := strconv.Atoi(parts[0])
-		if rerr != nil || rank < 0 || rank > 2 {
+		rank, rerr := strconv.Atoi(parts[1])
+		if rerr != nil || rank < 0 || rank > 1 {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
 		cursorRank = rank
 		var perr error
-		cursorTime, perr = time.Parse(time.RFC3339Nano, parts[1])
+		cursorTime, perr = time.Parse(time.RFC3339Nano, parts[2])
 		if perr != nil {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		cursorID = parts[2]
+		cursorID = parts[3]
 		if !looksLikeUUID(cursorID) {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
@@ -339,10 +343,10 @@ SELECT `+validationTestCols+`
 FROM validation_tests
 WHERE project_id = $1
   AND ($2::text = '' OR
-       CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END > $3
-       OR (CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END = $3
+       `+validationGroupRankSQL+` > $3
+       OR (`+validationGroupRankSQL+` = $3
            AND (created_at, id) < ($4::timestamptz, $5::uuid)))
-ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'committed' THEN 1 ELSE 2 END,
+ORDER BY `+validationGroupRankSQL+`,
          created_at DESC, id DESC
 LIMIT $6`,
 		projectID, cursor, cursorRank, cursorTime, cursorIDArg, limit+1)
@@ -365,20 +369,61 @@ LIMIT $6`,
 	if len(out) > limit {
 		out = out[:limit]
 		last := out[len(out)-1]
-		rank := 2
-		switch last.Status {
-		case TestProposed:
-			rank = 0
-		case TestCommitted:
-			rank = 1
-		}
-		next = fmt.Sprintf("%d|%s|%s", rank, last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
+		next = fmt.Sprintf("%s|%d|%s|%s", validationCursorVersion, validationGroupRank(last.Status),
+			last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
 	}
 	return out, next, nil
 }
 
+// recommendationsPageOrder is the one ordering contract for the findings
+// page: open findings before settled ones, then impact, then the last_seen_at
+// recurrence rewrites, with the primary key as the total tiebreak. The keyset
+// predicate, the ORDER BY, the capped readout and the declared index all use
+// this one string, so the page cannot be sorted by one key and indexed by
+// another — which is exactly how the created_at page ended up paging a
+// recurring finding behind a stale later-created one.
+const recommendationsPageOrder = `(status = 'open') DESC, impact_score DESC, last_seen_at DESC, id DESC`
+
+// recommendationsPlansPageIndex is the findings page index. It is deliberately
+// a new name: the pre-change database already materialized an index under the
+// old name on created_at, and CREATE INDEX IF NOT EXISTS would silently keep
+// it — leaving the page unindexed. The old index is left in place, inert; this
+// ticket drops nothing.
+const recommendationsPlansPageIndex = "agent_recommendations_plans_lastseen_idx"
+
+// recommendationsPlansPageIndexDDL is the declaration migrateAgent runs. The
+// key is written out here rather than assembled from recommendationsPageOrder
+// on purpose: the schema test compares the two strings, so the index and the
+// query can only agree by being edited together.
+const recommendationsPlansPageIndexDDL = `CREATE INDEX IF NOT EXISTS agent_recommendations_plans_lastseen_idx
+	ON agent_recommendations (project_id, (status = 'open') DESC, impact_score DESC, last_seen_at DESC, id DESC)`
+
+// recommendationsPageSQL is the findings keyset page. The row comparison is
+// the keyset half of recommendationsPageOrder: a total ordering because
+// status, impact_score, last_seen_at and id are all NOT NULL.
+const recommendationsPageSQL = `
+SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
+       evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
+       coalesce(revision, 1)
+FROM agent_recommendations
+WHERE project_id = $1
+  AND ($2::text = '' OR
+       ((status = 'open'), impact_score, last_seen_at, id) <
+       ($3::bool, $4::float8, $5::timestamptz, $6::uuid))
+ORDER BY ` + recommendationsPageOrder + `
+LIMIT $7`
+
+// recommendationsCursorVersion prefixes every findings cursor. The cursor's
+// timestamp half changed from created_at to last_seen_at, and the two agree in
+// type but not in meaning — a pre-change cursor would silently resume at the
+// wrong row. The version turns that into an explicit "invalid cursor".
+const recommendationsCursorVersion = "v2"
+
 // ListRecommendationsPage returns one keyset page of a project's findings:
 // current open findings by impact first, followed by the historical record.
+// Within an impact band, last_seen_at decides, so a finding a recurring agent
+// just folded forward leads rather than hiding behind a staler later-created
+// one.
 func (s *Store) ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]AgentRecommendation, string, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
@@ -388,24 +433,24 @@ func (s *Store) ListRecommendationsPage(ctx context.Context, projectID, cursor s
 	var cursorTime time.Time
 	var cursorID string
 	if cursor != "" {
-		parts := strings.SplitN(cursor, "|", 4)
-		if len(parts) != 4 {
+		parts := strings.SplitN(cursor, "|", 5)
+		if len(parts) != 5 || parts[0] != recommendationsCursorVersion {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
 		var err error
-		cursorOpen, err = strconv.ParseBool(parts[0])
+		cursorOpen, err = strconv.ParseBool(parts[1])
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		cursorImpact, err = strconv.ParseFloat(parts[1], 64)
+		cursorImpact, err = strconv.ParseFloat(parts[2], 64)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		cursorTime, err = time.Parse(time.RFC3339Nano, parts[2])
+		cursorTime, err = time.Parse(time.RFC3339Nano, parts[3])
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
-		cursorID = parts[3]
+		cursorID = parts[4]
 		if !looksLikeUUID(cursorID) {
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
@@ -416,17 +461,8 @@ func (s *Store) ListRecommendationsPage(ctx context.Context, projectID, cursor s
 	if cursor != "" {
 		cursorIDArg = cursorID
 	}
-	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
-       evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
-       coalesce(revision, 1)
-FROM agent_recommendations
-WHERE project_id = $1
-  AND ($2::text = '' OR
-       ((status = 'open'), impact_score, created_at, id) <
-       ($3::bool, $4::float8, $5::timestamptz, $6::uuid))
-ORDER BY (status = 'open') DESC, impact_score DESC, created_at DESC, id DESC
-LIMIT $7`, projectID, cursor, cursorOpen, cursorImpact, cursorTime, cursorIDArg, limit+1)
+	rows, err := s.pg.Query(ctx, recommendationsPageSQL,
+		projectID, cursor, cursorOpen, cursorImpact, cursorTime, cursorIDArg, limit+1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -448,9 +484,9 @@ LIMIT $7`, projectID, cursor, cursorOpen, cursorImpact, cursorTime, cursorIDArg,
 	if len(out) > limit {
 		out = out[:limit]
 		last := out[len(out)-1]
-		next = fmt.Sprintf("%t|%s|%s|%s", last.Status == "open",
+		next = fmt.Sprintf("%s|%t|%s|%s|%s", recommendationsCursorVersion, last.Status == "open",
 			strconv.FormatFloat(last.ImpactScore, 'g', -1, 64),
-			last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID)
+			last.LastSeenAt.UTC().Format(time.RFC3339Nano), last.ID)
 	}
 	return out, next, nil
 }
@@ -481,12 +517,12 @@ FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 // softDeleteCondition renders the positive "this row is deleted" predicate for
 // one sync's soft-delete contract, applied to the landed row: external_rows
 // keeps one row per row_key — a re-sync replaces it in place — so there is no
-// duplicate version left for a read to collapse. bool_true reads a JSON boolean;
-// non_null treats any present non-null value (e.g. a deleted_at timestamp) as
-// deleted — the pre-DuckDB extractor returned a non-nullable string, so testing
-// it for SQL NULL was constant-false and deleted_at:null would hide a live row;
-// comparing the extracted value works because JSON null reads as 'null' and a
-// real value does not.
+// duplicate version left for a read to collapse. bool_true reads a JSON
+// boolean; non_null treats any PRESENT non-null value (e.g. a deleted_at
+// timestamp) as deleted. Both read json_extract_string, which returns SQL NULL
+// for a missing key AND for a JSON null: json_extract does not (it yields a
+// JSON 'null', which IS NOT NULL), which is how `deleted_at: null` came to
+// hide a live row.
 // Both read paths — dataset_preview and the scoped_external_rows CTE behind
 // run_sql — build their filter from this one function so they can never
 // disagree about which rows are deleted.
@@ -496,13 +532,17 @@ func softDeleteCondition(column, semantics string) string {
 	col := sqlQuote(column)
 	switch semantics {
 	case "bool_true":
-		// json_extract on a missing key returns NULL, so the predicate is
-		// simply false for rows without the column — the job JSONHas did.
-		return `try_cast(json_extract_string(data, ` + col + `) AS BOOLEAN)`
+		// json_extract_string returns NULL both for a missing key and for a
+		// value that will not cast, and under three-valued logic `NOT (NULL)`
+		// is NULL — which drops a LIVE row. The predicate is therefore total
+		// rather than "false for rows without the column": only an explicit
+		// true marks a row deleted, so missing, false and malformed all read
+		// as live.
+		return `coalesce(try_cast(json_extract_string(data, ` + col + `) AS BOOLEAN), false)`
 	case "non_null":
-		// json_extract returns the JSON value; a JSON null extracts to SQL
-		// NULL, so IS NOT NULL is exactly "present and not null".
-		return `json_extract(data, ` + col + `) IS NOT NULL`
+		// A null-valued marker is a live row: `deleted_at: null` is what an
+		// un-deleted row carries, and only a present value marks it deleted.
+		return `json_extract_string(data, ` + col + `) IS NOT NULL`
 	}
 	return ""
 }

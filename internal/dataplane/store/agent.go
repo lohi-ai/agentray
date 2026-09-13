@@ -234,10 +234,11 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS revision BIGINT`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_title_trgm ON agent_recommendations USING gin (title gin_trgm_ops)`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_open_idx ON agent_recommendations (project_id, status, last_seen_at DESC)`,
-		// The Plans keyset begins with open state then impact; this matching
-		// expression index keeps it bounded as recommendation history grows.
-		`CREATE INDEX IF NOT EXISTS agent_recommendations_plans_page_idx
-			ON agent_recommendations (project_id, (status = 'open') DESC, impact_score DESC, created_at DESC, id DESC)`,
+		// The Plans keyset walks open findings first, then impact, then the
+		// last_seen_at recurrence rewrites, with id as the total tiebreak —
+		// recommendationsPageOrder. This index must be that key in that order
+		// (project equality first), or the page is unindexed.
+		recommendationsPlansPageIndexDDL,
 		`CREATE TABLE IF NOT EXISTS agent_sessions (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	scope_id UUID NOT NULL,
