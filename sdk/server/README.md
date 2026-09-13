@@ -69,7 +69,7 @@ event's `insert_id` column. De-duplicate at read time:
 
 ```sql
 SELECT sum(amount) AS revenue FROM (
-  SELECT argMax(JSONExtractFloat(properties, 'amount'), timestamp) AS amount
+  SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
   FROM events WHERE event_name = 'revenue' GROUP BY insert_id
 )
 ```

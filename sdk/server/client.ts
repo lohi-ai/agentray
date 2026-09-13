@@ -13,9 +13,10 @@
  *      The key is *stored*, not enforced: no read path de-dups on it today (see
  *      the note on `Event.InsertID` in internal/dataplane/store/store.go). It is
  *      what makes a money total de-dupable at read time —
- *      `argMax(amount, timestamp) … GROUP BY insert_id` before you sum, the
- *      recipe the Data Analyst preset teaches. Send it, and write that recipe;
- *      a plain `sum()` over a retried webhook double-counts.
+ *      `json_extract_string(properties, '$.amount')` → `try_cast(… AS DOUBLE)`
+ *      → `arg_max(amount, "timestamp") … GROUP BY insert_id` before you sum,
+ *      the recipe the Data Analyst preset teaches. Send it, and write that
+ *      recipe; a plain `sum()` over a retried webhook double-counts.
  *
  * Usage:
  *   const ar = new AgentRayServerClient({ apiUrl: "https://agentray.example.com", apiKey: "..." });
