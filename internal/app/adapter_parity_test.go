@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -578,7 +579,7 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
 	e := mountRealAdapters(t, s)
-	registerOverviewRoutes(e, s, nil)
+	registerOverviewRoutes(e, s, newOpAdapter(s, nil, storeRunner{s}))
 
 	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-parity-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
 	if err != nil {
@@ -646,5 +647,52 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 	}
 	if got := rpc.Result.StructuredContent.Context; got != want {
 		t.Fatalf("MCP context = %+v, want %+v", got, want)
+	}
+}
+
+// overviewFailingRepo forces the one read the overview operation performs to
+// fail with a given error; the embedded interface is never reached.
+type overviewFailingRepo struct {
+	usecase.Repo
+	err error
+}
+
+func (r overviewFailingRepo) Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error) {
+	return storage.OverviewResult{}, r.err
+}
+
+// GET /api/overview must map an operation error through the same
+// usecase.MapOpError as the mounted operation adapters: a typed not-found is a
+// 404 here, not the blanket 400 the route used to send.
+func TestOverviewAdaptersShareTypedErrorStatus(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-typed-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+
+	e := echo.New()
+	deps := &usecase.Deps{Repo: overviewFailingRepo{err: pgx.ErrNoRows}, Runner: storeRunner{s}, Audit: s}
+	reg := usecase.Registry()
+	resolve := func(c echo.Context) (opcore.Principal, error) { return principalFromRequest(c, s) }
+	opcore.MountHTTP(e.Group("/api/op"), reg, deps, resolve)
+	registerOverviewRoutes(e, s, &opAdapter{reg: reg, deps: deps})
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/overview?period=7d", nil)
+	getReq.Header.Set("Authorization", "Bearer "+secret)
+	getRec := httptest.NewRecorder()
+	e.ServeHTTP(getRec, getReq)
+	opRec := postJSON(t, e, "/api/op/overview", `{"period":"7d"}`, map[string]string{"Authorization": "Bearer " + secret})
+
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("GET overview on a not-found operation = %d %s, want 404", getRec.Code, getRec.Body.String())
+	}
+	if opRec.Code != getRec.Code {
+		t.Fatalf("GET %d vs /api/op %d — the adapters disagree on a typed error", getRec.Code, opRec.Code)
 	}
 }
