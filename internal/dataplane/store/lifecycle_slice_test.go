@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
 // Live tests for the slice-2 chart/source lifecycle contract: per-chart
@@ -163,6 +165,84 @@ func TestReorderChartsFenced(t *testing.T) {
 	}
 	if succeeded != 1 || conflicts != n-1 {
 		t.Fatalf("concurrent reorders: %d succeeded, %d conflicts — want 1 and %d", succeeded, conflicts, n-1)
+	}
+}
+
+// Archiving a source must stop the runs it already admitted, not only the
+// syncs it would start next: a queued run is cancelled in the archive
+// transaction (and can no longer be claimed), and a run already executing sees
+// the flag on its next heartbeat and finishes cancelled, never failed.
+func TestSourceArchiveCancelsQueuedAndRunningRuns(t *testing.T) {
+	s := openConvTestStore(t)
+	t.Setenv("AGENT_KEY_ENC_SECRET", "source-archive-test-secret")
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+
+	cred, err := s.CreateSourceCredential(ctx, userID, projectID, "prod-pg", "postgres://u:p@h:5432/db")
+	if err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	dc, err := s.CreateDataConnectorIdempotent(ctx, projectID, "warehouse", "postgres", cred.ID, "ck1", "h1")
+	if err != nil {
+		t.Fatalf("create connector: %v", err)
+	}
+	runningSync, err := s.CreateConnectorSync(ctx, userID, projectID, dc.ID, ConnectorSyncInput{
+		SourceTable: "orders", KeyColumn: "id", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create running sync: %v", err)
+	}
+	queuedSync, err := s.CreateConnectorSync(ctx, userID, projectID, dc.ID, ConnectorSyncInput{
+		SourceTable: "customers", KeyColumn: "id", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create queued sync: %v", err)
+	}
+
+	running, _, err := s.EnqueueConnectorRun(ctx, projectID, runningSync.ID, "r1")
+	if err != nil {
+		t.Fatalf("enqueue running: %v", err)
+	}
+	if _, ok, err := s.ClaimConnectorRun(ctx, running.ID, "owner-a"); err != nil || !ok {
+		t.Fatalf("claim running: %v %v", ok, err)
+	}
+	queued, _, err := s.EnqueueConnectorRun(ctx, projectID, queuedSync.ID, "r2")
+	if err != nil {
+		t.Fatalf("enqueue queued: %v", err)
+	}
+
+	if _, err := s.ArchiveDataConnectorIdempotent(ctx, projectID, dc.ID, 1, "sa1", "h2"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	queuedAfter, err := s.ConnectorRunForProject(ctx, projectID, queued.ID)
+	if err != nil {
+		t.Fatalf("read queued run: %v", err)
+	}
+	if !queuedAfter.CancelRequested || queuedAfter.Status != "cancelled" || queuedAfter.FinishedAt == nil {
+		t.Fatalf("queued run after archive = %+v, want cancel_requested and terminal cancelled", queuedAfter)
+	}
+	if _, ok, err := s.ClaimConnectorRun(ctx, queued.ID, "owner-b"); err != nil || ok {
+		t.Fatalf("claim cancelled queued run = %v %v", ok, err)
+	}
+
+	runningAfter, err := s.ConnectorRunForProject(ctx, projectID, running.ID)
+	if err != nil {
+		t.Fatalf("read running run: %v", err)
+	}
+	if !runningAfter.CancelRequested || runningAfter.Status != "running" {
+		t.Fatalf("running run after archive = %+v, want cancel_requested while still running", runningAfter)
+	}
+	cancelRequested, stillRunning, err := s.HeartbeatConnectorRun(ctx, running.ID)
+	if err != nil || !cancelRequested || !stillRunning {
+		t.Fatalf("heartbeat after archive = %v %v %v", cancelRequested, stillRunning, err)
+	}
+	if err := s.FinishConnectorRun(ctx, running.ID, runningSync.ID, "owner-a", connector.SyncResult{}, true); err != nil {
+		t.Fatalf("finish cancelled run: %v", err)
+	}
+	final, err := s.ConnectorRunForProject(ctx, projectID, running.ID)
+	if err != nil || final.Status != "cancelled" {
+		t.Fatalf("running run final = %+v %v, want cancelled", final, err)
 	}
 }
 
