@@ -280,6 +280,28 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 The operation set IS the shared registry — the same definitions the server
 exposes as REST, MCP tools, and in-process agent tools.
 
+**Two credentials, two jobs.** The key `agentray key` prints is the *capture*
+key: it feeds events and, on a project that has opted into the
+capture/management split (every project the API creates), it cannot run a single
+operation. Operations authenticate with a scoped, revocable management
+credential (`agm_…`) the CLI mints for the selected project and keeps in the
+same `0600` config. Its scope set is derived from the shared registry, so it
+covers every operation the CLI can dispatch — including `submit_recommendation`,
+`propose_test`, `update_test`, `record_outcome`, `abandon_test`, `remember` and
+`send_notification`. Minting is owner/admin-only: a member or viewer still logs
+in and still gets the capture key, and the CLI says plainly that operations will
+be refused until an owner or admin mints a credential.
+
+**The credential is revoked, never abandoned.** Selecting another project
+(`agentray key --project <name>`) revokes the credential bound to the project
+being left before the new selection replaces it, and `agentray logout` revokes
+it before the session — the session is what authorizes the revoke. A revoke is
+only believed when the server confirms it: the delete route answers one `403`
+for both a refusal and an already-revoked row, so the member-readable credential
+list decides. When that proof is missing, the command stops with the credential
+still tracked in the config for a retry rather than quietly orphaning a live
+key.
+
 ## AI Agents & MCP
 
 AgentRay exposes its analytics operations to external AI agents (Claude Code,
