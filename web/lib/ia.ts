@@ -90,7 +90,27 @@ export const WORKLOAD_CATEGORIES: readonly WorkloadCategory[] = [
 // jobLayers() in ./jobs, which states each layer as what it does for the job on
 // screen — a layer name on its own teaches a product owner nothing.
 
-export type ChildSurface = { href: string; label: string; parentHref: string; hostedOnly?: boolean };
+export type ChildSurface = {
+  // The route this surface opens. Absent when the destination's page does not
+  // exist yet — see `comingSoon`. There is deliberately no placeholder URL: a
+  // link the router cannot serve is a promise the product cannot keep.
+  href?: string;
+  label: string;
+  parentHref: string;
+  hostedOnly?: boolean;
+  // Named in the IA, not yet implemented. Rendered as a non-linked "Coming
+  // soon" affordance so the reader learns the surface exists without being
+  // sent to a 404.
+  comingSoon?: boolean;
+};
+
+export type LinkedChildSurface = ChildSurface & { href: string };
+
+// isLinkedSurface separates a real destination from a named-but-unbuilt one.
+// Callers that render a link must narrow through it rather than assume `href`.
+export function isLinkedSurface(surface: ChildSurface): surface is LinkedChildSurface {
+  return !!surface.href && !surface.comingSoon;
+}
 
 // Surfaces that used to sit as peer nav items. They stay reachable from a
 // parent Main/Explore screen instead of competing with Chat / Agents / etc.
@@ -109,6 +129,12 @@ export const CHILD_SURFACES: readonly ChildSurface[] = [
   { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
   { href: '/replay', label: 'Replay', parentHref: '/events' },
+  // App Store analytics groups. The IA names them so the product's shape is
+  // legible, but their pages do not exist yet — a non-linked "Coming soon"
+  // affordance, never a dead link. The sourced UI ticket fills them in.
+  { label: 'Acquisition', parentHref: '/dashboard', comingSoon: true },
+  { label: 'Monetization', parentHref: '/dashboard', comingSoon: true },
+  { label: 'App Usage', parentHref: '/dashboard', comingSoon: true },
 ];
 
 // Third-party channels the product will grow. Not CHANNEL_CATALOG kinds —

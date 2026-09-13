@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { APIError, type OverviewResult } from '@/lib/api';
-import { freshnessLabel, overviewViewState } from './page';
+import { APIError, type AgentRecommendation, type OverviewResult } from '@/lib/api';
+import { bestNextStep, freshnessLabel, overviewViewState } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -111,5 +111,54 @@ describe('overviewViewState', () => {
 
   it('reports data when qualifying events exist in range', () => {
     expect(overviewViewState({ ...baseInput, res: overviewRes({ events: 5, qualifying: 2 }) })).toBe('data');
+  });
+});
+
+// bestNextStep is the value-first panel's single decision: show the finding
+// only when it is display-complete, otherwise explain the capability. A row
+// that is missing its evidence envelope or its rationale cannot be presented
+// as an evidence-backed finding — the comparison would be a guess.
+function finding(over: Partial<AgentRecommendation> = {}): AgentRecommendation {
+  return {
+    id: 'f1',
+    project_id: 'p1',
+    category: 'activation',
+    title: 'Activation fell 12% week over week',
+    rationale: 'Signup → first project dropped from 41% to 29%.',
+    evidence_json: JSON.stringify({ query_ref: 'activation_funnel', range: 'last 7 days', metric_version: 'v3' }),
+    impact_score: 9,
+    status: 'open',
+    ack_note: '',
+    created_at: '2026-09-12T00:00:00Z',
+    seen_count: 1,
+    last_seen_at: '2026-09-12T00:00:00Z',
+    revision: 1,
+    ...over,
+  };
+}
+
+describe('bestNextStep', () => {
+  it('surfaces the open finding with its comparison and evidence line', () => {
+    const step = bestNextStep(finding());
+    expect(step.kind).toBe('finding');
+    if (step.kind !== 'finding') return;
+    expect(step.title).toBe('Activation fell 12% week over week');
+    expect(step.observation).toContain('41% to 29%');
+    expect(step.evidence).toContain('activation_funnel');
+    expect(step.evidence).toContain('metric v3');
+  });
+
+  it('falls back to the capability explanation when the finding is not display-complete', () => {
+    // A legacy row with no evidence envelope: the provenance line would read
+    // "evidence unavailable", so the panel must not call it a finding.
+    expect(bestNextStep(finding({ evidence_json: '' })).kind).toBe('capability');
+    expect(bestNextStep(finding({ evidence_json: '{not json' })).kind).toBe('capability');
+    expect(bestNextStep(finding({ rationale: '   ' })).kind).toBe('capability');
+    expect(bestNextStep(finding({ title: '' })).kind).toBe('capability');
+    // Only an open finding is a next step; a dismissed one is history.
+    expect(bestNextStep(finding({ status: 'dismissed' })).kind).toBe('capability');
+    expect(bestNextStep(null).kind).toBe('capability');
+    // A failed Plans read degrades this panel alone.
+    expect(bestNextStep(finding(), true)).toEqual({ kind: 'capability', reason: 'unavailable' });
   });
 });

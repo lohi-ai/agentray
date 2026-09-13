@@ -23,6 +23,21 @@ export function outcomeEntries(json: string | undefined): TestOutcomeEntry[] {
   }
 }
 
+// evidenceAvailable reports whether a finding's evidence envelope is present
+// and parseable. evidenceLine() renders "evidence unavailable" for a legacy or
+// malformed row; a caller deciding whether a finding is display-complete needs
+// the boolean, not the rendered string.
+export function evidenceAvailable(rec: { evidence_json?: string }): boolean {
+  const raw = rec.evidence_json?.trim();
+  if (!raw) return false;
+  try {
+    const env = JSON.parse(raw);
+    return !!env && typeof env === 'object' && !Array.isArray(env) && Object.keys(env).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // evidenceLine renders a finding's evidence envelope in one line. The
 // envelope is the typed contract the ops document — {query_ref,
 // metric_version, dataset_version, range, filters, timezone, watermark,
