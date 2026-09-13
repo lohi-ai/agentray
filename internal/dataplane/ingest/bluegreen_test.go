@@ -547,6 +547,50 @@ func TestBootLatchesNeverMaskALiveDiagnosis(t *testing.T) {
 	}
 }
 
+// TestFreshColourOverAnEmptiedStreamStaysRefused is the boundary of the fresh
+// colour's exemption, and the reason it has to be latched rather than derived:
+// nothing is retained, so there is nothing to replay and nothing to catch up to,
+// and a colour that has applied nothing would serve an empty file beside a
+// sibling holding the history. The live predicate cannot hold that line once the
+// first new message is applied — the mark then covers the whole retained window,
+// which reads exactly like a caught-up colour — so the boot sample latches it,
+// and the refusal must survive the rows that arrive afterwards.
+func TestFreshColourOverAnEmptiedStreamStaysRefused(t *testing.T) {
+	url := startBroker(t)
+	ctx := context.Background()
+
+	blue := newColour(t, url, testConfig("colour-blue"))
+	blue.serve(t)
+	queue := NewJetStreamQueue(blue.ss.JS, blue.ss.Subject, blue.ss.ConnectorSubject)
+	if err := queue.PublishExternalRows(ctx, parityProject, parityConnector, parityTable, parityRows("k1", "k2")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	blue.waitReady(t, 20*time.Second)
+
+	// Everything the stream ever held is gone, so a colour whose durable has
+	// applied nothing has no history at all.
+	if err := blue.ss.Ingest.Purge(ctx); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	fresh := newColour(t, url, testConfig("colour-fresh"))
+	fresh.serve(t)
+	v := mustVerdict(t, fresh.ss)
+	if v.Ready || v.Reason != ReplayPurgedGap || v.Missing == 0 {
+		t.Fatalf("verdict = %+v, want a %q refusal naming what is gone", v, ReplayPurgedGap)
+	}
+
+	// Rows arrive and the colour applies them: the refusal must hold, because
+	// catching up on what the stream still holds cannot restore what it lost.
+	if err := queue.PublishExternalRows(ctx, parityProject, parityConnector, parityTable, parityRows("k3")); err != nil {
+		t.Fatalf("publish after the purge: %v", err)
+	}
+	waitVerdict(t, fresh.ss, 20*time.Second, func(v ReplayVerdict) bool { return v.AckPending == 0 && v.Pending == 0 })
+	if after := mustVerdict(t, fresh.ss); after.Ready || after.Reason != ReplayPurgedGap {
+		t.Fatalf("verdict after applying the retained row = %+v, want the refusal to hold", after)
+	}
+}
+
 func mustVerdict(t *testing.T, ss *StreamSet) ReplayVerdict {
 	t.Helper()
 	v, err := ss.ReplayStatus(context.Background())

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -233,23 +234,58 @@ func filterCarried(streamSubjects []string, filter string) bool {
 }
 
 // subjectsDisjoint reports whether two subject patterns cannot both match any
-// one concrete subject. Only the decidable half is answered: matching stops as
-// soon as a token makes overlap possible, so false means "not provably
-// disjoint", never "overlapping". A `*` or `>` on either side always leaves
-// overlap possible.
+// one concrete subject. Only the decidable half is answered: false means "not
+// provably disjoint", never "overlapping", because the caller uses true to
+// refuse a colour and a maybe must not refuse a working one.
+//
+// Two things are decidable. The length a subject must have: `*` is exactly one
+// token and `>` is one or more, so a pattern with no `>` matches one length and
+// a pattern with one matches a range — disjoint ranges cannot both match. And
+// the tokens they share: `*` and `>` match anything, so only two different
+// literals prove the patterns apart, and only if every token before them matched.
 func subjectsDisjoint(a, b string) bool {
 	at := strings.Split(a, ".")
 	bt := strings.Split(b, ".")
-	for i := 0; i < len(at) && i < len(bt); i++ {
+	if disjointLengths(at, bt) {
+		return true
+	}
+	for i := range min(len(at), len(bt)) {
 		if at[i] == ">" || bt[i] == ">" {
+			// `>` absorbs everything after it, so a difference further along
+			// cannot be proven from here.
 			return false
 		}
-		if at[i] == "*" || bt[i] == "*" || at[i] == bt[i] {
-			return false
+		if at[i] == bt[i] || at[i] == "*" || bt[i] == "*" {
+			continue
 		}
 		return true
 	}
 	return false
+}
+
+// disjointLengths reports whether no single subject length can satisfy both
+// token lists.
+func disjointLengths(at, bt []string) bool {
+	amin, amax := tokenLengthRange(at)
+	bmin, bmax := tokenLengthRange(bt)
+	if amax != 0 && bmin > amax {
+		return true
+	}
+	if bmax != 0 && amin > bmax {
+		return true
+	}
+	return false
+}
+
+// tokenLengthRange is the range of subject lengths a pattern matches, with max 0
+// meaning unbounded.
+func tokenLengthRange(tokens []string) (int, int) {
+	for i, token := range tokens {
+		if token == ">" {
+			return i + 1, 0
+		}
+	}
+	return len(tokens), len(tokens)
 }
 
 // filterCovers reports whether some consumer filter is offered a literal
@@ -335,18 +371,17 @@ func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consum
 		cinfo, err := consumer.Info(ctx)
 		if err != nil {
 			if attempt < bootSampleAttempts {
+				sleepBeforeBootSampleRetry(attempt)
 				continue
 			}
 			ss.bootUnverified.Store(true)
 			log.Printf("ingestion: boot replay sample unreadable (consumer info: %v); /readyz will refuse until this colour restarts", err)
 			return
 		}
-		if cinfo.AckFloor.Stream == 0 {
-			return
-		}
 		sinfo, err := ss.Ingest.Info(ctx)
 		if err != nil {
 			if attempt < bootSampleAttempts {
+				sleepBeforeBootSampleRetry(attempt)
 				continue
 			}
 			ss.bootUnverified.Store(true)
@@ -356,11 +391,37 @@ func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consum
 		if _, dedicated := streamCarries(sinfo.Config.Subjects, consumerFilterSubjects(cinfo)); !dedicated {
 			return
 		}
+		if cinfo.AckFloor.Stream == 0 {
+			// A durable that has applied nothing has no history to lose, so a
+			// purge frontier above its mark is not its loss — UNLESS the stream
+			// has already lost everything it ever held (first past last): then
+			// there is nothing retained for this colour to replay and nothing to
+			// catch up to, and a colour that has applied nothing would serve an
+			// empty file beside a sibling holding the history. Latched for the
+			// same reason the gap above is: the live predicate sees a caught-up
+			// colour the moment the first new message is applied (its mark then
+			// covers the whole retained window), so a refusal that lived only in
+			// the live branch would clear itself.
+			if sinfo.State.LastSeq > 0 && sinfo.State.FirstSeq > sinfo.State.LastSeq {
+				ss.bootGap.Store(sinfo.State.LastSeq)
+			}
+			return
+		}
 		if sinfo.State.FirstSeq > cinfo.AckFloor.Stream+1 {
 			ss.bootGap.Store(sinfo.State.FirstSeq - cinfo.AckFloor.Stream - 1)
 		}
 		return
 	}
+}
+
+// sleepBeforeBootSampleRetry spaces the boot sample's retries. Back-to-back
+// attempts span milliseconds, which does not cover the failure they exist for — a
+// broker that is settling after a restart, a leader election, a first API call
+// slower than usual — so each retry waits a little longer than the last. The
+// container's healthcheck start_period (30s) is far larger than the whole budget
+// here, so the wait costs the deploy nothing.
+func sleepBeforeBootSampleRetry(attempt int) {
+	time.Sleep(time.Duration(attempt) * time.Second)
 }
 
 // ReplayStatus reads the live consumer and stream state and evaluates the

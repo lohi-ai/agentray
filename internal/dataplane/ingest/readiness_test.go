@@ -291,6 +291,32 @@ func TestStreamCarries(t *testing.T) {
 			wantDedicated:  false,
 		},
 		{
+			name: "the proof reads every shared token, not just the first",
+			// `agentray.events.prod.*` and `agentray.events.dev.*` diverge at
+			// their third token; a check that stopped at the first would call
+			// this wired and report a dead consumer caught-up.
+			streamSubjects: []string{"agentray.events.prod.*"},
+			filterSubjects: []string{"agentray.events.dev.*"},
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name: "different lengths with no '>' cannot both match",
+			// `agentray.*` is exactly two tokens, `agentray.events.*` exactly
+			// three, so no subject is matched by both.
+			streamSubjects: []string{"agentray.*"},
+			filterSubjects: []string{"agentray.events.*"},
+			wantWired:      false,
+			wantDedicated:  false,
+		},
+		{
+			name:           "an open-ended '>' overlaps whatever follows it",
+			streamSubjects: []string{"agentray.>"},
+			filterSubjects: []string{"agentray.events.*"},
+			wantWired:      true,
+			wantDedicated:  false,
+		},
+		{
 			name:           "a pattern that might overlap stays wired",
 			streamSubjects: []string{"agentray.>"},
 			filterSubjects: []string{"agentray.events.ingest.>"},
