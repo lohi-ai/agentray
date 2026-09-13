@@ -65,6 +65,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	var (
 		worker *ingestion.EventWorker
 		queue  ingestion.EventQueue
+		// ready is the data-coherence probe behind /readyz. Nil on the
+		// core-NATS fallback, where there is no durable replay to wait for.
+		ready readinessProbe
 	)
 	if cfg.IngestJetStream {
 		ss, err := ingestion.EnsureStreams(ctx, nc, cfg)
@@ -82,16 +85,17 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject)
+		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject)
+		ready = ss
 	} else {
-		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, store)
+		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, cfg.IngestConnectorSubject, store)
 		if err != nil {
 			store.Close()
 			_ = redisClient.Close()
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewEventQueue(nc, cfg.IngestSubject)
+		queue = ingestion.NewEventQueue(nc, cfg.IngestSubject, cfg.IngestConnectorSubject)
 	}
 	rateLimit := ingestion.RedisRateLimit(redisClient, cfg.RateLimitPerMinute, time.Minute)
 	// Credential endpoints get a separate, much tighter per-IP limiter so the
@@ -240,7 +244,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// The connector engine is built before the scheduler so in-process agents
 	// (scheduled AND interactive) get the same source-runner surface MCP and
 	// /api/op expose — one engine, three adapters.
-	connectorEngine := connector.NewEngine(store)
+	connectorEngine := connector.NewEngine(store, queue)
 	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
 	scheduler := agentruntime.NewScheduler(nc, store, runnerOpts...)
 	// The evaluator and the connector sync engine ride the scheduler's minute
@@ -262,7 +266,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// One adapter bundle serves every legacy route that now runs through the
 	// shared operation registry — the same deps MountHTTP hands /api/op.
 	ops := newOpAdapter(store, alertDeliverer, connectorEngine)
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, ready, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerOverviewRoutes(e, store, alertDeliverer)

@@ -47,13 +47,18 @@ func (s publicCollectSet) has(path string) bool { return s[path] }
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, ready readinessProbe, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
 	})
+
+	// Liveness above, data coherence here: /readyz is 503 until this colour has
+	// applied everything on the durable stream, which is what the blue-green
+	// healthcheck gates the traffic switch on (see readyzHandler).
+	e.GET("/readyz", readyzHandler(ready))
 
 	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)

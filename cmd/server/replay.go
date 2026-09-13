@@ -55,7 +55,16 @@ func replayDLQ(cfg config.Config) error {
 		got := 0
 		for msg := range batch.Messages() {
 			got++
-			if _, perr := ss.JS.Publish(ctx, ss.Subject, msg.Data(), jetstream.WithMsgID(ingestion.BodyMsgID(msg.Data()))); perr != nil {
+			// A dead-lettered body goes back to the subject it came from — the
+			// worker decodes by subject, so an event batch returned to the
+			// connector subject (or vice versa) would be poison again. Bodies
+			// dead-lettered before the header existed carry none: those are
+			// event batches, the only kind the pipeline had.
+			target := ss.Subject
+			if origin := msg.Headers().Get(ingestion.OriginSubjectHeader); origin != "" {
+				target = origin
+			}
+			if _, perr := ss.JS.Publish(ctx, target, msg.Data(), jetstream.WithMsgID(ingestion.BodyMsgID(msg.Data()))); perr != nil {
 				// Leave it in the DLQ (do not ack) so a later run retries it.
 				log.Printf("replay-dlq: republish failed, leaving in DLQ: %v", perr)
 				continue

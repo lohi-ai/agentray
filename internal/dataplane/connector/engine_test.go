@@ -81,17 +81,20 @@ func (f *fakeSource) pulledCursors() []string {
 
 // fakeStore is the engine's Store with an in-memory run model mirroring the
 // real contract: one active run per sync, claim moves queued→running under an
-// owner, heartbeat reads back the persisted cancel flag.
+// owner, heartbeat reads back the persisted cancel flag. It also implements
+// RowPublisher, recording each batch the engine hands to the durable stream —
+// the engine no longer touches DuckDB, so "landed" in these tests means
+// "durably queued".
 type fakeStore struct {
-	mu        sync.Mutex
-	syncs     []ScheduledSync
-	job       SyncJob
-	inserted  [][]LandedRow
-	insertErr error
-	finished  []SyncResult
-	cancelled []bool
-	runs      map[string]*Run
-	runSeq    int
+	mu         sync.Mutex
+	syncs      []ScheduledSync
+	job        SyncJob
+	published  [][]LandedRow
+	publishErr error
+	finished   []SyncResult
+	cancelled  []bool
+	runs       map[string]*Run
+	runSeq     int
 	// heartbeatBlock, when non-nil, makes HeartbeatConnectorRun wait on it —
 	// a hung lease RPC for the bounded-call test.
 	heartbeatBlock chan struct{}
@@ -109,13 +112,13 @@ func (f *fakeStore) ConnectorSyncJob(ctx context.Context, syncID string) (SyncJo
 	job.SyncID = syncID
 	return job, nil
 }
-func (f *fakeStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
+func (f *fakeStore) PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.insertErr != nil {
-		return f.insertErr
+	if f.publishErr != nil {
+		return f.publishErr
 	}
-	f.inserted = append(f.inserted, rows)
+	f.published = append(f.published, rows)
 	return nil
 }
 
@@ -248,10 +251,10 @@ func TestRunSyncAdvancesCursorAcrossBatches(t *testing.T) {
 	useFakeSource(&fakeSource{batches: []PullResult{b1, b2}}, nil)
 	store := newFakeStore(incrementalJob())
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
-	if len(store.inserted) != 2 || len(store.inserted[0]) != 2 || len(store.inserted[1]) != 1 {
-		t.Fatalf("inserted batches = %+v", store.inserted)
+	if len(store.published) != 2 || len(store.published[0]) != 2 || len(store.published[1]) != 1 {
+		t.Fatalf("queued batches = %+v", store.published)
 	}
 	if len(store.finished) != 1 {
 		t.Fatalf("finished = %+v", store.finished)
@@ -262,39 +265,44 @@ func TestRunSyncAdvancesCursorAcrossBatches(t *testing.T) {
 	}
 }
 
-// A failed insert must not advance the persisted cursor past the last batch
-// that actually landed — the failed batch is re-pulled on the next run.
-func TestRunSyncInsertFailureKeepsLandedCursor(t *testing.T) {
+// A batch the stream did not durably accept must not advance the persisted
+// cursor past the last batch that was accepted: the shared source cursor is
+// what stops the rows ever being pulled again, so it may only move once the
+// stream (not merely a socket) holds the batch.
+func TestRunSyncPublishFailureKeepsCursor(t *testing.T) {
 	b1 := rowsBatch("5", "k1")
 	b1.HasMore = true
 	b2 := rowsBatch("9", "k2")
 	src := &fakeSource{batches: []PullResult{b1, b2}}
 	useFakeSource(src, nil)
 	store := newFakeStore(incrementalJob())
-	failing := &failSecondInsertStore{fakeStore: store}
+	failing := &failSecondPublishStore{fakeStore: store}
 
-	runSync(t, NewEngine(failing), store, "s1")
+	runSync(t, NewEngine(failing, failing), store, "s1")
 
 	got := store.finished[0]
 	if got.Cursor != "5" {
-		t.Fatalf("cursor = %q, want the last successfully landed cursor 5", got.Cursor)
+		t.Fatalf("cursor = %q, want the last durably queued cursor 5", got.Cursor)
 	}
-	if got.Err == "" || !strings.Contains(got.Err, "land rows") {
-		t.Fatalf("err = %q, want a land-rows failure", got.Err)
+	if got.Err == "" || !strings.Contains(got.Err, "queue rows") {
+		t.Fatalf("err = %q, want a queue-rows failure", got.Err)
 	}
 }
 
-type failSecondInsertStore struct {
+type failSecondPublishStore struct {
 	*fakeStore
 	calls int
 }
 
-func (f *failSecondInsertStore) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
+// PublishExternalRows fails the SECOND batch, the way a broker outage that
+// starts mid-run does: the first batch is durably queued, the second is not, and
+// the cursor must not move past the batch that never made it.
+func (f *failSecondPublishStore) PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
 	f.calls++
 	if f.calls == 2 {
-		return fmt.Errorf("duckdb down")
+		return fmt.Errorf("stream unavailable")
 	}
-	return f.fakeStore.InsertExternalRows(ctx, projectID, connectorID, table, rows)
+	return f.fakeStore.PublishExternalRows(ctx, projectID, connectorID, table, rows)
 }
 
 // Snapshot mode (no cursor column) re-pulls from the beginning every run:
@@ -306,7 +314,7 @@ func TestRunSyncSnapshotModePersistsNoCursor(t *testing.T) {
 	job.CursorColumn = ""
 	store := newFakeStore(job)
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
 	if got := store.finished[0]; got.AdvanceCursor || got.Cursor != "" || got.CursorKey != "" || got.Rows != 2 {
 		t.Fatalf("result = %+v, want no persisted cursor and 2 rows", got)
@@ -326,10 +334,10 @@ func TestRunSyncBreaksOnCursorStall(t *testing.T) {
 	useFakeSource(&fakeSource{batches: []PullResult{b1, b2}}, nil)
 	store := newFakeStore(incrementalJob())
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
-	if len(store.inserted) != 2 {
-		t.Fatalf("inserted %d batches, want 2 (stall detected after the second)", len(store.inserted))
+	if len(store.published) != 2 {
+		t.Fatalf("queued %d batches, want 2 (stall detected after the second)", len(store.published))
 	}
 	if got := store.finished[0]; got.Cursor != "7" {
 		t.Fatalf("cursor = %q, want 7", got.Cursor)
@@ -342,7 +350,7 @@ func TestRunSyncOpenFailurePersistsError(t *testing.T) {
 	useFakeSource(nil, fmt.Errorf("connect failed: host unreachable"))
 	store := newFakeStore(incrementalJob())
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
 	if got := store.finished[0]; got.Err != "connect failed: host unreachable" || got.Cursor != "" || got.Rows != 0 {
 		t.Fatalf("result = %+v", got)
@@ -356,7 +364,7 @@ func TestRunSyncRefusesOverlap(t *testing.T) {
 	src := &fakeSource{blockCh: block}
 	useFakeSource(src, nil)
 	store := newFakeStore(incrementalJob())
-	engine := NewEngine(store)
+	engine := NewEngine(store, store)
 
 	run, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s1", "")
 	if err != nil || !enqueued {
@@ -385,7 +393,7 @@ func TestRunSyncObservesPersistedCancel(t *testing.T) {
 	src := &fakeSource{blockCh: block}
 	useFakeSource(src, nil)
 	store := newFakeStore(incrementalJob())
-	engine := NewEngine(store)
+	engine := NewEngine(store, store)
 	engine.heartbeatEvery = 5 * time.Millisecond
 
 	run, enqueued, err := engine.EnqueueRun(context.Background(), "p1", "s1", "")
@@ -423,7 +431,7 @@ func TestTickRunsOnlyDueSyncs(t *testing.T) {
 		{ID: "not-due", ProjectID: "p1", Cron: "30 3 * * *"},
 		{ID: "unscheduled", ProjectID: "p1", Cron: ""},
 	}
-	engine := NewEngine(store)
+	engine := NewEngine(store, store)
 	engine.Tick(context.Background(), time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC))
 	engine.Wait() // Tick dispatches runs to goroutines; wait before asserting
 	if len(store.finished) != 1 {
@@ -449,10 +457,10 @@ func TestRunSyncNullCursorRegionAdvancesByKey(t *testing.T) {
 	useFakeSource(&fakeSource{batches: []PullResult{b1, b2}}, nil)
 	store := newFakeStore(incrementalJob())
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
-	if len(store.inserted) != 2 {
-		t.Fatalf("inserted %d batches, want 2 (key-only progress must not stall)", len(store.inserted))
+	if len(store.published) != 2 {
+		t.Fatalf("queued %d batches, want 2 (key-only progress must not stall)", len(store.published))
 	}
 	got := store.finished[0]
 	if !got.AdvanceCursor || got.Cursor != "" || got.CursorKey != "k2" || got.Rows != 2 {
@@ -475,7 +483,7 @@ func TestRunSyncSnapshotCapReportsTruncation(t *testing.T) {
 	job.CursorColumn = ""
 	store := newFakeStore(job)
 
-	runSync(t, NewEngine(store), store, "s1")
+	runSync(t, NewEngine(store, store), store, "s1")
 
 	got := store.finished[0]
 	if got.AdvanceCursor || got.Err == "" || !strings.Contains(got.Err, "snapshot limit") || got.Rows != maxBatchesPerRun {
@@ -492,7 +500,7 @@ func TestRunSyncHungHeartbeatFencesRun(t *testing.T) {
 	useFakeSource(src, nil)
 	store := newFakeStore(incrementalJob())
 	store.heartbeatBlock = make(chan struct{}) // never closes — hung lease RPC
-	engine := NewEngine(store)
+	engine := NewEngine(store, store)
 	engine.heartbeatEvery = 5 * time.Millisecond
 	engine.heartbeatCallTimeout = 10 * time.Millisecond
 	engine.leaseStaleAfter = 50 * time.Millisecond
@@ -525,7 +533,7 @@ func TestEnqueueBusyRejectsThenExecutesOnce(t *testing.T) {
 	src := &fakeSource{blockCh: block}
 	useFakeSource(src, nil)
 	store := newFakeStore(incrementalJob())
-	engine := NewEngine(store)
+	engine := NewEngine(store, store)
 
 	// Fill all four slots with runs that block in PullRows.
 	for i := 0; i < maxConcurrentRuns; i++ {

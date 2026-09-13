@@ -21,10 +21,18 @@ x-agentray-api: &agentray-api-svc
   networks:
     - edge
   healthcheck:
-    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+    # /readyz, not /healthz: the deploy gate must wait for this colour to have
+    # applied the whole durable stream (events AND connector rows) before Caddy
+    # is pointed at it — a colour still replaying would serve stale data behind
+    # a static 200. retries is deliberately above the deploy's own gate window
+    # (GATE_TIMEOUT, 240s) so a replay that is still progressing is not declared
+    # dead at ~120s: the gate's --gate-timeout is the single decision point, and
+    # --no-gate / --gate-timeout are the operator's escape hatches when a
+    # legitimately long replay outruns it.
+    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/readyz"]
     interval: 30s
     timeout: 5s
-    retries: 3
+    retries: 10
     start_period: 30s
 
 x-agentray-web: &agentray-web-svc
@@ -43,8 +51,12 @@ services:
   # DuckDB is a single-writer embedded database, so each colour owns its own
   # file on its own volume — a shared file would lock out the incoming colour
   # and a shared volume would corrupt it. Each colour also gets its own
-  # JetStream durable (INGEST_DURABLE) so both receive every event while both
-  # run; a fresh colour replays the stream's retention window on first boot.
+  # JetStream durable (INGEST_DURABLE), and BOTH subjects on the ingest stream —
+  # event batches and connector sync batches — are filtered by that one durable,
+  # so both colours receive every row while both run and a fresh colour replays
+  # the stream's retention window on first boot. That is also why the healthcheck
+  # above waits for /readyz: until the replay covers the stream head, the colour
+  # is missing rows it would answer queries from.
   agentray-api-blue:
     <<: *agentray-api-svc
     container_name: prod-agentray-api-blue

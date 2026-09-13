@@ -14,6 +14,21 @@ set -euo pipefail
 #                   without waiting for its healthcheck.
 #   --gate-timeout  Seconds to wait for the new colour to go healthy (default 240).
 #
+# THE GATE IS A DATA-COHERENCE GATE. The API healthcheck targets /readyz, which
+# answers 503 until this colour has applied every row on the durable ingest
+# stream — event batches AND connector sync batches — because a colour that is
+# still replaying would answer queries from a DuckDB file with a hole in it. Two
+# consequences the operator owns:
+#   * A legitimately long replay (a long quiet period, a broker outage that
+#     backed events up, or a large connector table) can outrun --gate-timeout.
+#     Raise it: `--gate-timeout 900`. The refusal is safe — bg_wait removes the
+#     new colour and Caddy is never repointed, so the old colour keeps serving.
+#   * `--no-gate` skips that wait entirely and is therefore a data-coherence
+#     waiver, not just a speed switch: traffic can land on a colour that is
+#     behind. Also check /readyz's body (applied/head/lag) before reaching for
+#     it — a `purged-gap` colour will never become ready, because messages were
+#     purged before it applied them and no amount of waiting recovers them.
+#
 # Schema migrations are automatic: the API creates/updates Postgres and
 # DuckDB tables at startup. Redis/NATS are shared single instances (infra/)
 # serving both envs; Postgres is the existing Cloud SQL instance (secret
@@ -39,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=true; shift ;;
     --no-gate)      GATE=false; shift ;;
     --gate-timeout) GATE_TIMEOUT="$2"; shift 2 ;;
-    -h|--help)    sed -n '3,17p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
+    -h|--help)    sed -n '3,30p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done

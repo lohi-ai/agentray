@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/shared/config"
@@ -21,9 +22,17 @@ type StreamSet struct {
 	Subject  string
 	DLQSubj  string
 	MaxDeliv int
+	// ConnectorSubject carries connector sync batches on the same stream as
+	// events; the per-colour durable filters both, so the colour's ack floor
+	// covers both.
+	ConnectorSubject string
 	// Durable names this process's consumer. Blue-green colours each get
 	// their own so both receive every message.
 	Durable string
+	// bootGap latches a retention loss detected when this process booted, see
+	// latchBootGap. Atomic because the HTTP healthcheck reads it while the
+	// boot path writes it.
+	bootGap atomic.Uint64
 }
 
 // EnsureStreams connects a JetStream context on nc and idempotently provisions
@@ -38,7 +47,7 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 	}
 	ingest, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      cfg.IngestStreamName,
-		Subjects:  []string{cfg.IngestSubject},
+		Subjects:  []string{cfg.IngestSubject, cfg.IngestConnectorSubject},
 		Storage:   jetstream.FileStorage,
 		Retention: jetstream.LimitsPolicy,
 		// A LimitsPolicy stream purges by age regardless of ack state, so MaxAge is
@@ -65,12 +74,13 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 	}
 	maxDeliv := cfg.IngestMaxDeliver
 	return &StreamSet{
-		JS:       js,
-		Ingest:   ingest,
-		DLQ:      dlq,
-		Subject:  cfg.IngestSubject,
-		DLQSubj:  cfg.IngestDLQSubject,
-		MaxDeliv: maxDeliv,
-		Durable:  cfg.IngestDurable,
+		JS:               js,
+		Ingest:           ingest,
+		DLQ:              dlq,
+		Subject:          cfg.IngestSubject,
+		DLQSubj:          cfg.IngestDLQSubject,
+		MaxDeliv:         maxDeliv,
+		ConnectorSubject: cfg.IngestConnectorSubject,
+		Durable:          cfg.IngestDurable,
 	}, nil
 }
