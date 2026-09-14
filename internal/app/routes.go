@@ -867,15 +867,11 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 // mountDashboardLifecycle registers the dashboard/chart lifecycle routes. They
 // are thin adapters over the shared operation registry: same URLs, same
 // envelopes, but the mutation runs the opcore -> usecase -> store path every
-// other adapter runs. Admission stays the legacy contract (any non-capture
-// credential for the project) — the op's Access class governs /api/op, not
-// this surface. Extracted from registerRoutes so tests can mount it alone.
+// other adapter runs. These routes decide nothing about authorization — the
+// caller's admission is the legacy non-capture contract, and the operation's
+// Access class is applied by opAdapter.invoke, exactly as it is on /api/op.
+// Extracted from registerRoutes so tests can mount it alone.
 func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter) {
-	// Dashboard/chart lifecycle routes are thin adapters over the shared
-	// operation registry: same URLs, same envelopes, but the mutation runs the
-	// opcore -> usecase -> store path every other adapter runs. Admission stays
-	// the legacy contract (projectFromRequest: any non-capture credential for
-	// the project) — the op's Access class governs /api/op, not this surface.
 	e.GET("/api/dashboards", func(c echo.Context) error {
 		principal, project, err := principalAndProject(c, store)
 		if err != nil {
@@ -1136,6 +1132,10 @@ func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter)
 	})
 }
 
+// projectFromRequest resolves the project a legacy read route acts on. Capture
+// credentials are refused; every other admitted kind gets a project whose
+// capture key has been withheld (projectForPrincipal) — the response bodies of
+// these routes all echo it.
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {
@@ -1148,7 +1148,7 @@ func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, 
 	if err != nil {
 		return storage.Project{}, err
 	}
-	return project, nil
+	return projectForPrincipal(project, principal), nil
 }
 // wrapObject re-envelopes an operation's bare JSON result under the legacy
 // response key — {"id":…} becomes {"dashboard":{"id":…}} — so the adapter
