@@ -617,3 +617,70 @@ func TestMoneyPaidAtRecipeIsThePublishedOne(t *testing.T) {
 		}
 	}
 }
+
+// The other half of "published": the SQL in docs/ANALYTICS.md has to be SQL
+// run_sql will accept. The sandbox allows exactly one readable source, spelled
+// `events`, and rewrites it to the project-scoped view; the store's own grid
+// says `resolved_events`, which run_sql rejects outright. A recipe published in
+// the store's dialect therefore fails for every reader who copies it — the way
+// the reconciliation control in this ticket's own plan failed before
+// scopedReadonlySQL learned to merge a caller's CTE list.
+func TestPublishedMoneySQLRunsInTheSandbox(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "ANALYTICS.md"))
+	if err != nil {
+		t.Fatalf("read docs/ANALYTICS.md: %v", err)
+	}
+	blocks := fencedSQLBlocks(string(doc))
+	grid := blockWith(t, blocks, "WITH money_raw AS (")
+	aggregate := blockWith(t, blocks, "FROM money_rows")
+	paidAt := blockWith(t, blocks, "min(occurred_at) AS paid_at")
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{name: "the de-duplication grid + the per-currency aggregate", query: grid + "\n" + aggregate},
+		{name: "the de-duplication grid + the paid_at recipe", query: grid + "\n" + paidAt},
+	} {
+		scoped, args, err := scopedReadonlySQL(tc.query, "project-1", nil)
+		if err != nil {
+			t.Errorf("%s is not runnable through run_sql: %v\n%s", tc.name, err, tc.query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("%s did not resolve to the scoped events source: %s", tc.name, scoped)
+		}
+		if len(args) == 0 {
+			t.Errorf("%s lost its project scoping argument: %s", tc.name, scoped)
+		}
+	}
+}
+
+// fencedSQLBlocks returns the body of every ```sql fence in doc, in order.
+func fencedSQLBlocks(doc string) []string {
+	var blocks []string
+	rest := doc
+	for {
+		open := strings.Index(rest, "```sql\n")
+		if open < 0 {
+			return blocks
+		}
+		rest = rest[open+len("```sql\n"):]
+		end := strings.Index(rest, "```")
+		if end < 0 {
+			return blocks
+		}
+		blocks = append(blocks, rest[:end])
+		rest = rest[end:]
+	}
+}
+
+func blockWith(t *testing.T, blocks []string, marker string) string {
+	t.Helper()
+	for _, b := range blocks {
+		if strings.Contains(b, marker) {
+			return b
+		}
+	}
+	t.Fatalf("docs/ANALYTICS.md no longer publishes a sql block containing %q", marker)
+	return ""
+}

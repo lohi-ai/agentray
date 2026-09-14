@@ -331,13 +331,23 @@ func rowPhrase(n int64) string {
 	}
 }
 
-// MoneyPaidAtRecipe is the published recipe for "when did this person become a
-// paying customer", ready to run in the SQL sandbox (run_sql) or to build a
-// cohort on. It derives the milestone from the ledger instead of emitting a
-// `paid_user` event, which would be a second fact able to disagree with the
-// money it claims to describe:
+// MoneyPaidAtRecipe is the "when did this person become a paying customer"
+// recipe, written against the store's own grid (resolved_events, and the
+// stitched canonical_distinct_id the tile also reads), so a caller inside the
+// store can run it with duckQuery and a bound window. It derives the milestone
+// from the ledger instead of emitting a `paid_user` event, which would be a
+// second fact able to disagree with the money it claims to describe:
 //
 //	a person is paid from their earliest de-duplicated POSITIVE booking onward.
+//
+// This is NOT the run_sql form: the sandbox accepts one readable source, spelled
+// `events`, and rewrites it — a query reading `resolved_events` is rejected
+// ("SQL must read from the events table exactly once"). The published form, for
+// run_sql, the SQL page, a saved chart and an agent, is the same recipe written
+// against `events` and `canonical_id` in docs/ANALYTICS.md § Reading money with
+// SQL; TestMoneyPaidAtRecipeIsThePublishedOne pins that the two stay one recipe
+// and TestPublishedMoneySQLRunsInTheSandbox pins that the published form is
+// something run_sql actually accepts.
 //
 // Reversals do not erase the milestone (a refund is not a time machine) and
 // neither does a later correction, because the grid resolves the correction

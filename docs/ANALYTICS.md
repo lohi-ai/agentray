@@ -182,6 +182,9 @@ grid from `resolved_events` instead, which exposes the stitched id under its
 internal name; that is the only difference and it changes no total, since the
 de-dup key is `$insert_id`/`event_id`, never the person.
 
+Both queries below are **tails over this grid** — paste the `WITH` clause with
+whichever one you need. Neither runs on its own: `money_rows` is defined here.
+
 De-duplication ranks the writes **inside the requested window**. A correction
 carrying a later timestamp in the same window replaces the booking it fixes; one
 that lands in a *later* window is that window's booking, and the earlier window
