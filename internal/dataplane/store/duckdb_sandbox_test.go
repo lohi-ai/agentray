@@ -90,12 +90,15 @@ func TestSandboxRefreshExternalRowsIncremental(t *testing.T) {
 		t.Fatalf("first query sees %v, want [a]", got)
 	}
 
-	// Rewrite the sandbox's own copy of row a.
+	// Rewrite the sandbox's own copy of row a — an upsert the parent can only
+	// perform through the child, which is exactly the copy a wholesale recopy
+	// would overwrite.
 	sb, err := pool.sandboxFor(ctx, p1)
 	if err != nil {
 		t.Fatalf("sandbox: %v", err)
 	}
-	_, err = sb.feeder.ExecContext(ctx, `UPDATE external_rows SET data = '{"sentinel":true}' WHERE row_key = 'a'`)
+	_, err = sb.call(ctx, sandboxRequest{Op: "insert", Table: DuckDBExternalRowsName, Replace: true,
+		Rows: [][]any{{p1, c1, "users", "a", "", `{"sentinel":true}`, time.Now().UTC()}}})
 	sb.release()
 	if err != nil {
 		t.Fatalf("plant sentinel: %v", err)
