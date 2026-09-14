@@ -268,7 +268,7 @@ func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev O
 	}
 
 	metric := OverviewMetric{
-		Definition: "Deduplicated net revenue per declared currency: rows de-duplicate by $insert_id (last write wins, event_id fallback), refunds and revenue_reversed rows net against bookings, and the headline is the currency with the largest deduplicated gross. No FX — currencies are never summed together.",
+		Definition: metricDefRevenue,
 		Notes:      revenueNotes(win),
 	}
 	if win.moneyRows == 0 {
@@ -278,9 +278,7 @@ func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev O
 			// "nothing arrived in this range" note would be a false claim
 			// about a project that has never sent one.
 			metric.State = OverviewStateUnconfigured
-			metric.Notes = append([]string{
-				"requires a trusted, deduplicated server or billing source that sends " + moneyBookingEvent + " events with a declared currency and gross/net basis",
-			}, metric.Notes[:len(metric.Notes)-1]...)
+			metric.Notes = append([]string{metricPrereqRevenue}, metric.Notes[:len(metric.Notes)-1]...)
 			return metric, detail, nil
 		}
 		metric.State = OverviewStateNoData

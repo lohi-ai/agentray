@@ -59,6 +59,10 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, archiveChart())
 	opcore.Register(r, unarchiveChart())
 	opcore.Register(r, reorderCharts())
+	opcore.Register(r, listMetrics())
+	opcore.Register(r, readMetric())
+	opcore.Register(r, getBoard())
+	opcore.Register(r, saveBoard())
 	opcore.Register(r, testSource())
 	opcore.Register(r, previewSource())
 	opcore.Register(r, listSources())
@@ -260,7 +264,6 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 		},
 	}
 }
-
 
 // --- Authoring operations (analyze_build) ---
 

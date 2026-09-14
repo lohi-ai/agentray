@@ -133,7 +133,18 @@ type Dashboard struct {
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// BoardKey is the stable name a declaration addresses this board by. It is
+	// empty for boards created positionally (create_dashboard) — a key is
+	// something a declaration chooses, never something the store invents.
+	BoardKey string `json:"board_key,omitempty"`
+	// DefinitionUpdatedAt is when the board's declared content was last
+	// written. Nil means the board was never declared: it renders from its
+	// charts, which is how every board behaved before declarations existed.
+	DefinitionUpdatedAt *time.Time `json:"definition_updated_at,omitempty"`
 }
+
+// HasDefinition reports whether the board carries a declared composition.
+func (d Dashboard) HasDefinition() bool { return d.DefinitionUpdatedAt != nil }
 
 type Chart struct {
 	ID          string `json:"id"`
@@ -1066,6 +1077,17 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	}
 
 	if err := s.migrateLifecycle(ctx); err != nil {
+		return err
+	}
+
+	// The metric catalog is the vocabulary a board declaration is validated
+	// against, and the contract every metric surface serves — so it is
+	// refreshed before the boards that reference it are read.
+	if err := s.migrateMetricCatalog(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateBoards(ctx); err != nil {
 		return err
 	}
 

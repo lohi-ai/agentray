@@ -102,6 +102,15 @@ type DataSource interface {
 	ListRecommendationsPage(ctx context.Context, projectID, cursor string, limit int) ([]storage.AgentRecommendation, string, error)
 	RecommendationForProject(ctx context.Context, projectID, id string) (storage.AgentRecommendation, error)
 	DatasetPreviewForProject(ctx context.Context, projectID, syncID string, limit int) (storage.DatasetPreview, error)
+
+	// The metric catalog and the declarative board content model: the catalog a
+	// tile is validated against, one metric read, and the board content read
+	// and fenced declaration behind save_board.
+	ListMetricDefinitions(ctx context.Context) ([]storage.MetricDefinition, error)
+	MetricDefinitionByKey(ctx context.Context, key string) (storage.MetricDefinition, error)
+	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
+	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
+	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -143,6 +152,10 @@ const (
 	ToolArchiveChart       = "archive_chart"
 	ToolUnarchiveChart     = "unarchive_chart"
 	ToolReorderCharts      = "reorder_charts"
+	ToolListMetrics        = "list_metrics"
+	ToolReadMetric         = "read_metric"
+	ToolGetBoard           = "get_board"
+	ToolSaveBoard          = "save_board"
 	ToolListSources        = "list_sources"
 	ToolArchiveSource      = "archive_source"
 	ToolUnarchiveSource    = "unarchive_source"

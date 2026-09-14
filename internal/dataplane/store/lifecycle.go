@@ -64,10 +64,10 @@ func (s *Store) migrateLifecycle(ctx context.Context) error {
 	return nil
 }
 
-const dashboardColumns = `id::text, project_id::text, name, description, revision, archived_at, created_at, updated_at`
+const dashboardColumns = `id::text, project_id::text, name, description, revision, archived_at, created_at, updated_at, board_key, definition_updated_at`
 
 func dashboardScanDest(d *Dashboard) []any {
-	return []any{&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.Revision, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt}
+	return []any{&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.Revision, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt, &d.BoardKey, &d.DefinitionUpdatedAt}
 }
 
 // ListDashboardsFiltered lists the project's dashboards; includeArchived=false

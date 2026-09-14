@@ -17,7 +17,7 @@ type Scopes struct {
 var scopeTools = map[string][]string{
 	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview, ToolListSources},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolListMetrics, ToolReadMetric, ToolGetBoard, ToolSaveBoard, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
 }
 
@@ -55,6 +55,13 @@ var readTools = map[string]bool{
 	// inventory an authoring agent needs before it can fence a write.
 	ToolListCharts:  true,
 	ToolListSources: true,
+	// The catalog and a board's declared content are reads: list_metrics says
+	// what a metric means, read_metric computes one over a range, and get_board
+	// returns the composition an authoring agent must read before it declares
+	// its own.
+	ToolListMetrics: true,
+	ToolReadMetric:  true,
+	ToolGetBoard:    true,
 }
 
 // ScopesFromMap maps a stored scope map (agent_configs columns) onto Scopes.
