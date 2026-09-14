@@ -64,6 +64,42 @@ func TestDuckDBBootCreatesSchema(t *testing.T) {
 	}
 }
 
+// A file written by an older build is stamped with the version it was brought
+// to. The DDL is idempotent, so a v1 file gains whatever it is missing on this
+// boot; a ledger still saying 1 would then describe a schema the file does not
+// have, which is the one reading the version exists to give.
+func TestDuckDBReopenStampsTheCurrentSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "analytics.duckdb")
+
+	d, err := OpenDuckDB(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenDuckDB: %v", err)
+	}
+	// Stand in for the previous generation: its file, its ledger.
+	if err := d.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE schema_meta SET version = 1 WHERE name = 'schema'`)
+		return err
+	}); err != nil {
+		t.Fatalf("age the ledger: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := OpenDuckDB(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if got := duckCount(t, reopened, `SELECT count(*) FROM schema_meta WHERE name = 'schema' AND version = ?`, DuckDBSchemaVersion); got != 1 {
+		t.Fatalf("an existing file was not stamped with version %d", DuckDBSchemaVersion)
+	}
+	if got := duckCount(t, reopened, `SELECT count(*) FROM schema_meta`); got != 1 {
+		t.Fatalf("schema_meta rows = %d, want the single ledger row", got)
+	}
+}
+
 // A second open over the same path observes the committed event and its person
 // projection: clean close/restart has no bootstrap-only state.
 func TestDuckDBRestartDurability(t *testing.T) {
@@ -74,7 +110,7 @@ func TestDuckDBRestartDurability(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectID, eventID := uuid.NewString(), uuid.NewString()
-	if err := d.SinkEvents(ctx, []Event{duckEvent(projectID, eventID, "reader", time.Now())}); err != nil {
+	if err := d.SinkEvents(ctx, []Event{duckEvent(projectID, eventID, "reader", time.Now())}, AppliedMark{}); err != nil {
 		t.Fatalf("SinkEvents: %v", err)
 	}
 	if err := d.Close(); err != nil {
@@ -105,7 +141,7 @@ func TestDuckDBRedeliveryIdempotent(t *testing.T) {
 	projectID, eventID := uuid.NewString(), uuid.NewString()
 	event := duckEvent(projectID, eventID, "reader", time.Now())
 	for i := 0; i < 2; i++ {
-		if err := d.SinkEvents(context.Background(), []Event{event}); err != nil {
+		if err := d.SinkEvents(context.Background(), []Event{event}, AppliedMark{}); err != nil {
 			t.Fatalf("SinkEvents replay %d: %v", i, err)
 		}
 	}
@@ -129,7 +165,7 @@ func TestDuckDBProjectIsolation(t *testing.T) {
 	if err := d.SinkEvents(ctx, []Event{
 		duckEvent(projectA, uuid.NewString(), "anon", time.Now()),
 		duckEvent(projectB, uuid.NewString(), "anon", time.Now()),
-	}); err != nil {
+	}, AppliedMark{}); err != nil {
 		t.Fatalf("SinkEvents: %v", err)
 	}
 	profilesA, err := d.PersonProfilesByKeys(ctx, projectA, []string{"reader"})
@@ -152,7 +188,7 @@ func TestDuckDBConcurrentReadWrite(t *testing.T) {
 	d := openTestDuckDB(t)
 	ctx := context.Background()
 	projectID := uuid.NewString()
-	if err := d.SinkEvents(ctx, []Event{duckEvent(projectID, uuid.NewString(), "reader", time.Now())}); err != nil {
+	if err := d.SinkEvents(ctx, []Event{duckEvent(projectID, uuid.NewString(), "reader", time.Now())}, AppliedMark{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +207,7 @@ func TestDuckDBConcurrentReadWrite(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs <- d.SinkEvents(ctx, []Event{duckEvent(projectID, uuid.NewString(), "reader", time.Now())})
+		errs <- d.SinkEvents(ctx, []Event{duckEvent(projectID, uuid.NewString(), "reader", time.Now())}, AppliedMark{})
 	}()
 	wg.Wait()
 	close(errs)

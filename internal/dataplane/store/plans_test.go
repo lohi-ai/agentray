@@ -566,7 +566,7 @@ func TestSoftDeleteConsumersAgreeOnMissingFalseTrueAndMalformed(t *testing.T) {
 
 	land := func(table string, rows ...connector.LandedRow) {
 		t.Helper()
-		if err := s.InsertExternalRows(ctx, projectID, conn.ID, table, rows); err != nil {
+		if err := s.InsertExternalRows(ctx, projectID, conn.ID, table, rows, AppliedMark{}); err != nil {
 			t.Fatalf("land %s: %v", table, err)
 		}
 	}

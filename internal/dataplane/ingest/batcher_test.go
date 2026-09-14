@@ -11,9 +11,12 @@ import (
 )
 
 // recordingSink captures every flushed batch so tests can assert on coalescing.
+// It also captures the position mark each flush carries, which is what the
+// store records for the readiness binding.
 type recordingSink struct {
 	mu      sync.Mutex
 	batches [][]storage.Event
+	marks   []storage.AppliedMark
 	flushed chan struct{}
 }
 
@@ -21,10 +24,11 @@ func newRecordingSink() *recordingSink {
 	return &recordingSink{flushed: make(chan struct{}, 64)}
 }
 
-func (r *recordingSink) insert(_ context.Context, events []storage.Event) error {
+func (r *recordingSink) insert(_ context.Context, events []storage.Event, mark storage.AppliedMark) error {
 	r.mu.Lock()
 	cp := append([]storage.Event(nil), events...)
 	r.batches = append(r.batches, cp)
+	r.marks = append(r.marks, mark)
 	r.mu.Unlock()
 	r.flushed <- struct{}{}
 	return nil
@@ -34,6 +38,13 @@ func (r *recordingSink) snapshot() [][]storage.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([][]storage.Event(nil), r.batches...)
+}
+
+// markSnapshot is the position mark of every flush, in flush order.
+func (r *recordingSink) markSnapshot() []storage.AppliedMark {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]storage.AppliedMark(nil), r.marks...)
 }
 
 func (r *recordingSink) totalRows() int {
@@ -116,6 +127,30 @@ func TestEventBatcherDrainsOnStop(t *testing.T) {
 
 	if rows := sink.totalRows(); rows != 7 {
 		t.Fatalf("want 7 rows drained on stop, got %d", rows)
+	}
+}
+
+// The position a flush records under is the HIGHEST consumer sequence among its
+// messages: the store's record has to dominate every message the batch is about
+// to acknowledge, or the readiness binding would refuse a colour for messages
+// that are in its file.
+func TestEventBatcherRecordsHighestDeliveryPosition(t *testing.T) {
+	sink := newRecordingSink()
+	b := NewEventBatcher(sink.insert, EventBatcherConfig{
+		MaxBatch: 1000, FlushEvery: time.Hour, Durable: "colour-mark",
+	})
+
+	b.AddMsg(ev(1), &fakeMsg{deliv: 1, seqN: 4})
+	b.AddMsg(ev(1), &fakeMsg{deliv: 1, seqN: 9})
+	b.AddMsg(ev(1), &fakeMsg{deliv: 2, seqN: 6})
+	b.Stop()
+
+	marks := sink.markSnapshot()
+	if len(marks) != 1 {
+		t.Fatalf("flush marks = %v, want one coalesced flush", marks)
+	}
+	if marks[0].Durable != "colour-mark" || marks[0].Seq != 9 {
+		t.Fatalf("flush mark = %+v, want colour-mark at the highest delivery 9", marks[0])
 	}
 }
 

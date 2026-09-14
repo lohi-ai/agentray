@@ -138,12 +138,20 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 //
 // The person projection commits in the same transaction as the events, so the
 // profile can no longer be lost once the batch is acked.
-func (d *DuckDB) SinkEvents(ctx context.Context, events []Event) error {
+//
+// mark is the durable position this batch lands; it commits in the SAME
+// transaction, which is what lets /readyz compare the durable's floor against
+// what this file can show it applied (see duckdb_position.go). An empty mark is
+// a write that did not come off the durable stream.
+func (d *DuckDB) SinkEvents(ctx context.Context, events []Event, mark AppliedMark) error {
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		if err := insertEventsTx(ctx, tx, events); err != nil {
 			return err
 		}
-		return d.applyPersonUpdatesTx(ctx, tx, events)
+		if err := d.applyPersonUpdatesTx(ctx, tx, events); err != nil {
+			return err
+		}
+		return advancePositionTx(ctx, tx, mark)
 	})
 }
 
@@ -365,10 +373,15 @@ func (d *DuckDB) ReconcileAliases(ctx context.Context, rows [][3]string) error {
 // InsertExternalRows lands one connector batch. The (project, connector,
 // table, row_key) primary key makes snapshot re-syncs and retried batches
 // idempotent — the job ReplacingMergeTree(synced_at) did, enforced at write
-// time instead of merge time.
-func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
+// time instead of merge time. mark lands in the same transaction, as it does
+// for events: one durable consumer carries both subjects, so the position it
+// records covers both (see duckdb_position.go).
+func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, mark AppliedMark) error {
 	if len(rows) == 0 {
-		return nil
+		// An empty batch still settles its message, and settling advances the
+		// consumer's ack floor: record the position so the file does not fall
+		// behind a floor built of deliveries that carried no rows at all.
+		return d.RecordPosition(ctx, mark)
 	}
 	pid, err := uuid.Parse(projectID)
 	if err != nil {
@@ -397,6 +410,6 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 				return err
 			}
 		}
-		return nil
+		return advancePositionTx(ctx, tx, mark)
 	})
 }

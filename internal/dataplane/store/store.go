@@ -1680,12 +1680,51 @@ func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
 // person-profile projection commit in ONE DuckDB transaction, and the error
 // drives the JetStream ack/nak/dead-letter decision. Commit-before-ack plus
 // the (project_id, event_id) dedup key makes redelivery a no-op, and the
-// profile commits atomically with the batch.
-func (s *Store) SinkEvents(ctx context.Context, events []Event) error {
+// profile commits atomically with the batch. mark is the durable position the
+// batch lands, recorded in that same transaction (see duckdb_position.go).
+func (s *Store) SinkEvents(ctx context.Context, events []Event, mark AppliedMark) error {
 	if s.duck == nil {
 		return errors.New("storage: duckdb not open")
 	}
-	return s.duck.SinkEvents(ctx, events)
+	return s.duck.SinkEvents(ctx, events, mark)
+}
+
+// The position record is the store-side half of the readiness contract: it is
+// what lets /readyz answer for THIS DuckDB file rather than for the durable's
+// own arithmetic. The ingestion worker reads and binds it at boot (see
+// internal/dataplane/ingest/readiness.go); the record itself lives in
+// duckdb_position.go.
+func (s *Store) AppliedPosition(ctx context.Context, durable string) (AppliedPosition, error) {
+	if s.duck == nil {
+		return AppliedPosition{}, errors.New("storage: duckdb not open")
+	}
+	return s.duck.AppliedPosition(ctx, durable)
+}
+
+// AdoptPosition records the starting position of a file that predates the
+// record; RefusePosition writes down a gap a boot proved, so restarting the
+// colour does not forget it.
+func (s *Store) AdoptPosition(ctx context.Context, durable string, seq uint64) error {
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
+	}
+	return s.duck.AdoptPosition(ctx, durable, seq)
+}
+
+func (s *Store) RefusePosition(ctx context.Context, durable string, missing uint64) error {
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
+	}
+	return s.duck.RefusePosition(ctx, durable, missing)
+}
+
+// RecordPosition advances the applied position for a delivery that settled
+// without a row write; see duckdb_position.go.
+func (s *Store) RecordPosition(ctx context.Context, mark AppliedMark) error {
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
+	}
+	return s.duck.RecordPosition(ctx, mark)
 }
 
 func (s *Store) CreateAlias(ctx context.Context, projectID, anonymousID, canonicalID string) error {
