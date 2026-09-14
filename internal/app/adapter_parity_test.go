@@ -1105,27 +1105,4 @@ func TestLegacyRESTAuthorizationParity(t *testing.T) {
 	if legacyCharts.Body.String() != opCharts.Body.String() {
 		t.Fatalf("legacy refusal bodies differ: legacy %q, /api/op %q", legacyCharts.Body.String(), opCharts.Body.String())
 	}
-
-	// A read-only session keeps its role floor on the legacy surface too.
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("rest-parity-viewer-%d@test.local", time.Now().UnixNano()), "V", "password-123", "ws-v", "proj-v")
-	if err != nil {
-		t.Fatalf("viewer account: %v", err)
-	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
-	}
-	viewerCookie := sessionCookieFor(t, s, viewer.User.ID)
-	viewerList := callREST(t, e, http.MethodGet, "/api/dashboards?project_id="+project.ID, "", "", viewerCookie)
-	if viewerList.Code != http.StatusOK {
-		t.Fatalf("viewer list_dashboards: %d %s, want 200", viewerList.Code, viewerList.Body.String())
-	}
-	// The viewer may read the list but not hold the ingest key: the resolvers
-	// load the row through the role-blind ProjectByID, so the echoed project is
-	// withheld unless the resolved role may write.
-	if strings.Contains(viewerList.Body.String(), captureKey) {
-		t.Fatalf("viewer session received the capture key: %s", viewerList.Body.String())
-	}
-	if rec := callREST(t, e, http.MethodPost, "/api/dashboards?project_id="+project.ID, `{"name":"viewer board"}`, "", viewerCookie); rec.Code != http.StatusForbidden {
-		t.Fatalf("viewer create via REST: %d %s, want 403 (MinSessionRole member)", rec.Code, rec.Body.String())
-	}
 }

@@ -69,9 +69,9 @@ func newFakeGuardStore() *fakeGuardStore {
 			homeProject: {ID: homeProject, WorkspaceID: homeWS, Name: "My project"},
 		},
 		members: map[string]map[string]string{
-			// The visitor is a viewer of the demo and the OWNER of their own
+			// The visitor is a member of the demo and the OWNER of their own
 			// workspace. That pairing is the whole point of the fixture.
-			demoWS: {visitorID: storage.DemoViewerRole, operatorID: "owner"},
+			demoWS: {visitorID: "member", operatorID: "owner"},
 			homeWS: {visitorID: "owner"},
 		},
 		apiKeys:     map[string]string{demoKey: demoProject},
@@ -510,7 +510,7 @@ func TestDemoAgentRunsAreCappedPerUserPerDay(t *testing.T) {
 
 	// Per user: a second person still has their own full budget.
 	fake.defaultProj[operatorID] = homeProject
-	fake.members[demoWS][operatorID] = storage.DemoViewerRole
+	fake.members[demoWS][operatorID] = "member"
 	if rec := do(e, http.MethodPost, target, operatorTok); rec.Code != reachedHandler {
 		t.Fatalf("a second viewer's first question: status %d, want it allowed", rec.Code)
 	}

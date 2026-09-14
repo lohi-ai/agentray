@@ -98,14 +98,14 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 // grants nothing. Capture principals never reach here — both resolvers refuse
 // them first.
 //
-// A session keeps the key only when its resolved role may write. That is not
+// A session keeps the key only when Allow would let it write. That is not
 // redundant with the kind check: these resolvers load the row through
-// store.ProjectByID, which is role-blind, so a viewer's session would otherwise
-// come back holding the project's ingest key — the escalation
+// store.ProjectByID, which is role-blind, so a demo member's session would
+// otherwise come back holding the project's ingest key — the escalation
 // redactAPIKeyForRole already refuses on every path that loads through
 // ProjectByIDForUser.
 func projectForPrincipal(project storage.Project, principal opcore.Principal) storage.Project {
-	if principal.Kind != opcore.CredSession || !storage.RoleMayWrite(principal.Role) {
+	if principal.Kind != opcore.CredSession || !sessionWriteFloor.Allow(principal, legacyWrite(opcore.AccessDashboardsWrite)) {
 		project.APIKey = ""
 	}
 	return project
@@ -156,10 +156,9 @@ func managementGrants(scopes []string) []opcore.Access {
 // caller could forget would let a demo member inherit full member grants, and
 // the write floor would let them through.
 //
-// Demo non-owners get analytics read plus sources:read (today's viewer set).
-// Owner/admin of the demo workspace keep full grants. Member adds dashboard
-// and growth writes; owner/admin add source management. The viewer arm is
-// kept until the role itself is deleted. An unrecognized role gets NOTHING.
+// Demo non-owners get analytics read plus sources:read. Owner/admin of the
+// demo workspace keep full grants. Member adds dashboard and growth writes;
+// owner/admin add source management. An unrecognized role gets NOTHING.
 func sessionGrants(project storage.Project) []opcore.Access {
 	role := project.Role
 	if project.IsDemo && role != "owner" && role != "admin" {
@@ -178,8 +177,6 @@ func sessionGrants(project storage.Project) []opcore.Access {
 			opcore.AccessSourcesRead, opcore.AccessGrowthWrite,
 			opcore.AccessPlansWrite,
 		}
-	case "viewer":
-		return []opcore.Access{opcore.AccessAnalyticsRead, opcore.AccessSourcesRead}
 	default:
 		return nil
 	}
