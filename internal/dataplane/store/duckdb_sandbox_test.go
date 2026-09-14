@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,69 @@ func TestRunSQLEndToEndThroughSandbox(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "forbidden") && !strings.Contains(err.Error(), "not allowed") && !strings.Contains(err.Error(), "only SELECT") {
 			t.Errorf("RunSQL(%q) error = %v, want a guard rejection", q, err)
 		}
+	}
+}
+
+// insertEventAt writes one event with an explicit inserted_at. InsertEvents
+// always stamps now(), and the refresh cursor is a high-water mark over
+// inserted_at, so placing a row above the cursor needs the column directly.
+func insertEventAt(t *testing.T, d *DuckDB, projectID, eventID string, at, insertedAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	err := d.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO events (project_id, event_id, event_name, "timestamp", inserted_at)
+			 VALUES (?, ?, 'probe', ?, ?)`,
+			projectID, eventID, at.UTC(), insertedAt.UTC())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert event at %s: %v", insertedAt, err)
+	}
+}
+
+// TestSandboxRebuildsWhenDeletesAreMaskedByInserts: the refresh copies only
+// what arrived above its cursor, so a delete is visible to it only as a count
+// drift. Counting against the main table's total let an equal number of new
+// events mask the delete — retention removing an expired event while a fresh
+// one landed left both totals at two, and the sandbox went on answering
+// queries with the row the main store had deleted.
+func TestSandboxRebuildsWhenDeletesAreMaskedByInserts(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	p1 := uuid.NewString()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	expired := retentionEvent(t, d, p1, base.AddDate(0, 0, -400))
+	retentionEvent(t, d, p1, base.AddDate(0, 0, -1))
+
+	pool := newSQLSandboxPool(d)
+	t.Cleanup(pool.closeAll)
+
+	rows, err := pool.query(ctx, p1, `SELECT count(*) AS n FROM events`, nil)
+	if err != nil || rows[0]["n"] != int64(2) {
+		t.Fatalf("first refresh: rows=%v err=%v, want 2 events", rows, err)
+	}
+
+	if _, err := (&Store{duck: d}).DeleteEventsBefore(ctx, base.AddDate(0, 0, -365), 100); err != nil {
+		t.Fatalf("DeleteEventsBefore: %v", err)
+	}
+	// One new event lands above the sandbox's cursor, putting the main table's
+	// total back where the sandbox last saw it.
+	insertEventAt(t, d, p1, uuid.NewString(), base, time.Now().UTC().Add(time.Second))
+
+	rows, err = pool.query(ctx, p1, `SELECT count(*) AS n FROM events`, nil)
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if rows[0]["n"] != int64(2) {
+		t.Errorf("sandbox holds %v events after a masked delete, want 2 — the deleted row survived", rows[0]["n"])
+	}
+	rows, err = pool.query(ctx, p1, `SELECT count(*) AS n FROM events WHERE event_id = '`+expired+`'`, nil)
+	if err != nil {
+		t.Fatalf("expired-row query: %v", err)
+	}
+	if rows[0]["n"] != int64(0) {
+		t.Errorf("sandbox still answers with the deleted event %s", expired)
 	}
 }

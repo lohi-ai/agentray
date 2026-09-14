@@ -31,6 +31,7 @@ type Server struct {
 	worker          *ingestion.EventWorker
 	scheduler       *agentruntime.Scheduler
 	connectorEngine *connector.Engine
+	retention       *storage.Retention
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -247,9 +248,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// tick, sharing one clock with scheduled runs instead of standing up more
 	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
+	// Event retention rides the same minute tick for ADMISSION only — it starts
+	// at most one daily sweep, on its own goroutine, because a multi-minute
+	// delete must not hold the clock alert evaluation and connector syncs share.
+	retention := storage.NewRetention(store, cfg.EventRetentionDays)
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)
+		retention.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
 		store.Close()
@@ -270,7 +276,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine, retention: retention}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -423,6 +429,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// landing and terminal-status writes.
 	if s.connectorEngine != nil {
 		s.connectorEngine.Shutdown()
+	}
+	// The retention sweep is the same shape one level down: it detaches from the
+	// tick that admitted it and can be minutes from its own budget, so shutdown
+	// cancels it and waits rather than closing the DuckDB handle underneath it.
+	if s.retention != nil {
+		s.retention.Stop()
 	}
 	// Drain the consumer first: Stop() blocks until the batcher's final flush
 	// commits, so every acked batch is durable in DuckDB before the engine

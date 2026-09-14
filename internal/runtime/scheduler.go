@@ -46,6 +46,11 @@ type Scheduler struct {
 	subject string
 	sub     *nats.Subscription
 	stop    chan struct{}
+	// tickDone is closed when the minute loop has returned. Stop waits on it:
+	// a tick that already selected the timer would otherwise be free to reach
+	// its callback — and the callbacks hold store work — after Stop returned
+	// and the caller moved on to closing the database underneath them.
+	tickDone chan struct{}
 	// onTick, if set, runs each minute alongside the schedule scan (the alert
 	// evaluator hooks here so alerting shares the one clock instead of a second
 	// timer). Failures are the callback's own concern — the ticker never blocks.
@@ -102,15 +107,21 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	s.sub = sub
 
+	s.tickDone = make(chan struct{})
 	go s.tickLoop(ctx)
 	return nil
 }
 
-// Stop unsubscribes and halts the ticker.
+// Stop unsubscribes, halts the ticker, and waits for a tick already in flight
+// to finish. Joining the loop is what makes the callbacks safe to order against
+// a caller that closes their dependencies immediately afterwards.
 func (s *Scheduler) Stop() {
 	close(s.stop)
 	if s.sub != nil {
 		_ = s.sub.Unsubscribe()
+	}
+	if s.tickDone != nil {
+		<-s.tickDone
 	}
 }
 
@@ -151,6 +162,7 @@ func (s *Scheduler) publishRun(m runMessage) error {
 func (s *Scheduler) tickLoop(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	defer close(s.tickDone)
 	for {
 		select {
 		case <-ctx.Done():
