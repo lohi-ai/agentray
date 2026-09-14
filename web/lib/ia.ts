@@ -50,7 +50,10 @@ export type ChannelInfo = {
   kind: 'chat' | 'mcp' | 'schedule' | 'webhook' | 'lab' | 'support_widget' | 'voice';
   label: string;
   shipped: boolean;
-  href: string;
+  // Absent on reserved kinds: a channel that ships nothing has no destination,
+  // and a placeholder URL would be a link the router cannot serve — the same
+  // contract ChildSurface.href carries.
+  href?: string;
 };
 
 export const CHANNEL_CATALOG: readonly ChannelInfo[] = [
@@ -62,9 +65,18 @@ export const CHANNEL_CATALOG: readonly ChannelInfo[] = [
   { kind: 'schedule', label: 'Schedule', shipped: true, href: '/operations' },
   { kind: 'webhook', label: 'Webhook', shipped: true, href: '/operations' },
   { kind: 'lab', label: 'Lab', shipped: true, href: '/agents' },
-  { kind: 'support_widget', label: 'Support', shipped: false, href: '' },
-  { kind: 'voice', label: 'Voice', shipped: false, href: '' },
+  { kind: 'support_widget', label: 'Support', shipped: false },
+  { kind: 'voice', label: 'Voice', shipped: false },
 ];
+
+export type ShippedChannel = ChannelInfo & { href: string };
+
+// isShippedChannel separates a reachable channel from a reserved one. Callers
+// that render a link must narrow through it rather than assume `href` —
+// isLinkedSurface's twin for the channel catalog.
+export function isShippedChannel(channel: ChannelInfo): channel is ShippedChannel {
+  return channel.shipped && !!channel.href;
+}
 
 export type WorkloadCategory = {
   id: 'validate' | 'growth' | 'marketing' | 'data' | 'operator' | 'support';

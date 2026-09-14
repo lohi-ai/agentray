@@ -23,6 +23,7 @@ import { Avatar } from '@astryxdesign/core/Avatar';
 import { Button } from '@astryxdesign/core/Button';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { CHILD_SURFACES, childSurfacesFor, isLinkedSurface, matchActiveHref, navGroups, navItemsFor } from '@/lib/ia';
+import { useMediaQuery } from '@/modules/app/hooks/media';
 import { useAuth, useProjectAccess, useUser } from '@/modules/app/hooks';
 import { useAuthStore } from '@/lib/app-state';
 import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
@@ -40,15 +41,6 @@ const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/events': List,
   '/plans': FlaskConical,
 };
-
-// Small pulsing "live" indicator shown on the Chat item. Uses the --agent token
-// (via the bg-agent/text-agent utilities) and the shared `pulse` keyframes; no
-// hardcoded colors.
-function LiveDot() {
-  return (
-    <span className="relative inline-block size-2 flex-none rounded-full bg-agent text-agent after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" />
-  );
-}
 
 // Account + language + logout footer, pinned to the bottom of the SideNav.
 function SidebarFooter() {
@@ -174,6 +166,20 @@ export function AppShell({
     if (navOpen) setNavOpen(false);
   }
 
+  // Emptiness is decided here, not inside RelatedSurfacesNav: a component that
+  // returns null is still a truthy element, so asking `related ? …` there would
+  // hand PageShell an aside on every screen and leave a blank 240px column on
+  // the ones with no child surfaces.
+  const hasRelated = !hideRelated && childSurfacesFor(current, CHILD_SURFACES, { hosted }).some((s) => !isLinkedSurface(s) || s.href !== pathname);
+
+  // The aside that carries RelatedSurfacesNav only exists at ≥1400px
+  // (page-shell.tsx). Below that the child surfaces nest inside the active nav
+  // item instead — the library's own collapsible group — so Acquisition,
+  // Monetization and Usage stay represented in the IA at every width rather
+  // than vanishing between 900px and 1400px. The hook returns false during
+  // SSR, which is the wide case: the aside owns the surfaces there.
+  const narrowShell = useMediaQuery('(max-width: 1399.98px)');
+
   const sideNav = (
     <SideNav
       header={<ProjectSwitcher />}
@@ -191,8 +197,11 @@ export function AppShell({
                 label={item.label}
                 icon={Icon}
                 isSelected={item.href === current}
-                endContent={item.href === '/chat' ? <LiveDot /> : undefined}
-              />
+              >
+                {narrowShell && hasRelated && item.href === current ? (
+                  <RelatedSurfacesNav parentHref={item.href} currentHref={pathname} hosted={hosted} />
+                ) : null}
+              </SideNavItem>
             );
           })}
         </SideNavSection>
@@ -200,11 +209,6 @@ export function AppShell({
     </SideNav>
   );
 
-  // Emptiness is decided here, not inside RelatedSurfacesNav: a component that
-  // returns null is still a truthy element, so asking `related ? …` there would
-  // hand PageShell an aside on every screen and leave a blank 240px column on
-  // the ones with no child surfaces.
-  const hasRelated = !hideRelated && childSurfacesFor(current, CHILD_SURFACES, { hosted }).some((s) => !isLinkedSurface(s) || s.href !== pathname);
   const asideContent = aside || hasRelated
     ? (
       <>
@@ -232,7 +236,7 @@ export function AppShell({
             track only has to give it a height and a width — adding overflow here
             would make a second, competing scroller. */}
         <div
-          className="hidden h-full min-h-0 border-e border-[var(--color-border)] lg:block"
+          className="hidden h-full min-h-0 border-e border-[var(--color-border)] [@media(min-width:901px)]:block"
           style={{ width: 'var(--sidebar-w)' }}
         >
           {sideNav}
@@ -244,7 +248,7 @@ export function AppShell({
               placement would slide the page up into the `auto` track and it
               would size to its content instead of filling the viewport. */}
           <div
-            className="flex items-center gap-2 border-b border-[var(--color-border)] p-[var(--pad)] lg:hidden"
+            className="flex items-center gap-2 border-b border-[var(--color-border)] p-[var(--pad)] [@media(min-width:901px)]:hidden"
             style={{ gridRow: 1 }}
           >
             <IconButton
@@ -274,7 +278,7 @@ export function AppShell({
       </div>
 
       {navOpen ? (
-        <div className="fixed inset-0 z-50 lg:hidden">
+        <div className="fixed inset-0 z-50 [@media(min-width:901px)]:hidden">
           <button
             aria-label="Close navigation"
             className="absolute inset-0 bg-[color-mix(in_srgb,var(--background)_70%,transparent)]"
