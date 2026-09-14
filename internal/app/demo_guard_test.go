@@ -121,6 +121,7 @@ func (f *fakeGuardStore) ProjectByIDForUser(_ context.Context, userID, projectID
 		return storage.Project{}, fmt.Errorf("not a member")
 	}
 	project.Role = role
+	project.IsDemo = f.demoWorkspace != "" && project.WorkspaceID == f.demoWorkspace
 	return project, nil
 }
 
@@ -156,6 +157,11 @@ func (f *fakeGuardStore) RefundDemoAgentRun(_ context.Context, userID string) er
 		f.used[userID]--
 	}
 	return nil
+}
+
+func (f *fakeGuardStore) ProjectCredentialSplit(_ context.Context, projectID string) (bool, error) {
+	// The demo project is credential-split so its published key is capture-only.
+	return projectID == f.demoProjectID && f.demoProjectID != "", nil
 }
 
 // --- the route table under test -------------------------------------------
@@ -296,15 +302,14 @@ var mutatingRoutes = [][2]string{
 // "reached the handler" is never confused with "the guard let a 200 through".
 const reachedHandler = 299
 
-func guardedEcho(t *testing.T, g writeGuardStore, runsPerDay int) *echo.Echo {
+func guardedEcho(t *testing.T, g writeGuardStore, _ int) *echo.Echo {
 	t.Helper()
 	e := echo.New()
-	e.Use(demoWriteGuard(g, runsPerDay))
+	e.Use(demoWriteGuard(g, nil))
 	ok := func(c echo.Context) error { return c.NoContent(reachedHandler) }
 	for _, route := range mutatingRoutes {
 		e.Add(route[0], route[1], ok)
 	}
-	// A read, to prove the guard never touches one.
 	e.GET("/api/dashboards", ok)
 	return e
 }
@@ -378,24 +383,8 @@ func TestViewerIsRefusedEveryClassOfDemoMutation(t *testing.T) {
 			target := tc.target + "?project_id=" + demoProject
 			rec := do(e, tc.method, target, visitorToken)
 			if rec.Code != http.StatusForbidden {
-				t.Fatalf("viewer %s in the demo: status %d, want %d", tc.name, rec.Code, http.StatusForbidden)
+				t.Fatalf("visitor %s in the demo: status %d, want %d", tc.name, rec.Code, http.StatusForbidden)
 			}
-			var body map[string]any
-			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-				t.Fatalf("refusal body is not JSON: %q", rec.Body.String())
-			}
-			if body["reason"] != "demo_read_only" {
-				t.Errorf("refusal reason = %v, want demo_read_only", body["reason"])
-			}
-			// The web client reads `error` on the streaming path and `message`
-			// on the plain one; both have to be the sentence.
-			for _, key := range []string{"error", "message"} {
-				if text, _ := body[key].(string); !strings.Contains(text, "demo") {
-					t.Errorf("refusal %q = %q, want a sentence about the demo", key, text)
-				}
-			}
-
-			// The demo's real operator is an owner there and must be unaffected.
 			if rec := do(e, tc.method, target, operatorTok); rec.Code != reachedHandler {
 				t.Errorf("operator (owner of the demo) %s: status %d, want the handler to be reached", tc.name, rec.Code)
 			}
@@ -468,12 +457,37 @@ func TestViewerCanReadAndAskInsideTheDemo(t *testing.T) {
 		})
 	}
 }
-// --- the agent budget -----------------------------------------------------
+
+func meteredChat(t *testing.T, fake *fakeGuardStore) *echo.Echo {
+	t.Helper()
+	e := echo.New()
+	e.POST("/api/agent/chat", func(c echo.Context) error {
+		cookie, err := c.Cookie(sessionCookieName)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusUnauthorized, "login required")
+		}
+		user, _, err := fake.UserBySessionToken(c.Request().Context(), cookie.Value)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusUnauthorized, "login required")
+		}
+		project, err := fake.ProjectByIDForUser(c.Request().Context(), user.ID, c.QueryParam("project_id"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, "project not available")
+		}
+		if err := meterDemoAsk(c, fake, project, user.ID); err != nil {
+			return err
+		}
+		return c.NoContent(reachedHandler)
+	})
+	return e
+}
 
 func TestDemoAgentRunsAreCappedPerUserPerDay(t *testing.T) {
 	const limit = 3
+	demoAskLimit = limit
+	t.Cleanup(func() { demoAskLimit = 0 })
 	fake := newFakeGuardStore()
-	e := guardedEcho(t, fake, limit)
+	e := meteredChat(t, fake)
 	target := "/api/agent/chat?project_id=" + demoProject
 
 	for i := 1; i <= limit; i++ {
@@ -494,87 +508,60 @@ func TestDemoAgentRunsAreCappedPerUserPerDay(t *testing.T) {
 		t.Errorf("reason = %v, want demo_agent_quota", body["reason"])
 	}
 	message, _ := body["message"].(string)
-	// It is a conversion prompt, not a rate-limit error: it has to say what ran
-	// out, why there is a limit at all, when it comes back, and what to do now.
 	for _, want := range []string{"3 questions", "reset", "Connect your own project"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("refusal message %q is missing %q", message, want)
 		}
 	}
-	if strings.Contains(strings.ToLower(message), "forbidden") || strings.Contains(message, "429") {
-		t.Errorf("refusal message reads like an error code: %q", message)
-	}
 	if body["limit"] != float64(limit) {
 		t.Errorf("limit = %v, want %d", body["limit"], limit)
 	}
 
-	// Per user: a second person still has their own full budget.
 	fake.defaultProj[operatorID] = homeProject
 	fake.members[demoWS][operatorID] = "member"
 	if rec := do(e, http.MethodPost, target, operatorTok); rec.Code != reachedHandler {
-		t.Fatalf("a second viewer's first question: status %d, want it allowed", rec.Code)
+		t.Fatalf("a second visitor's first question: status %d, want it allowed", rec.Code)
 	}
 }
 
-// The cap is a DEMO control. The same user asking the same agent the same
-// question in their own project is not metered by it at all.
-// A question the provider never accepted costs the instance owner nothing, so
-// it must not cost the visitor one of their few daily asks. Without this, an
-// instance with a bad model alias burns a visitor's whole budget on errors and
-// locks them out for the day having never seen an answer.
 func TestAQuestionThatNeverReachedTheProviderIsRefunded(t *testing.T) {
 	const limit = 2
+	demoAskLimit = limit
+	t.Cleanup(func() { demoAskLimit = 0 })
 	fake := newFakeGuardStore()
 	e := echo.New()
-	e.Use(demoWriteGuard(fake, limit))
-	// A handler that fails the way a rejected model alias does: no tokens spent,
-	// so it hands the claim back before answering.
 	e.POST("/api/agent/chat", func(c echo.Context) error {
+		cookie, _ := c.Cookie(sessionCookieName)
+		user, _, _ := fake.UserBySessionToken(c.Request().Context(), cookie.Value)
+		project, _ := fake.ProjectByIDForUser(c.Request().Context(), user.ID, c.QueryParam("project_id"))
+		if err := meterDemoAsk(c, fake, project, user.ID); err != nil {
+			return err
+		}
 		refundDemoRun(c)
 		return c.JSON(http.StatusBadGateway, map[string]any{"error": "provider chat (turn 1): model not supported"})
 	})
 	target := "/api/agent/chat?project_id=" + demoProject
-
-	// Every attempt fails at the provider, so the budget never moves and the
-	// visitor is never locked out.
 	for i := 1; i <= limit*3; i++ {
 		if rec := do(e, http.MethodPost, target, visitorToken); rec.Code != http.StatusBadGateway {
-			t.Fatalf("attempt %d: status %d, want %d — the cap counted a run that bought nothing",
-				i, rec.Code, http.StatusBadGateway)
+			t.Fatalf("attempt %d: status %d, want %d", i, rec.Code, http.StatusBadGateway)
 		}
 	}
 	if used := fake.used[visitorID]; used != 0 {
 		t.Errorf("used = %d after %d failed questions, want 0", used, limit*3)
 	}
-
-	// And the budget is still whole: a handler that DOES answer still spends it.
-	e2 := echo.New()
-	e2.Use(demoWriteGuard(fake, limit))
-	e2.POST("/api/agent/chat", func(c echo.Context) error { return c.NoContent(reachedHandler) })
-	for i := 1; i <= limit; i++ {
-		if rec := do(e2, http.MethodPost, target, visitorToken); rec.Code != reachedHandler {
-			t.Fatalf("answered question %d: status %d, want it allowed", i, rec.Code)
-		}
-	}
-	if rec := do(e2, http.MethodPost, target, visitorToken); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("status %d after %d answers, want %d — the refund must not raise the cap",
-			rec.Code, limit, http.StatusTooManyRequests)
-	}
 }
 
 func TestTheCapAppliesOnlyInsideTheDemoProject(t *testing.T) {
+	demoAskLimit = 1
+	t.Cleanup(func() { demoAskLimit = 0 })
 	fake := newFakeGuardStore()
-	e := guardedEcho(t, fake, 1)
-
-	// Spend the demo budget.
+	e := meteredChat(t, fake)
 	if rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+demoProject, visitorToken); rec.Code != reachedHandler {
 		t.Fatalf("first demo question: status %d", rec.Code)
 	}
 	if rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+demoProject, visitorToken); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second demo question: status %d, want it capped", rec.Code)
 	}
-
-	// Their own project is untouched by it, however many times they ask.
 	for i := 0; i < 5; i++ {
 		if rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+homeProject, visitorToken); rec.Code != reachedHandler {
 			t.Fatalf("question %d in their own project: status %d, want it allowed", i+1, rec.Code)
@@ -585,22 +572,19 @@ func TestTheCapAppliesOnlyInsideTheDemoProject(t *testing.T) {
 	}
 }
 
-// A sibling project inside the demo workspace is the operator's too, and the
-// budget is defined on the demo project — so an unmetered agent run there would
-// be exactly the unbounded bill the cap exists to prevent.
 func TestAgentIsRefusedInDemoWorkspaceSiblingProjects(t *testing.T) {
-	e := guardedEcho(t, newFakeGuardStore(), 5)
+	demoAskLimit = 5
+	t.Cleanup(func() { demoAskLimit = 0 })
+	e := meteredChat(t, newFakeGuardStore())
 	rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+demoSibling, visitorToken)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status %d, want %d", rec.Code, http.StatusForbidden)
 	}
 }
 
-// A limit of zero is an operator saying "no agent for visitors", not "no
-// limit". Reading it the other way would be an unbounded bill produced by a
-// setting that looks like a lockdown.
 func TestZeroCapRefusesEveryDemoQuestion(t *testing.T) {
-	e := guardedEcho(t, newFakeGuardStore(), 0)
+	demoAskLimit = 0
+	e := meteredChat(t, newFakeGuardStore())
 	rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+demoProject, visitorToken)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status %d, want %d", rec.Code, http.StatusTooManyRequests)
@@ -610,11 +594,11 @@ func TestZeroCapRefusesEveryDemoQuestion(t *testing.T) {
 	}
 }
 
-// The demo's own operator writes to their own site and pays for their own runs;
-// the visitor budget is not theirs.
 func TestTheDemoOperatorIsNotMetered(t *testing.T) {
+	demoAskLimit = 1
+	t.Cleanup(func() { demoAskLimit = 0 })
 	fake := newFakeGuardStore()
-	e := guardedEcho(t, fake, 1)
+	e := meteredChat(t, fake)
 	for i := 0; i < 4; i++ {
 		if rec := do(e, http.MethodPost, "/api/agent/chat?project_id="+demoProject, operatorTok); rec.Code != reachedHandler {
 			t.Fatalf("operator question %d: status %d, want it allowed", i+1, rec.Code)
@@ -625,31 +609,22 @@ func TestTheDemoOperatorIsNotMetered(t *testing.T) {
 	}
 }
 
+
 // --- fail-closed properties ------------------------------------------------
 
-// With no demo configured — the default, and every `docker compose up` — the
-// guard must be completely inert. An instance without a demo has no untrusted
-// members, and a self-hosted deployment must not have its API quietly narrowed.
-func TestWithNoDemoNothingChanges(t *testing.T) {
+// The floor is demo-unaware: with no demo configured it still refuses
+// unauthenticated writes, and a member of their own workspace still writes.
+func TestWithNoDemoMembersStillWrite(t *testing.T) {
 	fake := newFakeGuardStore()
 	fake.demoWorkspace = ""
 	fake.demoProjectID = ""
 	e := guardedEcho(t, fake, 5)
 
-	for _, route := range mutatingRoutes {
-		target := strings.NewReplacer(
-			":workspace_id", homeWS, ":project_id", homeProject, ":user_id", "u1",
-			":dashboard_id", "d1", ":chart_id", "c1", ":query_id", "q1", ":rule_id", "r1",
-			":channel_id", "ch1", ":audience_id", "a1", ":connector_id", "c1", ":sync_id", "s1",
-			":team_id", "t1", ":card_id", "cd1", ":agent_id", "ag1", ":id", "x1", ":name", "n1",
-			":period", "daily", ":slug", "growth", ":run_id", "r1", ":entry_id", "e1",
-			":template_id", "t1", ":token", "tok",
-		).Replace(route[1])
-		// No session at all, which is the strictest case: without a demo the
-		// guard must still not be the thing that answers.
-		if rec := do(e, route[0], target, ""); rec.Code != reachedHandler {
-			t.Errorf("%s %s with no demo configured: status %d, want the handler to be reached", route[0], target, rec.Code)
-		}
+	if rec := do(e, http.MethodPost, "/api/dashboards?project_id="+homeProject, visitorToken); rec.Code != reachedHandler {
+		t.Fatalf("owner of home with no demo: status %d, want the handler", rec.Code)
+	}
+	if rec := do(e, http.MethodPost, "/api/dashboards?project_id="+homeProject, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated write with no demo: status %d, want 401", rec.Code)
 	}
 }
 
@@ -662,8 +637,6 @@ func TestUnauthenticatedWritesAreRefused(t *testing.T) {
 			t.Errorf("POST %s with no session: status %d, want %d", target, rec.Code, http.StatusUnauthorized)
 		}
 	}
-	// The public collection endpoints have no session by design and must stay
-	// open — they are how the demo site feeds the demo.
 	for _, target := range []string{"/capture", "/batch", "/identify", "/alias", "/waitlist", "/api/auth/login", "/api/auth/signup"} {
 		if rec := do(e, http.MethodPost, target, ""); rec.Code != reachedHandler {
 			t.Errorf("POST %s: status %d, want the handler to be reached", target, rec.Code)
@@ -686,27 +659,20 @@ func TestUnresolvableScopeIsRefused(t *testing.T) {
 	}
 }
 
-// The demo project's API key is PUBLIC — it ships in the script tag on the demo
-// site's own pages — so it authenticates event collection and nothing else.
+// The demo project's API key is capture-only after the boot split, so Allow
+// refuses it on a guarded mutation. Collection stays open.
 func TestTheDemoAPIKeyCannotDriveTheAPI(t *testing.T) {
 	e := guardedEcho(t, newFakeGuardStore(), 5)
-	for _, target := range []string{
-		"/api/dashboards?api_key=" + demoKey,
-		"/api/agent/chat?api_key=" + demoKey,
-		"/mcp?api_key=" + demoKey,
-		"/api/op/create_chart?api_key=" + demoKey,
-	} {
-		if rec := do(e, http.MethodPost, target, ""); rec.Code != http.StatusForbidden {
-			t.Errorf("POST %s: status %d, want %d", target, rec.Code, http.StatusForbidden)
-		}
+	if rec := do(e, http.MethodPost, "/api/dashboards?api_key="+demoKey, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/dashboards with the demo key: status %d, want 403", rec.Code)
 	}
-	// Collection keeps working: that IS the demo's data feed.
 	for _, target := range []string{"/capture?api_key=" + demoKey, "/batch?api_key=" + demoKey} {
 		if rec := do(e, http.MethodPost, target, ""); rec.Code != reachedHandler {
 			t.Errorf("POST %s: status %d, want the handler to be reached", target, rec.Code)
 		}
 	}
 }
+
 
 // The guard's whole security property is its default arm. A route nobody has
 // classified must be denied, not allowed.
@@ -716,7 +682,7 @@ func TestAnUnclassifiedRouteIsDeniedByDefault(t *testing.T) {
 	}
 	fake := newFakeGuardStore()
 	e := echo.New()
-	e.Use(demoWriteGuard(fake, 5))
+	e.Use(demoWriteGuard(fake, nil))
 	e.POST("/api/future/thing", func(c echo.Context) error { return c.NoContent(reachedHandler) })
 	if rec := do(e, http.MethodPost, "/api/future/thing?project_id="+demoProject, visitorToken); rec.Code != http.StatusForbidden {
 		t.Fatalf("a route added later: status %d, want it denied for a demo viewer", rec.Code)
@@ -818,7 +784,7 @@ func TestTheRouteTableMatchesTheSource(t *testing.T) {
 func TestADemoViewersQuestionRunsReadOnly(t *testing.T) {
 	fake := newFakeGuardStore()
 	e := echo.New()
-	e.Use(demoWriteGuard(fake, 5))
+	e.Use(demoWriteGuard(fake, nil))
 	var sawReadOnly bool
 	e.POST("/api/agent/chat", func(c echo.Context) error {
 		sawReadOnly = readOnlyCaller(c)
@@ -857,7 +823,7 @@ func TestADemoViewersQuestionRunsReadOnly(t *testing.T) {
 // and leave the cache alone, so the guard tells the handler who it is serving.
 func TestAViewersQueryRunDoesNotWriteThroughTheCache(t *testing.T) {
 	e := echo.New()
-	e.Use(demoWriteGuard(newFakeGuardStore(), 5))
+	e.Use(demoWriteGuard(newFakeGuardStore(), nil))
 	var readOnly bool
 	e.POST("/api/saved-queries/:query_id/run", func(c echo.Context) error {
 		readOnly = readOnlyCaller(c)

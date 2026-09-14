@@ -57,9 +57,12 @@ WHERE id = NULLIF($1, '')::uuid`, cfg.DemoProjectID).Scan(&projectID, &workspace
 	}
 	s.demoProjectID = projectID
 	s.demoWorkspaceID = workspaceID
+	if _, err := s.pg.Exec(ctx, `
+UPDATE projects SET credential_split_at = now()
+WHERE id = $1::uuid AND credential_split_at IS NULL`, projectID); err != nil {
+		fmt.Printf("warn: demo credential split (%s): %v\n", projectID, err)
+	}
 	if err := s.backfillDemoViewers(ctx); err != nil {
-		// Same reasoning as above: an account that misses the demo has a working
-		// account. The next boot retries, and signup grants it directly.
 		fmt.Printf("warn: backfillDemoViewers(%s): %v\n", workspaceID, err)
 	}
 	return nil
