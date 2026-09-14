@@ -77,6 +77,15 @@ type Repo interface {
 	ArchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
 	UnarchiveChartIdempotent(ctx context.Context, projectID, chartID string, expectedRevision int64, idemKey, requestHash string) (storage.Chart, error)
 	ReorderChartsIdempotent(ctx context.Context, projectID, dashboardID string, chartIDs []string, expectedRevision int64, idemKey, requestHash string) (storage.Dashboard, error)
+	// The metric catalog and the declarative board content model. The catalog
+	// is the vocabulary a board tile is validated against; the board reads and
+	// the fenced declaration are the content surface behind list_metrics,
+	// read_metric, get_board and save_board.
+	ListMetricDefinitions(ctx context.Context) ([]storage.MetricDefinition, error)
+	MetricDefinitionByKey(ctx context.Context, key string) (storage.MetricDefinition, error)
+	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
+	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
+	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
 	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
 

@@ -202,6 +202,26 @@ type OverviewResult struct {
 
 var overviewPeriodRe = regexp.MustCompile(`^(\d{1,2})d$`)
 
+// validPeriod reports whether a period string belongs to the range contract:
+// "" (the default 7d), "today" (the partial current day), or "Nd" with
+// 1 <= N <= overviewMaxDays. It exists as its own function because a board tile
+// declares the same period a read takes, and the two must accept exactly the
+// same strings.
+func validPeriod(period string) error {
+	if period == "" || period == "today" {
+		return nil
+	}
+	m := overviewPeriodRe.FindStringSubmatch(period)
+	if m == nil {
+		return fmt.Errorf("period must be \"Nd\" (1-%d) or \"today\", got %q", overviewMaxDays, period)
+	}
+	days, _ := strconv.Atoi(m[1])
+	if days < 1 || days > overviewMaxDays {
+		return fmt.Errorf("period must be \"Nd\" (1-%d) or \"today\", got %q", overviewMaxDays, period)
+	}
+	return nil
+}
+
 // overviewRange resolves the period string into half-open UTC instants [from,
 // to), whose boundaries are midnight in loc. Complete-day ranges exclude the
 // current local day; "today" is the explicit partial-period escape.
@@ -214,17 +234,14 @@ func overviewRange(period string, now time.Time, loc *time.Location) (OverviewRa
 	if period == "" {
 		period = "7d"
 	}
+	if err := validPeriod(period); err != nil {
+		return OverviewRange{}, fmt.Errorf("overview: %w", err)
+	}
 	if period == "today" {
 		return OverviewRange{From: midnight, To: now, Days: 1, CompleteDays: false}, nil
 	}
 	m := overviewPeriodRe.FindStringSubmatch(period)
-	if m == nil {
-		return OverviewRange{}, fmt.Errorf("overview: period must be \"Nd\" (1-%d) or \"today\", got %q", overviewMaxDays, period)
-	}
 	days, _ := strconv.Atoi(m[1])
-	if days < 1 || days > overviewMaxDays {
-		return OverviewRange{}, fmt.Errorf("overview: period must be \"Nd\" (1-%d) or \"today\", got %q", overviewMaxDays, period)
-	}
 	return OverviewRange{
 		From:         midnight.AddDate(0, 0, -days),
 		To:           midnight,
@@ -415,12 +432,12 @@ WHERE project_id = ? AND "timestamp" >= ? AND "timestamp" < ? AND `+overviewQual
 		}
 		res.Metrics.ActiveUsers = OverviewMetric{
 			State:      metricState,
-			Definition: "Distinct people (canonical identity) with qualifying human product activity per complete project-local calendar-day range.",
+			Definition: metricDefActiveUsers,
 			Notes:      []string{exclusionNote, "anonymous people are approximate until an explicit identify link exists"},
 		}
 		res.Metrics.Sessions = OverviewMetric{
 			State:      metricState,
-			Definition: "Distinct session ids on qualifying activity; sessions end after 30 minutes of inactivity (server sessionizer).",
+			Definition: metricDefSessions,
 			Notes:      []string{exclusionNote},
 		}
 		if metricState == OverviewStateOK {
@@ -460,7 +477,7 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		}
 		res.Metrics.NewUsers = OverviewMetric{
 			State:      metricState,
-			Definition: "People whose first-ever observed qualifying activity falls inside the range. First observed, not signup or download.",
+			Definition: metricDefNewUsers,
 			Notes:      []string{exclusionNote},
 		}
 		if metricState == OverviewStateOK {
@@ -483,8 +500,8 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 	// --- activation: still unconfigured, and says so rather than inventing 0 ---
 	res.Metrics.Activation = OverviewMetric{
 		State:      OverviewStateUnconfigured,
-		Definition: "Share of a cohort completing the project's chosen activation event inside a conversion window.",
-		Notes:      []string{"no activation condition is stored for projects yet — configure it before this metric can compute"},
+		Definition: metricDefActivation,
+		Notes:      []string{metricPrereqActivation},
 	}
 
 	// --- daily active-user trend ---
