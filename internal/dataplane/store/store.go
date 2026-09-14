@@ -1100,6 +1100,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		fmt.Printf("seeded chart repair: rewrote the guest-vs-identified query on %d chart(s) across %d project(s)\n", charts, projects)
 	}
 
+	// Analysis destinations (Acquisition / Monetization / Usage) are declared
+	// boards. Projects created before this slice have none; seed them once the
+	// board columns exist. Existing keys are left alone.
+	if err := s.EnsureDefaultBoardsForAll(ctx); err != nil {
+		return err
+	}
+
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
@@ -1808,9 +1815,11 @@ func (s *Store) SeedProjectFromTemplate(ctx context.Context, projectID string) e
 	}
 	_, _, err := s.CloneTemplate(ctx, ProductOverviewTemplateID, projectID)
 	if err != nil {
-		return seedStarterDashboard(ctx, s.pg, projectID)
+		if seedErr := seedStarterDashboard(ctx, s.pg, projectID); seedErr != nil {
+			return seedErr
+		}
 	}
-	return nil
+	return s.EnsureDefaultBoards(ctx, projectID)
 }
 
 // InsertEvents durably stores a raw event batch in DuckDB (no person

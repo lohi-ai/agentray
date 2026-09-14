@@ -31,13 +31,13 @@ The template's scan pattern is kept: three named groups of concise KPI tiles bel
 - **Monetization** — Instrumented revenue, Paying people, Purchases, Purchase→repeat. Every tile requires a trusted billing source. With none connected the group renders `Set up` per tile with the required instrumentation named — never zero, never a sample figure, never a projection.
 - **Usage** — Active people, Sessions, D1/D7/D30 retention, Top actions. Retention points carry cohort-maturity semantics; an immature cohort renders `Not ready` rather than a partial number.
 
-A destination whose page is not yet implemented renders as a non-linked "Coming soon" affordance — never a link to a route that does not exist.
+Acquisition, Monetization and Usage are shipped destinations (`/acquisition`, `/monetization`, `/usage`) declared as 007 boards. Overview **See more** opens them. Tile titles on those boards follow App Store Connect labels; values stay AgentRay catalog metrics with honest empty states.
 
 **Provenance contract (hard requirement):** every tile carries a provenance line naming the metric version, the range, the project timezone, the coverage and the freshness — the same `evidenceLine()` contract the Best next step panel uses. A metric with no verified source renders its state label (`no_data` / `not_ready` / `unconfigured`); it is never derived, estimated, sampled or zero-filled from unrelated events. There is exactly one day-boundary convention in this product: the project timezone.
 
 ### Navigation
 
-`web/lib/ia.ts` gains the grouped child surfaces under Analytics: **Acquisition**, **Monetization**, **Usage**. Each is represented in the IA; a destination whose page is not implemented renders as a non-linked "Coming soon" affordance rather than a dead link. All existing URLs and aliases stay reachable. No nav item is conditional on an external source connection — nothing in this product depends on a store connector.
+`web/lib/ia.ts` lists **Acquisition**, **Monetization**, **Usage** as linked child surfaces under Analytics. All existing URLs and aliases stay reachable. No nav item is conditional on an external source connection — nothing in this product depends on a store connector.
 
 ## States
 

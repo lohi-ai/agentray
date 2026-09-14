@@ -899,7 +899,7 @@ export function OverviewPage() {
             <div className="grid grid-cols-2 gap-4 [@media(max-width:980px)]:grid-cols-1">
               <MetricGroup
                 title="Acquisition"
-                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/acquisition'; }}>See more</Button>}
               >
                 <div className="flex flex-col gap-4">
                   <StatsStrip stats={acquisition} />
@@ -931,7 +931,7 @@ export function OverviewPage() {
 
               <MetricGroup
                 title="Monetization"
-                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/events'; }}>Inspect data</Button>}
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/monetization'; }}>See more</Button>}
               >
                 <div className="flex flex-col gap-3">
                   <StatsStrip stats={monetizationStats} />
@@ -946,7 +946,7 @@ export function OverviewPage() {
 
               <MetricGroup
                 title="Usage"
-                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/usage'; }}>See more</Button>}
               >
                 <div className="flex flex-col gap-4">
                   <StatsStrip stats={usageStats} />

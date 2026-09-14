@@ -139,13 +139,18 @@ needs to know that a chart was archived or that a metric left the catalog.
 - `list_dashboards` gained `board_key` and `definition_updated_at` (additive
   JSON fields) so a menu can address declared boards by key.
 
-## What comes next (ticket 008 and after)
+## Default analysis boards (shipped)
 
-The default analysis menu and the AppConnect content declare boards by key
-(`save_board` with `board_key` + `name`) and render them from `get_board` +
-`read_metric`. Nothing in the model is AppConnect-specific: the catalog is the
-vocabulary, and adding a metric to it means adding the definition *and* the
-implementation the read dispatches to.
+Acquisition, Monetization and Usage are declared boards addressed by
+`board_key` (`acquisition`, `monetization`, `usage`). Boot and project
+creation seed them via `EnsureDefaultBoards`; an existing key is left
+alone. Tile titles follow App Store Connect analytics labels (2026-09-14);
+values are AgentRay catalog metrics via the same overview read `read_metric`
+projects. Apple-shaped metrics with no implementation are not catalog
+entries — the destinations render them as named empty states.
+
+Adding a metric still means adding the definition *and* the implementation
+the read dispatches to.
 
 ## Non-goals
 

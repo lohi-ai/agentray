@@ -24,7 +24,7 @@ export const NAV_ITEMS: readonly NavItemDef[] = [
   // Overview is the front door — the deterministic product read, not a chat.
   { href: '/overview', label: 'Overview', group: 'Product' },
   // Analytics = explore: dashboards, traffic, product views, templates, SQL.
-  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/web-analytics', '/traffic', '/product'] },
+  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/web-analytics', '/traffic', '/product', '/acquisition', '/monetization', '/usage'] },
   { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
   // Data = connect and inspect: events, replay, SDK setup, connectors.
   { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
@@ -141,13 +141,11 @@ export const CHILD_SURFACES: readonly ChildSurface[] = [
   { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
   { href: '/replay', label: 'Replay', parentHref: '/events' },
-  // The three AgentRay metric groups the Overview's grouped state renders.
-  // The IA names them so the product's shape is legible, but their pages do
-  // not exist yet — a non-linked "Coming soon" affordance, never a dead link.
-  // Nothing here depends on an external source: the metrics are AgentRay's own.
-  { label: 'Acquisition', parentHref: '/dashboard', comingSoon: true },
-  { label: 'Monetization', parentHref: '/dashboard', comingSoon: true },
-  { label: 'Usage', parentHref: '/dashboard', comingSoon: true },
+  // The three AgentRay metric groups. Destinations render from the seeded
+  // declared boards (board_key acquisition / monetization / usage).
+  { href: '/acquisition', label: 'Acquisition', parentHref: '/dashboard' },
+  { href: '/monetization', label: 'Monetization', parentHref: '/dashboard' },
+  { href: '/usage', label: 'Usage', parentHref: '/dashboard' },
 ];
 
 // Third-party channels the product will grow. Not CHANNEL_CATALOG kinds —
