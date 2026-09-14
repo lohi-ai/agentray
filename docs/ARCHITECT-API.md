@@ -48,22 +48,24 @@ GET /api/activity?project_id=xxx
 
 `projectFromRequest` accepts either `?api_key=` / `X-API-Key` header (SDK use) or a valid session cookie + `?project_id=` (dashboard use). Auth and project resolution are always the first two steps in every protected handler.
 
-It answers **admission, not access** — which credential may address the project —
-and that is the whole question for a read, because every read class a legacy
-route needs is one a viewer's session and a reader-scoped management credential
-already hold. A **mutating** legacy route resolves with `projectForWrite`
-instead, which applies the access class the work belongs to through the same
-`Registry.Allow` decision `/api/op` makes (`projectForWrite`, `authorizeAccess`,
-`legacyWrite` / `legacyRead` in `internal/app/op_adapter.go`). Without it a
-mutation ran for any credential that could reach the project — a management key
-minted `analytics:read` alone, a viewer's session, a pre-split project key —
-while `/api/op` refused the identical call. The routes that predate the registry
-(cohort audiences, saved queries, templates, the subscription mapping) state
-their class at the call site: dashboard/chart authoring and saved queries are
-`dashboards:write`, the plan-gated segmentation and subscription config is
-`plans:write`, and the two POSTs that only run SQL are `analytics:read`.
-`TestNoMutatingRouteResolvesThroughTheReadResolver` scans this package's source
-and fails when a mutating route resolves through `projectFromRequest`.
+It answers **admission, not access** — which credential may address the project.
+That is the whole question for exactly one route, `GET /api/projects`, which
+returns the project a credential named and reads no analytics; it reaches the
+resolver through `projectForAdmission`, whose name says so. Every other route
+declares the class of its work and asks the same `Registry.Allow` decision
+`/api/op` makes: `projectForRead` for the reads (all `analytics:read`, the class
+`activity_summary` and `persons` carry) and `projectForWrite` for the mutations
+(`dashboards:write`, `plans:write`, `analytics:read`), with `legacyWrite` /
+`legacyRead` in `internal/app/op_adapter.go` stating the requirement. Without
+them a route ran for any credential that could reach the project — a management
+key minted `sources:read` alone read every analytics route and a key minted
+`analytics:read` alone created and deleted audiences and saved queries, while
+`/api/op` refused the identical calls. The routes that predate the registry
+(cohort audiences, saved queries, templates, the subscription mapping, activity,
+persons, events, sessions) state their class at the call site.
+`TestNoRouteResolvesThroughTheReadResolver` scans this package's source — reads
+as well as mutations — and fails when a route reaches `projectFromRequest`
+directly.
 
 ### Writes: the guard in front of every handler
 
