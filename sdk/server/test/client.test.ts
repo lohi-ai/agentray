@@ -75,6 +75,25 @@ describe('AgentRayServerClient', () => {
     vi.unstubAllGlobals();
   });
 
+  it('keeps a caller-supplied $insert_id instead of overwriting it with a random one', async () => {
+    // The raw-HTTP convention puts the key in properties; the SDK shares that
+    // payload, so a key there must survive — a minted replacement would make a
+    // retried money row book twice. The explicit option still wins.
+    const calls = stubFetch();
+    await new AgentRayServerClient(config).batch([
+      { distinctId: 'u1', event: 'revenue', properties: { amount: 1900, $insert_id: 'evt_props' } },
+      {
+        distinctId: 'u2',
+        event: 'revenue',
+        properties: { amount: 1900, $insert_id: 'evt_props' },
+        options: { idempotencyKey: 'evt_option' },
+      },
+    ]);
+
+    expect(calls[0].body.batch.map((e: any) => e.properties.$insert_id)).toEqual(['evt_props', 'evt_option']);
+    vi.unstubAllGlobals();
+  });
+
   it('sends nothing for an empty batch', async () => {
     const calls = stubFetch();
     await new AgentRayServerClient(config).batch([]);

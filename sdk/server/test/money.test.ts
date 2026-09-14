@@ -111,10 +111,21 @@ describe('money taxonomy', () => {
     const ar = new AgentRayServerClient(config);
     const booking = { amount: 100, currency: 'USD', kind: 'payment' };
 
-    await expect(ar.revenue('u1', booking, { idempotencyKey: '  ' })).rejects.toThrow(/idempotencyKey/);
+    await expect(ar.revenue('u1', booking, { idempotencyKey: '  ' })).rejects.toThrow(
+      /idempotencyKey must be a non-empty stable id/,
+    );
     await expect(
       ar.revenue('u1', booking, {} as { idempotencyKey: string }),
-    ).rejects.toThrow(/idempotencyKey/);
+    ).rejects.toThrow(/idempotencyKey must be a non-empty stable id/);
+    // Plain JS can drop the whole object the types require. The guard must
+    // answer with the key error, not a TypeError from inside the SDK — which is
+    // what a caller would otherwise forward to a billing webhook's error log.
+    await expect(
+      ar.revenue('u1', booking, undefined as unknown as { idempotencyKey: string }),
+    ).rejects.toThrow(/idempotencyKey must be a non-empty stable id/);
+    await expect(
+      ar.revenueReversed('u1', { amount: 100, currency: 'USD' }, undefined as unknown as { idempotencyKey: string }),
+    ).rejects.toThrow(/idempotencyKey must be a non-empty stable id/);
   });
 
   it('refuses an amount the read could only book as zero', async () => {

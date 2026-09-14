@@ -136,16 +136,19 @@ type OverviewRevenueDetail struct {
 // overviewMoneyWindow is one window's money arithmetic, before the headline
 // currency is chosen.
 type overviewMoneyWindow struct {
-	byCurrency   []OverviewRevenueCurrency
-	currency     string
-	gross        int64
-	reversed     int64
-	net          int64
-	moneyRows    int64
-	excludedRows int64
-	noCurrency   int64
-	ltRows       int64
+	byCurrency []OverviewRevenueCurrency
+	currency   string
+	gross      int64
+	reversed   int64
+	net        int64
+	moneyRows  int64
+	noCurrency int64
+	ltRows     int64
 }
+
+// excludedRows is every deduplicated money-shaped row the money test dropped —
+// derived, never a third counter to keep in step with the two reasons.
+func (w overviewMoneyWindow) excludedRows() int64 { return w.noCurrency + w.ltRows }
 
 // overviewMoney computes one window. The aggregate stays inside DuckDB — the
 // grid is grouped by currency there, never materialized as rows in Go — so a
@@ -164,7 +167,9 @@ SELECT
 	currency,
 	CAST(sum(gross) AS BIGINT) AS gross,
 	CAST(sum(reversed) AS BIGINT) AS reversed,
-	CAST(sum(CASE WHEN reverses THEN -abs(amount) ELSE amount END) AS BIGINT) AS net,
+	-- Net is the two columns above subtracted, not a third expression over the
+	-- rows: the tile renders all three side by side, so they can never disagree.
+	CAST(sum(gross) - sum(reversed) AS BIGINT) AS net,
 	CAST(count(*) AS BIGINT) AS rows
 FROM (
 	SELECT
@@ -188,29 +193,24 @@ ORDER BY gross DESC, currency ASC`, args, func(rows *sql.Rows) error {
 	if err != nil {
 		return out, err
 	}
+	// One pass classifies each currency group and keeps the money ones: the
+	// "which currencies are money" rule exists once, and the SQL's ordering
+	// (gross desc, currency asc) means the first money group is the headline.
+	money := make([]OverviewRevenueCurrency, 0, len(out.byCurrency))
 	for _, row := range out.byCurrency {
 		switch {
 		case row.Currency == "":
 			// A money-shaped row that declared no unit cannot be added to any
 			// total: it is a tracking defect to report, not a number to invent.
 			out.noCurrency += row.Rows
-			out.excludedRows += row.Rows
 		case row.Currency == moneyNonCurrency:
 			out.ltRows += row.Rows
-			out.excludedRows += row.Rows
 		default:
+			money = append(money, row)
 			out.moneyRows += row.Rows
 			if out.currency == "" {
 				out.currency, out.gross, out.reversed, out.net = row.Currency, row.Gross, row.Reversed, row.Net
 			}
-		}
-	}
-	// Only the currencies that are money take part in the breakdown the tile
-	// renders; the excluded groups have already been accounted for above.
-	money := make([]OverviewRevenueCurrency, 0, len(out.byCurrency))
-	for _, row := range out.byCurrency {
-		if row.Currency != "" && row.Currency != moneyNonCurrency {
-			money = append(money, row)
 		}
 	}
 	out.byCurrency = money
@@ -233,14 +233,17 @@ func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev O
 		Reversed:           win.reversed,
 		Net:                win.net,
 		DedupedRows:        win.moneyRows,
-		ExcludedRows:       win.excludedRows,
+		ExcludedRows:       win.excludedRows(),
 		ExcludedCurrencies: nil,
 		ByCurrency:         win.byCurrency,
 	}
 	if win.ltRows > 0 {
 		detail.ExcludedCurrencies = []string{moneyNonCurrency}
 	}
-	if r.CompleteDays {
+	// The previous-window scan is only worth running when there is a headline
+	// currency to compare against: with no money row in this window the match
+	// below can never fire (excluded groups are not in byCurrency).
+	if r.CompleteDays && win.currency != "" {
 		prior, err := s.overviewMoney(ctx, projectID, prev, platform)
 		if err != nil {
 			return OverviewMetric{}, nil, err

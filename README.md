@@ -228,7 +228,10 @@ trusted to send — payments, subscriptions, refunds:
 ```ts
 import { AgentRayServerClient } from '@agentray/server';
 const ar = new AgentRayServerClient({ apiUrl: process.env.AGENTRAY_URL!, apiKey: process.env.AGENTRAY_API_KEY! });
-await ar.revenue('user-123', { amount: 19, currency: 'USD' }, { idempotencyKey: webhook.id });
+// amount is an integer in the smallest unit of currency (1900 = $19.00), and
+// both money methods require a stable idempotency key.
+await ar.revenue('user-123', { amount: 1900, currency: 'USD', kind: 'payment' }, { idempotencyKey: webhook.id });
+await ar.revenueReversed('user-123', { amount: 1900, currency: 'USD' }, { idempotencyKey: `refund:${refund.id}` });
 ```
 
 Every SDK speaks the same `capture` / `batch` / `identify` payload, so a

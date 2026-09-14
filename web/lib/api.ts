@@ -201,10 +201,15 @@ export type OverviewRevenueCurrency = {
   rows: number;
 };
 
+// OverviewRange mirrors the Go store.OverviewRange: the complete-day window a
+// read covered. Named once so the money block cannot drift from the context
+// block it is served beside.
+export type OverviewRange = { from: string; to: string; days: number; complete_days: boolean };
+
 // The signed arithmetic behind the Net revenue tile. `value`/`previous` above
 // are unsigned, so a negative net lives here — never in a clamped zero.
 export type OverviewRevenueDetail = {
-  window: { from: string; to: string; days: number; complete_days: boolean };
+  window: OverviewRange;
   currency?: string;
   gross: number;
   reversed: number;
@@ -251,8 +256,8 @@ export type OverviewResult = {
     project_id: string;
     timezone: string;
     timezone_source: string;
-    range: { from: string; to: string; days: number; complete_days: boolean };
-    previous_range: { from: string; to: string; days: number; complete_days: boolean };
+    range: OverviewRange;
+    previous_range: OverviewRange;
     platform: string;
     generated_at: string;
     metric_version: string;

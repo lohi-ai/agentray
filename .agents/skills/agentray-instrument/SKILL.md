@@ -32,11 +32,16 @@ that duplicates it with zero extra properties.
    retention is meaningless without a return-defining event; every retention
    curve and "active user" count keys off this one name. Choose it once and
    never rename it casually.
-3. **Revenue outcomes** (server-side only). The standard money taxonomy —
-   `revenue` and `revenue_reversed`, never a project-specific revenue name.
+3. **Revenue outcomes** (server-side, unless the browser is genuinely the
+   source of the sale). The standard money taxonomy — `revenue` and
+   `revenue_reversed`, never a project-specific revenue name.
    *Why:* MRR/LTV/conversion read from exactly these two names; webhooks retry,
    so the row-specific `$insert_id` is what keeps money from being counted
-   twice. Never emit money from the browser. Contract in the next section.
+   twice. A browser is forgeable, so emit money from the backend whenever the
+   backend can see the charge; when a client-side purchase flow is the only
+   source (an in-app purchase the server never sees), capture it through the
+   ordinary browser `capture` in the same taxonomy. Contract in the next
+   section and in `agentray-setup`.
 4. **Decision-bound feature events.** One event per keep/kill/invest decision
    pending — `tts_played`, `dark_mode_enabled`. *Why:* usage is the evidence
    for the decision; when the decision is made, the event can be retired.
@@ -112,15 +117,15 @@ The four consumer surfaces, and what each demands of the event:
   from the plan's events, the plan is missing a step, not the agent.
 - **SQL** (SQL page in the web app; `run_sql` over MCP; SELECT-only). Ad-hoc
   slicing via `json_extract_string(properties, '$.plan')` etc. — which is why
-  properties must be flat, typed values, not prose. Revenue reads de-duplicate
-  by `insert_id`:
-
-  ```sql
-  SELECT sum(amount) AS revenue FROM (
-    SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
-    FROM events WHERE event_name = 'revenue' GROUP BY insert_id
-  )
-  ```
+  properties must be flat, typed values, not prose. Money is **net, not gross**:
+  read both `revenue` and `revenue_reversed` in one query, de-duplicate by
+  `coalesce(nullif(insert_id, ''), CAST(event_id AS VARCHAR))` keeping the
+  greatest `("timestamp", event_id)` per key, subtract the reversals, and
+  exclude `LT` plus rows that declared no currency. Never `GROUP BY insert_id`
+  alone — every unkeyed row shares the empty key and collapses into one — and
+  never sum `revenue` by itself, which answers gross where the Net revenue tile
+  answers net. The canonical query is `docs/ANALYTICS.md` → *Reading money with
+  SQL*; copy that one instead of writing a second.
 
 - **Alerts** (Alerts tab). A threshold rule on a metric that should page
   someone — error rate, revenue drop to zero, funnel-step volume collapse.
@@ -165,6 +170,7 @@ never a reason to add typed events.
   and saved query — treat names as API. If a rename is unavoidable, update the
   consumers in the same change.
 - No PII in properties; ids and amounts in, emails and raw input out.
-- Revenue only from the server, only in the standard taxonomy (`revenue`,
-  `revenue_reversed`), only with stable `$insert_id` keys — a refund carries
-  its own key, never the booking's.
+- Revenue from the server whenever the server can see the charge, otherwise
+  from the browser that was genuinely the source — always in the standard
+  taxonomy (`revenue`, `revenue_reversed`) and always with stable `$insert_id`
+  keys: a refund carries its own key, never the booking's.

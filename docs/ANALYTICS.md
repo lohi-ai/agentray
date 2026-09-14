@@ -154,7 +154,7 @@ The grid first: one row per write, last write wins.
 ```sql
 WITH money_raw AS (
   SELECT
-    canonical_distinct_id AS person_id,
+    canonical_id AS person_id,
     event_id,
     event_name,
     "timestamp" AS occurred_at,
@@ -162,9 +162,8 @@ WITH money_raw AS (
     coalesce(try_cast(json_extract_string(properties, '$.amount') AS BIGINT), 0) AS amount,
     lower(trim(coalesce(json_extract_string(properties, '$.kind'), ''))) AS kind,
     coalesce(nullif(insert_id, ''), CAST(event_id AS VARCHAR)) AS row_key
-  FROM resolved_events
-  WHERE project_id = '<project id>'
-    AND "timestamp" >= TIMESTAMPTZ '2026-09-01T00:00:00Z'
+  FROM events
+  WHERE "timestamp" >= TIMESTAMPTZ '2026-09-01T00:00:00Z'
     AND "timestamp" <  TIMESTAMPTZ '2026-10-01T00:00:00Z'
     AND event_name IN ('revenue', 'revenue_reversed')
 ),
@@ -176,14 +175,30 @@ money_rows AS (
 )
 ```
 
+`run_sql` accepts exactly this shape: `FROM events` once (the sandbox rewrites it
+to the caller's scoped table, exposing the stitched id as `canonical_id`) and no
+`project_id` filter — the console scopes every query. The tile reads the same
+grid from `resolved_events` instead, which exposes the stitched id under its
+internal name; that is the only difference and it changes no total, since the
+de-dup key is `$insert_id`/`event_id`, never the person.
+
+De-duplication ranks the writes **inside the requested window**. A correction
+carrying a later timestamp in the same window replaces the booking it fixes; one
+that lands in a *later* window is that window's booking, and the earlier window
+keeps the number it was read with. Rank over the same range you are reporting.
+
 Money the project actually earned, per currency, signed and unclamped:
 
 ```sql
 SELECT
   currency,
-  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN 0 ELSE amount END) AS gross,
-  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN abs(amount) ELSE 0 END) AS reversed,
-  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN -abs(amount) ELSE amount END) AS net,
+  -- CAST to BIGINT: DuckDB's sum() over BIGINT returns HUGEINT, which the SQL
+  -- console's JSON rows render as an empty object. The Go read casts for the
+  -- same reason.
+  CAST(sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN 0 ELSE amount END) AS BIGINT) AS gross,
+  CAST(sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN abs(amount) ELSE 0 END) AS BIGINT) AS reversed,
+  CAST(sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN 0 ELSE amount END)
+     - sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN abs(amount) ELSE 0 END) AS BIGINT) AS net,
   count(*) AS rows
 FROM money_rows
 WHERE write_rank = 1

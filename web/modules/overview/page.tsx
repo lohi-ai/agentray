@@ -77,14 +77,28 @@ export function formatMoney(value: number): string {
 // leaves unsigned — a net reversal is a real measured negative, not a state to
 // be hidden behind "No data". A legacy `ok` with no detail renders "Not
 // available" rather than a bare number with no currency attached.
-export function revenueTile(m: OverviewMetric, detail?: OverviewRevenueDetail | null): { label: string; value: string } {
-  if (m.state === 'ok') {
-    return {
-      label: REVENUE_LABEL,
-      value: detail?.currency ? `${formatMoney(detail.net)} ${detail.currency}` : 'Not available',
-    };
+//
+// The delta follows metricTile's rule — a comparison needs a positive base —
+// applied to the same currency's previous-window net: a percentage over a zero
+// or reversal base would invert its own meaning, and there is no FX, so a
+// different currency's net is not a base at all.
+export function revenueTile(
+  m: OverviewMetric,
+  detail?: OverviewRevenueDetail | null,
+): { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } {
+  if (m.state !== 'ok') return metricTile(REVENUE_LABEL, m);
+  if (!detail?.currency) return { label: REVENUE_LABEL, value: 'Not available' };
+  const tile: { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } = {
+    label: REVENUE_LABEL,
+    value: `${formatMoney(detail.net)} ${detail.currency}`,
+  };
+  const previous = detail.previous_net;
+  if (previous !== undefined && previous > 0) {
+    const pct = ((detail.net - previous) / previous) * 100;
+    tile.delta = `${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`;
+    tile.deltaTone = pct >= 0 ? 'up' : 'down';
   }
-  return metricTile(REVENUE_LABEL, m);
+  return tile;
 }
 
 // revenueBreakdownRows is the money arithmetic behind the headline — one row
@@ -201,9 +215,16 @@ function tileCoverage(res: OverviewResult, input: TileInput): string {
   // bookings the arithmetic ran on, never the page's event count.
   if (input.kind === 'money') {
     const detail = input.detail;
-    if (!detail) return tileCoverage(res, { kind: 'metric', metric: input.metric });
+    if (!detail) {
+      // A packet without the money detail cannot state a money population: say
+      // so rather than borrowing the page's event coverage for a figure it
+      // never counted. An unconfigured project still gets its served reason.
+      return input.metric.state === 'unconfigured'
+        ? tileCoverage(res, { kind: 'metric', metric: input.metric })
+        : 'money coverage not reported';
+    }
     const excluded = detail.excluded_rows > 0 ? `, ${formatNumber(detail.excluded_rows)} excluded` : '';
-    if (input.metric.state !== 'ok' || detail.deduped_rows === 0) return `0 valid money rows${excluded}`;
+    if (detail.deduped_rows === 0) return `0 valid money rows${excluded}`;
     return `${formatNumber(detail.deduped_rows)} deduplicated ${detail.deduped_rows === 1 ? 'row' : 'rows'}${excluded}`;
   }
   const m = input.metric;

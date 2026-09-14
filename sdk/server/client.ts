@@ -144,7 +144,10 @@ export class AgentRayServerClient {
    */
   async revenue(distinctId: string, revenue: RevenueFacts, options: RevenueOptions): Promise<void> {
     assertRevenueFacts(revenue, REVENUE_EVENT);
-    assertIdempotencyKey(options.idempotencyKey, REVENUE_EVENT);
+    // `options?.` — a plain-JS caller can omit the object the types require;
+    // the guard must answer with the documented error, not a TypeError from
+    // inside the SDK.
+    assertIdempotencyKey(options?.idempotencyKey, REVENUE_EVENT);
     await this.capture(distinctId, REVENUE_EVENT, { ...revenue }, options);
   }
 
@@ -166,7 +169,7 @@ export class AgentRayServerClient {
     options: RevenueOptions,
   ): Promise<void> {
     assertReversalFacts(reversal, REVENUE_REVERSED_EVENT);
-    assertIdempotencyKey(options.idempotencyKey, REVENUE_REVERSED_EVENT);
+    assertIdempotencyKey(options?.idempotencyKey, REVENUE_REVERSED_EVENT);
     await this.capture(
       distinctId,
       REVENUE_REVERSED_EVENT,
@@ -216,7 +219,11 @@ export class AgentRayServerClient {
         properties: {
           ...(e.properties ?? {}),
           platform: this.platform,
-          $insert_id: e.options?.idempotencyKey ?? generateId(),
+          // A caller-supplied key wins wherever it arrives — the option or
+          // `$insert_id` in properties (the raw-HTTP convention this SDK
+          // shares). Minting one is only for a keyless event, and must never
+          // overwrite a real key: that key is what stops a retry double-booking.
+          $insert_id: e.options?.idempotencyKey ?? e.properties?.$insert_id ?? generateId(),
         },
         timestamp: e.options?.timestamp ?? new Date().toISOString(),
       })),

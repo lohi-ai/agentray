@@ -406,7 +406,8 @@ describe('revenue tile', () => {
   const ok = (value?: number): OverviewMetric => ({ state: 'ok', ...(value === undefined ? {} : { value }), definition: 'Measured by AgentRay.' });
 
   it('prints the signed net with the currency its sender declared', () => {
-    expect(revenueTile(ok(50000), moneyDetail())).toEqual({ label: 'Net revenue', value: '50,000 VND' });
+    // No prior window in this fixture, so the reading is exactly this pair.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 0 }))).toEqual({ label: 'Net revenue', value: '50,000 VND' });
   });
 
   it('shows a net reversal as the signed negative it is, never as missing data', () => {
@@ -430,6 +431,26 @@ describe('revenue tile', () => {
     expect(revenueTile({ state: 'unconfigured', definition: '', notes: ['no trusted deduplicated revenue source exists'] }, null).value).toBe('Set up');
   });
 
+  it('compares against the same currency’s previous net, and only over a positive base', () => {
+    // The page's design contract gives an `ok` headline tile a delta. The base
+    // is the previous window's net in the SAME currency — there is no FX — and
+    // a zero or reversal base is not a percentage: metricTile's rule, applied
+    // where the signed figure lives.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 40000 })).delta).toBe('+25%');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 40000 })).deltaTone).toBe('up');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 100000 })).delta).toBe('-50%');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 100000 })).deltaTone).toBe('down');
+    // A window with no prior money, or a prior reversal, has no comparison —
+    // and a signed net still renders its absolute value beside it.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: undefined })).delta).toBeUndefined();
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 0 })).delta).toBeUndefined();
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: -30 })).delta).toBeUndefined();
+    // A signed net keeps its absolute reading and still gets the comparison:
+    // reversals exceeded bookings by 130% of last window's net.
+    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, previous_net: 100, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1 }] });
+    expect(revenueTile(ok(), reversed)).toMatchObject({ value: '\u221230 VND', delta: '-130%', deltaTone: 'down' });
+  });
+
   it('reports the money read’s own coverage, not the page’s event count', () => {
     const r = servedRes();
     const line = tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: r.metrics.revenue_detail });
@@ -442,6 +463,17 @@ describe('revenue tile', () => {
     const empty = moneyDetail({ currency: undefined, gross: 0, reversed: 0, net: 0, deduped_rows: 0, excluded_rows: 2, by_currency: [] });
     const r = servedRes({ revenueState: 'no_data', revenueDetail: empty });
     expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: empty })).toContain('0 valid money rows, 2 excluded');
+  });
+
+  it('never claims page-event coverage for a money tile', () => {
+    // Without the money detail there is no money population to report. The
+    // page's event coverage is a different tile's input and must not stand in
+    // for it; an unconfigured project still gets its served reason.
+    const r = servedRes({ revenueState: 'ok', revenueDetail: null });
+    expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: null })).toContain('money coverage not reported');
+    expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: null })).not.toContain('400 events');
+    const unconfigured = servedRes({ revenueState: 'unconfigured', revenueNotes: ['no trusted deduplicated revenue source exists'], revenueDetail: null });
+    expect(tileProvenance(unconfigured, { kind: 'money', metric: unconfigured.metrics.revenue, detail: null })).toContain('no trusted deduplicated revenue source exists');
   });
 
   it('lists one row per declared currency, with the headline marked', () => {

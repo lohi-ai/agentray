@@ -267,11 +267,12 @@ func (b *EventBatcher) flush(items []queued) {
 				if ackErr := it.msg.ack(); ackErr != nil {
 					// Insert succeeded but the ack didn't land; the message will
 					// redeliver and re-insert. The JetStream duplicate window absorbs a
-					// redelivery of the identical body, and the only money-critical read
-					// (the retention "ever paid" flag) aggregates with max(), so a rare
-					// surviving duplicate can't corrupt it. Count/sum rollups tolerate the
-					// near-zero residual dup rate per the data-architecture doc; there is
-					// no read-time insert_id de-dup, so do not claim one here.
+					// redelivery of the identical body; the money read de-duplicates on
+					// $insert_id (money.go's grid), and the retention "ever paid" flag
+					// aggregates with max(), so a surviving duplicate cannot double-book
+					// money or flip a paid flag. Count/sum rollups over non-money events
+					// still tolerate the near-zero residual dup rate per the
+					// data-architecture doc — do not claim an insert_id de-dup for those.
 					log.Printf("ingestion batcher: ack after insert: %v", ackErr)
 				}
 			}
