@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -437,6 +438,25 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	}
 	if v := mustVerdict(t, again); v.Ready || v.Reason != ReplayPurgedGap || v.Missing == 0 {
 		t.Fatalf("verdict after a restart = %+v, want the recorded loss to keep refusing", v)
+	}
+
+	// A marker that exists but cannot be read is a loss we can no longer size.
+	// It has to refuse as unverified: reading it as "no marker" is how a torn
+	// write — or an operator who truncated the file — would hand back a colour
+	// with a hole in its DuckDB file.
+	if err := worker.Stop(); err != nil {
+		t.Fatalf("stop worker: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write a torn marker: %v", err)
+	}
+	torn := newStreamSet()
+	worker, err = StartJetStreamWorker(ctx, torn, duck, nil)
+	if err != nil {
+		t.Fatalf("restart worker: %v", err)
+	}
+	if v := mustVerdict(t, torn); v.Ready || v.Reason != ReplayUnverified {
+		t.Fatalf("verdict with an unreadable marker = %+v, want an unverified refusal", v)
 	}
 }
 

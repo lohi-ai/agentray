@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -359,31 +360,38 @@ type ingestLoss struct {
 }
 
 // readLatch returns a loss recorded by an earlier process of this colour, so a
-// restart cannot forget one. A marker that cannot be read is logged and ignored:
-// it is a refusal, and refusing a colour over an unreadable file would be its own
-// outage — the boot sample below still runs and still catches what it can.
-func (ss *StreamSet) readLatch() (uint64, bool) {
+// restart cannot forget one. Three outcomes, and the two failures do not
+// collapse: no marker is the ordinary case; a marker that exists but cannot be
+// read is a colour that recorded a loss we can no longer size, which refuses as
+// "unverified" rather than passing as whole. A file that is absent is the only
+// reason to keep the boot sample as the sole judge.
+func (ss *StreamSet) readLatch() (missing uint64, found bool, unreadable bool) {
 	if ss.LossMarkerPath == "" {
-		return 0, false
+		return 0, false, false
 	}
 	raw, err := os.ReadFile(ss.LossMarkerPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("ingestion: retention loss marker %s unreadable: %v", ss.LossMarkerPath, err)
+			return 0, false, true
 		}
-		return 0, false
+		return 0, false, false
 	}
 	var loss ingestLoss
 	if err := json.Unmarshal(raw, &loss); err != nil {
 		log.Printf("ingestion: retention loss marker %s malformed: %v", ss.LossMarkerPath, err)
-		return 0, false
+		return 0, false, true
 	}
-	return loss.Missing, loss.Missing > 0
+	return loss.Missing, loss.Missing > 0, false
 }
 
-// recordLatch writes the loss next to this colour's DuckDB file. A write that
-// fails leaves the in-process latch standing (this process still refuses); it is
-// logged because the NEXT process will not know.
+// recordLatch writes the loss next to this colour's DuckDB file, through a
+// temporary file and a rename so a process killed mid-write cannot leave a torn
+// marker behind: a half-written marker is unreadable, and unreadable now refuses
+// (see readLatch), which would turn this container's rename into a wrong-shaped
+// refusal for every later boot. A write that fails leaves the in-process latch
+// standing (this process still refuses); it is logged because the NEXT process
+// will not know.
 func (ss *StreamSet) recordLatch(missing uint64) {
 	if ss.LossMarkerPath == "" {
 		return
@@ -397,7 +405,24 @@ func (ss *StreamSet) recordLatch(missing uint64) {
 		log.Printf("ingestion: cannot encode retention loss: %v", err)
 		return
 	}
-	if err := os.WriteFile(ss.LossMarkerPath, append(body, '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(ss.LossMarkerPath), ".ingest-loss-*")
+	if err == nil {
+		var writeErr error
+		if _, writeErr = tmp.Write(append(body, '\n')); writeErr == nil {
+			writeErr = tmp.Sync()
+		}
+		if closeErr := tmp.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		if writeErr == nil {
+			writeErr = os.Rename(tmp.Name(), ss.LossMarkerPath)
+		}
+		if writeErr != nil {
+			_ = os.Remove(tmp.Name())
+			err = writeErr
+		}
+	}
+	if err != nil {
 		log.Printf("ingestion: cannot record retention loss at %s: %v — reset the stream's consumers or delete the colour's volume", ss.LossMarkerPath, err)
 	}
 }
@@ -423,7 +448,12 @@ func (ss *StreamSet) recordLatch(missing uint64) {
 // environment's purge as this colour's loss, permanently, which is the opposite
 // of fail-safe.
 func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consumer) {
-	if missing, ok := ss.readLatch(); ok {
+	switch missing, found, unreadable := ss.readLatch(); {
+	case unreadable:
+		ss.bootUnverified.Store(true)
+		log.Printf("ingestion: this colour has a retention loss marker at %s that cannot be read; /readyz refuses until an operator accepts the loss (delete the marker) or resets the colour", ss.LossMarkerPath)
+		return
+	case found:
 		ss.bootGap.Store(missing)
 		log.Printf("ingestion: this colour recorded a retention loss of %d message(s) at %s; /readyz refuses until an operator accepts it (see infra/gce/deploy.sh)", missing, ss.LossMarkerPath)
 		return
