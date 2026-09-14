@@ -135,7 +135,6 @@ var writeClasses = map[string]writeClass{
 	// --- controlling a run that is already going. Costs no quota because it
 	// starts nothing; refusing it would leave a viewer unable to stop a run
 	// they are being billed for. ---
-	"/api/agent/chat/steer":    writeAgentControl,
 	"/api/agent/chat/cancel":   writeAgentControl,
 	"/api/agent/conversations": writeAgentControl,
 

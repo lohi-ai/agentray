@@ -168,40 +168,10 @@ VALUES ($1, $2, $3, $4, $5::uuid, $6, '{}'::jsonb)`,
 	return c, nil
 }
 
-// ListSourceCredentials returns metadata only — the ciphertext column is
-// deliberately not selected.
-func (s *Store) ListSourceCredentials(ctx context.Context, userID, projectID string) ([]SourceCredential, error) {
-	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
-	if err != nil {
-		return nil, err
-	}
-	canManage, err := s.userCanManageWorkspace(ctx, userID, project.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
-	if !canManage {
-		return nil, errAgentForbidden
-	}
-	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, COALESCE(created_by::text, ''), created_at, revoked_at
-FROM source_credentials WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []SourceCredential{}
-	for rows.Next() {
-		var c SourceCredential
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Name, &c.CreatedBy, &c.CreatedAt, &c.RevokedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
 // RevokeSourceCredential marks a credential unusable. Connectors referencing
 // it keep their row but fail at run/probe time — revocation is the point.
+// No route calls this today; it is the only writer of revoked_at and the
+// fixture the fails-closed tests exercise.
 func (s *Store) RevokeSourceCredential(ctx context.Context, userID, projectID, credentialID string) error {
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
@@ -226,6 +196,7 @@ WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL`, credentialID, project
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "source_credential.revoke", "project", project.ID, project.Name, "{}")
 	return nil
 }
+
 
 // sourceCredentialDSN decrypts a credential's secret for the run/probe path.
 // A revoked or foreign credential fails closed.

@@ -41,21 +41,6 @@ func TestCloseDanglingCallsLeavesSatisfiedCalls(t *testing.T) {
 	}
 }
 
-// TestLastUserPrompt verifies the most recent user turn is returned for recall.
-func TestLastUserPrompt(t *testing.T) {
-	msgs := []agentcore.Message{
-		{Role: agentcore.RoleUser, Content: "first"},
-		{Role: agentcore.RoleAssistant, Content: "ok"},
-		{Role: agentcore.RoleUser, Content: "second"},
-		{Role: agentcore.RoleAssistant, Content: "done"},
-	}
-	if got := lastUserPrompt(msgs); got != "second" {
-		t.Fatalf("lastUserPrompt = %q, want \"second\"", got)
-	}
-	if got := lastUserPrompt(nil); got != "" {
-		t.Fatalf("lastUserPrompt(nil) = %q, want empty", got)
-	}
-}
 
 // TestNormalizeProvider verifies the empty label folds to openai and matching is
 // case-insensitive, so a key refresh matches the provider an agentcore provider

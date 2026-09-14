@@ -1,12 +1,10 @@
 package app
 
 import (
-	"encoding/csv"
 	"net/http"
 	"strconv"
 
 	"github.com/labstack/echo/v4"
-	ingestion "github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -112,34 +110,6 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 	// Same table, same `proposed` starting state — there is no path that creates
 	// an already-committed test, because commitment is always a second, separate
 	// act.
-	e.POST("/api/validation/tests", func(c echo.Context) error {
-		_, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		var payload struct {
-			Hypothesis    string `json:"hypothesis"`
-			MetricEvent   string `json:"metric_event"`
-			BaselineEvent string `json:"baseline_event"`
-			TargetCount   int    `json:"target_count"`
-			WindowDays    int    `json:"window_days"`
-		}
-		if err := c.Bind(&payload); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
-		}
-		id, err := store.CreateValidationTest(c.Request().Context(), storage.ValidationTest{
-			ProjectID:     project.ID,
-			Hypothesis:    payload.Hypothesis,
-			MetricEvent:   payload.MetricEvent,
-			BaselineEvent: payload.BaselineEvent,
-			TargetCount:   payload.TargetCount,
-			WindowDays:    payload.WindowDays,
-		})
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-		}
-		return c.JSON(http.StatusCreated, map[string]any{"id": id, "status": storage.TestProposed})
-	})
 
 	// Commit is the load-bearing click on /start?job=validate: the owner agreeing
 	// to the number BEFORE the data arrives. Everything the readout says
@@ -192,43 +162,4 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 		return c.JSON(http.StatusOK, map[string]any{"signups": rows, "count": count})
 	})
 
-	// Export exists because a contact list the owner cannot take with them is a
-	// hostage, not a feature.
-	e.GET("/api/validation/waitlist.csv", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		c.Response().Header().Set(echo.HeaderContentType, "text/csv; charset=utf-8")
-		c.Response().Header().Set(echo.HeaderContentDisposition, `attachment; filename="waitlist.csv"`)
-		c.Response().WriteHeader(http.StatusOK)
-		w := csv.NewWriter(c.Response())
-		// unsubscribe_url ships in the export because the owner is the one who
-		// sends the mail this file is for, and mail without a way out is spam.
-		_ = w.Write([]string{"email", "status", "source", "referrer", "joined_at", "unsubscribe_url"})
-		// Streamed in keyset pages rather than one capped query: the whole list or
-		// an error, never a quiet fraction of it.
-		err = store.ExportWaitlistSignups(c.Request().Context(), ctx.User.ID, project.ID, func(r storage.WaitlistSignup) error {
-			return w.Write([]string{r.Email, r.Status, r.Source, r.Referrer,
-				r.CreatedAt.Format("2006-01-02 15:04:05"), ingestion.UnsubscribeURL(c, r.UnsubscribeToken)})
-		})
-		if err != nil {
-			return err
-		}
-		w.Flush()
-		return w.Error()
-	})
-
-	// A real delete, not a status flag: "remove my data" has to mean the row is
-	// gone from the table.
-	e.DELETE("/api/validation/waitlist/:id", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		if err := store.DeleteWaitlistSignup(c.Request().Context(), ctx.User.ID, project.ID, c.Param("id")); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-		}
-		return c.JSON(http.StatusOK, map[string]any{"ok": true})
-	})
 }

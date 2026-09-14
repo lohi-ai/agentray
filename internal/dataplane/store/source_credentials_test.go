@@ -25,10 +25,11 @@ func TestSourceCredentialLifecycle(t *testing.T) {
 	if cred.ID == "" || cred.RevokedAt != nil {
 		t.Fatalf("cred = %+v", cred)
 	}
-	// List returns metadata only.
-	creds, err := s.ListSourceCredentials(ctx, userID, projectID)
-	if err != nil || len(creds) != 1 || creds[0].ID != cred.ID {
-		t.Fatalf("list = %+v %v", creds, err)
+	// The credential row exists (metadata only — the ciphertext column is never
+	// selected by any read path).
+	var credCount int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM source_credentials WHERE project_id = $1`, projectID).Scan(&credCount); err != nil || credCount != 1 {
+		t.Fatalf("credential count = %d %v", credCount, err)
 	}
 
 	// A connector referencing the credential resolves its DSN at run time.
@@ -106,9 +107,9 @@ func TestCreateSourceConnectorIdempotent(t *testing.T) {
 	if _, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "bad", "unknown", "postgres://u:p@h/db", "bad-key"); err == nil {
 		t.Fatal("unknown kind accepted")
 	}
-	creds, err := s.ListSourceCredentials(ctx, userID, projectID)
-	if err != nil || len(creds) != 0 {
-		t.Fatalf("invalid request left credential(s): %+v %v", creds, err)
+	var credCount int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM source_credentials WHERE project_id = $1`, projectID).Scan(&credCount); err != nil || credCount != 0 {
+		t.Fatalf("invalid request left credential(s): %d %v", credCount, err)
 	}
 
 	first, err := s.CreateSourceConnectorIdempotent(ctx, userID, projectID, "warehouse", "postgres", "postgres://u:p@h/db", "retry-key")
@@ -119,9 +120,8 @@ func TestCreateSourceConnectorIdempotent(t *testing.T) {
 	if err != nil || replay.ID != first.ID {
 		t.Fatalf("ambiguous-response replay = %+v %v", replay, err)
 	}
-	creds, err = s.ListSourceCredentials(ctx, userID, projectID)
-	if err != nil || len(creds) != 1 {
-		t.Fatalf("replay created orphan credential(s): %+v %v", creds, err)
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM source_credentials WHERE project_id = $1`, projectID).Scan(&credCount); err != nil || credCount != 1 {
+		t.Fatalf("replay created orphan credential(s): %d %v", credCount, err)
 	}
 	connectors, err := s.ListDataConnectorsForProject(ctx, projectID)
 	if err != nil || len(connectors) != 1 || connectors[0].ID != first.ID {
