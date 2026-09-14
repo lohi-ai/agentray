@@ -385,38 +385,280 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 
 // TestNoRouteResolvesThroughTheReadResolver pins the property rather than the
 // instances of it: projectFromRequest answers admission, never an access class,
-// so any route that reaches it directly runs for whatever credential may
-// address the project. The scan covers READS as well as mutations — the read
-// half of the bypass was fifteen read routes, not a missing verb check — and
-// both registration forms this package uses. It is over the package's own
-// source because that is the only place a route that does not exist yet can be
-// caught.
+// so any route that reaches it runs for whatever credential may address the
+// project. It is over the package's own source because that is the only place a
+// route that does not exist yet can be caught.
 //
-// The single exception is greppable on purpose: projectForAdmission, whose name
-// says the route's work is the addressing itself.
+// It asserts three things, and the first one does not depend on how a route is
+// registered:
+//
+//  1. The census — this package contains exactly ONE production call to
+//     projectFromRequest. A second call site fails here however it is reached:
+//     inlined into a route, hidden in a helper, registered through a computed
+//     path or a wrapper. A route-shaped scan alone cannot see those, which is
+//     why the count comes first.
+//  2. The exemption — the one call is the GET /api/projects handler and no
+//     other registration contains it. The exemption is by route identity, not
+//     by a helper's name: a named admission resolver is a hatch any later route
+//     could reuse to skip its class, so there deliberately is not one.
+//  3. The parity — every route that declares a class (authorizedProject /
+//     authorizedPrincipalAndProject) has a behavioural case in the two matrices
+//     below, and every case still matches a registration. Drift in either
+//     direction fails: a new class-decided route without a case, or a case
+//     whose route was renamed away.
 func TestNoRouteResolvesThroughTheReadResolver(t *testing.T) {
-	// A registration runs from its line to the next registration of ANY method
-	// or the next package-level function — whichever comes first — so the slice
-	// is that handler's body and nothing else. (Bounding on mutating
-	// registrations alone would run a read handler's body into the next
-	// mutating route's slice and report its resolver.) Both registration forms
-	// the package uses are scanned — `receiver.METHOD("path"` and
-	// `receiver.Add(http.MethodX, "path"` — because a route that registers the
-	// second way is exactly as capable of resolving through the read resolver
-	// as one that registers the first.
+	registrations := scanRouteRegistrations(t)
+
+	// 1. The census, over the package source rather than over registrations —
+	// because a route-shaped scan cannot see a call a helper hides.
+	//
+	// projectFromRequest has exactly two legitimate owners and they are named
+	// here. The first is the GET /api/projects handler, asserted by route
+	// identity below. The second is authProject, the resolver of the modern
+	// surface — agent, team, alert, connector, validation, operations — whose
+	// routes authorize at the operation or store layer rather than at the
+	// route; those routes are not the legacy store-direct surface this ticket
+	// closes, and the classes their writes still owe are the residual recorded
+	// in the ticket evidence.
+	//
+	// What the census guarantees is that no THIRD owner appears: a new helper
+	// that wraps the admission-only resolver, or a legacy route that inlines
+	// it, changes this set and fails here however it is registered — which is
+	// exactly how the modern surface's own resolver was found.
+	var helperOwners []string
+	routeOwners := map[string]bool{}
+	for _, file := range packageSources(t) {
+		masked, spans := maskRegistrations(file.source)
+		for _, span := range spans {
+			if strings.Contains(file.source[span.start:span.end], "projectFromRequest(") {
+				routeOwners[span.method+" "+span.path] = true
+			}
+		}
+		for _, at := range occurrences(masked, "projectFromRequest(") {
+			owner := enclosingFunc(masked, at)
+			if owner == "projectFromRequest" {
+				continue // the definition is not a call
+			}
+			helperOwners = append(helperOwners, owner)
+		}
+	}
+	sort.Strings(helperOwners)
+	helperOwners = dedupe(helperOwners)
+	if len(routeOwners) != 1 || !routeOwners[http.MethodGet+" /api/projects"] {
+		t.Errorf("projectFromRequest is called from the routes %v; the only route allowed to skip the class decision is GET /api/projects", keys(routeOwners))
+	}
+	if len(helperOwners) != 1 || helperOwners[0] != "authProject" {
+		t.Errorf("projectFromRequest is called from the helpers %v; the only helper allowed to is authProject, the modern surface's resolver. Every legacy route declares its class through authorizedProject",
+			helperOwners)
+	}
+
+	// 2. The exemption is the route the census names, and it still asks.
+	admitted := 0
+	for _, r := range registrations {
+		if r.method == http.MethodGet && r.path == "/api/projects" && strings.Contains(r.body, "projectFromRequest(") {
+			admitted++
+		}
+	}
+	if admitted != 1 {
+		t.Errorf("GET /api/projects is registered %d times through projectFromRequest; it is the one admission-only route", admitted)
+	}
+
+	// 3. The parity, in both directions.
+	classed := map[string]bool{}
+	for _, r := range registrations {
+		if strings.Contains(r.body, "authorizedProject(") || strings.Contains(r.body, "authorizedPrincipalAndProject(") {
+			classed[r.method+" "+r.path] = true
+		}
+	}
+	cased := map[string]string{}
+	for _, path := range storeDirectReadRoutes {
+		cased[http.MethodGet+" "+path] = "reads"
+	}
+	placeholders := directMutatorFixture{
+		dashboardID:     "d0000000-0000-4000-8000-000000000001",
+		audienceID:      "a0000000-0000-4000-8000-000000000002",
+		renameQueryID:   "q0000000-0000-4000-8000-000000000003",
+		deleteQueryID:   "q0000000-0000-4000-8000-000000000004",
+		templateID:      "t0000000-0000-4000-8000-000000000005",
+		templateChartID: "c0000000-0000-4000-8000-000000000006",
+	}
+	for _, tc := range directMutatorCases() {
+		cased[tc.method+" "+tc.path(placeholders)] = "writes"
+	}
+	for _, r := range registrations {
+		key := r.method + " " + r.path
+		if !classed[key] {
+			continue
+		}
+		if !matchedByCases(r, cased) {
+			t.Errorf("%s registers %s %s with a class decision and no case in either matrix — add it to the reads or writes matrix so the decision is exercised",
+				r.file, r.method, r.path)
+		}
+	}
+	for key, matrix := range cased {
+		if !matchedByClassed(key, classed) {
+			t.Errorf("the %s matrix covers %s, which no registration declares a class for — the case is stale", matrix, key)
+		}
+	}
+}
+
+// scanRouteRegistrations returns every route registration in this package with
+// the source slice that is its handler body.
+//
+// A registration runs from its line to the next registration of ANY method or
+// the next package-level function — whichever comes first — so the slice is
+// that handler's body and nothing else. (Bounding on mutating registrations
+// alone would run a read handler's body into the next mutating route's slice
+// and report its resolver.) Both registration forms the package uses are
+// scanned — `receiver.METHOD("path"` and `receiver.Add(http.MethodX, "path"` —
+// because a route that registers the second way is exactly as capable of
+// resolving through the read resolver as one that registers the first.
+func scanRouteRegistrations(t *testing.T) []routeRegistration {
+	t.Helper()
+	var out []routeRegistration
+	for _, file := range packageSources(t) {
+		for _, span := range registrationSpans(file.source) {
+			span.file = file.name
+			span.body = file.source[span.start:span.end]
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+// registrationSpans locates every registration in one file's source. Each span
+// runs from the registration to the next registration of ANY method or the next
+// package-level function — whichever comes first — so the span is that
+// handler's body and nothing else. (Bounding on mutating registrations alone
+// would run a read handler's body into the next mutating route's slice and
+// report its resolver.) Both registration forms the package uses are found —
+// `receiver.METHOD("path"` and `receiver.Add(http.MethodX, "path"` — because a
+// route that registers the second way is exactly as capable of resolving
+// through the admission-only resolver as one that registers the first.
+func registrationSpans(source string) []routeRegistration {
 	registration := regexp.MustCompile(`(?m)^\s*\w+\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\("([^"]+)"`)
 	added := regexp.MustCompile(`(?m)^\s*\w+\.Add\(http\.(Method\w+),\s*"([^"]+)"`)
 	topLevelFunc := regexp.MustCompile(`(?m)^func `)
 
+	var hits []routeRegistration
+	for _, m := range registration.FindAllStringSubmatchIndex(source, -1) {
+		hits = append(hits, routeRegistration{start: m[0], method: source[m[2]:m[3]], path: source[m[4]:m[5]]})
+	}
+	for _, m := range added.FindAllStringSubmatchIndex(source, -1) {
+		hits = append(hits, routeRegistration{start: m[0], method: strings.TrimPrefix(source[m[2]:m[3]], "Method"), path: source[m[4]:m[5]]})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
+	for i, h := range hits {
+		end := len(source)
+		if i+1 < len(hits) {
+			end = hits[i+1].start
+		}
+		if fn := topLevelFunc.FindStringIndex(source[h.start:end]); fn != nil {
+			end = h.start + fn[0]
+		}
+		hits[i].end = end
+	}
+	return hits
+}
+
+// maskRegistrations blanks the registration spans so the census counts what the
+// handler bodies call separately from what the helpers call. Newlines survive,
+// so the source stays line-shaped for the `^func ` search.
+func maskRegistrations(source string) (string, []routeRegistration) {
+	spans := registrationSpans(source)
+	masked := []byte(source)
+	for _, span := range spans {
+		for i := span.start; i < span.end; i++ {
+			if masked[i] != '\n' {
+				masked[i] = ' '
+			}
+		}
+	}
+	return string(masked), spans
+}
+
+// occurrences returns every index at which needle starts.
+func occurrences(source, needle string) []int {
+	var out []int
+	for offset := 0; ; {
+		at := strings.Index(source[offset:], needle)
+		if at < 0 {
+			return out
+		}
+		out = append(out, offset+at)
+		offset += at + len(needle)
+	}
+}
+
+// enclosingFunc names the top-level function whose body contains the offset.
+func enclosingFunc(source string, at int) string {
+	head := source[:at]
+	start := -1
+	if idx := strings.LastIndex(head, "\nfunc "); idx >= 0 {
+		start = idx + len("\nfunc ")
+	} else if strings.HasPrefix(head, "func ") {
+		start = len("func ")
+	} else {
+		return ""
+	}
+	// The name follows start immediately; read it from the source rather than
+	// from head, because for a function's own definition the offset sits exactly
+	// where the name begins.
+	rest := source[start:]
+	if strings.HasPrefix(rest, "(") { // a method receiver
+		close := strings.Index(rest, ")")
+		if close < 0 {
+			return ""
+		}
+		rest = rest[close+1:]
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	end := strings.IndexAny(rest, "( \t")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func dedupe(sorted []string) []string {
+	var out []string
+	for i, v := range sorted {
+		if i == 0 || v != sorted[i-1] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+type routeRegistration struct {
+	start, end   int
+	file         string
+	method, path string
+	body         string
+}
+
+type packageFile struct {
+	name   string
+	source string
+}
+
+// packageSources is every non-test .go file of this package.
+func packageSources(t *testing.T) []packageFile {
+	t.Helper()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	type registered struct {
-		start        int
-		method, path string
-	}
-	examined := 0
+	var out []packageFile
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -426,34 +668,65 @@ func TestNoRouteResolvesThroughTheReadResolver(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		source := string(src)
-		var hits []registered
-		for _, m := range registration.FindAllStringSubmatchIndex(source, -1) {
-			hits = append(hits, registered{m[0], source[m[2]:m[3]], source[m[4]:m[5]]})
+		out = append(out, packageFile{name: name, source: string(src)})
+	}
+	return out
+}
+
+// matchedByCases reports whether a registration is exercised by a concrete path
+// in one of the matrices, by matching its pattern against the case's path.
+func matchedByCases(r routeRegistration, cased map[string]string) bool {
+	for key := range cased {
+		method, path, ok := strings.Cut(key, " ")
+		if !ok || method != r.method {
+			continue
 		}
-		for _, m := range added.FindAllStringSubmatchIndex(source, -1) {
-			hits = append(hits, registered{m[0], strings.TrimPrefix(source[m[2]:m[3]], "Method"), source[m[4]:m[5]]})
-		}
-		sort.Slice(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
-		for i, h := range hits {
-			end := len(source)
-			if i+1 < len(hits) {
-				end = hits[i+1].start
-			}
-			if fn := topLevelFunc.FindStringIndex(source[h.start:end]); fn != nil {
-				end = h.start + fn[0]
-			}
-			examined++
-			if strings.Contains(source[h.start:end], "projectFromRequest(") {
-				t.Errorf("%s registers %s %s through projectFromRequest — the read resolver decides admission, not access; resolve with projectForRead / projectForWrite (declaring the class) or projectForAdmission",
-					name, h.method, h.path)
-			}
+		if pathMatches(r.path, path) {
+			return true
 		}
 	}
-	// A regex that matches nothing would make this test pass forever.
-	if examined < 150 {
-		t.Fatalf("only %d registrations found in the package source; the scan is broken", examined)
+	return false
+}
+
+// matchedByClassed reports whether a case's concrete path lands on a route that
+// declares a class.
+func matchedByClassed(key string, classed map[string]bool) bool {
+	method, path, ok := strings.Cut(key, " ")
+	if !ok {
+		return false
 	}
+	for route := range classed {
+		routeMethod, pattern, ok := strings.Cut(route, " ")
+		if ok && routeMethod == method && pathMatches(pattern, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMatches reports whether a concrete path is an instance of a route pattern
+// (`:param` matches one segment).
+func pathMatches(pattern, path string) bool {
+	if !strings.Contains(pattern, ":") {
+		return pattern == path
+	}
+	segments := strings.Split(pattern, "/")
+	got := strings.Split(path, "/")
+	if len(segments) != len(got) {
+		return false
+	}
+	for i, segment := range segments {
+		if strings.HasPrefix(segment, ":") {
+			if got[i] == "" {
+				return false
+			}
+			continue
+		}
+		if segment != got[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestAViewerCannotCommitOrDecideWithoutADemo is F2's other half — the
@@ -606,6 +879,34 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 // session still reads (the demo's whole point), and a pre-split project key
 // still reads — its frozen allowlist covers analytics:read through
 // activity_summary, so the Option A bridge survives.
+//
+// storeDirectReadRoutes is the read half of the store-direct surface: the
+// routes that return a project's analytics and therefore declare
+// analytics:read. It is one declaration because two tests read it — the
+// behavioural matrix below and the parity check in
+// TestNoRouteResolvesThroughTheReadResolver, which fails if a route that
+// declares a class has no case here or if a case here matches no route.
+//
+// The replay route is exercised with a session id that does not exist: the
+// store answers an empty replay with 200, so the class decision is what the
+// status reports.
+var storeDirectReadRoutes = []string{
+	"/api/activity",
+	"/api/insights/run",
+	"/api/templates",
+	"/api/web-analytics",
+	"/api/persons",
+	"/api/cohorts",
+	"/api/cohorts/audiences",
+	"/api/subscription/mapping",
+	"/api/events/explore",
+	"/api/events/names",
+	"/api/sessions/qa-no-such-session/replay",
+	"/api/saved-queries",
+	"/api/events",
+	"/api/sessions",
+}
+
 func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
@@ -648,23 +949,10 @@ func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
 
 	// The read routes that return the project's analytics. /api/projects is not
 	// here: it returns the project the credential addressed — the addressing
-	// itself — and is the one admission-only route, reached through
-	// projectForAdmission.
-	reads := []string{
-		"/api/activity",
-		"/api/insights/run",
-		"/api/templates",
-		"/api/web-analytics",
-		"/api/persons",
-		"/api/cohorts",
-		"/api/cohorts/audiences",
-		"/api/subscription/mapping",
-		"/api/events/explore",
-		"/api/events/names",
-		"/api/saved-queries",
-		"/api/events",
-		"/api/sessions",
-	}
+	// itself — and is the one admission-only route, reached by calling
+	// projectFromRequest directly (there is no wrapper to reuse, and
+	// TestNoRouteResolvesThroughTheReadResolver counts the call sites).
+	reads := storeDirectReadRoutes
 	sourcesCaller := caller{name: "sources:read credential", headers: map[string]string{"Authorization": "Bearer " + sources}}
 	analyticsCaller := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + analytics}, projectID: project.ID}
 	viewerCaller := caller{name: "viewer session", cookies: []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}}, projectID: project.ID}
