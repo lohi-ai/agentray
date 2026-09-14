@@ -112,13 +112,12 @@ func (h Handler) Waitlist(c echo.Context) error {
 		// The event store is append-only with a bounded retention window
 		// (`EVENT_RETENTION_DAYS`, default one year — an operator can set
 		// it to 0, which keeps every event forever); the contact table is
-		// not. Writing the address to both would mean DeleteWaitlistSignup
-		// removes the row the owner can see and leaves the copy they cannot,
-		// which turns "remove my data" into a lie the product tells on the
-		// owner's behalf. The link that matters is distinct_id, and that is
-		// already on both sides: the same visitor who fired user.pageview fires
-		// waitlist.joined, so the conversion rate is real without the address
-		// ever leaving Postgres.
+		// not. Writing the address to both would leave a copy the owner
+		// cannot remove, which turns "remove my data" into a lie the product
+		// tells on the owner's behalf. The link that matters is distinct_id,
+		// and that is already on both sides: the same visitor who fired
+		// user.pageview fires waitlist.joined, so the conversion rate is real
+		// without the address ever leaving Postgres.
 		join, err := h.toEvent(c, capturePayload{
 			APIKey: apiKey, Event: "waitlist.joined", DistinctID: distinctID, Properties: props,
 		}, apiKey)
@@ -196,13 +195,3 @@ func (h Handler) WaitlistUnsubscribe(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"status": 1, "unsubscribed": true})
 }
 
-// UnsubscribeURL builds the link for a token. It is handed to the OWNER through
-// their authenticated contact export — never to the page that submitted the
-// form, which is called with the public write key and so is the whole internet.
-func UnsubscribeURL(c echo.Context, token string) string {
-	scheme := "https"
-	if c.Request().TLS == nil && strings.HasPrefix(c.Request().Host, "localhost") {
-		scheme = "http"
-	}
-	return scheme + "://" + c.Request().Host + "/waitlist/unsubscribe?token=" + token
-}

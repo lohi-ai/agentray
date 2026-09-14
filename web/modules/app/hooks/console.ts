@@ -4,7 +4,6 @@ import { useEffect, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { AgentRayAPI, type Agent, type AudienceInput, type Filters, type SubscriptionMappingInput } from '@/lib/api';
-import { buildIdentityMap } from '@/lib/identity';
 import { useAuthStore, useFiltersStore, useUIStore } from '@/lib/app-state';
 import { invalidateRecommendationQueries } from '@/lib/recommendation-cache';
 
@@ -109,10 +108,6 @@ export function usePersons() {
   };
 }
 
-export function useExplorer() {
-  const query = useConsoleQuery();
-  return query.data?.explorer?.explorer ?? null;
-}
 
 // useCohorts drives the Cohort Analysis page on its own query, keyed by the
 // audience segment so the segment toggle refetches without disturbing the shared
@@ -516,37 +511,3 @@ export function useReplay() {
   };
 }
 
-export function useIdentityMap() {
-  const query = useConsoleQuery();
-  const replay = useUIStore((s) => s.replay);
-
-  return useMemo(() => {
-    const summary = query.data?.activity?.summary;
-    const explorer = query.data?.explorer?.explorer;
-    const persons = query.data?.persons?.persons;
-
-    const map = buildIdentityMap([
-      ...(summary?.recent_events || []),
-      ...(explorer?.events || []),
-      ...(explorer?.timeline || []),
-      ...(replay?.events || []),
-    ]);
-    for (const person of persons?.persons || []) {
-      if (!person.email && !person.name) continue;
-      map[person.distinct_id] = {
-        email: person.email || map[person.distinct_id]?.email,
-        name: person.name || map[person.distinct_id]?.name,
-      };
-    }
-    return map;
-  }, [query.data, replay]);
-}
-
-export function useUIState() {
-  const consoleQuery = useConsoleQuery();
-  return {
-    message: useUIStore((s) => s.message),
-    error: useUIStore((s) => s.error),
-    loading: consoleQuery.isFetching,
-  };
-}

@@ -122,7 +122,6 @@ export function DashboardPage() {
 
   return (
     <AppShell
-      active="dashboards"
       title="Dashboards"
       sub={boardSubtitle}
       actions={<>

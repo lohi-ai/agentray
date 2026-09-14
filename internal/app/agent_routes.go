@@ -565,17 +565,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 	// --- agent grants (workspace-owned agents assigned into projects) ---
 	// The workspace owns agents; a grant assigns one into a project (a product)
 	// with a per-project scope cap. These power "assign this agent to a product".
-	e.GET("/api/agent/workspace-agents", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		agents, err := store.ListWorkspaceAgents(c.Request().Context(), ctx.User.ID, project.WorkspaceID)
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{"agents": agents})
-	})
 
 	e.GET("/api/agent/agents/:id/grants", func(c echo.Context) error {
 		ctx, _, err := authProject(c, store)
@@ -786,43 +775,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	// --- long-term memory (§14.7, §14.10) ---
-	// Memory is agent-private: writes land on the agent scope, so list/delete
-	// must resolve that same scope. An empty `agent` query param keeps the
-	// default agent (the project id), so existing callers are unchanged.
-	e.GET("/api/agent/memory", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		agentID := c.QueryParam("agent")
-		scopeID, serr := store.AgentScopeForRun(c.Request().Context(), project.ID, agentID)
-		if serr != nil {
-			return echo.NewHTTPError(http.StatusForbidden, serr.Error())
-		}
-		mem, err := store.ListAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, scopeID, intParam(c, "limit", 50, 1, 200))
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, map[string]any{"memory": mem})
-	})
-
-	e.DELETE("/api/agent/memory/:id", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		agentID := c.QueryParam("agent")
-		scopeID, serr := store.AgentScopeForRun(c.Request().Context(), project.ID, agentID)
-		if serr != nil {
-			return echo.NewHTTPError(http.StatusForbidden, serr.Error())
-		}
-		if err := store.DeleteAgentMemory(c.Request().Context(), ctx.User.ID, project.ID, scopeID, c.Param("id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
-
 	// --- runs (§8) ---
 	e.GET("/api/agent/runs", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
@@ -1018,36 +970,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
 			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
 		})
-	})
-
-	// --- live control (§ steering): inject a message into an in-flight run keyed
-	// on the client conversation id. `steer` is honored before the model reasons on
-	// its next turn (a mid-run correction); `followup` continues the same bounded
-	// run after it produces its next final answer. Returns delivered:false when no
-	// run is live for the session (the client then starts a normal turn). ---
-	e.POST("/api/agent/chat/steer", func(c echo.Context) error {
-		_, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		if liveReg == nil {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "live control unavailable")
-		}
-		var payload struct {
-			SessionID string `json:"session_id"`
-			Message   string `json:"message"`
-			Mode      string `json:"mode"` // "steer" (default) | "followup"
-		}
-		if err := c.Bind(&payload); err != nil || payload.SessionID == "" || payload.Message == "" {
-			return echo.NewHTTPError(http.StatusBadRequest, "session_id and message required")
-		}
-		delivered := false
-		if payload.Mode == "followup" {
-			delivered = liveReg.FollowUp(project.ID, payload.SessionID, payload.Message)
-		} else {
-			delivered = liveReg.Steer(project.ID, payload.SessionID, payload.Message)
-		}
-		return c.JSON(http.StatusOK, map[string]any{"delivered": delivered})
 	})
 
 	// --- live control (§ stop): cancel an in-flight run keyed on the client
@@ -1353,49 +1275,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return err
 		}
 		return runConversationTurn(c, ctx, project, conv, message, "")
-	})
-
-	// --- resume (§ durable runs): replay a crashed/interrupted run from its durable
-	// session log. Reduces the append-only log into a conservative recovery plan,
-	// rebuilds a valid transcript, and drives a fresh run seeded with it. Owner/admin
-	// only — it spends model budget. ---
-	e.POST("/api/agent/run/:run_id/resume", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		runner := agentruntime.NewRunner(store, runnerOpts...)
-		run, res, runErr := runner.ResumeRun(c.Request().Context(), ctx.User.ID, project.ID, c.Param("run_id"))
-		if runErr != nil {
-			return c.JSON(http.StatusBadGateway, map[string]any{"error": runErr.Error(), "run_id": run.ID})
-		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"run_id": run.ID, "final": res.Final, "tool_calls": res.Tools,
-			"usage": res.Usage, "turns": res.Turns,
-		})
-	})
-
-	// --- manual "run now": enqueue a scheduled-style autonomous run ---
-	e.POST("/api/agent/run", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		// Only owner/admin can trigger autonomous runs.
-		cfg, err := store.GetAgentConfig(c.Request().Context(), ctx.User.ID, project.ID)
-		if err != nil {
-			return err
-		}
-		if !cfg.Enabled {
-			return echo.NewHTTPError(http.StatusForbidden, "agent is disabled for this project")
-		}
-		if scheduler == nil {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "scheduler unavailable")
-		}
-		if err := scheduler.Publish(project.ID, agentruntime.MonitorPrompt); err != nil {
-			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
-		}
-		return c.JSON(http.StatusAccepted, map[string]any{"queued": true})
 	})
 
 	// --- triggers (AgentGarden §7): per-agent schedule + webhook config ---

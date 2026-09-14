@@ -7,7 +7,7 @@
 // ingesting — the meter informs, it never blocks. Copy in this file must not
 // promise otherwise.
 
-export type PlanID = 'free' | 'solo' | 'team';
+type PlanID = 'free' | 'solo' | 'team';
 
 export type Plan = {
   id: PlanID;
