@@ -7,6 +7,7 @@ import {
   WORKLOAD_CATEGORIES,
   childSurfacesFor,
   isLinkedSurface,
+  isShippedChannel,
   firstSessionNotice,
   firstValuePath,
   formatAgentError,
@@ -112,6 +113,22 @@ describe('nav grouping', () => {
       expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
     );
   });
+
+  it('exposes every child surface through a real nav parent', () => {
+    // Below 1400px the aside is hidden and the shell nests the active item's
+    // child surfaces inside its SideNavItem instead. That only works when every
+    // surface's parentHref is a top-level item — an orphaned parentHref would
+    // make the surface unreachable at any width.
+    const navHrefs = new Set(NAV_ITEMS.map((item) => item.href));
+    for (const surface of CHILD_SURFACES) {
+      expect(navHrefs.has(surface.parentHref)).toBe(true);
+    }
+    // Coming-soon surfaces are part of the set the nav exposes — represented
+    // in the IA means the shell can render them, not that they are filtered out.
+    expect(childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s)).map((s) => s.label)).toEqual(
+      ['Acquisition', 'Monetization', 'Usage'],
+    );
+  });
 });
 
 describe('matchActiveHref', () => {
@@ -166,6 +183,23 @@ describe('architecture catalogs', () => {
     expect(kinds).not.toContain('discord');
     expect(kinds).not.toContain('telegram');
     expect(FUTURE_CHANNELS.map((c) => c.kind)).toEqual(['slack', 'discord', 'telegram']);
+  });
+
+  it('gives reserved channels no href — a placeholder URL is a dead link', () => {
+    // The catalog lists support_widget and voice so the UI can say "not yet",
+    // but a channel that ships nothing has no destination. An empty-string
+    // href is still a link the router cannot serve.
+    for (const channel of CHANNEL_CATALOG) {
+      if (channel.shipped) {
+        expect(channel.href).toMatch(/^\//);
+      } else {
+        expect(channel.href).toBeUndefined();
+        expect(isShippedChannel(channel)).toBe(false);
+      }
+    }
+    expect(CHANNEL_CATALOG.filter(isShippedChannel).map((c) => c.kind)).toEqual([
+      'chat', 'mcp', 'schedule', 'webhook', 'lab',
+    ]);
   });
 
   // Reserved means "ships no pack". Operator stopped being reserved when
