@@ -32,7 +32,7 @@ export function TeamPage() {
 
   if (notFound) {
     return (
-      <AppShell active="agents">
+      <AppShell>
         <EmptyState title="Team not found" detail="It may have been deleted, or it belongs to another project." action={<Button variant="outline" size="sm" onClick={() => router.push('/teams')}>Back to teams</Button>} />
       </AppShell>
     );
@@ -46,7 +46,6 @@ export function TeamPage() {
 
   return (
     <AppShell
-      active="agents"
       title={
         <span className="flex items-center gap-3">
           <Button variant="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={() => router.push('/teams')}>Teams</Button>

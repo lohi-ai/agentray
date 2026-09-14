@@ -34,7 +34,7 @@ export function PrototypeDetailPage() {
 
   if (isLoading && !test) {
     return (
-      <AppShell active="prototypes">
+      <AppShell>
         <Loading label="Opening the prototype…" />
       </AppShell>
     );
@@ -42,7 +42,7 @@ export function PrototypeDetailPage() {
 
   if (error || !test) {
     return (
-      <AppShell active="prototypes" title="Prototype" sub="One falsifiable bet on one idea.">
+      <AppShell title="Prototype" sub="One falsifiable bet on one idea.">
         <Callout
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
@@ -68,7 +68,6 @@ export function PrototypeDetailPage() {
 
   return (
     <AppShell
-      active="prototypes"
       title={
           <HStack gap={2} align="center">
             <span>Prototype</span>

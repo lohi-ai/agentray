@@ -89,8 +89,7 @@ type Runner struct {
 	Tracer observe.Sink
 	// SessionStore, when non-nil, makes every run durable: the loop appends an
 	// append-only entry log (keyed by run id) so a crashed or compacted run can be
-	// reduced and resumed (ResumeRun / the resume endpoint). nil (the default)
-	// keeps runs in-memory only.
+	// reduced. nil (the default) keeps runs in-memory only.
 	SessionStore agentcore.SessionStore
 	// SpillStore, when non-nil, keeps an oversized tool result out of the model's
 	// context WITHOUT destroying it: the full text is persisted and the model gets
@@ -382,23 +381,11 @@ type RunOptions struct {
 	// WorkspaceKey overrides which conversation this run's workspace belongs to,
 	// without any of SessionID's other effects.
 	//
-	// The workspace segment normally comes from SessionID, but two run shapes have
-	// no SessionID and must not therefore share one directory: a delegated run
-	// (the sub-agent runs under the PARENT's conversation, and reusing SessionID
-	// itself would collide with the parent in the LiveRegistry) and a resumed run
-	// (which continues a conversation it must still be able to read its own files
-	// from). Both set this instead. Empty falls back to SessionID, then
-	// ResumeSessionID.
+	// The workspace segment normally comes from SessionID, but a delegated run
+	// has no SessionID and must not therefore share one directory: the sub-agent
+	// runs under the PARENT's conversation, and reusing SessionID itself would
+	// collide with the parent in the LiveRegistry. Empty falls back to SessionID.
 	WorkspaceKey string
-	// ResumeSessionID, when set, makes this run CONTINUE the durable session of a
-	// previous run instead of opening a fresh log: the session is the durable
-	// object, runs are attempts on it. A new run row is still created (billing,
-	// trace), but the loop keys its log on this id and recovers from it —
-	// history rebuilt from the log, the crashed run's disabled tools re-applied,
-	// dangling retry-safe calls replayed with their original call IDs (so
-	// idempotency keys and sub-agent child sessions reattach), the rest closed
-	// with interrupted notes. Empty — the default — keys the log on the new run id.
-	ResumeSessionID string
 	// MaxTokens caps the model's output tokens per turn. 0 — the default — uses
 	// the provider's own cap. Set a generous value for runs that emit large
 	// artifacts so output isn't truncated with stop_reason:"length".
@@ -542,15 +529,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	}
 	// Which conversation's directory this is: an explicit WorkspaceKey (delegate,
 	// resume) first, then the live conversation, then the session being resumed.
-	// Without this fallback chain every run that has no SessionID — every delegate,
-	// every resume — collapses onto the agent's single "default" directory, and two
-	// concurrent conversations delegating to the same member overwrite each other.
+	// Without this fallback every run that has no SessionID — every delegate —
+	// collapses onto the agent's single "default" directory, and two concurrent
+	// conversations delegating to the same member overwrite each other.
 	workspaceKey := opts.WorkspaceKey
 	if workspaceKey == "" {
 		workspaceKey = opts.SessionID
-	}
-	if workspaceKey == "" {
-		workspaceKey = opts.ResumeSessionID
 	}
 	runWorkspace, wserr := sandbox.WorkspaceFor(r.WorkspaceBase, sandbox.WorkspaceScope{
 		WorkspaceID:    wsID,
@@ -676,13 +660,9 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		}
 	}
 
-	// A resume attempt records the durable session it continues on its run row
-	// (the session_id column) so a later resume of THIS run can follow the chain
-	// back to the log; a chat run records its conversation id there as before.
+	// A chat run records its conversation id on the run row (the session_id
+	// column) so a later turn can follow the chain back to the log.
 	rowSession := opts.SessionID
-	if rowSession == "" && opts.ResumeSessionID != "" {
-		rowSession = opts.ResumeSessionID
-	}
 	runID, err := r.Store.CreateAgentRun(ctx, opts.ProjectID, scopeID, trigger, rowSession)
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -699,13 +679,8 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// opaque; the run→agent mapping stays here in the consumer.
 	ctx = observe.WithTraceID(ctx, runID)
 
-	// The durable log this run appends to: its own id, or — on a resume — the
-	// original run's session, so the log continues as one durable object across
-	// attempts (child-session ids and idempotency keys stay stable).
+	// The durable log this run appends to, keyed on the run id.
 	durableSession := runID
-	if opts.ResumeSessionID != "" {
-		durableSession = opts.ResumeSessionID
-	}
 
 	// Key the persistent computer_use session to the conversation (so installed
 	// tooling and produced files survive across turns) and fall back to the run id
@@ -815,14 +790,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		ReadOnly:     opts.ReadOnly,
 		Tracer:       r.Tracer,
 		StepGate:     opts.StepGate,
-		// Durable resume: key the append-only log on the run id (the FK that the
-		// resume endpoint and the trace both use) — unless this run continues an
-		// earlier run's session, in which case the ORIGINAL log keeps growing
-		// under its own id and the loop recovers from it (retry-safe replay,
-		// breaker re-applied, sub-agent reattach). nil store leaves runs in-memory.
+		// Durable log: key the append-only log on the run id (the FK that the
+		// trace uses). nil store leaves runs in-memory.
 		Session:       r.SessionStore,
 		SessionID:     durableSession,
-		ResumeSession: opts.ResumeSessionID != "",
 		MaxTokens:     maxTokens,
 		// Prompt caching: a stable per-agent key so the persona/skills system prefix
 		// is reused across this agent's turns and runs. Empty store keys leave the
@@ -871,8 +842,6 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 
 	// Thread prior turns into a multi-turn run when the caller supplied history;
 	// the current prompt is the task that drives skill selection + memory recall.
-	// On a resume these seeds are a fallback only — the loop rebuilds history
-	// from the continued session's log (ResumeRun verified it is non-empty).
 	messages := append(append([]agentcore.Message{}, opts.History...), agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
 
 	// The model loop runs on runCtx (cancellable by Stop); everything after it —
@@ -1022,106 +991,6 @@ func normalizeProvider(p string) string {
 	return p
 }
 
-// ResumeRun continues a crashed or interrupted run from its durable session log
-// (agentcore P9). The session is the durable object and runs are attempts on
-// it: resume opens a NEW run row (billing, trace) but the loop continues the
-// ORIGINAL session — history is rebuilt from the log in-loop, the crashed run's
-// disabled tools are re-applied, and dangling retry-safe calls are replayed
-// with their original call IDs, so idempotency keys stay stable and a dangling
-// spawn_subagent reattaches to its child's recorded work instead of redoing it.
-// A run with no durable log, or one that already reached a final answer, is not
-// resumable and returns an error.
-//
-// Resuming a run that was itself a resume follows the chain: the attempt row
-// records the session it continued (session_id), so the original log is found
-// no matter which attempt the caller points at. The caller has already been
-// authorized for the run (GetAgentRun enforces project membership).
-func (r *Runner) ResumeRun(ctx context.Context, userID, projectID, runID string) (storage.AgentRun, agentcore.RunResult, error) {
-	if r.SessionStore == nil {
-		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agentruntime: durable sessions are disabled; cannot resume")
-	}
-	run, _, err := r.Store.GetAgentRun(ctx, userID, projectID, runID)
-	if err != nil {
-		return storage.AgentRun{}, agentcore.RunResult{}, err
-	}
-	// A run that is still executing must not be resumed: two loops appending to
-	// the same durable log would interleave entries and race the seq assignment.
-	// (A crashed process leaves status "running" too — the reaper flips those to
-	// "error" after the stale-run window, after which resume proceeds.)
-	if run.Status == "running" {
-		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agentruntime: run %s is still running; wait for it to finish (or be reaped) before resuming", runID)
-	}
-	sessionID := runID
-	// The windowed read, same as the loop's: a suffix that reduces to the same
-	// state, or the whole log when it would not. This pass only reduces the log
-	// (to validate resumability and recover the task), and reduce restarts at the
-	// newest checkpoint either way — so the window and the whole log give it the
-	// identical answer, for a fraction of the read.
-	log, err := agentcore.LoadResumeLog(ctx, r.SessionStore, sessionID)
-	if err != nil {
-		return storage.AgentRun{}, agentcore.RunResult{}, err
-	}
-	if len(log) == 0 && run.SessionID != "" {
-		// This run has no log of its own but references a session (it was itself
-		// a resume attempt, or a chat run whose log lives under the conversation
-		// chain): continue that session instead.
-		if chained, cerr := agentcore.LoadResumeLog(ctx, r.SessionStore, run.SessionID); cerr == nil && len(chained) > 0 {
-			sessionID, log = run.SessionID, chained
-		}
-	}
-	if len(log) == 0 {
-		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agentruntime: run %s has no durable log to resume", runID)
-	}
-	// The loop redoes recovery in-session with the real toolset; this pass only
-	// validates resumability and extracts the task for recall/skill selection.
-	plan := agentcore.RecoverSession(log, nil, agentcore.RecoveryMarkInterrupted)
-	if plan.Completed {
-		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("agentruntime: run %s already completed; nothing to resume", runID)
-	}
-
-	// The default agent's id equals the project id; pass "" in that case so the
-	// scope resolves to the project (the original single-agent path).
-	agentID := run.AgentID
-	if agentID == projectID {
-		agentID = ""
-	}
-	// Preserve the original trigger so the autonomy rail re-applies: a resumed
-	// scheduled/webhook run is still unattended and must not regain
-	// external-write tools by being relabeled "manual".
-	trigger := run.Trigger
-	if trigger == "" {
-		trigger = "manual"
-	}
-	// The resumed run continues a conversation, so it must land in that
-	// conversation's workspace — the files the interrupted run wrote are the
-	// context it is resuming with. run.SessionID is the original chat's
-	// conversation id (see rowSession above); the durable session id stands in
-	// when the run had none.
-	workspaceKey := run.SessionID
-	if workspaceKey == "" {
-		workspaceKey = sessionID
-	}
-	return r.Run(ctx, RunOptions{
-		ProjectID:       projectID,
-		AgentID:         agentID,
-		Trigger:         trigger,
-		Prompt:          lastUserPrompt(plan.Messages),
-		ResumeSessionID: sessionID,
-		WorkspaceKey:    workspaceKey,
-	})
-}
-
-// lastUserPrompt returns the most recent user message content, used as the
-// resumed run's task for memory recall and skill selection. Empty when the
-// transcript has no user turn.
-func lastUserPrompt(messages []agentcore.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == agentcore.RoleUser {
-			return messages[i].Content
-		}
-	}
-	return ""
-}
 
 // CheapProvider resolves the provider+model for the orchestrator's front-desk
 // "triage" task — cheap, no-analytics intent classification and small-talk. It

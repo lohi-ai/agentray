@@ -25,7 +25,6 @@ export function TeamsPage() {
 
   return (
     <AppShell
-      active="agents"
       title="Agent teams"
       sub="Group agents around a board, pick a lead, and let it orchestrate the work."
       actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate}>New team</Button>}

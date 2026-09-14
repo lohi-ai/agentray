@@ -3,7 +3,7 @@
 
 export type AuthMode = 'login' | 'signup';
 
-export type AuthFormValues = {
+type AuthFormValues = {
   mode: AuthMode;
   email: string;
   name: string;
@@ -14,7 +14,7 @@ export type AuthFormValues = {
 
 export type AuthField = 'email' | 'name' | 'password' | 'workspaceName' | 'projectName';
 
-export type AuthFormIssue = {
+type AuthFormIssue = {
   field: AuthField;
   message: string;
 };

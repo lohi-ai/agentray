@@ -25,7 +25,7 @@ export function Modal({ title, onClose, children, footer, wide = false }: { titl
   );
 }
 
-export type PromptOption = { value: string; label: string };
+type PromptOption = { value: string; label: string };
 
 // PromptDialog replaces window.prompt: a single text field, plus an optional
 // select (for choosing from a known set like chart metrics). Enter submits.

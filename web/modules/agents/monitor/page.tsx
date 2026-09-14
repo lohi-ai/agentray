@@ -39,7 +39,6 @@ export function AgentsMonitorPage() {
 
   return (
     <AppShell
-      active="monitor"
       title="Agent health"
       sub="Know what's safe, active, or needs review."
       actions={<Button variant="primary" icon={<Radio size={15} />} onClick={() => router.push('/chat')}>Open live monitor</Button>}
