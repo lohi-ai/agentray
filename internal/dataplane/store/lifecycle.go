@@ -750,8 +750,11 @@ func (s *Store) DataConnectorForProject(ctx context.Context, projectID, connecto
 	return c, err
 }
 
-// archiveDataConnector soft-archives a connector and disables its syncs in
-// the same transaction — an archived source can never keep landing rows.
+// archiveDataConnector soft-archives a connector and, in the same
+// transaction, disables its syncs and cancels the runs it already admitted —
+// an archived source can never keep landing rows. Queued runs end cancelled
+// inside this transaction; a running run is asked to stop and does so at its
+// next heartbeat (the engine's 10-second poll), finishing cancelled.
 // Syncs it disables are marked disabled_by_archive so unarchive resumes
 // exactly those; a sync the operator paused by hand stays paused. The FIRST
 // mutation requires the current revision; an already-archived row returns its
@@ -784,6 +787,20 @@ RETURNING `+dataConnectorColumns, projectID, connectorID, expectedRevision).
 UPDATE connector_syncs
 SET enabled = false, disabled_by_archive = true, revision = revision + 1, updated_at = now()
 WHERE connector_id = $1 AND project_id = $2 AND enabled`, connectorID, projectID)
+		if err != nil {
+			return err
+		}
+		// An archived source must never keep landing rows, and pausing its
+		// syncs only stops the runs it would start next. Stop the runs it
+		// already admitted too, in the same transaction: a queued run is
+		// terminal here, and a running run carries the flag its worker reads
+		// back on its next heartbeat before it finishes cancelled.
+		_, err = tx.Exec(ctx, `
+UPDATE connector_runs
+SET cancel_requested = true,
+    status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
+    finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END
+WHERE connector_id = $1 AND project_id = $2 AND status IN ('queued', 'running')`, connectorID, projectID)
 		return err
 	})
 	return c, err

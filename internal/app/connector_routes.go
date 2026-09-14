@@ -336,10 +336,28 @@ func openConnectorSource(ctx context.Context, store *storage.Store, userID, proj
 	return connector.Open(ctx, kind, dsn)
 }
 
+// workspaceTierReader is the one read the authoring-tier resolution needs.
+// Narrow so a unit test can drive every fallback without a database.
+type workspaceTierReader interface {
+	WorkspaceTiersForRun(ctx context.Context, workspaceID string) (storage.WorkspaceModelTiers, map[string]string, error)
+}
+
+// authoringProviderInitError marks a failure to CONSTRUCT the provider, as
+// opposed to a failure to read its configuration. Callers keep their own status
+// contract: /api/agent/definition/generate answers 502 for a provider it could
+// not build and 400 for configuration it could not read.
+type authoringProviderInitError struct{ err error }
+
+func (e *authoringProviderInitError) Error() string { return e.err.Error() }
+func (e *authoringProviderInitError) Unwrap() error { return e.err }
+
 // authoringProvider resolves the workspace's authoring model tier (same
 // resolution as the agent-definition draft endpoint) into a callable provider.
-func authoringProvider(ctx context.Context, store *storage.Store, workspaceID string) (agentcore.LLMProvider, string, error) {
-	cfg, keys, err := store.WorkspaceTiersForRun(ctx, workspaceID)
+// It is the single owner of the tier/fallback rules both authoring endpoints
+// use: the pro tier's overrides, falling back to the flash default, then to the
+// workspace defaults and the flash key.
+func authoringProvider(ctx context.Context, tiers workspaceTierReader, workspaceID string) (agentcore.LLMProvider, string, error) {
+	cfg, keys, err := tiers.WorkspaceTiersForRun(ctx, workspaceID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -361,7 +379,7 @@ func authoringProvider(ctx context.Context, store *storage.Store, workspaceID st
 	}
 	provider, err := agentruntime.NewTierProvider(pro.Provider, pro.BaseURL, pro.APIKey)
 	if err != nil {
-		return nil, "", err
+		return nil, "", &authoringProviderInitError{err: err}
 	}
 	return provider, pro.Model, nil
 }

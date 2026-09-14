@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -374,10 +375,10 @@ func (sb *sqlSandbox) createTables(ctx context.Context) error {
 }
 
 // refresh copies the project's rows from the main store into the sandbox.
-// Events are append-only, so the copy is incremental on (inserted_at,
-// event_id); aliases and external_rows are small enough to reconcile
-// wholesale. A row removed from the main file is removed here too — the
-// count check keeps the common refresh cheap.
+// Events and external_rows are append-mostly, so both copies are incremental
+// on a high-water key; aliases (one row per identify) are still reconciled
+// wholesale. A row removed from the main file is removed here too — a count
+// comparison catches it without a per-row probe on the common path.
 func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -388,11 +389,10 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 		return fmt.Errorf("refresh events: %w", err)
 	}
 	if err := sb.refreshTable(ctx, "aliases",
-		`SELECT project_id, anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, 3); err != nil {
+		`SELECT project_id, anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, 3, false); err != nil {
 		return fmt.Errorf("refresh aliases: %w", err)
 	}
-	if err := sb.refreshTable(ctx, "external_rows",
-		`SELECT project_id, connector_id, table_name, row_key, cursor, data, synced_at FROM external_rows WHERE project_id = ?`, 7); err != nil {
+	if err := sb.refreshExternalRows(ctx); err != nil {
 		return fmt.Errorf("refresh external_rows: %w", err)
 	}
 	return nil
@@ -439,7 +439,7 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		return err
 	}
 	if err := sb.copyRows(ctx, sandboxEventCopy,
-		[]any{sb.projectID, highWater, highWater, highWaterID}, "events", 28); err != nil {
+		[]any{sb.projectID, highWater, highWater, highWaterID}, "events", 28, false); err != nil {
 		return err
 	}
 
@@ -469,24 +469,101 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 			return err
 		}
 		return sb.copyRows(ctx, sandboxEventCopy,
-			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 28)
+			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 28, false)
 	}
 	return nil
 }
 
-// refreshTable reconciles a small table wholesale: delete-then-copy so a row
-// removed upstream disappears here too. Both tables are small (aliases are
-// one row per identify, external_rows one per synced source row).
-func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string, nCols int) error {
+// externalRowsSelect is the sandbox copy's column list — the shape both the
+// incremental range copy and the wholesale rebuild stream.
+const externalRowsSelect = `SELECT project_id, connector_id, table_name, row_key, cursor, data, synced_at
+FROM external_rows WHERE project_id = ?`
+
+// refreshExternalRows appends only what a connector landed since the last
+// refresh, keyed on (synced_at, connector_id, table_name, row_key): one
+// InsertExternalRows batch stamps a single synced_at, and re-landing an
+// existing (project, connector, table, row_key) row writes it with a fresh
+// synced_at, so the tuple moves forward for updates as well as inserts.
+// Copying the whole table on every query made sandbox cost grow with the
+// connector's landed data. The count comparison keeps deletions honest: a row
+// gone from the main file is gone from the sandbox after the same refresh.
+func (sb *sqlSandbox) refreshExternalRows(ctx context.Context) error {
+	// The cursor is the greatest tuple present in the sandbox — read as a row,
+	// not as per-column maxima, so the range predicate never skips a row that
+	// shares the high-water timestamp.
+	var highWater time.Time
+	var highWaterConnector, highWaterTable, highWaterKey string
+	err := sb.feeder.QueryRowContext(ctx,
+		`SELECT synced_at, connector_id::VARCHAR, table_name, row_key FROM external_rows
+		 ORDER BY synced_at DESC, connector_id::VARCHAR DESC, table_name DESC, row_key DESC
+		 LIMIT 1`).Scan(&highWater, &highWaterConnector, &highWaterTable, &highWaterKey)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	var sandboxCount, mainCount int64
+	if err := sb.feeder.QueryRowContext(ctx, `SELECT count(*) FROM external_rows`).Scan(&sandboxCount); err != nil {
+		return err
+	}
+	if err := sb.main.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM external_rows WHERE project_id = ?`, sb.projectID).Scan(&mainCount)
+	}); err != nil {
+		return err
+	}
+	if sandboxCount > mainCount {
+		// Rows vanished from the main file; rebuild rather than probe per row.
+		return sb.refreshTable(ctx, "external_rows", externalRowsSelect, 7, true)
+	}
+
+	if err := sb.copyRows(ctx,
+		`SELECT project_id, connector_id, table_name, row_key, cursor, data, synced_at FROM external_rows
+		 WHERE project_id = ?
+		   AND (synced_at > ?
+		        OR (synced_at = ? AND (connector_id::VARCHAR > ?
+		             OR (connector_id::VARCHAR = ? AND (table_name > ?
+		                  OR (table_name = ? AND row_key > ?))))))
+		 ORDER BY synced_at, connector_id::VARCHAR, table_name, row_key`,
+		[]any{sb.projectID, highWater, highWater, highWaterConnector, highWaterConnector, highWaterTable, highWaterTable, highWaterKey},
+		"external_rows", 7, true); err != nil {
+		return err
+	}
+
+	// A delete that kept the count equal — one row removed upstream, one landed
+	// — leaves the sandbox holding a row the source no longer has. The
+	// post-copy comparison sees it without a per-row existence probe.
+	var afterCount int64
+	if err := sb.feeder.QueryRowContext(ctx, `SELECT count(*) FROM external_rows`).Scan(&afterCount); err != nil {
+		return err
+	}
+	if afterCount != mainCount {
+		return sb.refreshTable(ctx, "external_rows", externalRowsSelect, 7, true)
+	}
+	return nil
+}
+
+// refreshTable reconciles a table wholesale: delete-then-copy so a row removed
+// upstream disappears here too. Aliases are one row per identify and always
+// pass replaceExisting=false; the landing table is keyed by
+// project/connector/table/row_key and passes true, which also lets the rebuild
+// absorb a row that arrived while it was streaming.
+func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string, nCols int, replaceExisting bool) error {
 	if _, err := sb.feeder.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 		return err
 	}
-	return sb.copyRows(ctx, selectSQL, []any{sb.projectID}, table, nCols)
+	return sb.copyRows(ctx, selectSQL, []any{sb.projectID}, table, nCols, replaceExisting)
 }
 
 // copyRows streams rows out of the main store and inserts them into the
 // sandbox in batches. The sandbox never sees the file — only values.
-func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int) error {
+// replaceExisting turns the insert into INSERT OR REPLACE, which an incremental
+// copy of a re-landed row needs (external_rows is keyed by
+// project/connector/table/row_key); append-only tables pass false.
+func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int, replaceExisting bool) error {
+	verb := "INSERT INTO"
+	if replaceExisting {
+		verb = "INSERT OR REPLACE INTO"
+	}
 	var rows *sql.Rows
 	err := sb.main.Read(ctx, func(conn *sql.Conn) error {
 		var err error
@@ -504,7 +581,7 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 		}
 		// Build the batched INSERT once.
 		placeholder := "(" + strings.TrimSuffix(strings.Repeat("?,", nCols), ",") + ")"
-		insertSQL := fmt.Sprintf("INSERT INTO %s VALUES %s", table,
+		insertSQL := fmt.Sprintf("%s %s VALUES %s", verb, table,
 			strings.TrimSuffix(strings.Repeat(placeholder+",", sandboxCopyBatch), ","))
 		stmt, err := sb.feeder.PrepareContext(ctx, insertSQL)
 		if err != nil {
@@ -512,7 +589,7 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 		}
 		defer stmt.Close()
 		single, err := sb.feeder.PrepareContext(ctx,
-			fmt.Sprintf("INSERT INTO %s VALUES %s", table, placeholder))
+			fmt.Sprintf("%s %s VALUES %s", verb, table, placeholder))
 		if err != nil {
 			return err
 		}
