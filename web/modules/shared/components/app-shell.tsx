@@ -42,8 +42,6 @@ const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/plans': FlaskConical,
 };
 
-
-
 // Account + language + logout footer, pinned to the bottom of the SideNav.
 function SidebarFooter() {
   const user = useUser();
