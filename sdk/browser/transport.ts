@@ -199,17 +199,23 @@ export class BatchTransport {
    * has the console open, and the event is for anything already listening.
    */
   private reportDropped(drop: DroppedBatch): void {
+    // Nothing here may throw. `deliver` is the tail of the flush chain, so an
+    // exception escaping it would reject `flush()` — and an analytics SDK must
+    // never be the reason the host page breaks. The callback is isolated from
+    // the rest so a bad one cannot also hide the console signal.
     try {
       this.onBatchDropped?.(drop);
     } catch {}
-    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-      console.warn(
-        `[agentray] dropped ${drop.events.length} event(s) after ${drop.attempts} attempt(s): ${drop.reason}`,
-      );
-    }
-    if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
-      window.dispatchEvent(new CustomEvent('agentray:batch_dropped', { detail: drop }));
-    }
+    try {
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(
+          `[agentray] dropped ${drop.events.length} event(s) after ${drop.attempts} attempt(s): ${drop.reason}`,
+        );
+      }
+      if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('agentray:batch_dropped', { detail: drop }));
+      }
+    } catch {}
   }
 
   /**

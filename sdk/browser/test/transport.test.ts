@@ -180,6 +180,27 @@ describe('BatchTransport', () => {
     vi.useRealTimers();
   });
 
+  it('does not let a throwing drop callback break the flush', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () => new Response('', { status: 502 }));
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      retryBudgetMs: 0,
+      fetchImpl,
+      onBatchDropped: () => {
+        throw new Error('host reporter is broken');
+      },
+    });
+
+    transport.enqueue(event('a'));
+    // The signal runs at the tail of the flush chain, so an exception escaping
+    // it would reject `flush()` — an analytics SDK must never be the reason the
+    // host page breaks.
+    await expect(transport.flush()).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('does not multiply requests during an outage', async () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
