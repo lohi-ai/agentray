@@ -10,9 +10,8 @@ import (
 )
 
 // The seeded "Visitors: guest vs identified" chart classifies by identity
-// linkage, not by a property. Nothing in these events carries an email or a
-// name, so the property-based query this replaced would report both visitors as
-// "Guest" — the failure mode is the second half of this test.
+// linkage, not by a property. Nothing here carries an email or a name, so the
+// property-based query this replaced would report every visitor as "Guest".
 func TestSeededGuestVsIdentifiedChartSplitsByIdentityLinkage(t *testing.T) {
 	d := openTestDuckDB(t)
 	ctx := context.Background()
@@ -30,19 +29,25 @@ func TestSeededGuestVsIdentifiedChartSplitsByIdentityLinkage(t *testing.T) {
 		e.EventName = "$identify"
 		return e
 	}
-	// One reader browses anonymously and then logs in (the SDK's identify()
-	// writes the alias and the $identify event); a second reader never signs in;
-	// a third identified but never produced a pageview.
+	// Three readers, none of whom ever sends a trait:
+	//   user-1  browsed anonymously, then identified (alias + $identify);
+	//   user-2  was linked to an anonymous id by alias alone;
+	//   never-1 never linked to anything.
+	// Plus an identify with no pageview, which is not a visitor.
 	if err := d.InsertEvents(ctx, []Event{
 		pageview("anon-1", start),
 		identify("user-1", start.Add(time.Minute)),
 		pageview("user-1", start.Add(2*time.Minute)),
-		pageview("never-1", start.Add(3*time.Minute)),
-		identify("user-2", start.Add(4*time.Minute)),
+		pageview("anon-2", start.Add(3*time.Minute)),
+		pageview("never-1", start.Add(4*time.Minute)),
+		identify("user-3", start.Add(5*time.Minute)),
 	}); err != nil {
 		t.Fatalf("InsertEvents: %v", err)
 	}
-	if err := d.UpsertAliases(ctx, [][3]string{{project, "anon-1", "user-1"}}); err != nil {
+	if err := d.UpsertAliases(ctx, [][3]string{
+		{project, "anon-1", "user-1"},
+		{project, "anon-2", "user-2"},
+	}); err != nil {
 		t.Fatalf("UpsertAliases: %v", err)
 	}
 
@@ -57,8 +62,8 @@ func TestSeededGuestVsIdentifiedChartSplitsByIdentityLinkage(t *testing.T) {
 	for _, row := range rows {
 		visitors[fmt.Sprint(row["user_type"])] = fmt.Sprint(row["visitors"])
 	}
-	if len(rows) != 2 || visitors["Identified"] != "1" || visitors["Guest"] != "1" {
-		t.Fatalf("seeded chart classified %v, want exactly one Identified and one Guest visitor", rows)
+	if len(rows) != 2 || visitors["Identified"] != "2" || visitors["Guest"] != "1" {
+		t.Fatalf("seeded chart classified %v, want two Identified and one Guest visitor", rows)
 	}
 }
 

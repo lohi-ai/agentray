@@ -2,21 +2,19 @@ package storage
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
-// The deploy-time repair, against a real Postgres. Skipped when no test
-// database is reachable, like the other *_live_test.go files:
-//
-//	AGENTRAY_TEST_DATABASE_URL=postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable \
-//	go test ./internal/dataplane/store/ -run SeededChart -v
+// The deploy-time repair, against a real Postgres: it rewrites every shipped
+// version of the seeded query on the boards that already hold it, leaves every
+// other chart byte-identical, and is a no-op on the second run. Skipped when no
+// test database is reachable — openConvTestStore is the package's live-store
+// opener, used well beyond the conversation tests it was named for.
 func TestRepairSeededChartsRewritesOnlyTheSeededQuery(t *testing.T) {
-	s, ctx := seededChartRepairStore(t)
+	s := openConvTestStore(t)
+	ctx := context.Background()
 
 	project, err := s.CreateProject(ctx, "seeded-chart-repair-"+uuid.NewString())
 	if err != nil {
@@ -32,52 +30,61 @@ func TestRepairSeededChartsRewritesOnlyTheSeededQuery(t *testing.T) {
 		t.Fatalf("CreateDashboard: %v", err)
 	}
 
-	newChart := func(chart Chart) Chart {
-		t.Helper()
-		chart.DashboardID = dashboard.ID
-		chart.ProjectID = project.ID
-		chart.XField = "user_type"
-		chart.YField = "visitors"
-		created, err := s.CreateChart(ctx, chart)
-		if err != nil {
-			t.Fatalf("CreateChart(%s): %v", chart.Name, err)
-		}
-		return created
+	// Each shipped version of the seeded chart, with the query it must become.
+	// The two ClickHouse-era strings are still on boards seeded before the
+	// engine port, which never translated stored chart SQL.
+	cases := []struct {
+		name  string
+		stale string
+		want  string
+	}{
+		{"DuckDB starter", staleStarterGuestVsIdentifiedSQL, guestVsIdentifiedSQL("canonical_id", true)},
+		{"DuckDB template", staleTemplateGuestVsIdentifiedSQL, guestVsIdentifiedSQL("distinct_id", false)},
+		{"ClickHouse starter", legacyStarterGuestVsIdentifiedSQL, guestVsIdentifiedSQL("canonical_id", true)},
+		{"ClickHouse template", legacyTemplateGuestVsIdentifiedSQL, guestVsIdentifiedSQL("distinct_id", false)},
 	}
-	starter := newChart(Chart{Name: "Visitors: guest vs identified", SQL: staleStarterGuestVsIdentifiedSQL})
-	template := newChart(Chart{Name: "Guest vs identified", SQL: staleTemplateGuestVsIdentifiedSQL})
 	// A customer's own chart that reads an email property on purpose. The repair
 	// is scoped to AgentRay's seeded queries and must leave it alone.
 	ownSQL := `SELECT count(*) AS visitors FROM events WHERE event_name = 'user.pageview' AND json_extract_string(properties, '$.email') <> ''`
-	own := newChart(Chart{Name: "Readers who left an email", SQL: ownSQL})
+
+	seeded := make([]Chart, len(cases))
+	for i, c := range cases {
+		seeded[i], err = s.CreateChart(ctx, Chart{
+			DashboardID: dashboard.ID, ProjectID: project.ID, Name: c.name,
+			SQL: c.stale, XField: "user_type", YField: "visitors",
+		})
+		if err != nil {
+			t.Fatalf("CreateChart(%s): %v", c.name, err)
+		}
+	}
+	own, err := s.CreateChart(ctx, Chart{
+		DashboardID: dashboard.ID, ProjectID: project.ID, Name: "Readers who left an email",
+		SQL: ownSQL, XField: "visitors",
+	})
+	if err != nil {
+		t.Fatalf("CreateChart(own): %v", err)
+	}
 
 	repaired, projects, err := s.repairSeededCharts(ctx)
 	if err != nil {
 		t.Fatalf("repairSeededCharts: %v", err)
 	}
 	// Other projects on a shared test database may hold the same seeded rows, so
-	// the total is a lower bound — the point is the scope is reported at all.
-	if repaired < 2 || projects < 1 {
-		t.Errorf("repair reported %d chart(s) in %d project(s), want at least this test's two", repaired, projects)
+	// the total is a lower bound — the point is that the scope is reported at all.
+	if repaired < int64(len(cases)) || projects < 1 {
+		t.Errorf("repair reported %d chart(s) in %d project(s), want at least this test's %d", repaired, projects, len(cases))
 	}
 
-	for _, want := range []struct {
-		name   string
-		before Chart
-		want   string
-	}{
-		{"starter board", starter, guestVsIdentifiedSQL("canonical_id", true)},
-		{"cloned template", template, guestVsIdentifiedSQL("distinct_id", false)},
-	} {
-		got, err := s.ChartForProject(ctx, project.ID, want.before.ID)
+	for i, c := range cases {
+		got, err := s.ChartForProject(ctx, project.ID, seeded[i].ID)
 		if err != nil {
-			t.Fatalf("ChartForProject(%s): %v", want.name, err)
+			t.Fatalf("ChartForProject(%s): %v", c.name, err)
 		}
-		if got.SQL != want.want {
-			t.Errorf("%s chart kept the stale query:\n got %s\nwant %s", want.name, got.SQL, want.want)
+		if got.SQL != c.want {
+			t.Errorf("%s chart kept the stale query:\n got %s\nwant %s", c.name, got.SQL, c.want)
 		}
-		if got.Revision != want.before.Revision+1 {
-			t.Errorf("%s chart revision = %d, want %d — a content change must fence a stale edit", want.name, got.Revision, want.before.Revision+1)
+		if got.Revision != seeded[i].Revision+1 {
+			t.Errorf("%s chart revision = %d, want %d — a content change must fence a stale edit", c.name, got.Revision, seeded[i].Revision+1)
 		}
 	}
 
@@ -97,32 +104,4 @@ func TestRepairSeededChartsRewritesOnlyTheSeededQuery(t *testing.T) {
 	if repaired != 0 || projects != 0 {
 		t.Errorf("second repair rewrote %d chart(s) in %d project(s), want none — it is not idempotent", repaired, projects)
 	}
-}
-
-// seededChartRepairStore opens the shared test database and brings it to
-// schema, mirroring the other live store tests.
-func seededChartRepairStore(t *testing.T) (*Store, context.Context) {
-	t.Helper()
-	url := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
-	if url == "" {
-		url = "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Skipf("no test database (%v)", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("test database unreachable (%v)", err)
-	}
-	s := &Store{pg: pool}
-	if err := s.migratePostgres(ctx, config.Config{
-		PostgresURL:           url,
-		DefaultProjectName:    "seeded-chart-repair",
-		DefaultProjectAPIKey:  "seeded_chart_repair_test_key",
-	}); err != nil {
-		t.Fatalf("migratePostgres: %v", err)
-	}
-	return s, ctx
 }

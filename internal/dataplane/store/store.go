@@ -1118,53 +1118,68 @@ type pgQuerier interface {
 // guestVsIdentifiedSQL builds the seeded "Visitors: guest vs identified" chart
 // query: how many visitors were identified, and how many never were.
 //
-// Identified-ness is a fact about the person, not a property of an event.
-// AgentRay records it when identity linkage happens — `identify()` aliases the
-// anonymous id and then sends an `$identify` event — so the query partitions by
-// the board's visitor column and asks whether that partition owns an
-// `$identify` event. Partitioning on canonical_id is what folds an anonymous
-// visitor's pageviews onto the user they later identified as; the scoped read
-// supplies it from resolved_events' aliases join, the same linkage every other
-// person-scoped query uses.
+// Identified-ness is a fact about the person, not a property of an event, and
+// AgentRay already has one definition of it — DistinctIDLinked (lifecycle.go):
+// an explicit identify/alias link exists for the id. The chart states that rule
+// in SQL, over the stitched view every person-scoped read already reads:
+//
+//   - the visitor owns an `$identify` event, or
+//   - the aliases mirror folded a different raw id into the visitor
+//     (distinct_id <> canonical_id), which is the forward half of the same link.
 //
 // It used to test `properties.email` / `$."$set".email` instead. That was a PII
-// read on AgentRay's own starter board, and it was a silent lie waiting to
-// happen: a customer that stops sending an email trait — LoHi does, on purpose —
-// would have every visitor reported as "Guest".
+// read on AgentRay's own starter board, and a silent lie waiting to happen: a
+// customer that stops sending an email trait — LoHi does, on purpose — would
+// have every visitor reported as "Guest".
 //
-// visitorColumn keeps each caller's existing scope (the starter board counts
-// stitched humans; the stock templates count raw distinct ids with no bot
-// filter), so the identified-ness predicate is the only thing that changes.
-// humanOnly keeps crawlers out of a visitor count, as the other visitor reads do.
+// visitorColumn is the id this board counts as a visitor (the starter board
+// counts stitched humans; the stock templates count raw ids), so the column is
+// the only thing that changes for them. humanOnly keeps crawlers out of a
+// visitor count — but it filters the non-human *pageview*, not the markers: a
+// visitor whose identify request was classified non-human (a UA change
+// mid-session, a client that sends none) still owns the human pageview it came
+// with, and dropping the marker would report that visitor as a Guest.
 func guestVsIdentifiedSQL(visitorColumn string, humanOnly bool) string {
-	human := ""
+	scope := `event_name IN ('user.pageview', '$identify')`
 	if humanOnly {
-		human = ` AND coalesce(visitor_class, 'human') = 'human'`
+		scope = `(event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human') OR event_name = '$identify'`
 	}
-	return `SELECT if(identified, 'Identified', 'Guest') AS user_type, count(DISTINCT visitor) AS visitors FROM (
-SELECT ` + visitorColumn + ` AS visitor,
-       max(if(event_name = '$identify', 1, 0)) OVER (PARTITION BY ` + visitorColumn + `) > 0 AS identified,
-       max(if(event_name = 'user.pageview', 1, 0)) OVER (PARTITION BY ` + visitorColumn + `) > 0 AS is_pageview
+	return `SELECT if(identified, 'Identified', 'Guest') AS user_type, count(*) AS visitors FROM (
+SELECT (max(if(event_name = '$identify', 1, 0)) > 0
+        OR max(if(distinct_id <> canonical_id, 1, 0)) > 0) AS identified,
+       max(if(event_name = 'user.pageview', 1, 0)) > 0 AS is_pageview
 FROM events
-WHERE event_name IN ('user.pageview', '$identify')` + human + `
+WHERE ` + scope + `
+GROUP BY ` + visitorColumn + `
 ) WHERE is_pageview GROUP BY user_type ORDER BY visitors DESC`
 }
 
 // The shipped (pre-repair) seeded queries: the exact strings earlier revisions
-// wrote into `charts` and `template_charts`. The repair matches them literally,
-// which is what bounds it to AgentRay's own seeded chart — a customer's chart is
-// never rewritten, not even one that reads an email property deliberately.
+// wrote into `charts` and `template_charts`. Two eras of the same chart are
+// still out there — the DuckDB one, and the ClickHouse one from before the
+// engine port, which never translated stored chart SQL and so is both a PII
+// read and unrunnable on the current engine.
+//
+// The repair matches these literally, which is what bounds it to AgentRay's own
+// seeded chart — a customer's chart is never rewritten, not even one that reads
+// an email property deliberately. The template string covers both the Product
+// Overview and the Marketing & Acquisition charts; they shipped identically.
 const (
 	staleStarterGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	staleTemplateGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
+
+	legacyStarterGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	legacyTemplateGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 )
 
 // seededChartRepairs pairs each shipped seeded query with its replacement: same
-// chart, same columns, identified-ness read from identity linkage.
+// chart, same visitor column, identified-ness read from identity linkage.
 func seededChartRepairs() [][2]string {
 	return [][2]string{
 		{staleStarterGuestVsIdentifiedSQL, guestVsIdentifiedSQL("canonical_id", true)},
 		{staleTemplateGuestVsIdentifiedSQL, guestVsIdentifiedSQL("distinct_id", false)},
+		{legacyStarterGuestVsIdentifiedSQL, guestVsIdentifiedSQL("canonical_id", true)},
+		{legacyTemplateGuestVsIdentifiedSQL, guestVsIdentifiedSQL("distinct_id", false)},
 	}
 }
 
@@ -1177,10 +1192,10 @@ func seededChartRepairs() [][2]string {
 // rows from the current source on every boot.)
 //
 // Bounded and idempotent by construction. The predicate is an exact match on the
-// two shipped strings, so it can only ever touch a row that IS the seeded chart,
-// and a second run matches nothing because no replacement contains the stale
-// text. `charts` is a small table and the update writes only the matched rows'
-// own `sql` column — no rewrite, no DDL, no lock on a big table — so none of the
+// shipped strings, so it can only ever touch a row that IS the seeded chart, and
+// a second run matches nothing because no replacement contains the stale text.
+// `charts` is a small table and the update writes only the matched rows' own
+// `sql` column — no rewrite, no DDL, no lock on a big table — so none of the
 // deploy-time hazards the big-table migration rule guards against apply.
 //
 // It returns the rows repaired and how many projects own them: the blast radius
