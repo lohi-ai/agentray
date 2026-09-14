@@ -95,7 +95,6 @@ export function PlansPage() {
 
   return (
     <AppShell
-      active="plans"
       title="Plans"
       sub="What the agents noticed, and the bets you have agreed to be judged by. A finding becomes an experiment; an experiment ends in a decision."
       actions={

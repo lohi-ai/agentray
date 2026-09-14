@@ -150,7 +150,6 @@ export function SQLPage() {
 
   return (
     <AppShell
-      active="dashboards"
       title="SQL"
       sub="Query the event store directly — or describe what you want and let the agent write it."
       actions={<><Button variant="outline" icon={<Columns3 size={15} />} onClick={() => setShowReference((v) => !v)}>{showReference ? 'Hide reference' : 'Schema & names'}</Button><Button variant="outline" icon={<Save size={15} />} onClick={() => sql.trim() && void createSavedQuery(sql.slice(0, 60), sql, true)}>Save</Button><Button variant="primary" icon={<Play size={15} />} onClick={runQuery}>Run</Button></>}

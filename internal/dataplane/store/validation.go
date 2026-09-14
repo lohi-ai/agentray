@@ -773,67 +773,6 @@ FROM waitlist_signups WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`, 
 	return out, rows.Err()
 }
 
-// ExportWaitlistSignups walks the WHOLE list, oldest first, in keyset pages.
-//
-// The listing above is a screenful and is right to be capped. An export is the
-// opposite promise: an owner who mails a launch announcement to the file this
-// produces has to be mailing all of it. A silent LIMIT there would hand them a
-// slice of their own contacts with nothing on the page or in the file saying so
-// — and they would find out from the people who never heard from them.
-//
-// It carries the unsubscribe token, because the owner is the one who sends the
-// mail this list is for and every message needs a way out. That is the token's
-// only exit from the server: an authenticated request from the account that
-// owns the row, never the public form response.
-func (s *Store) ExportWaitlistSignups(ctx context.Context, userID, projectID string, yield func(WaitlistSignup) error) error {
-	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
-	if err != nil {
-		return err
-	}
-	const page = 500
-	var cursor time.Time
-	var cursorID string
-	for {
-		rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, email, source, referrer, distinct_id, consent_text, status, created_at, unsubscribe_token
-FROM waitlist_signups
-WHERE project_id = $1 AND ($2::timestamptz IS NULL OR (created_at, id::text) > ($2, $3))
-ORDER BY created_at, id::text LIMIT $4`, project.ID, nullableTime(cursor), cursorID, page)
-		if err != nil {
-			return err
-		}
-		n := 0
-		for rows.Next() {
-			var sn WaitlistSignup
-			if err := rows.Scan(&sn.ID, &sn.ProjectID, &sn.Email, &sn.Source, &sn.Referrer,
-				&sn.DistinctID, &sn.ConsentText, &sn.Status, &sn.CreatedAt, &sn.UnsubscribeToken); err != nil {
-				rows.Close()
-				return err
-			}
-			if err := yield(sn); err != nil {
-				rows.Close()
-				return err
-			}
-			cursor, cursorID = sn.CreatedAt, sn.ID
-			n++
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if n < page {
-			return nil
-		}
-	}
-}
-
-func nullableTime(t time.Time) any {
-	if t.IsZero() {
-		return nil
-	}
-	return t
-}
 
 // CountWaitlistSignups counts subscribed addresses — the number the threshold is
 // judged against. Unsubscribes are excluded: someone who left is not demand.
@@ -844,16 +783,6 @@ SELECT count(*) FROM waitlist_signups WHERE project_id = $1 AND status = 'subscr
 	return n, err
 }
 
-// DeleteWaitlistSignup erases one address on request. A real delete, not a flag:
-// "remove my data" has to mean the row is gone.
-func (s *Store) DeleteWaitlistSignup(ctx context.Context, userID, projectID, id string) error {
-	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
-	if err != nil {
-		return err
-	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM waitlist_signups WHERE id = $1 AND project_id = $2`, id, project.ID)
-	return err
-}
 
 // plausibleEmail is a shape check, not a validity check — nothing short of
 // delivery proves an address, and a stricter regex mostly rejects real people.

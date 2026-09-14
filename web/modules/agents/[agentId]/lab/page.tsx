@@ -101,7 +101,6 @@ export function AgentLabPage() {
 
   return (
     <AppShell
-      active="monitor"
       title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push(`/agents/${agentID}/monitor`)}><ArrowLeft size={15} /></button>Agent lab</span>}
       sub="Learn how this agent's harness runs — context, tools, messages, memory, loop — and test it step by step."
       actions={<Button variant="outline" icon={<Save size={15} />} onClick={() => input.trim() ? save.mutate({ name: input.slice(0, 48), input, expected }) : undefined}>Save case</Button>}

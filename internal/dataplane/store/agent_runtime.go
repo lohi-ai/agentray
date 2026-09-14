@@ -27,8 +27,7 @@ type AgentRun struct {
 	Trigger   string `json:"trigger"` // chat | scheduled | manual | webhook
 	Status    string `json:"status"`  // running | done | error
 	// SessionID is the session this run belongs to: the client conversation id
-	// for a chat run, or — for a resume attempt — the durable session (original
-	// run id) it continued, so ResumeRun can follow the chain back to the log.
+	// for a chat run.
 	SessionID   string  `json:"session_id,omitempty"`
 	TokenInput  int     `json:"token_input"`
 	TokenOutput int     `json:"token_output"`
@@ -576,44 +575,6 @@ ORDER BY (%s) DESC, last_seen_at DESC LIMIT $%d`, where, scoreExpr, limitParam)
 	return scanMemoryRows(rows)
 }
 
-// ListAgentMemory returns recent entries for a scope (member-readable).
-//
-// scopeID is the resolved agent scope (AgentScopeForRun): the default agent
-// is the project id, so an empty agent query param is byte-for-byte the old
-// path. userID+projectID remain the authorization boundary — naming an agent
-// must not let a caller read another user's project.
-func (s *Store) ListAgentMemory(ctx context.Context, userID, projectID, scopeID string, limit int) ([]AgentMemoryRow, error) {
-	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
-	if err != nil {
-		return nil, err
-	}
-	if scopeID == "" {
-		scopeID = project.ID
-	}
-	return s.RecallAgentMemory(ctx, scopeID, "", limit)
-}
-
-// DeleteAgentMemory removes one entry (owner/admin only). scopeID is the
-// resolved agent scope, same contract as ListAgentMemory; the row is keyed
-// on (id, scope_id) so a caller cannot delete another agent's memory by id.
-func (s *Store) DeleteAgentMemory(ctx context.Context, userID, projectID, scopeID, id string) error {
-	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
-	if err != nil {
-		return err
-	}
-	canManage, err := s.userCanManageWorkspace(ctx, userID, project.WorkspaceID)
-	if err != nil {
-		return err
-	}
-	if !canManage {
-		return errAgentForbidden
-	}
-	if scopeID == "" {
-		scopeID = project.ID
-	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM agent_memory WHERE id = $1 AND scope_id = $2`, id, scopeID)
-	return err
-}
 
 func scanMemoryRows(rows pgx.Rows) ([]AgentMemoryRow, error) {
 	out := []AgentMemoryRow{}

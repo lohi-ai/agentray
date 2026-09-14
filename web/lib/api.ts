@@ -794,13 +794,6 @@ export type AlertChannelInput = {
   config: Record<string, unknown>;
 };
 
-export type AlertEvent = {
-  id: string;
-  rule_id: string;
-  fired_at: string;
-  state: string;
-  value: number;
-};
 
 // --- Data connectors ---
 
@@ -1033,14 +1026,6 @@ export type AgentAdvisor = {
   instructions: string;
 };
 
-// AgentAdvisorNote is one note the reviewer left on a run. `delivered` is the
-// distinction that matters to an operator: a nit was recorded and the answer
-// shipped, while a concern or blocker was put in front of the agent to resolve.
-export type AgentAdvisorNote = {
-  text: string;
-  severity: 'nit' | 'concern' | 'blocker';
-  delivered: boolean;
-};
 
 // AgentConfigTestResult is the per-tier connectivity check returned by
 // testWorkspaceModels: only configured tiers appear in `tiers`.
@@ -1054,33 +1039,6 @@ export type AgentConfigTestResult = {
 export const MODEL_TIERS = ['lite', 'flash', 'pro'] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
-// MODEL_SUGGESTIONS maps a provider to a per-tier default model plus the
-// suggestion list shown in the picker. Free text is always allowed (Advanced
-// mode) — these only seed the Default-mode select and the auto-filled default.
-export const MODEL_SUGGESTIONS: Record<
-  string,
-  { label: string; tiers: Record<ModelTier, string>; options: string[] }
-> = {
-  openai: {
-    label: 'OpenAI',
-    tiers: { lite: 'gpt-4o-mini', flash: 'gpt-4o', pro: 'o1' },
-    options: ['gpt-4o-mini', 'gpt-4o', 'o1', 'o1-mini', 'gpt-4-turbo'],
-  },
-  anthropic: {
-    label: 'Anthropic',
-    tiers: {
-      lite: 'claude-haiku-4-5',
-      flash: 'claude-sonnet-4-6',
-      pro: 'claude-opus-4-8',
-    },
-    options: ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-8'],
-  },
-  'openai-compatible': {
-    label: 'OpenAI-compatible (custom)',
-    tiers: { lite: '', flash: '', pro: '' },
-    options: [],
-  },
-};
 
 export type AgentDefinition = {
   scope_id: string;
@@ -1116,16 +1074,6 @@ export type AgentSkillInput = {
   enabled: boolean;
 };
 
-export type AgentMemory = {
-  id: string;
-  scope_id: string;
-  kind: string;
-  content: string;
-  tags: string[];
-  confidence: number;
-  source_run_id: string;
-  created_at: string;
-};
 
 export type AgentRun = {
   id: string;
@@ -1809,9 +1757,6 @@ export class AgentRayAPI {
     });
   }
 
-  workspaces() {
-    return this.get<{ workspaces: Workspace[] }>('/api/workspaces');
-  }
 
   createWorkspace(name: string) {
     return this.post<{ workspace: Workspace }>('/api/workspaces', { name });
@@ -1877,16 +1822,6 @@ export class AgentRayAPI {
     return this.post<{ project: Project }>(`/api/workspaces/${workspaceID}/projects`, { name });
   }
 
-  project() {
-    return this.get<{ project: Project }>('/api/projects');
-  }
-
-  createProject(name: string, workspaceID = '') {
-    return this.request<{ project: Project }>('/api/projects', {
-      method: 'POST',
-      body: JSON.stringify({ name, workspace_id: workspaceID }),
-    });
-  }
 
   updateProject(projectID: string, name: string) {
     return this.request<{ project: Project }>(`/api/projects/${projectID}`, {
@@ -1940,12 +1875,6 @@ export class AgentRayAPI {
     return this.post<{ agent: Agent }>(`/api/marketplace/agents/${slug}/install`, {});
   }
 
-  // Agent grants: a workspace owns agents and assigns them into projects. These
-  // act on this client's project (construct AgentRayAPI(targetProjectID) to
-  // assign into a different product).
-  workspaceAgents() {
-    return this.get<{ agents: Agent[] }>('/api/agent/workspace-agents');
-  }
 
   agentGrants(agentID: string) {
     return this.get<{ grants: AgentGrant[] }>(`/api/agent/agents/${agentID}/grants`);
@@ -2132,9 +2061,6 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/alerts/rules/${id}`), { method: 'DELETE' });
   }
 
-  alertEvents(ruleID: string) {
-    return this.get<{ events: AlertEvent[] }>(`/api/alerts/rules/${ruleID}/events`);
-  }
 
   alertChannels() {
     return this.get<{ channels: AlertChannel[] }>('/api/alerts/channels');
@@ -2144,9 +2070,6 @@ export class AgentRayAPI {
     return this.post<{ channel: AlertChannel }>('/api/alerts/channels', input);
   }
 
-  deleteAlertChannel(id: string) {
-    return this.request<void>(this.withProject(`/api/alerts/channels/${id}`), { method: 'DELETE' });
-  }
 
   // --- Data connectors ---
 
@@ -2492,13 +2415,6 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/agent/skills/${id}${agentQuery(agentID)}`), { method: 'DELETE' });
   }
 
-  agentMemory(agentID = '') {
-    return this.get<{ memory: AgentMemory[] }>(`/api/agent/memory${agentQuery(agentID)}`);
-  }
-
-  deleteAgentMemory(id: string, agentID = '') {
-    return this.request<void>(this.withProject(`/api/agent/memory/${id}${agentQuery(agentID)}`), { method: 'DELETE' });
-  }
 
   agentRuns(limit = 50) {
     return this.get<{ runs: AgentRun[] }>(`/api/agent/runs?limit=${limit}`);
@@ -2741,9 +2657,6 @@ export class AgentRayAPI {
     return this.consumeChatSSE(response, handlers);
   }
 
-  triggerAgentRun() {
-    return this.post<{ queued: boolean }>('/api/agent/run', {});
-  }
 
   // --- AgentGarden agents (§3): first-class agent identity per project ---
 
@@ -2855,9 +2768,6 @@ export class AgentRayAPI {
     return this.get<{ signups: WaitlistSignup[]; count: number }>(`/api/validation/waitlist?limit=${limit}`);
   }
 
-  deleteWaitlistSignup(id: string) {
-    return this.request<void>(this.withProject(`/api/validation/waitlist/${id}`), { method: 'DELETE' });
-  }
 
   createAgentTrigger(input: AgentTriggerInput, agentID = '') {
     return this.post<AgentTrigger>(`/api/agent/triggers${agentQuery(agentID)}`, input);

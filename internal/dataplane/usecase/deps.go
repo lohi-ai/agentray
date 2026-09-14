@@ -37,7 +37,6 @@ type Repo interface {
 	CreateChart(ctx context.Context, chart storage.Chart) (storage.Chart, error)
 	CreateRecommendation(ctx context.Context, rec storage.AgentRecommendation) (string, error)
 	CreateRecommendationIdempotent(ctx context.Context, rec storage.AgentRecommendation, idemKey, requestHash string) (string, error)
-	CreateValidationTest(ctx context.Context, t storage.ValidationTest) (string, error)
 	CreateValidationTestIdempotent(ctx context.Context, t storage.ValidationTest, idemKey, requestHash string) (string, error)
 	ActiveValidationTest(ctx context.Context, projectID string) (*storage.ValidationTest, error)
 	// The plural reads. Without them an agent can only ever discuss the one test

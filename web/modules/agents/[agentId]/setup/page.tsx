@@ -737,15 +737,14 @@ export function AgentSetupPage() {
   const [tab, setTab] = useState<string>('persona');
 
   if (isLoading && !agent) {
-    return <AppShell active="agents" title="Agent setup" sub="Configure your teammate."><Loading label="Loading agent…" /></AppShell>;
+    return <AppShell title="Agent setup" sub="Configure your teammate."><Loading label="Loading agent…" /></AppShell>;
   }
   if (!agent) {
-    return <AppShell active="agents" title="Agent setup" sub="Configure your teammate."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents')}>Back to agents</Button>} /></AppShell>;
+    return <AppShell title="Agent setup" sub="Configure your teammate."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents')}>Back to agents</Button>} /></AppShell>;
   }
 
   return (
     <AppShell
-      active="agents"
       title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents')}><ArrowLeft size={15} /></button>{agent.name}</span>}
       sub="Set up how this teammate thinks, what it can use, and what it's trusted to do."
       tabs={
