@@ -172,10 +172,10 @@ func (r *Registry) legacyAllowsClass(access Access) bool {
 	return false
 }
 
-// sessionRoleAtLeast applies MinSessionRole: "" admits any member role
-// (including viewer), "member" admits member/admin/owner, "admin" admits
-// owner/admin only. Unknown roles admit nothing beyond the "" floor — a role
-// the vocabulary does not know is read-only, matching writeRoles' direction.
+// sessionRoleAtLeast applies MinSessionRole: "" admits any session role,
+// "member" admits member/admin/owner, "admin" admits owner/admin only.
+// Unknown roles admit nothing beyond the "" floor — a role the vocabulary
+// does not know is read-only, matching writeRoles' direction.
 func sessionRoleAtLeast(role, min string) bool {
 	switch min {
 	case "":

@@ -47,9 +47,8 @@ func TestEveryWorkspaceRoleIsClassified(t *testing.T) {
 		t.Fatalf("%d of %v may write, but writeRoles has %d entries — a role was added to the scale without deciding whether it writes",
 			writers, workspaceRoles, len(writeRoles))
 	}
-	// The one that must never drift.
-	if RoleMayWrite(DemoViewerRole) {
-		t.Fatalf("the demo membership role %q may write; every signed-up visitor could change someone else's site", DemoViewerRole)
+	if writers != len(workspaceRoles) {
+		t.Fatalf("not every role on the scale may write: %d of %v", writers, workspaceRoles)
 	}
 }
 
@@ -66,7 +65,12 @@ func TestAPIKeyIsRedactedForReadOnlyRoles(t *testing.T) {
 			t.Errorf("role %q lost the api key it is entitled to", role)
 		}
 	}
-	for _, role := range []string{DemoViewerRole, "", "some-future-role"} {
+	demoMember := Project{APIKey: "agentray_secret", Role: "member", IsDemo: true}
+	demoMember.redactAPIKeyForRole()
+	if demoMember.APIKey != "" {
+		t.Errorf("demo member kept the api key: %q", demoMember.APIKey)
+	}
+	for _, role := range []string{"", "some-future-role"} {
 		project := Project{APIKey: "agentray_secret", Role: role}
 		project.redactAPIKeyForRole()
 		if project.APIKey != "" {

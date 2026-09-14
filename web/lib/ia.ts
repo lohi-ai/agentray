@@ -237,21 +237,17 @@ export function shouldShowFirstEventGuide(input: FirstRunInput): boolean {
 
 // ---- who may write here ----------------------------------------------------
 //
-// The shared demo (internal/dataplane/store/demo.go) puts every signed-up
-// visitor inside a workspace somebody else owns, as a 'viewer'. The API refuses
-// their writes at one choke point (internal/app/demo_guard.go), which is the
-// correct place for the SECURITY decision and the wrong place for the UI one: a
-// button that is present, clicked, and then answered 403 has already wasted the
-// person's attention and taught them the product is broken.
+// The shared demo puts every signed-up visitor inside a workspace somebody
+// else owns. The API refuses their writes at one choke point (the mutating
+// floor asking Allow), which is the correct place for the SECURITY decision
+// and the wrong place for the UI one: a button that is present, clicked, and
+// then answered 403 has already wasted the person's attention.
 //
-// So the affordance decision is made here, from the two read-only facts the API
-// already hands back on every project — the caller's `role` and whether the
-// project lives in the demo workspace (`is_demo`). Never from the project's
-// NAME: the demo is a real project on a real site and can be called anything.
-
-// Mirror of writeRoles in internal/dataplane/store/auth.go. Anything absent —
-// 'viewer', an empty role, a role a later release adds — reads.
-const WRITE_ROLES = new Set(['owner', 'admin', 'member']);
+// So the affordance decision is made here, from the two read-only facts the
+// API already hands back on every project — the caller's `role` and whether
+// the project lives in the demo workspace (`is_demo`). A demo member is
+// read-only; owner/admin of the demo keep writes. Never from the project's
+// NAME.
 
 export type ProjectLike = { role?: string; is_demo?: boolean; name?: string } | null | undefined;
 
@@ -269,12 +265,11 @@ export function projectAccess(project: ProjectLike): ProjectAccess {
   // No project resolved yet, or an API old enough not to send a role: allow.
   // The alternative is every control on every page flickering disabled on each
   // navigation, and the API is still the one that actually decides.
-  const canWrite = !project || !role || WRITE_ROLES.has(role);
+  const demoReadOnly = isDemo && role !== 'owner' && role !== 'admin';
+  const canWrite = !project || !role || !demoReadOnly;
   const reason = canWrite
     ? ''
-    : isDemo
-      ? 'This is the shared demo — someone else’s site. Switch to your own project to change anything.'
-      : 'You’re a viewer in this workspace. An owner can give you access.';
+    : 'This is the shared demo — someone else’s site. Switch to your own project to change anything.';
   return { isDemo, role, canWrite, reason };
 }
 
@@ -282,9 +277,8 @@ export function projectAccess(project: ProjectLike): ProjectAccess {
 //
 // What a new account actually has on its first session:
 //
-//   * a read-only 'viewer' membership in ONE shared demo workspace, holding a
+//   * a read-only membership in ONE shared demo workspace, holding a
 //     real project fed by a real website that somebody else runs;
-//   * its own workspace, holding exactly one project, with nothing in it.
 //
 // The tour walks that: look around a working product, ask it something, then go
 // and make the empty one yours. It is six steps when the instance has a demo
@@ -393,8 +387,8 @@ export function tourSteps(input: TourInput): TourStep[] {
       id: 'demo',
       label: 'Look around a working product',
       detail: input.inDemo
-        ? `You’re in ${demoName}. It is a real site someone else runs, wired to AgentRay, and you joined it as a viewer — you can read all of it and change none of it.`
-        : `${demoName} is a real site someone else runs, wired to AgentRay. Open it as a viewer and see the product with data already in it.`,
+        ? `You’re in ${demoName}. It is a real site someone else runs, wired to AgentRay — you can read all of it and change none of it.`
+        : `${demoName} is a real site someone else runs, wired to AgentRay. Open it and see the product with data already in it.`,
       done: input.inDemo,
       observable: false,
       action: input.inDemo ? { label: 'You’re here' } : { label: `Open ${demoName}`, act: 'open-demo' },

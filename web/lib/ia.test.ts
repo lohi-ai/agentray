@@ -512,28 +512,24 @@ describe('shouldStartDocksOpen', () => {
 });
 
 describe('projectAccess', () => {
-  it('drives affordances off the role and the demo mark, never off the name', () => {
-    // The demo is a REAL project on a real site and can be called anything —
-    // the old check was `/^demo$/i.test(project.name)`, which both missed the
-    // real one and would have locked a customer's own project called "Demo".
+  it('drives affordances off the demo mark, never off the name', () => {
     expect(projectAccess({ name: 'Demo', role: 'owner' }).canWrite).toBe(true);
-    expect(projectAccess({ name: 'Kiem Lai', role: 'viewer', is_demo: true }).canWrite).toBe(false);
+    expect(projectAccess({ name: 'Kiem Lai', role: 'member', is_demo: true }).canWrite).toBe(false);
+    expect(projectAccess({ role: 'owner', is_demo: true }).canWrite).toBe(true);
+    expect(projectAccess({ role: 'admin', is_demo: true }).canWrite).toBe(true);
   });
 
-  it('says why, in the reader’s words, and distinguishes the demo from a plain viewer', () => {
-    expect(projectAccess({ role: 'viewer', is_demo: true }).reason).toMatch(/shared demo/i);
-    expect(projectAccess({ role: 'viewer' }).reason).toMatch(/viewer in this workspace/i);
+  it('says why, in the reader’s words', () => {
+    expect(projectAccess({ role: 'member', is_demo: true }).reason).toMatch(/shared demo/i);
     expect(projectAccess({ role: 'admin' }).reason).toBe('');
   });
 
-  it('mirrors the API’s writing roles, and treats an unresolved project as writable', () => {
+  it('treats an unresolved project as writable', () => {
     for (const role of ['owner', 'admin', 'member']) {
       expect(projectAccess({ role }).canWrite).toBe(true);
     }
-    // Nothing loaded yet: disabling every control on every page for one frame of
-    // each navigation is worse than letting the API make the real decision.
     expect(projectAccess(null).canWrite).toBe(true);
-    expect(projectAccess({ name: 'x' }).canWrite).toBe(true);
+    expect(projectAccess({}).canWrite).toBe(true);
   });
 });
 
@@ -556,7 +552,7 @@ describe('tourSteps', () => {
     const detail = tourSteps(IN_DEMO).map((s) => `${s.label} ${s.detail}`).join(' ');
     expect(detail).not.toMatch(/sample/i);
     expect(detail).toMatch(/someone else runs/i);
-    expect(detail).toMatch(/viewer/i);
+    expect(detail).toMatch(/change none of it/i);
   });
 
   it('ticks connect and schedule from real workspace state, not from a flag', () => {

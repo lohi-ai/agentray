@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-02 · **Status:** internal review
 **Scope:** product idea, feature inventory, and market-fit assessment. The
-companion improvement plan lives in [`../ROADMAP.md`](../ROADMAP.md).
+redesign proposal and its delivery sequence live in
+[`redesign/strategy.md`](redesign/strategy.md).
 
 ---
 

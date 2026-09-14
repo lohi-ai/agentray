@@ -226,67 +226,26 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	if got.APIKey != project.APIKey {
 		t.Fatalf("session capture key = %q, want %q", got.APIKey, project.APIKey)
 	}
-
-	// A viewer's session is admitted to the project but may not hold its ingest
-	// key (RoleMayWrite), so the key is withheld here too. These resolvers load
-	// the row through the role-blind store.ProjectByID, so without the role check
-	// every project-echoing response would hand a viewer the write key.
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-viewer-%d@test.local", time.Now().UnixNano()), "Viewer", "password-123", "viewer-ws", "viewer-proj")
-	if err != nil {
-		t.Fatalf("create viewer account: %v", err)
-	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
-	}
-	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("create viewer session: %v", err)
-	}
-	viewerReq := httptest.NewRequest(http.MethodGet, "/api/dashboards?project_id="+project.ID, nil)
-	viewerReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: viewerToken})
-	got, err = projectFromRequest(e.NewContext(viewerReq, httptest.NewRecorder()), s)
-	if err != nil || got.ID != project.ID {
-		t.Fatalf("viewer session project = %+v, %v; want %s", got, err, project.ID)
-	}
-	if got.APIKey != "" {
-		t.Fatalf("viewer session received the capture key: %q", got.APIKey)
-	}
 }
 
-func TestSessionRoleGrants(t *testing.T) {
-	s := openAppTestStore(t)
-	ctx := context.Background()
-	e := echo.New()
-
-	owner, err := s.CreateAccount(ctx, fmt.Sprintf("owner-%d@test.local", time.Now().UnixNano()), "O", "password-123", "ws", "proj")
-	if err != nil {
-		t.Fatalf("owner account: %v", err)
+func TestSessionGrantsCarriesTheDemoFact(t *testing.T) {
+	if sessionAllowsWrite(storage.Project{Role: "member", IsDemo: true}) {
+		t.Fatal("demo member must not write: IsDemo lives on the project so a caller cannot pass false by accident")
 	}
-	// A second user joins as viewer.
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("viewer-%d@test.local", time.Now().UnixNano()), "V", "password-123", "ws2", "proj2")
-	if err != nil {
-		t.Fatalf("viewer account: %v", err)
+	if !sessionAllowsWrite(storage.Project{Role: "owner", IsDemo: true}) {
+		t.Fatal("demo owner must still write")
 	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
+	if !sessionAllowsWrite(storage.Project{Role: "admin", IsDemo: true}) {
+		t.Fatal("demo admin must still write")
 	}
-	_, token, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("viewer session: %v", err)
+	if !sessionAllowsWrite(storage.Project{Role: "member"}) {
+		t.Fatal("non-demo member must write")
 	}
-	// Viewer targets the owner's project explicitly.
-	req := httptest.NewRequest(http.MethodPost, "/mcp?project_id="+owner.Project.ID, nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	rec := httptest.NewRecorder()
-	p, err := principalFromRequest(e.NewContext(req, rec), s)
-	if err != nil {
-		t.Fatalf("viewer resolve: %v", err)
+	if sessionAllowsWrite(storage.Project{Role: "guest"}) {
+		t.Fatal("unknown role must not write")
 	}
-	if p.Kind != opcore.CredSession || p.Role != "viewer" {
-		t.Fatalf("viewer principal = %+v", p)
-	}
-	// Viewer grants: analytics read + sources read (status), nothing else.
-	if len(p.Grants) != 2 {
-		t.Fatalf("viewer grants = %v", p.Grants)
+	got := sessionGrants(storage.Project{Role: "member", IsDemo: true})
+	if len(got) != 2 {
+		t.Fatalf("demo member grants = %v, want the viewer read set", got)
 	}
 }

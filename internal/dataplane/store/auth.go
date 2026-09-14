@@ -30,10 +30,9 @@ type Workspace struct {
 	// Plan is display-only (see workspace_plan.go): it drives the plan badge,
 	// the usage meter's ceiling, and the upgrade moment. Nothing enforces it.
 	Plan string `json:"plan"`
-	// IsDemo marks the ONE shared demo workspace (demo.go). The caller's Role in
-	// it is 'viewer'; together they let the UI say "this is a live demo of
-	// someone else's site, you are reading it" instead of presenting it as the
-	// user's own workspace.
+	// IsDemo marks the ONE shared demo workspace (demo.go). Together with the
+	// caller's Role they let the UI say "this is a live demo of someone else's
+	// site" instead of presenting it as the user's own workspace.
 	IsDemo    bool      `json:"is_demo,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -137,7 +136,7 @@ VALUES ($1, $2, 'owner')`, out.Workspace.ID, out.User.ID); err != nil {
 	// Exactly one project, and it is theirs. This used to also insert a project
 	// named "Demo" full of synthetic events — invented numbers sitting in the
 	// owner's own workspace, indistinguishable from data they had collected. The
-	// demo is now one real shared project they join as a viewer (see demo.go).
+	// demo is now one real shared project they join as a member (see demo.go).
 	own := Project{Role: "owner"}
 	key := "agentray_" + uuid.NewString()
 	if err := tx.QueryRow(ctx, `
@@ -757,22 +756,19 @@ SELECT
 
 // workspaceRoles is the role scale, most privileged first. It is the single
 // source for both normalization and display order, so a new role is placed by
-// editing this line alone. 'viewer' — the read-only role the shared demo grants
-// (demo.go) — sits last because it is the least privileged, not because the
-// members list happened to sort it there.
-var workspaceRoles = []string{"owner", "admin", "member", DemoViewerRole}
+// editing this line alone.
+var workspaceRoles = []string{"owner", "admin", "member"}
 
 // writeRoles is the other half of the role scale: which memberships may CHANGE
 // a workspace, as opposed to reading it. It is a map rather than a condition
-// inside one query because the same answer is needed by the HTTP write guard
-// (internal/app/demo_guard.go), which stands in front of routes whose store
-// call does not join workspace_members at all.
+// inside one query because the same answer is needed by callers that stand in
+// front of routes whose store call does not join workspace_members at all.
 //
-// Everything absent from it — 'viewer', an empty role, a role a future release
-// adds and forgets to classify — cannot write. That direction is deliberate: a
-// new role appearing in workspaceRoles without an entry here is read-only until
-// someone decides otherwise, and TestEveryWorkspaceRoleIsClassified fails until
-// they do. The opposite default would hand write access to a role nobody has
+// Everything absent from it — an empty role, a role a future release adds and
+// forgets to classify — cannot write. That direction is deliberate: a new role
+// appearing in workspaceRoles without an entry here is read-only until someone
+// decides otherwise, and TestEveryWorkspaceRoleIsClassified fails until they
+// do. The opposite default would hand write access to a role nobody has
 // thought about yet.
 var writeRoles = map[string]bool{
 	"owner":  true,
@@ -781,7 +777,7 @@ var writeRoles = map[string]bool{
 }
 
 // RoleMayWrite reports whether a workspace membership may mutate the workspace.
-// Exported for the HTTP write guard; unknown and empty roles answer false.
+// Unknown and empty roles answer false.
 func RoleMayWrite(role string) bool {
 	return writeRoles[strings.ToLower(strings.TrimSpace(role))]
 }
@@ -815,13 +811,19 @@ SELECT role FROM workspace_members WHERE user_id = $1::uuid AND workspace_id = $
 //
 // The key is a WRITE credential: anyone holding it can ingest events into the
 // project (that is what the customer's own site does with it). Handing it to a
-// read-only member would give back with one hand exactly what the viewer role
-// takes with the other — a demo viewer could read the demo project's key off
-// /api/auth/me and start writing events into someone else's live site.
+// demo visitor would give back with one hand exactly what session grants take
+// with the other — they could read the demo project's key off /api/auth/me and
+// start writing events into someone else's live site.
 //
+// Demo non-owners are members of someone else's workspace; RoleMayWrite would
+// hand them the key. The demo fact lives on the project, same as sessionGrants.
 // The api-key path leaves Role empty by design (there is no user to have one),
 // so this is applied only where a membership was actually resolved.
 func (p *Project) redactAPIKeyForRole() {
+	if p.IsDemo && p.Role != "owner" && p.Role != "admin" {
+		p.APIKey = ""
+		return
+	}
 	if !RoleMayWrite(p.Role) {
 		p.APIKey = ""
 	}
@@ -852,16 +854,13 @@ func workspaceRoleOrderSQL(column string) string {
 }
 
 // normalizeWorkspaceRole maps free-form input onto the enumerated scale.
-// 'viewer' is enumerated here so it survives a round-trip through the members
-// API instead of being silently promoted to 'member' by the default arm.
+// Unknown input, including the retired 'viewer' name, becomes 'member'.
 func normalizeWorkspaceRole(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "owner":
 		return "owner"
 	case "admin":
 		return "admin"
-	case "viewer":
-		return DemoViewerRole
 	default:
 		return "member"
 	}
