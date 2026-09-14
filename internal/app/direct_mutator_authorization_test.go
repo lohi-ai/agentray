@@ -383,13 +383,18 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 	}
 }
 
-// TestNoMutatingRouteResolvesThroughTheReadResolver pins the property rather
-// than the eleven instances of it: projectFromRequest answers admission, never
-// an access class, so a mutating handler that resolves through it is open to
-// whatever credential may address the project. The scan is over the package's
-// own source because that is the only place a route that does not exist yet
-// can be caught.
-func TestNoMutatingRouteResolvesThroughTheReadResolver(t *testing.T) {
+// TestNoRouteResolvesThroughTheReadResolver pins the property rather than the
+// instances of it: projectFromRequest answers admission, never an access class,
+// so any route that reaches it directly runs for whatever credential may
+// address the project. The scan covers READS as well as mutations — the read
+// half of the bypass was fifteen read routes, not a missing verb check — and
+// both registration forms this package uses. It is over the package's own
+// source because that is the only place a route that does not exist yet can be
+// caught.
+//
+// The single exception is greppable on purpose: projectForAdmission, whose name
+// says the route's work is the addressing itself.
+func TestNoRouteResolvesThroughTheReadResolver(t *testing.T) {
 	// A registration runs from its line to the next registration of ANY method
 	// or the next package-level function — whichever comes first — so the slice
 	// is that handler's body and nothing else. (Bounding on mutating
@@ -431,11 +436,6 @@ func TestNoMutatingRouteResolvesThroughTheReadResolver(t *testing.T) {
 		}
 		sort.Slice(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
 		for i, h := range hits {
-			// mutatingMethod is the guard's own deny-by-default verb rule, so a
-			// verb this scan does not know is treated as a mutation by both.
-			if !mutatingMethod(h.method) {
-				continue
-			}
 			end := len(source)
 			if i+1 < len(hits) {
 				end = hits[i+1].start
@@ -445,14 +445,14 @@ func TestNoMutatingRouteResolvesThroughTheReadResolver(t *testing.T) {
 			}
 			examined++
 			if strings.Contains(source[h.start:end], "projectFromRequest(") {
-				t.Errorf("%s registers %s %s through projectFromRequest — the read resolver decides admission, not access; resolve with projectForWrite (declaring the class) or principalAndProject",
+				t.Errorf("%s registers %s %s through projectFromRequest — the read resolver decides admission, not access; resolve with projectForRead / projectForWrite (declaring the class) or projectForAdmission",
 					name, h.method, h.path)
 			}
 		}
 	}
 	// A regex that matches nothing would make this test pass forever.
-	if examined < 80 {
-		t.Fatalf("only %d mutating registrations found in the package source; the scan is broken", examined)
+	if examined < 150 {
+		t.Fatalf("only %d registrations found in the package source; the scan is broken", examined)
 	}
 }
 
@@ -592,6 +592,113 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 	}
 	if test, err := s.ValidationTestByID(ctx, owner.User.ID, owner.Project.ID, secondID); err != nil || test.Status != storage.TestProposed {
 		t.Errorf("a refused bearer committed the row: status %q, err %v", test.Status, err)
+	}
+}
+
+// TestStoreDirectReadsRefuseACredentialWithoutTheReadClass is the read half of
+// F1, and it is the half the audit reported first: a management credential
+// scoped sources:read and nothing else read every analytics route on this
+// surface while /api/op refused the same credential activity_summary. The
+// routes answered 200 because projectFromRequest consults no grant at all.
+//
+// Both sides are asserted, because "deny the under-privileged caller" is only
+// half a contract: the credential that holds the class still reads, a viewer's
+// session still reads (the demo's whole point), and a pre-split project key
+// still reads — its frozen allowlist covers analytics:read through
+// activity_summary, so the Option A bridge survives.
+func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	e := mountServerRoutes(t, s)
+
+	stamp := time.Now().UnixNano()
+	owner, err := s.CreateAccount(ctx, fmt.Sprintf("read-class-%d@test.local", stamp), "Owner", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	project := owner.Project
+	_, sources, err := s.CreateProjectCredential(ctx, owner.User.ID, project.ID, "sources", []string{"sources:read"})
+	if err != nil {
+		t.Fatalf("sources credential: %v", err)
+	}
+	_, analytics, err := s.CreateProjectCredential(ctx, owner.User.ID, project.ID, "analytics", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("analytics credential: %v", err)
+	}
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("read-class-viewer-%d@test.local", stamp), "Viewer", "password-123", "vws", "vproj")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("viewer session: %v", err)
+	}
+	// A pre-split project key: the Option A bridge, whose frozen allowlist is
+	// what admits it to a class it held before the split.
+	legacy, err := s.CreateProject(ctx, "Legacy read class")
+	if err != nil {
+		t.Fatalf("create legacy project: %v", err)
+	}
+	if _, err := s.ProjectCredentialSplit(ctx, legacy.ID); err != nil {
+		t.Fatalf("read split flag: %v", err)
+	}
+
+	// The read routes that return the project's analytics. /api/projects is not
+	// here: it returns the project the credential addressed — the addressing
+	// itself — and is the one admission-only route, reached through
+	// projectForAdmission.
+	reads := []string{
+		"/api/activity",
+		"/api/insights/run",
+		"/api/templates",
+		"/api/web-analytics",
+		"/api/persons",
+		"/api/cohorts",
+		"/api/cohorts/audiences",
+		"/api/subscription/mapping",
+		"/api/events/explore",
+		"/api/events/names",
+		"/api/saved-queries",
+		"/api/events",
+		"/api/sessions",
+	}
+	sourcesCaller := caller{name: "sources:read credential", headers: map[string]string{"Authorization": "Bearer " + sources}}
+	analyticsCaller := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + analytics}, projectID: project.ID}
+	viewerCaller := caller{name: "viewer session", cookies: []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}}, projectID: project.ID}
+	legacyCaller := caller{name: "pre-split project key", headers: map[string]string{"X-API-Key": legacy.APIKey}, projectID: legacy.ID}
+	captureCaller := caller{name: "capture key", headers: map[string]string{"X-API-Key": project.APIKey}, projectID: project.ID}
+
+	for _, path := range reads {
+		if rec := sourcesCaller.request(t, e, http.MethodGet, path+"?project_id="+project.ID, ""); rec.Code != http.StatusForbidden {
+			t.Errorf("sources:read GET %s = %d %s, want 403 — the credential holds no analytics class", path, rec.Code, rec.Body.String())
+		}
+	}
+	for _, who := range []caller{analyticsCaller, viewerCaller} {
+		for _, path := range reads {
+			if rec := who.request(t, e, http.MethodGet, path, ""); rec.Code != http.StatusOK {
+				t.Errorf("%s GET %s = %d %s, want 200 — this caller holds analytics:read", who.name, path, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	// The bridge: a pre-split key keeps the reads it had before the split.
+	for _, path := range reads {
+		if rec := legacyCaller.request(t, e, http.MethodGet, path, ""); rec.Code != http.StatusOK {
+			t.Errorf("pre-split project key GET %s = %d %s, want 200 — its frozen allowlist covers analytics:read", path, rec.Code, rec.Body.String())
+		}
+	}
+	// And the key that is refused everywhere stays refused.
+	for _, path := range reads {
+		if rec := captureCaller.request(t, e, http.MethodGet, path, ""); rec.Code != http.StatusForbidden {
+			t.Errorf("capture key GET %s = %d %s, want 403", path, rec.Code, rec.Body.String())
+		}
+	}
+	// The admission-only route still answers the addressing question: the
+	// sources:read credential may see the project it was minted for.
+	if rec := sourcesCaller.request(t, e, http.MethodGet, "/api/projects?project_id="+project.ID, ""); rec.Code != http.StatusOK {
+		t.Errorf("sources:read GET /api/projects = %d %s, want 200 — it is the addressing, not analytics", rec.Code, rec.Body.String())
 	}
 }
 
