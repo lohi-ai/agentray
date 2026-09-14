@@ -40,7 +40,10 @@ export interface InitOptions {
    * visitor, and one their browser is entitled to have kept.
    */
   respectDoNotTrack?: boolean;
-  /** Override batching defaults (size, interval, retries). */
+  /**
+   * Override batching defaults (size, interval, retry budget) and observe
+   * dropped batches (`onBatchDropped`). See `TransportOptions`.
+   */
   batching?: Omit<TransportOptions, 'host' | 'apiKey'>;
   /**
    * Value stamped on every event's `platform` property (default `"web"`), which
@@ -154,7 +157,7 @@ export function init(options: InitOptions): AgentRay {
 
 export { AgentRayClient } from './client';
 export { BatchTransport } from './transport';
-export type { TransportOptions, BatchEvent } from './transport';
+export type { TransportOptions, BatchEvent, DroppedBatch } from './transport';
 export { installAutocapture } from './autocapture';
 export type { AutocaptureOptions, CaptureConfig } from './autocapture';
 export { DEFAULT_PLATFORM } from './platform';

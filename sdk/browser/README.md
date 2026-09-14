@@ -111,10 +111,49 @@ never had one.
 
 Events are buffered and sent to `POST /batch` when the buffer reaches
 `batchSize` (default 20) or after `flushIntervalMs` (default 3000). Transient
-5xx/network failures retry with exponential backoff up to `maxRetries` (default
-3); 4xx responses are not retried. On `visibilitychange→hidden` and `pagehide`
-the buffer is flushed via `navigator.sendBeacon` so the tail of a session is not
-lost when the tab closes.
+5xx/network failures retry with exponential backoff (1 s, doubling, capped at
+8 s) until `retryBudgetMs` (default 60000) is spent; 4xx responses are not
+retried, because resending a bad key cannot fix it. On
+`visibilitychange→hidden` and `pagehide` the buffer is flushed via
+`navigator.sendBeacon` so the tail of a session is not lost when the tab closes.
+
+**A dropped batch is reported, never silent.** An event batch has no durable
+copy — unlike an alias, which waits out a page load in `localStorage` — so once
+the budget is spent those events are gone. Every abandonment therefore fires
+three signals: the `onBatchDropped` callback (wire it to your own error
+reporting), a `console.warn`, and an `agentray:batch_dropped` window event whose
+`detail` is `{ events, attempts, reason }`. A 4xx is reported the same way, with
+`attempts: 1`.
+
+```ts
+init({
+  host,
+  apiKey,
+  batching: {
+    // A restart, not a deploy: the deploy's own healthcheck expects the API to
+    // answer within its 30 s start_period, and a blue/green roll keeps the old
+    // colour serving. Raise it if a longer window is worth holding a batch in
+    // memory for.
+    retryBudgetMs: 60_000,
+    onBatchDropped: (drop) => reportToSentry('agentray batch dropped', drop),
+  },
+});
+```
+
+The budget is a deadline rather than an attempt count because what it has to
+outlast is a *window*: with a capped backoff curve, "3 attempts" silently means
+a different amount of time on every failure pattern. Deliveries are also
+serialized — a batch that is still retrying is not joined by a second loop for
+the events captured meanwhile, so an outage produces one retry loop rather than
+one per flush interval.
+
+What the budget does **not** cover is a page that navigates mid-outage: the
+in-flight batch lives in memory, and the unload beacon cannot save it because
+`/batch` is not idempotent (beaconing a batch the retry loop may also deliver
+would double-count its events). Closing that gap needs a durable queue, which
+would put event payloads — URLs, referrers, caller-authored properties — in
+`localStorage`, a privacy surface this SDK deliberately keeps to ID pairs only.
+It is not implemented; treat it as a separate decision.
 
 `identify()` and `alias()` are not events and do not travel in a batch. They go
 out on their own ordered lane — `POST /alias` first, then `POST /identify` —
