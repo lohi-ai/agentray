@@ -879,3 +879,66 @@ func TestAViewersQueryRunDoesNotWriteThroughTheCache(t *testing.T) {
 		t.Error("a query run in the caller's OWN project was marked read-only; the cache would never refresh")
 	}
 }
+
+// The guard in front of every mutation and the principal resolver behind it
+// must reach ONE answer for one request. A Bearer header that is present but is
+// not a management credential was the case that did not: principalFromRequest
+// answers it 401 rather than falling through to the cookie (principal_test.go
+// cases 5 and 6), while this resolver skipped the header and approved the write
+// on the session riding alongside it — so the guard said yes to a request the
+// handler then refused, and the two authorization layers disagreed about who
+// the caller was.
+func TestWriteGuardRefusesADeniedBearerInsteadOfFallingThrough(t *testing.T) {
+	denied := []struct {
+		name   string
+		header string
+	}{
+		{"a non-management bearer", "Bearer not-a-management-credential"},
+		{"an empty bearer", "Bearer "},
+	}
+	for _, tc := range denied {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newFakeGuardStore()
+			e := guardedEcho(t, g, 5)
+
+			// The cookie alone is a valid write: the visitor owns homeProject.
+			// Without the header this request reaches the handler, so what the
+			// assertion below measures is the header and nothing else.
+			if rec := do(e, http.MethodPost, "/api/saved-queries", visitorToken); rec.Code != reachedHandler {
+				t.Fatalf("session without a bearer: status %d, want %d", rec.Code, reachedHandler)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/saved-queries", strings.NewReader("{}"))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			req.Header.Set("Authorization", tc.header)
+			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: visitorToken})
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("bearer with a session behind it: status %d %s, want 401", rec.Code, rec.Body.String())
+			}
+
+			// The same header with a project key behind it is refused too —
+			// the fall-through is closed for every credential, not just the
+			// cookie.
+			req = httptest.NewRequest(http.MethodPost, "/api/saved-queries", strings.NewReader("{}"))
+			req.Header.Set("Authorization", tc.header)
+			req.Header.Set("X-API-Key", demoKey)
+			rec = httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("bearer with an api key behind it: status %d %s, want 401", rec.Code, rec.Body.String())
+			}
+
+			// And the resolver the guard is mirroring agrees: the header is a
+			// denial, not an absence.
+			scope, err := resolveWriteScope(e.NewContext(req, httptest.NewRecorder()), g)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if !scope.badBearer || scope.workspaceID != "" || scope.user != "" {
+				t.Fatalf("scope = %+v, want a denied bearer and nothing resolved from it", scope)
+			}
+		})
+	}
+}
