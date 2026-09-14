@@ -260,13 +260,14 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 			}
 
 			isDemo := scope.workspaceID == demoWorkspace
+			membership := storage.Project{Role: scope.role, IsDemo: isDemo}
 			if !isDemo {
 				// Outside the demo, reads-with-a-body and agent questions are
 				// open to any member, and everything else needs a writing role.
 				if class == writeReadOnly || class == writeAgentAsk || class == writeAgentControl {
 					return next(c)
 				}
-				if scope.byAPIKey || scope.byManagementKey || storage.RoleMayWrite(scope.role) {
+				if scope.byAPIKey || scope.byManagementKey || sessionAllowsWrite(membership) {
 					return next(c)
 				}
 				return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
@@ -288,7 +289,7 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				// The read itself is fine. Anything the handler does BESIDE
 				// reading — a result cache written back to the owner's row —
 				// is not, so it is told who it is serving.
-				if !storage.RoleMayWrite(scope.role) {
+				if !sessionAllowsWrite(membership) {
 					c.Set(demoReadOnlyCallerKey, true)
 				}
 				return next(c)
@@ -298,7 +299,7 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				// The operator of the demo site pays for their own runs and is
 				// not a visitor; everyone else spends the instance owner's key
 				// and is metered.
-				if storage.RoleMayWrite(scope.role) {
+				if sessionAllowsWrite(membership) {
 					return next(c)
 				}
 				if scope.projectID != g.DemoProjectID() {
@@ -332,7 +333,7 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				})
 				return next(c)
 			default:
-				if storage.RoleMayWrite(scope.role) {
+				if sessionAllowsWrite(membership) {
 					return next(c)
 				}
 				return demoRefusal(c, demoReadOnlyMessage)

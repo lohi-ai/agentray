@@ -290,3 +290,28 @@ func TestSessionRoleGrants(t *testing.T) {
 		t.Fatalf("viewer grants = %v", p.Grants)
 	}
 }
+
+func TestSessionGrantsCarriesTheDemoFact(t *testing.T) {
+	if sessionAllowsWrite(storage.Project{Role: "member", IsDemo: true}) {
+		t.Fatal("demo member must not write: IsDemo lives on the project so a caller cannot pass false by accident")
+	}
+	if !sessionAllowsWrite(storage.Project{Role: "owner", IsDemo: true}) {
+		t.Fatal("demo owner must still write")
+	}
+	if !sessionAllowsWrite(storage.Project{Role: "admin", IsDemo: true}) {
+		t.Fatal("demo admin must still write")
+	}
+	if !sessionAllowsWrite(storage.Project{Role: "member"}) {
+		t.Fatal("non-demo member must write")
+	}
+	if sessionAllowsWrite(storage.Project{Role: "viewer"}) {
+		t.Fatal("viewer arm is still read-only")
+	}
+	if sessionAllowsWrite(storage.Project{Role: "viewer", IsDemo: true}) {
+		t.Fatal("demo viewer is still read-only")
+	}
+	got := sessionGrants(storage.Project{Role: "member", IsDemo: true})
+	if len(got) != 2 {
+		t.Fatalf("demo member grants = %v, want the viewer read set", got)
+	}
+}

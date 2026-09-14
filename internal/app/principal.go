@@ -79,7 +79,7 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 		Kind:      opcore.CredSession,
 		Role:      project.Role,
 		UserID:    auth.User.ID,
-		Grants:    sessionGrants(project.Role),
+		Grants:    sessionGrants(project),
 	}, nil
 }
 
@@ -151,14 +151,20 @@ func managementGrants(scopes []string) []opcore.Access {
 	return out
 }
 
-// sessionGrants maps a workspace role onto the operation access classes the
-// matrix assigns it. Viewer gets analytics read plus sources:read (the matrix
-// allows a viewer source_status; the probe operations carry MinSessionRole
-// "admin" so the class alone never lets a viewer touch a credential).
-// Member adds dashboard and growth writes; owner/admin add source management.
-// An unrecognized role gets NOTHING — a role the vocabulary does not know is
-// not a viewer by accident.
-func sessionGrants(role string) []opcore.Access {
+// sessionGrants maps a workspace membership onto the operation access classes
+// the matrix assigns it. The project carries the demo fact — a boolean the
+// caller could forget would let a demo member inherit full member grants, and
+// the write floor would let them through.
+//
+// Demo non-owners get analytics read plus sources:read (today's viewer set).
+// Owner/admin of the demo workspace keep full grants. Member adds dashboard
+// and growth writes; owner/admin add source management. The viewer arm is
+// kept until the role itself is deleted. An unrecognized role gets NOTHING.
+func sessionGrants(project storage.Project) []opcore.Access {
+	role := project.Role
+	if project.IsDemo && role != "owner" && role != "admin" {
+		return []opcore.Access{opcore.AccessAnalyticsRead, opcore.AccessSourcesRead}
+	}
 	switch role {
 	case "owner", "admin":
 		return []opcore.Access{
@@ -177,6 +183,20 @@ func sessionGrants(role string) []opcore.Access {
 	default:
 		return nil
 	}
+}
+
+// sessionWriteFloor is the one Allow question the mutating floor asks of a
+// session. An empty registry is enough: Allow's CredSession arm does not
+// consult registered operations. Credential principals never reach this
+// helper — the guard still short-circuits API keys.
+var sessionWriteFloor = &opcore.Registry{}
+
+func sessionAllowsWrite(project storage.Project) bool {
+	return sessionWriteFloor.Allow(opcore.Principal{
+		Kind:   opcore.CredSession,
+		Role:   project.Role,
+		Grants: sessionGrants(project),
+	}, legacyWrite(opcore.AccessDashboardsWrite))
 }
 
 // registerCredentialRoutes mounts the session-only management-credential
