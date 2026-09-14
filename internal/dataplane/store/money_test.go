@@ -119,9 +119,19 @@ func moneyStore(t *testing.T, seeds ...moneySeed) *Store {
 	return &Store{duck: d}
 }
 
+// readMoney runs the tile read the way Overview does: the instrumented flag is
+// the lifetime money-event count the data-status scan already computes, so the
+// test derives it from the same events table rather than asserting it.
 func readMoney(t *testing.T, s *Store, cur, prev OverviewRange, platform string) (OverviewMetric, *OverviewRevenueDetail) {
 	t.Helper()
-	metric, detail, err := s.overviewRevenue(context.Background(), moneyProject, cur, prev, platform)
+	var moneySeen uint64
+	if err := s.duckQueryRow(context.Background(), `
+SELECT count(*) FROM events
+WHERE project_id = ? AND event_name IN ('`+moneyBookingEvent+`', '`+moneyReversalEvent+`')`,
+		[]any{moneyProject}, &moneySeen); err != nil {
+		t.Fatalf("moneySeen: %v", err)
+	}
+	metric, detail, err := s.overviewRevenue(context.Background(), moneyProject, cur, prev, platform, moneySeen > 0)
 	if err != nil {
 		t.Fatalf("overviewRevenue: %v", err)
 	}
@@ -307,10 +317,10 @@ func TestOverviewRevenueContractVectors(t *testing.T) {
 				gross: 70, net: 70, previousNet: int64Ptr(50), dedupedRows: 1},
 		},
 		{
-			name:  "11: no money row at all is no_data, never a fabricated zero",
+			name:  "11: a project that never sent a money event is unconfigured, never a fabricated zero",
 			seeds: []moneySeed{{event: "user.pageview", amount: 0}},
-			want: moneyWant{state: OverviewStateNoData,
-				notesContain: []string{"no deduplicated revenue"}},
+			want: moneyWant{state: OverviewStateUnconfigured,
+				notesContain: []string{"trusted, deduplicated"}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,6 +532,37 @@ WHERE project_id = ? AND event_name = 'revenue'
 	if naive != 180000 {
 		t.Fatalf("naive control = %d, want 180000 (the double count the dedup removes)", naive)
 	}
+}
+
+// The instrumentation signal is lifetime, not windowed: a project that has
+// never delivered a money-shaped event is "unconfigured" (Set up — the
+// required instrumentation is named), while a project that HAS sent money
+// events but whose window holds none is "no_data". The two states render
+// differently and must never be conflated.
+func TestOverviewRevenueUnconfiguredVsNoData(t *testing.T) {
+	cur, prev := moneyRanges()
+
+	t.Run("never a money event is unconfigured, not no_data", func(t *testing.T) {
+		s := moneyStore(t, moneySeed{event: "user.pageview", amount: 0})
+		metric, _ := readMoney(t, s, cur, prev, "")
+		if metric.State != OverviewStateUnconfigured {
+			t.Fatalf("state = %q, want unconfigured — the project never sent a money event", metric.State)
+		}
+		if !containsNote(metric.Notes, "trusted, deduplicated") {
+			t.Fatalf("notes %v must name the required instrumentation", metric.Notes)
+		}
+	})
+
+	t.Run("money in the previous window only is no_data, not unconfigured", func(t *testing.T) {
+		s := moneyStore(t,
+			moneySeed{event: "user.pageview", amount: 0},
+			moneySeed{amount: 100, currency: "VND", insertID: "old-1", at: moneyPrevWindow},
+		)
+		metric, _ := readMoney(t, s, cur, prev, "")
+		if metric.State != OverviewStateNoData {
+			t.Fatalf("state = %q, want no_data — instrumentation exists, the window is empty", metric.State)
+		}
+	})
 }
 
 // paid_at is DERIVED from the ledger, never emitted as a `paid_user` event: a
