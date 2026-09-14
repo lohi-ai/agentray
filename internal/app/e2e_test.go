@@ -929,8 +929,9 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 		type dashListResp struct {
 			Dashboards []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID       string `json:"id"`
+				Name     string `json:"name"`
+				BoardKey string `json:"board_key"`
 			} `json:"dashboards"`
 		}
 		var dashList dashListResp
@@ -938,15 +939,31 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		if len(dashList.Dashboards) == 0 {
 			t.Fatal("new project has no dashboards")
 		}
+		keys := map[string]bool{}
+		var chartBoardID string
+		for _, d := range dashList.Dashboards {
+			if d.BoardKey != "" {
+				keys[d.BoardKey] = true
+			} else {
+				chartBoardID = d.ID
+			}
+		}
+		for _, key := range []string{"acquisition", "monetization", "usage"} {
+			if !keys[key] {
+				t.Errorf("seeded project missing analysis board %q", key)
+			}
+		}
+		if chartBoardID == "" {
+			t.Fatal("seeded project has no chart board (template / starter)")
+		}
 
-		// Verify the seeded dashboard has at least 2 charts.
 		type chartListResp struct {
 			Charts []struct {
 				ID string `json:"id"`
 			} `json:"charts"`
 		}
 		var chartList chartListResp
-		getJSONMust(t, client, ts.URL+"/api/dashboards/"+dashList.Dashboards[0].ID+"/charts?api_key="+seedKey, &chartList)
+		getJSONMust(t, client, ts.URL+"/api/dashboards/"+chartBoardID+"/charts?api_key="+seedKey, &chartList)
 		if len(chartList.Charts) < 2 {
 			t.Fatalf("seeded dashboard has %d charts, want >= 2", len(chartList.Charts))
 		}
