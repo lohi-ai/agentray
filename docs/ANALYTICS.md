@@ -141,6 +141,84 @@ charge also emits `revenue` with `kind: 'subscription'`.
 
 ---
 
+## Reading money with SQL
+
+The Overview **Net revenue** tile implements the contract below, and this is the
+same contract hand-written (`run_sql`, a saved chart, an agent, a cohort). Both
+go through one de-duplication — the tile's is the Go read in
+`internal/dataplane/store/money.go`, and the recipe below is the SQL form of it,
+pinned to that code by a test. Do not write a third one.
+
+The grid first: one row per write, last write wins.
+
+```sql
+WITH money_raw AS (
+  SELECT
+    canonical_distinct_id AS person_id,
+    event_id,
+    event_name,
+    "timestamp" AS occurred_at,
+    upper(trim(coalesce(json_extract_string(properties, '$.currency'), ''))) AS currency,
+    coalesce(try_cast(json_extract_string(properties, '$.amount') AS BIGINT), 0) AS amount,
+    lower(trim(coalesce(json_extract_string(properties, '$.kind'), ''))) AS kind,
+    coalesce(nullif(insert_id, ''), CAST(event_id AS VARCHAR)) AS row_key
+  FROM resolved_events
+  WHERE project_id = '<project id>'
+    AND "timestamp" >= TIMESTAMPTZ '2026-09-01T00:00:00Z'
+    AND "timestamp" <  TIMESTAMPTZ '2026-10-01T00:00:00Z'
+    AND event_name IN ('revenue', 'revenue_reversed')
+),
+money_rows AS (
+  SELECT
+    person_id, event_id, event_name, occurred_at, currency, amount, kind,
+    row_number() OVER (PARTITION BY row_key ORDER BY occurred_at DESC, event_id DESC) AS write_rank
+  FROM money_raw
+)
+```
+
+Money the project actually earned, per currency, signed and unclamped:
+
+```sql
+SELECT
+  currency,
+  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN 0 ELSE amount END) AS gross,
+  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN abs(amount) ELSE 0 END) AS reversed,
+  sum(CASE WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN -abs(amount) ELSE amount END) AS net,
+  count(*) AS rows
+FROM money_rows
+WHERE write_rank = 1
+GROUP BY currency
+ORDER BY gross DESC, currency ASC
+```
+
+Rows whose `currency` is empty (`''`) and rows declaring `LT` come back in this
+result; the tile keeps them out of the totals and reports them as
+`excluded_rows` / `excluded_currencies`. Filter them the same way in your own
+query (`WHERE currency NOT IN ('', 'LT')`) — a credit balance is not revenue.
+
+Finally, the derived milestone — when each person became a paying customer:
+
+```sql
+SELECT person_id, min(occurred_at) AS paid_at
+FROM money_rows
+WHERE write_rank = 1
+  AND event_name = 'revenue'
+  AND NOT (event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0)
+  AND amount > 0
+  AND currency <> ''
+  AND currency <> 'LT'
+GROUP BY person_id
+ORDER BY paid_at ASC, person_id ASC
+```
+
+That is the whole definition: the earliest booking that survived de-duplication,
+carried a currency, and was not money coming back. A refund does not erase the
+milestone, a correction replaces the row it corrects (so the corrected write's
+timestamp is the milestone), and two ids for one person are one person
+(`canonical_distinct_id`, the same stitching every other person read uses).
+
+---
+
 ## Emitting money
 
 ### Server (`@agentray/server` ≥ 0.2.0)
