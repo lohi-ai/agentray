@@ -309,6 +309,8 @@ export type Dashboard = {
   archived_at?: string | null;
   created_at: string;
   updated_at: string;
+  board_key?: string;
+  definition_updated_at?: string | null;
 };
 
 export type Chart = {
@@ -329,6 +331,51 @@ export type Chart = {
   archived_at?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type BoardTile = {
+  key: string;
+  title?: string;
+  kind?: 'metric' | 'chart';
+  display?: string;
+  span?: number;
+  metric?: string;
+  chart_id?: string;
+  params?: { period?: string; platform?: string };
+};
+
+export type BoardSection = {
+  key: string;
+  title: string;
+  description?: string;
+  tiles: BoardTile[];
+};
+
+export type BoardDefinition = {
+  version: number;
+  sections: BoardSection[];
+};
+
+export type MetricDefinition = {
+  key: string;
+  metric_version: string;
+  label: string;
+  unit: string;
+  kind: string;
+  group: string;
+  definition: string;
+  prerequisite?: string;
+  displays: string[];
+  params: string[];
+};
+
+export type BoardContent = {
+  board: Dashboard;
+  has_definition: boolean;
+  definition: BoardDefinition;
+  metrics: MetricDefinition[];
+  charts: Chart[];
+  warnings: string[];
 };
 
 export type ChartInput = Pick<Chart, 'name' | 'kind' | 'metric' | 'event_name' | 'event_type' | 'sql' | 'x_field' | 'y_field' | 'col_span'>;
@@ -2112,6 +2159,10 @@ export class AgentRayAPI {
 
   verifySDK(eventName = 'onboarding_verified') {
     return this.callOp<VerifySDKResult>('verify_sdk', { event_name: eventName });
+  }
+
+  getBoard(input: { board_id?: string; board_key?: string }) {
+    return this.callOp<BoardContent>('get_board', input);
   }
 
   // recordOutcome appends one measured observation to a committed or decided

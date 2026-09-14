@@ -100,18 +100,13 @@ describe('nav grouping', () => {
     );
   });
 
-  it('names the AgentRay metric groups as non-linked Coming soon affordances', () => {
-    // The IA should make the product's shape legible before the pages exist.
-    // A coming-soon surface therefore carries no href at all: a placeholder
-    // URL would be a link the router cannot serve. These are AgentRay's own
-    // metric groups — there is no store source behind any of them.
-    const comingSoon = childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s));
-    expect(comingSoon.map((s) => s.label)).toEqual(['Acquisition', 'Monetization', 'Usage']);
-    expect(comingSoon.every((s) => s.href === undefined)).toBe(true);
-    // The linked Analytics surfaces are untouched by the addition.
-    expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
-    );
+  it('links the AgentRay metric groups as Analytics destinations', () => {
+    const linked = childSurfacesFor('/dashboard').filter(isLinkedSurface);
+    expect(linked.map((s) => s.label)).toEqual(expect.arrayContaining(['Acquisition', 'Monetization', 'Usage']));
+    expect(linked.find((s) => s.label === 'Acquisition')?.href).toBe('/acquisition');
+    expect(linked.find((s) => s.label === 'Monetization')?.href).toBe('/monetization');
+    expect(linked.find((s) => s.label === 'Usage')?.href).toBe('/usage');
+    expect(childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s))).toEqual([]);
   });
 
   it('exposes every child surface through a real nav parent', () => {
@@ -123,10 +118,8 @@ describe('nav grouping', () => {
     for (const surface of CHILD_SURFACES) {
       expect(navHrefs.has(surface.parentHref)).toBe(true);
     }
-    // Coming-soon surfaces are part of the set the nav exposes — represented
-    // in the IA means the shell can render them, not that they are filtered out.
-    expect(childSurfacesFor('/dashboard').filter((s) => !isLinkedSurface(s)).map((s) => s.label)).toEqual(
-      ['Acquisition', 'Monetization', 'Usage'],
+    expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(
+      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product', '/acquisition', '/monetization', '/usage']),
     );
   });
 });
@@ -154,7 +147,9 @@ describe('matchActiveHref', () => {
     ['/dashboard', '/dashboard', 'Understand'],
     ['/web-analytics', '/dashboard', 'Understand'],
     ['/sql', '/dashboard', 'Understand'],
-    ['/templates', '/dashboard', 'Understand'],
+    ['/acquisition', '/dashboard', 'Understand'],
+    ['/monetization', '/dashboard', 'Understand'],
+    ['/usage', '/dashboard', 'Understand'],
     ['/settings', '/settings', 'Workspace'],
     ['/alerts', '/settings', 'Workspace'],
     ['/pricing', '/settings', 'Workspace'],

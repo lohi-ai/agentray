@@ -118,6 +118,7 @@ export const CRAWLER_DISALLOW = [
   '/agent',
   '/agents',
   '/alerts',
+  '/acquisition',
   '/chat',
   '/cohorts',
   '/dashboard',
@@ -125,6 +126,7 @@ export const CRAWLER_DISALLOW = [
   '/events',
   '/marketplace',
   '/monitor',
+  '/monetization',
   '/operations',
   '/persons',
   '/pricing',
@@ -137,6 +139,7 @@ export const CRAWLER_DISALLOW = [
   '/teams',
   '/templates',
   '/traffic',
+  '/usage',
   '/web-analytics',
 ] as const;
 

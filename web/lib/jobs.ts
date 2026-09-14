@@ -95,6 +95,9 @@ export const JOBS: readonly JobDef[] = [
     needsEvents: true,
     surfaces: [
       { href: '/dashboard', label: 'Dashboards' },
+      { href: '/acquisition', label: 'Acquisition' },
+      { href: '/monetization', label: 'Monetization' },
+      { href: '/usage', label: 'Usage' },
       { href: '/persons', label: 'People' },
       { href: '/web-analytics', label: 'Traffic' },
       { href: '/product', label: 'Product' },
