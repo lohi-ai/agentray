@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -246,6 +247,29 @@ func TestMapOpErrorPreservesExplicitOperationKinds(t *testing.T) {
 		{opcore.NotFound("gone"), http.StatusNotFound},
 		{opcore.Conflict("stale"), http.StatusConflict},
 		{opcore.Retryable("busy"), http.StatusServiceUnavailable},
+	} {
+		mapped := MapOpError(tc.err)
+		var he *echo.HTTPError
+		if !errors.As(mapped, &he) || he.Code != tc.want {
+			t.Fatalf("MapOpError(%v) = %#v, want HTTP %d", tc.err, mapped, tc.want)
+		}
+	}
+}
+
+// A sandbox that could not start or died mid-query is an engine failure, so it
+// is retryable on every surface that classifies errors — not only on the one
+// HTTP route that noticed. A budget refusal and a SQL error are the author's,
+// and must keep answering as such.
+func TestSandboxFailureIsRetryableEverywhere(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{storage.ErrSandboxUnavailable, http.StatusServiceUnavailable},
+		{fmt.Errorf("analytics sandbox did not start: %w", storage.ErrSandboxUnavailable), http.StatusServiceUnavailable},
+		{&storage.SandboxError{Kind: "child", Message: "sandbox stopped responding", Err: storage.ErrSandboxUnavailable}, http.StatusServiceUnavailable},
+		{storage.ErrSandboxBytes, http.StatusBadRequest},
+		{storage.ErrSandboxSQL, http.StatusBadRequest},
 	} {
 		mapped := MapOpError(tc.err)
 		var he *echo.HTTPError

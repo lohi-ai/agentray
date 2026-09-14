@@ -14,6 +14,15 @@ type Config struct {
 	// Relative paths resolve against the server working directory; the default
 	// keeps a self-hosted `docker compose up` self-contained.
 	DuckDBPath string
+	// EventRetentionDays bounds how long events stay queryable. A sweep deletes
+	// events older than this many days; 0 keeps every event forever.
+	//
+	// The default is not a new policy: the ClickHouse schema this store
+	// replaced carried `TTL toDateTime(timestamp) + INTERVAL 1 YEAR`, so 365
+	// restores the all-history semantics the product already had instead of
+	// silently widening them. It is also the only bound on the per-colour
+	// DuckDB file, which otherwise grows without limit on a single VM.
+	EventRetentionDays int
 	RedisURL             string
 	NATSURL              string
 	IngestSubject        string
@@ -27,6 +36,12 @@ type Config struct {
 	IngestJetStream bool
 	// IngestStreamName is the JetStream stream that captures IngestSubject.
 	IngestStreamName string
+	// IngestConnectorSubject carries connector sync batches on the SAME durable
+	// stream as events, so a blue-green colour switch replays landed
+	// external_rows exactly like events instead of losing them. Defaults to
+	// IngestSubject + ".connectors", which inherits the per-env subject suffix
+	// (dev/prod) from the one variable that already carries it.
+	IngestConnectorSubject string
 	// IngestDLQSubject receives batches that exhaust IngestMaxDeliver redelivery
 	// attempts (poison payloads). Republish them with `agentray-server replay-dlq`.
 	IngestDLQSubject string
@@ -35,7 +50,11 @@ type Config struct {
 	// IngestDurable names the JetStream durable consumer. Blue-green deploys
 	// give each colour its own durable (e.g. agentray-ingestors-blue) so both
 	// colours receive every message — a shared durable would split the stream
-	// between them and the two DuckDB files would diverge.
+	// between them and the two DuckDB files would diverge. The durable also
+	// carries the readiness contract: its ack floor is that colour's applied
+	// high-water mark for events AND connector rows, which /readyz compares
+	// against the stream head before a deploy switches traffic (see
+	// ingest.ReplayStatus).
 	IngestDurable string
 	// PipelineMetricsProjectAPIKey names the project that pipeline self-metrics
 	// (system.pipeline.* events: flush size, insert failures, dead-letters, ingest
@@ -154,9 +173,11 @@ func FromEnv() Config {
 		HTTPAddr:                     env("HTTP_ADDR", ":8080"),
 		PostgresURL:                  env("POSTGRES_URL", "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"),
 		DuckDBPath:                   env("DUCKDB_PATH", "./data/agentray.duckdb"),
+		EventRetentionDays:           eventRetentionDays(),
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),
 		NATSURL:                      env("NATS_URL", "nats://localhost:4223"),
 		IngestSubject:                env("INGEST_SUBJECT", "agentray.events.ingest"),
+		IngestConnectorSubject:       env("INGEST_CONNECTOR_SUBJECT", env("INGEST_SUBJECT", "agentray.events.ingest")+".connectors"),
 		IngestJetStream:              envBool("INGEST_JETSTREAM", true),
 		IngestStreamName:             env("INGEST_STREAM_NAME", "AGENTRAY_EVENTS"),
 		IngestDLQSubject:             env("INGEST_DLQ_SUBJECT", "agentray.events.dlq"),
@@ -197,6 +218,19 @@ func FromEnv() Config {
 		DefaultModelLite:     env("AGENTRAY_DEFAULT_MODEL_LITE", "plus"),
 		DefaultModelPro:      env("AGENTRAY_DEFAULT_MODEL_PRO", "pro"),
 	}
+}
+
+// eventRetentionDays reads EVENT_RETENTION_DAYS. 0 is the operator's explicit
+// "keep everything"; a negative value is a typo, so it falls back to the
+// default rather than quietly removing the only bound on the event log. A
+// non-numeric value falls back the same way (envInt's own contract).
+func eventRetentionDays() int {
+	const fallback = 365
+	days := envInt("EVENT_RETENTION_DAYS", fallback)
+	if days < 0 {
+		return fallback
+	}
+	return days
 }
 
 func envBool(key string, fallback bool) bool {

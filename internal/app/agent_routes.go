@@ -332,31 +332,17 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if !canManage {
 			return echo.NewHTTPError(http.StatusForbidden, "agent config permission denied")
 		}
-		cfg, keys, err := store.WorkspaceTiersForRun(c.Request().Context(), project.WorkspaceID)
+		provider, model, err := authoringProvider(c.Request().Context(), store, project.WorkspaceID)
 		if err != nil {
+			// A provider this process cannot build is a gateway failure; a
+			// workspace whose tier is unconfigured is the caller's 400.
+			var initErr *authoringProviderInitError
+			if errors.As(err, &initErr) {
+				return echo.NewHTTPError(http.StatusBadGateway, err.Error())
+			}
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		pro := agentruntime.TierSetFromWorkspace(cfg, keys).Resolve(agentruntime.DefaultAuthoringTier)
-		if strings.TrimSpace(pro.Provider) == "" {
-			pro.Provider = cfg.Provider
-		}
-		if strings.TrimSpace(pro.BaseURL) == "" {
-			pro.BaseURL = cfg.BaseURL
-		}
-		if pro.APIKey == "" {
-			pro.APIKey = keys["flash"]
-		}
-		if strings.TrimSpace(pro.Model) == "" {
-			pro.Model = cfg.Model
-		}
-		if strings.TrimSpace(pro.Model) == "" || strings.TrimSpace(pro.APIKey) == "" {
-			return echo.NewHTTPError(http.StatusBadRequest, "pro model tier is not configured")
-		}
-		provider, err := agentruntime.NewTierProvider(pro.Provider, pro.BaseURL, pro.APIKey)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
-		}
-		draft, err := authoring.DraftDefinition(c.Request().Context(), provider, pro.Model, prompt)
+		draft, err := authoring.DraftDefinition(c.Request().Context(), provider, model, prompt)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadGateway, err.Error())
 		}

@@ -105,7 +105,9 @@ func sinkSeeds(t *testing.T, d *DuckDB, seeds ...moneySeed) {
 	for _, seed := range seeds {
 		events = append(events, moneyEvent(t, seed))
 	}
-	if err := d.SinkEvents(context.Background(), events); err != nil {
+	// An empty AppliedMark: this fixture writes events directly rather than off
+	// the durable stream, so no position is recorded.
+	if err := d.SinkEvents(context.Background(), events, AppliedMark{}); err != nil {
 		t.Fatalf("SinkEvents: %v", err)
 	}
 }

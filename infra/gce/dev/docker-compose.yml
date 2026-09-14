@@ -12,7 +12,15 @@ x-agentray-api: &agentray-api-svc
   env_file:
     - app.env
     - secret.env
-  mem_limit: 384m
+  # 1024m is the api's half of the sandbox envelope (duckdb_sandbox.go): the
+  # GOMEMLIMIT declared per colour below (256 MiB), the trusted DuckDB instance
+  # (128 MB), two sandbox children at their measured 192 MiB address-space
+  # budget plus 32 MiB of runtime each, and a 96 MiB reserve for the kernel and
+  # the page cache of a spill. 384m was sized before the engine was embedded
+  # (its measured cgroup peak alone was 344 MiB), and 768m could not hold two
+  # children once the budget they actually need was measured: TestSandboxBudget-
+  # FitsContainer sums exactly these terms and fails if it does not fit.
+  mem_limit: 1024m
   logging:
     driver: json-file
     options:
@@ -21,10 +29,35 @@ x-agentray-api: &agentray-api-svc
   networks:
     - edge
   healthcheck:
-    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+    # /readyz, not /healthz: the deploy gate must wait for this colour to have
+    # applied the whole durable stream (events AND connector rows) before Caddy
+    # is pointed at it — a colour still replaying would serve stale data behind
+    # a static 200. /healthz stays the static-200 liveness answer for everything
+    # else.
+    #
+    # This window and the deploy's --gate-timeout are two timers, not one.
+    # Docker reports `starting` through start_period and `unhealthy` after
+    # `retries` consecutive failures, i.e. start_period + interval × retries =
+    # 330s here; bg_wait treats `unhealthy` as TERMINAL (it removes the new
+    # colour rather than waiting the deadline out, which is what keeps a
+    # genuinely broken colour from burning the whole gate). So a replay that
+    # outlives 330s must be met by widening THIS window too, not only by
+    # `--gate-timeout`: raise retries to cover the wait, or accept the refusal
+    # — it is safe, the old colour keeps serving — and see deploy.sh's header
+    # for the rest. The declared window must stay above the default
+    # GATE_TIMEOUT (240s) so an ordinary deploy is decided by the gate and not
+    # by Docker.
+    #
+    # One passing probe is all the gate needs and one failing probe is not a
+    # verdict: Docker marks the container healthy on the first probe that
+    # succeeds, and a busy process can answer 503 while it cannot read the broker
+    # (those reads are bounded) before the next probe clears it. What the window
+    # has to outlast is the REPLAY, because a colour that has not caught up
+    # refuses every probe.
+    test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/readyz"]
     interval: 30s
     timeout: 5s
-    retries: 3
+    retries: 10
     start_period: 30s
 
 x-agentray-web: &agentray-web-svc
@@ -43,14 +76,22 @@ services:
   # DuckDB is a single-writer embedded database, so each colour owns its own
   # file on its own volume — a shared file would lock out the incoming colour
   # and a shared volume would corrupt it. Each colour also gets its own
-  # JetStream durable (INGEST_DURABLE) so both receive every event while both
-  # run; a fresh colour replays the stream's retention window on first boot.
+  # JetStream durable (INGEST_DURABLE), and BOTH subjects on the ingest stream —
+  # event batches and connector sync batches — are filtered by that one durable,
+  # so both colours receive every row while both run and a fresh colour replays
+  # the stream's retention window on first boot. That is also why the healthcheck
+  # above waits for /readyz: until the replay covers the stream head, the colour
+  # is missing rows it would answer queries from.
   agentray-api-blue:
     <<: *agentray-api-svc
     container_name: dev-agentray-api-blue
     environment:
       DUCKDB_PATH: /data/agentray.duckdb
       INGEST_DURABLE: agentray-ingestors-dev-blue
+      # Declared per colour, not on the x-agentray-api anchor: a service's
+      # `environment:` map REPLACES the anchor's (YAML merge keys are shallow),
+      # so a limit set up there silently never reaches a container.
+      GOMEMLIMIT: 256MiB
     volumes:
       - duckdb-dev-blue:/data
 
@@ -60,6 +101,10 @@ services:
     environment:
       DUCKDB_PATH: /data/agentray.duckdb
       INGEST_DURABLE: agentray-ingestors-dev-green
+      # Declared per colour, not on the x-agentray-api anchor: a service's
+      # `environment:` map REPLACES the anchor's (YAML merge keys are shallow),
+      # so a limit set up there silently never reaches a container.
+      GOMEMLIMIT: 256MiB
     volumes:
       - duckdb-dev-green:/data
 

@@ -27,7 +27,15 @@ func classifyOpError(err error) error {
 		errors.Is(err, storage.ErrSourceArchived),
 		errors.Is(err, storage.ErrSyncPaused):
 		return &opcore.OpError{Kind: opcore.ErrConflict, Message: err.Error(), Err: err}
-	case errors.Is(err, connector.ErrEngineBusy):
+	case errors.Is(err, connector.ErrEngineBusy),
+		// The analytics sandbox is an engine too: a child that could not start or
+		// died mid-query is a transient refusal, and every surface has to say so.
+		// Classifying it in ONE place, rather than at the HTTP route that
+		// happened to need it, is what stops /api/op/run_sql, MCP, the in-process
+		// tool and the CLI from telling an agent its SQL was wrong during an
+		// outage. A budget refusal (rows/bytes) and the engine's own SQL error
+		// stay unclassified on purpose: those the author fixes.
+		errors.Is(err, storage.ErrSandboxUnavailable):
 		return &opcore.OpError{Kind: opcore.ErrRetryable, Message: err.Error(), Err: err}
 	default:
 		return err

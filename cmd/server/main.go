@@ -9,10 +9,23 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/app"
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 func main() {
+	// The sandbox worker shares this binary: run_sql's untrusted SQL executes in
+	// a child process of the API (see duckdb_sandbox.go), and the child is
+	// started with none of the API's environment. It is dispatched before any
+	// config is read, because the child must never need — or be able to leak —
+	// the api's credentials, and it must never open the analytics file.
+	if len(os.Args) > 1 && os.Args[1] == storage.SandboxWorkerArgv {
+		if err := storage.RunSandboxWorker(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("%s: %v", storage.SandboxWorkerArgv, err)
+		}
+		return
+	}
+
 	cfg := config.FromEnv()
 
 	// Operator subcommands run against the same config, then exit (they do not

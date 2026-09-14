@@ -41,7 +41,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 1
+const DuckDBSchemaVersion = 2
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -87,6 +87,13 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
 		for _, stmt := range []string{
 			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
+			// The cgroup is the real ceiling, but DuckDB does not know that: with
+			// no limit of its own it treats the whole container as its budget.
+			// This instance is the trusted writer and the dashboard reader, so it
+			// gets its share of the envelope and spills the rest to disk — see
+			// the sandbox budget in duckdb_sandbox.go.
+			"SET memory_limit = '" + sandboxMainMemoryLimit + "'",
+			"SET max_temp_directory_size = '" + sandboxMainTempSize + "'",
 			"SET TimeZone = 'UTC'",
 		} {
 			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
@@ -190,9 +197,31 @@ func (d *DuckDB) Close() error {
 	return d.db.Close()
 }
 
-// migrate creates the v1 schema. Every statement is idempotent so a restart
-// over an existing file is a no-op; schema_meta records the version so a later
+// Checkpoint takes the writer slot and folds the write-ahead log into the
+// database file. Deleting rows only marks them; the checkpoint is what lets
+// the freed blocks be reused, so the retention sweep runs it after a delete
+// that removed anything.
+func (d *DuckDB) Checkpoint(ctx context.Context) error {
+	if d.closed.Load() {
+		return errDuckDBClosed
+	}
+	select {
+	case d.writeCh <- struct{}{}:
+		defer func() { <-d.writeCh }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	_, err := d.db.ExecContext(ctx, "CHECKPOINT")
+	return err
+}
+
+// migrate creates the schema. Every statement is idempotent so a restart over
+// an existing file is a no-op; schema_meta records the version so a later
 // schema generation can detect what it is opening.
+//
+// The version is stamped, not merely inserted: a file created by an older build
+// gains the new DDL on this boot, and a ledger still saying "1" would describe a
+// schema it no longer has — the one reading the version exists to give.
 func (d *DuckDB) migrate(ctx context.Context) error {
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		for _, stmt := range duckDBSchema {
@@ -205,13 +234,18 @@ func (d *DuckDB) migrate(ctx context.Context) error {
 			DuckDBSchemaVersion); err != nil {
 			return fmt.Errorf("duckdb schema version: %w", err)
 		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE schema_meta SET version = ? WHERE name = 'schema' AND version <> ?`,
+			DuckDBSchemaVersion, DuckDBSchemaVersion); err != nil {
+			return fmt.Errorf("duckdb schema version: %w", err)
+		}
 		return nil
 	})
 }
 
-// duckDBSchema is the v1 analytics schema: the event log, alias mirror,
-// person profiles, and connector landing rows, with two properties the
-// embedded engine makes cheap:
+// duckDBSchema is the analytics schema: the event log, alias mirror, person
+// profiles, connector landing rows, and the ingest position record, with two
+// properties the embedded engine makes cheap:
 //   - events has a real PRIMARY KEY on (project_id, event_id): the ingest
 //     dedup contract is enforced by the engine, not by merge-time luck.
 //   - persons is a plain transactional table (read-merge-write inside the
@@ -287,6 +321,17 @@ var duckDBSchema = []string{
 		data VARCHAR NOT NULL DEFAULT '',
 		synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (project_id, connector_id, table_name, row_key)
+	)`,
+	// ingest_position is the store-side half of the readiness contract: how far
+	// this file's own writes have carried it along the durable stream, and the
+	// gap a boot proved the file can never fill. It lives INSIDE the file the
+	// claim is about, so a store that lost its volume cannot inherit a warm
+	// durable's floor (see duckdb_position.go).
+	`CREATE TABLE IF NOT EXISTS ingest_position (
+		durable VARCHAR PRIMARY KEY,
+		applied_seq UBIGINT NOT NULL DEFAULT 0,
+		refused_missing UBIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`,
 	// resolved_events is the canonical-identity view every person-scoped read
 	// uses: raw distinct_id plus its stitched canonical id (self when no alias

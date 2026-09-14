@@ -506,14 +506,17 @@ type archiveSourceInput struct {
 	IdempotencyKey string `json:"idempotency_key" desc:"retry key — archiving twice is safe"`
 }
 
-// archive_source is the reversible stop: it marks the connector archived and
-// disables its syncs in one transaction (remembering which it paused), so an
-// archived source can never keep landing rows. Probes and new runs against it
-// fail closed; unarchive_source resumes exactly the syncs the archive paused.
+// archive_source is the reversible stop: it marks the connector archived,
+// disables its syncs, and cancels the runs already admitted, all in one
+// transaction (remembering which syncs it paused), so an archived source can
+// never keep landing rows. A queued run is cancelled inside that transaction;
+// a run already executing stops at its next heartbeat — the engine polls every
+// 10 seconds — and finishes cancelled. Probes and new runs against it fail
+// closed; unarchive_source resumes exactly the syncs the archive paused.
 func archiveSource() opcore.Operation[archiveSourceInput, storage.DataConnector] {
 	return opcore.Operation[archiveSourceInput, storage.DataConnector]{
 		Name:           "archive_source",
-		Summary:        "Archive a source (reversible): keeps the connector, credential reference, and landed data; pauses its syncs transactionally. Repeating is idempotent.",
+		Summary:        "Archive a source (reversible): keeps the connector, credential reference, and landed data; pauses its syncs and cancels its queued/running runs transactionally. Repeating is idempotent.",
 		Access:         opcore.AccessSourcesManage,
 		Scope:          "analyze_build",
 		MinSessionRole: "admin",

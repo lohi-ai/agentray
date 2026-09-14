@@ -26,6 +26,11 @@ type msgHandle interface {
 	term() error
 	deliveries() uint64
 	body() []byte
+	// seq is this delivery's consumer sequence: the position the DuckDB write
+	// records for the batch it lands, so /readyz can compare the durable's ack
+	// floor against what the store can show it applied. Zero when the broker
+	// cannot say.
+	seq() uint64
 }
 
 // queued pairs a decoded message's events with its (optional) ack handle so the
@@ -51,7 +56,7 @@ type queued struct {
 // backoff), and a message that has exhausted maxDeliver attempts is dead-lettered
 // so one poison batch never wedges the stream.
 type EventBatcher struct {
-	sink       func(ctx context.Context, events []storage.Event) error
+	sink       func(ctx context.Context, events []storage.Event, mark storage.AppliedMark) error
 	deadLetter func(body []byte) error
 	metrics    *PipelineMetrics
 	maxBatch   int
@@ -60,6 +65,14 @@ type EventBatcher struct {
 	maxRetries int
 	maxDeliver int
 	nakDelay   time.Duration
+	// durable names the consumer these batches arrive under, recorded with each
+	// flush as the store's applied position (see storage.AppliedMark). Empty on
+	// the legacy core-NATS path, where nothing replays and no position is kept.
+	durable string
+	// record advances the store's applied position for a delivery that settles
+	// with nothing to write — an empty batch, a poison message leaving via the
+	// DLQ. Nil where there is no store position to keep.
+	record func(ctx context.Context, mark storage.AppliedMark) error
 
 	in   chan queued
 	done chan struct{}
@@ -77,16 +90,27 @@ type EventBatcherConfig struct {
 	MaxDeliver    int           // redelivery attempts before dead-lettering (default 5)
 	NakDelay      time.Duration // delay asked of JetStream on NAK (default 5s)
 
+	// Durable names the consumer the batches arrive under. Set it on the durable
+	// path so each flush records the store's applied position; leave it empty
+	// where there is no durable (the core-NATS fallback, tests that only
+	// exercise the coalescing).
+	Durable string
+
 	// DeadLetter republishes a poison batch's raw body to the DLQ. Nil disables
 	// dead-lettering (the batch is NAK'd indefinitely instead).
 	DeadLetter func(body []byte) error
+	// RecordPosition writes the store's applied position for a delivery that
+	// settles without rows (see storage.RecordPosition). Set it on the durable
+	// path alongside Durable; with it nil, a settlement that writes no rows
+	// leaves the store's position behind the ack floor it just advanced.
+	RecordPosition func(ctx context.Context, mark storage.AppliedMark) error
 	// Metrics, when set, counts flush/failure/retry/nak/dead-letter activity.
 	Metrics *PipelineMetrics
 }
 
 // NewEventBatcher constructs a batcher around a sink (typically
-// store.InsertEvents) and starts its flush loop. Call Stop to drain.
-func NewEventBatcher(sink func(ctx context.Context, events []storage.Event) error, cfg EventBatcherConfig) *EventBatcher {
+// store.SinkEvents) and starts its flush loop. Call Stop to drain.
+func NewEventBatcher(sink func(ctx context.Context, events []storage.Event, mark storage.AppliedMark) error, cfg EventBatcherConfig) *EventBatcher {
 	if cfg.MaxBatch <= 0 {
 		cfg.MaxBatch = 500
 	}
@@ -118,6 +142,8 @@ func NewEventBatcher(sink func(ctx context.Context, events []storage.Event) erro
 		maxRetries: cfg.MaxRetries,
 		maxDeliver: cfg.MaxDeliver,
 		nakDelay:   cfg.NakDelay,
+		durable:    cfg.Durable,
+		record:     cfg.RecordPosition,
 		in:         make(chan queued, cfg.QueueDepth),
 		done:       make(chan struct{}),
 	}
@@ -147,8 +173,14 @@ func (b *EventBatcher) Add(events []storage.Event) {
 func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 	if len(events) == 0 {
 		// Nothing to insert, but the message must still be acked or it redelivers
-		// forever.
+		// forever. The ack moves the consumer's ack floor over this delivery, so
+		// the store must record the position first — and if it cannot, the
+		// delivery is retried instead of settling the floor over a hole.
 		if msg != nil {
+			if err := b.recordSettled(msg.seq()); err != nil {
+				b.retrySettlement(msg, err)
+				return
+			}
 			_ = msg.ack()
 		}
 		return
@@ -192,6 +224,13 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 		}
 		return
 	}
+	// The position is recorded BEFORE the dead-letter and the terminate: both of
+	// those leave the delivery behind, and a store that fell behind the floor
+	// they advance would refuse this colour as store-behind on its next boot.
+	if err := b.recordSettled(msg.seq()); err != nil {
+		b.retrySettlement(msg, err)
+		return
+	}
 	if err := b.deadLetter(msg.body()); err != nil {
 		log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
 		_ = msg.nak(b.nakDelay)
@@ -205,6 +244,41 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 	}
 	_ = msg.term()
 	log.Printf("ingestion batcher: terminated poison message: %v", cause)
+}
+
+// recordSettled moves the store's applied position over a delivery that is
+// settling with nothing written. Terminating a message advances the consumer's
+// ack floor exactly as acking does, so a store that skipped the record here
+// would wake up behind its own floor on the next boot and refuse a colour that
+// lost nothing (see storage.RecordPosition). A NAK is not a settlement and
+// records nothing — the delivery comes back.
+//
+// It returns the error, and the callers do not settle without it: the position
+// is the store's half of the same claim the ack makes, so a store that cannot
+// take it leaves the delivery to be retried rather than advancing the floor over
+// a gap only the next boot would see.
+func (b *EventBatcher) recordSettled(seq uint64) error {
+	if b.record == nil || b.durable == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
+	defer cancel()
+	if err := b.record(ctx, storage.AppliedMark{Durable: b.durable, Seq: seq}); err != nil {
+		return fmt.Errorf("record applied position %d for durable %q: %w", seq, b.durable, err)
+	}
+	return nil
+}
+
+// retrySettlement hands a message back to JetStream because it could not be
+// settled durably. Retrying costs one redelivery; settling anyway would leave
+// the store behind the ack floor it just advanced, which is the defect this
+// record exists to catch.
+func (b *EventBatcher) retrySettlement(msg msgHandle, cause error) {
+	log.Printf("ingestion batcher: %v; redelivering instead of settling over it", cause)
+	_ = msg.nak(b.nakDelay)
+	if b.metrics != nil {
+		b.metrics.recordNak()
+	}
 }
 
 func (b *EventBatcher) loop() {
@@ -250,17 +324,28 @@ func (b *EventBatcher) loop() {
 
 // flush inserts every buffered message's events in one DuckDB write and then
 // settles each source message (ack on success; NAK or dead-letter on failure).
+//
+// The write also records how far this batch carries the store along the durable
+// stream — the highest consumer sequence among its messages. A maximum, not a
+// contiguous floor: the position record only ever has to dominate the highest
+// message this file acknowledged (see ReplayStoreBehind), and the messages that
+// would make it contiguous are either in this same batch or were applied, and
+// recorded, by an earlier one.
 func (b *EventBatcher) flush(items []queued) {
 	total := 0
 	for _, it := range items {
 		total += len(it.events)
 	}
 	all := make([]storage.Event, 0, total)
+	mark := storage.AppliedMark{Durable: b.durable}
 	for _, it := range items {
 		all = append(all, it.events...)
+		if it.msg != nil && it.msg.seq() > mark.Seq {
+			mark.Seq = it.msg.seq()
+		}
 	}
 
-	if err := b.sinkWithRetry(all); err == nil {
+	if err := b.sinkWithRetry(all, mark); err == nil {
 		b.metrics.recordFlush(len(all), ingestLagMS(all))
 		for _, it := range items {
 			if it.msg != nil {
@@ -294,6 +379,13 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 			continue
 		}
 		if it.msg.deliveries() >= uint64(b.maxDeliver) && b.deadLetter != nil {
+			// Recorded before the dead-letter and the terminate, like the poison
+			// path: settling moves the ack floor, and a store that could not take
+			// the record must not be left behind it.
+			if err := b.recordSettled(it.msg.seq()); err != nil {
+				b.retrySettlement(it.msg, err)
+				continue
+			}
 			if derr := b.deadLetter(it.msg.body()); derr != nil {
 				// Couldn't dead-letter (DLQ unreachable); keep the message alive by
 				// asking for another redelivery rather than losing it.
@@ -316,11 +408,11 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 // out a transient DuckDB blip without a full redelivery cycle. On a longer
 // outage it gives up and returns the error so the caller NAKs (JetStream then owns
 // the slower redelivery/backoff).
-func (b *EventBatcher) sinkWithRetry(events []storage.Event) error {
+func (b *EventBatcher) sinkWithRetry(events []storage.Event, mark storage.AppliedMark) error {
 	var err error
 	for attempt := 0; attempt < b.maxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
-		err = b.sink(ctx, events)
+		err = b.sink(ctx, events, mark)
 		cancel()
 		if err == nil {
 			return nil

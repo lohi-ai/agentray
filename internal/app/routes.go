@@ -44,16 +44,36 @@ func (s publicCollectSet) collect(e *echo.Echo, method, path string, handler ech
 
 func (s publicCollectSet) has(path string) bool { return s[path] }
 
+// registerHealthRoutes mounts the two probes. They answer HEAD as well as GET:
+// the compose healthcheck is `wget --spider`, and spider mode sends HEAD — a
+// GET-only route answers that 405, the probe exits non-zero for every colour,
+// and the blue-green gate then never sees a healthy container at all. RFC 9110
+// says HEAD is GET without the body, which is exactly what a probe wants.
+//
+// /healthz is the static liveness answer and stays what it always was. /readyz
+// is the data-coherence probe the deploy gate reads through that healthcheck
+// (see readyzHandler): 503 until this colour has applied everything the durable
+// stream offers it.
+func registerHealthRoutes(e *echo.Echo, ready readinessProbe) {
+	liveness := func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
+	}
+	e.GET("/healthz", liveness)
+	e.HEAD("/healthz", liveness)
+
+	readyz := readyzHandler(ready)
+	e.GET("/readyz", readyz)
+	e.HEAD("/readyz", readyz)
+}
+
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, ready readinessProbe, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
-	e.GET("/healthz", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
-	})
+	registerHealthRoutes(e, ready)
 
 	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)
@@ -772,6 +792,13 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		// rows without touching the cache.
 		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), !readOnlyCaller(c))
 		if err != nil {
+			// Same contract as /api/sql/run: a sandbox that could not run the
+			// query is retryable capacity, not a 500 — the identical query
+			// answered 503 there.
+			if storage.IsSandboxUnavailable(err) {
+				c.Response().Header().Set("Retry-After", "5")
+				return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+			}
 			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]any{"result": result})
@@ -819,6 +846,14 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		rows, err := store.RunSQL(c.Request().Context(), project.ID, payload.SQL)
 		if err != nil {
+			// A sandbox that could not run the query is not the author's fault,
+			// and must not read as bad SQL: answer 503 (retryable) for that case
+			// only. Everything else is the engine's answer to the query, which
+			// the SQL screen shows inline so users can fix it.
+			if storage.IsSandboxUnavailable(err) {
+				c.Response().Header().Set("Retry-After", "5")
+				return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
+			}
 			// Surface the underlying SQL error (e.g. DuckDB syntax/column
 			// errors) to the author instead of Echo's generic 500 — the SQL
 			// screen shows this message inline so users can fix their query.
@@ -867,15 +902,11 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 // mountDashboardLifecycle registers the dashboard/chart lifecycle routes. They
 // are thin adapters over the shared operation registry: same URLs, same
 // envelopes, but the mutation runs the opcore -> usecase -> store path every
-// other adapter runs. Admission stays the legacy contract (any non-capture
-// credential for the project) — the op's Access class governs /api/op, not
-// this surface. Extracted from registerRoutes so tests can mount it alone.
+// other adapter runs. These routes decide nothing about authorization — the
+// caller's admission is the legacy non-capture contract, and the operation's
+// Access class is applied by opAdapter.invoke, exactly as it is on /api/op.
+// Extracted from registerRoutes so tests can mount it alone.
 func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter) {
-	// Dashboard/chart lifecycle routes are thin adapters over the shared
-	// operation registry: same URLs, same envelopes, but the mutation runs the
-	// opcore -> usecase -> store path every other adapter runs. Admission stays
-	// the legacy contract (projectFromRequest: any non-capture credential for
-	// the project) — the op's Access class governs /api/op, not this surface.
 	e.GET("/api/dashboards", func(c echo.Context) error {
 		principal, project, err := principalAndProject(c, store)
 		if err != nil {
@@ -1136,6 +1167,10 @@ func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter)
 	})
 }
 
+// projectFromRequest resolves the project a legacy read route acts on. Capture
+// credentials are refused; every other admitted kind gets a project whose
+// capture key has been withheld (projectForPrincipal) — the response bodies of
+// these routes all echo it.
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {
@@ -1148,7 +1183,7 @@ func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, 
 	if err != nil {
 		return storage.Project{}, err
 	}
-	return project, nil
+	return projectForPrincipal(project, principal), nil
 }
 // wrapObject re-envelopes an operation's bare JSON result under the legacy
 // response key — {"id":…} becomes {"dashboard":{"id":…}} — so the adapter
