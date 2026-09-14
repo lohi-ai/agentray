@@ -153,6 +153,30 @@ Sessions are stored in PostgreSQL. On login/signup the server sets an `HttpOnly`
 
 `EventFilter` is the shared query parameter struct populated by `filterFromRequest()` from query string params (`hours`, `from`, `to`, `event_type`, `event_name`, `distinct_id`, `session_id`, `agent_id`, `model_name`, `search`, `error_only`, `limit`).
 
+### Metric catalog and declared boards (`store/metric_catalog.go`, `store/boards.go`)
+
+A board's content is one document on its `dashboards` row
+(`definition JSONB`, `board_key`, `definition_updated_at`): sections, and the
+tiles inside them. A tile declares a catalog metric (the server computes it) or
+places a chart that already belongs to the board. The model, its rules and its
+compatibility story are in
+[DESIGN-BOARD-CONTENT-MODEL.md](DESIGN-BOARD-CONTENT-MODEL.md).
+
+`metric_definitions` is the catalog: one row per metric, carrying its label,
+unit, kind, definition, required instrumentation, and the displays a tile may
+draw it as. The rows are the projection of the Go declaration in
+`metric_catalog.go`, refreshed on every boot — the declaration is the authority,
+the table is what every consumer reads (web, MCP, `run_sql`). A metric's
+`definition` text is the same constant the overview read prints beside the
+number, so the explanation cannot outlive the computation.
+
+Four operations serve the model, each declared once in
+`internal/dataplane/usecase/boards.go` and projected onto REST, the agent tool,
+the CLI and MCP by opcore: `list_metrics`, `read_metric` and `get_board`
+(`analytics:read`), and `save_board` (`dashboards:write`, revision-fenced and
+idempotent). `read_metric` projects the metric out of the shared
+`Store.Overview` read — there is no second computation behind a board tile.
+
 ### Event retention (`internal/dataplane/store/retention.go`)
 
 `events` is append-only, so it is bounded by policy rather than by the engine: a

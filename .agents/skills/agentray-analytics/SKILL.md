@@ -45,6 +45,13 @@ Read first, then build:
   table for anything `run_insight` does not cover. Extract JSON props with
   `json_extract_string(properties, '$.key')`.
 - `list_dashboards`: see existing boards before creating a new one.
+- `list_metrics` / `read_metric`: the metric catalog — what a board tile may
+  reference, in what unit, with which definition and required instrumentation —
+  and the read that computes one over a range. Use `read_metric` instead of
+  hand-writing SQL for a number the catalog already defines.
+- `get_board` / `save_board`: read a board's declared content (sections and
+  tiles, with the revision) and declare it back in one write. `save_board`
+  replaces the board's content, so read it first.
 - `create_dashboard` / `create_chart`: pin a worthwhile view. Create the
   dashboard first if none fits, then add charts to it.
 - `submit_recommendation`: file a growth/marketing recommendation with the
@@ -62,8 +69,11 @@ Read first, then build:
    window tight; widen only if the data is thin.
 4. Answer with the number first and a one-line interpretation. Name the single
    biggest driver or drop-off, not five shallow observations.
-5. If a view is worth keeping, ask the user, then `create_chart` it onto a
-   relevant dashboard (`list_dashboards` first; `create_dashboard` if none fits).
+5. If a view is worth keeping, ask the user, then either declare it onto a board
+   (`list_metrics` for the metric, `get_board` for the current revision and
+   `save_board` with the whole document) or pin an ad-hoc chart
+   (`create_chart` onto a dashboard from `list_dashboards`, creating one with
+   `create_dashboard` if none fits).
 6. When you spot an opportunity, end with `submit_recommendation` carrying the
    evidence, and `remember` durable findings.
 
@@ -86,7 +96,12 @@ Lead with the highest-signal result:
   chart from an unverified, erroring, or empty query.
 - **SELECT-only.** `run_sql` is read-only; never attempt a write.
 - **Confirm before side effects.** `create_dashboard`, `create_chart`,
-  `submit_recommendation`, and `remember` are durable. State the exact action and
-  its evidence, and get an explicit go-ahead before calling them.
+  `save_board`, `submit_recommendation`, and `remember` are durable. State the
+  exact action and its evidence, and get an explicit go-ahead before calling
+  them.
+- **Declare only what the catalog defines.** A `save_board` tile references a
+  metric key from `list_metrics` or a chart that already belongs to the board;
+  anything else is refused. Carry the current `revision` from `get_board` — a
+  declaration without one is a create and conflicts against an existing board.
 - **One project per key.** Every tool call is scoped to the API key's project; to
   analyze another project, reconnect with that project's key.
