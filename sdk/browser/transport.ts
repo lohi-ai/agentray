@@ -326,19 +326,34 @@ export class IdentityQueue {
 
   private pump(): Promise<void> {
     if (this.pumping !== null) return this.pumping;
-    this.pumping = this.drain().finally(() => {
+    const pumping = (async () => {
+      // Keep draining while the queue came up empty but something arrived
+      // meanwhile. An operation enqueued while the previous drain was finishing
+      // finds `pumping` still set and so starts nothing of its own; this loop,
+      // not that enqueue, is what delivers it — and `flush()` waits for it.
+      let drained: boolean;
+      do {
+        drained = await this.drain();
+      } while (drained && this.queue.length > 0);
+    })().finally(() => {
       this.pumping = null;
     });
-    return this.pumping;
+    this.pumping = pumping;
+    return pumping;
   }
 
-  private async drain(): Promise<void> {
+  /**
+   * Deliver the queue front to back. Resolves `true` when it ran out of work
+   * and `false` when the head is still unacknowledged — what tells `pump()`
+   * "gone" apart from "stalled", since a stalled head would otherwise loop.
+   */
+  private async drain(): Promise<boolean> {
     while (this.queue.length > 0) {
       const queued = this.queue[0];
       const outcome = await this.deliver(queued, 0);
       // Still unacknowledged: keep it for the next flush or the unload beacon
       // rather than dropping the only record of how two ids are related.
-      if (outcome === 'unsent') return;
+      if (outcome === 'unsent') return false;
       this.queue.shift();
       const { op } = queued;
       if (op.kind !== 'alias') continue;
@@ -349,6 +364,7 @@ export class IdentityQueue {
       } catch {}
       if (outcome === 'ok') this.onAliasConfirmed?.(op);
     }
+    return true;
   }
 
   private async deliver(queued: QueuedOperation, attempt: number): Promise<DeliveryOutcome> {

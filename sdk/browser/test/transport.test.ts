@@ -260,4 +260,32 @@ describe('IdentityQueue', () => {
     aliasInFlight.resolve();
     vi.unstubAllGlobals();
   });
+
+  it('delivers an operation enqueued while the previous drain was finishing', async () => {
+    const paths: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      paths.push(new URL(String(url)).pathname);
+      return new Response('', { status: 200 });
+    });
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    let armed = false;
+    queue.onAliasConfirmed = () => {
+      if (armed) return;
+      armed = true;
+      // A caller that resolves the next login in a promise continuation lands
+      // exactly in this window: after the drain shifted its last operation and
+      // before the in-flight pump is cleared, so its own enqueue finds a pump
+      // that has already finished and starts nothing.
+      queueMicrotask(() => {
+        queue.enqueue({ kind: 'alias', anonymousId: 'anon-2', distinctId: 'user_2' });
+      });
+    };
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    await queue.flush();
+
+    // Nothing else on this page will trigger the queue, so an operation the
+    // pump forgets is an alias that never reaches the server.
+    await vi.waitFor(() => expect(paths).toEqual(['/alias', '/alias']));
+  });
 });
