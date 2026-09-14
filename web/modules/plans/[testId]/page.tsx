@@ -39,7 +39,7 @@ export function PlanDetailPage() {
 
   if (isLoading && !test) {
     return (
-      <AppShell active="plans">
+      <AppShell>
         <Loading label="Opening the experiment…" />
       </AppShell>
     );
@@ -47,7 +47,7 @@ export function PlanDetailPage() {
 
   if (error || !test) {
     return (
-      <AppShell active="plans" title="Experiment" sub="One falsifiable bet on one idea.">
+      <AppShell title="Experiment" sub="One falsifiable bet on one idea.">
         <Callout
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
@@ -74,7 +74,6 @@ export function PlanDetailPage() {
 
   return (
     <AppShell
-      active="plans"
       title={
         <HStack gap={2} align="center">
           <span>Experiment</span>

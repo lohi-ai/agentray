@@ -194,7 +194,6 @@ export function OperationsPage() {
 
   return (
     <AppShell
-      active="operations"
       title="Operations"
       sub="Chat is the front door. These channels start a run without a conversation — a schedule or a webhook. Slack, Discord, and Telegram are next."
       actions={

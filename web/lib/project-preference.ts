@@ -2,7 +2,7 @@ import type { Project } from '@/lib/api';
 
 // Same prefix as the chat cache (`agentray.chat.v2.<projectID>`). Per-browser,
 // not per-user: a stale id from another account is ignored, never deleted.
-export const PROJECT_PREFERENCE_KEY = 'agentray.projectId';
+const PROJECT_PREFERENCE_KEY = 'agentray.projectId';
 
 export function readPreferredProjectID(): string {
   if (typeof window === 'undefined') return '';

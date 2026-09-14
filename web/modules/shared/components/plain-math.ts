@@ -18,7 +18,7 @@ function mathBody(dollar: string | undefined, paren: string | undefined): string
 }
 
 /** Unwraps a run of prose the markdown parser has already isolated from code. */
-export function unwrapInlineMath(value: string): string {
+function unwrapInlineMath(value: string): string {
   // Models escape the delimiters as often as not (`\$to\$`), and markdown
   // renders `\$` as `$` either way — so dropping the backslash first is
   // display-neutral and lets one rule cover both spellings.

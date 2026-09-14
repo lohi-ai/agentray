@@ -18,7 +18,7 @@ import type { TablePlugin } from '@astryxdesign/core/Table';
 import { useAuthStore } from '@/lib/app-state';
 import { AutoGrid } from '@/modules/shared/components/page-shell';
 
-export type Tone = 'agent' | 'warning' | 'success' | 'danger';
+type Tone = 'agent' | 'warning' | 'success' | 'danger';
 
 // Astryx migration note: these shared primitives keep their exported APIs intact
 // (22 consumers), but their *neutral* surfaces/text/borders now reference Astryx's

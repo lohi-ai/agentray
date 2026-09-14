@@ -21,7 +21,7 @@ import { CHANNEL_CATALOG, type ChannelInfo, type WorkloadCategory } from './ia';
 
 export type JobId = 'validate' | 'grow' | 'operate';
 
-export type LayerId = 'channel' | 'workload' | 'runtime' | 'data';
+type LayerId = 'channel' | 'workload' | 'runtime' | 'data';
 
 export type JobDef = {
   id: JobId;
@@ -159,7 +159,7 @@ export function jobPacks(job: JobDef): string[] {
 // jobLayers renders one job as the four architecture rows. It is the only place
 // the layer names are shown to a user, and each row is stated as what the layer
 // does for *this* job — a label like "Dataplane" on its own teaches nothing.
-export type JobLayer = { id: LayerId; label: string; detail: string };
+type JobLayer = { id: LayerId; label: string; detail: string };
 
 // jobChannels resolves a job's channel kinds against the shipped catalog, so a
 // job can never advertise a channel the backend has not shipped (support and

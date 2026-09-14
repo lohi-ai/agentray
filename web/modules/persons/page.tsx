@@ -120,7 +120,7 @@ export function PersonsPage() {
 
   if (!persons) {
     return (
-      <AppShell active="traffic" title="People" sub="Who is behind the events — identified and anonymous.">
+      <AppShell title="People" sub="Who is behind the events — identified and anonymous.">
         <Loading label="Loading people…" />
       </AppShell>
     );
@@ -129,7 +129,7 @@ export function PersonsPage() {
   const identifiedShare = persons.total ? (persons.identified / persons.total) * 100 : 0;
 
   return (
-    <AppShell active="traffic" title="People" sub="Who is behind the events — identified and anonymous.">
+    <AppShell title="People" sub="Who is behind the events — identified and anonymous.">
       <FilterBar showEventType={false} showErrors={false} />
       <StatsStrip stats={[
         { label: 'People', value: formatNumber(persons.total) },

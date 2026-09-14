@@ -67,17 +67,6 @@ func registerAlertRoutes(e *echo.Echo, store *storage.Store) {
 		return c.NoContent(http.StatusNoContent)
 	})
 
-	e.GET("/api/alerts/rules/:rule_id/events", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		events, err := store.ListAlertEvents(c.Request().Context(), ctx.User.ID, project.ID, c.Param("rule_id"), intParam(c, "limit", 50, 1, 200))
-		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
-		}
-		return c.JSON(http.StatusOK, map[string]any{"events": events})
-	})
 
 	// --- channels (workspace-scoped) ---
 	e.GET("/api/alerts/channels", func(c echo.Context) error {
@@ -108,14 +97,4 @@ func registerAlertRoutes(e *echo.Echo, store *storage.Store) {
 		return c.JSON(http.StatusCreated, map[string]any{"channel": channel})
 	})
 
-	e.DELETE("/api/alerts/channels/:channel_id", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
-		if err != nil {
-			return err
-		}
-		if err := store.DeleteAlertChannel(c.Request().Context(), ctx.User.ID, project.WorkspaceID, c.Param("channel_id")); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
-		}
-		return c.NoContent(http.StatusNoContent)
-	})
 }

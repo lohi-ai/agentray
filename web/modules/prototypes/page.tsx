@@ -39,7 +39,6 @@ export function PrototypesPage() {
 
   return (
     <AppShell
-      active="prototypes"
       title="Prototypes"
       sub="Market the idea before you build it. Paste the snippet on the page, collect the waitlist, and keep the number you agreed to."
       actions={
