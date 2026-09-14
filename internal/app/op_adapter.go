@@ -97,8 +97,11 @@ func (a *opAdapter) authorizeAccess(principal opcore.Principal, req opcore.Requi
 	}
 	// A session refused on a write hears why: the class is not the missing
 	// piece, the membership is. It is the sentence the demo write guard
-	// answers a viewer with, for the same situation.
-	if principal.Kind == opcore.CredSession && !storage.RoleMayWrite(principal.Role) {
+	// answers a viewer with, for the same situation. A read requirement carries
+	// no floor (legacyRead leaves MinSessionRole empty), so a session refused a
+	// read is told which class it lacks instead of being told its role is
+	// read-only — which would be the wrong sentence for a read.
+	if principal.Kind == opcore.CredSession && req.MinSessionRole != "" && !storage.RoleMayWrite(principal.Role) {
 		return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
 	}
 	return echo.NewHTTPError(http.StatusForbidden, "credential may not perform this action (requires "+string(req.Access)+")")
@@ -147,6 +150,39 @@ func projectAndPrincipalForWrite(c echo.Context, store *storage.Store, ops *opAd
 		return storage.Project{}, opcore.Principal{}, err
 	}
 	return project, principal, nil
+}
+
+// projectForRead is projectForWrite's counterpart for the legacy read routes:
+// the same admission, then the class of the data the route returns. Admission
+// alone is not the whole question for a read either — projectFromRequest never
+// consults a management credential's grants, so a credential minted with
+// sources:read and nothing else read every analytics route on this surface
+// while /api/op refused the same credential activity_summary. The classes the
+// reads declare are all analytics:read, which a viewer's session holds and a
+// pre-split project key's frozen allowlist covers, so the callers that are
+// meant to keep reading keep reading.
+func projectForRead(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
+	principal, project, err := principalAndProject(c, store)
+	if err != nil {
+		return storage.Project{}, err
+	}
+	if err := ops.authorizeAccess(principal, req); err != nil {
+		return storage.Project{}, err
+	}
+	return project, nil
+}
+
+// projectForAdmission is the resolver for the one legacy route whose work IS the
+// addressing: GET /api/projects returns the project a credential named — the
+// projects it may address — and reads no analytics, so the class decision every
+// other route makes would be a decision about data this route never touches.
+//
+// It is projectFromRequest under a name that says why a route is allowed to ask
+// only "may you address this project", so the exception is greppable rather
+// than a hole: TestNoRouteResolvesThroughTheReadResolver fails any route that
+// reaches projectFromRequest directly.
+func projectForAdmission(c echo.Context, store *storage.Store) (storage.Project, error) {
+	return projectFromRequest(c, store)
 }
 
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —
