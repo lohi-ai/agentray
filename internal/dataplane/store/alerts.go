@@ -303,33 +303,6 @@ func (s *Store) DeleteAlertRule(ctx context.Context, userID, projectID, ruleID s
 	return err
 }
 
-// ListAlertEvents returns a rule's recent firing history (member-readable).
-func (s *Store) ListAlertEvents(ctx context.Context, userID, projectID, ruleID string, limit int) ([]AlertEvent, error) {
-	if _, err := s.ProjectByIDForUser(ctx, userID, projectID); err != nil {
-		return nil, err
-	}
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	rows, err := s.pg.Query(ctx, `
-SELECT e.id::text, e.rule_id::text, e.fired_at, e.state, e.value, e.payload
-FROM alert_events e JOIN alert_rules r ON r.id = e.rule_id
-WHERE e.rule_id = $1 AND r.project_id = $2
-ORDER BY e.fired_at DESC LIMIT $3`, ruleID, projectID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]AlertEvent, 0)
-	for rows.Next() {
-		var e AlertEvent
-		if err := rows.Scan(&e.ID, &e.RuleID, &e.FiredAt, &e.State, &e.Value, &e.Payload); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
 
 // --- channels CRUD ---
 
@@ -389,18 +362,6 @@ RETURNING id::text, workspace_id::text, kind, name, config, created_at`,
 	return out, err
 }
 
-// DeleteAlertChannel removes a channel (owner/admin only).
-func (s *Store) DeleteAlertChannel(ctx context.Context, userID, workspaceID, channelID string) error {
-	canManage, err := s.userCanManageWorkspace(ctx, userID, workspaceID)
-	if err != nil {
-		return err
-	}
-	if !canManage {
-		return errAgentForbidden
-	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM alert_channels WHERE workspace_id=$1 AND id=$2`, workspaceID, channelID)
-	return err
-}
 
 // --- evaluation-support reads (internal, used by the alerting worker) ---
 

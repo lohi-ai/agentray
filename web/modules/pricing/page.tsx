@@ -102,7 +102,7 @@ export function PricingPage() {
   // or a typed URL, since navItemsFor already drops the nav item.
   if (!hosted) {
     return (
-      <AppShell active="settings" title="Plans" sub="This instance is self-hosted.">
+      <AppShell title="Plans" sub="This instance is self-hosted.">
         <Card padding={4}>
           <VStack gap={3} align="start">
             <Badge variant="green" label="Self-hosted · unlimited · MIT" />
@@ -119,7 +119,6 @@ export function PricingPage() {
 
   return (
     <AppShell
-      active="settings"
       title="Plans"
       sub="Meter the events. Never the questions — you bring your own AI key, so asking is always unlimited."
     >

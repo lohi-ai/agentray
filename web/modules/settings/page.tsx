@@ -31,7 +31,6 @@ export function SettingsPage() {
 
   return (
     <AppShell
-      active="settings"
       title="Settings"
       sub="Workspace, people, AI key, and how events get in."
       tabs={<PageTabs tabs={TABS.map((t) => ({ id: t, label: t }))} value={tab} onChange={setTab} />}

@@ -219,7 +219,7 @@ export function MarketplacePage() {
   const { templates, applyTemplate } = useTemplates();
 
   return (
-    <AppShell active="dashboards">
+    <AppShell>
       <div
         className="relative overflow-hidden rounded-xl bg-[var(--color-background-card)] p-6"
         style={{

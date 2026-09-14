@@ -118,11 +118,6 @@ export function useAgent() {
     }
   };
 
-  const triggerRun = useMutation({
-    mutationFn: () => client().triggerAgentRun(),
-    onSuccess: () => setMessage('Autonomous run queued'),
-    onError: (e: Error) => setError(e.message),
-  });
 
   const ack = useMutation({
     mutationFn: (vars: { id: string; status: 'accepted' | 'dismissed'; note?: string }) =>
@@ -162,7 +157,6 @@ export function useAgent() {
         .then((r) => ({ run: r.run, toolCalls: r.tool_calls ?? [] }))
         .catch(() => null),
     chatPending: chat.isPending,
-    triggerRun: () => triggerRun.mutateAsync(),
     ackRecommendation: (id: string, status: 'accepted' | 'dismissed', note?: string) =>
       ack.mutateAsync({ id, status, note }),
   };

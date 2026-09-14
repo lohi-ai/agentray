@@ -24,7 +24,7 @@ const TEXT_KEYS = [
 
 /** Every query-string key this module owns — used to clear stale filter state
  *  without disturbing params that belong to the page (`?tab=`, `?agent=`). */
-export const FILTER_URL_KEYS = [...TEXT_KEYS, 'hours', 'from', 'to', 'error_only'] as const;
+const FILTER_URL_KEYS = [...TEXT_KEYS, 'hours', 'from', 'to', 'error_only'] as const;
 
 export function filtersToQuery(filters: Filters, base?: URLSearchParams): URLSearchParams {
   const params = new URLSearchParams(base?.toString() ?? '');

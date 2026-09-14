@@ -49,7 +49,6 @@ export function ReplayPage() {
 
   return (
     <AppShell
-      active="monitor"
       title="Session replay"
       sub="What happened in one session, in order."
       actions={<>{input}<Button variant="primary" icon={<Play size={15} />} onClick={() => void load()}>Replay</Button></>}

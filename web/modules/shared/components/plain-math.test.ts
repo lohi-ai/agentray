@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { remarkPlainMath, stripInlineMath, unwrapInlineMath } from '@/modules/shared/components/plain-math';
+import { remarkPlainMath, stripInlineMath } from '@/modules/shared/components/plain-math';
 
-describe('unwrapInlineMath', () => {
+describe('unwrapInlineMath (via stripInlineMath)', () => {
   it('unwraps the LaTeX a model reaches for unprompted', () => {
     // Verbatim from a Growth Lead answer: nothing renders math, so the reader
     // saw the dollar signs in the middle of a sentence.
-    expect(unwrapInlineMath('Conversion from user.pageview $to$ reader.chapter_open.'))
+    expect(stripInlineMath('Conversion from user.pageview $to$ reader.chapter_open.'))
       .toBe('Conversion from user.pageview to reader.chapter_open.');
   });
 
@@ -13,16 +13,16 @@ describe('unwrapInlineMath', () => {
     // What the stored answer actually contained. Astryx parses `\$` into its own
     // inline node, so by the time a text node reaches a plugin the pair is gone
     // — the escape has to be resolved before the parse.
-    expect(unwrapInlineMath('user.pageview \\$to\\$ reader.chapter_open'))
+    expect(stripInlineMath('user.pageview \\$to\\$ reader.chapter_open'))
       .toBe('user.pageview to reader.chapter_open');
   });
 
   it('unwraps a TeX command', () => {
-    expect(unwrapInlineMath('the rate $\\alpha$ here')).toBe('the rate \\alpha here');
+    expect(stripInlineMath('the rate $\\alpha$ here')).toBe('the rate \\alpha here');
   });
 
   it('unwraps \\( \\) inline math', () => {
-    expect(unwrapInlineMath('solve \\(x + 1\\) now')).toBe('solve x + 1 now');
+    expect(stripInlineMath('solve \\(x + 1\\) now')).toBe('solve x + 1 now');
   });
 
   it('never eats currency', () => {
@@ -35,18 +35,18 @@ describe('unwrapInlineMath', () => {
       'it costs $5.00$ apparently',
       'budget $1,240 vs $980',
     ]) {
-      expect(unwrapInlineMath(money)).toBe(money);
+      expect(stripInlineMath(money)).toBe(money);
     }
   });
 
   it('keeps escaped currency readable', () => {
     // `\$5` and `$5` render identically, so dropping the backslash is
     // display-neutral — what matters is that the amount survives.
-    expect(unwrapInlineMath('spend went from \\$5 to \\$10')).toBe('spend went from $5 to $10');
+    expect(stripInlineMath('spend went from \\$5 to \\$10')).toBe('spend went from $5 to $10');
   });
 
   it('leaves a lone dollar sign alone', () => {
-    expect(unwrapInlineMath('spend is $0.00')).toBe('spend is $0.00');
+    expect(stripInlineMath('spend is $0.00')).toBe('spend is $0.00');
   });
 });
 

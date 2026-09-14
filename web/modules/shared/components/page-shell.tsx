@@ -26,7 +26,7 @@ import type { CSSProperties, ReactNode } from 'react';
 // min-content-sized, so one wide table or a long unbroken id would push the
 // content column past the viewport instead of scrolling inside it.
 
-export type PageShellProps = {
+type PageShellProps = {
   /** Full-width strip above the header — the demo bar, an outage notice. */
   banner?: ReactNode;
   title?: ReactNode;

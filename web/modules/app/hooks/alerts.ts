@@ -77,11 +77,6 @@ export function useAlertChannels() {
     onError: (e) => setError(e instanceof Error ? e.message : 'Unable to add channel'),
   });
 
-  const remove = useMutation({
-    mutationFn: (id: string) => new AgentRayAPI(projectID!).deleteAlertChannel(id),
-    onSuccess: invalidate,
-    onError: (e) => setError(e instanceof Error ? e.message : 'Unable to remove channel'),
-  });
 
-  return { channels: query.data?.channels ?? [], loading: query.isFetching, create, remove };
+  return { channels: query.data?.channels ?? [], loading: query.isFetching, create };
 }

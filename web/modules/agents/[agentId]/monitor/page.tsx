@@ -21,17 +21,16 @@ export function AgentMonitorPage() {
   const { agent, runs, isLoading } = useAgentMonitorDetail(agentID);
 
   if (isLoading && !agent) {
-    return <AppShell active="monitor" title="Agent" sub="Per-agent health and recent runs."><Loading label="Loading agent…" /></AppShell>;
+    return <AppShell title="Agent" sub="Per-agent health and recent runs."><Loading label="Loading agent…" /></AppShell>;
   }
   if (!agent) {
-    return <AppShell active="monitor" title="Agent" sub="Per-agent health and recent runs."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents/monitor')}>Back to fleet</Button>} /></AppShell>;
+    return <AppShell title="Agent" sub="Per-agent health and recent runs."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents/monitor')}>Back to fleet</Button>} /></AppShell>;
   }
 
   const status = !agent.enabled ? { s: 'paused', l: 'Paused' } : agent.error_count > 0 ? { s: 'attention', l: 'Attention' } : agent.running_count > 0 ? { s: 'working', l: 'Working' } : { s: 'healthy', l: 'Healthy' };
 
   return (
     <AppShell
-      active="monitor"
       title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}><button className="flex-none grid h-[26px] w-[26px] place-items-center rounded-sm border-none bg-transparent text-[var(--color-text-secondary)] transition-[background,color] duration-[var(--fast)] ease-[var(--ease)] hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]" onClick={() => router.push('/agents/monitor')}><ArrowLeft size={15} /></button>{agent.name}</span>}
       sub="Per-agent health and recent runs."
       actions={<><StatusPill status={status.s} label={status.l} grow={false} /><Button variant="outline" icon={<Settings2 size={15} />} onClick={() => router.push(`/agents/${agentID}/setup`)}>Set up</Button><Button variant="agent" icon={<FlaskConical size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button></>}

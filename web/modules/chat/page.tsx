@@ -891,7 +891,6 @@ export function ChatPage() {
   return (
     <CommandNames.Provider value={commandNames}>
     <AppShell
-      active="chat"
       bleed
       // Chat's "related" surface is Set up, and that is already a header
       // button here — listing it again in an aside would be the same link twice.

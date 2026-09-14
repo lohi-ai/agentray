@@ -62,7 +62,6 @@ export function CohortsPage() {
 
   return (
     <AppShell
-      active="traffic"
       title="Cohort analysis"
       sub="How weekly acquisition cohorts retain — split by users and guests."
       actions={(

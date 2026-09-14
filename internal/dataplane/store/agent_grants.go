@@ -107,33 +107,6 @@ func (s *Store) RevokeAgentFromProject(ctx context.Context, userID, agentID, pro
 	return nil
 }
 
-// ListWorkspaceAgents returns every agent the workspace owns (across all home
-// projects), for the "hired agents" view. Any workspace member may read.
-func (s *Store) ListWorkspaceAgents(ctx context.Context, userID, workspaceID string) ([]Agent, error) {
-	ok, err := s.userCanAccessWorkspace(ctx, userID, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, errAgentForbidden
-	}
-	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, slug, is_default, enabled, autonomy, workspace_path, created_at, updated_at
-FROM agents WHERE workspace_id = $1 ORDER BY is_default DESC, name ASC`, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]Agent, 0)
-	for rows.Next() {
-		var a Agent
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Slug, &a.IsDefault, &a.Enabled, &a.Autonomy, &a.WorkspacePath, &a.CreatedAt, &a.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
 
 // ListAgentGrants returns the projects an agent is granted into, with scopes.
 func (s *Store) ListAgentGrants(ctx context.Context, userID, agentID string) ([]AgentGrant, error) {

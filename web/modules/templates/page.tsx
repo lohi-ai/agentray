@@ -9,7 +9,7 @@ export function TemplatesPage() {
   const { templates, applyTemplate } = useTemplates();
 
   return (
-    <AppShell active="dashboards" title="Templates" sub="Start from a ready-made dashboard instead of a blank canvas.">
+    <AppShell title="Templates" sub="Start from a ready-made dashboard instead of a blank canvas.">
       {templates.length === 0 ? (
         <EmptyState icon={<LayoutTemplate size={22} />} title="No templates available" detail="System templates will appear here once published." />
       ) : (
