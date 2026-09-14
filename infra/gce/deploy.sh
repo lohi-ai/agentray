@@ -14,6 +14,42 @@ set -euo pipefail
 #                   without waiting for its healthcheck.
 #   --gate-timeout  Seconds to wait for the new colour to go healthy (default 240).
 #
+# THE GATE IS A DATA-COHERENCE GATE. The API healthcheck targets /readyz, which
+# answers 503 until this colour has applied every row on the durable ingest
+# stream — event batches AND connector sync batches — because a colour that is
+# still replaying would answer queries from a DuckDB file with a hole in it. Two
+# consequences the operator owns:
+#   * A legitimately long replay (a long quiet period, a broker outage that
+#     backed events up, or a large connector table) can outrun --gate-timeout.
+#     Raise it: `--gate-timeout 900`. That is necessary but NOT sufficient: the
+#     wait is bounded by the compose healthcheck's own window
+#     (start_period + interval × retries, 330s in infra/gce/<env>/docker-compose.yml),
+#     because Docker's `unhealthy` verdict is terminal for bg_wait — it removes
+#     the new colour instead of waiting the deadline out. A replay expected to
+#     outlast that window needs `retries` raised to cover it as well. The refusal
+#     either way is safe: bg_wait removes the new colour and Caddy is never
+#     repointed, so the old colour keeps serving.
+#   * `--no-gate` skips that wait entirely and is therefore a data-coherence
+#     waiver, not just a speed switch: traffic can land on a colour that is
+#     behind. Read /readyz's body first — it names the reason. `purged-gap`
+#     never clears (messages were purged before this colour applied them and no
+#     amount of waiting recovers them — the colour writes the loss down beside
+#     its DuckDB file, so restarting it, or redeploying, does not clear it
+#     either; to ACCEPT the loss and let that colour serve without those rows,
+#     delete `<DUCKDB_PATH>.ingest-loss` inside the container's volume, then
+#     deploy again), and `stream-mismatch` means the stream
+#     does not carry this env's subjects at all, so the colour will never be
+#     offered another row. Both envs default INGEST_STREAM_NAME to the SAME
+#     stream on the shared broker and EnsureStreams rewrites that stream's
+#     subject list to the booting env's on EVERY boot, so the env that restarted
+#     last owns it and the other one is unwired — including for publishing, which
+#     fails with "no response from stream". The durable fix is a stream per env
+#     (`INGEST_STREAM_NAME: AGENTRAY_EVENTS_PROD` / `_DEV` in that env's app.env,
+#     next to the subjects it already sets); a hand-edited subject list is only a
+#     stop-gap, because the next boot of either env rewrites it, and re-running
+#     this env's deploy clears this env's refusal by handing the same one to its
+#     sibling.
+#
 # Schema migrations are automatic: the API creates/updates Postgres and
 # DuckDB tables at startup. Redis/NATS are shared single instances (infra/)
 # serving both envs; Postgres is the existing Cloud SQL instance (secret
@@ -43,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=true; shift ;;
     --no-gate)      GATE=false; shift ;;
     --gate-timeout) GATE_TIMEOUT="$2"; shift 2 ;;
-    -h|--help)    sed -n '3,17p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
+    -h|--help)    sed -n '3,39p' "$0" | sed 's/^# //; s/^#$//'; exit 0 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done

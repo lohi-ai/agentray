@@ -36,6 +36,12 @@ type Config struct {
 	IngestJetStream bool
 	// IngestStreamName is the JetStream stream that captures IngestSubject.
 	IngestStreamName string
+	// IngestConnectorSubject carries connector sync batches on the SAME durable
+	// stream as events, so a blue-green colour switch replays landed
+	// external_rows exactly like events instead of losing them. Defaults to
+	// IngestSubject + ".connectors", which inherits the per-env subject suffix
+	// (dev/prod) from the one variable that already carries it.
+	IngestConnectorSubject string
 	// IngestDLQSubject receives batches that exhaust IngestMaxDeliver redelivery
 	// attempts (poison payloads). Republish them with `agentray-server replay-dlq`.
 	IngestDLQSubject string
@@ -44,7 +50,11 @@ type Config struct {
 	// IngestDurable names the JetStream durable consumer. Blue-green deploys
 	// give each colour its own durable (e.g. agentray-ingestors-blue) so both
 	// colours receive every message — a shared durable would split the stream
-	// between them and the two DuckDB files would diverge.
+	// between them and the two DuckDB files would diverge. The durable also
+	// carries the readiness contract: its ack floor is that colour's applied
+	// high-water mark for events AND connector rows, which /readyz compares
+	// against the stream head before a deploy switches traffic (see
+	// ingest.ReplayStatus).
 	IngestDurable string
 	// PipelineMetricsProjectAPIKey names the project that pipeline self-metrics
 	// (system.pipeline.* events: flush size, insert failures, dead-letters, ingest
@@ -167,6 +177,7 @@ func FromEnv() Config {
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),
 		NATSURL:                      env("NATS_URL", "nats://localhost:4223"),
 		IngestSubject:                env("INGEST_SUBJECT", "agentray.events.ingest"),
+		IngestConnectorSubject:       env("INGEST_CONNECTOR_SUBJECT", env("INGEST_SUBJECT", "agentray.events.ingest")+".connectors"),
 		IngestJetStream:              envBool("INGEST_JETSTREAM", true),
 		IngestStreamName:             env("INGEST_STREAM_NAME", "AGENTRAY_EVENTS"),
 		IngestDLQSubject:             env("INGEST_DLQ_SUBJECT", "agentray.events.dlq"),

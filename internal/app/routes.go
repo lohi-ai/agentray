@@ -44,16 +44,36 @@ func (s publicCollectSet) collect(e *echo.Echo, method, path string, handler ech
 
 func (s publicCollectSet) has(path string) bool { return s[path] }
 
+// registerHealthRoutes mounts the two probes. They answer HEAD as well as GET:
+// the compose healthcheck is `wget --spider`, and spider mode sends HEAD — a
+// GET-only route answers that 405, the probe exits non-zero for every colour,
+// and the blue-green gate then never sees a healthy container at all. RFC 9110
+// says HEAD is GET without the body, which is exactly what a probe wants.
+//
+// /healthz is the static liveness answer and stays what it always was. /readyz
+// is the data-coherence probe the deploy gate reads through that healthcheck
+// (see readyzHandler): 503 until this colour has applied everything the durable
+// stream offers it.
+func registerHealthRoutes(e *echo.Echo, ready readinessProbe) {
+	liveness := func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
+	}
+	e.GET("/healthz", liveness)
+	e.HEAD("/healthz", liveness)
+
+	readyz := readyzHandler(ready)
+	e.GET("/readyz", readyz)
+	e.HEAD("/readyz", readyz)
+}
+
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
 // a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, ready readinessProbe, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
-	e.GET("/healthz", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]string{"ok": "true"})
-	})
+	registerHealthRoutes(e, ready)
 
 	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)

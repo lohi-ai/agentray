@@ -79,11 +79,12 @@ type SyncResult struct {
 }
 
 // Store is the narrow persistence surface the engine needs; storage.Store
-// implements it.
+// implements it. Landing rows is deliberately NOT here: the engine hands each
+// batch to the durable stream (RowPublisher), so every colour applies it, and
+// the row reaches DuckDB through the ingest worker on each colour.
 type Store interface {
 	ListEnabledConnectorSyncs(ctx context.Context) ([]ScheduledSync, error)
 	ConnectorSyncJob(ctx context.Context, syncID string) (SyncJob, error)
-	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 	EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error)
 	ConnectorRunByIdempotencyKey(ctx context.Context, projectID, syncID, idemKey string) (run Run, found bool, err error)
 	ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error)
@@ -92,6 +93,24 @@ type Store interface {
 	ReconcileConnectorRuns(ctx context.Context, staleBefore time.Time) (int, error)
 	ConnectorRunForProject(ctx context.Context, projectID, runID string) (Run, error)
 	CancelConnectorRun(ctx context.Context, projectID, runID string) (Run, error)
+}
+
+// RowPublisher hands one pulled batch to the durable stream. The call must not
+// return nil until the batch is durably accepted: the run's cursor advances
+// only after it, and the cursor is the shared source high-water mark, so a
+// batch that was merely handed to a socket would be skipped forever.
+//
+// That guarantee is the DURABLE implementation's; the fire-and-forget core-NATS
+// fallback (INGEST_JETSTREAM=false) can only flush to the socket, and there the
+// cursor can outrun a batch the worker never lands — the same at-most-once
+// contract that mode already had for events (see StartEventWorker). It is also
+// only a promise about DELIVERY to the stream, not about landing: a batch that
+// no colour can insert dead-letters to the DLQ after IngestMaxDeliver attempts
+// while this run has already reported success, so the DLQ depth — replayed with
+// `agentray-server replay-dlq` — is the operator's signal for that case.
+// ingestion.EventQueue implements it.
+type RowPublisher interface {
+	PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 }
 
 // Run is one durable sync-run record — the client-visible contract for
@@ -123,7 +142,10 @@ type Run struct {
 // state — the cancel func and the worker semaphore.
 type Engine struct {
 	store Store
-	mu    sync.Mutex
+	// publisher is where a pulled batch goes: the durable stream, not this
+	// process's DuckDB, so every colour ends up with the rows.
+	publisher RowPublisher
+	mu        sync.Mutex
 	// id identifies this process's runs — the lease owner Reconcile uses to
 	// tell a dead process's rows from a live one's.
 	id string
@@ -181,8 +203,8 @@ const maxPendingRuns = maxConcurrentRuns
 // key is a fresh claim rather than a replay of an abandoned one.
 var ErrEngineBusy = errors.New("connector engine at capacity — retry shortly")
 
-func NewEngine(store Store) *Engine {
-	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
+func NewEngine(store Store, publisher RowPublisher) *Engine {
+	return &Engine{store: store, publisher: publisher, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
 }
 
 // Tick starts every due sync for this minute. Called from the scheduler's
@@ -500,8 +522,8 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 			}
 			landed = append(landed, LandedRow{Key: r.Key, Cursor: r.Cursor, DataJSON: string(data)})
 		}
-		if err := e.store.InsertExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
-			return result(fmt.Sprintf("land rows: %v", err))
+		if err := e.publisher.PublishExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
+			return result(fmt.Sprintf("queue rows: %v", err))
 		}
 		total += len(pull.Rows)
 		hasMore = pull.HasMore
