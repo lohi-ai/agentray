@@ -130,14 +130,23 @@ func legacyRead(access opcore.Access) opcore.Requirement {
 // could reach the project — a reader-scoped management key, a viewer's session,
 // a pre-split project key.
 func projectForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
+	project, _, err := projectAndPrincipalForWrite(c, store, ops, req)
+	return project, err
+}
+
+// projectAndPrincipalForWrite is projectForWrite for the one route that has to
+// decide something else about the caller as well: running a saved query is an
+// analytics read, but caching its result is an UPDATE to the owner's row, so the
+// handler needs the principal and not only the project.
+func projectAndPrincipalForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, opcore.Principal, error) {
 	principal, project, err := principalAndProject(c, store)
 	if err != nil {
-		return storage.Project{}, err
+		return storage.Project{}, opcore.Principal{}, err
 	}
 	if err := ops.authorizeAccess(principal, req); err != nil {
-		return storage.Project{}, err
+		return storage.Project{}, opcore.Principal{}, err
 	}
-	return project, nil
+	return project, principal, nil
 }
 
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —
@@ -244,16 +253,22 @@ func sessionCaller(c echo.Context, store *storage.Store) (authContext, opcore.Pr
 
 // authProjectForWrite is authProject plus the route's access-class decision,
 // for the session-only families whose store methods prove membership and stop
-// there. Admission is unchanged — sessionCaller resolves the same cookie and
-// binds the same project authProject did — and the decision is the registry's
-// Allow, so a viewer is refused here for the reason /api/op already refuses it
-// propose_test rather than by a rule this file invented.
+// there. Admission stays authProject's, unchanged — including credential
+// precedence, so a Bearer that is present and does not resolve is still the 401
+// principalFromRequest answers it with rather than a fall-through to the cookie
+// riding beside it. The decision is the registry's Allow, so a viewer is refused
+// here for the reason /api/op already refuses it propose_test, not by a rule
+// this file invented.
 //
-// authProject's own project cannot answer this: it comes from
-// store.ProjectByID, which is role-blind, so the role the decision needs is the
-// one sessionPrincipal loads from the membership row.
+// authProject's own project cannot answer the decision: it comes from
+// store.ProjectByID, which is role-blind, so the role comes from the membership
+// row — the same lookup principalFromRequest's session branch makes.
 func authProjectForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (authContext, storage.Project, error) {
-	auth, principal, project, err := sessionCaller(c, store)
+	auth, project, err := authProject(c, store)
+	if err != nil {
+		return authContext{}, storage.Project{}, err
+	}
+	principal, _, err := sessionPrincipal(c, store, auth.User.ID, project.ID)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}

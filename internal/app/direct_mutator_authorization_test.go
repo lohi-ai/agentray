@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -48,10 +50,17 @@ func mountServerRoutes(t *testing.T, s *storage.Store) *echo.Echo {
 // project is its own, so a viewer's write aimed at the demo's project (exactly
 // what the web client sends) must name it.
 type caller struct {
-	name      string
-	headers   map[string]string
-	cookies   []*http.Cookie
+	name    string
+	headers map[string]string
+	cookies []*http.Cookie
+	// projectID is appended as ?project_id=: a session's default project is its
+	// own, so a write aimed at another project must name it.
 	projectID string
+	// mayRunReads marks a caller whose grants cover the class the two
+	// SQL-carrying routes need (analytics:read). Those routes are reads, so the
+	// matrix asserts a refusal only for the callers that lack the class —
+	// stated here rather than inferred from the caller's display name.
+	mayRunReads bool
 }
 
 func (c caller) request(t *testing.T, e *echo.Echo, method, path, body string) *httptest.ResponseRecorder {
@@ -63,13 +72,7 @@ func (c caller) request(t *testing.T, e *echo.Echo, method, path, body string) *
 		}
 		path += separator + "project_id=" + c.projectID
 	}
-	var reader *strings.Reader
-	if body == "" {
-		reader = strings.NewReader("")
-	} else {
-		reader = strings.NewReader(body)
-	}
-	req := httptest.NewRequest(method, path, reader)
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
@@ -333,12 +336,13 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 
 	fixture := seedDirectMutatorFixture(t, s, project.ID)
 
-	reader := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + readerSecret}}
+	reader := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + readerSecret}, mayRunReads: true}
 	sources := caller{name: "sources:read credential", headers: map[string]string{"Authorization": "Bearer " + sourceSecret}}
 	viewerCaller := caller{
-		name:      "viewer session",
-		cookies:   []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}},
-		projectID: project.ID,
+		name:        "viewer session",
+		cookies:     []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}},
+		projectID:   project.ID,
+		mayRunReads: true,
 	}
 
 	// Every credential that may not change this project is refused by every
@@ -347,10 +351,10 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 	before := snapshotDirectMutatorState(t, s, project.ID)
 	for _, tc := range directMutatorCases() {
 		for _, who := range []caller{reader, sources, viewerCaller} {
-			if tc.kind == readRoute && who.name != sources.name {
-				// Running SQL is analytics:read, which both the reader and a
-				// viewer hold — the same class /api/op's run_sql requires, and
-				// the same call the demo guard lets a viewer make.
+			if tc.kind == readRoute && who.mayRunReads {
+				// Running SQL is analytics:read — the class /api/op's run_sql
+				// requires and the call the demo lets a viewer make — so the
+				// only refusal to assert here is the caller that lacks it.
 				continue
 			}
 			rec := who.request(t, e, tc.method, tc.path(fixture), tc.body(fixture))
@@ -390,14 +394,22 @@ func TestNoMutatingRouteResolvesThroughTheReadResolver(t *testing.T) {
 	// or the next package-level function — whichever comes first — so the slice
 	// is that handler's body and nothing else. (Bounding on mutating
 	// registrations alone would run a read handler's body into the next
-	// mutating route's slice and report its resolver.)
-	registration := regexp.MustCompile(`(?m)^\s*e\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\("([^"]+)"`)
-	mutating := map[string]bool{"POST": true, "PUT": true, "PATCH": true, "DELETE": true}
+	// mutating route's slice and report its resolver.) Both registration forms
+	// the package uses are scanned — `receiver.METHOD("path"` and
+	// `receiver.Add(http.MethodX, "path"` — because a route that registers the
+	// second way is exactly as capable of resolving through the read resolver
+	// as one that registers the first.
+	registration := regexp.MustCompile(`(?m)^\s*\w+\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\("([^"]+)"`)
+	added := regexp.MustCompile(`(?m)^\s*\w+\.Add\(http\.(Method\w+),\s*"([^"]+)"`)
 	topLevelFunc := regexp.MustCompile(`(?m)^func `)
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
+	}
+	type registered struct {
+		start        int
+		method, path string
 	}
 	examined := 0
 	for _, entry := range entries {
@@ -410,24 +422,31 @@ func TestNoMutatingRouteResolvesThroughTheReadResolver(t *testing.T) {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		source := string(src)
-		matches := registration.FindAllStringSubmatchIndex(source, -1)
-		for i, m := range matches {
-			method := source[m[2]:m[3]]
-			if !mutating[method] {
+		var hits []registered
+		for _, m := range registration.FindAllStringSubmatchIndex(source, -1) {
+			hits = append(hits, registered{m[0], source[m[2]:m[3]], source[m[4]:m[5]]})
+		}
+		for _, m := range added.FindAllStringSubmatchIndex(source, -1) {
+			hits = append(hits, registered{m[0], strings.TrimPrefix(source[m[2]:m[3]], "Method"), source[m[4]:m[5]]})
+		}
+		sort.Slice(hits, func(i, j int) bool { return hits[i].start < hits[j].start })
+		for i, h := range hits {
+			// mutatingMethod is the guard's own deny-by-default verb rule, so a
+			// verb this scan does not know is treated as a mutation by both.
+			if !mutatingMethod(h.method) {
 				continue
 			}
 			end := len(source)
-			if i+1 < len(matches) {
-				end = matches[i+1][0]
+			if i+1 < len(hits) {
+				end = hits[i+1].start
 			}
-			if fn := topLevelFunc.FindStringIndex(source[m[1]:end]); fn != nil {
-				end = m[1] + fn[0]
+			if fn := topLevelFunc.FindStringIndex(source[h.start:end]); fn != nil {
+				end = h.start + fn[0]
 			}
 			examined++
-			handler := source[m[1]:end]
-			if strings.Contains(handler, "projectFromRequest(") {
+			if strings.Contains(source[h.start:end], "projectFromRequest(") {
 				t.Errorf("%s registers %s %s through projectFromRequest — the read resolver decides admission, not access; resolve with projectForWrite (declaring the class) or principalAndProject",
-					name, method, source[m[4]:m[5]])
+					name, h.method, h.path)
 			}
 		}
 	}
@@ -545,6 +564,35 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 	if got := status(); got != storage.TestPassed {
 		t.Fatalf("member decide left status %q, want %q", got, storage.TestPassed)
 	}
+
+	// Admission is unchanged: a Bearer that is present and does not resolve is
+	// the 401 principalFromRequest answers it with, never a fall-through to the
+	// session riding beside it. Without this the route would commit as the
+	// member while the caller believed it had presented a credential.
+	secondID, err := s.CreateValidationTest(ctx, storage.ValidationTest{
+		ProjectID:   owner.Project.ID,
+		Hypothesis:  "an unresolvable bearer is a denial, not an absence",
+		MetricEvent: "waitlist.joined",
+		TargetCount: 10,
+		WindowDays:  7,
+		Status:      storage.TestProposed,
+	})
+	if err != nil {
+		t.Fatalf("seed second validation test: %v", err)
+	}
+	deniedBearer := caller{
+		name:      "member session behind an unresolvable bearer",
+		headers:   map[string]string{"Authorization": "Bearer not-a-management-credential"},
+		cookies:   memberCaller.cookies,
+		projectID: owner.Project.ID,
+	}
+	rec := deniedBearer.request(t, e, http.MethodPost, "/api/validation/tests/"+secondID+"/commit", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("commit behind an unresolvable bearer = %d %s, want 401", rec.Code, rec.Body.String())
+	}
+	if test, err := s.ValidationTestByID(ctx, owner.User.ID, owner.Project.ID, secondID); err != nil || test.Status != storage.TestProposed {
+		t.Errorf("a refused bearer committed the row: status %q, err %v", test.Status, err)
+	}
 }
 
 // TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation is F3: a denied
@@ -561,10 +609,7 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 func TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
-	e := echo.New()
-	e.HideBanner = true
-	pass := func(next echo.HandlerFunc) echo.HandlerFunc { return next }
-	registerRoutes(e, s, ingestion.EventQueue{}, pass, pass, nil, nil, agentruntime.ToolBuildContext{}, nil, false, publicCollectSet{}, newOpAdapter(s, nil, nil), nil)
+	e := mountServerRoutes(t, s)
 	registerOpRoutes(e, s, nil, nil)
 
 	stamp := time.Now().UnixNano()
@@ -630,5 +675,88 @@ func TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation(t *testing.T) {
 		`{"natural_language":"Authorised","generated_sql":"SELECT 1 AS n","verified":true}`, author)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("dashboards:write credential create saved query = %d %s, want 201", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo is the other half of the
+// run route's contract, and the half that has no demo guard behind it: running a
+// saved query is an analytics read a viewer is entitled to, but caching the
+// result is an UPDATE to the owner's saved_queries row. The route used to ask
+// the demo guard's read-only marker, which only exists when a demo is
+// configured — so on an instance with none, a viewer's run cached its result
+// into the owner's row. The registry is asked instead, and the owner's own run
+// still caches, so the fence is not "never cache".
+func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	e := mountServerRoutes(t, s)
+
+	stamp := time.Now().UnixNano()
+	owner, err := s.CreateAccount(ctx, fmt.Sprintf("query-cache-%d@test.local", stamp), "Owner", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("query-cache-viewer-%d@test.local", stamp), "Viewer", "password-123", "vws", "vproj")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	session := func(userID string) []*http.Cookie {
+		_, token, err := s.CreateUserSession(ctx, userID, time.Hour)
+		if err != nil {
+			t.Fatalf("session: %v", err)
+		}
+		return []*http.Cookie{{Name: sessionCookieName, Value: token}}
+	}
+	viewerCaller := caller{name: "viewer session", cookies: session(viewer.User.ID), projectID: owner.Project.ID}
+	ownerCaller := caller{name: "owner session", cookies: session(owner.User.ID), projectID: owner.Project.ID}
+
+	query, err := s.CreateSavedQuery(ctx, owner.Project.ID, "Cache probe", countEventsSQL, true)
+	if err != nil {
+		t.Fatalf("seed saved query: %v", err)
+	}
+	cached := func() []byte {
+		queries, err := s.ListSavedQueries(ctx, owner.Project.ID)
+		if err != nil {
+			t.Fatalf("list saved queries: %v", err)
+		}
+		for _, q := range queries {
+			if q.ID == query.ID {
+				return q.ResultCache
+			}
+		}
+		t.Fatalf("saved query %s is gone", query.ID)
+		return nil
+	}
+	run := "/api/saved-queries/" + query.ID + "/run"
+
+	// The store reads a never-cached row back as the JSON literal null, so that
+	// — not an empty slice — is what "nothing was written" looks like.
+	const notCached = "null"
+
+	rec := viewerCaller.request(t, e, http.MethodPost, run, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer run = %d %s, want 200 — a viewer may execute a saved query", rec.Code, rec.Body.String())
+	}
+	if got := string(cached()); got != notCached {
+		t.Errorf("a viewer's run cached its result into the owner's row: %s", got)
+	}
+
+	rec = ownerCaller.request(t, e, http.MethodPost, run, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner run = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	ownerCached := cached()
+	if string(ownerCached) == notCached {
+		t.Fatalf("the owner's own run did not refresh the cache — the route no longer caches for anyone")
+	}
+
+	if rec := viewerCaller.request(t, e, http.MethodPost, run, `{}`); rec.Code != http.StatusOK {
+		t.Fatalf("viewer re-run = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got := cached(); !bytes.Equal(got, ownerCached) {
+		t.Errorf("a viewer's run rewrote the owner's cached result: %s, want %s", got, ownerCached)
 	}
 }

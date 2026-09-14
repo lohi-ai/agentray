@@ -783,14 +783,18 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/saved-queries/:query_id/run", func(c echo.Context) error {
-		project, err := projectForWrite(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
+		project, principal, err := projectAndPrincipalForWrite(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
 		// Running the query is a read; refreshing its stored result is a write to
-		// the owner's row, so a read-only caller (a shared-demo viewer) gets the
-		// rows without touching the cache.
-		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), !readOnlyCaller(c))
+		// the owner's row, so a caller that may not author saved queries gets the
+		// rows without touching the cache. The decision is the registry's, not the
+		// demo guard's read-only marker: that marker is set only when a demo is
+		// configured, so on an instance with none a viewer's run used to cache its
+		// result into the owner's row.
+		cache := ops.reg.Allow(principal, legacyWrite(opcore.AccessDashboardsWrite))
+		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), cache)
 		if err != nil {
 			// Same contract as /api/sql/run: a sandbox that could not run the
 			// query is retryable capacity, not a 500 — the identical query

@@ -94,16 +94,27 @@ immediately and the API behaves exactly as it did before it existed.
 That is why the guard is a second line and never the decision. A route's own
 answer has to hold with no demo configured, and the session-only families reach
 one the same way the legacy mutators do: `sessionCaller`
-(`internal/app/op_adapter.go`) resolves the cookie into an `opcore.Principal`,
-and the route then asks the registry — the connector routes by operation name
-(`sessionOp`), the validation writes (`/api/validation/tests/:id/commit`,
-`:decide`) by class through `authProjectForWrite`, at `plans:write` with a
-`member` floor, which is the class `propose_test` and `update_test` already
-carry. Those store methods prove membership and stop there, so a route that
-asked nothing admitted a viewer to commit the threshold it agreed to. A Bearer
-that is present but does not resolve is likewise a denial rather than an
-absence: `principalFromRequest` answers it `401` instead of falling through to
-the cookie, and `resolveWriteScope` now reports the same refusal instead of
+(`internal/app/op_adapter.go`) resolves a cookie into an `opcore.Principal` for
+the connector routes, which then ask the registry by operation name
+(`sessionOp`); the validation writes (`/api/validation/tests/:id/commit`,
+`:decide`) go through `authProjectForWrite`, which keeps `authProject`'s
+admission — cookie first, and a supplied Bearer that does not resolve is still
+the `401` `principalFromRequest` answers it with — and adds the class decision
+at `plans:write` with a `member` floor, the class `propose_test` and
+`update_test` already carry. Those store methods prove membership and stop
+there, so a route that asked nothing admitted a viewer to commit the threshold
+it agreed to.
+
+One legacy route decides twice on purpose: `POST /api/saved-queries/:id/run` is
+an `analytics:read` a viewer may make, but caching the result is an `UPDATE` to
+the owner's `saved_queries` row, so the handler asks the registry for
+`dashboards:write` before refreshing the cache. It used to ask the demo guard's
+read-only marker, which exists only when a demo is configured — on an instance
+with none, a viewer's run wrote its result into the owner's row.
+
+A Bearer that is present but does not resolve is likewise a denial rather than
+an absence: `principalFromRequest` answers it `401` instead of falling through
+to the cookie, and `resolveWriteScope` now reports the same refusal instead of
 approving a write the handler is about to refuse.
 
 ### Event ingestion
