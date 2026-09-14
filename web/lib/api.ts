@@ -190,6 +190,32 @@ export type OverviewMetric = {
   notes?: string[];
 };
 
+// One declared currency's deduplicated money arithmetic. Amounts are integers
+// in that currency's smallest unit; AgentRay performs no FX, so these are the
+// only numbers that may be added together.
+export type OverviewRevenueCurrency = {
+  currency: string;
+  gross: number;
+  reversed: number;
+  net: number;
+  rows: number;
+};
+
+// The signed arithmetic behind the Net revenue tile. `value`/`previous` above
+// are unsigned, so a negative net lives here — never in a clamped zero.
+export type OverviewRevenueDetail = {
+  window: { from: string; to: string; days: number; complete_days: boolean };
+  currency?: string;
+  gross: number;
+  reversed: number;
+  net: number;
+  previous_net?: number;
+  deduped_rows: number;
+  excluded_rows: number;
+  excluded_currencies?: string[];
+  by_currency: OverviewRevenueCurrency[];
+};
+
 export type VerifySDKResult = {
   found: boolean;
   event_name?: string;
@@ -237,6 +263,7 @@ export type OverviewResult = {
     sessions: OverviewMetric;
     activation: OverviewMetric;
     revenue: OverviewMetric;
+    revenue_detail?: OverviewRevenueDetail | null;
   };
   trend: Array<{ day: string; active_users: number }>;
   retention: {
