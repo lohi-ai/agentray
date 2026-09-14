@@ -27,7 +27,7 @@ export type Project = {
   // legacy nullable rows, whose overview context labels its UTC fallback.
   timezone?: string;
   // Blank for a membership that may not write (store/auth.go
-  // redactAPIKeyForRole) — a demo viewer never receives the demo's write key.
+  // redactAPIKeyForRole) — a demo visitor never receives the demo's write key.
   api_key: string;
   created_at: string;
   // The caller's role in the owning workspace, and whether the project lives in
@@ -52,8 +52,8 @@ export type Workspace = {
   id: string;
   name: string;
   role: string;
-  // The ONE shared demo workspace every account joins as a viewer. There is at
-  // most one, and an instance with no demo configured has none.
+  // The ONE shared demo workspace every account joins as a read-only member.
+  // There is at most one, and an instance with no demo configured has none.
   is_demo?: boolean;
   // Display-only plan id (free | solo | team). Nothing in the backend enforces
   // it — it drives the plan badge, the meter's ceiling, and the upgrade moment.

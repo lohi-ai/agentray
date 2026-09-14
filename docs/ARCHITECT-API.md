@@ -73,57 +73,38 @@ hide one — and requires the set to be exactly `GET /api/projects` and
 that declares a class to have a behavioural case in the read or write matrix,
 and every case to still match a route.
 
-### Writes: the guard in front of every handler
+### Writes: the floor in front of every handler
 
 Reads are open to any member of a project's workspace. Writes go through one
 middleware first — `demoWriteGuard` in `internal/app/demo_guard.go`, mounted in
-`app.go` beside CORS.
+`app.go` after the operation registry exists so it can ask the same `Allow`.
 
-It exists because of the shared demo (`store/demo.go`): every signed-up account
-is a `viewer` of a workspace that belongs to someone else, and `viewer` has to
-mean something. For any non-GET request the guard resolves the workspace the
-request targets — path `:workspace_id`, then `:project_id` / `?project_id=`,
-then the caller's default project, the same order the handlers use — and
-refuses unless the caller's role there may write (`storage.RoleMayWrite`:
-owner, admin, member).
+It is a second *invocation* of the one decision, not a second rule. The modern
+`authProject` surface has no per-route class (the fence names that surface as
+admission-only on purpose), so a mutating request that would otherwise skip
+Allow is asked here: `legacyWrite(AccessDashboardsWrite)`. Demo non-owners fail
+because `sessionGrants`, given the project, withheld the write class — Allow
+itself stays demo-blind. The demo fact lives on the project.
 
 **It is fail-closed by default.** A route is exempt only by being named in
 `writeClasses` with a reason: session lifecycle, the caller's own account, a
 public collection endpoint, a read that carries a body, or the agent-ask
-surface (deliberately open to demo viewers, and metered against
+surface (open to demo visitors, and metered in the chat handler against
 `AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY`). Anything unlisted — including a
-route added next year — is denied for a read-only caller. `TestTheRouteTableMatchesTheSource`
-scans this package's source and fails when a mutating route is registered that
-the guard's table does not name.
+route added next year — is denied for a caller without the write class.
+`TestTheRouteTableMatchesTheSource` scans this package's source and fails when
+a mutating route is registered that the floor's table does not name.
 
-On an instance with no `AGENTRAY_DEMO_PROJECT_ID` the guard returns
-immediately and the API behaves exactly as it did before it existed.
-
-That is why the guard is a second line and never the decision. A route's own
-answer has to hold with no demo configured, and the session-only families reach
-one the same way the legacy mutators do: `sessionCaller`
-(`internal/app/op_adapter.go`) resolves a cookie into an `opcore.Principal` for
-the connector routes, which then ask the registry by operation name
-(`sessionOp`); the validation writes (`/api/validation/tests/:id/commit`,
-`:decide`) go through `authProjectForWrite`, which keeps `authProject`'s
-admission — cookie first, and a supplied Bearer that does not resolve is still
-the `401` `principalFromRequest` answers it with — and adds the class decision
-at `plans:write` with a `member` floor, the class `propose_test` and
-`update_test` already carry. Those store methods prove membership and stop
-there, so a route that asked nothing admitted a viewer to commit the threshold
-it agreed to.
+The floor is demo-unaware: it does not return early when no demo is configured.
+A Bearer that is present but does not resolve is a denial rather than an
+absence: `principalFromRequest` answers it `401` instead of falling through
+to the cookie, and `resolveWriteScope` reports the same refusal.
 
 One legacy route decides twice on purpose: `POST /api/saved-queries/:id/run` is
-an `analytics:read` a viewer may make, but caching the result is an `UPDATE` to
-the owner's `saved_queries` row, so the handler asks the registry for
-`dashboards:write` before refreshing the cache. It used to ask the demo guard's
-read-only marker, which exists only when a demo is configured — on an instance
-with none, a viewer's run wrote its result into the owner's row.
+an `analytics:read`, but caching the result is an `UPDATE` to the owner's
+`saved_queries` row, so the handler asks the registry for `dashboards:write`
+before refreshing the cache.
 
-A Bearer that is present but does not resolve is likewise a denial rather than
-an absence: `principalFromRequest` answers it `401` instead of falling through
-to the cookie, and `resolveWriteScope` now reports the same refusal instead of
-approving a write the handler is about to refuse.
 
 ### Event ingestion
 

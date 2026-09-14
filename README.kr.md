@@ -368,7 +368,7 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 (`export AGENTRAY_API_KEY=$(agentray key)`)이고, private scope secret을 SDK
 config에 찍어 넣는 건 잘못된 기본값이기 때문이다. operation은 CLI가 login 때
 프로젝트마다 한 번 발급해서 같은 `0600` config에 보관하는 management credential을
-쓴다 — 발급은 owner/admin만 할 수 있고, member나 viewer도 login은 되고 capture
+쓴다 — 발급은 owner/admin만 할 수 있고, member도 login은 되고 capture
 key도 받지만, owner나 admin이 credential을 발급하기 전까지 operation은 거부된다는
 걸 분명히 안내받는다.
 

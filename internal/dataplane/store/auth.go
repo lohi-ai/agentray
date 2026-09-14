@@ -136,7 +136,7 @@ VALUES ($1, $2, 'owner')`, out.Workspace.ID, out.User.ID); err != nil {
 	// Exactly one project, and it is theirs. This used to also insert a project
 	// named "Demo" full of synthetic events — invented numbers sitting in the
 	// owner's own workspace, indistinguishable from data they had collected. The
-	// demo is now one real shared project they join as a viewer (see demo.go).
+	// demo is now one real shared project they join as a member (see demo.go).
 	own := Project{Role: "owner"}
 	key := "agentray_" + uuid.NewString()
 	if err := tx.QueryRow(ctx, `

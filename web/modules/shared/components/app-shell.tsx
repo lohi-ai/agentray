@@ -101,7 +101,7 @@ function DemoBar() {
       <span className="min-w-0">
         <b className="font-medium text-[var(--color-text-primary)]">{projectName || 'This project'}</b>
         {' is a live site someone else runs. '}
-        {access.canWrite ? 'You can read and change it.' : 'You’re reading it as a viewer — nothing here can be changed.'}
+        {access.canWrite ? 'You can read and change it.' : 'You’re reading it — nothing here can be changed.'}
       </span>
     </div>
   );
