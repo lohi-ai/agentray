@@ -1,6 +1,6 @@
 # AgentRay redesign proposal
 
-Status: proposed, 2026-09-11. Product and architecture design; storage savings are unmeasured. This proposal supersedes the chat-first product direction only when implemented. Existing production behavior is unchanged.
+Status: as-built 2026-09-15. The 2026-09-11 proposal below is kept; present-tense claims that the tree no longer ships are marked superseded. Index: [as-built.md](as-built.md).
 
 ## Product decision
 
@@ -34,6 +34,8 @@ Replace the current Runtime / Channels / Workloads navigation with destinations 
 
 Do not label the current scheduler screen as business operations: today `/operations` means agent triggers. Keep its routes reachable under Agent Garden during the transition. Preserve old deep links, saved dashboards and user layouts. Start new projects on Overview; migrate the returning-user default without deleting existing views.
 
+**Authorization (as-built 2026-09-15, 010 `bs-hv4s2nlr`).** There is no `viewer` role. Workspace roles are owner / admin / member. Members hold access classes. Demo non-owners get the read grant set so `Allow` refuses writes. The mutating floor is a demo-unaware `Allow` invocation, not a second authorization path.
+
 ### First session
 
 Create project → choose Web or App → install SDK manually or copy an agent setup task → verify an actual event → open Product Overview → optionally map signup, activation and purchase events → connect a business dataset when needed.
@@ -44,7 +46,7 @@ Installation success means a known test event is visible with correct platform a
 
 ### Default Product Overview
 
-Borrow the quick-overview and drill-down *pattern* from a store analytics dashboard — the scan order, the grouped KPI tiles, the See more affordance — while defining AgentRay's own metric semantics from AgentRay's own events. That screen was a layout and information-hierarchy reference only: there is no store integration, no store credential, no store metric and no store provenance anywhere in this product, and no store figure is ever inferred from SDK events. A metric AgentRay cannot verify from its own data stays `Not available` / `Set up` with the required instrumentation named.
+Borrow the quick-overview and drill-down *pattern* from a store analytics dashboard — the scan order, the grouped KPI tiles, the See more affordance — while defining AgentRay's own metric semantics from AgentRay's own events. **Superseded 2026-09-14 (007/008):** tile *titles* on Acquisition / Monetization / Usage follow App Store Connect labels; values remain AgentRay catalog metrics. There is still no store integration, store credential, or store provenance, and no store figure is ever inferred from SDK events. A metric AgentRay cannot verify stays `Not available` / `Set up` / `Not ready` with the required instrumentation named.
 
 | Block | Definition / prerequisite |
 |---|---|
@@ -73,7 +75,7 @@ One operation registry supplies web/API, MCP and Garden. Reuse `opcore.Operation
 | Analyze → marketing plan | Run metrics/cohorts/funnels/retention, save findings and propose tests | Baseline, evidence query IDs, audience, hypothesis, action, owner, success metric, guardrail and review date |
 | Future execution | Publish content, CRM actions, sales tasks, live chat and scheduled workflows | Explicit scope, action history, delivery/outcome and cancellation path |
 
-Existing registry coverage is partial: analytics, dashboard creation, chart creation, recommendations and tests are present; dashboard editing/deletion and connector lifecycle management are not registered there. SDK setup skills already exist. Make the missing capabilities operations, not MCP-only handlers. See [registry](../../internal/dataplane/usecase/analytics.go), [MCP adapter](../../internal/app/mcp_routes.go), and [governance](../AGENT-GOVERNANCE.md).
+**Superseded 2026-09-14 (004 F4, re-verified at 47 operations including 007).** "Existing registry coverage is partial … dashboard editing/deletion and connector lifecycle management are not registered" is false of this tree. `usecase.Registry()` (`internal/dataplane/usecase/analytics.go`) is the single registration site: 47 `opcore.Register` calls. Dashboard lifecycle (`update_dashboard`, `archive_dashboard`, `unarchive_dashboard`, `list_charts`, `update_chart`, `archive_chart`, `unarchive_chart`, `reorder_charts`) and connector lifecycle (`test_source` … `cancel_source_run`) **are** registered, plus `list_metrics` / `read_metric` / `get_board` / `save_board`. SDK setup skills already exist. New capabilities still belong in the registry, not as MCP-only handlers. See [registry](../../internal/dataplane/usecase/analytics.go), [MCP adapter](../../internal/app/mcp_routes.go), and [governance](../AGENT-GOVERNANCE.md).
 
 Proposed operation response envelope: `result + evidence {query_id, metric_version, dataset_version, range, filters, watermark, warnings} + artifact_id when saved`; bounded expensive work returns `job_id`, status and cancellation. Project/workspace scope is resolved by authenticated server context, never trusted from arbitrary model arguments. Updates carry revision checks and retryable writes use idempotency keys.
 
@@ -107,9 +109,9 @@ Start with the existing PostgreSQL connector. Support bounded snapshot and incre
 > `EVENT_RETENTION_DAYS` (default 365 days, `0` keeps every event) — see
 > [ARCHITECT-API.md](../ARCHITECT-API.md#event-retention-internaldataplanestorageretentiongo).
 
-**Evaluate DuckDB as the preferred small-deployment candidate; do not declare it better or migrate production until the workload test passes.** Keep PostgreSQL for transactional metadata. Retain ClickHouse as the migration fallback, not an indefinite promise to maintain every feature on two engines.
+> Historical proposal text follows. It is **not** a live instruction.
 
-Evidence from this checkout: `infra/gce/infra/docker-compose.yml` pins ClickHouse 24.12, caps it at 2 GB and shares it across dev/prod; Redis is capped at 128 MB and NATS at 256 MB. The ingest code already batches and supports durable JetStream acknowledgements. `store.go` contains ClickHouse-specific identity dictionaries, materialized views, rollups, `windowFunnel`, deduplication and SQL guards. This is a substantial adapter migration, not a driver substitution. These are configuration/code observations, not measurements of the running deployment.
+**Evaluate DuckDB as the preferred small-deployment candidate; do not declare it better or migrate production until the workload test passes.** Keep PostgreSQL for transactional metadata. Retain ClickHouse as the migration fallback, not an indefinite promise to maintain every feature on two engines.
 
 | Concern | DuckDB candidate | ClickHouse |
 |---|---|---|
@@ -157,6 +159,6 @@ Product validation: observe whether a builder can install the SDK, explain the o
 - Derived, identity/metric parity: [storage implementation](../../internal/dataplane/store/store.go) and commit `063c947` contain session/platform behaviors that must survive the migration.
 - Derived, permission migration: [MCP routes](../../internal/app/mcp_routes.go) reuse project keys; audit existing key distribution and grant behavior before tightening access.
 - Derived, historical compatibility: [SQL operation](../../internal/dataplane/usecase/analytics.go) declared ClickHouse dialect before the port and declares DuckDB dialect now; saved SQL written for the old dialect needs inventory and per-query disposition.
-- Derived, product direction: [current DESIGN.md](../../DESIGN.md) requires chat-first and architecture-layer navigation; this proposal deliberately changes those rules while keeping its component/token system.
+- Derived, product direction: **closed.** DESIGN.md (2026-09-12 changelog) records Overview as the front door and owner-task navigation; this proposal's IA shipped in 002.
 
-See [execution plan](plan.md), [UI concept specification](design.md), and the [interactive architecture diagram](architecture.html) ([source](architecture.json), [delivery receipt](architecture.receipt.json)).
+See [as-built.md](as-built.md), [execution plan](plan.md), [UI concept](design.md), board model [DESIGN-BOARD-CONTENT-MODEL.md](../DESIGN-BOARD-CONTENT-MODEL.md), and the [architecture diagram](architecture.html) ([source](architecture.json), [receipt](architecture.receipt.json)).

@@ -3,15 +3,15 @@
   "ok": true,
   "command": "deliver",
   "type": "architecture",
-  "input": "/Users/long/workspace/lohi/kiem-lai/agentray/docs/redesign/architecture.json",
-  "output": "/Users/long/workspace/lohi/kiem-lai/agentray/docs/redesign/architecture.html",
+  "input": "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-k6nps79r_005-docs-redesign-as-built/docs/redesign/architecture.json",
+  "output": "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-k6nps79r_005-docs-redesign-as-built/docs/redesign/architecture.html",
   "specification": {
-    "sha256": "a71b3f3e26131f923674d3cc6141518ab97b29cb43dbb9ba675a6e2bbc0d8a43",
-    "bytes": 3834
+    "sha256": "c7ea3ea289ad2ff01977315f8f401d800a8c4fba35af0bb6a1cfcea6ea65b9b0",
+    "bytes": 3805
   },
   "artifact": {
-    "sha256": "73e00291ea110fae62783515a7cc458545812898b1d30f32d35ee71525f2b641",
-    "bytes": 814473
+    "sha256": "c200ef49d14911adc62c1a7ebc64479ffaafbc58b4936e219f19f3e2c0cec1fc",
+    "bytes": 814421
   },
   "validation": {
     "checksPassed": 9,
@@ -22,7 +22,7 @@
     "warnings": 0
   },
   "browser_evidence": "passed",
-  "visual_review": "passed",
+  "visual_review": "automated-only",
   "correction_rounds": 1,
-  "visual_review_scope": "Inspected default READ/Still screenshots at 1440x900 light and 2048x1320 dark. Routes, labels, cards and desktop balance are clear. Automated containment passed at all four required desktop sizes; light/dark endpoint captures completed."
+  "visual_review_scope": "2026-09-15 as-built refresh (005): source JSON no longer claims a ClickHouse benchmark gate. `archify deliver` showcase 9/9. `archify visual-check` containment/readability/chrome pass at 1440×900 and 2048×1320 light/dark; PNG sidecars replaced. Perceptual polish was not re-scored by a human."
 }
