@@ -95,10 +95,51 @@ type ExternalRow struct {
 	Data   json.RawMessage `json:"data"`
 }
 
-// wireBytes estimates the row's contribution to a marshaled batch: the payload
-// plus its JSON framing (the fixed keys, quotes and separators).
+// wireBytes is an UPPER bound on the row's contribution to a marshaled batch:
+// the payload plus its JSON framing (the fixed keys, quotes and separators).
+//
+// An upper bound, not len(): json.Marshal ESCAPES what these fields carry, and
+// an escaped byte costs up to six. Counting raw lengths let a chunk whose keys,
+// cursors or payload were escape-heavy exceed the broker's payload limit, which
+// fails the publish and stalls the sync on every retry of the same batch. The
+// row-level guard below reads the same number, so it stays an over-estimate —
+// the safe direction for a message that must fit.
 func (r ExternalRow) wireBytes() int {
-	return len(r.Data) + len(r.Key) + len(r.Cursor) + 48
+	return rawJSONBytes(r.Data) + jsonStringBytes(r.Key) + jsonStringBytes(r.Cursor) + wireFramingBytes
+}
+
+// wireFramingBytes is everything a row's JSON costs beyond the three field
+// bodies: `{"key":,"cursor":,"data":},` and the batch's own separator.
+const wireFramingBytes = 44
+
+// jsonStringBytes is an upper bound on the bytes json.Marshal writes for s,
+// including its two quotes: one per plain ASCII character, six for everything
+// the encoder escapes — a quote, a backslash, `<`, `>`, `&` (which it escapes
+// by default), any control byte (`\u0000`), and any non-ASCII rune, which it
+// may emit as `\uXXXX`.
+func jsonStringBytes(s string) int {
+	n := 2
+	for _, r := range s {
+		if r >= 0x20 && r < 0x80 && r != '"' && r != '\\' && r != '<' && r != '>' && r != '&' {
+			n++
+			continue
+		}
+		n += 6
+	}
+	return n
+}
+
+// rawJSONBytes is an upper bound on what a RawMessage contributes: itself,
+// re-emitted rather than re-encoded, except that the encoder's HTML escaping
+// still expands each `<`, `>` and `&` to six bytes. Bytes ≥ 0x80 pass through.
+func rawJSONBytes(raw []byte) int {
+	n := len(raw)
+	for _, b := range raw {
+		if b == '<' || b == '>' || b == '&' {
+			n += 5
+		}
+	}
+	return n
 }
 
 // LandedRows converts the wire form back into the engine's landing form.

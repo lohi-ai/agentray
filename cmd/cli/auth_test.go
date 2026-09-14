@@ -821,3 +821,45 @@ func TestLoginRevokesMintedCredentialWhenConfigSaveFails(t *testing.T) {
 		t.Fatalf("the unpersisted credential must be revoked, not orphaned: %v", deleted)
 	}
 }
+
+// A mint that fails for a reason other than the caller's role or a legacy
+// server is a fault, and a login may not answer it with a capture-only config:
+// every management command would 403 behind an exit code of zero. Nothing is
+// minted and nothing is saved, so the on-disk config must be untouched.
+func TestLoginFailsOnMintFault(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.mintStatus = http.StatusInternalServerError
+	srv.mintBody = "boom"
+
+	err := runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil || !strings.Contains(err.Error(), "could not mint a management credential") {
+		t.Fatalf("a mint fault must fail the login, got %v", err)
+	}
+	if cfg := loadConfig(); cfg.SessionToken != "" || cfg.ManagementKey != "" || cfg.ProjectID != "" {
+		t.Fatalf("a failed login must not save a config: %+v", cfg)
+	}
+}
+
+// A management credential belongs to the server that issued it: its id means
+// nothing on another one, whose delete route answers "gone" for a row that is
+// still live. So a change of server stops with the config untouched instead of
+// orphaning a live key on the old server.
+func TestLoginRefusesServerChangeHoldingCredential(t *testing.T) {
+	from, to := fakeServer(t), fakeServer(t)
+	withTempConfig(t)
+	seedConfig(t, trackedConfig(from))
+
+	err := runAccountCommand(to.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil || !strings.Contains(err.Error(), "revoke it there first") {
+		t.Fatalf("a server change with a live credential must stop, got %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.URL != from.URL || cfg.ManagementKey != "agm_old_secret" || cfg.ManagementKeyID != "cred-old" {
+		t.Fatalf("config must be untouched: %+v", cfg)
+	}
+	if from.mintedCount() != 0 || to.mintedCount() != 0 || len(to.deleted()) != 0 {
+		t.Fatalf("no credential may be touched across servers: from-minted=%d to-minted=%d to-deleted=%v",
+			from.mintedCount(), to.mintedCount(), to.deleted())
+	}
+}

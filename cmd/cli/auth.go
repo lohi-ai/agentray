@@ -332,6 +332,12 @@ func cmdKey(base string, cfg cliConfig, args []string) error {
 	if cfg.SessionToken == "" {
 		return errors.New("not logged in — run `agentray login --email <email>` first")
 	}
+	// The same server rule persistSession applies: a credential issued by
+	// another server cannot be revoked from this one, and the capture-key
+	// rotation below would be applied to a project of the wrong server.
+	if err := credentialBelongsToServer(cfg, base); err != nil {
+		return err
+	}
 	client := newAuthClient(base, cfg.SessionToken)
 	var payload accountPayload
 	if _, err := client.do(http.MethodGet, "/api/auth/me", nil, &payload); err != nil {
@@ -523,6 +529,31 @@ func credentialNotice(err error, project string) string {
 	}
 }
 
+// credentialFallbackOK reports whether a failed mint is a statement about what
+// this caller MAY have — a role that cannot mint one, or a server predating the
+// surface — rather than a fault. Only those two may downgrade a command to a
+// capture-only configuration: continuing through a fault saves a config whose
+// every management command 403s, and reports success while doing it. The
+// classification itself is mintManagementCredential's.
+func credentialFallbackOK(err error) bool {
+	return errors.Is(err, errCredentialDenied) || errors.Is(err, errCredentialUnsupported)
+}
+
+// credentialBelongsToServer refuses to carry a stored management credential to
+// a server that did not issue it. Its id and secret mean nothing there, and the
+// delete route answers "absent from the project's credentials" for a row that
+// is very much alive on the old server — the one answer this file treats as
+// proof a secret is dead. So the whole operation stops before the session, the
+// URL and the project are rewritten, and the operator is told where to revoke
+// it. An empty recorded URL is a config from before the field existed; there is
+// nothing to compare and nothing to protect.
+func credentialBelongsToServer(cfg cliConfig, base string) error {
+	if cfg.ManagementKey == "" || cfg.URL == "" || cfg.URL == base {
+		return nil
+	}
+	return fmt.Errorf("this config still holds a management credential issued by %s; revoke it there first (`agentray --url %s logout`), then log in to %s", cfg.URL, cfg.URL, base)
+}
+
 // credentialRow is the non-secret view of one management credential.
 type credentialRow struct {
 	ID        string  `json:"id"`
@@ -644,6 +675,13 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 	if token == "" {
 		return errors.New("server did not return a session cookie")
 	}
+	// A credential issued by another server cannot be revoked from this one, so
+	// a change of server stops here — with the config on disk untouched — rather
+	// than saving a session, a URL and a secret that belong to different
+	// servers.
+	if err := credentialBelongsToServer(cfg, base); err != nil {
+		return err
+	}
 	cfg.URL = base
 	cfg.SessionToken = token
 	cfg.Email = email
@@ -672,13 +710,23 @@ func persistSession(base string, cfg cliConfig, email, token string, payload acc
 	var fresh mintedCredential
 	if cfg.ManagementKey == "" {
 		cred, err := mintManagementCredential(client, payload.Project.ID, payload.Project.Role)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", credentialNotice(err, payload.Project.Name))
-		} else {
+		switch {
+		case err == nil:
 			fresh = cred
 			cfg.ManagementKey = cred.secret
 			cfg.ManagementKeyID = cred.id
 			cfg.ManagementKeyProject = payload.Project.ID
+		case credentialFallbackOK(err):
+			// The capture key is still printable and still valid for SDKs; a
+			// credential this role cannot mint (or a server without the
+			// surface) must not fail the command.
+			fmt.Fprintf(os.Stderr, "warning: %s\n", credentialNotice(err, payload.Project.Name))
+		default:
+			// A fault is not a statement about the caller: saving a config here
+			// would leave every management command 403ing behind a successful
+			// login. Nothing has been minted and nothing is saved yet, so the
+			// whole login fails and the on-disk config is untouched.
+			return fmt.Errorf("could not mint a management credential for project %s: %w", payload.Project.Name, err)
 		}
 	}
 	if err := saveConfig(cfg); err != nil {

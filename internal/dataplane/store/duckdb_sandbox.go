@@ -618,7 +618,7 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 		// relative spill path would resolve somewhere else entirely.
 		tmpDir, err = filepath.Abs(dir)
 		if err != nil {
-			_ = os.RemoveAll(dir)
+			removeSpillDir(dir)
 			return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
 				fmt.Sprintf("analytics sandbox tmp dir: %v", err))
 		}
@@ -634,19 +634,19 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		removeSpillDir(tmpDir)
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, err.Error())
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		removeSpillDir(tmpDir)
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, err.Error())
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
-		if tmpDir != "" {
-			_ = os.RemoveAll(tmpDir)
-		}
+		removeSpillDir(tmpDir)
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
 			fmt.Sprintf("start analytics sandbox: %v", err))
 	}
@@ -679,6 +679,16 @@ func spawnSQLSandbox(ctx context.Context, pool *sqlSandboxPool, projectID string
 	sb.engineMemoryLimit = resp.EngineMemoryLimit
 	sb.rlimitBytes = resp.RlimitBytes
 	return sb, nil
+}
+
+// removeSpillDir cleans up a spill directory whose child never started. Every
+// early return on the spawn path must leave nothing behind: an operator who
+// never sees the failure — because the query was merely retried — would find
+// the volume filling with `sandbox-<project>-*` directories instead.
+func removeSpillDir(tmpDir string) {
+	if tmpDir != "" {
+		_ = os.RemoveAll(tmpDir)
+	}
 }
 
 // sandboxChildEnv is the whole environment a sandbox child is given. The child

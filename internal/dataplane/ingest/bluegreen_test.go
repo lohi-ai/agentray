@@ -846,6 +846,42 @@ func TestChunkRowsKeepsEveryRowInOrder(t *testing.T) {
 	}
 }
 
+// TestChunkRowsFitsEscapedKeys is the guard for the estimator being an upper
+// bound rather than len(): a key or cursor full of bytes json.Marshal escapes
+// (a control byte costs six) makes the MARSHALED chunk far larger than the sum
+// of its raw lengths. A chunk sized on raw lengths therefore exceeded the
+// broker's payload limit, and every retry of the same batch failed the same
+// way — a connector sync that could never advance.
+func TestChunkRowsFitsEscapedKeys(t *testing.T) {
+	const budget = 25_000
+	rows := make([]connector.LandedRow, 0, 12)
+	for i := range 12 {
+		rows = append(rows, connector.LandedRow{
+			Key:      strings.Repeat("\x00", 2000),
+			Cursor:   strconv.Itoa(i),
+			DataJSON: `{"n":` + strconv.Itoa(i) + `}`,
+		})
+	}
+	chunks := chunkRows(rows, budget)
+	if len(chunks) < 2 {
+		t.Fatalf("escape-heavy rows were not split: %d chunk(s) for %d rows", len(chunks), len(rows))
+	}
+	total := 0
+	for _, chunk := range chunks {
+		body, err := json.Marshal(ExternalRowsBatch{ProjectID: "p", ConnectorID: "c", Table: "t", Rows: chunk})
+		if err != nil {
+			t.Fatalf("marshal chunk: %v", err)
+		}
+		if len(body) > budget {
+			t.Fatalf("chunk of %d rows marshals to %d bytes, over the %d-byte budget", len(chunk), len(body), budget)
+		}
+		total += len(chunk)
+	}
+	if total != len(rows) {
+		t.Fatalf("rows across chunks = %d, want %d", total, len(rows))
+	}
+}
+
 // TestConnectorBatchOverBrokerPayloadFailsSync is the guard for the one case the
 // wire format cannot carry: a source row larger than a single message. The sync
 // must fail naming the row — the cursor then holds, so both colours stay without
