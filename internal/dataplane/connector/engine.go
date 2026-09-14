@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,16 +79,38 @@ type SyncResult struct {
 }
 
 // Store is the narrow persistence surface the engine needs; storage.Store
-// implements it.
+// implements it. Landing rows is deliberately NOT here: the engine hands each
+// batch to the durable stream (RowPublisher), so every colour applies it, and
+// the row reaches DuckDB through the ingest worker on each colour.
 type Store interface {
 	ListEnabledConnectorSyncs(ctx context.Context) ([]ScheduledSync, error)
 	ConnectorSyncJob(ctx context.Context, syncID string) (SyncJob, error)
-	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 	EnqueueConnectorRun(ctx context.Context, projectID, syncID, idemKey string) (run Run, enqueued bool, err error)
+	ConnectorRunByIdempotencyKey(ctx context.Context, projectID, syncID, idemKey string) (run Run, found bool, err error)
 	ClaimConnectorRun(ctx context.Context, runID, owner string) (Run, bool, error)
 	HeartbeatConnectorRun(ctx context.Context, runID string) (cancelRequested bool, stillRunning bool, err error)
 	FinishConnectorRun(ctx context.Context, runID, syncID, owner string, result SyncResult, cancelled bool) error
 	ReconcileConnectorRuns(ctx context.Context, staleBefore time.Time) (int, error)
+	ConnectorRunForProject(ctx context.Context, projectID, runID string) (Run, error)
+	CancelConnectorRun(ctx context.Context, projectID, runID string) (Run, error)
+}
+
+// RowPublisher hands one pulled batch to the durable stream. The call must not
+// return nil until the batch is durably accepted: the run's cursor advances
+// only after it, and the cursor is the shared source high-water mark, so a
+// batch that was merely handed to a socket would be skipped forever.
+//
+// That guarantee is the DURABLE implementation's; the fire-and-forget core-NATS
+// fallback (INGEST_JETSTREAM=false) can only flush to the socket, and there the
+// cursor can outrun a batch the worker never lands — the same at-most-once
+// contract that mode already had for events (see StartEventWorker). It is also
+// only a promise about DELIVERY to the stream, not about landing: a batch that
+// no colour can insert dead-letters to the DLQ after IngestMaxDeliver attempts
+// while this run has already reported success, so the DLQ depth — replayed with
+// `agentray-server replay-dlq` — is the operator's signal for that case.
+// ingestion.EventQueue implements it.
+type RowPublisher interface {
+	PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 }
 
 // Run is one durable sync-run record — the client-visible contract for
@@ -119,7 +142,10 @@ type Run struct {
 // state — the cancel func and the worker semaphore.
 type Engine struct {
 	store Store
-	mu    sync.Mutex
+	// publisher is where a pulled batch goes: the durable stream, not this
+	// process's DuckDB, so every colour ends up with the rows.
+	publisher RowPublisher
+	mu        sync.Mutex
 	// id identifies this process's runs — the lease owner Reconcile uses to
 	// tell a dead process's rows from a live one's.
 	id string
@@ -159,6 +185,12 @@ const maxHeartbeatFailures = 3
 // 10-minute run context past the 2-minute lease.
 const heartbeatCallTimeout = 15 * time.Second
 
+// queuedCancelTimeout bounds the terminal write a cancelled, not-yet-claimed
+// worker makes for its own queued receipt — the write must survive the
+// cancellation that caused it, and must not outlive the shutdown waiting on
+// the run.
+const queuedCancelTimeout = 5 * time.Second
+
 // maxPendingRuns bounds goroutines parked on the run semaphore. Runs beyond
 // it are refused BEFORE a durable row exists — a queued row with no worker
 // would be silently abandoned until reconcile fails it, which is not
@@ -166,13 +198,13 @@ const heartbeatCallTimeout = 15 * time.Second
 const maxPendingRuns = maxConcurrentRuns
 
 // ErrEngineBusy rejects an enqueue when every worker slot and every pending
-// slot is taken. It is typed and retryable: no run row is created, so a
-// retry with the same idempotency key is a fresh claim, not a replay of an
-// abandoned one.
+// slot is taken AND the caller's idempotency key resolves to no existing run.
+// It is typed and retryable: no run row is created, so a retry with the same
+// key is a fresh claim rather than a replay of an abandoned one.
 var ErrEngineBusy = errors.New("connector engine at capacity — retry shortly")
 
-func NewEngine(store Store) *Engine {
-	return &Engine{store: store, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
+func NewEngine(store Store, publisher RowPublisher) *Engine {
+	return &Engine{store: store, publisher: publisher, id: uuid.NewString(), cancels: map[string]context.CancelFunc{}, sem: make(chan struct{}, maxConcurrentRuns), heartbeatEvery: 10 * time.Second, heartbeatCallTimeout: heartbeatCallTimeout, leaseStaleAfter: runLeaseStaleAfter}
 }
 
 // Tick starts every due sync for this minute. Called from the scheduler's
@@ -240,8 +272,25 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 	// never be recorded — an orphaned queued row would be fenced stale and a
 	// same-key retry would replay the failure instead of running.
 	e.mu.Lock()
-	if e.closed || e.pending >= maxPendingRuns {
+	if e.closed {
 		e.mu.Unlock()
+		return Run{}, false, ErrEngineBusy
+	}
+	if e.pending >= maxPendingRuns {
+		e.mu.Unlock()
+		// Capacity bounds NEW work. A retry carrying a key this sync already
+		// resolved is a receipt read — refusing it as busy would hide the run
+		// the caller asked about — and it dispatches nothing, so it consumes
+		// no slot. A key with no prior run is still refused.
+		if strings.TrimSpace(idemKey) != "" {
+			existing, found, lerr := e.store.ConnectorRunByIdempotencyKey(ctx, projectID, syncID, idemKey)
+			if lerr != nil {
+				return Run{}, false, lerr
+			}
+			if found {
+				return existing, false, nil
+			}
+		}
 		return Run{}, false, ErrEngineBusy
 	}
 	e.pending++
@@ -274,7 +323,7 @@ func (e *Engine) EnqueueRun(ctx context.Context, projectID, syncID, idemKey stri
 		}()
 		e.sem <- struct{}{}
 		defer func() { <-e.sem }()
-		e.executeRun(run.ID, run.SyncID)
+		e.executeRun(run.ID, run.SyncID, run.ProjectID)
 	}()
 	return run, true, nil
 }
@@ -294,10 +343,43 @@ func (e *Engine) CancelRun(runID string) {
 // both the run row and the sync's last_* columns. The whole run is bounded by
 // syncRunTimeout; the finish write rides an independent bounded context so a
 // timed-out run still records its outcome.
-func (e *Engine) executeRun(runID, syncID string) {
+func (e *Engine) executeRun(runID, syncID, projectID string) {
 	ctx := context.Background()
-	_, claimed, err := e.store.ClaimConnectorRun(ctx, runID, e.id)
+	runCtx, cancel := context.WithTimeout(ctx, syncRunTimeout)
+
+	// Register this run's cancel BEFORE the claim. Shutdown sweeps e.cancels
+	// under e.mu, so a worker that registers after that sweep must observe
+	// e.closed here and cancel itself — otherwise a run admitted just before
+	// shutdown would keep pulling (and keep e.wg incremented) for up to
+	// syncRunTimeout while Shutdown waits on e.wg.
+	e.mu.Lock()
+	shuttingDown := e.closed
+	e.cancels[runID] = cancel
+	e.mu.Unlock()
+	if shuttingDown {
+		cancel()
+	}
+
+	heartbeatDone := make(chan struct{})
+	heartbeatRunning := false
+	defer func() {
+		cancel()
+		if heartbeatRunning {
+			<-heartbeatDone
+		}
+		e.mu.Lock()
+		delete(e.cancels, runID)
+		e.mu.Unlock()
+	}()
+
+	_, claimed, err := e.store.ClaimConnectorRun(runCtx, runID, e.id)
 	if err != nil {
+		if errors.Is(runCtx.Err(), context.Canceled) {
+			// Cancelled between admission and the claim: no worker will ever
+			// finish this row, so record the terminal state here rather than
+			// leaving a live-looking queued receipt for stale-run reconcile.
+			e.cancelQueuedRun(projectID, runID)
+		}
 		log.Printf("connector: claim run %s: %v", runID, err)
 		return
 	}
@@ -305,16 +387,11 @@ func (e *Engine) executeRun(runID, syncID string) {
 		return // cancelled while queued, or claimed elsewhere
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, syncRunTimeout)
-	e.mu.Lock()
-	e.cancels[runID] = cancel
-	e.mu.Unlock()
-
 	// The heartbeat does two jobs in one write: it keeps the lease fresh so a
 	// peer process's boot reconcile cannot fence this live run, and it reads
 	// back cancel_requested so a cancel issued against another process still
 	// lands here.
-	heartbeatDone := make(chan struct{})
+	heartbeatRunning = true
 	go func() {
 		defer close(heartbeatDone)
 		tick := time.NewTicker(e.heartbeatEvery)
@@ -355,14 +432,6 @@ func (e *Engine) executeRun(runID, syncID string) {
 		}
 	}()
 
-	defer func() {
-		cancel()
-		<-heartbeatDone
-		e.mu.Lock()
-		delete(e.cancels, runID)
-		e.mu.Unlock()
-	}()
-
 	job, err := e.store.ConnectorSyncJob(runCtx, syncID)
 	var result SyncResult
 	if err != nil {
@@ -375,6 +444,27 @@ func (e *Engine) executeRun(runID, syncID string) {
 	defer finishCancel()
 	if err := e.store.FinishConnectorRun(finishCtx, runID, syncID, e.id, result, cancelled); err != nil {
 		log.Printf("connector: finish run %s: %v", runID, err)
+	}
+}
+
+// cancelQueuedRun records the terminal cancelled state for a run this process
+// admitted but could not claim because shutdown cancelled it mid-claim. The
+// write rides its own bounded context — it must survive the cancellation that
+// caused it — and only touches a row that is still queued, so a shutdown can
+// never cancel a run another process already owns.
+func (e *Engine) cancelQueuedRun(projectID, runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), queuedCancelTimeout)
+	defer cancel()
+	run, err := e.store.ConnectorRunForProject(ctx, projectID, runID)
+	if err != nil {
+		log.Printf("connector: read run %s for cancellation: %v", runID, err)
+		return
+	}
+	if run.Status != "queued" {
+		return
+	}
+	if _, err := e.store.CancelConnectorRun(ctx, projectID, runID); err != nil {
+		log.Printf("connector: cancel queued run %s: %v", runID, err)
 	}
 }
 
@@ -432,8 +522,8 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 			}
 			landed = append(landed, LandedRow{Key: r.Key, Cursor: r.Cursor, DataJSON: string(data)})
 		}
-		if err := e.store.InsertExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
-			return result(fmt.Sprintf("land rows: %v", err))
+		if err := e.publisher.PublishExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
+			return result(fmt.Sprintf("queue rows: %v", err))
 		}
 		total += len(pull.Rows)
 		hasMore = pull.HasMore

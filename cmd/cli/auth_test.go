@@ -2,70 +2,292 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
-// fakeServer mimics the /api/auth/* + rotate-key surface the CLI talks to.
-func fakeServer(t *testing.T) *httptest.Server {
+// fakeProject is one project the fake server serves.
+type fakeProject struct {
+	ID     string
+	Name   string
+	APIKey string
+}
+
+// fakeCred is one management credential the fake server hands out or lists.
+type fakeCred struct {
+	ID      string
+	Project string
+	Name    string
+	Secret  string
+	Live    bool
+}
+
+// hint mirrors the server's key_hint: the last four characters of the secret,
+// which is the only handle a config written before ids existed carries.
+func (c fakeCred) hint() string {
+	if len(c.Secret) < 4 {
+		return c.Secret
+	}
+	return c.Secret[len(c.Secret)-4:]
+}
+
+// fakeAgentRay stands in for the account API and the scoped-credential surface.
+// Tests drive it by mutating fields between calls: the workspace role the login
+// payload reports, whether the mint is refused, and whether the delete route
+// answers. Every credential request is recorded so a test can assert the order
+// of the lifecycle (revoke before session, never revoke what the list disproves).
+type fakeAgentRay struct {
+	*httptest.Server
+
+	mu           sync.Mutex
+	role         string
+	mintStatus   int
+	mintBody     string
+	mintScopes   []string
+	mintCalls    int
+	deleteStatus int
+	events       []string
+	creds        []fakeCred
+	projects     []fakeProject
+}
+
+func (f *fakeAgentRay) record(event string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, event)
+}
+
+// eventIndex returns the position of an event in the request trace, or -1.
+func (f *fakeAgentRay) eventIndex(event string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.events {
+		if e == event {
+			return i
+		}
+	}
+	return -1
+}
+
+func (f *fakeAgentRay) requestedScopes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.mintScopes...)
+}
+
+func (f *fakeAgentRay) mintedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mintCalls
+}
+
+func (f *fakeAgentRay) deleted() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var ids []string
+	for _, event := range f.events {
+		if id, ok := strings.CutPrefix(event, "delete:"); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func (f *fakeAgentRay) seedCred(c fakeCred) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.creds = append(f.creds, c)
+}
+
+// authPayload is the body /api/auth/{login,signup,me} answers with.
+func (f *fakeAgentRay) authPayload() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	projects := make([]map[string]any, 0, len(f.projects))
+	for _, p := range f.projects {
+		projects = append(projects, map[string]any{
+			"id": p.ID, "workspace_id": "ws-1", "name": p.Name, "api_key": p.APIKey, "role": f.role,
+		})
+	}
+	return map[string]any{
+		"user":       map[string]any{"id": "u1", "email": "a@example.com", "name": "Alice"},
+		"workspaces": []any{map[string]any{"id": "ws-1", "name": "Main"}},
+		"projects":   projects,
+		"project":    projects[0],
+	}
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
+}
+
+// fakeServer mimics the /api/auth/*, rotate-key and scoped-credential surface
+// the CLI talks to. The default account is an owner of two projects.
+func fakeServer(t *testing.T) *fakeAgentRay {
 	t.Helper()
 	const token = "session-token-1"
-	project := map[string]any{"id": "proj-1", "workspace_id": "ws-1", "name": "Demo", "api_key": "key-original"}
-	payload := func() map[string]any {
-		return map[string]any{
-			"user":       map[string]any{"id": "u1", "email": "a@example.com", "name": "Alice"},
-			"workspaces": []any{map[string]any{"id": "ws-1", "name": "Main"}},
-			"projects":   []any{project},
-			"project":    project,
+	f := &fakeAgentRay{
+		role: "owner",
+		projects: []fakeProject{
+			{ID: "proj-1", Name: "Demo", APIKey: "key-original"},
+			{ID: "proj-2", Name: "Mobile", APIKey: "key-mobile"},
+		},
+	}
+	requireSession := func(w http.ResponseWriter, r *http.Request) bool {
+		if c, err := r.Cookie(sessionCookieName); err != nil || c.Value != token {
+			writeJSONError(w, http.StatusUnauthorized, "login required")
+			return false
 		}
+		return true
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/signup", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body["email"] == "" || body["password"] == "" {
-			http.Error(w, `{"message":"email and password required"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "email and password required")
 			return
 		}
 		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: token})
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(payload())
+		_ = json.NewEncoder(w).Encode(f.authPayload())
 	})
 	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body["password"] != "secret" {
-			http.Error(w, `{"message":"invalid email or password"}`, http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "invalid email or password")
 			return
 		}
 		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: token})
-		_ = json.NewEncoder(w).Encode(payload())
+		_ = json.NewEncoder(w).Encode(f.authPayload())
 	})
 	mux.HandleFunc("GET /api/auth/me", func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie(sessionCookieName); err != nil || c.Value != token {
-			http.Error(w, `{"message":"login required"}`, http.StatusUnauthorized)
+		if !requireSession(w, r) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(payload())
-	})
-	mux.HandleFunc("POST /api/projects/proj-1/rotate-key", func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie(sessionCookieName); err != nil || c.Value != token {
-			http.Error(w, `{"message":"login required"}`, http.StatusUnauthorized)
-			return
-		}
-		project["api_key"] = "key-rotated"
-		_ = json.NewEncoder(w).Encode(map[string]any{"project": project})
+		_ = json.NewEncoder(w).Encode(f.authPayload())
 	})
 	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		f.record("logout")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /api/projects/{project}/rotate-key", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(w, r) {
+			return
+		}
+		id := r.PathValue("project")
+		f.mu.Lock()
+		for i := range f.projects {
+			if f.projects[i].ID == id {
+				f.projects[i].APIKey = "key-rotated"
+			}
+		}
+		var rotated map[string]any
+		for _, p := range f.projects {
+			if p.ID == id {
+				rotated = map[string]any{"id": p.ID, "workspace_id": "ws-1", "name": p.Name, "api_key": p.APIKey, "role": f.role}
+			}
+		}
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"project": rotated})
+	})
+	mux.HandleFunc("POST /api/projects/{project}/credentials", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(w, r) {
+			return
+		}
+		var body struct {
+			Name   string   `json:"name"`
+			Scopes []string `json:"scopes"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.mintCalls++
+		f.mintScopes = append([]string(nil), body.Scopes...)
+		status, message := f.mintStatus, f.mintBody
+		f.mu.Unlock()
+		if status != 0 {
+			writeJSONError(w, status, message)
+			return
+		}
+		project := r.PathValue("project")
+		cred := fakeCred{ID: "cred-" + project, Project: project, Name: body.Name, Secret: "agm_secret_" + project, Live: true}
+		f.seedCred(cred)
+		f.record("mint:" + cred.ID)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"credential": map[string]any{"id": cred.ID, "name": cred.Name, "scopes": body.Scopes, "key_hint": cred.hint()},
+			"secret":     cred.Secret,
+		})
+	})
+	mux.HandleFunc("GET /api/projects/{project}/credentials", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(w, r) {
+			return
+		}
+		project := r.PathValue("project")
+		f.mu.Lock()
+		rows := make([]map[string]any, 0, len(f.creds))
+		for _, c := range f.creds {
+			if c.Project != project {
+				continue
+			}
+			row := map[string]any{"id": c.ID, "name": c.Name, "key_hint": c.hint()}
+			if !c.Live {
+				row["revoked_at"] = "2026-09-13T00:00:00Z"
+			}
+			rows = append(rows, row)
+		}
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"credentials": rows})
+	})
+	mux.HandleFunc("DELETE /api/projects/{project}/credentials/{cred}", func(w http.ResponseWriter, r *http.Request) {
+		if !requireSession(w, r) {
+			return
+		}
+		f.mu.Lock()
+		status := f.deleteStatus
+		f.mu.Unlock()
+		if status != 0 {
+			// The real route answers every revocation failure with one status,
+			// so "already revoked" and "refused" are indistinguishable here.
+			writeJSONError(w, status, "agent config permission denied")
+			return
+		}
+		id := r.PathValue("cred")
+		f.mu.Lock()
+		found := false
+		for i := range f.creds {
+			if f.creds[i].ID == id {
+				f.creds[i].Live = false
+				found = true
+			}
+		}
+		f.mu.Unlock()
+		if !found {
+			writeJSONError(w, http.StatusForbidden, "credential not found or already revoked")
+			return
+		}
+		f.record("delete:" + id)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv
+	f.Server = srv
+	return f
 }
 
 func withTempConfig(t *testing.T) string {
@@ -256,5 +478,388 @@ func TestOpKeyPrecedence(t *testing.T) {
 	cfg.ManagementKeyProject = "p2"
 	if got := operationCredential(cfg, "capture-env"); got != "capture-env" {
 		t.Fatalf("stale management key must not be reused, got %q", got)
+	}
+}
+
+func (f *fakeAgentRay) trace() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+// captureStderr runs fn with os.Stderr redirected, returning what a user would
+// have read on the terminal.
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	runErr := fn()
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(out), runErr
+}
+
+// seedConfig writes the state a previous invocation would have left behind.
+func seedConfig(t *testing.T, cfg cliConfig) {
+	t.Helper()
+	if err := saveConfig(cfg); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+}
+
+// trackedConfig is a logged-in CLI holding a management credential minted for
+// proj-1, the state every switch and logout test starts from.
+func trackedConfig(srv *fakeAgentRay) cliConfig {
+	return cliConfig{
+		URL:                  srv.URL,
+		SessionToken:         "session-token-1",
+		Email:                "a@example.com",
+		ProjectID:            "proj-1",
+		ProjectName:          "Demo",
+		APIKey:               "key-original",
+		ManagementKey:        "agm_old_secret",
+		ManagementKeyProject: "proj-1",
+		ManagementKeyID:      "cred-old",
+	}
+}
+
+// Acceptance 1: credential creation is owner/admin-only, so a member's mint is
+// refused — the session the API issued must survive it, and the CLI must say
+// plainly what this role cannot do instead of failing the login.
+func TestMemberLoginPersistsSessionWithoutMintRights(t *testing.T) {
+	srv := fakeServer(t)
+	dir := withTempConfig(t)
+	srv.role = "member"
+	srv.mintStatus = http.StatusBadRequest
+	srv.mintBody = "agent config permission denied"
+
+	notice, err := captureStderr(t, func() error {
+		return runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	})
+	if err != nil {
+		t.Fatalf("login must complete without mint rights: %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.SessionToken != "session-token-1" || cfg.ProjectID != "proj-1" || cfg.APIKey != "key-original" {
+		t.Fatalf("session and project not persisted for a member: %+v", cfg)
+	}
+	if cfg.ManagementKey != "" || cfg.ManagementKeyProject != "" {
+		t.Fatalf("a refused mint must not leave a credential behind: %+v", cfg)
+	}
+	if !strings.Contains(notice, "no management credential for project Demo") || !strings.Contains(notice, "cannot mint one") {
+		t.Fatalf("login must state the role's limit, got:\n%s", notice)
+	}
+	info, err := os.Stat(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("config file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config perms = %v, want 0600", info.Mode().Perm())
+	}
+	if srv.mintedCount() != 1 {
+		t.Fatalf("mint attempts = %d, want 1", srv.mintedCount())
+	}
+}
+
+// Acceptance 2: one credential must cover every operation the CLI can dispatch
+// — including the growth/plans writes the retired four-scope literal missed
+// (submit_recommendation, propose_test, update_test, record_outcome,
+// abandon_test, remember, send_notification) — and every scope asked for must
+// be one the server will actually mint.
+func TestCLIMintScopesCoverRegistry(t *testing.T) {
+	scopes, err := cliMintScopes()
+	if err != nil {
+		t.Fatalf("derive mint scopes: %v", err)
+	}
+	grants := make([]opcore.Access, 0, len(scopes))
+	for _, scope := range scopes {
+		if !storage.ManagementScopes[scope] {
+			t.Errorf("requested scope %q is not mintable by the server", scope)
+		}
+		grants = append(grants, opcore.Access(scope))
+	}
+	reg := usecase.Registry()
+	principal := opcore.Principal{Kind: opcore.CredManagement, Grants: grants}
+	for _, spec := range reg.Specs() {
+		if !reg.Authorize(principal, spec.OpName()) {
+			t.Errorf("minted credential cannot call %s (access %q)", spec.OpName(), spec.OpAccess())
+		}
+	}
+}
+
+// Acceptance 2, on the wire: login asks for exactly the registry's access
+// classes and stores the credential the server returns.
+func TestLoginMintsRegistryScopes(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+
+	if err := runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	want := make([]string, 0)
+	for _, spec := range usecase.Registry().Specs() {
+		want = append(want, string(spec.OpAccess()))
+	}
+	sort.Strings(want)
+	want = slices.Compact(want)
+	got := srv.requestedScopes()
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("mint requested %v, want the registry's access classes %v", got, want)
+	}
+	cfg := loadConfig()
+	if cfg.ManagementKey != "agm_secret_proj-1" || cfg.ManagementKeyID != "cred-proj-1" || cfg.ManagementKeyProject != "proj-1" {
+		t.Fatalf("minted credential not persisted: %+v", cfg)
+	}
+}
+
+// A server with no credential surface leaves the project key carrying
+// operations, exactly as it did before the split.
+func TestLegacyServerLoginKeepsProjectKeyPath(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.mintStatus = http.StatusNotFound
+	srv.mintBody = "not found"
+
+	notice, err := captureStderr(t, func() error {
+		return runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	})
+	if err != nil {
+		t.Fatalf("login against a legacy server: %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.ManagementKey != "" || cfg.SessionToken != "session-token-1" || cfg.APIKey != "key-original" {
+		t.Fatalf("legacy login state wrong: %+v", cfg)
+	}
+	if !strings.Contains(notice, "predates scoped credentials") {
+		t.Fatalf("legacy login must explain the fallback, got:\n%s", notice)
+	}
+}
+
+// Acceptance 3: the credential bound to the project being left is revoked
+// before the new selection replaces it.
+func TestProjectSwitchRevokesAbandonedCredential(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-old", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	seedConfig(t, trackedConfig(srv))
+
+	if err := runAccountCommand(srv.URL, []string{"key", "--project", "Mobile"}); err != nil {
+		t.Fatalf("key --project: %v", err)
+	}
+	if deleted := srv.deleted(); len(deleted) != 1 || deleted[0] != "cred-old" {
+		t.Fatalf("abandoned credential not revoked: %v", deleted)
+	}
+	cfg := loadConfig()
+	if cfg.ProjectID != "proj-2" || cfg.APIKey != "key-mobile" {
+		t.Fatalf("switch not saved: %+v", cfg)
+	}
+	if cfg.ManagementKey != "agm_secret_proj-2" || cfg.ManagementKeyID != "cred-proj-2" || cfg.ManagementKeyProject != "proj-2" {
+		t.Fatalf("credential not replaced by the new project's: %+v", cfg)
+	}
+}
+
+// Acceptance 3, failure path: a revoke that cannot be proved must abort the
+// switch with the live credential still tracked in the config.
+func TestProjectSwitchPreservesTrackedCredentialOnRevokeFailure(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-old", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	srv.deleteStatus = http.StatusForbidden
+	seedConfig(t, trackedConfig(srv))
+
+	err := runAccountCommand(srv.URL, []string{"key", "--project", "Mobile"})
+	if err == nil || !strings.Contains(err.Error(), "still live") {
+		t.Fatalf("switch must abort while the credential is live, got %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.ProjectID != "proj-1" || cfg.APIKey != "key-original" {
+		t.Fatalf("failed switch must not move the selection: %+v", cfg)
+	}
+	if cfg.ManagementKey != "agm_old_secret" || cfg.ManagementKeyID != "cred-old" || cfg.ManagementKeyProject != "proj-1" {
+		t.Fatalf("the live credential must stay tracked: %+v", cfg)
+	}
+	if srv.mintedCount() != 0 {
+		t.Fatal("no credential may be minted while the old one is still live")
+	}
+}
+
+// The delete route answers one status for a refusal and for an already-revoked
+// row, so the member-readable list decides: a revoked row means it is gone.
+func TestRevokeAcceptedWhenListShowsCredentialAlreadyRevoked(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-old", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret"})
+	srv.deleteStatus = http.StatusForbidden
+	seedConfig(t, trackedConfig(srv))
+
+	if err := runAccountCommand(srv.URL, []string{"key", "--project", "Mobile"}); err != nil {
+		t.Fatalf("key --project: %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.ProjectID != "proj-2" || cfg.ManagementKeyProject != "proj-2" {
+		t.Fatalf("switch must proceed once the credential is provably gone: %+v", cfg)
+	}
+}
+
+// A config written before ids were stored carries only the key hint: the CLI
+// resolves the live row the server shows and revokes that id.
+func TestLegacyConfigResolvesAbandonedCredentialByKeyHint(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-legacy", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	cfg := trackedConfig(srv)
+	cfg.ManagementKeyID = ""
+	seedConfig(t, cfg)
+
+	if err := runAccountCommand(srv.URL, []string{"key", "--project", "Mobile"}); err != nil {
+		t.Fatalf("key --project: %v", err)
+	}
+	if deleted := srv.deleted(); len(deleted) != 1 || deleted[0] != "cred-legacy" {
+		t.Fatalf("resolved credential not revoked: %v", deleted)
+	}
+}
+
+// The hint is four characters, so it can collide. Two live matches mean the CLI
+// cannot prove which credential it holds — it revokes neither and keeps the key.
+func TestLegacyConfigAmbiguityAbortsSwitch(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-a", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	srv.seedCred(fakeCred{ID: "cred-b", Project: "proj-1", Name: cliCredentialName, Secret: "agm_other_secret", Live: true})
+	cfg := trackedConfig(srv)
+	cfg.ManagementKeyID = ""
+	seedConfig(t, cfg)
+
+	err := runAccountCommand(srv.URL, []string{"key", "--project", "Mobile"})
+	if err == nil || !strings.Contains(err.Error(), "share the key hint") {
+		t.Fatalf("an ambiguous match must abort, got %v", err)
+	}
+	if deleted := srv.deleted(); len(deleted) != 0 {
+		t.Fatalf("nothing may be revoked on an ambiguous match: %v", deleted)
+	}
+	stored := loadConfig()
+	if stored.ManagementKey != "agm_old_secret" || stored.ProjectID != "proj-1" {
+		t.Fatalf("config must be untouched: %+v", stored)
+	}
+}
+
+// Acceptance 4: the management credential is revoked before the session, since
+// the session is what authorizes the revoke.
+func TestLogoutRevokesManagementCredentialBeforeSession(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-old", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	seedConfig(t, trackedConfig(srv))
+
+	if err := runAccountCommand(srv.URL, []string{"logout"}); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	revokedAt, sessionAt := srv.eventIndex("delete:cred-old"), srv.eventIndex("logout")
+	if revokedAt < 0 || sessionAt < 0 || revokedAt > sessionAt {
+		t.Fatalf("credential must be revoked before the session, trace: %v", srv.trace())
+	}
+	cfg := loadConfig()
+	if cfg.SessionToken != "" || cfg.APIKey != "" || cfg.ManagementKey != "" || cfg.ManagementKeyID != "" {
+		t.Fatalf("logout must clear credentials: %+v", cfg)
+	}
+	if cfg.URL != srv.URL {
+		t.Fatalf("logout should keep the server url: %+v", cfg)
+	}
+}
+
+// Acceptance 4, failure path: a logout that cannot revoke keeps everything it
+// would have to abandon, so the retry is one command away.
+func TestLogoutPreservesCredentialsOnRevokeFailure(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.seedCred(fakeCred{ID: "cred-old", Project: "proj-1", Name: cliCredentialName, Secret: "agm_old_secret", Live: true})
+	srv.deleteStatus = http.StatusForbidden
+	seedConfig(t, trackedConfig(srv))
+
+	err := runAccountCommand(srv.URL, []string{"logout"})
+	if err == nil || !strings.Contains(err.Error(), "still live") {
+		t.Fatalf("logout must stop while the credential is live, got %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.SessionToken != "session-token-1" || cfg.ManagementKey != "agm_old_secret" || cfg.ManagementKeyID != "cred-old" {
+		t.Fatalf("credentials must be preserved for retry: %+v", cfg)
+	}
+	if srv.eventIndex("logout") >= 0 {
+		t.Fatal("the session must stay valid until the credential is revoked")
+	}
+}
+
+// A credential minted during login that cannot be persisted must not be left
+// live and untracked: the CLI revokes it before reporting the save failure.
+func TestLoginRevokesMintedCredentialWhenConfigSaveFails(t *testing.T) {
+	srv := fakeServer(t)
+	dir := withTempConfig(t)
+	// config.json as a directory makes every saveConfig fail.
+	if err := os.Mkdir(filepath.Join(dir, "config.json"), 0o700); err != nil {
+		t.Fatalf("seed unwritable config: %v", err)
+	}
+
+	err := runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil {
+		t.Fatal("login must report the failed save")
+	}
+	if srv.mintedCount() != 1 {
+		t.Fatalf("mint attempts = %d, want 1", srv.mintedCount())
+	}
+	if deleted := srv.deleted(); len(deleted) != 1 || deleted[0] != "cred-proj-1" {
+		t.Fatalf("the unpersisted credential must be revoked, not orphaned: %v", deleted)
+	}
+}
+
+// A mint that fails for a reason other than the caller's role or a legacy
+// server is a fault, and a login may not answer it with a capture-only config:
+// every management command would 403 behind an exit code of zero. Nothing is
+// minted and nothing is saved, so the on-disk config must be untouched.
+func TestLoginFailsOnMintFault(t *testing.T) {
+	srv := fakeServer(t)
+	withTempConfig(t)
+	srv.mintStatus = http.StatusInternalServerError
+	srv.mintBody = "boom"
+
+	err := runAccountCommand(srv.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil || !strings.Contains(err.Error(), "could not mint a management credential") {
+		t.Fatalf("a mint fault must fail the login, got %v", err)
+	}
+	if cfg := loadConfig(); cfg.SessionToken != "" || cfg.ManagementKey != "" || cfg.ProjectID != "" {
+		t.Fatalf("a failed login must not save a config: %+v", cfg)
+	}
+}
+
+// A management credential belongs to the server that issued it: its id means
+// nothing on another one, whose delete route answers "gone" for a row that is
+// still live. So a change of server stops with the config untouched instead of
+// orphaning a live key on the old server.
+func TestLoginRefusesServerChangeHoldingCredential(t *testing.T) {
+	from, to := fakeServer(t), fakeServer(t)
+	withTempConfig(t)
+	seedConfig(t, trackedConfig(from))
+
+	err := runAccountCommand(to.URL, []string{"login", "--email", "a@example.com", "--password", "secret"})
+	if err == nil || !strings.Contains(err.Error(), "revoke it there first") {
+		t.Fatalf("a server change with a live credential must stop, got %v", err)
+	}
+	cfg := loadConfig()
+	if cfg.URL != from.URL || cfg.ManagementKey != "agm_old_secret" || cfg.ManagementKeyID != "cred-old" {
+		t.Fatalf("config must be untouched: %+v", cfg)
+	}
+	if from.mintedCount() != 0 || to.mintedCount() != 0 || len(to.deleted()) != 0 {
+		t.Fatalf("no credential may be touched across servers: from-minted=%d to-minted=%d to-deleted=%v",
+			from.mintedCount(), to.mintedCount(), to.deleted())
 	}
 }

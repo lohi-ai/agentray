@@ -87,6 +87,13 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
 		for _, stmt := range []string{
 			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
+			// The cgroup is the real ceiling, but DuckDB does not know that: with
+			// no limit of its own it treats the whole container as its budget.
+			// This instance is the trusted writer and the dashboard reader, so it
+			// gets its share of the envelope and spills the rest to disk — see
+			// the sandbox budget in duckdb_sandbox.go.
+			"SET memory_limit = '" + sandboxMainMemoryLimit + "'",
+			"SET max_temp_directory_size = '" + sandboxMainTempSize + "'",
 			"SET TimeZone = 'UTC'",
 		} {
 			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
@@ -188,6 +195,24 @@ func (d *DuckDB) Close() error {
 	case <-ctx.Done():
 	}
 	return d.db.Close()
+}
+
+// Checkpoint takes the writer slot and folds the write-ahead log into the
+// database file. Deleting rows only marks them; the checkpoint is what lets
+// the freed blocks be reused, so the retention sweep runs it after a delete
+// that removed anything.
+func (d *DuckDB) Checkpoint(ctx context.Context) error {
+	if d.closed.Load() {
+		return errDuckDBClosed
+	}
+	select {
+	case d.writeCh <- struct{}{}:
+		defer func() { <-d.writeCh }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	_, err := d.db.ExecContext(ctx, "CHECKPOINT")
+	return err
 }
 
 // migrate creates the v1 schema. Every statement is idempotent so a restart

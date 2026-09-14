@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -578,7 +580,7 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
 	e := mountRealAdapters(t, s)
-	registerOverviewRoutes(e, s, nil)
+	registerOverviewRoutes(e, s, newOpAdapter(s, nil, storeRunner{s}))
 
 	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-parity-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
 	if err != nil {
@@ -646,5 +648,357 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 	}
 	if got := rpc.Result.StructuredContent.Context; got != want {
 		t.Fatalf("MCP context = %+v, want %+v", got, want)
+	}
+}
+
+// overviewFailingRepo forces the one read the overview operation performs to
+// fail with a given error; the embedded interface is never reached.
+type overviewFailingRepo struct {
+	usecase.Repo
+	err error
+}
+
+func (r overviewFailingRepo) Overview(ctx context.Context, projectID, period, platform string, now time.Time) (storage.OverviewResult, error) {
+	return storage.OverviewResult{}, r.err
+}
+
+// GET /api/overview must map an operation error through the same
+// usecase.MapOpError as the mounted operation adapters: a typed not-found is a
+// 404 here, not the blanket 400 the route used to send.
+func TestOverviewAdaptersShareTypedErrorStatus(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-typed-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+
+	e := echo.New()
+	deps := &usecase.Deps{Repo: overviewFailingRepo{err: pgx.ErrNoRows}, Runner: storeRunner{s}, Audit: s}
+	reg := usecase.Registry()
+	resolve := func(c echo.Context) (opcore.Principal, error) { return principalFromRequest(c, s) }
+	opcore.MountHTTP(e.Group("/api/op"), reg, deps, resolve)
+	registerOverviewRoutes(e, s, &opAdapter{reg: reg, deps: deps})
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/overview?period=7d", nil)
+	getReq.Header.Set("Authorization", "Bearer "+secret)
+	getRec := httptest.NewRecorder()
+	e.ServeHTTP(getRec, getReq)
+	opRec := postJSON(t, e, "/api/op/overview", `{"period":"7d"}`, map[string]string{"Authorization": "Bearer " + secret})
+
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("GET overview on a not-found operation = %d %s, want 404", getRec.Code, getRec.Body.String())
+	}
+	if opRec.Code != getRec.Code {
+		t.Fatalf("GET %d vs /api/op %d — the adapters disagree on a typed error", getRec.Code, opRec.Code)
+	}
+}
+
+// fakeTierReader is the workspace-tier read the authoring helper depends on.
+type fakeTierReader struct {
+	cfg  storage.WorkspaceModelTiers
+	keys map[string]string
+	err  error
+}
+
+func (f fakeTierReader) WorkspaceTiersForRun(ctx context.Context, workspaceID string) (storage.WorkspaceModelTiers, map[string]string, error) {
+	return f.cfg, f.keys, f.err
+}
+
+// Both authoring endpoints resolve their provider through one helper now, so
+// the fallback chain has to be pinned here: an unconfigured pro tier inherits
+// the flash default (including its key), a workspace with nothing configured is
+// an ordinary configuration error — never the typed init one the definition
+// route turns into a 502 — and a provider the factory rejects is typed.
+func TestAuthoringProviderUsesFlashFallback(t *testing.T) {
+	ctx := context.Background()
+
+	reader := fakeTierReader{
+		cfg:  storage.WorkspaceModelTiers{Provider: "openai", Model: "gpt-5-mini"},
+		keys: map[string]string{"flash": "sk-flash"},
+	}
+	provider, model, err := authoringProvider(ctx, reader, "ws-1")
+	if err != nil || provider == nil {
+		t.Fatalf("flash fallback = provider %v model %q err %v", provider, model, err)
+	}
+	if model != "gpt-5-mini" {
+		t.Fatalf("resolved model = %q, want the flash default", model)
+	}
+
+	_, _, err = authoringProvider(ctx, fakeTierReader{}, "ws-1")
+	if err == nil {
+		t.Fatal("an unconfigured workspace resolved a provider")
+	}
+	var initErr *authoringProviderInitError
+	if errors.As(err, &initErr) {
+		t.Fatalf("unconfigured tier classified as a provider-init failure: %v", err)
+	}
+
+	unbuildable := fakeTierReader{
+		cfg:  storage.WorkspaceModelTiers{Provider: "mystery-router", Model: "m", BaseURL: ""},
+		keys: map[string]string{"flash": "sk-flash"},
+	}
+	_, _, err = authoringProvider(ctx, unbuildable, "ws-1")
+	if err == nil {
+		t.Fatal("an unbuildable provider resolved without error")
+	}
+	if !errors.As(err, &initErr) {
+		t.Fatalf("unbuildable provider err = %v, want the typed init error", err)
+	}
+}
+
+// --- Legacy REST ↔ registry authorization parity ---
+
+// legacyRESTAndRegistry wires the two surfaces this matrix compares for the SAME
+// operation and the SAME credential: the legacy dashboard/chart REST block, and
+// the registry's own POST /api/op mount. Both resolve the caller through the real
+// principalFromRequest and both run one registry + deps bundle, so any divergence
+// in the authorization answer is a divergence between the adapters themselves.
+func legacyRESTAndRegistry(t *testing.T, s *storage.Store) *echo.Echo {
+	t.Helper()
+	e := echo.New()
+	ops := newOpAdapter(s, nil, storeRunner{s})
+	mountDashboardLifecycle(e, s, ops)
+	opcore.MountHTTP(e.Group("/api/op"), ops.reg, ops.deps, func(c echo.Context) (opcore.Principal, error) {
+		return principalFromRequest(c, s)
+	})
+	return e
+}
+
+// bearer builds the management-credential header. A project key travels as
+// ?api_key= instead: a Bearer that is not an agm_ credential is rejected outright
+// rather than falling through to a weaker identity.
+func bearer(secret string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + secret}
+}
+
+// callREST drives one legacy request carrying a bearer credential or a session.
+func callREST(t *testing.T, e *echo.Echo, method, path, body, secret string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	if secret != "" {
+		req.Header.Set(echo.HeaderAuthorization, "Bearer "+secret)
+	}
+	for _, ck := range cookies {
+		req.AddCookie(ck)
+	}
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	return rec
+}
+
+// dashboardNames lists the active dashboard names a credential can see, through
+// the registry adapter — the surface both callers above share.
+func dashboardNames(t *testing.T, e *echo.Echo, secret string) map[string]bool {
+	t.Helper()
+	rec := postJSON(t, e, "/api/op/list_dashboards", `{}`, bearer(secret))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list_dashboards: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Dashboards []storage.Dashboard `json:"dashboards"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("list_dashboards body: %v (%s)", err, rec.Body.String())
+	}
+	names := make(map[string]bool, len(body.Dashboards))
+	for _, d := range body.Dashboards {
+		names[d.Name] = true
+	}
+	return names
+}
+
+// TestLegacyRESTAuthorizationParity is the regression for the nine dashboard and
+// chart routes that used to reach the registry without ever being authorized: a
+// credential scoped to analytics:read alone could create, update, archive and
+// reorder over REST while /api/op refused the identical call. Every row asserts
+// the same decision on both surfaces, so reopening that gap fails here.
+func TestLegacyRESTAuthorizationParity(t *testing.T) {
+	s := openAppTestStore(t)
+	ctx := t.Context()
+	e := legacyRESTAndRegistry(t, s)
+
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("rest-parity-%d@test.local", time.Now().UnixNano()), "RP", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	project := boot.Project
+	captureKey := project.APIKey
+
+	_, reader, err := s.CreateProjectCredential(ctx, boot.User.ID, project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("reader credential: %v", err)
+	}
+	_, author, err := s.CreateProjectCredential(ctx, boot.User.ID, project.ID, "author", []string{"analytics:read", "dashboards:write"})
+	if err != nil {
+		t.Fatalf("author credential: %v", err)
+	}
+
+	// Refused with the wrong scope — and refused identically, because the answer
+	// is the registry's own and not one the legacy adapter invents.
+	legacyDenied := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"denied"}`, reader)
+	opDenied := postJSON(t, e, "/api/op/create_dashboard", `{"name":"denied"}`, bearer(reader))
+	if legacyDenied.Code != http.StatusForbidden || opDenied.Code != http.StatusForbidden {
+		t.Fatalf("analytics:read create_dashboard: legacy %d %s | /api/op %d %s; want 403 on both",
+			legacyDenied.Code, legacyDenied.Body.String(), opDenied.Code, opDenied.Body.String())
+	}
+	if legacyDenied.Body.String() != opDenied.Body.String() {
+		t.Fatalf("refusal bodies differ: legacy %q, /api/op %q", legacyDenied.Body.String(), opDenied.Body.String())
+	}
+	if names := dashboardNames(t, e, reader); names["denied"] {
+		t.Fatalf("a refused create_dashboard persisted a row: %v", names)
+	}
+
+	// Allowed with the right scope — both operations, both surfaces.
+	if rec := callREST(t, e, http.MethodGet, "/api/dashboards", "", reader); rec.Code != http.StatusOK {
+		t.Fatalf("analytics:read list via REST: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postJSON(t, e, "/api/op/list_dashboards", `{}`, bearer(reader)); rec.Code != http.StatusOK {
+		t.Fatalf("analytics:read list_dashboards via /api/op: %d %s", rec.Code, rec.Body.String())
+	}
+	restBoard := callREST(t, e, http.MethodPost, "/api/dashboards", `{"name":"Parity REST board"}`, author)
+	if restBoard.Code != http.StatusCreated {
+		t.Fatalf("dashboards:write create via REST: %d %s", restBoard.Code, restBoard.Body.String())
+	}
+	var parityBoard struct {
+		Dashboard storage.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(restBoard.Body.Bytes(), &parityBoard); err != nil {
+		t.Fatalf("REST create body: %v (%s)", err, restBoard.Body.String())
+	}
+	if rec := postJSON(t, e, "/api/op/create_dashboard", `{"name":"Parity op board"}`, bearer(author)); rec.Code != http.StatusOK {
+		t.Fatalf("dashboards:write create_dashboard via /api/op: %d %s", rec.Code, rec.Body.String())
+	}
+	if names := dashboardNames(t, e, author); !names["Parity REST board"] || !names["Parity op board"] {
+		t.Fatalf("authorized creates did not persist: %v", names)
+	}
+	restChart := callREST(t, e, http.MethodPost, "/api/dashboards/"+parityBoard.Dashboard.ID+"/charts", `{"name":"Parity chart","kind":"line","metric":"events"}`, author)
+	if restChart.Code != http.StatusCreated {
+		t.Fatalf("dashboards:write create chart via REST: %d %s", restChart.Code, restChart.Body.String())
+	}
+	var parityChart struct {
+		Chart storage.Chart `json:"chart"`
+	}
+	if err := json.Unmarshal(restChart.Body.Bytes(), &parityChart); err != nil {
+		t.Fatalf("REST chart body: %v (%s)", err, restChart.Body.String())
+	}
+
+	// Every dashboard/chart handler is covered, not only the two above: each
+	// independently registered route must answer its own operation's refusal, so
+	// one rewritten to skip ops.invoke fails here instead of silently reopening
+	// the gap. The rows run against rows the author's credential just created, so
+	// the revision lookup that precedes invoke cannot answer for them.
+	boardID, chartID := parityBoard.Dashboard.ID, parityChart.Chart.ID
+	for _, row := range []struct {
+		name         string
+		method, path string
+		body         string
+		op, opBody   string
+	}{
+		{"update_dashboard", http.MethodPut, "/api/dashboards/" + boardID, `{"name":"nope"}`,
+			"update_dashboard", fmt.Sprintf(`{"dashboard_id":%q,"name":"nope"}`, boardID)},
+		{"archive_dashboard", http.MethodDelete, "/api/dashboards/" + boardID, "",
+			"archive_dashboard", fmt.Sprintf(`{"dashboard_id":%q}`, boardID)},
+		{"create_chart", http.MethodPost, "/api/dashboards/" + boardID + "/charts", `{"name":"nope","kind":"line","metric":"events"}`,
+			"create_chart", fmt.Sprintf(`{"dashboard_id":%q,"name":"nope"}`, boardID)},
+		{"update_chart", http.MethodPut, "/api/charts/" + chartID, `{"name":"nope"}`,
+			"update_chart", fmt.Sprintf(`{"chart_id":%q,"name":"nope"}`, chartID)},
+		{"archive_chart", http.MethodDelete, "/api/charts/" + chartID, "",
+			"archive_chart", fmt.Sprintf(`{"chart_id":%q}`, chartID)},
+		{"reorder_charts", http.MethodPut, "/api/dashboards/" + boardID + "/charts/order", `{"chart_ids":[]}`,
+			"reorder_charts", fmt.Sprintf(`{"dashboard_id":%q,"chart_ids":[]}`, boardID)},
+	} {
+		legacy := callREST(t, e, row.method, row.path, row.body, reader)
+		opCall := postJSON(t, e, "/api/op/"+row.op, row.opBody, bearer(reader))
+		if legacy.Code != http.StatusForbidden || opCall.Code != http.StatusForbidden {
+			t.Fatalf("analytics:read %s: legacy %d %s | /api/op %d %s; want 403 on both",
+				row.name, legacy.Code, legacy.Body.String(), opCall.Code, opCall.Body.String())
+		}
+		if legacy.Body.String() != opCall.Body.String() {
+			t.Fatalf("%s refusal bodies differ: legacy %q, /api/op %q", row.name, legacy.Body.String(), opCall.Body.String())
+		}
+	}
+	// A refused mutation touched nothing: the board is still active.
+	if names := dashboardNames(t, e, author); !names["Parity REST board"] {
+		t.Fatalf("a refused mutation archived the dashboard: %v", names)
+	}
+
+	// The capture key never reaches a non-session caller; the session, the one
+	// credential that resolved a membership that may write, still owns it.
+	readerBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", reader).Body.String()
+	if strings.Contains(readerBody, captureKey) {
+		t.Fatalf("management credential received the project capture key: %s", readerBody)
+	}
+	var readerProject struct {
+		Project storage.Project `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(readerBody), &readerProject); err != nil {
+		t.Fatalf("management credential body: %v (%s)", err, readerBody)
+	}
+	if readerProject.Project.ID != project.ID || readerProject.Project.APIKey != "" {
+		t.Fatalf("management credential body project = %+v, want %s with a blanked key", readerProject.Project, project.ID)
+	}
+	sessionBody := callREST(t, e, http.MethodGet, "/api/dashboards", "", "", sessionCookieFor(t, s, boot.User.ID)).Body.String()
+	if !strings.Contains(sessionBody, captureKey) {
+		t.Fatalf("the session lost the capture key it owns: %s", sessionBody)
+	}
+
+	// The capture key is still refused before any operation runs.
+	if rec := doJSON(t, e, http.MethodGet, "/api/dashboards?api_key="+captureKey, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("capture key on the read route: %d %s, want 403", rec.Code, rec.Body.String())
+	}
+
+	// An unsplit legacy project key keeps exactly the frozen allowlist: the two
+	// dashboard writes it always had, and nothing registered after the freeze.
+	legacy, err := s.CreateProject(ctx, "rest-parity-legacy")
+	if err != nil {
+		t.Fatalf("legacy project: %v", err)
+	}
+	created := doJSON(t, e, http.MethodPost, "/api/dashboards?api_key="+legacy.APIKey, `{"name":"Legacy board"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("legacy key create_dashboard (allowlisted): %d %s", created.Code, created.Body.String())
+	}
+	var legacyBody struct {
+		Dashboard storage.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &legacyBody); err != nil {
+		t.Fatalf("legacy create response: %v", err)
+	}
+	legacyCharts := doJSON(t, e, http.MethodGet, "/api/dashboards/"+legacyBody.Dashboard.ID+"/charts?api_key="+legacy.APIKey, "")
+	opCharts := postJSON(t, e, "/api/op/list_charts", fmt.Sprintf(`{"dashboard_id":%q}`, legacyBody.Dashboard.ID), map[string]string{"X-API-Key": legacy.APIKey})
+	if legacyCharts.Code != http.StatusForbidden || opCharts.Code != http.StatusForbidden {
+		t.Fatalf("legacy key list_charts (outside the allowlist): legacy %d %s | /api/op %d %s; want 403 on both",
+			legacyCharts.Code, legacyCharts.Body.String(), opCharts.Code, opCharts.Body.String())
+	}
+	if legacyCharts.Body.String() != opCharts.Body.String() {
+		t.Fatalf("legacy refusal bodies differ: legacy %q, /api/op %q", legacyCharts.Body.String(), opCharts.Body.String())
+	}
+
+	// A read-only session keeps its role floor on the legacy surface too.
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("rest-parity-viewer-%d@test.local", time.Now().UnixNano()), "V", "password-123", "ws-v", "proj-v")
+	if err != nil {
+		t.Fatalf("viewer account: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	viewerCookie := sessionCookieFor(t, s, viewer.User.ID)
+	viewerList := callREST(t, e, http.MethodGet, "/api/dashboards?project_id="+project.ID, "", "", viewerCookie)
+	if viewerList.Code != http.StatusOK {
+		t.Fatalf("viewer list_dashboards: %d %s, want 200", viewerList.Code, viewerList.Body.String())
+	}
+	// The viewer may read the list but not hold the ingest key: the resolvers
+	// load the row through the role-blind ProjectByID, so the echoed project is
+	// withheld unless the resolved role may write.
+	if strings.Contains(viewerList.Body.String(), captureKey) {
+		t.Fatalf("viewer session received the capture key: %s", viewerList.Body.String())
+	}
+	if rec := callREST(t, e, http.MethodPost, "/api/dashboards?project_id="+project.ID, `{"name":"viewer board"}`, "", viewerCookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer create via REST: %d %s, want 403 (MinSessionRole member)", rec.Code, rec.Body.String())
 	}
 }

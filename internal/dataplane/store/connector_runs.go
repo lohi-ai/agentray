@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -91,6 +92,49 @@ func (s *Store) migrateConnectorRuns(ctx context.Context) error {
 // ErrSyncPaused rejects enqueue on a paused (disabled) sync.
 var ErrSyncPaused = errors.New("sync is paused")
 
+// connectorRunByKey resolves an idempotency key to the run already bound to
+// it: the run's own stamp first, then the alias binding written when the key
+// observed an already-active run. q is the pool or an open transaction —
+// EnqueueConnectorRun calls it inside the transaction whose row lock makes
+// binding atomic, the engine's capacity path calls it read-only.
+func connectorRunByKey(ctx context.Context, q pgQuerier, projectID, syncID, idemKey string) (ConnectorRun, bool, error) {
+	var run ConnectorRun
+	err := q.QueryRow(ctx,
+		`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND idempotency_key = $3`,
+		syncID, projectID, idemKey).Scan(connectorRunScanDest(&run)...)
+	if err == nil {
+		return run, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return ConnectorRun{}, false, err
+	}
+	err = q.QueryRow(ctx,
+		`SELECT r.id::text, r.project_id::text, r.sync_id::text, r.connector_id::text, r.status,
+r.idempotency_key, r.cancel_requested, r.rows, r.cursor, r.cursor_key, r.error,
+r.queued_at, r.started_at, r.finished_at FROM connector_runs r
+JOIN connector_run_keys k ON k.run_id = r.id
+WHERE k.sync_id = $1 AND k.project_id = $2 AND k.idempotency_key = $3`,
+		syncID, projectID, idemKey).Scan(connectorRunScanDest(&run)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConnectorRun{}, false, nil
+	}
+	if err != nil {
+		return ConnectorRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// ConnectorRunByIdempotencyKey resolves an idempotency key to the run it is
+// already bound to, without taking the sync's row lock and without writing
+// anything — the engine asks this under capacity pressure, where the answer
+// decides whether a retry is a receipt read or a refusal.
+func (s *Store) ConnectorRunByIdempotencyKey(ctx context.Context, projectID, syncID, idemKey string) (ConnectorRun, bool, error) {
+	if strings.TrimSpace(idemKey) == "" {
+		return ConnectorRun{}, false, nil
+	}
+	return connectorRunByKey(ctx, s.pg, projectID, syncID, idemKey)
+}
+
 // EnqueueConnectorRun inserts a queued run for the sync. The enabled check is
 // INSIDE the insert — a pause landing between check and insert cannot slip a
 // run through. An identical idempotency key replays the original run row; an
@@ -120,25 +164,12 @@ WHERE cs.id = $1 AND cs.project_id = $2 FOR UPDATE OF cs`,
 		return ConnectorRun{}, false, err
 	}
 	if idemKey != "" {
-		var existing ConnectorRun
-		if qerr := tx.QueryRow(ctx,
-			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE sync_id = $1 AND project_id = $2 AND idempotency_key = $3`,
-			syncID, projectID, idemKey).Scan(connectorRunScanDest(&existing)...); qerr == nil {
-			return existing, false, tx.Commit(ctx)
-		} else if !errors.Is(qerr, pgx.ErrNoRows) {
+		existing, found, qerr := connectorRunByKey(ctx, tx, projectID, syncID, idemKey)
+		if qerr != nil {
 			return ConnectorRun{}, false, qerr
 		}
-		var aliased ConnectorRun
-		if qerr := tx.QueryRow(ctx,
-			`SELECT r.id::text, r.project_id::text, r.sync_id::text, r.connector_id::text, r.status,
-r.idempotency_key, r.cancel_requested, r.rows, r.cursor, r.cursor_key, r.error,
-r.queued_at, r.started_at, r.finished_at FROM connector_runs r
-JOIN connector_run_keys k ON k.run_id = r.id
-WHERE k.sync_id = $1 AND k.project_id = $2 AND k.idempotency_key = $3`,
-			syncID, projectID, idemKey).Scan(connectorRunScanDest(&aliased)...); qerr == nil {
-			return aliased, false, tx.Commit(ctx)
-		} else if !errors.Is(qerr, pgx.ErrNoRows) {
-			return ConnectorRun{}, false, qerr
+		if found {
+			return existing, false, tx.Commit(ctx)
 		}
 	}
 	var active ConnectorRun

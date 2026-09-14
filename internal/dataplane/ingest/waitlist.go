@@ -17,8 +17,11 @@ import (
 //
 //  1. A CONTACT — a person who asked to be told when this ships. That belongs in
 //     Postgres: deduped per address, exportable, deletable, and still there in
-//     two years. The event store is a 1-year-TTL append-only log; a contact list
-//     kept there is one that quietly expires.
+//     two years. The event store is append-only with a bounded retention
+//     window (`EVENT_RETENTION_DAYS`, default one year — an operator can set it
+//     to 0, which makes a list kept there permanent instead of merely short);
+//     with a window configured, a contact list kept there is one that quietly
+//     expires.
 //  2. An EVENT — `waitlist.joined`, written down the normal ingest path with the
 //     same enrichment (referrer → channel, UA → visitor class) every other event
 //     gets. That is what makes the signup show up in funnels, in dashboards, and
@@ -106,7 +109,9 @@ func (h Handler) Waitlist(c echo.Context) error {
 		// property, and not as a `$set` trait either, which would fold it into
 		// the person profile and put it in the event store for good.
 		//
-		// The event store is append-only with a 1-year TTL; the contact table is
+		// The event store is append-only with a bounded retention window
+		// (`EVENT_RETENTION_DAYS`, default one year — an operator can set
+		// it to 0, which keeps every event forever); the contact table is
 		// not. Writing the address to both would mean DeleteWaitlistSignup
 		// removes the row the owner can see and leaves the copy they cannot,
 		// which turns "remove my data" into a lie the product tells on the

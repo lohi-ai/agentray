@@ -102,6 +102,31 @@ Sessions are stored in PostgreSQL. On login/signup the server sets an `HttpOnly`
 
 `EventFilter` is the shared query parameter struct populated by `filterFromRequest()` from query string params (`hours`, `from`, `to`, `event_type`, `event_name`, `distinct_id`, `session_id`, `agent_id`, `model_name`, `search`, `error_only`, `limit`).
 
+### Event retention (`internal/dataplane/store/retention.go`)
+
+`events` is append-only, so it is bounded by policy rather than by the engine: a
+daily sweep deletes events whose `"timestamp"` is older than
+`EVENT_RETENTION_DAYS` — **default 365 days; `0` keeps every event**. The default
+is not a new decision. The ClickHouse schema this store replaced carried
+`TTL toDateTime(timestamp) + INTERVAL 1 YEAR`, and 365 matches that window in
+days rather than by calendar — the old TTL was calendar arithmetic, so the two
+differ by a day across a leap day.
+
+What the sweep bounds is how long events live, not how large the file gets:
+volume inside the window is unbounded, and the file also holds `persons`,
+`aliases` and `external_rows`, which the sweep never touches. A per-colour
+DuckDB file can therefore keep growing on a single VM while retention is
+enabled, and the disk-headroom argument this default carries is about the event
+log alone.
+
+The sweep is admitted from the scheduler's minute tick but runs on its own
+goroutine, in batches, under a wall-clock budget — that tick also drives alert
+evaluation and connector syncs, and a multi-minute delete must not hold it. Each
+run logs the cutoff and how many events it deleted; a window shortened on an
+already-grown database converges over consecutive sweeps instead of taking one
+window per day. Only `events` is swept: person profiles, aliases and connector
+landing rows are kept.
+
 ## Configuration (`internal/shared/config/config.go`)
 
 ## Shutdown

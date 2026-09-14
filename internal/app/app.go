@@ -31,6 +31,7 @@ type Server struct {
 	worker          *ingestion.EventWorker
 	scheduler       *agentruntime.Scheduler
 	connectorEngine *connector.Engine
+	retention       *storage.Retention
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -65,6 +66,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	var (
 		worker *ingestion.EventWorker
 		queue  ingestion.EventQueue
+		// ready is the data-coherence probe behind /readyz. Nil on the
+		// core-NATS fallback, where there is no durable replay to wait for.
+		ready readinessProbe
 	)
 	if cfg.IngestJetStream {
 		ss, err := ingestion.EnsureStreams(ctx, nc, cfg)
@@ -82,16 +86,17 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject)
+		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject)
+		ready = ss
 	} else {
-		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, store)
+		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, cfg.IngestConnectorSubject, store)
 		if err != nil {
 			store.Close()
 			_ = redisClient.Close()
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewEventQueue(nc, cfg.IngestSubject)
+		queue = ingestion.NewEventQueue(nc, cfg.IngestSubject, cfg.IngestConnectorSubject)
 	}
 	rateLimit := ingestion.RedisRateLimit(redisClient, cfg.RateLimitPerMinute, time.Minute)
 	// Credential endpoints get a separate, much tighter per-IP limiter so the
@@ -240,16 +245,21 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// The connector engine is built before the scheduler so in-process agents
 	// (scheduled AND interactive) get the same source-runner surface MCP and
 	// /api/op expose — one engine, three adapters.
-	connectorEngine := connector.NewEngine(store)
+	connectorEngine := connector.NewEngine(store, queue)
 	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
 	scheduler := agentruntime.NewScheduler(nc, store, runnerOpts...)
 	// The evaluator and the connector sync engine ride the scheduler's minute
 	// tick, sharing one clock with scheduled runs instead of standing up more
 	// timers.
 	alertEval := alerting.NewEvaluator(store, alertDeliverer)
+	// Event retention rides the same minute tick for ADMISSION only — it starts
+	// at most one daily sweep, on its own goroutine, because a multi-minute
+	// delete must not hold the clock alert evaluation and connector syncs share.
+	retention := storage.NewRetention(store, cfg.EventRetentionDays)
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)
+		retention.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
 		store.Close()
@@ -262,15 +272,15 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// One adapter bundle serves every legacy route that now runs through the
 	// shared operation registry — the same deps MountHTTP hands /api/op.
 	ops := newOpAdapter(store, alertDeliverer, connectorEngine)
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, runnerOpts...)
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, ready, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)
-	registerOverviewRoutes(e, store, alertDeliverer)
+	registerOverviewRoutes(e, store, ops)
 	registerConnectorRoutes(e, store, ops)
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine, retention: retention}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -423,6 +433,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// landing and terminal-status writes.
 	if s.connectorEngine != nil {
 		s.connectorEngine.Shutdown()
+	}
+	// The retention sweep is the same shape one level down: it detaches from the
+	// tick that admitted it and can be minutes from its own budget, so shutdown
+	// cancels it and waits rather than closing the DuckDB handle underneath it.
+	if s.retention != nil {
+		s.retention.Stop()
 	}
 	// Drain the consumer first: Stop() blocks until the batcher's final flush
 	// commits, so every acked batch is durable in DuckDB before the engine

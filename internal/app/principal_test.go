@@ -181,6 +181,12 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	if err != nil || got.ID != legacy.ID {
 		t.Fatalf("legacy key project = %+v, %v; want %s", got, err, legacy.ID)
 	}
+	// Resolved without its capture key: /api/projects serializes this struct
+	// straight into its body, and a key that authenticated with the key itself
+	// gains nothing by reading it back.
+	if got.APIKey != "" {
+		t.Fatalf("legacy key received the capture key: %q", got.APIKey)
+	}
 
 	// Management credentials and sessions are resolved to their authenticated
 	// project, rather than accepting a caller-supplied project identity.
@@ -191,6 +197,11 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	got, err = projectFromRequest(reqCtx(e, map[string]string{"Authorization": "Bearer " + secret}, nil), s)
 	if err != nil || got.ID != project.ID {
 		t.Fatalf("management credential project = %+v, %v; want %s", got, err, project.ID)
+	}
+	// A credential scoped to analytics:read never comes back holding the
+	// project's ingest key — that escalation is what this boundary closes.
+	if got.APIKey != "" {
+		t.Fatalf("management credential received the capture key: %q", got.APIKey)
 	}
 	other, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-other-%d@test.local", time.Now().UnixNano()), "Other", "password-123", "other-ws", "other-proj")
 	if err != nil {
@@ -209,6 +220,36 @@ func TestLegacyProjectRoutesUsePrincipalBoundary(t *testing.T) {
 	got, err = projectFromRequest(reqCtx(e, nil, []*http.Cookie{{Name: sessionCookieName, Value: sessionToken}}), s)
 	if err != nil || got.ID != project.ID {
 		t.Fatalf("session project = %+v, %v; want %s", got, err, project.ID)
+	}
+	// A session whose role may write is the credential that keeps the key the web
+	// app reveals and pastes into the install snippet.
+	if got.APIKey != project.APIKey {
+		t.Fatalf("session capture key = %q, want %q", got.APIKey, project.APIKey)
+	}
+
+	// A viewer's session is admitted to the project but may not hold its ingest
+	// key (RoleMayWrite), so the key is withheld here too. These resolvers load
+	// the row through the role-blind store.ProjectByID, so without the role check
+	// every project-echoing response would hand a viewer the write key.
+	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("legacy-route-viewer-%d@test.local", time.Now().UnixNano()), "Viewer", "password-123", "viewer-ws", "viewer-proj")
+	if err != nil {
+		t.Fatalf("create viewer account: %v", err)
+	}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, boot.User.ID, boot.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
+		t.Fatalf("add viewer: %v", err)
+	}
+	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("create viewer session: %v", err)
+	}
+	viewerReq := httptest.NewRequest(http.MethodGet, "/api/dashboards?project_id="+project.ID, nil)
+	viewerReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: viewerToken})
+	got, err = projectFromRequest(e.NewContext(viewerReq, httptest.NewRecorder()), s)
+	if err != nil || got.ID != project.ID {
+		t.Fatalf("viewer session project = %+v, %v; want %s", got, err, project.ID)
+	}
+	if got.APIKey != "" {
+		t.Fatalf("viewer session received the capture key: %q", got.APIKey)
 	}
 }
 

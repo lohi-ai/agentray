@@ -38,8 +38,8 @@ Companion docs: [ARCHITECT-API.md](ARCHITECT-API.md) (service layout),
 │                 cost)                                                    │
 │   external_rows connector landing rows, INSERT OR REPLACE per row_key    │
 │   migrations    idempotent CREATE at boot + schema_meta version ledger   │
-│   run_sql       per-project sandboxed read path: denylisted table        │
-│                 functions + project-scoped CTEs (blocks SSRF/file reads) │
+│   run_sql       per-project child process: its own in-memory DuckDB      │
+│                 holding only that project's rows, no files or network    │
 │ PostgreSQL — source of truth for everything non-event: users/sessions/   │
 │   workspaces/projects(API keys), dashboards, charts, saved queries,      │
 │   cohort audiences, subscription mappings, templates, query feedback,    │
@@ -86,9 +86,15 @@ Companion docs: [ARCHITECT-API.md](ARCHITECT-API.md) (service layout),
   choice: one schema/permission/handler serves web, CLI, in-house agents and
   external MCP clients, so surfaces cannot drift and agents can never reach
   infra directly.
-- **`run_sql` runs on a per-project sandboxed read path** — denylisted table
-  functions plus project-scoped CTEs close the table-function SSRF /
-  cross-tenant class without a separate database account.
+- **`run_sql` runs in a per-project child process.** The engine, the tenant's
+  rows, the untrusted SELECT and the materialization of its result all live in a
+  process the API can kill, with its own address-space limit and OOM score;
+  project-scoped CTEs close the cross-tenant class and
+  `enable_external_access=false` closes SSRF and file reads. It is a process and
+  not a guard because in-process limits were measured not to bound a scalar:
+  `SELECT repeat('x', 5e8)` delivered 500 MB into Go under a 122 MiB
+  `memory_limit`, and an engine-side projection guard still OOM-killed a
+  constrained container. See `internal/dataplane/store/duckdb_sandbox.go`.
 
 ### Honest weaknesses (evidence-cited, pre-DuckDB snapshot)
 
