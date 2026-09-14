@@ -25,6 +25,10 @@ func classifyOpError(err error) error {
 	case errors.Is(err, storage.ErrRevisionConflict),
 		errors.Is(err, storage.ErrIdempotencyConflict),
 		errors.Is(err, storage.ErrSourceArchived),
+		// A declaration aimed at an archived board is the same shape of
+		// refusal: the request contradicts current state, and the caller
+		// unarchives rather than retrying.
+		errors.Is(err, storage.ErrBoardArchived),
 		errors.Is(err, storage.ErrSyncPaused):
 		return &opcore.OpError{Kind: opcore.ErrConflict, Message: err.Error(), Err: err}
 	case errors.Is(err, connector.ErrEngineBusy),
