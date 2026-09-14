@@ -22,14 +22,14 @@ export function RelatedSurfacesNav({ parentHref, currentHref, hosted }: { parent
           <Link
             key={surface.href}
             href={surface.href}
-            className="inline-flex min-h-9 items-center rounded-sm px-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]"
+            className="inline-flex min-h-11 items-center rounded-sm px-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-background-muted)] hover:text-[var(--color-text-primary)]"
           >
             {surface.label}
           </Link>
         ) : (
           <span
             key={surface.label}
-            className="inline-flex min-h-9 items-center gap-2 rounded-sm px-2 text-sm text-[var(--color-text-secondary)]"
+            className="inline-flex min-h-11 items-center gap-2 rounded-sm px-2 text-sm text-[var(--color-text-secondary)]"
           >
             {surface.label}
             <span className="rounded-[20px] bg-[var(--color-background-muted)] px-1.5 py-0.5 text-2xs">Coming soon</span>
