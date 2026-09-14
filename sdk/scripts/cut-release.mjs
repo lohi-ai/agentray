@@ -61,6 +61,19 @@ if (sh('git', ['tag', '--list', tag])) {
   process.exit(1);
 }
 
+// The changelog is written with the change, not after it, so it must already
+// name the version about to be tagged. Checked here rather than only in the
+// release workflow: a tag whose tree fails its own gate is a tag you have to
+// move, and moving tags is how a registry ends up with two builds of one
+// version.
+if (kind === 'npm') {
+  const changelog = readFileSync(`${dir}/CHANGELOG.md`, 'utf8');
+  if (!changelog.includes(next)) {
+    console.error(`${dir}/CHANGELOG.md does not mention ${next} — write the entry (and the migration note) before tagging`);
+    process.exit(1);
+  }
+}
+
 // --- write, verify, commit, tag -------------------------------------------
 console.log(`${pkg}: ${current} -> ${next}`);
 

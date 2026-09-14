@@ -32,8 +32,8 @@ describe('AgentRayServerClient', () => {
     const calls = stubFetch();
     const ar = new AgentRayServerClient(config);
 
-    await ar.revenue('u1', { amount: 19, currency: 'USD' }, { idempotencyKey: 'evt_abc' });
-    await ar.revenue('u1', { amount: 19, currency: 'USD' }, { idempotencyKey: 'evt_abc' });
+    await ar.revenue('u1', { amount: 1900, currency: 'USD', kind: 'payment' }, { idempotencyKey: 'evt_abc' });
+    await ar.revenue('u1', { amount: 1900, currency: 'USD', kind: 'payment' }, { idempotencyKey: 'evt_abc' });
 
     expect(calls.map((c) => c.body.properties.$insert_id)).toEqual(['evt_abc', 'evt_abc']);
     expect(calls[0].body.event).toBe('revenue');

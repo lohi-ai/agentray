@@ -32,11 +32,11 @@ that duplicates it with zero extra properties.
    retention is meaningless without a return-defining event; every retention
    curve and "active user" count keys off this one name. Choose it once and
    never rename it casually.
-3. **Revenue outcomes** (server-side only). `revenue` with `amount`,
-   `currency`, `plan`, `kind`, and an `idempotencyKey` from the payment
-   provider's event id. *Why:* MRR/LTV/conversion all read from the
-   conventional `revenue` event; webhooks retry, so the idempotency key is what
-   keeps money from being counted twice. Never emit money from the browser.
+3. **Revenue outcomes** (server-side only). The standard money taxonomy —
+   `revenue` and `revenue_reversed`, never a project-specific revenue name.
+   *Why:* MRR/LTV/conversion read from exactly these two names; webhooks retry,
+   so the row-specific `$insert_id` is what keeps money from being counted
+   twice. Never emit money from the browser. Contract in the next section.
 4. **Decision-bound feature events.** One event per keep/kill/invest decision
    pending — `tts_played`, `dark_mode_enabled`. *Why:* usage is the evidence
    for the decision; when the decision is made, the event can be retired.
@@ -51,6 +51,46 @@ states — no PII, values land in the event store unredacted); browser = intent,
 server = outcome; one emitter module per app; stable `distinct_id` with
 `identify()` at login so anonymous and identified activity stitch into one
 person.
+
+## Money events (the standard taxonomy)
+
+Money is two stored event names every AgentRay project shares — there is no
+event per business model, and never a project-specific revenue name:
+
+- `revenue` — one settled money booking (a payment, subscription, in-app
+  purchase, top-up or donation).
+- `revenue_reversed` — money that came back: a refund, chargeback or clawback.
+
+Every money row carries the same payload:
+
+- `amount` — **integer in the smallest unit of the sender's currency**
+  (`1900` USD is $19.00, `50000` VND is 50,000 ₫). Nothing is converted.
+- `currency` — uppercase ISO 4217 code (`USD`, `VND`).
+- `kind` — the documented booking kind: `payment`, `in_app_purchase`,
+  `subscription`, `wallet_topup`, `donation`.
+- `$insert_id` — a stable, row-specific idempotency key; **required**, and the
+  dedup key every revenue read groups on.
+- Optional flat, non-PII dimensions: `provider`, `transaction_id`,
+  `product_id`, `plan`. Traits (email, display name) are **not** money
+  properties — they go through `identify()`.
+
+**`kind` is documentation, never a read filter.** The read does not inspect it,
+so an existing custom kind (`one_time`, `renewal`) books normally — never
+migrate or filter it to fit the vocabulary. Pick the kind that describes the
+sale so "subscription vs. top-up vs. one-off" is answerable later; a reversal's
+kind is `refund`.
+
+**A refund is its own row, never a second booking.** Emit `revenue_reversed`
+with the positive amount actually returned and its **own** `$insert_id`.
+Reusing the booking's key would make the read treat the reversal as a
+correction that replaces the booking instead of netting against it.
+
+**No FX, no cross-currency total.** Each declared currency is reported
+separately and signed.
+
+**Do not invent a `paid_user` event.** Paid status is derived — the earliest
+deduplicated positive booking per canonical person. A `paid_user` event would
+duplicate the booking and drift from it.
 
 ## Plan the consumers (AgentRay web app)
 
@@ -97,6 +137,7 @@ never a reason to add typed events.
 | `first_chapter_read` | funnel + core | first value & return anchor | funnel + retention charts |
 | `listen_started` | decision | invest-in-TTS decision pending | trend chart; SQL by `voice` |
 | `revenue` (server) | revenue | MRR/LTV; webhook-safe | dashboard; SQL dedup; alert on 0 |
+| `revenue_reversed` (server) | revenue | refunds net against bookings | dashboard; SQL dedup |
 | `tts_error` (server) | quality | triage by `model`, `voice` | alert on rate; incident SQL |
 
 ## Workflow
@@ -124,4 +165,6 @@ never a reason to add typed events.
   and saved query — treat names as API. If a rename is unavoidable, update the
   consumers in the same change.
 - No PII in properties; ids and amounts in, emails and raw input out.
-- Revenue only from the server, only with provider idempotency keys.
+- Revenue only from the server, only in the standard taxonomy (`revenue`,
+  `revenue_reversed`), only with stable `$insert_id` keys — a refund carries
+  its own key, never the booking's.

@@ -158,3 +158,12 @@ export type { TransportOptions, BatchEvent } from './transport';
 export { installAutocapture } from './autocapture';
 export type { AutocaptureOptions, CaptureConfig } from './autocapture';
 export { DEFAULT_PLATFORM } from './platform';
+// The standard money taxonomy: constants and types only. Money leaves the
+// browser through the ordinary `capture`, never a privileged helper.
+export {
+  REVENUE_EVENT,
+  REVENUE_REVERSED_EVENT,
+  REFUND_KIND,
+  STANDARD_REVENUE_KINDS,
+} from './money';
+export type { StandardRevenueKind, RevenueKind, RevenueProperties } from './money';

@@ -75,6 +75,78 @@ ar.reset();
 `clickAllowlist` narrows click capture to a selector, `internalHosts` normalizes
 referrers from your own domains so they don't land in the referrer table.
 
+## Money events
+
+Revenue is a shared contract, not a per-project convention: this SDK,
+`@agentray/server` and a raw `POST /capture` all publish the same two event
+names and the same payload, so a booking sent from any of them is one row, read
+one way.
+
+| Export | Value | Meaning |
+| --- | --- | --- |
+| `REVENUE_EVENT` | `'revenue'` | one settled money booking |
+| `REVENUE_REVERSED_EVENT` | `'revenue_reversed'` | money that came back: a refund, chargeback, or clawback |
+| `REFUND_KIND` | `'refund'` | the documented `kind` for a reversal row |
+| `STANDARD_REVENUE_KINDS` | `'payment'`, `'in_app_purchase'`, `'subscription'`, `'wallet_topup'`, `'donation'` | the documented booking kinds |
+
+`RevenueProperties` is the payload (`RevenueKind` and `StandardRevenueKind` are
+the matching types):
+
+| Property | Required | Meaning |
+| --- | --- | --- |
+| `amount` | yes | Integer in the smallest unit of `currency` — `1900` USD is $19.00, `50000` VND is 50,000 ₫. |
+| `currency` | yes | Uppercase ISO 4217 code, e.g. `USD`, `VND`. |
+| `kind` | yes | What the sale was: one of `STANDARD_REVENUE_KINDS`, or a customer kind that already exists. |
+| `$insert_id` | yes | Stable, row-specific idempotency key. This is the key the read de-duplicates on. |
+| `provider` | no | `stripe`, `sepay`, `app_store`, … |
+| `transaction_id` | no | The provider's transaction id, when it differs from `$insert_id`. |
+| `product_id` | no | The purchased product or SKU. |
+| `plan` | no | The plan id for a subscription purchase. |
+
+There is deliberately **no** `revenue()` helper on this SDK. A browser is a
+forgeable environment, so it carries no privileged money path: these constants
+go through the ordinary identity-aware `capture()` like any other event, and the
+browser's claims about money are worth exactly as much as its other claims.
+Server-truthful bookings and reversals belong to `@agentray/server`, or to a raw
+HTTP POST from your billing provider.
+
+```ts
+import { init, REVENUE_EVENT, REVENUE_REVERSED_EVENT } from '@agentray/browser';
+
+const ar = init({ host, apiKey });
+
+// A purchase the client completed itself, e.g. an App Store receipt.
+ar.capture(REVENUE_EVENT, {
+  amount: 1900,              // smallest unit: $19.00
+  currency: 'USD',           // uppercase ISO 4217
+  kind: 'in_app_purchase',
+  $insert_id: receipt.transactionId,  // stable; a retried send de-dups
+});
+
+// Money the client already saw come back.
+ar.capture(REVENUE_REVERSED_EVENT, {
+  amount: 1900,
+  currency: 'USD',
+  kind: 'refund',
+  $insert_id: `refund:${refund.id}`,  // its own key, never the booking's
+});
+```
+
+The SDK supplies `distinct_id`, `timestamp` and `platform`; the caller supplies
+`$insert_id`. That split is the whole contract, and the key has to be stable:
+the read de-duplicates on it, so a random one silently double-counts a retried
+send, while a reversal that reuses the booking's key replaces the booking
+instead of netting against it.
+
+`kind` is documentation, not a filter — the read never inspects it for a
+booking, so an existing taxonomy (`one_time`, `renewal`, anything else) still
+books normally.
+
+`amount` and `currency` are declared by the sender and never converted. There is
+no FX and no cross-currency total: each declared currency is reported separately
+and signed. Traits have no place on a money row — `$set`/`$set_once` are not
+money properties; send them through `identify()`.
+
 ## Privacy: `respectDoNotTrack`
 
 **Off by default.** No snippet that imports this SDK starts dropping events

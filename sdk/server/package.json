@@ -1,7 +1,7 @@
 {
   "name": "@agentray/server",
-  "version": "0.1.0",
-  "description": "AgentRay server SDK — awaitable, idempotent event capture for revenue truth (payments, subscriptions, refunds).",
+  "version": "0.2.0",
+  "description": "AgentRay server SDK \u2014 awaitable, idempotent event capture for revenue truth (payments, subscriptions, refunds).",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "sideEffects": false,
