@@ -1,1 +1,5 @@
 .babysit/
+node_modules/
+web/.next/
+bench/results/
+bench/solutions/
