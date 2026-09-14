@@ -41,11 +41,23 @@ type StreamSet struct {
 	// latchBootGap. Atomic because the HTTP healthcheck reads it while the
 	// boot path writes it.
 	bootGap atomic.Uint64
-	// bootUnverified latches a boot sample the broker could not answer. It
-	// refuses readiness for the life of the process: the one reading that can
-	// prove a retention loss is gone once the replay advances, so "I could not
-	// tell" is as disqualifying as "I lost rows".
+	// bootUnverified latches a boot that could not read this colour's own
+	// retention-loss marker. It refuses readiness for the life of the process:
+	// the marker is the only record of a loss that has already left the stream,
+	// so "I could not read it" is as disqualifying as "I lost rows". (A broker
+	// the boot could not sample is a different failure: it stops the worker
+	// before it consumes, see bindStore.)
 	bootUnverified atomic.Bool
+	// Positions is the store this colour's readiness claim is about: the record
+	// of how far this colour's own writes have carried its DuckDB file along the
+	// durable stream. The worker sets it at boot, because the binding it proves
+	// is a property of the store AND the durable (see bindStore). Nil where
+	// there is no store to bind.
+	Positions positionStore
+	// storeGap latches a boot that found the durable's ack floor above what the
+	// store behind it had applied — acknowledged messages the file cannot show.
+	// Atomic for the same reason bootGap is.
+	storeGap atomic.Uint64
 }
 
 // lossMarkerPath is where a colour records a retention loss it has proven: beside

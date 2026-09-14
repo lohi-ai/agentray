@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -23,6 +24,15 @@ import (
 // "the message before the first unacknowledged message" — is the highest
 // sequence this colour has durably applied, contiguously, across events AND
 // connector rows, because one durable consumer carries both subjects.
+//
+// That mark is a claim about a FILE, though, and the durable outlives the file
+// its acks were made against: a recreated volume, or a colour pointed at a
+// never-before-existing DUCKDB_PATH, keeps the floor while the file starts
+// empty, and everything published afterwards applies normally — so the file is
+// not empty, it is missing exactly the range the floor claims. The store's own
+// record is what catches that, and it is read once at boot, before this process
+// applies anything of its own (bindStore → ReplayStoreBehind, and
+// storage/duckdb_position.go for the record).
 //
 // The predicate has to ask two questions of the broker's OWN configuration
 // before it trusts either number, because a consumer is filter-scoped and the
@@ -88,8 +98,11 @@ type ReplayVerdict struct {
 	Head uint64 `json:"head,omitempty"`
 	// First is the stream's lowest retained sequence — the purge floor.
 	First uint64 `json:"first,omitempty"`
-	// Missing counts sequences below First that this colour never applied;
-	// non-zero means it cannot catch up by waiting.
+	// Missing counts messages this colour never applied. It is a stream
+	// sequence count for the retention refusals (sequences below First that are
+	// gone) and a delivery count for ReplayStoreBehind, which counts against the
+	// consumer's own sequence space; either way non-zero means waiting cannot
+	// help.
 	Missing uint64 `json:"missing,omitempty"`
 	// Pending is matching work not yet delivered; AckPending is delivered work
 	// not yet applied. Diagnostics — they are also the satisfiability half of
@@ -112,11 +125,24 @@ const (
 	// the consumer is offered nothing, so it cannot be caught up with anything.
 	// The operator's remedy is the stream's subject list, not more waiting.
 	ReplayStreamMismatch = "stream-mismatch"
-	// ReplayUnverified is the boot sample (latchBootGap) failing to read the
-	// broker: whether this colour lost rows to retention at boot could not be
+	// ReplayUnverified is this colour's retention-loss marker failing to read
+	// (latchBootGap): whether it lost rows to retention could not be
 	// established, and a colour whose coherence is unestablished must not take
-	// traffic. A restart re-samples.
+	// traffic. A restart re-reads the marker. (A broker that cannot be sampled
+	// at boot is not this: the worker refuses to start at all rather than
+	// consume over a provenance it never established — see bindStore.)
 	ReplayUnverified = "boot-unverified"
+	// ReplayStoreBehind is the DuckDB file behind this colour failing to show
+	// the range the durable's ack floor claims: the durable has acknowledged
+	// messages this store never applied. Its cause is a store that was not the
+	// one those acks were made against — a recreated volume, a new DUCKDB_PATH,
+	// a stream recreated under a warm consumer — and no amount of waiting fixes
+	// it, because the messages at fault were applied to some other file and are
+	// not on the stream any more. The refusal is written into the store, so a
+	// restart does not clear it; the operator's move is to reset the colour's
+	// durable (or accept the loss by starting that colour on a store that has
+	// nothing to lose) rather than to wait (see infra/gce/deploy.sh).
+	ReplayStoreBehind = "store-behind"
 	// ReplayUnavailable is not produced here: the readyz handler sets it when the
 	// probe could not read the broker at all, which is the same refusal one layer
 	// up. It lives with the others because /readyz is one vocabulary.
@@ -440,14 +466,14 @@ func (ss *StreamSet) recordLatch(missing uint64) {
 // loss is also written beside this colour's DuckDB file, where it survives the
 // process that found it. A restart re-samples, and can still find nothing.
 //
-// A sample that cannot be read at all latches ReplayUnverified rather than
-// returning: the one reading that can prove a loss is gone forever once the
-// replay advances, and "I could not tell" has to refuse for the same reason "I
-// lost rows" does. A restart takes a fresh sample. The comparison itself is only
-// made on a dedicated stream — on a shared one it would latch another
-// environment's purge as this colour's loss, permanently, which is the opposite
-// of fail-safe.
-func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consumer) {
+// The sample is read once at boot (bootSample) and passed in, because the store
+// binding asks a question of the same two readings; a sample that cannot be read
+// at all stops the boot there rather than reaching this function, so the two
+// latches below are the only refusals it can add.
+// The comparison itself is only made on a dedicated stream — on a shared one it
+// would latch another environment's purge as this colour's loss, permanently,
+// which is the opposite of fail-safe.
+func (ss *StreamSet) latchBootGap(cinfo *jetstream.ConsumerInfo, sinfo *jetstream.StreamInfo) {
 	switch missing, found, unreadable := ss.readLatch(); {
 	case unreadable:
 		ss.bootUnverified.Store(true)
@@ -458,55 +484,148 @@ func (ss *StreamSet) latchBootGap(ctx context.Context, consumer jetstream.Consum
 		log.Printf("ingestion: this colour recorded a retention loss of %d message(s) at %s; /readyz refuses until an operator accepts it (see infra/gce/deploy.sh)", missing, ss.LossMarkerPath)
 		return
 	}
-	for attempt := 1; ; attempt++ {
-		cinfo, err := consumer.Info(ctx)
-		if err != nil {
-			if attempt < bootSampleAttempts {
-				sleepBeforeBootSampleRetry(attempt)
-				continue
-			}
-			ss.bootUnverified.Store(true)
-			log.Printf("ingestion: boot replay sample unreadable (consumer info: %v); /readyz will refuse until this colour restarts", err)
-			return
-		}
-		sinfo, err := ss.Ingest.Info(ctx)
-		if err != nil {
-			if attempt < bootSampleAttempts {
-				sleepBeforeBootSampleRetry(attempt)
-				continue
-			}
-			ss.bootUnverified.Store(true)
-			log.Printf("ingestion: boot replay sample unreadable (stream info: %v); /readyz will refuse until this colour restarts", err)
-			return
-		}
-		if _, dedicated := streamCarries(sinfo.Config.Subjects, consumerFilterSubjects(cinfo)); !dedicated {
-			return
-		}
-		missing := uint64(0)
-		switch {
-		case cinfo.AckFloor.Stream == 0:
-			// A durable that has applied nothing has no history to lose, so a
-			// purge frontier above its mark is not its loss — UNLESS the stream
-			// has already lost everything it ever held (first past last): then
-			// there is nothing retained for this colour to replay and nothing to
-			// catch up to, and a colour that has applied nothing would serve an
-			// empty file beside a sibling holding the history. Latched for the
-			// same reason the gap below is: the live predicate sees a caught-up
-			// colour the moment the first new message is applied (its mark then
-			// covers the whole retained window).
-			if sinfo.State.LastSeq > 0 && sinfo.State.FirstSeq > sinfo.State.LastSeq {
-				missing = sinfo.State.LastSeq
-			}
-		case sinfo.State.FirstSeq > cinfo.AckFloor.Stream+1:
-			missing = sinfo.State.FirstSeq - cinfo.AckFloor.Stream - 1
-		}
-		if missing > 0 {
-			ss.bootGap.Store(missing)
-			ss.recordLatch(missing)
-			log.Printf("ingestion: retention loss: %d message(s) this colour never applied are no longer in %s; /readyz refuses until an operator accepts it", missing, ss.Ingest.CachedInfo().Config.Name)
-		}
+	if _, dedicated := streamCarries(sinfo.Config.Subjects, consumerFilterSubjects(cinfo)); !dedicated {
 		return
 	}
+	missing := uint64(0)
+	switch {
+	case cinfo.AckFloor.Stream == 0:
+		// A durable that has applied nothing has no history to lose, so a
+		// purge frontier above its mark is not its loss — UNLESS the stream
+		// has already lost everything it ever held (first past last): then
+		// there is nothing retained for this colour to replay and nothing to
+		// catch up to, and a colour that has applied nothing would serve an
+		// empty file beside a sibling holding the history. Latched for the
+		// same reason the gap below is: the live predicate sees a caught-up
+		// colour the moment the first new message is applied (its mark then
+		// covers the whole retained window).
+		if sinfo.State.LastSeq > 0 && sinfo.State.FirstSeq > sinfo.State.LastSeq {
+			missing = sinfo.State.LastSeq
+		}
+	case sinfo.State.FirstSeq > cinfo.AckFloor.Stream+1:
+		missing = sinfo.State.FirstSeq - cinfo.AckFloor.Stream - 1
+	}
+	if missing > 0 {
+		ss.bootGap.Store(missing)
+		ss.recordLatch(missing)
+		log.Printf("ingestion: retention loss: %d message(s) this colour never applied are no longer in %s; /readyz refuses until an operator accepts it", missing, ss.Ingest.CachedInfo().Config.Name)
+	}
+}
+
+// bootSample reads the broker state the boot decisions need — the durable's own
+// state and the stream's — and it is the ONE reading point for both, so a
+// failure to read is decided once rather than once per question. It retries:
+// the sample runs on a connection that just created this consumer, so a failure
+// is far more likely to be a broker still settling (a leader election, a slow
+// first API call after connect) than a real outage, and refusing readiness for
+// the life of the process over one of those would cost a deploy that re-running
+// would not fix. Past the retries the sample is treated as unreadable.
+func (ss *StreamSet) bootSample(ctx context.Context, consumer jetstream.Consumer) (*jetstream.ConsumerInfo, *jetstream.StreamInfo, error) {
+	for attempt := 1; ; attempt++ {
+		cinfo, err := consumer.Info(ctx)
+		if err == nil {
+			sinfo, streamErr := ss.Ingest.Info(ctx)
+			if streamErr == nil {
+				return cinfo, sinfo, nil
+			}
+			err = fmt.Errorf("stream info: %w", streamErr)
+		} else {
+			err = fmt.Errorf("consumer info: %w", err)
+		}
+		if attempt >= bootSampleAttempts {
+			return nil, nil, err
+		}
+		sleepBeforeBootSampleRetry(attempt)
+	}
+}
+
+// positionStore is the store-side surface the readiness binding needs: the
+// record of where a colour's own writes have carried its DuckDB file along the
+// durable stream, and the two facts a boot writes into it (see bindStore).
+// *storage.Store and *storage.DuckDB both satisfy it, and ingestStore embeds it,
+// so a worker cannot be wired to a store that would leave its readiness claim
+// unprovable.
+type positionStore interface {
+	AppliedPosition(ctx context.Context, durable string) (storage.AppliedPosition, error)
+	AdoptPosition(ctx context.Context, durable string, seq uint64) error
+	RefusePosition(ctx context.Context, durable string, missing uint64) error
+}
+
+// bindStore binds this colour's readiness claim to the DuckDB file behind it. It
+// runs at boot, before the worker consumes anything.
+//
+// Why the store: the durable's ack floor is a claim ABOUT a file — "these
+// messages were applied" — but the durable outlives the file those acks were
+// made against. Recreate a per-colour volume, or point a colour at a
+// never-before-existing DUCKDB_PATH, and the consumer keeps its floor while the
+// file starts empty. Everything published after that boot is applied normally,
+// so the file is not empty — it is missing exactly the range the floor claims,
+// and `applied >= head` is true of it. Only the store's own record can
+// contradict the durable (see storage/duckdb_position.go).
+//
+// Why at boot: this process has applied nothing yet, so the record still shows
+// where the file stood when the durable's floor was inherited. One message
+// applied first would move the record past the hole and hide it — and because
+// the refusal is written into the store, a restart cannot launder it either.
+//
+// Why consumer sequences: AckFloor.Consumer counts only the deliveries this
+// colour was offered, so it is comparable to the position its writes recorded
+// even when the stream is shared with another environment whose sequences are
+// interleaved with ours. Stream sequences are not (see streamCarries).
+//
+// One migration edge, named rather than hidden: a file written by a build that
+// kept no position record (this one) has history but no mark, and refusing it
+// would wedge the deploy that ships this check on every colour that is already
+// serving. Such a file is adopted at the durable's current position — the
+// claim that its history is the history those acks were made for, which is the
+// normal case for an upgrade and no worse than the check's absence for the
+// abnormal one. A file created EMPTY is never adopted: that is the defect.
+// A binding that cannot be established is NOT tolerated, and that is deliberate:
+// this process consumes as soon as it is up, and every ack it makes moves the
+// durable's floor. A boot that could not read the pair (sample unreadable), could
+// not read the file's own record, or could not WRITE DOWN what it found, would go
+// on to acknowledge a range whose provenance is unproven — and the moment one of
+// its writes lands, the record matches the floor and the next boot reads the hole
+// as coherence. So the failure is returned and the worker does not start: the
+// container comes back and asks again. Nothing is lost by refusing to start — the
+// stream is durable, the sibling colour keeps serving, and the broker was
+// required for the consumer above anyway — while the alternative is the silent
+// hole this whole record exists to catch.
+func (ss *StreamSet) bindStore(ctx context.Context, cinfo *jetstream.ConsumerInfo) error {
+	if ss.Positions == nil {
+		return nil
+	}
+	durable := ss.durableName()
+	floor := cinfo.AckFloor.Consumer
+	pos, err := ss.Positions.AppliedPosition(ctx, durable)
+	if err != nil {
+		return fmt.Errorf("read the applied position this store holds for durable %q: %w", durable, err)
+	}
+	switch {
+	case pos.RefusedMissing > 0:
+		// An earlier boot proved the gap and wrote it down. Traffic applied since
+		// must not launder it: the messages at fault are not on the stream any
+		// more, so the file can never come to hold them.
+		ss.storeGap.Store(pos.RefusedMissing)
+		log.Printf("ingestion: this store recorded %d acknowledged message(s) it never applied; /readyz refuses until the colour's durable is reset or its volume replaced (see infra/gce/deploy.sh)", pos.RefusedMissing)
+	case floor <= pos.Seq:
+		// The file's own writes reach at least as far as the durable claims, or
+		// the durable claims nothing yet.
+	case !pos.Known && pos.HasIngest:
+		if err := ss.Positions.AdoptPosition(ctx, durable, floor); err != nil {
+			return fmt.Errorf("adopt the applied position of an existing store for durable %q: %w", durable, err)
+		}
+		log.Printf("ingestion: adopted the applied position of an existing store at consumer sequence %d for durable %q", floor, durable)
+	default:
+		missing := floor - pos.Seq
+		ss.storeGap.Store(missing)
+		if err := ss.Positions.RefusePosition(ctx, durable, missing); err != nil {
+			return fmt.Errorf("write down the %d acknowledged message(s) this store (record %d) cannot show against durable %q's floor %d: %w",
+				missing, pos.Seq, durable, floor, err)
+		}
+		log.Printf("ingestion: readiness refuses: durable %q has acknowledged %d message(s) this store never applied (its record reaches %d, the durable's floor is %d); switching traffic here would serve a file missing that range", durable, missing, pos.Seq, floor)
+	}
+	return nil
 }
 
 // sleepBeforeBootSampleRetry spaces the boot sample's retries. Back-to-back
@@ -562,6 +681,15 @@ func (ss *StreamSet) ReplayStatus(ctx context.Context) (ReplayVerdict, error) {
 		if missing := ss.bootGap.Load(); missing > 0 {
 			v.Ready = false
 			v.Reason = ReplayPurgedGap
+			if missing > v.Missing {
+				v.Missing = missing
+			}
+		} else if missing := ss.storeGap.Load(); missing > 0 {
+			// The store behind this colour cannot show the range the durable has
+			// acknowledged. The live numbers cannot see this — that is the whole
+			// defect — so the boot binding is the only thing that reports it.
+			v.Ready = false
+			v.Reason = ReplayStoreBehind
 			if missing > v.Missing {
 				v.Missing = missing
 			}

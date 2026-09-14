@@ -15,9 +15,11 @@ import (
 )
 
 // fakeMsg is a test double for a durable (JetStream) message: it records how it
-// was settled (ack / nak / term) and reports a fixed delivery count.
+// was settled (ack / nak / term), reports a fixed delivery count, and reports
+// the consumer sequence the DuckDB write records for the batch it lands.
 type fakeMsg struct {
 	deliv   uint64
+	seqN    uint64
 	payload []byte
 
 	mu     sync.Mutex
@@ -31,6 +33,7 @@ func (m *fakeMsg) nak(time.Duration) error { m.mu.Lock(); m.nakked = true; m.mu.
 func (m *fakeMsg) term() error             { m.mu.Lock(); m.termed = true; m.mu.Unlock(); return nil }
 func (m *fakeMsg) deliveries() uint64      { return m.deliv }
 func (m *fakeMsg) body() []byte            { return m.payload }
+func (m *fakeMsg) seq() uint64             { return m.seqN }
 func (m *fakeMsg) state() (bool, bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -57,7 +60,7 @@ func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {
 // in an ack — no redelivery, no data loss.
 func TestBatcherRetriesThenAcks(t *testing.T) {
 	var calls atomic.Int32
-	sink := func(_ context.Context, _ []storage.Event) error {
+	sink := func(_ context.Context, _ []storage.Event, _ storage.AppliedMark) error {
 		if calls.Add(1) < 3 {
 			return errors.New("duckdb blip")
 		}
@@ -79,7 +82,9 @@ func TestBatcherRetriesThenAcks(t *testing.T) {
 	}
 }
 func TestDuckDBRetryNAK(t *testing.T) {
-	failing := func(_ context.Context, _ []storage.Event) error { return errors.New("duckdb I/O down") }
+	failing := func(_ context.Context, _ []storage.Event, _ storage.AppliedMark) error {
+		return errors.New("duckdb I/O down")
+	}
 	b := NewEventBatcher(failing, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour, MaxRetries: 1, MaxDeliver: 5})
 	defer b.Stop()
 
@@ -95,7 +100,7 @@ func TestDuckDBRetryNAK(t *testing.T) {
 // A persistent failure at the redelivery ceiling must be dead-lettered: the body
 // is republished to the DLQ and the original terminated so it leaves the stream.
 func TestBatcherDeadLettersAtMaxDeliver(t *testing.T) {
-	failing := func(_ context.Context, _ []storage.Event) error { return errors.New("poison") }
+	failing := func(_ context.Context, _ []storage.Event, _ storage.AppliedMark) error { return errors.New("poison") }
 	var dlq [][]byte
 	var dlqMu sync.Mutex
 	deadLetter := func(body []byte) error {
@@ -165,7 +170,7 @@ func TestDuckDBIngestAckAfterCommit(t *testing.T) {
 func TestDuckDBPoisonDLQ(t *testing.T) {
 	var sinkCalls atomic.Int32
 	var deadLetters atomic.Int32
-	b := NewEventBatcher(func(context.Context, []storage.Event) error {
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
 		sinkCalls.Add(1)
 		return nil
 	}, EventBatcherConfig{
@@ -196,7 +201,7 @@ func TestDuckDBPoisonDLQ(t *testing.T) {
 // Without a configured DLQ, poison preserves the existing durable contract:
 // NAK for redelivery rather than terminating a message with nowhere to replay.
 func TestDuckDBPoisonNaksWithoutDLQ(t *testing.T) {
-	b := NewEventBatcher(func(context.Context, []storage.Event) error {
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
 		t.Fatal("poison message reached sink")
 		return nil
 	}, EventBatcherConfig{})
@@ -255,5 +260,27 @@ func waitForState(t *testing.T, _ *fakeMsg, ready func() bool) {
 			t.Fatal("timed out waiting for message to settle")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// A delivery whose position cannot be written down is not settled: it goes back
+// for redelivery instead of acking a floor the store never recorded. The window
+// is narrow — the record rides the same DuckDB the rows do — but a store left
+// behind the ack floor is exactly the state /readyz refuses as store-behind, so
+// a healthy colour must not be walked into it by its own settlement path.
+func TestRowlessSettlementRetriesWhenTheRecordFails(t *testing.T) {
+	b := NewEventBatcher(
+		func(context.Context, []storage.Event, storage.AppliedMark) error { return nil },
+		EventBatcherConfig{
+			Durable:        "colour-mark",
+			RecordPosition: func(context.Context, storage.AppliedMark) error { return errors.New("position write refused") },
+		},
+	)
+	msg := &fakeMsg{deliv: 1, seqN: 4}
+	b.AddMsg(nil, msg)
+	b.Stop()
+
+	if acked, nakked, termed := msg.state(); acked || termed || !nakked {
+		t.Fatalf("acked=%v nakked=%v termed=%v, want the delivery retried rather than settled", acked, nakked, termed)
 	}
 }

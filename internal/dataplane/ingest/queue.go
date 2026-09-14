@@ -21,12 +21,23 @@ import (
 // dead-lettered straight back.
 const OriginSubjectHeader = "AgentRay-Origin-Subject"
 
-// eventSink is the DuckDB write surface the worker needs. *storage.Store is the
+// ingestStore is the DuckDB surface the worker needs. *storage.Store is the
 // production implementation; *storage.DuckDB stands in for one blue-green colour
 // in tests (batcher_ack_test.go already sinks events to it).
-type eventSink interface {
-	SinkEvents(ctx context.Context, events []storage.Event) error
-	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error
+//
+// The position methods are the readiness half of the same surface: the worker
+// binds this store to the durable it consumes under at boot, and every write
+// records how far along the stream it carries the file (see duckdb_position.go
+// and ReplayStoreBehind).
+type ingestStore interface {
+	SinkEvents(ctx context.Context, events []storage.Event, mark storage.AppliedMark) error
+	InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, mark storage.AppliedMark) error
+	AppliedPosition(ctx context.Context, durable string) (storage.AppliedPosition, error)
+	AdoptPosition(ctx context.Context, durable string, seq uint64) error
+	RefusePosition(ctx context.Context, durable string, missing uint64) error
+	// RecordPosition covers the settlements that carry no rows to write: an
+	// empty batch, a poison payload leaving via the DLQ. See storage.RecordPosition.
+	RecordPosition(ctx context.Context, mark storage.AppliedMark) error
 }
 
 // EventQueue is the ingestion publisher. With a JetStream context it publishes
@@ -269,7 +280,7 @@ type EventWorker struct {
 
 // StartEventWorker wires the legacy fire-and-forget consumer (core NATS). Used
 // only when INGEST_JETSTREAM=false; a failed insert is logged and dropped.
-func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink eventSink) (*EventWorker, error) {
+func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink ingestStore) (*EventWorker, error) {
 	ch := make(chan *nats.Msg, 1024)
 	sub, err := nc.ChanQueueSubscribe(subject, "agentray-ingestors", ch)
 	if err != nil {
@@ -306,7 +317,7 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink even
 				// and dropped — that is this mode's contract (see
 				// StartEventWorker), and it is why the durable path exists.
 				insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-				insertErr := sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, batch.LandedRows())
+				insertErr := sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, batch.LandedRows(), storage.AppliedMark{})
 				cancel()
 				if insertErr != nil {
 					log.Printf("ingestion worker: insert connector batch: %v", insertErr)
@@ -331,7 +342,7 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink even
 //
 // One consumer covers both subjects, so a single ack floor is this colour's
 // applied mark for events and connector rows alike (see ReplayStatus).
-func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, metrics *PipelineMetrics) (*EventWorker, error) {
+func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, metrics *PipelineMetrics) (*EventWorker, error) {
 	dlqPublish := func(origin string, body []byte) error {
 		pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -345,14 +356,17 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, me
 		return err
 	}
 	batcher := NewEventBatcher(sink.SinkEvents, EventBatcherConfig{
-		MaxDeliver: ss.MaxDeliv,
-		DeadLetter: func(body []byte) error { return dlqPublish(ss.Subject, body) },
-		Metrics:    metrics,
+		MaxDeliver:     ss.MaxDeliv,
+		Durable:        ss.durableName(),
+		DeadLetter:     func(body []byte) error { return dlqPublish(ss.Subject, body) },
+		RecordPosition: sink.RecordPosition,
+		Metrics:        metrics,
 	})
 	settler := externalRowsSettler{
 		sink:       sink,
 		deadLetter: func(body []byte) error { return dlqPublish(ss.ConnectorSubject, body) },
 		maxDeliver: ss.MaxDeliv,
+		durable:    ss.durableName(),
 		nakDelay:   connectorNakDelay,
 		metrics:    metrics,
 	}
@@ -371,10 +385,24 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, me
 		batcher.Stop()
 		return nil, fmt.Errorf("create ingest consumer: %w", err)
 	}
-	// Sample the retention gap now, before this process consumes anything: once
-	// the replay advances the applied mark past the purge frontier the loss is no
-	// longer visible in the broker's state (see latchBootGap).
-	ss.latchBootGap(ctx, cons)
+	// Sample the broker now, before this process consumes anything: the store
+	// binding and the retention gap are both questions about what this colour
+	// had applied before it started applying, and the replay advancing is what
+	// makes them unanswerable (see bindStore, latchBootGap). A boot that cannot
+	// answer them does not start consuming: every ack would move the durable's
+	// floor over a file whose provenance was never established, and the write
+	// would hide the hole for good.
+	ss.Positions = sink
+	cinfo, streamInfo, err := ss.bootSample(ctx, cons)
+	if err != nil {
+		batcher.Stop()
+		return nil, fmt.Errorf("boot replay sample unreadable: %w", err)
+	}
+	if err := ss.bindStore(ctx, cinfo); err != nil {
+		batcher.Stop()
+		return nil, fmt.Errorf("bind this colour's store to durable %q: %w", ss.durableName(), err)
+	}
+	ss.latchBootGap(cinfo, streamInfo)
 	consume, err := cons.Consume(func(msg jetstream.Msg) {
 		if msg.Subject() == ss.ConnectorSubject {
 			settler.settle(msg)
@@ -387,6 +415,15 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, me
 			// leaves the stream instead of redelivering forever. If the DLQ is
 			// unreachable, NAK instead: one more redelivery beats losing the body.
 			log.Printf("ingestion worker: decode event batch (dead-lettering): %v", err)
+			// Recorded before the dead-letter and the terminate: terminating the
+			// delivery moves the consumer's ack floor, so the store has to cover
+			// the position or its next boot reads the difference as a lost range.
+			// If the record will not land, the message is retried instead.
+			if recErr := recordSettled(sink, ss.durableName(), jsMsgHandle{msg: msg}.seq()); recErr != nil {
+				log.Printf("ingestion worker: %v; redelivering the undecodable batch instead of settling over it", recErr)
+				_ = msg.NakWithDelay(5 * time.Second)
+				return
+			}
 			if derr := dlqPublish(ss.Subject, msg.Data()); derr != nil {
 				log.Printf("ingestion worker: dead-letter undecodable batch: %v", derr)
 				_ = msg.NakWithDelay(5 * time.Second)
@@ -412,9 +449,13 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink eventSink, me
 // the message has exhausted its redeliveries. Connector messages need no
 // coalescing — the engine already sends pullBatchSize rows per message.
 type externalRowsSettler struct {
-	sink       eventSink
+	sink       ingestStore
 	deadLetter func(body []byte) error
 	maxDeliver int
+	// durable names the consumer these batches arrive under; connector rows are
+	// recorded against it exactly as events are, because one consumer carries
+	// both subjects (see storage.AppliedMark).
+	durable string
 	// nakDelay is the redelivery delay asked of JetStream. Zero means
 	// connectorNakDelay; tests shorten it.
 	nakDelay time.Duration
@@ -444,7 +485,7 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	var err error
 	for attempt := range connectorInsertAttempts {
 		insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed)
+		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq()})
 		cancel()
 		if err == nil {
 			if ackErr := handle.ack(); ackErr != nil {
@@ -460,6 +501,14 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 
 	s.metrics.recordInsertFailure()
 	if handle.deliveries() >= uint64(s.maxDeliver) && s.deadLetter != nil {
+		// Recorded before the dead-letter and the terminate: settling moves the
+		// ack floor, so a store that cannot take the record leaves the batch to be
+		// retried instead of being left behind the floor.
+		if err := recordSettled(s.sink, s.durable, handle.seq()); err != nil {
+			log.Printf("ingestion worker: %v; redelivering the connector batch instead of settling over it", err)
+			s.nak(handle)
+			return
+		}
 		if derr := s.deadLetter(msg.Data()); derr != nil {
 			log.Printf("ingestion worker: dead-letter connector batch failed, will retry: %v", derr)
 			s.nak(handle)
@@ -482,6 +531,11 @@ func (s externalRowsSettler) poison(handle jsMsgHandle, body []byte, cause error
 		s.nak(handle)
 		return
 	}
+	if err := recordSettled(s.sink, s.durable, handle.seq()); err != nil {
+		log.Printf("ingestion worker: %v; redelivering the poison connector batch instead of settling over it", err)
+		s.nak(handle)
+		return
+	}
 	if err := s.deadLetter(body); err != nil {
 		log.Printf("ingestion worker: dead-letter failed, will retry: %v", err)
 		s.nak(handle)
@@ -490,6 +544,27 @@ func (s externalRowsSettler) poison(handle jsMsgHandle, body []byte, cause error
 	s.metrics.recordDeadLetter()
 	_ = handle.term()
 	log.Printf("ingestion worker: terminated poison connector batch: %v", cause)
+}
+
+// recordSettled moves a store's applied position over a delivery that settles
+// without a row write — an empty batch, a poison payload dead-lettered and
+// terminated. Both acking and terminating advance the consumer's ack floor, so
+// skipping the record here leaves the store behind its own floor and the next
+// boot refuses a colour that lost nothing (see storage.RecordPosition).
+//
+// The error is returned and the callers do not settle without it: retrying the
+// delivery costs one redelivery, while settling over a failed record would
+// advance the ack floor past a position the store never wrote down.
+func recordSettled(sink ingestStore, durable string, seq uint64) error {
+	if durable == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
+	defer cancel()
+	if err := sink.RecordPosition(ctx, storage.AppliedMark{Durable: durable, Seq: seq}); err != nil {
+		return fmt.Errorf("record applied position %d for durable %q: %w", seq, durable, err)
+	}
+	return nil
 }
 
 func (s externalRowsSettler) nak(handle jsMsgHandle) {
@@ -541,4 +616,18 @@ func (h jsMsgHandle) deliveries() uint64 {
 		return 0
 	}
 	return md.NumDelivered
+}
+
+// seq is this delivery's consumer sequence — the total number of deliveries
+// this consumer has made, redeliveries included. It is the position the DuckDB
+// write records, and the same space AckFloor.Consumer reports in, so the two are
+// comparable however wide the stream is: a stream shared with another
+// environment interleaves its sequences with ours, and its traffic never
+// advances our consumer's delivery counter.
+func (h jsMsgHandle) seq() uint64 {
+	md, err := h.msg.Metadata()
+	if err != nil {
+		return 0
+	}
+	return md.Sequence.Consumer
 }

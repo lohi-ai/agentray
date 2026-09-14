@@ -455,8 +455,16 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart worker: %v", err)
 	}
-	if v := mustVerdict(t, torn); v.Ready || v.Reason != ReplayUnverified {
-		t.Fatalf("verdict with an unreadable marker = %+v, want an unverified refusal", v)
+	// Refused, either way. The store binding may also hold a refusal of its own
+	// by now — this stream's three-second MaxAge window is short on purpose, and
+	// a delivery it evicted while the message was still in flight leaves the
+	// durable's floor above what the file applied, which the binding refuses and
+	// records too. Both diagnoses are true and the gate reports the sized one;
+	// what must never happen is a verdict that lets traffic through.
+	if v := mustVerdict(t, torn); v.Ready {
+		t.Fatalf("verdict with an unreadable marker = %+v, want a refusal", v)
+	} else if v.Reason != ReplayUnverified && v.Reason != ReplayStoreBehind {
+		t.Fatalf("verdict with an unreadable marker = %+v, want %q or %q", v, ReplayUnverified, ReplayStoreBehind)
 	}
 }
 

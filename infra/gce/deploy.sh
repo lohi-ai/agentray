@@ -17,8 +17,8 @@ set -euo pipefail
 # THE GATE IS A DATA-COHERENCE GATE. The API healthcheck targets /readyz, which
 # answers 503 until this colour has applied every row on the durable ingest
 # stream — event batches AND connector sync batches — because a colour that is
-# still replaying would answer queries from a DuckDB file with a hole in it. Two
-# consequences the operator owns:
+# still replaying would answer queries from a DuckDB file with a hole in it. What
+# the operator owns:
 #   * A legitimately long replay (a long quiet period, a broker outage that
 #     backed events up, or a large connector table) can outrun --gate-timeout.
 #     Raise it: `--gate-timeout 900`. That is necessary but NOT sufficient: the
@@ -31,24 +31,36 @@ set -euo pipefail
 #     repointed, so the old colour keeps serving.
 #   * `--no-gate` skips that wait entirely and is therefore a data-coherence
 #     waiver, not just a speed switch: traffic can land on a colour that is
-#     behind. Read /readyz's body first — it names the reason. `purged-gap`
-#     never clears (messages were purged before this colour applied them and no
-#     amount of waiting recovers them — the colour writes the loss down beside
-#     its DuckDB file, so restarting it, or redeploying, does not clear it
-#     either; to ACCEPT the loss and let that colour serve without those rows,
-#     delete `<DUCKDB_PATH>.ingest-loss` inside the container's volume, then
-#     deploy again), and `stream-mismatch` means the stream
-#     does not carry this env's subjects at all, so the colour will never be
-#     offered another row. Both envs default INGEST_STREAM_NAME to the SAME
-#     stream on the shared broker and EnsureStreams rewrites that stream's
-#     subject list to the booting env's on EVERY boot, so the env that restarted
-#     last owns it and the other one is unwired — including for publishing, which
-#     fails with "no response from stream". The durable fix is a stream per env
-#     (`INGEST_STREAM_NAME: AGENTRAY_EVENTS_PROD` / `_DEV` in that env's app.env,
-#     next to the subjects it already sets); a hand-edited subject list is only a
-#     stop-gap, because the next boot of either env rewrites it, and re-running
-#     this env's deploy clears this env's refusal by handing the same one to its
-#     sibling.
+#     behind. Read /readyz's body first — it names the reason, and three of them
+#     are not waiting problems:
+#       - `purged-gap` never clears: messages were purged before this colour
+#         applied them and no amount of waiting recovers them. The colour writes
+#         the loss down beside its DuckDB file, so restarting it, or redeploying,
+#         does not clear it either; to ACCEPT the loss and let that colour serve
+#         without those rows, delete `<DUCKDB_PATH>.ingest-loss` inside the
+#         container's volume, then deploy again.
+#       - `store-behind` never clears either: the DuckDB file behind that colour
+#         cannot show the range its durable has already acknowledged, so serving
+#         it would answer queries from a file with a hole in it. The trigger is
+#         the per-colour volume being recreated (or DUCKDB_PATH repointed) while
+#         NATS survived to keep the consumer's floor: the messages at fault were
+#         applied to some other file and are no longer on the stream. The
+#         refusal is written INSIDE the store, so a restart reads it back. There
+#         is no in-place repair; to start that colour over, reset its durable
+#         (drop the consumer, or point INGEST_DURABLE at a fresh name) AND give
+#         it a fresh volume — the record lives in the file, so it goes with it.
+#       - `stream-mismatch` means the stream does not carry this env's subjects
+#         at all, so the colour will never be offered another row. Both envs
+#         default INGEST_STREAM_NAME to the SAME stream on the shared broker and
+#         EnsureStreams rewrites that stream's subject list to the booting env's
+#         on EVERY boot, so the env that restarted last owns it and the other one
+#         is unwired — including for publishing, which fails with "no response
+#         from stream". The durable fix is a stream per env
+#         (`INGEST_STREAM_NAME: AGENTRAY_EVENTS_PROD` / `_DEV` in that env's
+#         app.env, next to the subjects it already sets); a hand-edited subject
+#         list is only a stop-gap, because the next boot of either env rewrites
+#         it, and re-running this env's deploy clears this env's refusal by
+#         handing the same one to its sibling.
 #
 # Schema migrations are automatic: the API creates/updates Postgres and
 # DuckDB tables at startup. Redis/NATS are shared single instances (infra/)

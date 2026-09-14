@@ -77,7 +77,7 @@ func TestSandboxRefreshExternalRowsIncremental(t *testing.T) {
 	p1, c1 := uuid.NewString(), uuid.NewString()
 	land := func(rows ...connector.LandedRow) {
 		t.Helper()
-		if err := d.InsertExternalRows(ctx, p1, c1, "users", rows); err != nil {
+		if err := d.InsertExternalRows(ctx, p1, c1, "users", rows, AppliedMark{}); err != nil {
 			t.Fatalf("InsertExternalRows: %v", err)
 		}
 	}

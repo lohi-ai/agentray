@@ -38,7 +38,7 @@ func TestIngestBatchFitsTheMainEngineLimit(t *testing.T) {
 		t.Fatalf("InsertEvents with a full batch: %v", err)
 	}
 	// The ingest worker's path adds the person fold to the same transaction.
-	if err := d.SinkEvents(ctx, events); err != nil {
+	if err := d.SinkEvents(ctx, events, AppliedMark{}); err != nil {
 		t.Fatalf("SinkEvents with a full batch: %v", err)
 	}
 	// The fold writes one row per identity-bearing distinct id, so a batch of
@@ -53,7 +53,7 @@ func TestIngestBatchFitsTheMainEngineLimit(t *testing.T) {
 			Timestamp:  time.Now().UTC(), EventType: "user",
 		})
 	}
-	if err := d.SinkEvents(ctx, identified); err != nil {
+	if err := d.SinkEvents(ctx, identified, AppliedMark{}); err != nil {
 		t.Fatalf("SinkEvents with 500 distinct identities: %v", err)
 	}
 	// The connector landing path takes up to 1,000 rows per batch.
@@ -65,7 +65,7 @@ func TestIngestBatchFitsTheMainEngineLimit(t *testing.T) {
 			DataJSON: `{"note":"` + strings.Repeat("x", 200) + `"}`,
 		})
 	}
-	if err := d.InsertExternalRows(ctx, projectID, uuid.NewString(), "landed", landed); err != nil {
+	if err := d.InsertExternalRows(ctx, projectID, uuid.NewString(), "landed", landed, AppliedMark{}); err != nil {
 		t.Fatalf("InsertExternalRows with a full connector batch: %v", err)
 	}
 	var n int

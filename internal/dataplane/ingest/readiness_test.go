@@ -1,6 +1,8 @@
 package ingestion
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -421,5 +423,32 @@ func TestSharedStreamIsNotReadAsLoss(t *testing.T) {
 	v := EvaluateReplay(7, 140, 100, 0, 0, wired, dedicated)
 	if !v.Ready || v.Reason != ReplayCaughtUp {
 		t.Fatalf("verdict = %+v, want caught-up: a foreign purge is not this colour's loss", v)
+	}
+}
+
+// failingConsumer answers Info with an error. The embedded interface satisfies
+// the rest of jetstream.Consumer at compile time; Info is the only method the
+// boot sample touches.
+type failingConsumer struct {
+	jetstream.Consumer
+	err error
+}
+
+func (c failingConsumer) Info(context.Context) (*jetstream.ConsumerInfo, error) {
+	return nil, c.err
+}
+
+// An unreadable sample must come back as an error with no readings attached:
+// the caller fails the boot on the error instead of consuming, so a nil error
+// over nil readings would start a worker that binds the store to readings it
+// never got — the opposite of fail-safe.
+func TestBootSampleReportsUnreadableBroker(t *testing.T) {
+	ss := &StreamSet{}
+	cinfo, sinfo, err := ss.bootSample(context.Background(), failingConsumer{err: errors.New("broker unreachable")})
+	if err == nil {
+		t.Fatalf("unreadable sample reported success: cinfo=%v sinfo=%v", cinfo, sinfo)
+	}
+	if cinfo != nil || sinfo != nil {
+		t.Fatalf("unreadable sample returned readings: cinfo=%v sinfo=%v", cinfo, sinfo)
 	}
 }

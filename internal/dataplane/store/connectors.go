@@ -544,10 +544,11 @@ WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 // pulled batch to the durable stream and each colour's worker lands it, so a
 // blue-green switch replays connector rows like events instead of leaving the
 // serving colour's file stale. That also means a retried batch is re-applied
-// here, which the primary key above makes a replace.
-func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
+// here, which the primary key above makes a replace. mark lands in the same
+// transaction as the rows (see duckdb_position.go).
+func (s *Store) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, mark AppliedMark) error {
 	if s.duck == nil {
 		return errors.New("storage: duckdb not open")
 	}
-	return s.duck.InsertExternalRows(ctx, projectID, connectorID, table, rows)
+	return s.duck.InsertExternalRows(ctx, projectID, connectorID, table, rows, mark)
 }
