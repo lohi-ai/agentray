@@ -101,6 +101,43 @@ func (r *Registry) SetLegacyAllowlist(names []string) {
 	r.legacyAllowlist = append([]string(nil), names...)
 }
 
+// Requirement is what a surface asks of a principal when it has no registered
+// operation to name — the legacy REST routes that predate the registry. It
+// carries the same pair of facts a Spec does, so the decision those routes make
+// is the decision the adapters make, not a second one beside it.
+type Requirement struct {
+	Access         Access
+	MinSessionRole string
+}
+
+// Allow reports whether the principal satisfies a requirement. It is
+// Authorize's decision stated over an access class instead of an operation
+// name, and Authorize delegates here — so a route with no operation to name
+// cannot answer differently from the /api/op endpoint that does the same work.
+//
+// Deny-by-default in the same two places Authorize is: an empty class is
+// unreachable, and a credential kind the switch does not know is refused.
+func (r *Registry) Allow(p Principal, req Requirement) bool {
+	if req.Access == "" {
+		return false
+	}
+	switch p.Kind {
+	case CredCapture:
+		return false
+	case CredLegacy:
+		// A pre-split project key holds the classes the frozen allowlist
+		// covers — derived from the allowlist itself rather than a second list
+		// beside it, so the two cannot drift apart.
+		return r.legacyAllowsClass(req.Access)
+	case CredManagement:
+		return slices.Contains(p.Grants, req.Access)
+	case CredSession:
+		return slices.Contains(p.Grants, req.Access) && sessionRoleAtLeast(p.Role, req.MinSessionRole)
+	default:
+		return false
+	}
+}
+
 // Authorize reports whether the principal may invoke the named operation.
 // Deny-by-default: an operation with no Access class is unreachable over the
 // network adapters (in-process agent policy is unaffected — it filters tools
@@ -110,22 +147,29 @@ func (r *Registry) Authorize(p Principal, opName string) bool {
 	if !ok {
 		return false
 	}
-	access := spec.OpAccess()
-	if access == "" {
+	if spec.OpAccess() == "" {
 		return false
 	}
-	switch p.Kind {
-	case CredCapture:
-		return false
-	case CredLegacy:
+	if p.Kind == CredLegacy {
+		// By name, because the freeze is a list of names and a class would
+		// admit every later operation that happened to share one.
 		return r.legacyAllows(opName)
-	case CredManagement:
-		return slices.Contains(p.Grants, access)
-	case CredSession:
-		return slices.Contains(p.Grants, access) && sessionRoleAtLeast(p.Role, spec.OpMinSessionRole())
-	default:
-		return false
 	}
+	return r.Allow(p, Requirement{Access: spec.OpAccess(), MinSessionRole: spec.OpMinSessionRole()})
+}
+
+// legacyAllowsClass reports whether an operation of this access class was in
+// the frozen allowlist — i.e. whether a pre-split project key ever held this
+// power at all. A class no pre-split operation carried (sources:manage is the
+// one today) answers false for every caller, so a legacy key standing in front
+// of a legacy route cannot be granted a class the freeze never gave it.
+func (r *Registry) legacyAllowsClass(access Access) bool {
+	for _, name := range r.legacyAllowlist {
+		if spec, ok := r.Get(name); ok && spec.OpAccess() == access {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionRoleAtLeast applies MinSessionRole: "" admits any member role

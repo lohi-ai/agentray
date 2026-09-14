@@ -79,7 +79,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	registerAgentMonitorRoutes(e, store)
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)
-	registerValidationRoutes(e, store)
+	registerValidationRoutes(e, store, ops)
 	registerOperationsRoutes(e, store, scheduler)
 
 	// The waitlist is posted from the owner's own landing page, so it sits with
@@ -426,6 +426,16 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/projects", func(c echo.Context) error {
+		// The one admission-only legacy route, and the only production caller of
+		// projectFromRequest: it returns the project the caller named — the
+		// projects a credential may address — and reads no analytics, so the
+		// class decision every other legacy route makes would be a decision
+		// about data this route never touches. There is deliberately no wrapper
+		// with a reassuring name here: a named admission resolver is a hatch any
+		// later route could reuse to skip its class, so
+		// TestNoRouteResolvesThroughTheReadResolver exempts this route BY ITS
+		// PATH and fails if any other route — or any helper — calls
+		// projectFromRequest.
 		project, err := projectFromRequest(c, store)
 		if err != nil {
 			return err
@@ -498,7 +508,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/activity", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -513,7 +523,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/insights/run", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -533,7 +543,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/templates", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -545,7 +555,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/templates/:template_id/apply", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -560,7 +570,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/templates/:template_id/charts/:chart_id/clone", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -581,7 +591,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/web-analytics", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -593,7 +603,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/persons", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -605,7 +615,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/cohorts", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -622,7 +632,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	// Per-project custom cohort audiences (paid/premium-style groups). The rule is
 	// structured (kind + plans), compiled to SQL server-side — never raw SQL.
 	e.GET("/api/cohorts/audiences", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -634,7 +644,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/cohorts/audiences", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -654,7 +664,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PUT("/api/cohorts/audiences/:audience_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -674,7 +684,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.DELETE("/api/cohorts/audiences/:audience_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -687,7 +697,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	// Per-project subscription mapping — how the cohort engine reads subscription
 	// lifecycle off events (config, never raw SQL).
 	e.GET("/api/subscription/mapping", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -699,7 +709,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PUT("/api/subscription/mapping", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -715,7 +725,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/events/explore", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -727,7 +737,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/events/names", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -739,7 +749,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/sessions/:session_id/replay", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -751,7 +761,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/saved-queries", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -763,7 +773,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/saved-queries", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -783,14 +793,18 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/saved-queries/:query_id/run", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		principal, project, err := authorizedPrincipalAndProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
 		// Running the query is a read; refreshing its stored result is a write to
-		// the owner's row, so a read-only caller (a shared-demo viewer) gets the
-		// rows without touching the cache.
-		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), !readOnlyCaller(c))
+		// the owner's row, so a caller that may not author saved queries gets the
+		// rows without touching the cache. The decision is the registry's, not the
+		// demo guard's read-only marker: that marker is set only when a demo is
+		// configured, so on an instance with none a viewer's run used to cache its
+		// result into the owner's row.
+		cache := ops.reg.Allow(principal, legacyWrite(opcore.AccessDashboardsWrite))
+		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), cache)
 		if err != nil {
 			// Same contract as /api/sql/run: a sandbox that could not run the
 			// query is retryable capacity, not a 500 — the identical query
@@ -805,7 +819,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PATCH("/api/saved-queries/:query_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -823,7 +837,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.DELETE("/api/saved-queries/:query_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -834,7 +848,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/sql/run", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -865,7 +879,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 
 
 	e.GET("/api/events", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -882,7 +896,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.GET("/api/sessions", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -1167,10 +1181,18 @@ func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter)
 	})
 }
 
-// projectFromRequest resolves the project a legacy read route acts on. Capture
+// projectFromRequest resolves the project a request acts on. Capture
 // credentials are refused; every other admitted kind gets a project whose
 // capture key has been withheld (projectForPrincipal) — the response bodies of
 // these routes all echo it.
+//
+// It answers admission, never access: which credential may address the project.
+// It consults no grant and no role, so it is the whole question only for a
+// route whose work IS the addressing — and there is exactly one of those,
+// GET /api/projects, the only production caller. Every other route resolves
+// with authorizedProject (the class its requirement declares), and
+// TestNoRouteResolvesThroughTheReadResolver fails when a second call site
+// appears anywhere in this package, however it is registered.
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {

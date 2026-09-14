@@ -48,6 +48,31 @@ GET /api/activity?project_id=xxx
 
 `projectFromRequest` accepts either `?api_key=` / `X-API-Key` header (SDK use) or a valid session cookie + `?project_id=` (dashboard use). Auth and project resolution are always the first two steps in every protected handler.
 
+It answers **admission, not access** — which credential may address the project.
+That is the whole question for exactly one route, `GET /api/projects`, which
+returns the project a credential named and reads no analytics and is the only
+route that calls it: there is deliberately no wrapper with a reassuring name,
+because a named admission resolver is a hatch any later route could reuse to
+skip its class. Every other route declares the class of its work and asks the
+same `Registry.Allow` decision `/api/op` makes, through `authorizedProject` —
+one resolver, so the requirement decides and the name cannot disagree with the
+verb — with `legacyRead` / `legacyWrite` in `internal/app/op_adapter.go`
+stating the requirement: `analytics:read` for the reads (the class
+`activity_summary` and `persons` carry), `dashboards:write` / `plans:write` /
+`analytics:read` for the mutations. Without it a route ran for any credential
+that could reach the project — a management key minted `sources:read` alone
+read every analytics route and a key minted `analytics:read` alone created and
+deleted audiences and saved queries, while `/api/op` refused the identical
+calls. The routes that predate the registry (cohort audiences, saved queries,
+templates, the subscription mapping, activity, persons, events, sessions) state
+their class at the call site.
+`TestNoRouteResolvesThroughTheReadResolver` counts the admission-only resolver's
+call sites over this package's source — form-independently, so a helper cannot
+hide one — and requires the set to be exactly `GET /api/projects` and
+`authProject`, the modern surface's resolver; it separately requires every route
+that declares a class to have a behavioural case in the read or write matrix,
+and every case to still match a route.
+
 ### Writes: the guard in front of every handler
 
 Reads are open to any member of a project's workspace. Writes go through one
@@ -73,6 +98,32 @@ the guard's table does not name.
 
 On an instance with no `AGENTRAY_DEMO_PROJECT_ID` the guard returns
 immediately and the API behaves exactly as it did before it existed.
+
+That is why the guard is a second line and never the decision. A route's own
+answer has to hold with no demo configured, and the session-only families reach
+one the same way the legacy mutators do: `sessionCaller`
+(`internal/app/op_adapter.go`) resolves a cookie into an `opcore.Principal` for
+the connector routes, which then ask the registry by operation name
+(`sessionOp`); the validation writes (`/api/validation/tests/:id/commit`,
+`:decide`) go through `authProjectForWrite`, which keeps `authProject`'s
+admission — cookie first, and a supplied Bearer that does not resolve is still
+the `401` `principalFromRequest` answers it with — and adds the class decision
+at `plans:write` with a `member` floor, the class `propose_test` and
+`update_test` already carry. Those store methods prove membership and stop
+there, so a route that asked nothing admitted a viewer to commit the threshold
+it agreed to.
+
+One legacy route decides twice on purpose: `POST /api/saved-queries/:id/run` is
+an `analytics:read` a viewer may make, but caching the result is an `UPDATE` to
+the owner's `saved_queries` row, so the handler asks the registry for
+`dashboards:write` before refreshing the cache. It used to ask the demo guard's
+read-only marker, which exists only when a demo is configured — on an instance
+with none, a viewer's run wrote its result into the owner's row.
+
+A Bearer that is present but does not resolve is likewise a denial rather than
+an absence: `principalFromRequest` answers it `401` instead of falling through
+to the cookie, and `resolveWriteScope` now reports the same refusal instead of
+approving a write the handler is about to refuse.
 
 ### Event ingestion
 
