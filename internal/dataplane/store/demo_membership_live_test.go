@@ -174,8 +174,8 @@ func TestDemoSignupJoinsTheSharedDemoAsViewer(t *testing.T) {
 		demoWorkspaceID, boot.User.ID).Scan(&role); err != nil {
 		t.Fatalf("signup did not join the demo workspace: %v", err)
 	}
-	if role != DemoViewerRole {
-		t.Fatalf("demo membership role = %q, want %q", role, DemoViewerRole)
+	if role != "member" {
+		t.Fatalf("demo membership role = %q, want member", role)
 	}
 	// A viewer must not pass the write gate every mutator checks.
 	if ok, err := s.UserCanManageWorkspace(ctx, boot.User.ID, demoWorkspaceID); err != nil || ok {
@@ -198,9 +198,9 @@ func TestDemoSignupJoinsTheSharedDemoAsViewer(t *testing.T) {
 		t.Errorf("first workspace is %q, want the account's own %q", workspaces[0].ID, boot.Workspace.ID)
 	}
 	demo := workspaces[1]
-	if demo.ID != demoWorkspaceID || !demo.IsDemo || demo.Role != DemoViewerRole {
-		t.Errorf("demo workspace reported id=%q is_demo=%v role=%q, want %q/true/%q",
-			demo.ID, demo.IsDemo, demo.Role, demoWorkspaceID, DemoViewerRole)
+	if demo.ID != demoWorkspaceID || !demo.IsDemo || demo.Role != "member" {
+		t.Errorf("demo workspace reported id=%q is_demo=%v role=%q, want %q/true/member",
+			demo.ID, demo.IsDemo, demo.Role, demoWorkspaceID)
 	}
 	// The default project must still be theirs, not the (much older) demo's.
 	def, err := s.DefaultProjectForUser(ctx, boot.User.ID)
@@ -216,8 +216,8 @@ func TestDemoSignupJoinsTheSharedDemoAsViewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListWorkspaceProjects(demo): %v", err)
 	}
-	if len(demoProjects) != 1 || !demoProjects[0].IsDemo || demoProjects[0].Role != DemoViewerRole {
-		t.Errorf("demo project list = %+v, want one project marked is_demo with role %q", demoProjects, DemoViewerRole)
+	if len(demoProjects) != 1 || !demoProjects[0].IsDemo || demoProjects[0].Role != "member" {
+		t.Errorf("demo project list = %+v, want one project marked is_demo with role member", demoProjects)
 	}
 }
 
@@ -250,8 +250,8 @@ func TestDemoBackfillIsIdempotentAndNeverDowngrades(t *testing.T) {
 		demoWorkspaceID, old.User.ID).Scan(&backfilled); err != nil {
 		t.Fatalf("pre-existing user was not backfilled into the demo: %v", err)
 	}
-	if backfilled != DemoViewerRole {
-		t.Errorf("backfilled role = %q, want %q", backfilled, DemoViewerRole)
+	if backfilled != "member" {
+		t.Errorf("backfilled role = %q, want member", backfilled)
 	}
 	// Idempotent: the primary key makes a duplicate impossible, so a count above
 	// one would mean the schema lost that key.

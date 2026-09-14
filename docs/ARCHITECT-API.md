@@ -48,31 +48,63 @@ GET /api/activity?project_id=xxx
 
 `projectFromRequest` accepts either `?api_key=` / `X-API-Key` header (SDK use) or a valid session cookie + `?project_id=` (dashboard use). Auth and project resolution are always the first two steps in every protected handler.
 
-### Writes: the guard in front of every handler
+It answers **admission, not access** — which credential may address the project.
+That is the whole question for exactly one route, `GET /api/projects`, which
+returns the project a credential named and reads no analytics and is the only
+route that calls it: there is deliberately no wrapper with a reassuring name,
+because a named admission resolver is a hatch any later route could reuse to
+skip its class. Every other route declares the class of its work and asks the
+same `Registry.Allow` decision `/api/op` makes, through `authorizedProject` —
+one resolver, so the requirement decides and the name cannot disagree with the
+verb — with `legacyRead` / `legacyWrite` in `internal/app/op_adapter.go`
+stating the requirement: `analytics:read` for the reads (the class
+`activity_summary` and `persons` carry), `dashboards:write` / `plans:write` /
+`analytics:read` for the mutations. Without it a route ran for any credential
+that could reach the project — a management key minted `sources:read` alone
+read every analytics route and a key minted `analytics:read` alone created and
+deleted audiences and saved queries, while `/api/op` refused the identical
+calls. The routes that predate the registry (cohort audiences, saved queries,
+templates, the subscription mapping, activity, persons, events, sessions) state
+their class at the call site.
+`TestNoRouteResolvesThroughTheReadResolver` counts the admission-only resolver's
+call sites over this package's source — form-independently, so a helper cannot
+hide one — and requires the set to be exactly `GET /api/projects` and
+`authProject`, the modern surface's resolver; it separately requires every route
+that declares a class to have a behavioural case in the read or write matrix,
+and every case to still match a route.
+
+### Writes: the floor in front of every handler
 
 Reads are open to any member of a project's workspace. Writes go through one
 middleware first — `demoWriteGuard` in `internal/app/demo_guard.go`, mounted in
-`app.go` beside CORS.
+`app.go` after the operation registry exists so it can ask the same `Allow`.
 
-It exists because of the shared demo (`store/demo.go`): every signed-up account
-is a `viewer` of a workspace that belongs to someone else, and `viewer` has to
-mean something. For any non-GET request the guard resolves the workspace the
-request targets — path `:workspace_id`, then `:project_id` / `?project_id=`,
-then the caller's default project, the same order the handlers use — and
-refuses unless the caller's role there may write (`storage.RoleMayWrite`:
-owner, admin, member).
+It is a second *invocation* of the one decision, not a second rule. The modern
+`authProject` surface has no per-route class (the fence names that surface as
+admission-only on purpose), so a mutating request that would otherwise skip
+Allow is asked here: `legacyWrite(AccessDashboardsWrite)`. Demo non-owners fail
+because `sessionGrants`, given the project, withheld the write class — Allow
+itself stays demo-blind. The demo fact lives on the project.
 
 **It is fail-closed by default.** A route is exempt only by being named in
 `writeClasses` with a reason: session lifecycle, the caller's own account, a
 public collection endpoint, a read that carries a body, or the agent-ask
-surface (deliberately open to demo viewers, and metered against
+surface (open to demo visitors, and metered in the chat handler against
 `AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY`). Anything unlisted — including a
-route added next year — is denied for a read-only caller. `TestTheRouteTableMatchesTheSource`
-scans this package's source and fails when a mutating route is registered that
-the guard's table does not name.
+route added next year — is denied for a caller without the write class.
+`TestTheRouteTableMatchesTheSource` scans this package's source and fails when
+a mutating route is registered that the floor's table does not name.
 
-On an instance with no `AGENTRAY_DEMO_PROJECT_ID` the guard returns
-immediately and the API behaves exactly as it did before it existed.
+The floor is demo-unaware: it does not return early when no demo is configured.
+A Bearer that is present but does not resolve is a denial rather than an
+absence: `principalFromRequest` answers it `401` instead of falling through
+to the cookie, and `resolveWriteScope` reports the same refusal.
+
+One legacy route decides twice on purpose: `POST /api/saved-queries/:id/run` is
+an `analytics:read`, but caching the result is an `UPDATE` to the owner's
+`saved_queries` row, so the handler asks the registry for `dashboards:write`
+before refreshing the cache.
+
 
 ### Event ingestion
 

@@ -37,3 +37,8 @@ sdk/*/*.tgz
 sdk/python/dist
 sdk/python/*.egg-info
 __pycache__/
+
+# Babysit run state: this directory holds one full checkout per ticket under
+# worktrees/ (2.9 GB and growing). It is local machinery, never source — the
+# ticket branches it checks out are the reviewable artefacts.
+/.babysit/

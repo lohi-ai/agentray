@@ -105,7 +105,7 @@ type accountProject struct {
 	Name        string `json:"name"`
 	APIKey      string `json:"api_key"`
 	// Role is the caller's workspace role on this project ("owner", "admin",
-	// "member", "viewer", "" on key-authenticated paths). Credential minting is
+	// "member", "" on key-authenticated paths). Credential minting is
 	// owner/admin-only, so the role is what lets login explain a refusal
 	// instead of reporting it as a fault.
 	Role string `json:"role"`
@@ -508,7 +508,7 @@ func mintManagementCredential(client *authClient, projectID, role string) (minte
 // a fault. The route maps every store error to 400, so the status alone says
 // nothing; the caller's role — reported on the project payload — is the signal.
 func mintRefused(err error, role string) bool {
-	if role != "member" && role != "viewer" {
+	if role != "member" {
 		return false
 	}
 	msg := err.Error()

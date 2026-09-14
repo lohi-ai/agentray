@@ -8,35 +8,21 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
-// The write guard: one choke point in front of every mutating route.
+// The write floor: one choke point in front of every mutating route.
 //
-// WHY IT IS A MIDDLEWARE AND NOT A HELPER. The shared demo (store/demo.go) puts
-// every signed-up visitor inside a workspace that belongs to someone else, as a
-// 'viewer'. Until now that role was decorative almost everywhere — a handful of
-// `role IN ('owner','admin')` checks in store/auth.go and nothing else — so a
-// visitor could rename the demo's projects, delete its dashboards, rotate its
-// keys, and hire agents on the operator's model key. Closing that with a helper
-// each handler remembers to call would close it exactly once: the route someone
-// adds next year would be open, and nothing would say so. Mounted as
-// middleware, the decision is made where the request context is built, before
-// any handler runs, and a new route is covered by existing.
+// It is a second *invocation* of opcore.Allow, not a second rule. The modern
+// authProject surface has no per-route class (the F1 fence names that surface
+// as admission-only on purpose), so a mutating request that would otherwise
+// skip Allow is asked here: legacyWrite(AccessDashboardsWrite). Demo
+// non-owners fail because sessionGrants, given the project, withheld the
+// write class — Allow itself stays demo-blind.
 //
-// FAIL CLOSED. classifyWrite's default arm is writeGuarded — "prove a writing
-// role or be refused". A path is exempt only by being named below with a reason.
-// Scope resolution fails closed too: a mutating request whose target workspace
-// cannot be resolved is refused rather than allowed on the assumption that it
-// was harmless.
-//
-// WHAT IT DOES NOT DO. When the instance has no demo (the default, and every
-// `docker compose up`), the guard returns immediately and nothing about the API
-// changes. The demo is what makes an untrusted member possible; without one,
-// every member of a workspace was invited by its owner.
+// FAIL CLOSED. classifyWrite's default arm is writeGuarded. A path is exempt
+// only by being named below with a reason. Scope resolution fails closed too.
 
-// mutatingMethods are the verbs that may change state. GET/HEAD/OPTIONS read,
-// and reading is exactly what a demo viewer is here to do.
-//
 // TRACE and CONNECT are absent deliberately: Echo never routes them to a
 // handler in this app, and if that changed they would fall into the mutating
 // set by default rather than out of it.
@@ -164,9 +150,7 @@ func classifyWrite(path string) writeClass {
 }
 
 // writeGuardStore is what the guard needs from storage. It is an interface so
-// the authorization matrix can be tested exhaustively without a database — this
-// is authorization code, and a rule that is only exercised against live
-// Postgres is a rule that is exercised on almost no CI run.
+// the authorization matrix can be tested exhaustively without a database.
 type writeGuardStore interface {
 	DemoWorkspaceID() string
 	DemoProjectID() string
@@ -177,51 +161,69 @@ type writeGuardStore interface {
 	ProjectByIDForUser(ctx context.Context, userID string, projectID string) (storage.Project, error)
 	DefaultProjectForUser(ctx context.Context, userID string) (storage.Project, error)
 	WorkspaceRoleForUser(ctx context.Context, userID string, workspaceID string) (string, error)
-	ConsumeDemoAgentRun(ctx context.Context, userID string, limit int) (storage.DemoRunQuota, error)
-	RefundDemoAgentRun(ctx context.Context, userID string) error
+	ProjectCredentialSplit(ctx context.Context, projectID string) (bool, error)
 }
 
 // writeScope is the target a mutating request resolved to.
 type writeScope struct {
-	// user is the session's user id, and empty when the request carried no
-	// usable session. The quota ledger bills it.
 	user        string
 	workspaceID string
 	projectID   string
 	role        string
-	// byAPIKey marks the SDK/MCP path, which authenticates with the project's
-	// own key instead of a membership and therefore has no role at all.
-	byAPIKey bool
-	// byManagementKey marks a private scoped agm_ credential — unlike the
-	// public capture key it is NOT published, so the demo's "public key cannot
-	// mutate" refusal does not apply to it.
+	isDemo      bool
+	grants      []opcore.Access
+	split       bool
+	byAPIKey        bool
 	byManagementKey bool
-	// badKey marks an api_key that was supplied and did not resolve, so the
-	// refusal can say that instead of asking for a login the caller never
-	// intended to use.
-	badKey bool
+	badKey          bool
+	badBearer       bool
 }
 
-// demoWriteGuard refuses a mutating request that cannot prove the caller may
-// write to the workspace it targets.
-//
-// demoRunsPerDay is config.DemoAgentRunsPerUserPerDay: the per-user daily
-// ceiling on agent runs started from inside the demo project.
-func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
+func (s writeScope) membership() storage.Project {
+	return storage.Project{ID: s.projectID, Role: s.role, IsDemo: s.isDemo}
+}
+
+func (s writeScope) principal() opcore.Principal {
+	switch {
+	case s.byManagementKey:
+		return opcore.Principal{ProjectID: s.projectID, Kind: opcore.CredManagement, Grants: s.grants}
+	case s.byAPIKey:
+		kind := opcore.CredLegacy
+		if s.split {
+			kind = opcore.CredCapture
+		}
+		return opcore.Principal{ProjectID: s.projectID, Kind: kind}
+	default:
+		project := s.membership()
+		return opcore.Principal{
+			ProjectID: s.projectID,
+			Kind:      opcore.CredSession,
+			Role:      s.role,
+			UserID:    s.user,
+			Grants:    sessionGrants(project),
+		}
+	}
+}
+
+// writeFloorReg is used when the server did not pass a registry. CredSession
+// Allow does not consult registered operations; CredLegacy then denies.
+var writeFloorReg = &opcore.Registry{}
+
+func scopeAllowsWrite(reg *opcore.Registry, scope writeScope) bool {
+	if reg == nil {
+		reg = writeFloorReg
+	}
+	return reg.Allow(scope.principal(), legacyWrite(opcore.AccessDashboardsWrite))
+}
+
+// demoWriteGuard is the mutating floor. It asks Allow; it does not branch on
+// whether a demo is configured.
+func demoWriteGuard(g writeGuardStore, reg *opcore.Registry) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			if !mutatingMethod(c.Request().Method) {
 				return next(c)
 			}
-			// No demo, no guard. An instance without one has no untrusted
-			// members: everyone in a workspace was invited into it by its
-			// owner, and that is the contract this instance shipped with.
-			demoWorkspace := g.DemoWorkspaceID()
-			if demoWorkspace == "" {
-				return next(c)
-			}
-			// An unmatched path has no handler to reach, so there is nothing to
-			// guard; Echo answers 404/405 on its own.
 			if c.Path() == "" {
 				return next(c)
 			}
@@ -230,18 +232,14 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			ctx := c.Request().Context()
 			scope, err := resolveWriteScope(c, g)
 			if err != nil {
 				return err
 			}
 			if scope.workspaceID == "" {
-				// Could not prove where this write lands. That is what the
-				// fail-closed default is for: an unauthenticated caller hears
-				// 401 (the honest answer, and the same one the handler would
-				// have given), and an authenticated one whose scope will not
-				// resolve hears a refusal rather than being let through on the
-				// assumption it was harmless.
+				if scope.badBearer {
+					return echo.NewHTTPError(http.StatusUnauthorized, "invalid credential")
+				}
 				if scope.badKey {
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
 				}
@@ -251,83 +249,18 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				return echo.NewHTTPError(http.StatusForbidden, "this request does not name a workspace it may write to")
 			}
 
-			isDemo := scope.workspaceID == demoWorkspace
-			if !isDemo {
-				// Outside the demo, reads-with-a-body and agent questions are
-				// open to any member, and everything else needs a writing role.
-				if class == writeReadOnly || class == writeAgentAsk || class == writeAgentControl {
-					return next(c)
-				}
-				if scope.byAPIKey || scope.byManagementKey || storage.RoleMayWrite(scope.role) {
-					return next(c)
-				}
-				return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
-			}
-
-			// --- inside the demo ---
-			//
-			// The API key stops being a credential here. It is a PUBLIC
-			// write-only key — it ships in the script tag on the demo site's
-			// own pages — so anyone who views the demo can read it. It may
-			// still feed events (those paths are writeUnscoped above and never
-			// reach this line); it may not be used to drive the rest of the API
-			// against someone else's workspace.
-			if scope.byAPIKey {
-				return demoRefusal(c, "The demo project's API key is a public write key for sending events. It cannot be used to change the demo.")
-			}
+			mayWrite := scopeAllowsWrite(reg, scope)
 			switch class {
-			case writeReadOnly:
-				// The read itself is fine. Anything the handler does BESIDE
-				// reading — a result cache written back to the owner's row —
-				// is not, so it is told who it is serving.
-				if !storage.RoleMayWrite(scope.role) {
+			case writeReadOnly, writeAgentAsk, writeAgentControl:
+				if !mayWrite {
 					c.Set(demoReadOnlyCallerKey, true)
 				}
 				return next(c)
-			case writeAgentControl:
-				return next(c)
-			case writeAgentAsk:
-				// The operator of the demo site pays for their own runs and is
-				// not a visitor; everyone else spends the instance owner's key
-				// and is metered.
-				if storage.RoleMayWrite(scope.role) {
-					return next(c)
-				}
-				if scope.projectID != g.DemoProjectID() {
-					// A sibling project inside the demo workspace is the
-					// operator's too, and the budget is defined on the demo
-					// project alone — so an unmetered run here would be exactly
-					// the unbounded bill the cap exists to prevent.
-					return demoRefusal(c, "The agent answers questions in the demo project. Connect your own project to ask it about your data.")
-				}
-				quota, err := g.ConsumeDemoAgentRun(ctx, scope.user, demoRunsPerDay)
-				if err != nil {
-					return err
-				}
-				if !quota.Allowed {
-					return demoQuotaRefusal(c, quota)
-				}
-				// The run this request is about to start must not be able to do
-				// what the caller may not: the agent holds create_dashboard and
-				// create_chart, and "delete the funnel dashboard" is a sentence.
-				c.Set(demoReadOnlyCallerKey, true)
-				// A claim that buys nothing is given back. The handler is the
-				// only thing that knows whether the provider was ever reached,
-				// so it is handed a closure rather than the guard guessing from
-				// a status code — this path answers 200 with an error in the
-				// body, so there is no status to read.
-				user := scope.user
-				c.Set(demoRefundKey, func() {
-					if err := g.RefundDemoAgentRun(ctx, user); err != nil {
-						c.Logger().Warnf("demo quota refund for %s: %v", user, err)
-					}
-				})
-				return next(c)
 			default:
-				if storage.RoleMayWrite(scope.role) {
+				if mayWrite {
 					return next(c)
 				}
-				return demoRefusal(c, demoReadOnlyMessage)
+				return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
 			}
 		}
 	}
@@ -353,26 +286,49 @@ func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 	// reject the request before the principal resolver sees the Bearer. They
 	// are private scoped credentials, not the public capture key, so the
 	// demo's public-key refusal does not apply.
-	if tok, present := bearerToken(c); present && tok != "" {
+	//
+	// A Bearer that is present but is NOT an agm_ credential is denied, not
+	// absent: principalFromRequest answers it 401 rather than falling through
+	// to the cookie, and if this resolver fell through instead it would approve
+	// a write on a session the handler is about to refuse. Two resolvers over
+	// one request must reach one answer, so the denial is reported here and
+	// resolves to the same 401.
+	if tok, present := bearerToken(c); present {
+		if tok == "" {
+			return writeScope{badBearer: true}, nil
+		}
 		cred, err := g.CredentialBySecret(ctx, tok)
 		if err != nil {
-			return writeScope{badKey: true}, nil
+			return writeScope{badBearer: true}, nil
 		}
 		project, err := g.ProjectByID(ctx, cred.ProjectID)
 		if err != nil {
-			return writeScope{badKey: true}, nil
+			return writeScope{badBearer: true}, nil
 		}
-		return writeScope{workspaceID: project.WorkspaceID, projectID: project.ID, byManagementKey: true}, nil
+		return withDemo(g, writeScope{
+			workspaceID:     project.WorkspaceID,
+			projectID:       project.ID,
+			byManagementKey: true,
+			grants:          managementGrants(cred.Scopes),
+		}), nil
 	}
 
 	// The SDK/MCP path: the project's own key, no session, no membership.
 	if key := firstNonEmpty(c.QueryParam("api_key"), c.QueryParam("token"), c.Request().Header.Get("X-API-Key")); key != "" {
 		project, err := g.ProjectByAPIKey(ctx, key)
 		if err != nil {
-			// An invalid key proves nothing.
 			return writeScope{badKey: true}, nil
 		}
-		return writeScope{workspaceID: project.WorkspaceID, projectID: project.ID, byAPIKey: true}, nil
+		split, err := g.ProjectCredentialSplit(ctx, project.ID)
+		if err != nil {
+			return writeScope{badKey: true}, nil
+		}
+		return withDemo(g, writeScope{
+			workspaceID: project.WorkspaceID,
+			projectID:   project.ID,
+			byAPIKey:    true,
+			split:       split,
+		}), nil
 	}
 
 	cookie, err := c.Cookie(sessionCookieName)
@@ -397,7 +353,7 @@ func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 			return scope, nil
 		}
 		scope.workspaceID, scope.role = workspaceID, role
-		return scope, nil
+		return withDemo(g, scope), nil
 	}
 
 	projectID := firstNonEmpty(strings.TrimSpace(c.Param("project_id")), strings.TrimSpace(c.QueryParam("project_id")))
@@ -409,7 +365,7 @@ func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 			return scope, nil
 		}
 		scope.workspaceID, scope.projectID, scope.role = project.WorkspaceID, project.ID, project.Role
-		return scope, nil
+		return withDemo(g, scope), nil
 	}
 
 	// No explicit target: the same default the handlers take.
@@ -418,7 +374,13 @@ func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 		return scope, nil
 	}
 	scope.workspaceID, scope.projectID, scope.role = project.WorkspaceID, project.ID, project.Role
-	return scope, nil
+	return withDemo(g, scope), nil
+}
+
+func withDemo(g writeGuardStore, scope writeScope) writeScope {
+	demo := g.DemoWorkspaceID()
+	scope.isDemo = demo != "" && scope.workspaceID == demo
+	return scope
 }
 
 // demoReadOnlyCallerKey marks a request the guard let through even though the
@@ -437,39 +399,47 @@ func readOnlyCaller(c echo.Context) bool {
 	return value
 }
 
-// demoRefundKey carries the closure that gives back a demo agent-run claim.
-// Present only on a metered demo question; absent everywhere else, which is why
-// refundDemoRun is a no-op rather than an error when nothing set it.
+// demoAskLimit is config.DemoAgentRunsPerUserPerDay, set at server start.
+var demoAskLimit int
+
 const demoRefundKey = "agentray.demo_refund_run"
 
-// refundDemoRun returns a demo agent-run claim that bought nothing. Call it
-// ONLY when the run reported zero token usage — see Store.RefundDemoAgentRun
-// for why a run that spent tokens stays spent.
 func refundDemoRun(c echo.Context) {
 	if refund, ok := c.Get(demoRefundKey).(func()); ok && refund != nil {
 		refund()
 	}
 }
 
-// demoReadOnlyMessage is what a visitor is told when they try to change the
-// demo. It is written to be read by a person, not parsed by a client: it says
-// what happened, why, and what to do instead.
-const demoReadOnlyMessage = "This is a live demo of someone else's site — you can read everything here and ask the agent anything, but changes are switched off. Connect your own project to build dashboards, alerts and agents."
+type demoMeter interface {
+	DemoProjectID() string
+	ConsumeDemoAgentRun(ctx context.Context, userID string, limit int) (storage.DemoRunQuota, error)
+	RefundDemoAgentRun(ctx context.Context, userID string) error
+}
 
-// demoRefusal answers a write the demo will not accept.
-//
-// 403 is right: the caller is authenticated and the request is well formed;
-// they simply may not do this here. Both `message` and `error` carry the same
-// sentence because the web client reads whichever it finds first depending on
-// the call site, and a refusal that renders as "AgentRay API returned 403" in
-// one surface and as a sentence in another is a refusal people report as a bug.
-func demoRefusal(c echo.Context, message string) error {
-	return c.JSON(http.StatusForbidden, map[string]any{
-		"error":   message,
-		"message": message,
-		"reason":  "demo_read_only",
-		"demo":    true,
+// meterDemoAsk claims one demo visitor question. Owners/admins of the demo
+// are not metered. A budget, not a permission.
+func meterDemoAsk(c echo.Context, g demoMeter, project storage.Project, userID string) error {
+	if !project.IsDemo || sessionAllowsWrite(project) {
+		return nil
+	}
+	if project.ID != g.DemoProjectID() {
+		return echo.NewHTTPError(http.StatusForbidden, "The agent answers questions in the demo project. Connect your own project to ask it about your data.")
+	}
+	quota, err := g.ConsumeDemoAgentRun(c.Request().Context(), userID, demoAskLimit)
+	if err != nil {
+		return err
+	}
+	if !quota.Allowed {
+		return demoQuotaRefusal(c, quota)
+	}
+	user := userID
+	ctx := c.Request().Context()
+	c.Set(demoRefundKey, func() {
+		if err := g.RefundDemoAgentRun(ctx, user); err != nil {
+			c.Logger().Warnf("demo quota refund for %s: %v", user, err)
+		}
 	})
+	return nil
 }
 
 // demoQuotaRefusal answers the question after the last one the budget allowed.

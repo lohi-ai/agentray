@@ -40,7 +40,7 @@ func SandboxSessionFrom(ctx context.Context) string {
 // agentcore defines the contract only. A concrete backend (Docker container,
 // gVisor/Kata, micro-VM, …) is injected by the host via Env.Sandbox, keeping
 // this package a leaf with no infrastructure imports — the same boundary that
-// keeps the core reusable across agents (see docs/ARCHITECT-AGENT-BOUNDARY.md).
+// keeps the core reusable across agents (see agentcore/README.md).
 type Sandbox interface {
 	// Exec runs one command to completion inside an ephemeral sandbox and
 	// returns its captured output. It MUST NOT inherit the host process

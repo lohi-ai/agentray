@@ -6,13 +6,20 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
 // validation_routes.go — the owner's side of the pre-product pair. The public
 // half (the landing page posting a signup) lives in ingest/waitlist.go; these
 // routes are all authenticated and project-scoped through authProject, like
 // every other /api surface.
-func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
+//
+// The two writes resolve through authProjectForWrite instead: authProject binds
+// the project and the store then proves membership, which admits a viewer to
+// commit the threshold and decide the verdict. The class is the one the
+// operation surface already requires for the same act — plans:write, the class
+// propose_test, update_test, record_outcome and abandon_test carry.
+func registerValidationRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter) {
 	// The whole validate readout in one request: the active test, how it is
 	// doing, and the waitlist count. One call because /start renders them
 	// together and three round-trips would each flash their own empty state.
@@ -115,7 +122,7 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 	// to the number BEFORE the data arrives. Everything the readout says
 	// afterwards is only meaningful because this happened first.
 	e.POST("/api/validation/tests/:id/commit", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		ctx, project, err := authProjectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -126,7 +133,7 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store) {
 	})
 
 	e.POST("/api/validation/tests/:id/decide", func(c echo.Context) error {
-		ctx, project, err := authProject(c, store)
+		ctx, project, err := authProjectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}

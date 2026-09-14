@@ -778,6 +778,10 @@ ON workspace_members (user_id, workspace_id)`); err != nil {
 		return err
 	}
 	if _, err := s.pg.Exec(ctx, `
+UPDATE workspace_members SET role = 'member' WHERE role = 'viewer'`); err != nil {
+		return err
+	}
+	if _, err := s.pg.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS workspace_audit_logs (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

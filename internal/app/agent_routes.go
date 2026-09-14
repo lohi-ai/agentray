@@ -890,7 +890,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 	// otherwise returns the completed turn as one JSON body (back-compatible).
 	// `history` carries prior turns (client-held, no conversation store). ---
 	e.POST("/api/agent/chat", func(c echo.Context) error {
-		_, project, err := authProject(c, store)
+		auth, project, err := authProject(c, store)
 		if err != nil {
 			return err
 		}
@@ -939,17 +939,15 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 				return c.JSON(http.StatusOK, map[string]any{"steered": true, "delivered": true, "mode": mode})
 			}
 		}
-
+		if err := meterDemoAsk(c, store, project, auth.User.ID); err != nil {
+			return err
+		}
 		svc := agentruntime.NewChatService(store, runnerOpts...)
 		opts := agentruntime.ChatOptions{
 			ProjectID: project.ID, AgentID: c.QueryParam("agent"),
 			Message: payload.Message, History: chatHistory(payload.History),
 			SessionID: payload.SessionID,
-			// A question asked from inside the shared demo by a read-only
-			// member runs without the agent's writing tools (demo_guard.go).
-			// The guard already refused this caller's direct mutations; asking
-			// the agent to make them instead must not be the way around it.
-			ReadOnly: readOnlyCaller(c),
+			ReadOnly:  !sessionAllowsWrite(project),
 		}
 
 		if wantsEventStream(c) {
@@ -1027,13 +1025,15 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			string(agentcore.RoleUser), message, agentID, ctx.User.ID, "", 0); err != nil {
 			return err
 		}
+		if err := meterDemoAsk(c, store, project, ctx.User.ID); err != nil {
+			return err
+		}
 		svc := agentruntime.NewChatService(store, runnerOpts...)
 		opts := agentruntime.ChatOptions{
 			ProjectID: project.ID, AgentID: agentID,
 			Message: message, History: history,
 			SessionID: conv.ID, ConversationID: conv.ID,
-			// Same read-only run as /chat above, for the durable-thread path.
-			ReadOnly: readOnlyCaller(c),
+			ReadOnly:  !sessionAllowsWrite(project),
 		}
 		if wantsEventStream(c) {
 			return streamChat(c, svc, opts)
