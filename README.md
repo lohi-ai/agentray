@@ -1,118 +1,205 @@
 # AgentRay
 
-**Open-source analytics that runs your growth loop, not just your dashboards.**
+[English](README.md) · [Tiếng Việt](README.vi.md) · [中文](README.cn.md) · [日本語](README.jp.md) · [한국어](README.kr.md)
 
-Every analytics tool can tell you *what happened*. The real work — *measure →
-diagnose → test → learn* — falls to a human who rarely has time to run it, and
-the loop stalls at the dashboard. AgentRay ships that loop as the product: the
-same event store that powers your charts also powers **agents** that read the
-data, find the single weakest link in your funnel, design the smallest test,
-remember the result, and pick the thread back up next cycle.
+**Open-source product analytics that ends in a decision, not a dashboard.**
+
+AgentRay turns product activity and business data into marketing and operational
+decisions. Connect a website or app, see a trustworthy product overview, then use
+your preferred agent — Claude Code, Codex, or the built-in one — to investigate
+and improve it. The wedge is deliberately narrow: **instrument → understand →
+choose one measurable improvement.**
+
+Every analytics tool can tell you *what happened*. The work that matters —
+*measure → diagnose → test → learn* — usually falls to a human who has no time to
+run it, so the loop stalls at the chart. AgentRay ships that loop as the product:
+the same event store that draws your charts also answers your agents, from a
+one-off product question to a scheduled, unattended growth loop.
 
 Underneath is a complete product-analytics base you can self-host with one
-`docker compose up` — fast Go ingestion, cheap event storage in embedded
-DuckDB,
-instrumentation migrates by changing only the host. On top sits what other
-platforms bolt on: an MCP server and ready-made agent skills, so Claude Code or
-Codex works your real event data — from one-off product questions to a
-scheduled, unattended growth loop.
+`docker compose up` — Go ingestion, embedded DuckDB, Postgres for the control
+plane, PostHog-compatible capture, and SDKs for browser, iOS, Python and server.
 
-## What's inside
+## The three layers
+
+| Layer | What it owns |
+|---|---|
+| **Data** | Capture events; sync business records; maintain identity, schemas, freshness and lineage |
+| **Understanding** | Predefined metrics, dashboards, funnels, retention, people, reusable audiences |
+| **Decisions and work** | Evidence-backed plans and operational investigations |
+
+Basic analytics and setup work **without a model key and without an installed
+agent**. That is a requirement, not a fallback: the deterministic overview, the
+dashboards and the SDK verification all run from the event store alone.
+
+## Architecture
+
+```mermaid
+flowchart TD
+  sdk["Web / app SDKs<br/>browser · iOS · Python · server"]
+  biz["Business records<br/>Postgres tables"]
+  cap["Capture API<br/>/capture · /batch · /identify"]
+  stream["Durable ingestion<br/>NATS JetStream"]
+  sync["Connector engine<br/>snapshot · incremental"]
+  duck[("DuckDB<br/>events · persons · aliases · landed rows")]
+  pg[("PostgreSQL<br/>config · identities · plans")]
+  ops["Shared operations<br/>one registry, every adapter"]
+  ui["Product workspace<br/>overview · analytics · plans"]
+  ext["External agents<br/>Claude Code · Codex · MCP"]
+  garden["Agent Garden<br/>optional built-in runtime"]
+
+  sdk -->|HTTPS capture| cap
+  biz -->|pull| sync
+  cap --> stream
+  stream -->|batched writes| duck
+  sync -->|upsert| duck
+  ui -->|REST| ops
+  ext -->|MCP| ops
+  garden -->|tools| ops
+  ops -->|query / jobs| duck
+  ops -->|read / write| pg
+```
+
+The explorable version of this diagram — per-component detail, light and dark
+themes — is
+[`docs/redesign/architecture.html`](docs/redesign/architecture.html) (source:
+[`architecture.json`](docs/redesign/architecture.json), receipt:
+[`architecture.receipt.json`](docs/redesign/architecture.receipt.json)). The
+product and storage reasoning behind it is
+[`docs/redesign/strategy.md`](docs/redesign/strategy.md).
+
+### The code map
 
 The backend is four layers — **channels → workloads → runtime → dataplane** —
-mapped in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). `agentcore/` and
-`sandbox/` stay at the module root as the public runtime libraries.
+plus `internal/shared` and a composition root. The mapping, the import rules and
+a `TestLayerImportRules` that enforces them live in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-The foundation architecture (detailed in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
+| Layer | Path | Role |
+|---|---|---|
+| Channels | `internal/channels` | What starts work: `chat`, `mcp`, `schedule`, `webhook`, `lab` (reserved: `support_widget`, `voice`) |
+| Workloads | `internal/workloads` | Agent packs as config only: `validate`, `growth`, `marketing`, `data`, `operator` (reserved: `support`) |
+| Runtime | `internal/runtime` | AgentGarden, the `agentcore` loop, policy, sandbox |
+| Dataplane | `internal/dataplane` | `ingest` · `connector` · `store` · `usecase` · `alerting` |
 
-- Go ingestion API built with Echo
-- DuckDB raw event storage plus a session view
-- PostgreSQL project metadata, saved queries, and analyst feedback tables
-- Redis-backed rate limiting for ingestion endpoints
-- NATS-backed asynchronous ingestion from HTTP handlers into DuckDB
-- Next.js dashboard app in `web/` for project keys, activity, dashboards, and
-  chart management
-- MVP analytics workflows: insight builder, dashboard filters, templates, web
-  analytics, event explorer, agent session replay, and saved SQL-lite queries
-- PostHog-compatible `capture`, `batch`, and `identify` endpoints so existing
-  browser and backend instrumentation can move over incrementally
+`agentcore/` and `sandbox/` stay at the module root as the public runtime
+libraries. The Garden's design and the agent-team model are in
+[`docs/ARCHITECT-AGENTGARDEN.md`](docs/ARCHITECT-AGENTGARDEN.md) and
+[`docs/ARCHITECT-AGENT-TEAM.md`](docs/ARCHITECT-AGENT-TEAM.md).
 
-## Agent runtime as a library
+What is deliberately **not** here: three separate products (growth / ops / CS),
+a move of `agentcore`/`sandbox`, or a CDP. It is one runtime, one data plane,
+with packs and channels as config and adapters.
 
-The agent runtime powering AgentRay's growth loop is exported as two reusable Go
-packages you can import on their own:
+## Destinations
 
-- [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
-  OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
-  budget gating, and context compaction.
-- [`sandbox`](sandbox/) — read-only workspace tools (`read_file`, `grep`,
-  `glob`) for grounding an agent in a repository.
+The signed-in front door is `/overview` — the deterministic product read, not a
+chat box. Navigation names the job a product owner recognizes, not the backend
+layer that serves it ([`web/lib/ia.ts`](web/lib/ia.ts)):
 
-```bash
-go get github.com/lohi-ai/agentray@latest
-```
+| Destination | Job | Also reachable |
+|---|---|---|
+| **Overview** `/overview` | Understand usage, conversion, retention and data freshness | |
+| **Analytics** `/dashboard` | Explore acquisition, engagement, funnels, retention; save dashboards | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
+| **People** `/persons` | Inspect a person's activity and business attributes; save audiences | `/cohorts` |
+| **Data** `/events` | Connect SDKs and sources; inspect events, datasets and pipeline health | `/start` · `/replay` |
+| **Plans** `/plans` | Keep findings, evidence, proposed experiments and results | `/prototypes` |
+| **Agents** `/agents` | Connect an external agent; chat, operations, Garden, marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
+| **Settings** `/settings` | Workspace access, credentials, retention and usage | `/alerts` · `/pricing` (hosted only) |
 
-[Swatter](https://github.com/lohi-ai/swatter), the validated PR-review bugbot,
-is built entirely on these packages.
+Every pre-redesign URL still resolves: old top-level items became either an alias
+on the new destination or a child surface under it. Nothing redirects away, and
+no saved layout moves. A destination whose page does not exist yet renders as a
+non-linked "Coming soon" affordance — never a link the router cannot serve.
 
-## Why AgentRay
+## Numbers you can trust
 
-- Built for AI-first products: agent runs, tool usage, token cost, latency, and
-  failures fit the data model instead of feeling bolted on.
-- Easier to self-host: Go + embedded DuckDB + Postgres is simpler to reason about
-  than a much larger analytics platform.
-- Familiar migration path: it accepts the common event payload shape teams
-  already send today.
-- Open-source by default: the storage layer and local workflow are readable,
-  hackable, and designed for extraction into a standalone repository.
+The product's load-bearing rule: **a metric with no verified source renders its
+state, never a fabricated zero.**
 
-## Current Scope
+- `Set up` — the capability is uninstrumented; the copy names the required
+  instrumentation.
+- `Not ready` — the cohort is too immature to answer (a D7 number on day 2).
+- `No data` — nothing in the selected range, stated as such.
+- `Not available` — the metric cannot be answered as posed, rather than being
+  answered wrongly (an unlike-currency comparison has no FX rate behind it).
+- `Stale` — last-known figures stay visible, timestamped "As of …", with the
+  affected metrics named.
 
-The current service is the ingestion and storage base layer:
+There is exactly one day-boundary convention: the project timezone. Rates never
+round a real conversion down to `0%` — 16 of 4,783 is 0.3%, not zero — and a
+trend chart carries a textual equivalent. This is enforced in the UI's own
+helpers (`formatRate`, `metricTile`) rather than left to each panel.
 
-- `POST /capture`
-- `POST /batch`
-- `POST /identify`
-- `GET /api/events`
-- `GET /api/sessions`
-- `GET /api/activity`
-- `GET|POST /api/projects`
-- `POST /api/projects/:project_id/rotate-key`
-- `GET|POST|PUT|DELETE /api/dashboards`
-- `GET|POST /api/dashboards/:dashboard_id/charts`
-- `PUT|DELETE /api/charts/:chart_id`
-- `GET /api/insights/run`
-- `GET /api/templates`
-- `POST /api/templates/:template_id/apply`
-- `GET /api/web-analytics`
-- `GET /api/persons`
-- `GET /api/events/explore`
-- `GET /api/sessions/:session_id/replay`
-- `GET|POST /api/saved-queries`
-- `POST /api/saved-queries/:query_id/run`
-- `POST /api/sql/run`
-- `GET /healthz`
+## One capability layer, every agent
 
-Supported compatibility aliases:
+There is **one operation registry**
+([`internal/shared/opcore`](internal/shared/opcore), populated by
+[`internal/dataplane/usecase/analytics.go`](internal/dataplane/usecase/analytics.go)),
+and every surface is a projection of it:
 
-- `POST /e/`
-- `POST /e`
-- `POST /i/v0/e/`
-- `POST /i/v0/e`
+| Adapter | Surface |
+|---|---|
+| REST | `POST /api/op/<operation>` |
+| MCP | `POST /mcp` (JSON-RPC 2.0) |
+| In-process agent tools | `opcore.Tools` → `agentcore.Tool` |
+| CLI | `agentray <operation> '<json>'` |
 
-Both `api_key` and `token` are accepted for project authentication.
+Adding an operation therefore adds it to the web app, the MCP server, the
+in-app agent, and the CLI at once. The registry covers analytics
+(`activity_summary`, `recent_events`, `explore_events`, `persons`, `overview`,
+`run_insight`, `run_funnel`, `run_retention`, `run_sql`), dashboards and charts
+(`list_dashboards` … `archive_chart`), sources (`test_source`, `preview_source`,
+`run_source`, `source_status`, `cancel_source_run`), and Plans
+(`submit_recommendation`, `propose_test`, `update_test`, `record_outcome`,
+`abandon_test`, `list_findings`, `list_tests`), plus `remember`,
+`send_notification` and `verify_sdk`.
 
-Ingestion requests follow the foundation architecture from
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
+### Two credentials, two jobs
 
-```text
-HTTP API -> Redis rate limit -> NATS queue -> DuckDB storage
-```
+A **capture key** feeds events. It cannot run a single operation. Operations
+authenticate with a scoped, revocable **management credential** (`agm_…`),
+stored only as a SHA-256 hash and shown exactly once at creation.
 
-Every new project (signup, workspace project creation, and the default local
-project) is auto-seeded with a "Product overview" dashboard holding four
-predefined charts — event trend, top events, sessions, and agent cost — so the
-Dashboards tab gives a readable answer before any custom chart is built.
+| Scope | Grants |
+|---|---|
+| `analytics:read` | summaries, event reads, insights, funnels, retention, dashboard listing, SDK verification |
+| `dashboards:write` | dashboard and chart authoring, reorder, archive |
+| `sources:read` | probe, preview, status |
+| `sources:manage` | create, update, pause, run, cancel (implies `sources:read`) |
+| `plans:write` | findings and experiments: submit, propose, update, record outcome, abandon |
+| `growth:write` | memory and notification writes (`remember`, `send_notification`) |
+
+Resolution is deterministic and never downgrades: a management credential wins,
+then a project API key, then the session cookie — and a `Bearer` that is present
+but is not a valid `agm_` credential is **rejected outright** rather than falling
+through to a broader identity. New projects are born split, so the capture key is
+capture-only from day one. Pre-split ("legacy") projects keep their existing key
+for management under a frozen allowlist until
+`POST /api/projects/:project_id/credential-split` moves them across — which
+requires at least one live credential first, because splitting without one would
+brick every key-authenticated client.
+
+## Business data
+
+Events and synced records are kept distinct on purpose. An order row is current
+business state; an `order_paid` event is a fact at a point in time. Joining them
+without a grain and identity contract is how double counts get built.
+
+The connector engine ([`internal/dataplane/connector`](internal/dataplane/connector))
+ships a **PostgreSQL** source. Sync is keyset-paginated and retry-safe:
+
+- **Incremental** — a cursor column plus a primary-key tiebreak, so a run
+  resumes where it stopped.
+- **Snapshot** — no cursor column: the whole table is re-pulled each run and
+  deduplicated by `(project, connector, table, row_key)`. Hitting the batch cap
+  reports truncation rather than silently landing a partial table.
+
+Landed rows live in DuckDB's `external_rows` and **ride the same durable stream
+as events**, so a blue-green colour switch replays them exactly like events
+instead of losing them. Timestamp polling cannot discover hard deletes: a
+tombstone feed or periodic reconciliation is required, and CDC is not advertised
+until it exists.
 
 ## SDKs
 
@@ -133,9 +220,9 @@ get it; it builds, tests and releases itself.
 artefact actually contains the code. Cutting a release:
 [docs/RELEASING-SDK.md](docs/RELEASING-SDK.md).
 
-**Every SDK stamps a `platform` property** (`web` / `ios` / `server`), which is
-what Traffic's platform split and the per-platform funnel read. See
-["Which app did this come from?"](#which-app-did-this-come-from) below.
+**Every SDK stamps a `platform` property** (`web` / `ios` / `android` /
+`server`), which is what Traffic's platform split and the per-platform funnel
+read. See ["Which app did this come from?"](#which-app-did-this-come-from) below.
 
 **Browser — no npm.** Paste before `</body>` (Framer, Carrd, Webflow, or a
 plain HTML file). Source of truth:
@@ -280,20 +367,13 @@ agentray activity_summary '{"hours":24}'
 agentray run_sql '{"sql":"SELECT count() FROM events"}'
 ```
 
-The operation set IS the shared registry — the same definitions the server
-exposes as REST, MCP tools, and in-process agent tools.
-
-**Two credentials, two jobs.** The key `agentray key` prints is the *capture*
-key: it feeds events and, on a project that has opted into the
-capture/management split (every project the API creates), it cannot run a single
-operation. Operations authenticate with a scoped, revocable management
-credential (`agm_…`) the CLI mints for the selected project and keeps in the
-same `0600` config. Its scope set is derived from the shared registry, so it
-covers every operation the CLI can dispatch — including `submit_recommendation`,
-`propose_test`, `update_test`, `record_outcome`, `abandon_test`, `remember` and
-`send_notification`. Minting is owner/admin-only: a member or viewer still logs
-in and still gets the capture key, and the CLI says plainly that operations will
-be refused until an owner or admin mints a credential.
+`agentray key` deliberately prints the **capture** key, because that is the SDK
+flow (`export AGENTRAY_API_KEY=$(agentray key)`) and printing a private scoped
+secret into SDK config would be the wrong default. Operations use the management
+credential the CLI mints once per project at login and keeps in the same `0600`
+config — minting is owner/admin-only, and a member or viewer still logs in, still
+gets the capture key, and is told plainly that operations will be refused until
+an owner or admin mints a credential.
 
 **The credential is revoked, never abandoned.** Selecting another project
 (`agentray key --project <name>`) revokes the credential bound to the project
@@ -307,19 +387,28 @@ key.
 
 ## AI Agents & MCP
 
-AgentRay exposes its analytics operations to external AI agents (Claude Code,
-Codex, any MCP client) over an **MCP server** at `POST /mcp`. The agent can read
-activity, run funnels/retention/SQL over your events, and pin dashboards — the
-same operations the in-app analyst and the web client use, with no second API to
-learn.
+AgentRay exposes its operations to external AI agents (Claude Code, Codex, any
+MCP client) over an **MCP server** at `POST /mcp` — JSON-RPC 2.0, tools only.
+The agent can read activity, run funnels/retention/SQL over your events, and pin
+dashboards: the same operations the in-app agent and the web client use, with no
+second API to learn. `tools/list` advertises only what the calling credential may
+invoke, and `tools/call` re-authorizes by name.
 
-### Connect from Claude Code
-
-Authenticate with a project API key (Settings → project → API key) passed as a
-request header:
+**Auth is a management credential, not the capture key.** A capture key is
+denied outright, because it would let anyone holding a browser-embedded key
+rewrite your dashboards. Mint a scoped `agm_…` credential first (owner/admin;
+the secret is shown once):
 
 ```sh
-claude mcp add --transport http --header "X-API-Key: <project-key>" \
+curl -X POST https://agentray.lohi2.com/api/projects/$PROJECT_ID/credentials \
+  -H 'Content-Type: application/json' --cookie "$SESSION" \
+  -d '{"name":"claude-code","scopes":["analytics:read","dashboards:write"]}'
+```
+
+Then connect:
+
+```sh
+claude mcp add --transport http --header "Authorization: Bearer <agm_…>" \
   agentray https://agentray.lohi2.com/mcp
 ```
 
@@ -327,23 +416,15 @@ Codex:
 
 ```sh
 codex mcp add agentray --url https://agentray.lohi2.com/mcp \
-  --header "X-API-Key: <project-key>"
+  --header "Authorization: Bearer <agm_…>"
 ```
 
 Self-hosted: swap the host for your instance (e.g. `http://localhost:8088/mcp`).
-The API key scopes every call to one project — there is no separate login step.
-
-### What the agent can do
-
-The MCP tools are projected from the operation registry, so they stay in sync
-with the in-app agent and REST API:
-
-- `activity_summary`, `recent_events` — monitoring and incident triage
-- `explore_events`, `persons` — data-quality and audience sizing
-- `run_insight` (timeseries / funnel / retention), `run_sql` (SELECT-only) —
-  analysis
-- `list_dashboards`, `create_dashboard`, `create_chart` — pin views
-- `submit_recommendation`, `remember` — capture findings
+A signed-in browser session also authenticates, which is how the in-app agent
+reaches the same operations without a second credential. A `Bearer` header that
+is not an `agm_` credential is rejected rather than downgraded to the session.
+A project that predates the credential split can still use its project key here,
+under the frozen legacy allowlist.
 
 ### Agent Skills
 
@@ -378,6 +459,9 @@ mkdir -p ~/.codex/skills && cp -R .agents/skills/* ~/.codex/skills/
 ```
 
 ## Local Development
+
+[`docs/QUICKSTART.md`](docs/QUICKSTART.md) is the guided path — clone, first real
+event, first agent answer, in about 15 minutes. The manual version:
 
 Start the full local stack:
 
@@ -436,13 +520,74 @@ Open the dashboard:
 open http://localhost:3200
 ```
 
-Run the dashboard app without Docker:
+Run the API or the dashboard app without Docker:
 
 ```bash
-cd web
-bun install
-NEXT_PUBLIC_AGENTRAY_API_URL=http://localhost:8088 bun run dev
+make dev                                         # Go API with air hot reload
+cd web && pnpm install && pnpm dev               # Next.js on :3200
 ```
+
+## Ingestion
+
+```text
+HTTP API → Redis rate limit → NATS JetStream (durable) → batched writer → DuckDB
+```
+
+The API returns as soon as the broker acknowledges the message, not when DuckDB
+has it — that is what keeps a slow write off the request path. A durable consumer
+applies batches, acknowledging only after the write lands, so the consumer's ack
+floor *is* the store's position. `POST /capture`, `/batch` and `/identify` are
+PostHog-compatible, and both `api_key` and `token` authenticate a project.
+Compatibility aliases `/e/`, `/e`, `/i/v0/e/` and `/i/v0/e` are accepted;
+the `/i/v0/e*` pair maps to the batch handler, so it expects a `batch` array
+rather than a single event.
+
+Every new project (signup, workspace project creation, and the default local
+project) is auto-seeded with a "Product overview" dashboard holding four
+predefined charts — event trend, top events, sessions, and agent cost — so the
+Dashboards tab gives a readable answer before any custom chart is built.
+
+## Storage
+
+| Store | Holds |
+|---|---|
+| **DuckDB** (embedded, one file per deploy colour) | `events`, `persons`, `aliases`, `external_rows`, `ingest_position`, and a `sessions` view that rolls session aggregates forward as events arrive |
+| **PostgreSQL** | Users, sessions, workspaces, projects and API keys, dashboards, charts, saved queries, connectors, agents, Plans |
+
+DuckDB is single-writer MVCC: writes serialize through a one-slot gate, and
+reads admit a bounded number of snapshot readers, so a dashboard's parallel tiles
+cannot pin the file and a queued reader cannot starve the writer. Untrusted agent
+SQL runs in a **separate child process** with its own in-memory database holding
+only that project's rows — no files, no network, no credentials — because a
+SELECT-only regex is not a tenant boundary.
+
+A daily sweep deletes events older than `EVENT_RETENTION_DAYS` (default 365; `0`
+keeps every event). That bounds how long the event log lives, not how large the
+file gets: the same file also holds `persons`, `aliases` and connector landing
+rows, none of which the sweep touches, so disk capacity still needs watching.
+
+The DuckDB decision itself — including the reproducible comparison harness under
+[`storage-evaluation/`](storage-evaluation/) and its explicitly NOT RUN gates —
+is recorded in [`docs/redesign/strategy.md`](docs/redesign/strategy.md). The
+as-built data path, capture → store → analytics → agent, is
+[`docs/DESIGN-DATA-ARCHITECTURE.md`](docs/DESIGN-DATA-ARCHITECTURE.md).
+
+## Deployment
+
+`infra/gce/deploy.sh --env <dev|prod>` rolls the VM blue-green behind Caddy. A
+deploy starts the colour that is *not* serving, waits for it to report healthy,
+then flips the upstream; a broken build never sees a request, and rollback is
+just not flipping.
+
+The healthcheck targets `/readyz`, not `/healthz`, and that gate is a **data
+coherence** gate. A fresh colour replays the durable stream on first boot, and
+until it has applied every row it answers `503` — because a colour still
+replaying would serve queries from a DuckDB file with a hole in it. Each colour
+owns its own file and its own durable; a shared file would lock out the incoming
+colour and a shared volume would corrupt it. `/readyz` refuses with a reason, and
+three of those reasons never clear by waiting (`purged-gap`, `store-behind`,
+`stream-mismatch`) — the deploy script's header documents what each means and
+what the operator owns.
 
 ## End-to-End Test
 
@@ -460,25 +605,21 @@ AGENTRAY_E2E_INFRA_HOST=host.docker.internal \
   go test -tags=e2e ./internal/app -run TestAnalyticsServiceE2E -count=1 -v
 ```
 
-## Schema Notes
+## Verification
 
-The storage model is tuned for the roadmap without overbuilding the MVP:
+```bash
+make check                                       # go vet + the deterministic unit suite
+cd web && pnpm test && pnpm lint                  # dashboard app
+make sdk-check                                    # browser + server + python + swift
+```
 
-- Raw events stay append-only in DuckDB, and a daily sweep deletes events
-  older than `EVENT_RETENTION_DAYS` (default 365; `0` keeps every event), which
-  bounds how long the event log lives rather than how large the file gets: that
-  file also holds `persons`, `aliases` and connector landing rows, none of which
-  the sweep touches, so disk capacity still needs watching. The default restores
-  the window the pre-DuckDB ClickHouse schema enforced.
-- A `sessions` view rolls session aggregates forward as events
-  arrive, which keeps common session analytics cheap.
-- PostgreSQL keeps relational metadata and adds indexes for the read paths that
-  are already present in the design.
+`make check` needs no credentials: the real-provider agent tests skip unless
+`AGENTRAY_TEST_OPENAI_*` is set (`make test-agents` runs those for real).
 
 ## Dependency Baseline
 
-AgentRay currently targets Go `1.25` and the latest dependency set verified in
-container build during this migration:
+AgentRay targets Go `1.25` and the dependency set verified in the container
+build:
 
 - `github.com/duckdb/duckdb-go/v2 v2.10505.0`
 - `github.com/jackc/pgx/v5 v5.10.0`
@@ -487,16 +628,23 @@ container build during this migration:
 - `github.com/redis/go-redis/v9 v9.20.0`
 - Next.js `16.1.6`, React `19.2.3`, and Apache ECharts `6.1.0` in `web/`
 
-## Roadmap
+## Agent runtime as a library
 
-The living roadmap — current priorities, acceptance criteria, and sequencing —
-lives in [`ROADMAP.md`](ROADMAP.md), with the detailed engineering breakdown in
-[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+The runtime powering AgentRay's growth loop is exported as two reusable Go
+packages you can import on their own:
 
-## Naming
+- [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
+  OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
+  budget gating, and context compaction.
+- [`sandbox`](sandbox/) — workspace tools (`read_file`, `grep`, `glob`,
+  `web_fetch`) for grounding an agent in a repository.
 
-`AgentRay` is the product name because it is short, easy to say, and signals
-visibility into agent behavior instead of generic web analytics.
+```bash
+go get github.com/lohi-ai/agentray@latest
+```
+
+[Swatter](https://github.com/lohi-ai/swatter), the validated PR-review bugbot,
+is built entirely on these packages.
 
 ## License
 
