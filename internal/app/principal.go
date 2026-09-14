@@ -79,7 +79,7 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 		Kind:      opcore.CredSession,
 		Role:      project.Role,
 		UserID:    auth.User.ID,
-		Grants:    sessionGrants(project.Role),
+		Grants:    sessionGrants(project),
 	}, nil
 }
 
@@ -98,14 +98,14 @@ func principalFromRequest(c echo.Context, store *storage.Store) (opcore.Principa
 // grants nothing. Capture principals never reach here — both resolvers refuse
 // them first.
 //
-// A session keeps the key only when its resolved role may write. That is not
+// A session keeps the key only when Allow would let it write. That is not
 // redundant with the kind check: these resolvers load the row through
-// store.ProjectByID, which is role-blind, so a viewer's session would otherwise
-// come back holding the project's ingest key — the escalation
+// store.ProjectByID, which is role-blind, so a demo member's session would
+// otherwise come back holding the project's ingest key — the escalation
 // redactAPIKeyForRole already refuses on every path that loads through
 // ProjectByIDForUser.
 func projectForPrincipal(project storage.Project, principal opcore.Principal) storage.Project {
-	if principal.Kind != opcore.CredSession || !storage.RoleMayWrite(principal.Role) {
+	if principal.Kind != opcore.CredSession || !sessionWriteFloor.Allow(principal, legacyWrite(opcore.AccessDashboardsWrite)) {
 		project.APIKey = ""
 	}
 	return project
@@ -151,14 +151,19 @@ func managementGrants(scopes []string) []opcore.Access {
 	return out
 }
 
-// sessionGrants maps a workspace role onto the operation access classes the
-// matrix assigns it. Viewer gets analytics read plus sources:read (the matrix
-// allows a viewer source_status; the probe operations carry MinSessionRole
-// "admin" so the class alone never lets a viewer touch a credential).
-// Member adds dashboard and growth writes; owner/admin add source management.
-// An unrecognized role gets NOTHING — a role the vocabulary does not know is
-// not a viewer by accident.
-func sessionGrants(role string) []opcore.Access {
+// sessionGrants maps a workspace membership onto the operation access classes
+// the matrix assigns it. The project carries the demo fact — a boolean the
+// caller could forget would let a demo member inherit full member grants, and
+// the write floor would let them through.
+//
+// Demo non-owners get analytics read plus sources:read. Owner/admin of the
+// demo workspace keep full grants. Member adds dashboard and growth writes;
+// owner/admin add source management. An unrecognized role gets NOTHING.
+func sessionGrants(project storage.Project) []opcore.Access {
+	role := project.Role
+	if project.IsDemo && role != "owner" && role != "admin" {
+		return []opcore.Access{opcore.AccessAnalyticsRead, opcore.AccessSourcesRead}
+	}
 	switch role {
 	case "owner", "admin":
 		return []opcore.Access{
@@ -172,11 +177,23 @@ func sessionGrants(role string) []opcore.Access {
 			opcore.AccessSourcesRead, opcore.AccessGrowthWrite,
 			opcore.AccessPlansWrite,
 		}
-	case "viewer":
-		return []opcore.Access{opcore.AccessAnalyticsRead, opcore.AccessSourcesRead}
 	default:
 		return nil
 	}
+}
+
+// sessionWriteFloor is the one Allow question the mutating floor asks of a
+// session. An empty registry is enough: Allow's CredSession arm does not
+// consult registered operations. Credential principals never reach this
+// helper — the guard still short-circuits API keys.
+var sessionWriteFloor = &opcore.Registry{}
+
+func sessionAllowsWrite(project storage.Project) bool {
+	return sessionWriteFloor.Allow(opcore.Principal{
+		Kind:   opcore.CredSession,
+		Role:   project.Role,
+		Grants: sessionGrants(project),
+	}, legacyWrite(opcore.AccessDashboardsWrite))
 }
 
 // registerCredentialRoutes mounts the session-only management-credential

@@ -22,8 +22,8 @@ import { readPreferredProjectID, writePreferredProjectID } from '@/lib/project-p
 // useProjectAccess answers "may this person change what they are looking at?"
 // from the two facts the API stamps on every project — the caller's role in the
 // owning workspace and whether that workspace is the shared demo. Every write
-// affordance reads it, so a viewer sees a disabled control with a reason rather
-// than a live button that ends in a 403.
+// affordance reads it, so a demo visitor sees a disabled control with a reason
+// rather than a live button that ends in a 403.
 export function useProjectAccess(): ProjectAccess {
   const project = useAuthStore((s) => s.project);
   return projectAccess(project);
@@ -171,7 +171,7 @@ export function useTour(agentName?: string) {
     if (readPreferredProjectID()) return;
     if (!demo.project) return;
     landed.current = true;
-    activate(demo.project, demo.workspace?.id ?? '', `Reading ${demo.project.name} — a real site someone else runs. You’re a viewer here.`);
+    activate(demo.project, demo.workspace?.id ?? '', `Reading ${demo.project.name} — a real site someone else runs.`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input.ready, input.hasDemo, input.inDemo, input.ownEventNameCount, demo.project?.id]);
 
@@ -210,7 +210,7 @@ export function useTour(agentName?: string) {
     ownProject,
     armAgentName: armTarget?.name ?? '',
     arming: arm.isPending,
-    openDemo: () => activate(demo.project, demo.workspace?.id ?? '', `Reading ${demo.project?.name ?? 'the demo'} — you’re a viewer here.`),
+    openDemo: () => activate(demo.project, demo.workspace?.id ?? '', `Reading ${demo.project?.name ?? 'the demo'} — a real site someone else runs.`),
     openOwn: () => activate(ownProject, own.workspace?.id ?? '', `Switched to ${ownProject?.name ?? 'your project'}.`),
     arm: () => { void arm.mutateAsync().catch(() => {}); },
   };

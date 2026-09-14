@@ -15,22 +15,18 @@ import (
 // own workspace, indistinguishable from data the owner had collected.
 //
 // It is now one REAL project, on a site the instance operator actually runs,
-// that every account joins as a read-only viewer. Nothing is generated; what a
-// new user sees on their first session is traffic that happened.
+// that every account joins as a member. Nothing is generated; what a new user
+// sees on their first session is traffic that happened. Writes are refused by
+// session grants (the demo fact lives on the project) plus the mutating floor,
+// not by a second role.
 //
 // AGENTRAY_DEMO_PROJECT_ID names that project. Empty — the default, and every
 // `docker compose up` — means this instance has no demo, and every path here
 // degrades to a no-op rather than to a half-configured one.
 
-// DemoViewerRole is the membership a signed-up visitor gets in the demo
-// workspace. It is never owner or admin: the demo is someone else's site, and a
-// viewer is there to read it. (What a viewer may not DO is enforced separately;
-// this file only establishes the fact.)
-const DemoViewerRole = "viewer"
-
 // migrateDemoWorkspace resolves the configured demo project to the workspace
-// that owns it, then backfills the viewer membership for everyone who signed up
-// before the demo existed. Runs on every boot and must be safe to; see
+// that owns it, then backfills membership for everyone who signed up before
+// the demo existed. Runs on every boot and must be safe to; see
 // backfillDemoViewers for why re-running cannot demote anyone.
 //
 // A misconfigured or deleted demo project is NOT a boot failure. The instance
@@ -61,27 +57,30 @@ WHERE id = NULLIF($1, '')::uuid`, cfg.DemoProjectID).Scan(&projectID, &workspace
 	}
 	s.demoProjectID = projectID
 	s.demoWorkspaceID = workspaceID
+	if _, err := s.pg.Exec(ctx, `
+UPDATE projects SET credential_split_at = now()
+WHERE id = $1::uuid AND credential_split_at IS NULL`, projectID); err != nil {
+		fmt.Printf("warn: demo credential split (%s): %v\n", projectID, err)
+	}
 	if err := s.backfillDemoViewers(ctx); err != nil {
-		// Same reasoning as above: an account that misses the demo has a working
-		// account. The next boot retries, and signup grants it directly.
 		fmt.Printf("warn: backfillDemoViewers(%s): %v\n", workspaceID, err)
 	}
 	return nil
 }
 
-// backfillDemoViewers gives every existing user the viewer membership a new
+// backfillDemoViewers gives every existing user the demo membership a new
 // signup gets. ON CONFLICT DO NOTHING is the whole idempotency story AND the
 // whole safety story: the demo site's real operator is presumably an owner of
-// that workspace, and a boot that quietly demoted them to viewer would lock
-// them out of their own data.
+// that workspace, and a boot that quietly demoted them to member would not
+// lock them out of writes they already had, but it would still be wrong.
 func (s *Store) backfillDemoViewers(ctx context.Context) error {
 	if s.demoWorkspaceID == "" {
 		return nil
 	}
 	_, err := s.pg.Exec(ctx, `
 INSERT INTO workspace_members (workspace_id, user_id, role)
-SELECT $1::uuid, u.id, $2 FROM users u
-ON CONFLICT (workspace_id, user_id) DO NOTHING`, s.demoWorkspaceID, DemoViewerRole)
+SELECT $1::uuid, u.id, 'member' FROM users u
+ON CONFLICT (workspace_id, user_id) DO NOTHING`, s.demoWorkspaceID)
 	return err
 }
 
@@ -94,10 +93,11 @@ func (s *Store) addDemoViewer(ctx context.Context, userID string) error {
 	}
 	_, err := s.pg.Exec(ctx, `
 INSERT INTO workspace_members (workspace_id, user_id, role)
-VALUES ($1::uuid, $2::uuid, $3)
-ON CONFLICT (workspace_id, user_id) DO NOTHING`, s.demoWorkspaceID, userID, DemoViewerRole)
+VALUES ($1::uuid, $2::uuid, 'member')
+ON CONFLICT (workspace_id, user_id) DO NOTHING`, s.demoWorkspaceID, userID)
 	return err
 }
+
 
 // DemoWorkspaceID is the workspace that owns the configured demo project, or ""
 // when this instance has no demo. Exported so HTTP handlers can answer "is this

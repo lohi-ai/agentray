@@ -375,7 +375,7 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 (`export AGENTRAY_API_KEY=$(agentray key)`), còn in một secret có scope vào config
 SDK thì là mặc định sai. Operation dùng management credential mà CLI tạo một lần
 cho mỗi project lúc login và giữ trong cùng file config `0600` — chỉ owner/admin
-mới tạo được, và member hay viewer vẫn login được, vẫn lấy được capture key, và
+mới tạo được, và member vẫn login được, vẫn lấy được capture key, và
 được nói thẳng rằng operation sẽ bị từ chối cho tới khi owner hoặc admin tạo
 credential.
 

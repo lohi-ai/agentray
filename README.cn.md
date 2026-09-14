@@ -370,7 +370,7 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 （`export AGENTRAY_API_KEY=$(agentray key)`），把一个私有的、带 scope 的
 secret 打进 SDK config 是个错误的默认值。operation 用的是 CLI 在登录时为
 每个项目 mint 一次、存在同一个 `0600` config 里的 management
-credential：mint 只有 owner/admin 能做；member 或 viewer 照样能登录、照
+credential：mint 只有 owner/admin 能做；member 照样能登录、照
 样拿到 capture key，并且会被明确告知，在 owner 或 admin mint 出凭证之
 前，operation 一律拒绝。
 

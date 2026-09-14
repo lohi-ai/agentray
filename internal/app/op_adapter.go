@@ -218,7 +218,7 @@ func sessionPrincipal(c echo.Context, store *storage.Store, userID, projectID st
 		Kind:      opcore.CredSession,
 		Role:      project.Role,
 		UserID:    userID,
-		Grants:    sessionGrants(project.Role),
+		Grants:    sessionGrants(project),
 	}, project, nil
 }
 

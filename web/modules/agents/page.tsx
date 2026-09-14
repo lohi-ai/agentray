@@ -40,7 +40,7 @@ export function AgentsPage() {
   const spend = agents.reduce((sum, a) => sum + a.cost_usd, 0);
   const spendUnpriced = agents.some((a) => a.cost_unpriced);
 
-  // A demo viewer reads the roster — hiring, assigning, and setup all write.
+  // A demo visitor reads the roster — hiring, assigning, and setup all write.
   const access = useProjectAccess();
   const onCreate = () => setCreating(true);
 

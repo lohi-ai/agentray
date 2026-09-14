@@ -80,8 +80,6 @@ func TestAuthorizeMatrix(t *testing.T) {
 		{"session member reads", Principal{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}}, "echo", true},
 		{"session member cannot probe", Principal{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}}, "probe_source", false},
 		{"session member reads status", Principal{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}}, "source_status", true},
-		{"session viewer reads status", Principal{Kind: CredSession, Role: "viewer", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}}, "source_status", true},
-		{"session viewer cannot probe", Principal{Kind: CredSession, Role: "viewer", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}}, "probe_source", false},
 		{"session admin probes", Principal{Kind: CredSession, Role: "admin", Grants: []Access{AccessSourcesRead, AccessSourcesManage}}, "probe_source", true},
 		{"session unknown role denied", Principal{Kind: CredSession, Role: "superuser", Grants: []Access{AccessAnalyticsRead}}, "probe_source", false},
 		// unclassed op: denied to everyone
@@ -107,13 +105,13 @@ func TestAllowedSpecsFilters(t *testing.T) {
 	if len(legacy) != 1 || legacy[0].OpName() != "echo" {
 		t.Fatalf("legacy sees %v, want [echo]", toolNames(legacy))
 	}
-	viewer := r.AllowedSpecs(Principal{Kind: CredSession, Role: "viewer", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}})
+	reader := r.AllowedSpecs(Principal{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}})
 	got := map[string]bool{}
-	for _, s := range viewer {
+	for _, s := range reader {
 		got[s.OpName()] = true
 	}
 	if !got["echo"] || !got["source_status"] || got["probe_source"] || got["write_dash"] || got["unclassed"] {
-		t.Fatalf("viewer tools = %v", toolNames(viewer))
+		t.Fatalf("read-only session tools = %v", toolNames(reader))
 	}
 }
 
@@ -164,10 +162,6 @@ func TestAllowMatrix(t *testing.T) {
 		{"writer allowed its class", management(AccessDashboardsWrite), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, true},
 		{"writer refused another class", management(AccessDashboardsWrite), Requirement{Access: AccessPlansWrite, MinSessionRole: "member"}, false},
 
-		// sessions: the class and the role floor together. A viewer holds no
-		// write class, and an unknown role writes nothing.
-		{"viewer may read", session("viewer", AccessAnalyticsRead, AccessSourcesRead), Requirement{Access: AccessAnalyticsRead}, true},
-		{"viewer may not write", session("viewer", AccessAnalyticsRead, AccessSourcesRead), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, false},
 		{"member may write", session("member", AccessAnalyticsRead, AccessDashboardsWrite, AccessPlansWrite), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, true},
 		{"member cannot take an admin floor", session("member", AccessAnalyticsRead, AccessSourcesRead, AccessSourcesManage), Requirement{Access: AccessSourcesManage, MinSessionRole: "admin"}, false},
 		{"unknown role may read", session("superuser", AccessAnalyticsRead), Requirement{Access: AccessAnalyticsRead}, true},
@@ -192,7 +186,6 @@ func TestAllowAgreesWithAuthorize(t *testing.T) {
 		{Kind: CredManagement, Grants: []Access{AccessDashboardsWrite}},
 		{Kind: CredManagement, Grants: []Access{AccessSourcesRead}},
 		{Kind: CredManagement, Grants: []Access{AccessPlansWrite}},
-		{Kind: CredSession, Role: "viewer", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}},
 		{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessDashboardsWrite, AccessGrowthWrite, AccessPlansWrite, AccessSourcesRead}},
 		{Kind: CredSession, Role: "admin", Grants: []Access{AccessAnalyticsRead, AccessDashboardsWrite, AccessGrowthWrite, AccessPlansWrite, AccessSourcesRead, AccessSourcesManage}},
 		{Kind: CredentialKind("robot")},

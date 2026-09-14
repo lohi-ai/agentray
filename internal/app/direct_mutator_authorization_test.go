@@ -320,37 +320,17 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 		t.Fatalf("sources credential: %v", err)
 	}
 
-	// A viewer of the same workspace — a real member, admitted to the project,
-	// read-only by role.
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("direct-mutator-viewer-%d@test.local", stamp), "Viewer", "password-123", "viewer-ws", "viewer-proj")
-	if err != nil {
-		t.Fatalf("create viewer: %v", err)
-	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
-	}
-	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
-	if err != nil {
-		t.Fatalf("viewer session: %v", err)
-	}
-
 	fixture := seedDirectMutatorFixture(t, s, project.ID)
 
 	reader := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + readerSecret}, mayRunReads: true}
 	sources := caller{name: "sources:read credential", headers: map[string]string{"Authorization": "Bearer " + sourceSecret}}
-	viewerCaller := caller{
-		name:        "viewer session",
-		cookies:     []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}},
-		projectID:   project.ID,
-		mayRunReads: true,
-	}
 
 	// Every credential that may not change this project is refused by every
 	// route that changes it, and the refusal is the whole request: the state
 	// below is compared afterwards.
 	before := snapshotDirectMutatorState(t, s, project.ID)
 	for _, tc := range directMutatorCases() {
-		for _, who := range []caller{reader, sources, viewerCaller} {
+		for _, who := range []caller{reader, sources} {
 			if tc.kind == readRoute && who.mayRunReads {
 				// Running SQL is analytics:read — the class /api/op's run_sql
 				// requires and the call the demo lets a viewer make — so the
@@ -743,7 +723,7 @@ func pathMatches(pattern, path string) bool {
 //
 // The row's own status is the assertion that matters: not "the handler said no"
 // but "the store was never reached".
-func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
+func TestAMemberCanCommitAndDecideWithoutADemo(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
 	e := mountServerRoutes(t, s)
@@ -753,21 +733,12 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
 	}
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("validation-viewer-%d@test.local", stamp), "Viewer", "password-123", "vws", "vproj")
-	if err != nil {
-		t.Fatalf("create viewer: %v", err)
-	}
 	member, err := s.CreateAccount(ctx, fmt.Sprintf("validation-member-%d@test.local", stamp), "Member", "password-123", "mws", "mproj")
 	if err != nil {
 		t.Fatalf("create member: %v", err)
 	}
-	for _, m := range []struct {
-		boot storage.AccountBootstrap
-		role string
-	}{{viewer, "viewer"}, {member, "member"}} {
-		if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, m.boot.User.Email, m.role); err != nil {
-			t.Fatalf("add %s: %v", m.role, err)
-		}
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, member.User.Email, "member"); err != nil {
+		t.Fatalf("add member: %v", err)
 	}
 
 	cookie := func(userID string) []*http.Cookie {
@@ -777,12 +748,11 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 		}
 		return []*http.Cookie{{Name: sessionCookieName, Value: token}}
 	}
-	viewerCaller := caller{name: "viewer session", cookies: cookie(viewer.User.ID), projectID: owner.Project.ID}
 	memberCaller := caller{name: "member session", cookies: cookie(member.User.ID), projectID: owner.Project.ID}
 
 	testID, err := s.CreateValidationTest(ctx, storage.ValidationTest{
 		ProjectID:   owner.Project.ID,
-		Hypothesis:  "a viewer may not commit the threshold",
+		Hypothesis:  "a member may commit the threshold",
 		MetricEvent: "waitlist.joined",
 		TargetCount: 10,
 		WindowDays:  7,
@@ -800,36 +770,11 @@ func TestAViewerCannotCommitOrDecideWithoutADemo(t *testing.T) {
 	}
 	base := "/api/validation/tests/" + testID
 
-	// The viewer is refused both writes. Decide is aimed at a row that is still
-	// proposed — the state the store answers 400 for — so a handler that
-	// validated first would answer 400 here and the assertion below is the
-	// authorization answer and nothing else.
-	for _, step := range []struct{ name, path, body string }{
-		{"commit", base + "/commit", ""},
-		{"decide", base + "/decide", `{"status":"passed","note":"viewer"}`},
-	} {
-		rec := viewerCaller.request(t, e, http.MethodPost, step.path, step.body)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("viewer %s = %d %s, want 403", step.name, rec.Code, rec.Body.String())
-		}
-		if got := status(); got != storage.TestProposed {
-			t.Fatalf("a refused viewer %s changed the row: status %q, want %q", step.name, got, storage.TestProposed)
-		}
-	}
-
-	// The member keeps the flow: the cutover ends a viewer's writes, not the
-	// workspace's.
 	if rec := memberCaller.request(t, e, http.MethodPost, base+"/commit", ""); rec.Code != http.StatusOK {
 		t.Fatalf("member commit = %d %s, want 200", rec.Code, rec.Body.String())
 	}
 	if got := status(); got != storage.TestCommitted {
 		t.Fatalf("member commit left status %q, want %q", got, storage.TestCommitted)
-	}
-	if rec := viewerCaller.request(t, e, http.MethodPost, base+"/decide", `{"status":"passed","note":"viewer"}`); rec.Code != http.StatusForbidden {
-		t.Errorf("viewer decide on a committed row = %d %s, want 403", rec.Code, rec.Body.String())
-	}
-	if got := status(); got != storage.TestCommitted {
-		t.Fatalf("a refused viewer decide changed the row: status %q, want %q", got, storage.TestCommitted)
 	}
 	if rec := memberCaller.request(t, e, http.MethodPost, base+"/decide", `{"status":"passed","note":"member"}`); rec.Code != http.StatusOK {
 		t.Fatalf("member decide = %d %s, want 200", rec.Code, rec.Body.String())
@@ -926,16 +871,16 @@ func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("analytics credential: %v", err)
 	}
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("read-class-viewer-%d@test.local", stamp), "Viewer", "password-123", "vws", "vproj")
+	member, err := s.CreateAccount(ctx, fmt.Sprintf("read-class-member-%d@test.local", stamp), "Member", "password-123", "mws", "mproj")
 	if err != nil {
-		t.Fatalf("create viewer: %v", err)
+		t.Fatalf("create member: %v", err)
 	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
+	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, member.User.Email, "member"); err != nil {
+		t.Fatalf("add member: %v", err)
 	}
-	_, viewerToken, err := s.CreateUserSession(ctx, viewer.User.ID, time.Hour)
+	_, memberToken, err := s.CreateUserSession(ctx, member.User.ID, time.Hour)
 	if err != nil {
-		t.Fatalf("viewer session: %v", err)
+		t.Fatalf("member session: %v", err)
 	}
 	// A pre-split project key: the Option A bridge, whose frozen allowlist is
 	// what admits it to a class it held before the split.
@@ -955,7 +900,7 @@ func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
 	reads := storeDirectReadRoutes
 	sourcesCaller := caller{name: "sources:read credential", headers: map[string]string{"Authorization": "Bearer " + sources}}
 	analyticsCaller := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + analytics}, projectID: project.ID}
-	viewerCaller := caller{name: "viewer session", cookies: []*http.Cookie{{Name: sessionCookieName, Value: viewerToken}}, projectID: project.ID}
+	memberCaller := caller{name: "member session", cookies: []*http.Cookie{{Name: sessionCookieName, Value: memberToken}}, projectID: project.ID}
 	legacyCaller := caller{name: "pre-split project key", headers: map[string]string{"X-API-Key": legacy.APIKey}, projectID: legacy.ID}
 	captureCaller := caller{name: "capture key", headers: map[string]string{"X-API-Key": project.APIKey}, projectID: project.ID}
 
@@ -964,7 +909,7 @@ func TestStoreDirectReadsRefuseACredentialWithoutTheReadClass(t *testing.T) {
 			t.Errorf("sources:read GET %s = %d %s, want 403 — the credential holds no analytics class", path, rec.Code, rec.Body.String())
 		}
 	}
-	for _, who := range []caller{analyticsCaller, viewerCaller} {
+	for _, who := range []caller{analyticsCaller, memberCaller} {
 		for _, path := range reads {
 			if rec := who.request(t, e, http.MethodGet, path, ""); rec.Code != http.StatusOK {
 				t.Errorf("%s GET %s = %d %s, want 200 — this caller holds analytics:read", who.name, path, rec.Code, rec.Body.String())
@@ -1073,15 +1018,11 @@ func TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation(t *testing.T) {
 	}
 }
 
-// TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo is the other half of the
-// run route's contract, and the half that has no demo guard behind it: running a
-// saved query is an analytics read a viewer is entitled to, but caching the
-// result is an UPDATE to the owner's saved_queries row. The route used to ask
-// the demo guard's read-only marker, which only exists when a demo is
-// configured — so on an instance with none, a viewer's run cached its result
-// into the owner's row. The registry is asked instead, and the owner's own run
-// still caches, so the fence is not "never cache".
-func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
+// TestAReadOnlyQueryRunDoesNotWriteTheCacheWithoutADemo: running a saved query
+// is an analytics read, but caching the result is an UPDATE to the owner's
+// saved_queries row. The registry is asked; a credential without
+// dashboards:write must not cache, and the owner's own run still caches.
+func TestAReadOnlyQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 	s := openAppTestStore(t)
 	ctx := context.Background()
 	e := mountServerRoutes(t, s)
@@ -1091,12 +1032,9 @@ func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
 	}
-	viewer, err := s.CreateAccount(ctx, fmt.Sprintf("query-cache-viewer-%d@test.local", stamp), "Viewer", "password-123", "vws", "vproj")
+	_, readerSecret, err := s.CreateProjectCredential(ctx, owner.User.ID, owner.Project.ID, "reader", []string{"analytics:read"})
 	if err != nil {
-		t.Fatalf("create viewer: %v", err)
-	}
-	if _, err := s.AddWorkspaceMemberByEmail(ctx, owner.User.ID, owner.Workspace.ID, viewer.User.Email, "viewer"); err != nil {
-		t.Fatalf("add viewer: %v", err)
+		t.Fatalf("reader credential: %v", err)
 	}
 	session := func(userID string) []*http.Cookie {
 		_, token, err := s.CreateUserSession(ctx, userID, time.Hour)
@@ -1105,7 +1043,7 @@ func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 		}
 		return []*http.Cookie{{Name: sessionCookieName, Value: token}}
 	}
-	viewerCaller := caller{name: "viewer session", cookies: session(viewer.User.ID), projectID: owner.Project.ID}
+	readerCaller := caller{name: "analytics:read credential", headers: map[string]string{"Authorization": "Bearer " + readerSecret}, projectID: owner.Project.ID}
 	ownerCaller := caller{name: "owner session", cookies: session(owner.User.ID), projectID: owner.Project.ID}
 
 	query, err := s.CreateSavedQuery(ctx, owner.Project.ID, "Cache probe", countEventsSQL, true)
@@ -1127,16 +1065,14 @@ func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 	}
 	run := "/api/saved-queries/" + query.ID + "/run"
 
-	// The store reads a never-cached row back as the JSON literal null, so that
-	// — not an empty slice — is what "nothing was written" looks like.
 	const notCached = "null"
 
-	rec := viewerCaller.request(t, e, http.MethodPost, run, `{}`)
+	rec := readerCaller.request(t, e, http.MethodPost, run, `{}`)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("viewer run = %d %s, want 200 — a viewer may execute a saved query", rec.Code, rec.Body.String())
+		t.Fatalf("reader run = %d %s, want 200 — analytics:read may execute a saved query", rec.Code, rec.Body.String())
 	}
 	if got := string(cached()); got != notCached {
-		t.Errorf("a viewer's run cached its result into the owner's row: %s", got)
+		t.Errorf("a read-only run cached its result into the owner's row: %s", got)
 	}
 
 	rec = ownerCaller.request(t, e, http.MethodPost, run, `{}`)
@@ -1148,10 +1084,10 @@ func TestAViewersQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 		t.Fatalf("the owner's own run did not refresh the cache — the route no longer caches for anyone")
 	}
 
-	if rec := viewerCaller.request(t, e, http.MethodPost, run, `{}`); rec.Code != http.StatusOK {
-		t.Fatalf("viewer re-run = %d %s, want 200", rec.Code, rec.Body.String())
+	if rec := readerCaller.request(t, e, http.MethodPost, run, `{}`); rec.Code != http.StatusOK {
+		t.Fatalf("reader re-run = %d %s, want 200", rec.Code, rec.Body.String())
 	}
 	if got := cached(); !bytes.Equal(got, ownerCached) {
-		t.Errorf("a viewer's run rewrote the owner's cached result: %s, want %s", got, ownerCached)
+		t.Errorf("a read-only run rewrote the owner's cached result: %s, want %s", got, ownerCached)
 	}
 }

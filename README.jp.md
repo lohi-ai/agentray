@@ -384,7 +384,7 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 であり、scope 付きの秘密を SDK の config に出すのは既定として間違っている。
 operation が使うのは、CLI が login 時にプロジェクトごとに 1 回だけ発行し、同
 じ `0600` の config に置いておく management credential —— 発行できるのは
-owner/admin だけ。member や viewer でも login はでき、capture key も取れる。
+owner/admin だけ。member でも login はでき、capture key も取れる。
 そして、owner か admin が credential を発行するまで operation は拒否されると、
 はっきり伝えられる。
 

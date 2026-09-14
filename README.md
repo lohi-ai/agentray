@@ -371,7 +371,7 @@ agentray run_sql '{"sql":"SELECT count() FROM events"}'
 flow (`export AGENTRAY_API_KEY=$(agentray key)`) and printing a private scoped
 secret into SDK config would be the wrong default. Operations use the management
 credential the CLI mints once per project at login and keeps in the same `0600`
-config — minting is owner/admin-only, and a member or viewer still logs in, still
+config — minting is owner/admin-only, and a member still logs in, still
 gets the capture key, and is told plainly that operations will be refused until
 an owner or admin mints a credential.
 
