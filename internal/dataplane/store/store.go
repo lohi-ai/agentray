@@ -1070,6 +1070,15 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// Boards seeded before the "guest vs identified" query was corrected still
+	// read `properties.email`; the seed only ever runs once, so they have to be
+	// repaired here. Needs the revision column migrateLifecycle just added.
+	if charts, projects, err := s.repairSeededCharts(ctx); err != nil {
+		return err
+	} else if charts > 0 {
+		fmt.Printf("seeded chart repair: rewrote the guest-vs-identified query on %d chart(s) across %d project(s)\n", charts, projects)
+	}
+
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
@@ -1106,10 +1115,106 @@ type pgQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// seedStarterDashboard gives every new project a ready-use board with
-// predefined graphs from base activity, so dashboards are never empty.
-func seedStarterDashboard(ctx context.Context, q pgQuerier, projectID string) error {
-	starterCharts := []Chart{
+// guestVsIdentifiedSQL builds the seeded "Visitors: guest vs identified" chart
+// query: how many visitors were identified, and how many never were.
+//
+// Identified-ness is a fact about the person, not a property of an event.
+// AgentRay records it when identity linkage happens — `identify()` aliases the
+// anonymous id and then sends an `$identify` event — so the query partitions by
+// the board's visitor column and asks whether that partition owns an
+// `$identify` event. Partitioning on canonical_id is what folds an anonymous
+// visitor's pageviews onto the user they later identified as; the scoped read
+// supplies it from resolved_events' aliases join, the same linkage every other
+// person-scoped query uses.
+//
+// It used to test `properties.email` / `$."$set".email` instead. That was a PII
+// read on AgentRay's own starter board, and it was a silent lie waiting to
+// happen: a customer that stops sending an email trait — LoHi does, on purpose —
+// would have every visitor reported as "Guest".
+//
+// visitorColumn keeps each caller's existing scope (the starter board counts
+// stitched humans; the stock templates count raw distinct ids with no bot
+// filter), so the identified-ness predicate is the only thing that changes.
+// humanOnly keeps crawlers out of a visitor count, as the other visitor reads do.
+func guestVsIdentifiedSQL(visitorColumn string, humanOnly bool) string {
+	human := ""
+	if humanOnly {
+		human = ` AND coalesce(visitor_class, 'human') = 'human'`
+	}
+	return `SELECT if(identified, 'Identified', 'Guest') AS user_type, count(DISTINCT visitor) AS visitors FROM (
+SELECT ` + visitorColumn + ` AS visitor,
+       max(if(event_name = '$identify', 1, 0)) OVER (PARTITION BY ` + visitorColumn + `) > 0 AS identified,
+       max(if(event_name = 'user.pageview', 1, 0)) OVER (PARTITION BY ` + visitorColumn + `) > 0 AS is_pageview
+FROM events
+WHERE event_name IN ('user.pageview', '$identify')` + human + `
+) WHERE is_pageview GROUP BY user_type ORDER BY visitors DESC`
+}
+
+// The shipped (pre-repair) seeded queries: the exact strings earlier revisions
+// wrote into `charts` and `template_charts`. The repair matches them literally,
+// which is what bounds it to AgentRay's own seeded chart — a customer's chart is
+// never rewritten, not even one that reads an email property deliberately.
+const (
+	staleStarterGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	staleTemplateGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
+)
+
+// seededChartRepairs pairs each shipped seeded query with its replacement: same
+// chart, same columns, identified-ness read from identity linkage.
+func seededChartRepairs() [][2]string {
+	return [][2]string{
+		{staleStarterGuestVsIdentifiedSQL, guestVsIdentifiedSQL("canonical_id", true)},
+		{staleTemplateGuestVsIdentifiedSQL, guestVsIdentifiedSQL("distinct_id", false)},
+	}
+}
+
+// repairSeededCharts rewrites the seeded "guest vs identified" query on every
+// board that already holds a pre-repair copy. The seed runs once — at project
+// creation, or when a template is cloned — so without this an existing
+// deployment keeps reading `properties.email` forever, and starts calling every
+// visitor a "Guest" the moment its events stop carrying an email trait.
+// (template_charts itself needs no repair: SeedSystemTemplates rebuilds those
+// rows from the current source on every boot.)
+//
+// Bounded and idempotent by construction. The predicate is an exact match on the
+// two shipped strings, so it can only ever touch a row that IS the seeded chart,
+// and a second run matches nothing because no replacement contains the stale
+// text. `charts` is a small table and the update writes only the matched rows'
+// own `sql` column — no rewrite, no DDL, no lock on a big table — so none of the
+// deploy-time hazards the big-table migration rule guards against apply.
+//
+// It returns the rows repaired and how many projects own them: the blast radius
+// an operator should see, and where the numbers span projects this is the only
+// summary of it.
+func (s *Store) repairSeededCharts(ctx context.Context) (rows int64, projects int64, err error) {
+	repairs := seededChartRepairs()
+	args := make([]any, 0, len(repairs)*2)
+	values := make([]string, 0, len(repairs))
+	for i, pair := range repairs {
+		args = append(args, pair[0], pair[1])
+		values = append(values, fmt.Sprintf("($%d, $%d)", 2*i+1, 2*i+2))
+	}
+	// One statement for every pair: the UPDATE's RETURNING feeds the scope
+	// counts, so a boot reports rows and projects without a second round trip.
+	err = s.pg.QueryRow(ctx, `
+WITH stale(stale_sql, fresh_sql) AS (VALUES `+strings.Join(values, ", ")+`),
+repaired AS (
+	UPDATE charts c
+	SET sql = s.fresh_sql, revision = c.revision + 1, updated_at = now()
+	FROM stale s
+	WHERE c.sql = s.stale_sql
+	RETURNING c.project_id
+)
+SELECT count(*), count(DISTINCT project_id) FROM repaired`, args...).Scan(&rows, &projects)
+	return rows, projects, err
+}
+
+// starterCharts is the board every new project starts with, in board order.
+// Package-level rather than a local of seedStarterDashboard so the seeded
+// queries are addressable: the tests that prove what a seeded chart plots run
+// the very strings this returns, not a copy of them.
+func starterCharts() []Chart {
+	return []Chart{
 		{Name: "Event trend", Kind: "line", Metric: "events"},
 		{Name: "Top events", Kind: "bar", Metric: "event_breakdown"},
 		{Name: "Sessions", Kind: "stat", Metric: "sessions"},
@@ -1124,7 +1229,7 @@ func seedStarterDashboard(ctx context.Context, q pgQuerier, projectID string) er
 		{
 			Name:   "Visitors: guest vs identified",
 			Kind:   "bar",
-			SQL:    `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`,
+			SQL:    guestVsIdentifiedSQL("canonical_id", true),
 			XField: "user_type",
 			YField: "visitors",
 		},
@@ -1136,6 +1241,11 @@ func seedStarterDashboard(ctx context.Context, q pgQuerier, projectID string) er
 			YField: "visitors",
 		},
 	}
+}
+
+// seedStarterDashboard gives every new project a ready-use board with
+// predefined graphs from base activity, so dashboards are never empty.
+func seedStarterDashboard(ctx context.Context, q pgQuerier, projectID string) error {
 	var dashboardID string
 	if err := q.QueryRow(ctx, `
 INSERT INTO dashboards (project_id, name, description)
@@ -1143,7 +1253,7 @@ VALUES ($1, $2, $3)
 RETURNING id::text`, projectID, "Product overview", "Starter board auto-created with predefined graphs from base activity.").Scan(&dashboardID); err != nil {
 		return err
 	}
-	for _, chart := range starterCharts {
+	for _, chart := range starterCharts() {
 		if _, err := q.Exec(ctx, `
 INSERT INTO charts (dashboard_id, project_id, name, kind, metric, event_name, event_type, sql, x_field, y_field)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, dashboardID, projectID, chart.Name, chart.Kind, chart.Metric, chart.EventName, chart.EventType, chart.SQL, chart.XField, chart.YField); err != nil {
@@ -1400,7 +1510,7 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 				{Name: "Top events", Kind: "bar", Metric: "event_breakdown", SortOrder: 4},
 				{Name: "AI cost", Kind: "stat", Metric: "cost", EventType: "agent", SortOrder: 5},
 				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 6},
-				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 7},
+				{Name: "Visitors: guest vs identified", Kind: "bar", SQL: guestVsIdentifiedSQL("distinct_id", false), XField: "user_type", YField: "visitors", SortOrder: 7},
 			},
 		},
 		{
@@ -1454,7 +1564,7 @@ func (s *Store) SeedSystemTemplates(ctx context.Context) error {
 			charts: []TemplateChart{
 				{Name: "Traffic by class", Kind: "pie", SQL: `SELECT coalesce(visitor_class, 'human') AS class, count(*) AS count FROM events WHERE event_name = 'user.pageview' GROUP BY class ORDER BY count DESC`, XField: "class", YField: "count", SortOrder: 0},
 				{Name: "Top referrers", Kind: "bar", SQL: `SELECT coalesce(nullif(json_extract_string(properties, '$.referrer'), ''), 'direct') AS referrer, count(*) AS visits FROM events WHERE event_name = 'user.pageview' GROUP BY referrer ORDER BY visits DESC LIMIT 10`, XField: "referrer", YField: "visits", SortOrder: 1},
-				{Name: "Guest vs identified", Kind: "bar", SQL: `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`, XField: "user_type", YField: "visitors", SortOrder: 2},
+				{Name: "Guest vs identified", Kind: "bar", SQL: guestVsIdentifiedSQL("distinct_id", false), XField: "user_type", YField: "visitors", SortOrder: 2},
 				{Name: "Pageviews trend", Kind: "line", Metric: "events", EventName: "user.pageview", SortOrder: 3},
 				{Name: "Conversions", Kind: "bar", Metric: "event_breakdown", EventName: "user.conversion", SortOrder: 4},
 			},
