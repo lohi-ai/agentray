@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
-import { bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, retentionTile, revenueBreakdownRows, revenueTile, tileProvenance } from './page';
+import { acquisitionStats, bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, rangeLabel, retentionTile, revenueBreakdownRows, revenueTile, sourcePill, tileProvenance } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -46,6 +46,66 @@ describe('freshnessLabel', () => {
     const l = freshnessLabel(res(undefined, undefined, 'no_events'), now);
     expect(l.text).toBe('No capture receipts yet');
     expect(l.stale).toBe(true);
+  });
+});
+
+describe('freshnessLabel served verdict', () => {
+  const now = new Date('2026-09-12T12:00:00Z').getTime();
+
+  it('trusts the served verdict over the client clock', () => {
+    // The stale modifier's trigger is data_status.state == 'quiet' (spec
+    // §States). A packet the server judged quiet must render stale even when
+    // the client clock says the receipt is young — the served verdict is the
+    // contract, the age check is only the fallback for a stale cached packet.
+    const l = freshnessLabel(res('2026-09-12T11:59:00Z', '2026-09-12T11:59:00Z', 'quiet'), now);
+    expect(l.stale).toBe(true);
+    expect(l.word).toBe('Quiet');
+  });
+
+  it('still flags a receipt older than the quiet threshold when the served state is fresh', () => {
+    const l = freshnessLabel(res('2026-09-10T12:00:00Z', '2026-09-10T12:00:00Z', 'fresh'), now);
+    expect(l.stale).toBe(true);
+    expect(l.word).toBe('Quiet');
+  });
+
+  it('names the freshness word the StatusPill renders', () => {
+    expect(freshnessLabel(res('2026-09-12T11:59:00Z', '2026-09-12T11:59:00Z', 'fresh'), now).word).toBe('Data fresh');
+    expect(freshnessLabel(res(undefined, undefined, 'no_events'), now).word).toBe('No capture receipts yet');
+  });
+});
+
+describe('sourcePill', () => {
+  it('maps every served source state to a word + tone, never color alone', () => {
+    expect(sourcePill('healthy')).toEqual({ status: 'healthy', label: 'Healthy' });
+    expect(sourcePill('partial')).toEqual({ status: 'attention', label: 'Partial data' });
+    expect(sourcePill('error')).toEqual({ status: 'attention', label: 'Needs attention' });
+    expect(sourcePill('paused')).toEqual({ status: 'paused', label: 'Paused' });
+    expect(sourcePill('not_ready')).toEqual({ status: 'idle', label: 'Not run yet' });
+    expect(sourcePill('not_configured')).toEqual({ status: 'idle', label: 'Set up a table' });
+  });
+});
+
+describe('rangeLabel', () => {
+  it('prints the tile range format with the project timezone', () => {
+    // The header sub must match the tiles' own range wording — the spec's
+    // "Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh", not raw ISO instants.
+    expect(rangeLabel(servedRes())).toBe('Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh');
+  });
+
+  it('names a UTC fallback instead of implying a project timezone', () => {
+    expect(rangeLabel(servedRes({ timezoneSource: 'fallback' }))).toBe('Sep 5–11 · 7 complete days · UTC fallback — no project timezone set');
+  });
+
+  it('says a partial day carries no comparison', () => {
+    expect(rangeLabel(servedRes({ completeDays: false }))).toBe('Today so far · Asia/Ho_Chi_Minh · partial day, no comparison');
+  });
+});
+
+describe('acquisitionStats', () => {
+  it('leads the Acquisition group with the New people tile', () => {
+    const stats = acquisitionStats(servedRes());
+    expect(stats.map((s) => s.label)).toEqual(['New people']);
+    expect(stats[0].provenance).toContain('metric overview.v3');
   });
 });
 
@@ -147,21 +207,30 @@ describe('bestNextStep', () => {
     expect(step.evidence).toContain('metric v3');
   });
 
-  it('omits a finding that is not display-complete', () => {
+  it('falls back to the capability branch when no display-complete finding exists', () => {
+    // §Value-first story: no complete finding → a capability explanation,
+    // never an omitted panel and never a fabricated number.
+    expect(bestNextStep(undefined)).toEqual({ kind: 'capability', reason: 'no_finding' });
+    expect(bestNextStep([])).toEqual({ kind: 'capability', reason: 'no_finding' });
+    // A failed Plans read degrades this panel alone — still the capability
+    // branch, with its own reason.
+    expect(bestNextStep([finding()], true)).toEqual({ kind: 'capability', reason: 'unavailable' });
+  });
+
+  it('names an incomplete finding rather than pretending none exists', () => {
     // A legacy row with no evidence envelope: the provenance line would read
-    // "evidence unavailable", so the dashboard must not call it a finding.
-    expect(bestNextStep([finding({ evidence_json: '' })]).kind).toBe('none');
-    expect(bestNextStep([finding({ evidence_json: '{not json' })]).kind).toBe('none');
+    // "evidence unavailable", so the dashboard must not call it a finding —
+    // but rows DID arrive, so the reason is incomplete_finding, not no_finding.
+    expect(bestNextStep([finding({ evidence_json: '' })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
+    expect(bestNextStep([finding({ evidence_json: '{not json' })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
     // An envelope full of unrelated keys is not provenance either: evidenceLine
     // renders "evidence unavailable" for it, and the dashboard must agree.
-    expect(bestNextStep([finding({ evidence_json: JSON.stringify({ events: 202, sessions: 8, window_hours: 24 }) })]).kind).toBe('none');
-    expect(bestNextStep([finding({ rationale: '   ' })]).kind).toBe('none');
-    expect(bestNextStep([finding({ title: '' })]).kind).toBe('none');
+    expect(bestNextStep([finding({ evidence_json: JSON.stringify({ events: 202, sessions: 8, window_hours: 24 }) })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
+    expect(bestNextStep([finding({ rationale: '   ' })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
+    expect(bestNextStep([finding({ title: '' })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
     // Only an open finding is a next step; a dismissed one is history.
-    expect(bestNextStep([finding({ status: 'dismissed' })]).kind).toBe('none');
-    expect(bestNextStep(undefined).kind).toBe('none');
-    // A failed Plans read degrades this panel alone.
-    expect(bestNextStep([finding()], true)).toEqual({ kind: 'none' });
+    expect(bestNextStep([finding({ status: 'dismissed' })])).toEqual({ kind: 'capability', reason: 'incomplete_finding' });
+    // A real finding later in the ranked list still wins over the broken row.
     expect(bestNextStep([finding({ evidence_json: '' }), finding({ id: 'f2', impact_score: 8 })]).kind).toBe('finding');
   });
 });

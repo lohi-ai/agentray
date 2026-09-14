@@ -3,17 +3,17 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewRange, type OverviewResult, type OverviewRevenueDetail, type OverviewSourceStatus } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatCompact, formatNumber } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
-import { firstValuePath } from '@/lib/ia';
+import { firstValuePath, settingsPath } from '@/lib/ia';
 import { useEventNames } from '@/modules/app/hooks';
 import { evidenceAvailable, evidenceLine } from '@/modules/plans/lib/plans';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
-import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
 
 // The range control always offers Today plus the complete-day windows. Today
@@ -176,20 +176,14 @@ function monthDayLabel(d: LocalDate): { month: string; day: string } {
   return { month: at('month'), day: at('day') };
 }
 
-// tileRange is the tile's own window. Retention runs over lifetime cohorts, so
-// stamping the selected range on D1/D7/D30 would be a false claim; the served
-// range is half-open, so its last covered day is the one before `to`.
-function tileRange(res: OverviewResult, input: TileInput): string {
-  if (input.kind === 'retention') {
-    return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
-  }
-  const { range: contextRange, timezone } = res.context;
-  // The money read serves its own window; stamping the context range on it
-  // would be a claim about a window the arithmetic never covered.
-  const range = input.kind === 'money' && input.detail ? input.detail.window : contextRange;
+// rangeSpan is the shared "Sep 5–11 · 7 complete days" wording — the header
+// sub and every tile's provenance print the same range, so one function owns
+// it. The served range is half-open, so its last covered day is the one
+// before `to`.
+function rangeSpan(range: OverviewRange, timezone: string): string {
   if (!range.complete_days) return 'Today so far';
   // The served range is half-open — `to` is the first instant after it — so the
-  // tile's last covered day is the calendar day before `to` in the project zone.
+  // last covered day is the calendar day before `to` in the project zone.
   const from = localDate(range.from, timezone);
   const to = dayBefore(localDate(range.to, timezone));
   const start = monthDayLabel(from);
@@ -197,6 +191,29 @@ function tileRange(res: OverviewResult, input: TileInput): string {
   // Within one month the end day alone reads unambiguously: "Sep 5–11".
   const sameMonth = from.year === to.year && from.month === to.month;
   return `${start.month} ${start.day}–${sameMonth ? end.day : `${end.month} ${end.day}`} · ${range.days} complete days`;
+}
+
+// rangeLabel is the header sub: the shared range span plus the timezone the
+// figures were computed in — "Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh",
+// or "Today so far · <tz> · partial day, no comparison" for the partial range.
+export function rangeLabel(res: OverviewResult): string {
+  const timezone = res.context.timezone_source === 'fallback'
+    ? 'UTC fallback — no project timezone set'
+    : res.context.timezone;
+  const span = rangeSpan(res.context.range, res.context.timezone);
+  return res.context.range.complete_days ? `${span} · ${timezone}` : `${span} · ${timezone} · partial day, no comparison`;
+}
+
+// tileRange is the tile's own window. Retention runs over lifetime cohorts, so
+// stamping the selected range on D1/D7/D30 would be a false claim.
+function tileRange(res: OverviewResult, input: TileInput): string {
+  if (input.kind === 'retention') {
+    return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
+  }
+  // The money read serves its own window; stamping the context range on it
+  // would be a claim about a window the arithmetic never covered.
+  const range = input.kind === 'money' && input.detail ? input.detail.window : res.context.range;
+  return rangeSpan(range, res.context.timezone);
 }
 
 // tileCoverage is the tile's own input population — the qualifying events the
@@ -258,6 +275,13 @@ export function tileProvenance(res: OverviewResult, input: TileInput): string {
 
 // Tile composers: a tile and its provenance are built together, so no tile can
 // reach a StatsStrip without one.
+
+// acquisitionStats is the Acquisition group's tile row — New people is the
+// one served acquisition metric; the ranked lists below it are BarRows, not
+// tiles, so they are not in this strip.
+export function acquisitionStats(res: OverviewResult) {
+  return [metricStat(res, 'New people', res.metrics.new_users)];
+}
 function metricStat(res: OverviewResult, label: string, m: OverviewMetric) {
   return { ...metricTile(label, m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
 }
@@ -356,13 +380,32 @@ function trendMeaning(res: OverviewResult): 'data' | 'receipt_only' | 'empty' {
 
 // freshnessLabel ages capture receipt time, not client occurrence time: an
 // offline event that arrives late proves the source is currently reachable.
-// `now` is injectable so staleness is testable.
-export function freshnessLabel(res: OverviewResult, now = Date.now()): { text: string; stale: boolean } {
+// The stale trigger is the SERVED verdict — data_status.state == 'quiet' —
+// with the client-side age check kept only as the fallback for a cached packet
+// whose served state predates the threshold. `word` is the StatusPill's label
+// word; `now` is injectable so staleness is testable.
+export function freshnessLabel(res: OverviewResult, now = Date.now()): { text: string; word: string; stale: boolean } {
   const received = res.data_status.last_received_at;
-  if (!received) return { text: 'No capture receipts yet', stale: true };
+  if (!received) return { text: 'No capture receipts yet', word: 'No capture receipts yet', stale: true };
   const at = new Date(received);
   const text = `Last received ${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
-  return { text, stale: now - at.getTime() > 24 * 60 * 60 * 1000 };
+  const stale = res.data_status.state !== 'fresh' || now - at.getTime() > 24 * 60 * 60 * 1000;
+  return { text, word: stale ? 'Quiet' : 'Data fresh', stale };
+}
+
+// sourcePill maps a served connector-sync state to the StatusPill's word +
+// tone — status is word + dot, never color alone (§Responsive and
+// accessibility). An unknown future state degrades to a neutral pill rather
+// than a bare word.
+export function sourcePill(state: OverviewSourceStatus['state']): { status: string; label: string } {
+  switch (state) {
+    case 'healthy': return { status: 'healthy', label: 'Healthy' };
+    case 'partial': return { status: 'attention', label: 'Partial data' };
+    case 'error': return { status: 'attention', label: 'Needs attention' };
+    case 'paused': return { status: 'paused', label: 'Paused' };
+    case 'not_ready': return { status: 'idle', label: 'Not run yet' };
+    default: return { status: 'idle', label: 'Set up a table' };
+  }
 }
 
 // One mutually exclusive view state per the redesign state contract
@@ -404,12 +447,16 @@ export function overviewViewState(input: {
   return 'empty';
 }
 
-// Plans ranks open recommendations by impact. The overview treats a finding
-// as a single high-value action only when its title, observation, and evidence
-// are all readable; otherwise it omits the panel rather than fabricating advice.
+// The value-first panel has exactly two honest branches (§Value-first story).
+// A finding is shown only when it is display-complete — an open row with a
+// title, a rationale (where the comparison lives) and a parseable evidence
+// envelope — because AgentRecommendation carries no typed comparison or
+// next-action field, and inferring one from prose or a bare number would
+// present a guess as evidence. Everything else falls back to a capability
+// explanation, never a fabricated live number.
 export type NextStep =
   | { kind: 'finding'; title: string; observation: string; evidence: string }
-  | { kind: 'none' };
+  | { kind: 'capability'; reason: 'no_finding' | 'incomplete_finding' | 'unavailable' };
 
 function isEvidenceBackedFinding(candidate: AgentRecommendation): boolean {
   return candidate.status === 'open'
@@ -419,14 +466,17 @@ function isEvidenceBackedFinding(candidate: AgentRecommendation): boolean {
 }
 
 export function bestNextStep(findings: readonly AgentRecommendation[] | undefined, unavailable = false): NextStep {
-  if (unavailable) return { kind: 'none' };
+  if (unavailable) return { kind: 'capability', reason: 'unavailable' };
   // list_findings is open-first and impact-ranked. A malformed legacy row must
   // not hide the next real, evidence-backed action.
   const finding = findings?.find(isEvidenceBackedFinding);
-  if (!finding) return { kind: 'none' };
-  return { kind: 'finding', title: finding.title.trim(), observation: finding.rationale.trim(), evidence: evidenceLine(finding) };
+  if (finding) {
+    return { kind: 'finding', title: finding.title.trim(), observation: finding.rationale.trim(), evidence: evidenceLine(finding) };
+  }
+  // Rows arrived but none is display-complete is a different fact from "no
+  // findings yet" — the capability copy names which one happened.
+  return { kind: 'capability', reason: findings && findings.length > 0 ? 'incomplete_finding' : 'no_finding' };
 }
-
 // list_findings is keyset-paginated and open-first. Stop as soon as its ranking
 // yields the first display-complete open finding or the settled-history
 // partition; the repeated-cursor guard prevents a broken response from turning
@@ -532,6 +582,10 @@ export function OverviewPage() {
       ]
     : [];
 
+  // The Acquisition group's tile row: New people leads it (§Metric groups
+  // names it first under Acquisition), with the ranked pageview lists below.
+  const acquisition = res ? acquisitionStats(res) : [];
+
   const trendSpec = useMemo(() => {
     if (!res || res.trend.length === 0 || trendMeaning(res) !== 'data') return null;
     return {
@@ -545,14 +599,10 @@ export function OverviewPage() {
   }, [res]);
   const trend = res ? trendMeaning(res) : 'empty';
 
-  const rangeLabel = res
-    ? res.context.range.complete_days
-      ? `${res.context.range.from.slice(0, 10)} → ${res.context.range.to.slice(0, 10)} · ${res.context.range.days} complete days · ${res.context.timezone}${res.context.timezone_source === 'fallback' ? ' (UTC fallback — no project timezone set)' : ''}`
-      : `Today so far · ${res.context.timezone}${res.context.timezone_source === 'fallback' ? ' (UTC fallback — no project timezone set)' : ''} · partial day, no comparison`
-    : '';
+  const headerRange = res ? rangeLabel(res) : '';
 
   const dataStatusPanel = res ? (
-    <Panel title="Data status" action={freshness ? <span className="text-xs text-[var(--color-text-secondary)]">{freshness.text}</span> : null}>
+    <Panel title="Data status">
       <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
         <span>{formatCompact(res.data_status.events_in_range)} events in range</span>
         <span>{formatCompact(res.data_status.qualifying_in_range)} qualifying (human product activity)</span>
@@ -575,9 +625,7 @@ export function OverviewPage() {
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="font-medium">{source.connector_name}</span>
                 <span className="text-[var(--color-text-secondary)]">{source.source_table || 'No table configured'}</span>
-                <span className="text-[var(--color-text-secondary)]">
-                  {source.state === 'healthy' ? 'Healthy' : source.state === 'partial' ? 'Partial data' : source.state === 'error' ? 'Needs attention' : source.state === 'paused' ? 'Paused' : source.state === 'not_ready' ? 'Not run yet' : 'Set up a table'}
-                </span>
+                <StatusPill status={sourcePill(source.state).status} label={sourcePill(source.state).label} grow={false} />
               </div>
               {source.sync_configured ? (
                 <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
@@ -641,12 +689,40 @@ export function OverviewPage() {
           <div key={label}>
             <dt className="font-medium text-[var(--color-text-primary)]">{label}</dt>
             <dd>{m.definition}</dd>
-            {m.notes?.map((n) => <dd key={n} className="text-[var(--color-text-disabled)]">· {n}</dd>)}
+            {/* Meaningful text: --color-text-secondary, never --faint
+                (--color-text-disabled fails WCAG AA on the card surface). */}
+            {m.notes?.map((n) => <dd key={n} className="text-[var(--color-text-secondary)]">· {n}</dd>)}
           </div>
         ))}
       </dl>
     </details>
   ) : null;
+
+  // The capability branch of the value-first panel (§Value-first story): when
+  // no complete finding exists the page explains what the connected data makes
+  // possible, with a clearly labeled example — never a fabricated live number,
+  // an upgrade CTA, a price, or an ROI claim.
+  const capabilityExplanation = (reason: 'no_finding' | 'incomplete_finding' | 'unavailable') => (
+    <div className="flex flex-col gap-3">
+      <p className="text-sm text-[var(--color-text-secondary)]">
+        {reason === 'unavailable'
+          ? 'Findings are unavailable right now. The numbers above are unaffected.'
+          : reason === 'incomplete_finding'
+            ? 'A finding exists but its evidence is not readable yet. Once your agent has read enough of this project it files a complete one here — the observation, the comparison behind it, and the evidence line.'
+            : 'No complete finding yet. Once your agent has read enough of this project it files one here — the observation, the comparison behind it, and the evidence line.'}
+      </p>
+      {/* A labeled example, never a live number: the panel explains what a
+          finding looks like without claiming this project has one. */}
+      <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
+        <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Example — not your data</p>
+        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">“Activation fell 12% week over week, driven by the signup → first-project step.”</p>
+      </div>
+      <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+        <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
+        <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
+      </div>
+    </div>
+  );
 
   // The unified empty the receipt_only/empty states share: the chart slot says
   // why it is flat without pretending a group of state tiles is a measurement.
@@ -661,7 +737,7 @@ export function OverviewPage() {
     <AppShell>
       <PageShell
         title="Overview"
-        sub={rangeLabel || 'The last complete days, at a glance.'}
+        sub={headerRange || 'The last complete days, at a glance.'}
         actions={
           <div className={`flex flex-wrap items-center gap-2 ${TARGET_44}`}>
             {/* Segment, not Selector: the Astryx Selector trigger renders
@@ -678,6 +754,17 @@ export function OverviewPage() {
           </div>
         }
       >
+        {/* §Layout 2: the freshness line is a StatusPill — word + dot, never
+            color alone. It sits under the header whenever a result exists. */}
+        {freshness ? (
+          <div className="flex">
+            <StatusPill
+              status={!res?.data_status.ever_received ? 'idle' : freshness.stale ? 'attention' : 'healthy'}
+              label={freshness.word === freshness.text ? freshness.word : `${freshness.word} · ${freshness.text}`}
+            />
+          </div>
+        ) : null}
+
         {viewState === 'loading' ? (
           <div role="status" aria-label="Loading overview" className="flex flex-col gap-4">
             <Loading label="Loading overview…" />
@@ -697,14 +784,21 @@ export function OverviewPage() {
         ) : null}
 
         {viewState === 'error' ? (
-          <Callout
-            tone="warn"
-            icon={<AlertTriangle size={16} />}
-            label="Overview unavailable"
-            title="Could not load the overview"
-            detail={query.error instanceof Error ? query.error.message : 'The overview request failed.'}
-            action={<Button variant="outline" size="sm" className="min-h-[44px]" icon={<RefreshCw size={14} />} onClick={() => void query.refetch()}>Retry</Button>}
-          />
+          <>
+            <Callout
+              tone="warn"
+              icon={<AlertTriangle size={16} />}
+              label="Overview unavailable"
+              title="Could not load the overview"
+              detail={query.error instanceof Error ? query.error.message : 'The overview request failed.'}
+              action={<Button variant="outline" size="sm" className="min-h-[44px]" icon={<RefreshCw size={14} />} onClick={() => void query.refetch()}>Retry</Button>}
+            />
+            {/* §States: the data status panel notes its own unavailability
+                rather than disappearing with the rest of the page. */}
+            <Panel title="Data status">
+              <p className="text-sm text-[var(--color-text-secondary)]">Source health is unavailable while the overview cannot load.</p>
+            </Panel>
+          </>
         ) : null}
 
         {refetchCallout}
@@ -712,6 +806,12 @@ export function OverviewPage() {
         {viewState === 'first_run' ? (
           <>
             <FirstEventQuickstart />
+            {/* §Value-first story names the first-run state explicitly: the
+                capability explanation renders here too, with the labeled
+                example — never a fabricated number. */}
+            <Panel title="What this overview will show you">
+              {capabilityExplanation('no_finding')}
+            </Panel>
             {/* A first-run project with a result still gets its data status:
                 "nothing has arrived" is a receipt fact worth showing, not a
                 panel to hide behind the quickstart. */}
@@ -763,51 +863,46 @@ export function OverviewPage() {
 
             {definitions}
 
-            <MetricGroup
-              title="Usage"
-              action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
-            >
-              <div className="flex flex-col gap-4">
-                <StatsStrip stats={usageStats} />
-                <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
-                  <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
-                    <h3 className="mb-2 text-sm font-medium">Active people per day</h3>
-                    {trendSpec ? (
-                      <>
-                        <Chart spec={trendSpec} />
-                        {/* Textual equivalent: the chart is the shape, this is the data. */}
-                        <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
-                          {res.trend.map((p) => `${p.day.slice(5)}: ${p.active_users}`).join(' · ')}
-                        </p>
-                      </>
-                    ) : trend === 'receipt_only' ? (
-                      noQualifyingActivity
-                    ) : (
-                      <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
-                    )}
-                  </div>
-                  <div>
-                    <h3 className="mb-2 text-sm font-medium">Retention details</h3>
-                    <div className="flex flex-col gap-2 text-sm">
-                      <p>{retentionLine('Day 1', res.retention.d1)}</p>
-                      <p>{retentionLine('Day 7', res.retention.d7)}</p>
-                      <p>{retentionLine('Day 30', res.retention.d30)}</p>
-                      <p className="text-xs text-[var(--color-text-secondary)]">
-                        {res.retention.cohort_window === 'lifetime' ? 'Lifetime cohorts — a person counts from their first-ever event, not the selected range.' : `Cohort window: ${res.retention.cohort_window}`}
+            {/* §Layout 5: the trend + retention grid sits above the groups —
+                the order both prototypes and this doc's item list share. */}
+            <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
+              <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
+                <Panel title="Active people per day">
+                  {trendSpec ? (
+                    <>
+                      <Chart spec={trendSpec} />
+                      {/* Textual equivalent: the chart is the shape, this is the data. */}
+                      <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                        {res.trend.map((p) => `${p.day.slice(5)}: ${p.active_users}`).join(' · ')}
                       </p>
-                    </div>
-                  </div>
-                </div>
-                <p className="text-xs text-[var(--color-text-secondary)]">Crashes are Not available until AgentRay receives a verified crash event with a normalized app-version contract.</p>
+                    </>
+                  ) : trend === 'receipt_only' ? (
+                    noQualifyingActivity
+                  ) : (
+                    <EmptyState title="No activity in this range" detail="Qualifying human events will draw the trend once they arrive." />
+                  )}
+                </Panel>
               </div>
-            </MetricGroup>
+              <Panel title="Retention">
+                <div className="flex flex-col gap-2 text-sm">
+                  <p>{retentionLine('Day 1', res.retention.d1)}</p>
+                  <p>{retentionLine('Day 7', res.retention.d7)}</p>
+                  <p>{retentionLine('Day 30', res.retention.d30)}</p>
+                  <p className="text-xs text-[var(--color-text-secondary)]">
+                    {res.retention.cohort_window === 'lifetime' ? 'Lifetime cohorts — a person counts from their first-ever event, not the selected range.' : `Cohort window: ${res.retention.cohort_window}`}
+                  </p>
+                </div>
+              </Panel>
+            </div>
 
+            {/* §Metric groups order: Acquisition → Monetization → Usage. */}
             <div className="grid grid-cols-2 gap-4 [@media(max-width:980px)]:grid-cols-1">
               <MetricGroup
                 title="Acquisition"
                 action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
               >
                 <div className="flex flex-col gap-4">
+                  <StatsStrip stats={acquisition} />
                   <p className="text-xs text-[var(--color-text-secondary)]">New people is the Overview’s first-observed metric. These ranked pageview lists add its real acquisition context; direct / unknown remains visible.</p>
                   <div className="grid grid-cols-2 gap-4 [@media(max-width:700px)]:grid-cols-1">
                     <div>
@@ -840,28 +935,50 @@ export function OverviewPage() {
               >
                 <div className="flex flex-col gap-3">
                   <StatsStrip stats={monetizationStats} />
+                  {/* The required instrumentation is named on the group, not
+                      implied by a bare Set up: revenue needs a trusted,
+                      deduplicated billing source; purchases and subscriptions
+                      need their own verified contracts. */}
+                  <p className="text-xs text-[var(--color-text-secondary)]">Instrumented revenue requires a trusted, deduplicated server or billing source with a declared currency. Purchases and subscriptions need their own verified project-scoped metric contracts; no SDK event total is shown as money.</p>
                   <RevenueBreakdown metric={res.metrics.revenue} detail={res.metrics.revenue_detail} />
                 </div>
               </MetricGroup>
-            </div>
 
-            {findingsQuery.isLoading ? (
-              <Panel title="Best next step"><Loading label="Loading the latest finding…" /></Panel>
-            ) : nextStep.kind === 'finding' ? (
-              <Panel title="Best next step">
-                <div className="flex flex-col gap-2">
-                  <p className="text-sm font-medium">{nextStep.title}</p>
-                  <p className="text-sm text-[var(--color-text-secondary)]">{nextStep.observation}</p>
-                  {/* Provenance: the envelope behind the claim, rendered by the
-                      same helper /plans uses so the two never drift. */}
-                  <p className="font-mono text-xs text-[var(--color-text-secondary)]">{nextStep.evidence}</p>
-                  <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
-                    <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = '/plans'; }}>Open the finding</Button>
-                    <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask your agent to investigate</Button>
-                  </div>
+              <MetricGroup
+                title="Usage"
+                action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { window.location.href = '/dashboard'; }}>Explore in Analytics</Button>}
+              >
+                <div className="flex flex-col gap-4">
+                  <StatsStrip stats={usageStats} />
+                  <p className="text-xs text-[var(--color-text-secondary)]">Crashes are Not available until AgentRay receives a verified crash event with a normalized app-version contract.</p>
                 </div>
-              </Panel>
-            ) : null}
+              </MetricGroup>
+
+              {/* §Value-first story: one panel, two honest branches — a
+                  display-complete finding, or the capability explanation with
+                  a labeled example. Never omitted, never a fabricated number. */}
+              {findingsQuery.isLoading ? (
+                <Panel title="Best next step"><Loading label="Loading the latest finding…" /></Panel>
+              ) : nextStep.kind === 'finding' ? (
+                <Panel title="Best next step">
+                  <div className="flex flex-col gap-2">
+                    <p className="text-sm font-medium">{nextStep.title}</p>
+                    <p className="text-sm text-[var(--color-text-secondary)]">{nextStep.observation}</p>
+                    {/* Provenance: the envelope behind the claim, rendered by the
+                        same helper /plans uses so the two never drift. */}
+                    <p className="font-mono text-xs text-[var(--color-text-secondary)]">{nextStep.evidence}</p>
+                    <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+                      <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = '/plans'; }}>Open the finding</Button>
+                      <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask your agent to investigate</Button>
+                    </div>
+                  </div>
+                </Panel>
+              ) : (
+                <Panel title="Best next step">
+                  {capabilityExplanation(nextStep.reason)}
+                </Panel>
+              )}
+            </div>
 
             {dataStatusPanel}
           </>
