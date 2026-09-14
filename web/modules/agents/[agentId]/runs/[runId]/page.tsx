@@ -166,7 +166,7 @@ export function AgentRunPage() {
 
   if (isLoading && !run) {
     return (
-      <AppShell active="monitor" title="Run" sub="What the agent did, chapter by chapter.">
+      <AppShell title="Run" sub="What the agent did, chapter by chapter.">
         <Loading label="Loading run…" />
       </AppShell>
     );
@@ -176,7 +176,6 @@ export function AgentRunPage() {
 
   return (
     <AppShell
-      active="monitor"
       title={
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}>
             {back}

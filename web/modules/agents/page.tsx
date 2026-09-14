@@ -46,7 +46,6 @@ export function AgentsPage() {
 
   return (
     <AppShell
-      active="agents"
       title="Your team"
       sub="Teammates who watch the product and recommend the next move."
       actions={<Button variant="primary" icon={<Plus size={15} />} onClick={onCreate} disabled={!access.canWrite} tooltip={access.reason || undefined}>New agent</Button>}

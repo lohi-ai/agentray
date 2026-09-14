@@ -76,17 +76,6 @@ export function formatRelative(value: string | number | Date | undefined): strin
   return `${Math.floor(mon / 12)}y`;
 }
 
-// rangeLabel turns the active filter window (in hours) into the chip label the
-// prototype uses (Last 24 hours, Last 7 days, …).
-export function rangeLabel(hours: number | undefined): string {
-  const h = hours ?? 24;
-  if (h <= 1) return 'Last hour';
-  if (h < 48) return `Last ${h} hours`;
-  const days = Math.round(h / 24);
-  if (days < 14) return `Last ${days} days`;
-  if (days < 60) return `Last ${Math.round(days / 7)} weeks`;
-  return `Last ${Math.round(days / 30)} months`;
-}
 
 export function formatDate(
   date: Date | string | number | undefined,

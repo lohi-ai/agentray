@@ -193,7 +193,7 @@ export function OperationDetailPage() {
 
   if (isLoading && !operator) {
     return (
-      <AppShell active="operations">
+      <AppShell>
         <Loading label="Opening the operator…" />
       </AppShell>
     );
@@ -201,7 +201,7 @@ export function OperationDetailPage() {
 
   if (error || !operator) {
     return (
-      <AppShell active="operations" title="Operator" sub="One standing unit of unattended work.">
+      <AppShell title="Operator" sub="One standing unit of unattended work.">
         <Callout
           tone="warn"
           icon={<TriangleAlert size={18} aria-hidden />}
@@ -224,7 +224,6 @@ export function OperationDetailPage() {
 
   return (
     <AppShell
-      active="operations"
       title={
           <HStack gap={2} align="center">
             <span>{operatorTitle(operator)}</span>

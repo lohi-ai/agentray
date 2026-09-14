@@ -107,7 +107,6 @@ export function ProductPage() {
 
   return (
     <AppShell
-      active="product"
       title="Product"
       sub="Answer behavior questions without writing SQL first."
       actions={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask Growth Lead</Button>}

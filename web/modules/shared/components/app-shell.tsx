@@ -30,7 +30,6 @@ import { ProjectSwitcher } from '@/modules/shared/components/project-menu';
 import { AsideSection, PageShell } from '@/modules/shared/components/page-shell';
 import { RelatedSurfacesNav } from '@/modules/shared/components/related-surfaces';
 
-export type AppSection = 'agents' | 'chat' | 'traffic' | 'product' | 'monitor' | 'dashboards' | 'settings' | 'prototypes' | 'plans' | 'operations';
 
 const NAV_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   '/overview': Gauge,
@@ -109,7 +108,6 @@ function DemoBar() {
 }
 
 export type AppShellProps = {
-  active?: AppSection;
   /** Page title — row one of the page grid. */
   title?: ReactNode;
   /** One line under the title saying what this screen answers. */

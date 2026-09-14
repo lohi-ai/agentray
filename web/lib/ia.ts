@@ -160,7 +160,7 @@ export const FUTURE_CHANNELS: readonly FutureChannel[] = [
   { kind: 'telegram', label: 'Telegram', detail: 'Ask on the go. The thread still lands here.' },
 ];
 
-export function navPrefixes(item: NavItemDef): string[] {
+function navPrefixes(item: NavItemDef): string[] {
   return [item.href, ...(item.aliases ?? [])];
 }
 
@@ -196,7 +196,7 @@ export function childSurfacesFor(parentHref: string, surfaces: readonly ChildSur
 
 // Overview is the signed-in front door: the deterministic product read comes
 // first, chat and agents are one nav stop away under Agents.
-export const SIGNED_IN_LANDING = '/overview';
+const SIGNED_IN_LANDING = '/overview';
 
 export function signedInLandingTarget(): string {
   return SIGNED_IN_LANDING;
@@ -311,8 +311,8 @@ export function projectAccess(project: ProjectLike): ProjectAccess {
 
 export type TourStepId = 'demo' | 'explore' | 'ask' | 'project' | 'connect' | 'schedule';
 
-export const EXPLORE_STEPS: readonly TourStepId[] = ['demo', 'explore', 'ask'];
-export const CONNECT_STEPS: readonly TourStepId[] = ['project', 'connect', 'schedule'];
+const EXPLORE_STEPS: readonly TourStepId[] = ['demo', 'explore', 'ask'];
+const CONNECT_STEPS: readonly TourStepId[] = ['project', 'connect', 'schedule'];
 
 // The seeded question for step 3. Phrased about *this* product, not "my" —
 // the funnel on screen belongs to the site the demo runs, and calling it the
@@ -547,7 +547,7 @@ const FUNNEL_STAGES = [
   { id: 'revenue', label: 'purchase', match: /purchase|paid|checkout|subscri|upgrade|payment|invoice|conversion/i },
 ] as const;
 
-export const DEFAULT_FUNNEL_STEPS = ['user.pageview', 'user.signup', 'user.conversion'] as const;
+const DEFAULT_FUNNEL_STEPS = ['user.pageview', 'user.signup', 'user.conversion'] as const;
 
 type FunnelMatch = { id: string; label: string; event: string; count: number; users: number; order: number };
 

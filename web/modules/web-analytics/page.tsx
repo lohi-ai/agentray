@@ -19,7 +19,7 @@ export function WebAnalyticsPage() {
 
   if (!web) {
     return (
-      <AppShell active="traffic" title="Traffic" sub="Where visitors come from and which sources are worth more.">
+      <AppShell title="Traffic" sub="Where visitors come from and which sources are worth more.">
         <Loading label="Loading traffic…" />
       </AppShell>
     );
@@ -32,7 +32,6 @@ export function WebAnalyticsPage() {
 
   return (
     <AppShell
-      active="traffic"
       title="Traffic"
       sub="Where visitors come from and which sources are worth more."
       actions={<Button variant="agent" icon={<Sparkles size={15} />} onClick={() => router.push('/chat')}>Ask about traffic</Button>}
