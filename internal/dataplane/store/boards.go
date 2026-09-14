@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -129,6 +131,58 @@ type BoardDefinitionWrite struct {
 	// key already exists the declaration conflicts rather than overwriting a
 	// board the caller has not read.
 	ExpectedRevision int64
+}
+
+// unmarshalStrict refuses unknown JSON keys. A declaration is versioned, so a
+// misspelled field (`sectons`, `tile`, `colour`) is a 400, not a silent drop
+// that would store an empty document over the caller's intended content.
+func unmarshalStrict(data []byte, dest any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dest); err != nil {
+		return fmt.Errorf("%w: %v", ErrBoardDefinitionInvalid, err)
+	}
+	return nil
+}
+
+func (d *BoardDefinition) UnmarshalJSON(b []byte) error {
+	type alias BoardDefinition
+	var a alias
+	if err := unmarshalStrict(b, &a); err != nil {
+		return err
+	}
+	*d = BoardDefinition(a)
+	return nil
+}
+
+func (s *BoardSection) UnmarshalJSON(b []byte) error {
+	type alias BoardSection
+	var a alias
+	if err := unmarshalStrict(b, &a); err != nil {
+		return err
+	}
+	*s = BoardSection(a)
+	return nil
+}
+
+func (t *BoardTile) UnmarshalJSON(b []byte) error {
+	type alias BoardTile
+	var a alias
+	if err := unmarshalStrict(b, &a); err != nil {
+		return err
+	}
+	*t = BoardTile(a)
+	return nil
+}
+
+func (p *BoardTileParams) UnmarshalJSON(b []byte) error {
+	type alias BoardTileParams
+	var a alias
+	if err := unmarshalStrict(b, &a); err != nil {
+		return err
+	}
+	*p = BoardTileParams(a)
+	return nil
 }
 
 // migrateBoards adds the declared-content columns to dashboards. They are
@@ -635,6 +689,8 @@ func normalizeBoardTile(tile *BoardTile) error {
 			tile.Kind = TileKindMetric
 		case tile.ChartID != "" && tile.Metric == "":
 			tile.Kind = TileKindChart
+		case tile.Metric != "" && tile.ChartID != "":
+			return fmt.Errorf("%w: tile %q declares both a metric and a chart; a tile is one or the other", ErrBoardDefinitionInvalid, tile.Key)
 		default:
 			return fmt.Errorf("%w: tile %q declares neither a metric nor a chart", ErrBoardDefinitionInvalid, tile.Key)
 		}
@@ -672,6 +728,11 @@ func normalizeBoardTile(tile *BoardTile) error {
 		if tile.ChartID == "" {
 			return fmt.Errorf("%w: tile %q is a chart tile with no chart_id", ErrBoardDefinitionInvalid, tile.Key)
 		}
+		id, err := uuid.Parse(tile.ChartID)
+		if err != nil {
+			return fmt.Errorf("%w: tile %q has chart_id %q, which is not a chart id", ErrBoardDefinitionInvalid, tile.Key, tile.ChartID)
+		}
+		tile.ChartID = id.String()
 		if tile.Display != "" {
 			return fmt.Errorf("%w: tile %q sets display %q on a chart tile; a chart is drawn the way its own kind says", ErrBoardDefinitionInvalid, tile.Key, tile.Display)
 		}
@@ -698,7 +759,7 @@ func validateTileParams(params *BoardTileParams) error {
 		return fmt.Errorf("%w: period %q is not part of the range contract", ErrBoardDefinitionInvalid, params.Period)
 	}
 	switch params.Platform {
-	case "", PlatformWeb, PlatformIOS, PlatformAndroid, PlatformServer, "unknown":
+	case "", PlatformWeb, PlatformIOS, PlatformAndroid, PlatformServer, PlatformUnknown:
 	default:
 		return fmt.Errorf("%w: platform %q is unknown; use web, ios, android, server, unknown, or empty for every platform", ErrBoardDefinitionInvalid, params.Platform)
 	}

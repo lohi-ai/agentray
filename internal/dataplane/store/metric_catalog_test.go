@@ -112,6 +112,15 @@ func TestMetricCatalogIsInternallyConsistent(t *testing.T) {
 	}
 }
 
+func TestMetricCatalogDoesNotAliasDeclarationSlices(t *testing.T) {
+	a := MetricCatalog()
+	a[0].Displays[0] = "mutated"
+	b := MetricCatalog()
+	if b[0].Displays[0] == "mutated" {
+		t.Fatal("MetricCatalog aliases the declaration's Displays slice")
+	}
+}
+
 // TestEveryCatalogMetricIsComputable is the drift guard that matters: a metric
 // added to the catalog without a projection branch would otherwise be served as
 // a definition no read can fill.

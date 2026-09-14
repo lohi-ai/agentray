@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -13,6 +14,29 @@ import (
 // boards_test.go — live tests for the declarative board content model and the
 // served metric catalog. Needs the compose Postgres; skips without one.
 
+func TestBoardDefinitionJSONRejectsUnknownFields(t *testing.T) {
+	cases := []string{
+		`{"version":1,"sectons":[]}`,
+		`{"version":1,"sections":[{"key":"s","title":"S","tile":[]}]}`,
+		`{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"t","metric":"active_users","colour":"red"}]}]}`,
+		`{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"t","metric":"active_users","params":{"period":"7d","foo":1}}]}]}`,
+	}
+	for _, raw := range cases {
+		var def BoardDefinition
+		if err := json.Unmarshal([]byte(raw), &def); err == nil {
+			t.Errorf("accepted unknown field: %s", raw)
+		} else if !errors.Is(err, ErrBoardDefinitionInvalid) {
+			t.Errorf("%s: err = %v, want ErrBoardDefinitionInvalid", raw, err)
+		}
+	}
+	var ok BoardDefinition
+	if err := json.Unmarshal([]byte(`{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"t","metric":"active_users","display":"stat","params":{"period":"7d","platform":"web"}}]}]}`), &ok); err != nil {
+		t.Fatalf("known fields refused: %v", err)
+	}
+	if len(ok.Sections) != 1 || len(ok.Sections[0].Tiles) != 1 || ok.Sections[0].Tiles[0].Metric != "active_users" {
+		t.Fatalf("known-fields decode = %+v", ok)
+	}
+}
 func metricTile(key, metric, display string, span int) BoardTile {
 	return BoardTile{Key: key, Kind: TileKindMetric, Metric: metric, Display: display, Span: span}
 }
@@ -348,6 +372,20 @@ func TestBoardDeclarationValidation(t *testing.T) {
 			wantErr: "neither a metric nor a chart",
 		},
 		{
+			name: "tile that declares both",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Metric: MetricActiveUsers, ChartID: otherChart.ID},
+			}}}},
+			wantErr: "both a metric and a chart",
+		},
+		{
+			name: "chart_id that is not a uuid",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindChart, ChartID: "not-a-uuid"},
+			}}}},
+			wantErr: "not a chart id",
+		},
+		{
 			name: "param outside the range contract",
 			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
 				{Key: "t", Metric: MetricActiveUsers, Params: &BoardTileParams{Period: "week"}},
@@ -397,7 +435,7 @@ func TestChartTilePlacesAnExistingChartAndWarnsWhenItLeaves(t *testing.T) {
 	content, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
 		BoardID: board.ID, ExpectedRevision: board.Revision,
 		Definition: BoardDefinition{Sections: []BoardSection{{Key: "legacy", Title: "Legacy", Tiles: []BoardTile{
-			{Key: "chart-1", Kind: TileKindChart, ChartID: chart.ID},
+			{Key: "chart-1", Kind: TileKindChart, ChartID: strings.ToUpper(chart.ID)},
 			metricTile("people", MetricActiveUsers, DisplayStat, 1),
 		}}}},
 	}, "", "")
@@ -409,6 +447,9 @@ func TestChartTilePlacesAnExistingChartAndWarnsWhenItLeaves(t *testing.T) {
 	}
 	if len(content.Warnings) != 0 {
 		t.Fatalf("warnings = %v", content.Warnings)
+	}
+	if content.Definition.Sections[0].Tiles[0].ChartID != chart.ID {
+		t.Fatalf("stored chart_id = %q, want the canonical form %q", content.Definition.Sections[0].Tiles[0].ChartID, chart.ID)
 	}
 
 	if _, err := s.ArchiveChartIdempotent(ctx, projectID, chart.ID, chart.Revision, "", ""); err != nil {

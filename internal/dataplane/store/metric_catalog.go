@@ -17,8 +17,8 @@ import (
 // The declaration below is the single authority; `metric_definitions` rows are
 // its projection, refreshed on every boot. Storing them in Postgres rather than
 // serving the Go slice is what lets every consumer read one contract — the web
-// board renderer, an agent over MCP, a Garden preset, and a plain run_sql query
-// against the catalog — and it is what a board declaration is validated
+// board renderer, an agent over MCP, a Garden preset, and a SQL query against
+// `metric_definitions` — and it is what a board declaration is validated
 // against, so a tile can only reference a metric this server actually computes.
 //
 // A metric is added here only when a deterministic implementation exists: the
@@ -211,6 +211,7 @@ func MetricCatalog() []MetricDefinition {
 		def.MetricVersion = OverviewMetricVersion
 		def.SortOrder = i
 		def.IsSystem = true
+		def.Displays = append([]string(nil), def.Displays...)
 		def.Params = []string{MetricParamPeriod, MetricParamPlatform}
 		out = append(out, def)
 	}

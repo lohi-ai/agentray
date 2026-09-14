@@ -31,8 +31,9 @@ required instrumentation.
 ### Metric catalog (`internal/dataplane/store/metric_catalog.go`)
 
 `metric_definitions` — one row per metric, served to every consumer: the web
-renderer, an MCP client, a Garden preset, and a plain `run_sql` against the
-catalog.
+renderer, an MCP client, a Garden preset, and a SQL query against
+`metric_definitions` (Postgres; `run_sql` is the DuckDB event sandbox and does
+not see this table).
 
 | Column | Meaning |
 |---|---|
