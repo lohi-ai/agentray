@@ -31,15 +31,7 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter)
 	// project this request names — the legacy session-only admission plus the
 	// registry's access-class check.
 	sessionOp := func(c echo.Context, opName string) (opcore.Principal, storage.Project, error) {
-		ctx, err := authFromRequest(c, store)
-		if err != nil {
-			return opcore.Principal{}, storage.Project{}, err
-		}
-		projectID, err := sessionProjectID(c, store, ctx.User.ID)
-		if err != nil {
-			return opcore.Principal{}, storage.Project{}, err
-		}
-		principal, project, err := sessionPrincipal(c, store, ctx.User.ID, projectID)
+		_, principal, project, err := sessionCaller(c, store)
 		if err != nil {
 			return opcore.Principal{}, storage.Project{}, err
 		}

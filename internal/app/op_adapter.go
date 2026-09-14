@@ -83,6 +83,63 @@ func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
 	return nil
 }
 
+// authorizeAccess is authorize for the legacy routes that have no registered
+// operation to name — cohort audiences, saved queries, template
+// instantiation, the subscription mapping. The work is real and it writes, but
+// there is no operation to ask about, so the route states the class its work
+// belongs to instead of naming an operation. The decision is the registry's
+// (Allow), not a second implementation of it here: a management credential
+// without the class is refused exactly as /api/op refuses it, and a viewer's
+// session is refused on every write for the same reason /api/op refuses one.
+func (a *opAdapter) authorizeAccess(principal opcore.Principal, req opcore.Requirement) error {
+	if a.reg.Allow(principal, req) {
+		return nil
+	}
+	// A session refused on a write hears why: the class is not the missing
+	// piece, the membership is. It is the sentence the demo write guard
+	// answers a viewer with, for the same situation.
+	if principal.Kind == opcore.CredSession && !storage.RoleMayWrite(principal.Role) {
+		return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
+	}
+	return echo.NewHTTPError(http.StatusForbidden, "credential may not perform this action (requires "+string(req.Access)+")")
+}
+
+// legacyWrite is what a legacy mutating route requires: the access class its
+// work belongs to, at the session floor every write class in the registry
+// carries. A viewer's session holds no write class, so the floor is not the
+// only thing standing in its way — but stating both keeps this requirement and
+// an operation's Spec the same shape.
+func legacyWrite(access opcore.Access) opcore.Requirement {
+	return opcore.Requirement{Access: access, MinSessionRole: "member"}
+}
+
+// legacyRead is what a legacy route that only reads requires. Both of today's
+// callers are POSTs (they carry SQL in a body), and both are analytics:read —
+// the class /api/op's run_sql carries, so a viewer may run SQL here for the
+// same reason it may run it there.
+func legacyRead(access opcore.Access) opcore.Requirement {
+	return opcore.Requirement{Access: access}
+}
+
+// projectForWrite resolves the caller of a legacy mutating route — the same
+// admission and the same key redaction projectFromRequest applies to a read —
+// and then makes the route's access-class decision. It is the write side of the
+// resolver split: projectFromRequest answers "may this credential address the
+// project", which is the whole question for a read and never the question for a
+// write, and a mutation that resolved through it ran for any credential that
+// could reach the project — a reader-scoped management key, a viewer's session,
+// a pre-split project key.
+func projectForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
+	principal, project, err := principalAndProject(c, store)
+	if err != nil {
+		return storage.Project{}, err
+	}
+	if err := ops.authorizeAccess(principal, req); err != nil {
+		return storage.Project{}, err
+	}
+	return project, nil
+}
+
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —
 // the caller's expected revision and its idempotency key — without disturbing
 // the operation-specific payload the handler binds separately. An empty body
@@ -158,6 +215,52 @@ func sessionProjectID(c echo.Context, store *storage.Store, userID string) (stri
 		return "", echo.NewHTTPError(http.StatusNotFound, "project not found")
 	}
 	return project.ID, nil
+}
+
+// sessionCaller resolves a session-only route's caller in one step: the cookie,
+// the project it names (membership proven), and the opcore principal the
+// registry decides on. It is the admission half of the connector family's
+// resolver, shared so a second session-only family reaches its decision through
+// the same principal rather than a second reading of the same request.
+//
+// It is deliberately not principalAndProject: a session-only route never
+// admitted a project key or a management credential, and widening it here would
+// hand a machine key access the surface was built without.
+func sessionCaller(c echo.Context, store *storage.Store) (authContext, opcore.Principal, storage.Project, error) {
+	auth, err := authFromRequest(c, store)
+	if err != nil {
+		return authContext{}, opcore.Principal{}, storage.Project{}, err
+	}
+	projectID, err := sessionProjectID(c, store, auth.User.ID)
+	if err != nil {
+		return authContext{}, opcore.Principal{}, storage.Project{}, err
+	}
+	principal, project, err := sessionPrincipal(c, store, auth.User.ID, projectID)
+	if err != nil {
+		return authContext{}, opcore.Principal{}, storage.Project{}, err
+	}
+	return auth, principal, project, nil
+}
+
+// authProjectForWrite is authProject plus the route's access-class decision,
+// for the session-only families whose store methods prove membership and stop
+// there. Admission is unchanged — sessionCaller resolves the same cookie and
+// binds the same project authProject did — and the decision is the registry's
+// Allow, so a viewer is refused here for the reason /api/op already refuses it
+// propose_test rather than by a rule this file invented.
+//
+// authProject's own project cannot answer this: it comes from
+// store.ProjectByID, which is role-blind, so the role the decision needs is the
+// one sessionPrincipal loads from the membership row.
+func authProjectForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (authContext, storage.Project, error) {
+	auth, principal, project, err := sessionCaller(c, store)
+	if err != nil {
+		return authContext{}, storage.Project{}, err
+	}
+	if err := ops.authorizeAccess(principal, req); err != nil {
+		return authContext{}, storage.Project{}, err
+	}
+	return auth, project, nil
 }
 
 // revisionFor resolves the expected revision a legacy mutation carries: the

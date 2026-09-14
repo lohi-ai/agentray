@@ -79,7 +79,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	registerAgentMonitorRoutes(e, store)
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)
-	registerValidationRoutes(e, store)
+	registerValidationRoutes(e, store, ops)
 	registerOperationsRoutes(e, store, scheduler)
 
 	// The waitlist is posted from the owner's own landing page, so it sits with
@@ -545,7 +545,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/templates/:template_id/apply", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -560,7 +560,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/templates/:template_id/charts/:chart_id/clone", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -634,7 +634,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/cohorts/audiences", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -654,7 +654,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PUT("/api/cohorts/audiences/:audience_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -674,7 +674,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.DELETE("/api/cohorts/audiences/:audience_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -699,7 +699,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PUT("/api/subscription/mapping", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessPlansWrite))
 		if err != nil {
 			return err
 		}
@@ -763,7 +763,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/saved-queries", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -783,7 +783,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/saved-queries/:query_id/run", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -805,7 +805,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.PATCH("/api/saved-queries/:query_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -823,7 +823,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.DELETE("/api/saved-queries/:query_id", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyWrite(opcore.AccessDashboardsWrite))
 		if err != nil {
 			return err
 		}
@@ -834,7 +834,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/sql/run", func(c echo.Context) error {
-		project, err := projectFromRequest(c, store)
+		project, err := projectForWrite(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -1171,6 +1171,13 @@ func mountDashboardLifecycle(e *echo.Echo, store *storage.Store, ops *opAdapter)
 // credentials are refused; every other admitted kind gets a project whose
 // capture key has been withheld (projectForPrincipal) — the response bodies of
 // these routes all echo it.
+//
+// It answers admission, never access, and that is the whole question only for a
+// read: every read class a legacy route needs is one a viewer's session and a
+// reader-scoped management credential already hold. A mutating route must
+// resolve with projectForWrite instead, which applies the access class the
+// work belongs to — TestNoMutatingRouteResolvesThroughTheReadResolver fails
+// when one does not.
 func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, error) {
 	principal, err := principalFromRequest(c, store)
 	if err != nil {
