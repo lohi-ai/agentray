@@ -124,65 +124,40 @@ func legacyRead(access opcore.Access) opcore.Requirement {
 	return opcore.Requirement{Access: access}
 }
 
-// projectForWrite resolves the caller of a legacy mutating route — the same
-// admission and the same key redaction projectFromRequest applies to a read —
-// and then makes the route's access-class decision. It is the write side of the
-// resolver split: projectFromRequest answers "may this credential address the
-// project", which is the whole question for a read and never the question for a
-// write, and a mutation that resolved through it ran for any credential that
-// could reach the project — a reader-scoped management key, a viewer's session,
-// a pre-split project key.
-func projectForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
-	project, _, err := projectAndPrincipalForWrite(c, store, ops, req)
+// authorizedProject resolves the caller of a legacy route — the same admission
+// and the same key redaction projectFromRequest applies to a read — and then
+// makes the route's access-class decision through the registry, the same Allow
+// question /api/op asks. That pair is the whole of the resolver split:
+// projectFromRequest answers "may this credential address the project", which is
+// the question for the addressing itself and never the question for reading or
+// writing the project's data, so a route that resolved through it ran for any
+// credential that could reach the project — a reader-scoped management key, a
+// viewer's session, a pre-split project key.
+//
+// The name says nothing about reads or writes on purpose: the requirement
+// decides the class, so the class cannot disagree with the verb the way
+// projectForRead/projectForWrite could. TestNoRouteResolvesThroughTheReadResolver
+// is the fence — the only route allowed to skip this is the one whose work IS
+// the addressing, GET /api/projects.
+func authorizedProject(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
+	_, project, err := authorizedPrincipalAndProject(c, store, ops, req)
 	return project, err
 }
 
-// projectAndPrincipalForWrite is projectForWrite for the one route that has to
-// decide something else about the caller as well: running a saved query is an
-// analytics read, but caching its result is an UPDATE to the owner's row, so the
-// handler needs the principal and not only the project.
-func projectAndPrincipalForWrite(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, opcore.Principal, error) {
+// authorizedPrincipalAndProject is authorizedProject plus the caller it
+// resolved, for the routes that have to decide something else about the caller
+// as well: running a saved query is an analytics read, but caching its result is
+// an UPDATE to the owner's row, so that handler needs the principal and not only
+// the project.
+func authorizedPrincipalAndProject(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (opcore.Principal, storage.Project, error) {
 	principal, project, err := principalAndProject(c, store)
 	if err != nil {
-		return storage.Project{}, opcore.Principal{}, err
+		return opcore.Principal{}, storage.Project{}, err
 	}
 	if err := ops.authorizeAccess(principal, req); err != nil {
-		return storage.Project{}, opcore.Principal{}, err
+		return opcore.Principal{}, storage.Project{}, err
 	}
-	return project, principal, nil
-}
-
-// projectForRead is projectForWrite's counterpart for the legacy read routes:
-// the same admission, then the class of the data the route returns. Admission
-// alone is not the whole question for a read either — projectFromRequest never
-// consults a management credential's grants, so a credential minted with
-// sources:read and nothing else read every analytics route on this surface
-// while /api/op refused the same credential activity_summary. The classes the
-// reads declare are all analytics:read, which a viewer's session holds and a
-// pre-split project key's frozen allowlist covers, so the callers that are
-// meant to keep reading keep reading.
-func projectForRead(c echo.Context, store *storage.Store, ops *opAdapter, req opcore.Requirement) (storage.Project, error) {
-	principal, project, err := principalAndProject(c, store)
-	if err != nil {
-		return storage.Project{}, err
-	}
-	if err := ops.authorizeAccess(principal, req); err != nil {
-		return storage.Project{}, err
-	}
-	return project, nil
-}
-
-// projectForAdmission is the resolver for the one legacy route whose work IS the
-// addressing: GET /api/projects returns the project a credential named — the
-// projects it may address — and reads no analytics, so the class decision every
-// other route makes would be a decision about data this route never touches.
-//
-// It is projectFromRequest under a name that says why a route is allowed to ask
-// only "may you address this project", so the exception is greppable rather
-// than a hole: TestNoRouteResolvesThroughTheReadResolver fails any route that
-// reaches projectFromRequest directly.
-func projectForAdmission(c echo.Context, store *storage.Store) (storage.Project, error) {
-	return projectFromRequest(c, store)
+	return principal, project, nil
 }
 
 // optionalMutationBody decodes the extra fields a legacy mutation may carry —
