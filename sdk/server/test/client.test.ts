@@ -32,8 +32,8 @@ describe('AgentRayServerClient', () => {
     const calls = stubFetch();
     const ar = new AgentRayServerClient(config);
 
-    await ar.revenue('u1', { amount: 19, currency: 'USD' }, { idempotencyKey: 'evt_abc' });
-    await ar.revenue('u1', { amount: 19, currency: 'USD' }, { idempotencyKey: 'evt_abc' });
+    await ar.revenue('u1', { amount: 1900, currency: 'USD', kind: 'payment' }, { idempotencyKey: 'evt_abc' });
+    await ar.revenue('u1', { amount: 1900, currency: 'USD', kind: 'payment' }, { idempotencyKey: 'evt_abc' });
 
     expect(calls.map((c) => c.body.properties.$insert_id)).toEqual(['evt_abc', 'evt_abc']);
     expect(calls[0].body.event).toBe('revenue');
@@ -72,6 +72,25 @@ describe('AgentRayServerClient', () => {
     expect(batch).toHaveLength(2);
     expect(batch.every((e: any) => e.properties.platform === 'server')).toBe(true);
     expect(batch[1].properties.$insert_id).toBe('evt_b');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps a caller-supplied $insert_id instead of overwriting it with a random one', async () => {
+    // The raw-HTTP convention puts the key in properties; the SDK shares that
+    // payload, so a key there must survive — a minted replacement would make a
+    // retried money row book twice. The explicit option still wins.
+    const calls = stubFetch();
+    await new AgentRayServerClient(config).batch([
+      { distinctId: 'u1', event: 'revenue', properties: { amount: 1900, $insert_id: 'evt_props' } },
+      {
+        distinctId: 'u2',
+        event: 'revenue',
+        properties: { amount: 1900, $insert_id: 'evt_props' },
+        options: { idempotencyKey: 'evt_option' },
+      },
+    ]);
+
+    expect(calls[0].body.batch.map((e: any) => e.properties.$insert_id)).toEqual(['evt_props', 'evt_option']);
     vi.unstubAllGlobals();
   });
 

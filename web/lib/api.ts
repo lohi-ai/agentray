@@ -190,6 +190,37 @@ export type OverviewMetric = {
   notes?: string[];
 };
 
+// One declared currency's deduplicated money arithmetic. Amounts are integers
+// in that currency's smallest unit; AgentRay performs no FX, so these are the
+// only numbers that may be added together.
+export type OverviewRevenueCurrency = {
+  currency: string;
+  gross: number;
+  reversed: number;
+  net: number;
+  rows: number;
+};
+
+// OverviewRange mirrors the Go store.OverviewRange: the complete-day window a
+// read covered. Named once so the money block cannot drift from the context
+// block it is served beside.
+export type OverviewRange = { from: string; to: string; days: number; complete_days: boolean };
+
+// The signed arithmetic behind the Net revenue tile. `value`/`previous` above
+// are unsigned, so a negative net lives here — never in a clamped zero.
+export type OverviewRevenueDetail = {
+  window: OverviewRange;
+  currency?: string;
+  gross: number;
+  reversed: number;
+  net: number;
+  previous_net?: number;
+  deduped_rows: number;
+  excluded_rows: number;
+  excluded_currencies?: string[];
+  by_currency: OverviewRevenueCurrency[];
+};
+
 export type VerifySDKResult = {
   found: boolean;
   event_name?: string;
@@ -225,8 +256,8 @@ export type OverviewResult = {
     project_id: string;
     timezone: string;
     timezone_source: string;
-    range: { from: string; to: string; days: number; complete_days: boolean };
-    previous_range: { from: string; to: string; days: number; complete_days: boolean };
+    range: OverviewRange;
+    previous_range: OverviewRange;
     platform: string;
     generated_at: string;
     metric_version: string;
@@ -237,6 +268,7 @@ export type OverviewResult = {
     sessions: OverviewMetric;
     activation: OverviewMetric;
     revenue: OverviewMetric;
+    revenue_detail?: OverviewRevenueDetail | null;
   };
   trend: Array<{ day: string; active_users: number }>;
   retention: {

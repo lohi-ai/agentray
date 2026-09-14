@@ -32,11 +32,16 @@ that duplicates it with zero extra properties.
    retention is meaningless without a return-defining event; every retention
    curve and "active user" count keys off this one name. Choose it once and
    never rename it casually.
-3. **Revenue outcomes** (server-side only). `revenue` with `amount`,
-   `currency`, `plan`, `kind`, and an `idempotencyKey` from the payment
-   provider's event id. *Why:* MRR/LTV/conversion all read from the
-   conventional `revenue` event; webhooks retry, so the idempotency key is what
-   keeps money from being counted twice. Never emit money from the browser.
+3. **Revenue outcomes** (server-side, unless the browser is genuinely the
+   source of the sale). The standard money taxonomy — `revenue` and
+   `revenue_reversed`, never a project-specific revenue name.
+   *Why:* MRR/LTV/conversion read from exactly these two names; webhooks retry,
+   so the row-specific `$insert_id` is what keeps money from being counted
+   twice. A browser is forgeable, so emit money from the backend whenever the
+   backend can see the charge; when a client-side purchase flow is the only
+   source (an in-app purchase the server never sees), capture it through the
+   ordinary browser `capture` in the same taxonomy. Contract in the next
+   section and in `agentray-setup`.
 4. **Decision-bound feature events.** One event per keep/kill/invest decision
    pending — `tts_played`, `dark_mode_enabled`. *Why:* usage is the evidence
    for the decision; when the decision is made, the event can be retired.
@@ -51,6 +56,46 @@ states — no PII, values land in the event store unredacted); browser = intent,
 server = outcome; one emitter module per app; stable `distinct_id` with
 `identify()` at login so anonymous and identified activity stitch into one
 person.
+
+## Money events (the standard taxonomy)
+
+Money is two stored event names every AgentRay project shares — there is no
+event per business model, and never a project-specific revenue name:
+
+- `revenue` — one settled money booking (a payment, subscription, in-app
+  purchase, top-up or donation).
+- `revenue_reversed` — money that came back: a refund, chargeback or clawback.
+
+Every money row carries the same payload:
+
+- `amount` — **integer in the smallest unit of the sender's currency**
+  (`1900` USD is $19.00, `50000` VND is 50,000 ₫). Nothing is converted.
+- `currency` — uppercase ISO 4217 code (`USD`, `VND`).
+- `kind` — the documented booking kind: `payment`, `in_app_purchase`,
+  `subscription`, `wallet_topup`, `donation`.
+- `$insert_id` — a stable, row-specific idempotency key; **required**, and the
+  dedup key every revenue read groups on.
+- Optional flat, non-PII dimensions: `provider`, `transaction_id`,
+  `product_id`, `plan`. Traits (email, display name) are **not** money
+  properties — they go through `identify()`.
+
+**`kind` is documentation, never a read filter.** The read does not inspect it,
+so an existing custom kind (`one_time`, `renewal`) books normally — never
+migrate or filter it to fit the vocabulary. Pick the kind that describes the
+sale so "subscription vs. top-up vs. one-off" is answerable later; a reversal's
+kind is `refund`.
+
+**A refund is its own row, never a second booking.** Emit `revenue_reversed`
+with the positive amount actually returned and its **own** `$insert_id`.
+Reusing the booking's key would make the read treat the reversal as a
+correction that replaces the booking instead of netting against it.
+
+**No FX, no cross-currency total.** Each declared currency is reported
+separately and signed.
+
+**Do not invent a `paid_user` event.** Paid status is derived — the earliest
+deduplicated positive booking per canonical person. A `paid_user` event would
+duplicate the booking and drift from it.
 
 ## Plan the consumers (AgentRay web app)
 
@@ -72,15 +117,15 @@ The four consumer surfaces, and what each demands of the event:
   from the plan's events, the plan is missing a step, not the agent.
 - **SQL** (SQL page in the web app; `run_sql` over MCP; SELECT-only). Ad-hoc
   slicing via `json_extract_string(properties, '$.plan')` etc. — which is why
-  properties must be flat, typed values, not prose. Revenue reads de-duplicate
-  by `insert_id`:
-
-  ```sql
-  SELECT sum(amount) AS revenue FROM (
-    SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
-    FROM events WHERE event_name = 'revenue' GROUP BY insert_id
-  )
-  ```
+  properties must be flat, typed values, not prose. Money is **net, not gross**:
+  read both `revenue` and `revenue_reversed` in one query, de-duplicate by
+  `coalesce(nullif(insert_id, ''), CAST(event_id AS VARCHAR))` keeping the
+  greatest `("timestamp", event_id)` per key, subtract the reversals, and
+  exclude `LT` plus rows that declared no currency. Never `GROUP BY insert_id`
+  alone — every unkeyed row shares the empty key and collapses into one — and
+  never sum `revenue` by itself, which answers gross where the Net revenue tile
+  answers net. The canonical query is `docs/ANALYTICS.md` → *Reading money with
+  SQL*; copy that one instead of writing a second.
 
 - **Alerts** (Alerts tab). A threshold rule on a metric that should page
   someone — error rate, revenue drop to zero, funnel-step volume collapse.
@@ -97,6 +142,7 @@ never a reason to add typed events.
 | `first_chapter_read` | funnel + core | first value & return anchor | funnel + retention charts |
 | `listen_started` | decision | invest-in-TTS decision pending | trend chart; SQL by `voice` |
 | `revenue` (server) | revenue | MRR/LTV; webhook-safe | dashboard; SQL dedup; alert on 0 |
+| `revenue_reversed` (server) | revenue | refunds net against bookings | dashboard; SQL dedup |
 | `tts_error` (server) | quality | triage by `model`, `voice` | alert on rate; incident SQL |
 
 ## Workflow
@@ -124,4 +170,7 @@ never a reason to add typed events.
   and saved query — treat names as API. If a rename is unavoidable, update the
   consumers in the same change.
 - No PII in properties; ids and amounts in, emails and raw input out.
-- Revenue only from the server, only with provider idempotency keys.
+- Revenue from the server whenever the server can see the charge, otherwise
+  from the browser that was genuinely the source — always in the standard
+  taxonomy (`revenue`, `revenue_reversed`) and always with stable `$insert_id`
+  keys: a refund carries its own key, never the booking's.

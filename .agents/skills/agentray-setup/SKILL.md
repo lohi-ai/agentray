@@ -113,8 +113,9 @@ before writing emitters. The mechanical contract (in full in the
    function per event; never call `capture` from components or routes
    directly. Exactly one call site per event.
 5. **Browser emits intent, server emits outcomes.** `donate_clicked` from the
-   client; `donation_completed` from the payment webhook. Never emit revenue
-   from the browser.
+   client; `donation_completed` from the payment webhook. Emit money from the
+   server unless the browser is genuinely the source of the sale (see *Wiring
+   money* below).
 6. **No PII in properties** (ids and amounts in; emails, phones, raw form
    input out — property values land in the event store unredacted). Attach
    `$groups` on group-scoped events or they vanish from per-group analytics.
@@ -124,6 +125,64 @@ before writing emitters. The mechanical contract (in full in the
 
 Instrument the app's **activation funnel first** (the 3–5 steps from landing
 to first value), then revenue outcomes, then breadth.
+
+### Wiring money
+
+Money uses the standard taxonomy — `revenue` (a settled booking) and
+`revenue_reversed` (money returned), never a project-specific name. The sender
+declares the unit: `amount` is an integer in the smallest unit of an uppercase
+ISO 4217 `currency`, and every row needs a stable `$insert_id`. Pick the
+producer by where the truth lives; the tabular definition lives in the AgentRay
+`docs/ANALYTICS.md`.
+
+- **Server SDK — billing truth, and the default.** Payment webhooks and
+  subscription jobs are server-side facts:
+
+  ```ts
+  import { AgentRayServerClient } from '@agentray/server';
+
+  const ar = new AgentRayServerClient({ apiUrl: '<host>', apiKey: '<key>' });
+
+  await ar.revenue(
+    'user-123',
+    { amount: 1900, currency: 'USD', kind: 'subscription' },
+    { idempotencyKey: webhook.id },
+  );
+  await ar.revenueReversed(
+    'user-123',
+    { amount: 1900, currency: 'USD' },
+    { idempotencyKey: `refund:${refund.id}` },
+  );
+  ```
+
+  `idempotencyKey` is required and becomes `$insert_id`; a reversal gets its
+  **own** key, because reusing the booking's would make the read replace the
+  booking instead of netting against it. `kind` is documentation, not a filter
+  — an existing `one_time`/`renewal` kind still books normally.
+
+- **Browser SDK — only if the browser is genuinely the source.** There is no
+  revenue helper on `@agentray/browser`; a browser is forgeable, so money goes
+  through the ordinary capture with a caller-supplied `$insert_id`:
+
+  ```ts
+  import { init, REVENUE_EVENT } from '@agentray/browser';
+
+  const ar = init({ host: '<host>', apiKey: '<key>' });
+  ar.capture(REVENUE_EVENT, {
+    amount: 1900,                        // smallest unit: $19.00
+    currency: 'USD',                     // uppercase ISO 4217
+    kind: 'in_app_purchase',
+    $insert_id: receipt.transactionId,   // stable; a retried send de-dups
+  });
+  ```
+
+- **Raw HTTP — for a provider webhook with no SDK.** Same envelope as any other
+  event; no money-specific endpoint and no ingest-side validation:
+
+  ```bash
+  curl -X POST <host>/capture -H 'Content-Type: application/json' \
+    -d '{"api_key":"<key>","event":"revenue","distinct_id":"user-123","properties":{"amount":1900,"currency":"USD","kind":"payment","provider":"stripe","$insert_id":"evt_1P2x"}}'
+  ```
 
 **Verify:** exercise the flow once; confirm each new event arrives with the
 expected properties via the Events tab or `explore_events` (MCP). Typecheck
@@ -181,7 +240,8 @@ continue building on an unverified layer.
 - **Never advance past a failed verification.** Dashboards on missing events
   and agents on empty projects waste every later step.
 - **Server key stays server-side.** Only the browser SDK's project key ships
-  to clients; revenue events come only from the backend with idempotency keys.
+  to clients; revenue events come from the backend with `$insert_id` keys,
+  unless the browser is genuinely the source of the sale.
 - **Don't over-instrument.** Autocapture plus a handful of typed
   funnel/outcome events beats fifty ad-hoc events nobody charts. Every typed
   event needs a question it answers.

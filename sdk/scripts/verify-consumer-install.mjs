@@ -33,6 +33,33 @@ if (!symbol) {
   process.exit(2);
 }
 
+// The money taxonomy is a wire contract, so its values — not just its names —
+// have to survive the build. A published 0.2.0 bundle that ships
+// `REVENUE_EVENT = 'revenue_event'` would file every customer's bookings under
+// an event name the Overview read never queries, and nothing else in CI would
+// notice.
+const MONEY_CONSTANTS = {
+  '@agentray/browser': {
+    REVENUE_EVENT: 'revenue',
+    REVENUE_REVERSED_EVENT: 'revenue_reversed',
+    REFUND_KIND: 'refund',
+  },
+  '@agentray/server': {
+    REVENUE_EVENT: 'revenue',
+    REVENUE_REVERSED_EVENT: 'revenue_reversed',
+    REFUND_KIND: 'refund',
+  },
+};
+const constants = MONEY_CONSTANTS[pkg.name];
+if (!constants) {
+  console.error(`no money constants recorded for ${pkg.name} — add them to verify-consumer-install.mjs`);
+  process.exit(2);
+}
+const constantChecks = Object.entries(constants)
+  .map(([name, value]) =>
+    `if (sdk.${name} !== ${JSON.stringify(value)}) throw new Error('${name} should be ${value}, got ' + String(sdk.${name}));`)
+  .join('\n   ');
+
 const dir = mkdtempSync(join(tmpdir(), 'agentray-consumer-'));
 const run = (cmd, args) => execFileSync(cmd, args, { cwd: dir, stdio: 'inherit' });
 
@@ -44,21 +71,25 @@ run('npm', ['install', '--no-audit', '--no-fund', tarballPath]);
 run('node', ['--input-type=module', '-e',
   `import * as sdk from '${pkg.name}';
    if (typeof sdk.${symbol} !== 'function') throw new Error('${symbol} missing from the esm entrypoint');
-   console.log('  esm ok: ${symbol}');`]);
+   ${constantChecks}
+   console.log('  esm ok: ${symbol} + ${Object.keys(constants).length} money constants');`]);
 
 run('node', ['--input-type=commonjs', '-e',
   `const sdk = require('${pkg.name}');
    if (typeof sdk.${symbol} !== 'function') throw new Error('${symbol} missing from the cjs entrypoint');
-   console.log('  cjs ok: ${symbol}');`]);
+   ${constantChecks}
+   console.log('  cjs ok: ${symbol} + ${Object.keys(constants).length} money constants');`]);
 
 // The declaration file is what an editor resolves; a package whose types 404
 // installs fine and is miserable to use.
 const types = join(dir, 'node_modules', pkg.name, (pkg.types ?? '').replace(/^\.\//, ''));
 const dts = readFileSync(types, 'utf8');
-if (!new RegExp(`\\b${symbol}\\b`).test(dts)) {
-  console.error(`${pkg.types} does not declare ${symbol}`);
-  process.exit(1);
+for (const name of [symbol, ...Object.keys(constants)]) {
+  if (!new RegExp(`\\b${name}\\b`).test(dts)) {
+    console.error(`${pkg.types} does not declare ${name}`);
+    process.exit(1);
+  }
 }
-console.log(`  types ok: ${pkg.types} declares ${symbol}`);
+console.log(`  types ok: ${pkg.types} declares ${symbol} and the money constants`);
 
 console.log(`${pkg.name}@${pkg.version} installs and imports from a clean project`);

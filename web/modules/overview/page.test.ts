@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult } from '@/lib/api';
-import { bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, retentionTile, tileProvenance } from './page';
+import { APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
+import { bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, retentionTile, revenueBreakdownRows, revenueTile, tileProvenance } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -224,6 +224,28 @@ describe('retentionTile', () => {
   });
 });
 
+// The served money block for a VND-headline project: a booking that was partly
+// reversed, a separate USD row that must never be added to it, and one legacy
+// LT row the read excluded as a platform credit rather than money.
+function moneyDetail(over: Partial<OverviewRevenueDetail> = {}): OverviewRevenueDetail {
+  return {
+    window: { from: '2026-09-04T17:00:00Z', to: '2026-09-11T17:00:00Z', days: 7, complete_days: true },
+    currency: 'VND',
+    gross: 80000,
+    reversed: 30000,
+    net: 50000,
+    previous_net: 40000,
+    deduped_rows: 3,
+    excluded_rows: 1,
+    excluded_currencies: ['LT'],
+    by_currency: [
+      { currency: 'VND', gross: 80000, reversed: 30000, net: 50000, rows: 2 },
+      { currency: 'USD', gross: 100, reversed: 0, net: 100, rows: 1 },
+    ],
+    ...over,
+  };
+}
+
 // tileProvenance is the hard contract: every tile names the metric version, its
 // own range, the project timezone, its coverage and its freshness — in that
 // order, from served fields only. Each case pins a field that would otherwise
@@ -240,6 +262,9 @@ function servedRes(over: {
   cohortWindow?: string;
   d7Eligible?: number;
   completeDays?: boolean;
+  revenueState?: OverviewMetric['state'];
+  revenueNotes?: string[];
+  revenueDetail?: OverviewRevenueDetail | null;
 } = {}): OverviewResult {
   const metric = (state: OverviewMetric['state'], notes?: string[]): OverviewMetric => ({ state, definition: 'Measured by AgentRay.', notes });
   return {
@@ -257,14 +282,15 @@ function servedRes(over: {
       previous_range: { from: '2026-08-28T17:00:00Z', to: '2026-09-04T17:00:00Z', days: 7, complete_days: true },
       platform: '',
       generated_at: '2026-09-12T10:00:00Z',
-      metric_version: 'overview.v2',
+      metric_version: 'overview.v3',
     },
     metrics: {
       active_users: metric('ok'),
       new_users: metric('ok'),
       sessions: metric('ok'),
       activation: metric('unconfigured', ['no activation condition is stored for projects yet — configure it before this metric can compute']),
-      revenue: metric('unconfigured', ['no trusted deduplicated revenue source exists — SDK revenue events are not deduplicated at read time']),
+      revenue: metric(over.revenueState ?? 'ok', over.revenueNotes),
+      revenue_detail: over.revenueDetail === undefined ? moneyDetail() : over.revenueDetail,
     },
     trend: [],
     retention: {
@@ -293,7 +319,7 @@ describe('tileProvenance', () => {
   it('names version, range, timezone, coverage and freshness in that order', () => {
     const r = servedRes();
     expect(tileProvenance(r, { kind: 'metric', metric: r.metrics.active_users })).toBe(
-      'metric overview.v2 · Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh · coverage 120 of 400 events in range · Last received 2026-09-12 09:59 UTC',
+      'metric overview.v3 · Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh · coverage 120 of 400 events in range · Last received 2026-09-12 09:59 UTC',
     );
   });
 
@@ -339,9 +365,11 @@ describe('tileProvenance', () => {
   });
 
   it('carries the served reason instead of a coverage claim for an unconfigured metric', () => {
-    const r = servedRes();
-    expect(tileProvenance(r, { kind: 'metric', metric: r.metrics.activation })).toContain('no activation condition is stored');
-    expect(tileProvenance(r, { kind: 'metric', metric: r.metrics.revenue })).toContain('no trusted deduplicated revenue source exists');
+    expect(tileProvenance(servedRes(), { kind: 'metric', metric: servedRes().metrics.activation })).toContain('no activation condition is stored');
+    // A project whose money source is still unconfigured keeps the served
+    // reason on the tile rather than a coverage count it never measured.
+    const unconfigured = servedRes({ revenueState: 'unconfigured', revenueNotes: ['no trusted deduplicated revenue source exists'], revenueDetail: null });
+    expect(tileProvenance(unconfigured, { kind: 'metric', metric: unconfigured.metrics.revenue })).toContain('no trusted deduplicated revenue source exists');
   });
 
   it('says nothing arrived rather than blaming the metric for it', () => {
@@ -365,5 +393,96 @@ describe('tileProvenance', () => {
     const line = tileProvenance(servedRes(), { kind: 'unserved' });
     expect(line).toContain('not instrumented — no served metric');
     expect(line).not.toContain('coverage');
+  });
+});
+
+// The revenue tile is the money contract's face: a signed net in the currency
+// its sender declared, and a provenance line carrying the deduplicated rows the
+// arithmetic actually ran on — not the page's event count. Every case below
+// pins a reading that would otherwise become a false claim: a bare number with
+// no currency, a net reversal rendered as "No data", a measured zero rendered
+// as "no data", or an exclusion that disappears from the coverage line.
+describe('revenue tile', () => {
+  const ok = (value?: number): OverviewMetric => ({ state: 'ok', ...(value === undefined ? {} : { value }), definition: 'Measured by AgentRay.' });
+
+  it('prints the signed net with the currency its sender declared', () => {
+    // No prior window in this fixture, so the reading is exactly this pair.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 0 }))).toEqual({ label: 'Net revenue', value: '50,000 VND' });
+  });
+
+  it('shows a net reversal as the signed negative it is, never as missing data', () => {
+    // OverviewMetric.value is unsigned, so a refund-only window has no
+    // `value` at all — reading the tile off it would print "No data" over a
+    // measured loss.
+    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1 }] });
+    expect(revenueTile(ok(), reversed).value).toBe('\u221230 VND');
+  });
+
+  it('keeps a measured zero distinct from no data', () => {
+    const zero = moneyDetail({ gross: 0, reversed: 0, net: 0, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 0, net: 0, rows: 1 }] });
+    expect(revenueTile(ok(0), zero).value).toBe('0 VND');
+    expect(revenueTile({ state: 'no_data', definition: '' }, moneyDetail({ currency: undefined, gross: 0, reversed: 0, net: 0, deduped_rows: 0, excluded_rows: 0, by_currency: [] })).value).toBe('No data');
+  });
+
+  it('never prints a bare amount when the unit is missing', () => {
+    // An older server can answer `ok` without the money detail. A number with
+    // no currency cannot be read as money, so the tile says so instead.
+    expect(revenueTile(ok(50000), null).value).toBe('Not available');
+    expect(revenueTile({ state: 'unconfigured', definition: '', notes: ['no trusted deduplicated revenue source exists'] }, null).value).toBe('Set up');
+  });
+
+  it('compares against the same currency’s previous net, and only over a positive base', () => {
+    // The page's design contract gives an `ok` headline tile a delta. The base
+    // is the previous window's net in the SAME currency — there is no FX — and
+    // a zero or reversal base is not a percentage: metricTile's rule, applied
+    // where the signed figure lives.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 40000 })).delta).toBe('+25%');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 40000 })).deltaTone).toBe('up');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 100000 })).delta).toBe('-50%');
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 100000 })).deltaTone).toBe('down');
+    // A window with no prior money, or a prior reversal, has no comparison —
+    // and a signed net still renders its absolute value beside it.
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: undefined })).delta).toBeUndefined();
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: 0 })).delta).toBeUndefined();
+    expect(revenueTile(ok(50000), moneyDetail({ previous_net: -30 })).delta).toBeUndefined();
+    // A signed net keeps its absolute reading and still gets the comparison:
+    // reversals exceeded bookings by 130% of last window's net.
+    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, previous_net: 100, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1 }] });
+    expect(revenueTile(ok(), reversed)).toMatchObject({ value: '\u221230 VND', delta: '-130%', deltaTone: 'down' });
+  });
+
+  it('reports the money read’s own coverage, not the page’s event count', () => {
+    const r = servedRes();
+    const line = tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: r.metrics.revenue_detail });
+    expect(line).toContain('3 deduplicated rows, 1 excluded');
+    expect(line).not.toContain('400 events');
+    expect(line).toContain('metric overview.v3 · Sep 5–11 · 7 complete days');
+  });
+
+  it('says zero valid rows when nothing qualified, and names the exclusion', () => {
+    const empty = moneyDetail({ currency: undefined, gross: 0, reversed: 0, net: 0, deduped_rows: 0, excluded_rows: 2, by_currency: [] });
+    const r = servedRes({ revenueState: 'no_data', revenueDetail: empty });
+    expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: empty })).toContain('0 valid money rows, 2 excluded');
+  });
+
+  it('never claims page-event coverage for a money tile', () => {
+    // Without the money detail there is no money population to report. The
+    // page's event coverage is a different tile's input and must not stand in
+    // for it; an unconfigured project still gets its served reason.
+    const r = servedRes({ revenueState: 'ok', revenueDetail: null });
+    expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: null })).toContain('money coverage not reported');
+    expect(tileProvenance(r, { kind: 'money', metric: r.metrics.revenue, detail: null })).not.toContain('400 events');
+    const unconfigured = servedRes({ revenueState: 'unconfigured', revenueNotes: ['no trusted deduplicated revenue source exists'], revenueDetail: null });
+    expect(tileProvenance(unconfigured, { kind: 'money', metric: unconfigured.metrics.revenue, detail: null })).toContain('no trusted deduplicated revenue source exists');
+  });
+
+  it('lists one row per declared currency, with the headline marked', () => {
+    // The rows are the only comparable set: the tile never adds VND to USD.
+    expect(revenueBreakdownRows(moneyDetail())).toEqual([
+      { currency: 'VND', gross: '80,000', reversed: '30,000', net: '50,000', headline: true },
+      { currency: 'USD', gross: '100', reversed: '0', net: '100', headline: false },
+    ]);
+    expect(revenueBreakdownRows(moneyDetail({ currency: 'USD' }))[1]?.headline).toBe(true);
+    expect(revenueBreakdownRows(null)).toEqual([]);
   });
 });

@@ -24,7 +24,9 @@ import (
 
 // OverviewMetricVersion is bumped when any metric definition changes, so a
 // saved chart or agent finding can name the semantics it was computed under.
-const OverviewMetricVersion = "overview.v2"
+// v3 is the money release: revenue stops being "unconfigured" and becomes a
+// deduplicated, per-currency, signed net (see money.go).
+const OverviewMetricVersion = "overview.v3"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -165,6 +167,12 @@ type OverviewMetrics struct {
 	Sessions    OverviewMetric `json:"sessions"`
 	Activation  OverviewMetric `json:"activation"`
 	Revenue     OverviewMetric `json:"revenue"`
+	// RevenueDetail carries the signed arithmetic behind Revenue — the
+	// per-currency gross/reversed/net, the exclusions, and the previous
+	// window's net. Revenue.Value is unsigned (the field is shared with every
+	// other tile), so a negative net can only be read from here. Additive: a
+	// client that does not know the block ignores it.
+	RevenueDetail *OverviewRevenueDetail `json:"revenue_detail,omitempty"`
 }
 
 type OverviewRetention struct {
@@ -223,6 +231,23 @@ func overviewRange(period string, now time.Time, loc *time.Location) (OverviewRa
 		Days:         days,
 		CompleteDays: true,
 	}, nil
+}
+
+// overviewWindowWhere is the fragment every Overview query starts from — the
+// project, the half-open instant range, and the optional platform filter — with
+// its bind args in the same order. It is one function rather than a copied
+// string so a metric added later cannot quietly widen the window or drop the
+// platform filter.
+func overviewWindowWhere(projectID string, r OverviewRange, platform string) (string, []any) {
+	where := "project_id = ? AND timestamp >= ? AND timestamp < ?"
+	args := []any{projectID, r.From, r.To}
+	if clause, arg, ok := platformClause(platform); ok {
+		where += " AND " + clause
+		if arg != nil {
+			args = append(args, arg)
+		}
+	}
+	return where, args
 }
 
 // overviewQualifying is the WHERE fragment every people/activity metric
@@ -309,14 +334,7 @@ func (s *Store) Overview(ctx context.Context, projectID, period, platform string
 	// One WHERE fragment for the whole read: project + half-open range +
 	// optional platform. Qualifying-activity clauses are added per query so
 	// data_status can still see non-qualifying arrivals.
-	where := "project_id = ? AND timestamp >= ? AND timestamp < ?"
-	args := []any{projectID, r.From, r.To}
-	if clause, arg, ok := platformClause(platform); ok {
-		where += " AND " + clause
-		if arg != nil {
-			args = append(args, arg)
-		}
-	}
+	where, args := overviewWindowWhere(projectID, r, platform)
 	qualWhere := where + " AND " + overviewQualifying
 
 	// --- data status (all events, no qualifying clause) ---
@@ -451,16 +469,21 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		}
 	}
 
-	// --- unconfigured blocks: honest states, no fabricated numbers ---
+	// --- money: one deduplicated, per-currency, signed net ---
+	{
+		metric, detail, err := s.overviewRevenue(ctx, projectID, r, prev, platform)
+		if err != nil {
+			return res, err
+		}
+		res.Metrics.Revenue = metric
+		res.Metrics.RevenueDetail = detail
+	}
+
+	// --- activation: still unconfigured, and says so rather than inventing 0 ---
 	res.Metrics.Activation = OverviewMetric{
 		State:      OverviewStateUnconfigured,
 		Definition: "Share of a cohort completing the project's chosen activation event inside a conversion window.",
 		Notes:      []string{"no activation condition is stored for projects yet — configure it before this metric can compute"},
-	}
-	res.Metrics.Revenue = OverviewMetric{
-		State:      OverviewStateUnconfigured,
-		Definition: "Gross/net revenue from a trusted, deduplicated server or billing source, in a declared currency.",
-		Notes:      []string{"no trusted deduplicated revenue source exists — SDK revenue events are not deduplicated at read time"},
 	}
 
 	// --- daily active-user trend ---

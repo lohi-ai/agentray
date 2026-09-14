@@ -89,6 +89,46 @@ func TestValidateReadonlySQLAllowsInnocuousNames(t *testing.T) {
 	}
 }
 
+// A caller's own CTE list must join ours rather than follow a second WITH: a
+// de-dup grid or a cohort is written as a CTE, and `WITH a AS (…) WITH b AS (…)`
+// is a DuckDB parser error — so every such query failed before this.
+func TestScopedReadonlySQLMergesCallerCTEs(t *testing.T) {
+	query, args, err := scopedReadonlySQL(
+		"WITH money AS (SELECT amount FROM events WHERE event_name = 'revenue')\nSELECT sum(amount) FROM money",
+		"project-1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("scopedReadonlySQL returned error: %v", err)
+	}
+	if strings.Count(strings.ToUpper(query), "WITH ") != 1 {
+		t.Fatalf("query must carry exactly one WITH keyword: %s", query)
+	}
+	if !strings.HasPrefix(query, "WITH scoped_events AS (SELECT *, canonical_distinct_id AS canonical_id FROM resolved_events WHERE project_id = ?), money AS (") {
+		t.Fatalf("caller CTE was not merged into the scoped list: %s", query)
+	}
+	if !strings.Contains(query, "FROM scoped_events") {
+		t.Fatalf("query did not read from scoped alias: %s", query)
+	}
+	if len(args) != 1 || args[0] != "project-1" {
+		t.Fatalf("args=%v want one project arg", args)
+	}
+
+	// RECURSIVE covers the whole list, so it stays on the front and our CTEs
+	// ride inside it.
+	recursive, _, err := scopedReadonlySQL(
+		"WITH RECURSIVE t AS (SELECT 1 AS n FROM events) SELECT n FROM t",
+		"project-1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("scopedReadonlySQL returned error: %v", err)
+	}
+	if !strings.HasPrefix(recursive, "WITH RECURSIVE scoped_events AS (") || strings.Count(strings.ToUpper(recursive), "WITH ") != 1 {
+		t.Fatalf("recursive query not merged correctly: %s", recursive)
+	}
+}
+
 // external_rows (the data-connector landing table) is the second readable
 // source: it must be rewritten to a project-scoped FINAL CTE, alone or next to
 // events, with CTE args in CTE order.

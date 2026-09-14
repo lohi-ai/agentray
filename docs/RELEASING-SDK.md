@@ -131,8 +131,8 @@ the PR gate and the release gate check the same things:
 
 | Script | Asserts |
 | --- | --- |
-| `verify-npm-tarball.mjs` | every entrypoint `package.json` declares is actually in the tarball |
-| `verify-consumer-install.mjs` | the tarball installs into an empty project and imports as ESM, as CJS, and in types |
+| `verify-npm-tarball.mjs` | every entrypoint `package.json` declares, plus `README.md`, `LICENSE` and `CHANGELOG.md`, is actually in the tarball — and that the changelog mentions the version being published |
+| `verify-consumer-install.mjs` | the tarball installs into an empty project and imports as ESM, as CJS, and in types, including the standard money constants at their contract values |
 | `verify-cdn-bundle.mjs` | `dist/index.global.js` attaches `window.AgentRay` and gets an event to the wire |
 | `verify-python-wheel.py` | the wheel contains the package, not just metadata |
 | `resolve-tag.mjs` | the tag names a real package at the version the tree claims |
@@ -197,9 +197,29 @@ way a consumer would, and creates the GitHub Release.
 Pre-1.0, treat a change to any of the following as a **minor** bump, because each
 one changes numbers a customer is already reading:
 
-- what an event is named (`user.pageview`, `$autocapture`, `revenue`)
+- what an event is named (`user.pageview`, `$autocapture`, `revenue`,
+  `revenue_reversed`)
+- what a money event's `amount` unit is, which property a row must carry, or
+  which key makes it de-dupable
 - what `platform` reports
 - how identity is minted, aliased, or reset
 - whether a failed delivery is retried, re-queued, or dropped
 
 Everything else is a patch.
+
+## Changelogs
+
+Every npm package carries a package-local `CHANGELOG.md`, listed in its `files`
+so it ships inside the tarball. Write the entry **as part of the change**, not at
+release time: the migration note a customer needs is the one you can still
+remember writing.
+
+The entry for a version must name that version and be written for the person
+upgrading — what changed, what now fails to compile, and what value they have to
+correct in their own code. `verify-npm-tarball.mjs` fails the PR gate and the
+release gate when the changelog does not mention the version being published, so
+a bumped manifest with last release's entry cannot reach a registry.
+
+Pre-1.0 there is no deprecation window: a breaking change is allowed, and the
+changelog is where it is paid for. `sdk/browser/CHANGELOG.md` and
+`sdk/server/CHANGELOG.md` are the reference for the shape.

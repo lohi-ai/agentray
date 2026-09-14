@@ -3,9 +3,9 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
-import { formatCompact } from '@/lib/format';
+import { formatCompact, formatNumber } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
 import { firstValuePath } from '@/lib/ia';
 import { useEventNames } from '@/modules/app/hooks';
@@ -58,6 +58,66 @@ export function metricTile(label: string, m: OverviewMetric): { label: string; v
   return tile;
 }
 
+// --- Money ---------------------------------------------------------------
+// An amount is only meaningful with its unit: AgentRay converts nothing, so
+// every money figure the page prints carries the currency its sender declared,
+// and the per-currency arithmetic is shown underneath instead of a total that
+// would silently add VND to USD.
+const REVENUE_LABEL = 'Net revenue';
+
+// formatMoney renders an integer amount with thousands separators and a real
+// minus sign (U+2212), so a net reversal stays legible and is never mistaken
+// for a hyphen inside a table of numbers.
+export function formatMoney(value: number): string {
+  return `${value < 0 ? '\u2212' : ''}${formatNumber(Math.abs(value))}`;
+}
+
+// revenueTile is the Monetization headline. The signed net comes from the
+// served revenue_detail, not from `OverviewMetric.value`, which the operation
+// leaves unsigned — a net reversal is a real measured negative, not a state to
+// be hidden behind "No data". A legacy `ok` with no detail renders "Not
+// available" rather than a bare number with no currency attached.
+//
+// The delta follows metricTile's rule — a comparison needs a positive base —
+// applied to the same currency's previous-window net: a percentage over a zero
+// or reversal base would invert its own meaning, and there is no FX, so a
+// different currency's net is not a base at all.
+export function revenueTile(
+  m: OverviewMetric,
+  detail?: OverviewRevenueDetail | null,
+): { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } {
+  if (m.state !== 'ok') return metricTile(REVENUE_LABEL, m);
+  if (!detail?.currency) return { label: REVENUE_LABEL, value: 'Not available' };
+  const tile: { label: string; value: string; delta?: string; deltaTone?: 'up' | 'down' } = {
+    label: REVENUE_LABEL,
+    value: `${formatMoney(detail.net)} ${detail.currency}`,
+  };
+  const previous = detail.previous_net;
+  if (previous !== undefined && previous > 0) {
+    const pct = ((detail.net - previous) / previous) * 100;
+    tile.delta = `${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`;
+    tile.deltaTone = pct >= 0 ? 'up' : 'down';
+  }
+  return tile;
+}
+
+// revenueBreakdownRows is the money arithmetic behind the headline — one row
+// per declared currency, which is the only set of figures that may be compared
+// with each other. Values are pre-formatted strings so the rendering tests pin
+// the contract (signed, unit-free cells under a currency heading).
+export type RevenueBreakdownRow = { currency: string; gross: string; reversed: string; net: string; headline: boolean };
+
+export function revenueBreakdownRows(detail?: OverviewRevenueDetail | null): RevenueBreakdownRow[] {
+  if (!detail) return [];
+  return detail.by_currency.map((row) => ({
+    currency: row.currency,
+    gross: formatMoney(row.gross),
+    reversed: formatMoney(row.reversed),
+    net: formatMoney(row.net),
+    headline: row.currency === detail.currency,
+  }));
+}
+
 function retentionLine(label: string, p: { state: string; rate: number; returned: number; eligible: number }): string {
   if (p.state === 'not_ready' || p.eligible === 0) return `${label}: Not ready — not enough mature cohorts yet`;
   if (p.state !== 'ok') return `${label}: ${p.state === 'unconfigured' ? 'Set up' : 'Unavailable'}`;
@@ -79,6 +139,7 @@ export function retentionTile(label: string, p: { state: string; rate: number; r
 // one blanket percentage across the page would be a claim no tile can support.
 export type TileInput =
   | { kind: 'metric'; metric: OverviewMetric }
+  | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
   | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
   | { kind: 'unserved' };
 
@@ -122,7 +183,10 @@ function tileRange(res: OverviewResult, input: TileInput): string {
   if (input.kind === 'retention') {
     return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
   }
-  const { range, timezone } = res.context;
+  const { range: contextRange, timezone } = res.context;
+  // The money read serves its own window; stamping the context range on it
+  // would be a claim about a window the arithmetic never covered.
+  const range = input.kind === 'money' && input.detail ? input.detail.window : contextRange;
   if (!range.complete_days) return 'Today so far';
   // The served range is half-open — `to` is the first instant after it — so the
   // tile's last covered day is the calendar day before `to` in the project zone.
@@ -146,6 +210,22 @@ function tileCoverage(res: OverviewResult, input: TileInput): string {
     return input.point.eligible === 0
       ? `no mature ${input.day}-day cohort yet`
       : `coverage ${formatCompact(input.point.eligible)} mature members`;
+  }
+  // Money coverage is the money read's own population — the deduplicated
+  // bookings the arithmetic ran on, never the page's event count.
+  if (input.kind === 'money') {
+    const detail = input.detail;
+    if (!detail) {
+      // A packet without the money detail cannot state a money population: say
+      // so rather than borrowing the page's event coverage for a figure it
+      // never counted. An unconfigured project still gets its served reason.
+      return input.metric.state === 'unconfigured'
+        ? tileCoverage(res, { kind: 'metric', metric: input.metric })
+        : 'money coverage not reported';
+    }
+    const excluded = detail.excluded_rows > 0 ? `, ${formatNumber(detail.excluded_rows)} excluded` : '';
+    if (detail.deduped_rows === 0) return `0 valid money rows${excluded}`;
+    return `${formatNumber(detail.deduped_rows)} deduplicated ${detail.deduped_rows === 1 ? 'row' : 'rows'}${excluded}`;
   }
   const m = input.metric;
   if (m.state === 'ok') {
@@ -182,6 +262,12 @@ function metricStat(res: OverviewResult, label: string, m: OverviewMetric) {
   return { ...metricTile(label, m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
 }
 
+function revenueStat(res: OverviewResult) {
+  const metric = res.metrics.revenue;
+  const detail = res.metrics.revenue_detail;
+  return { ...revenueTile(metric, detail), provenance: tileProvenance(res, { kind: 'money', metric, detail }) };
+}
+
 function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number }) {
   return { ...retentionTile(label, p), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
 }
@@ -195,6 +281,68 @@ function unservedStat(res: OverviewResult, label: string) {
 // the shipped Panel, StatsStrip, Chart, and BarRows primitives.
 function MetricGroup({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return <section aria-label={title}><Panel title={title} action={action}>{children}</Panel></section>;
+}
+
+// A money cell is unit-less on purpose: the currency is the row's own heading,
+// so no reader can add one row's number to another's. At narrow widths the row
+// stacks and each value carries its column name, keeping the table inside the
+// panel instead of pushing the page sideways.
+const MONEY_CELL = '[@media(min-width:701px)]:px-3 [@media(min-width:701px)]:py-2 text-right tabular-nums [@media(max-width:700px)]:flex [@media(max-width:700px)]:justify-between [@media(max-width:700px)]:before:content-[attr(data-label)] [@media(max-width:700px)]:before:text-[var(--color-text-secondary)]';
+const MONEY_HEAD_CELL = `border-b border-[var(--color-border)] ${MONEY_CELL}`;
+
+// The per-currency arithmetic behind the Net revenue tile, plus the served
+// notes that explain the headline and name what was excluded. It is page-local
+// markup because no shared primitive shows three signed measures per row.
+function RevenueBreakdown({ metric, detail }: { metric: OverviewMetric; detail?: OverviewRevenueDetail | null }) {
+  const rows = revenueBreakdownRows(detail);
+  const notes = metric.notes ?? [];
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.length > 0 ? (
+        // Desktop: one bordered table. ≤700px: the wrap drops its frame and each
+        // row becomes its own card, so nothing pushes the page sideways — the
+        // same treatment the approved prototype uses.
+        <div className="rounded-[var(--radius-md)] [@media(min-width:701px)]:border [@media(min-width:701px)]:border-[var(--color-border)]">
+          <table className="w-full text-sm">
+            <caption className="px-3 pt-3 text-left text-xs text-[var(--color-text-secondary)]">Net revenue by declared currency</caption>
+            <thead className="text-xs text-[var(--color-text-secondary)] [@media(max-width:700px)]:sr-only">
+              <tr>
+                <th scope="col" className="border-b border-[var(--color-border)] px-3 py-2 text-left font-medium">Currency</th>
+                <th scope="col" className={MONEY_HEAD_CELL}>Gross</th>
+                <th scope="col" className={MONEY_HEAD_CELL}>Reversed</th>
+                <th scope="col" className={MONEY_HEAD_CELL}>Net</th>
+              </tr>
+            </thead>
+            <tbody className="[@media(min-width:701px)]:divide-y [@media(min-width:701px)]:divide-[var(--color-border)]">
+              {rows.map((row) => (
+                <tr key={row.currency} className="[@media(max-width:700px)]:mb-2 [@media(max-width:700px)]:block [@media(max-width:700px)]:rounded-[var(--radius-md)] [@media(max-width:700px)]:border [@media(max-width:700px)]:border-[var(--color-border)] [@media(max-width:700px)]:p-3">
+                  <th scope="row" data-label="Currency" className={`${MONEY_CELL} text-left font-medium`}>
+                    {/* One flex child: on the stacked layout the label pairs
+                        with the whole reading ("VND · headline"), never with
+                        half of it. */}
+                    <span>
+                      {row.currency}
+                      {row.headline ? <span className="text-[var(--color-text-secondary)]"> · headline</span> : null}
+                    </span>
+                  </th>
+                  <td data-label="Gross" className={MONEY_CELL}>{row.gross}</td>
+                  <td data-label="Reversed" className={MONEY_CELL}>{row.reversed}</td>
+                  <td data-label="Net" className={MONEY_CELL}>{row.net}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {/* Served notes, verbatim: they name the headline currency, state that no
+          FX is applied, and say which rows were excluded and why. */}
+      {notes.length > 0 ? (
+        <ul className="flex flex-col gap-1 text-xs text-[var(--color-text-secondary)]">
+          {notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
 // trendMeaning distinguishes "the chart is flat because nothing qualified"
@@ -369,10 +517,10 @@ export function OverviewPage() {
     : [];
   const monetizationStats = res
     ? [
-        metricStat(res, 'Instrumented revenue', res.metrics.revenue),
-        unservedStat(res, 'Purchases'),
-        unservedStat(res, 'Subscriptions'),
-      ]
+      revenueStat(res),
+      unservedStat(res, 'Purchases'),
+      unservedStat(res, 'Subscriptions'),
+    ]
     : [];
   const usageStats = res
     ? [
@@ -692,7 +840,7 @@ export function OverviewPage() {
               >
                 <div className="flex flex-col gap-3">
                   <StatsStrip stats={monetizationStats} />
-                  <p className="text-xs text-[var(--color-text-secondary)]">Instrumented revenue requires a trusted, deduplicated server or billing source with a declared currency. Purchases and subscriptions need their own verified project-scoped metric contracts; no SDK event total is shown as money.</p>
+                  <RevenueBreakdown metric={res.metrics.revenue} detail={res.metrics.revenue_detail} />
                 </div>
               </MetricGroup>
             </div>

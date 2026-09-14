@@ -191,17 +191,17 @@ type Event struct {
 	// two audiences added together. Empty means undetermined; it is rendered as
 	// "unknown" rather than folded into web.
 	Platform string `json:"platform,omitempty"`
-	// InsertID is the caller-supplied idempotency key ($insert_id). It is captured
-	// and stored so a future read-time de-dup (arg_max(amount, "timestamp") GROUP BY
-	// insert_id) can be layered on if a money path ever needs one. NOTE: no read path
-	// de-dups on it today. The one money-adjacent read — the retention "ever paid"
-	// flag — is duplicate-safe by construction (it aggregates the paid flag with
-	// max(), so a re-inserted `revenue` event can't change the boolean). Cost/token
-	// *sums* in the daily rollups and raw agent reads are not de-duped; the pipeline
-	// keeps the practical duplicate rate near zero (ack-after-insert + the JetStream
-	// duplicate window), which the data-architecture doc explicitly accepts for
-	// count/sum metrics. Do not describe a de-dup guard here that the code does not
-	// implement.
+	// InsertID is the caller-supplied idempotency key ($insert_id). Every money
+	// read de-duplicates on it — `coalesce(nullif(insert_id, ''), event_id)` in
+	// money.go's grid, keeping the greatest `(timestamp, event_id)` per key — so
+	// a retried webhook books once and a correction under the same key replaces
+	// the row it fixes. The retention "ever paid" flag stays duplicate-safe by
+	// construction (it aggregates the paid flag with max()). Cost/token *sums* in
+	// the daily rollups and raw agent reads are still not de-duped; the pipeline
+	// keeps the practical duplicate rate near zero (ack-after-insert + the
+	// JetStream duplicate window), which the data-architecture doc explicitly
+	// accepts for count/sum metrics. Do not describe a de-dup guard here that the
+	// code does not implement.
 	InsertID string `json:"insert_id,omitempty"`
 	// IsUnplanned marks an event whose name was not in the project's established
 	// catalog when captured (P4 tracking-plan signal). Advisory only.
@@ -4334,6 +4334,11 @@ var (
 	// are stripped before this check so `WHERE name = 'events'` stays legal.
 	residualSourcePattern = regexp.MustCompile(`(?i)\b(events|external_rows)\b`)
 	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
+	// A caller's own CTE list. Its leading `WITH [RECURSIVE]` has to give way to
+	// ours — `WITH scoped_events AS (…) WITH money_raw AS (…)` is a parser error,
+	// and a multi-step query (a de-dup grid, a cohort) is written as a CTE by
+	// every agent and every analyst.
+	leadingWithPattern = regexp.MustCompile(`(?is)^with\s+(recursive\s+)?`)
 )
 
 func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule) (string, []any, error) {
@@ -4408,8 +4413,18 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 		args = append(args, projectID)
 		ctes = append(ctes, "scoped_external_rows AS (SELECT * FROM external_rows WHERE project_id = ?"+externalFilter+")")
 	}
-	for i := 0; i < projectPlaceholders; i++ {
+	for range projectPlaceholders {
 		args = append(args, projectID)
+	}
+	// Our scoped CTEs go first, then the caller's own list if it has one: a
+	// second `WITH` keyword would not parse, so a query that opens with one has
+	// its keyword replaced and its CTEs appended to ours.
+	if m := leadingWithPattern.FindStringIndex(query); m != nil {
+		prefix := "WITH "
+		if strings.Contains(strings.ToUpper(query[m[0]:m[1]]), "RECURSIVE") {
+			prefix = "WITH RECURSIVE "
+		}
+		return prefix + strings.Join(ctes, ", ") + ", " + query[m[1]:], args, nil
 	}
 	query = "WITH " + strings.Join(ctes, ", ") + " " + query
 	return query, args, nil

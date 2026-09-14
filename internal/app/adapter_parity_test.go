@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
@@ -648,6 +649,132 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 	}
 	if got := rpc.Result.StructuredContent.Context; got != want {
 		t.Fatalf("MCP context = %+v, want %+v", got, want)
+	}
+}
+
+// The money block is served by ONE operation, so every adapter must hand back
+// the same signed detail — not just the same headline. An adapter that dropped
+// `revenue_detail`, or that recomputed a total of its own, would still look
+// right in a screenshot and be wrong in a saved chart.
+//
+// The fixture is seeded relative to the project's local midnight (period "1d"
+// is the previous complete local day), so the window is deterministic instead
+// of racing the calendar.
+func TestOverviewAdaptersShareMoneyContract(t *testing.T) {
+	t.Setenv("AGENT_KEY_ENC_SECRET", "overview-money-parity-secret")
+	s := openAppTestStore(t)
+	ctx := context.Background()
+	e := mountRealAdapters(t, s)
+	registerOverviewRoutes(e, s, newOpAdapter(s, nil, storeRunner{s}))
+	srv := httptest.NewServer(e)
+	t.Cleanup(srv.Close)
+
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("overview-money-%d@test.local", time.Now().UnixNano()), "P", "password-123", "ws", "proj")
+	if err != nil {
+		t.Fatalf("account: %v", err)
+	}
+	zone := "Asia/Ho_Chi_Minh"
+	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, nil, &zone); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})
+	if err != nil {
+		t.Fatalf("read credential: %v", err)
+	}
+
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Fatalf("load zone: %v", err)
+	}
+	localNow := time.Now().In(loc)
+	midnight := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
+	yesterday := midnight.Add(-12 * time.Hour)                   // inside the "1d" range
+	dayBefore := midnight.AddDate(0, 0, -1).Add(-12 * time.Hour) // inside its previous range
+
+	seed := func(name, distinct, currency, kind, insertID string, amount int64, at time.Time) storage.Event {
+		return storage.Event{
+			ProjectID:    boot.Project.ID,
+			EventID:      uuid.NewString(),
+			EventName:    name,
+			EventType:    "user",
+			DistinctID:   distinct,
+			Properties:   fmt.Sprintf(`{"amount":%d,"currency":%q,"kind":%q}`, amount, currency, kind),
+			InsertID:     insertID,
+			VisitorClass: "human",
+			Platform:     "server",
+			Timestamp:    at.UTC(),
+		}
+	}
+	if err := s.InsertEvents(ctx, []storage.Event{
+		// One booking, corrected later under the same key: the correction wins.
+		seed("revenue", "payer-1", "VND", "wallet_topup", "pay-1", 100000, yesterday.Add(-time.Minute)),
+		seed("revenue", "payer-1", "VND", "wallet_topup", "pay-1", 80000, yesterday),
+		seed("revenue_reversed", "payer-1", "VND", "refund", "refund-1", 30000, yesterday.Add(time.Minute)),
+		seed("revenue", "payer-2", "USD", "payment", "pay-2", 100, yesterday.Add(2*time.Minute)),
+		// The previous local day, so previous_net has a comparable VND figure.
+		seed("revenue", "payer-1", "VND", "wallet_topup", "prev-1", 20000, dayBefore),
+	}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	type moneyMetrics struct {
+		Metrics struct {
+			Revenue       storage.OverviewMetric         `json:"revenue"`
+			RevenueDetail *storage.OverviewRevenueDetail `json:"revenue_detail"`
+		} `json:"metrics"`
+	}
+
+	reg := usecase.Registry()
+	deps := &usecase.Deps{Repo: s, Runner: storeRunner{s}}
+	invokers := map[string]opInvoker{
+		"rest":    restInvoker(e, secret),
+		"mcp":     mcpInvoker(e, secret),
+		"cli":     cliInvoker(srv.URL, secret),
+		"runtime": runtimeInvoker(reg, opcore.CallContext{ProjectID: boot.Project.ID, Deps: deps}),
+	}
+
+	args := `{"period":"1d"}`
+	first := ""
+	var want moneyMetrics
+	for _, adapter := range []string{"rest", "mcp", "cli", "runtime"} {
+		out := invokers[adapter](t, "overview", args)
+		if out.class != "ok" {
+			t.Fatalf("%s overview: %s", adapter, out.class)
+		}
+		var got moneyMetrics
+		if err := json.Unmarshal(out.raw, &got); err != nil {
+			t.Fatalf("%s overview not an object: %v; body=%s", adapter, err, string(out.raw))
+		}
+		if first == "" {
+			first, want = adapter, got
+			continue
+		}
+		if !reflect.DeepEqual(got.Metrics, want.Metrics) {
+			t.Fatalf("%s money block differs from %s:\n%+v\nvs\n%+v", adapter, first, got.Metrics, want.Metrics)
+		}
+	}
+
+	// And the shared block is the contract, not just consistent: VND gross
+	// 80000 (the correction, counted once), reversed 30000, net 50000; USD
+	// separate; the previous local day's VND net carried as the comparison.
+	d := want.Metrics.RevenueDetail
+	if d == nil {
+		t.Fatal("revenue_detail missing from the served overview packet")
+	}
+	if want.Metrics.Revenue.State != storage.OverviewStateOK || want.Metrics.Revenue.Value == nil || *want.Metrics.Revenue.Value != 50000 {
+		t.Fatalf("headline = %+v, want ok 50000", want.Metrics.Revenue)
+	}
+	if d.Currency != "VND" || d.Gross != 80000 || d.Reversed != 30000 || d.Net != 50000 || d.DedupedRows != 3 {
+		t.Fatalf("detail = %+v, want VND 80000/30000/50 over 3 deduplicated rows", d)
+	}
+	if !reflect.DeepEqual(d.ByCurrency, []storage.OverviewRevenueCurrency{
+		{Currency: "VND", Gross: 80000, Reversed: 30000, Net: 50000, Rows: 2},
+		{Currency: "USD", Gross: 100, Net: 100, Rows: 1},
+	}) {
+		t.Fatalf("by_currency = %+v, want VND ahead of USD with the refund netted", d.ByCurrency)
+	}
+	if d.PreviousNet == nil || *d.PreviousNet != 20000 || want.Metrics.Revenue.Previous == nil || *want.Metrics.Revenue.Previous != 20000 {
+		t.Fatalf("previous net = %v / %v, want 20000", d.PreviousNet, want.Metrics.Revenue.Previous)
 	}
 }
 

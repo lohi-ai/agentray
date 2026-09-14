@@ -126,10 +126,18 @@ The only queryable table is ` + "`events`" + `, one row per tracked event:
 - agent telemetry: ` + "`agent_id`" + `, ` + "`tool_name`" + `, ` + "`model_name`" + `,
   ` + "`tokens_input`" + `, ` + "`tokens_output`" + `, ` + "`cost_usd`" + `, ` + "`latency_ms`" + `,
   ` + "`is_error`" + ` (1 = error), ` + "`error_message`" + `
-- ` + "`insert_id`" + ` (idempotency key on server-sent events). Revenue is sent
-  server-side as the ` + "`revenue`" + ` event (amount/currency/plan in
-  ` + "`properties`" + `); webhooks retry, so for money totals dedup first:
-  ` + "`GROUP BY insert_id`" + ` with ` + "`arg_max(metric, \"timestamp\")`" + ` before you sum.
+- ` + "`insert_id`" + ` (idempotency key on server-sent events). Money is the
+  ` + "`revenue`" + ` event and its reversal ` + "`revenue_reversed`" + `
+  (amount / currency / kind in ` + "`properties`" + `). It is a **net** figure:
+  read both names in one query, de-duplicate by
+  ` + "`coalesce(nullif(insert_id, ''), CAST(event_id AS VARCHAR))`" + `
+  keeping the greatest ` + "`(\"timestamp\", event_id)`" + ` per key, subtract
+  the reversals, and drop rows whose ` + "`currency`" + ` is empty or
+  ` + "`LT`" + ` (a platform credit, not money). Never
+  ` + "`GROUP BY insert_id`" + ` alone — every unkeyed row shares the empty key
+  — and never sum ` + "`revenue`" + ` by itself: that answers gross where the
+  Net revenue tile answers net. The canonical query is ` + "`docs/ANALYTICS.md`" + `
+  → *Reading money with SQL*; copy that one.
 - ` + "`visitor_class`" + ` (` + "`human`" + ` | ` + "`search-bot`" + ` |
   ` + "`ai-platform`" + `) and ` + "`referrer_channel`" + ` (acquisition channel).
   When counting *people* (users, signups, retention), add

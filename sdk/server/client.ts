@@ -10,22 +10,33 @@
  *      payment event is not. Callers can await, retry, and alert.
  *   3. Every event carries an idempotency key (`$insert_id`). Revenue webhooks
  *      (SePay, Stripe, …) retry, so the same payment can arrive several times.
- *      The key is *stored*, not enforced: no read path de-dups on it today (see
- *      the note on `Event.InsertID` in internal/dataplane/store/store.go). It is
- *      what makes a money total de-dupable at read time —
- *      `json_extract_string(properties, '$.amount')` → `try_cast(… AS DOUBLE)`
- *      → `arg_max(amount, "timestamp") … GROUP BY insert_id` before you sum,
- *      the recipe the Data Analyst preset teaches. Send it, and write that
- *      recipe; a plain `sum()` over a retried webhook double-counts.
+ *      The key is what makes a money total de-duplicable — the Overview read
+ *      groups money rows by `insert_id` (last write wins, `event_id` fallback)
+ *      before it sums, and the recipe in `docs/ANALYTICS.md` is the same
+ *      grouping for hand-written SQL. Send a stable key; a random one over a
+ *      retried webhook double-counts.
  *
  * Usage:
  *   const ar = new AgentRayServerClient({ apiUrl: "https://agentray.example.com", apiKey: "..." });
  *   await ar.identify("user-123", { email: "alice@example.com", plan: "pro" });
- *   await ar.revenue("user-123", { amount: 19, currency: "USD", plan: "pro" }, {
+ *   await ar.revenue("user-123", { amount: 1900, currency: "USD", kind: "subscription" }, {
  *     // pass the provider's event id so a retry is de-dupable at read time:
  *     idempotencyKey: webhook.id,
  *   });
+ *   await ar.revenueReversed("user-123", { amount: 1900, currency: "USD" }, {
+ *     idempotencyKey: `refund:${refund.id}`,
+ *   });
  */
+
+import {
+  REFUND_KIND,
+  REVENUE_EVENT,
+  REVENUE_REVERSED_EVENT,
+  assertIdempotencyKey,
+  assertReversalFacts,
+  assertRevenueFacts,
+} from './money';
+import type { RevenueFacts, RevenueReversalFacts } from './money';
 
 export interface AgentRayServerConfig {
   /** Base URL of the AgentRay server (e.g. https://agentray.example.com). */
@@ -63,17 +74,16 @@ export interface CaptureOptions {
   sessionId?: string;
 }
 
-export interface RevenueEvent {
-  /** Amount in the smallest natural unit you report on (e.g. dollars, not cents — be consistent). */
-  amount: number;
-  /** ISO 4217 currency code, e.g. "USD", "VND". */
-  currency: string;
-  /** Plan / product the payment is for, when applicable. */
-  plan?: string;
-  /** "subscription" | "one_time" | "renewal" | "refund" — your own taxonomy; refunds should be negative `amount`. */
-  kind?: string;
-  /** Any extra properties to attach (provider, invoice id, …). */
-  [key: string]: unknown;
+/**
+ * `CaptureOptions` with the key made mandatory — what {@link
+ * AgentRayServerClient.revenue} and {@link AgentRayServerClient.revenueReversed}
+ * take. Money is the one payload where a random key is a defect rather than a
+ * convenience: a retried webhook carrying no stable key books twice, and the
+ * Overview tile would report revenue the provider never collected.
+ */
+export interface RevenueOptions extends CaptureOptions {
+  /** The provider's event id (or any stable id for this booking). */
+  idempotencyKey: string;
 }
 
 function generateId(): string {
@@ -120,14 +130,52 @@ export class AgentRayServerClient {
   }
 
   /**
-   * Record a revenue event under the conventional `revenue` name so the analytics
-   * surface and the Growth Lead can read MRR/LTV/conversion without bespoke
-   * instrumentation. Always pass an `idempotencyKey` from your payment provider's
-   * event id — webhook retries are the norm, and this is what keeps revenue from
-   * being counted twice.
+   * Record a settled money booking under the standard {@link REVENUE_EVENT}
+   * name, so the Overview money tile and every money query read it without
+   * bespoke instrumentation.
+   *
+   *   await ar.revenue('user-123', { amount: 1900, currency: 'USD', kind: 'in_app_purchase' },
+   *     { idempotencyKey: webhook.id });
+   *
+   * `amount` is an integer in the smallest unit of `currency`, the unit is the
+   * sender's, and `idempotencyKey` is required — it becomes `$insert_id`, which
+   * is what stops a webhook retry from booking twice and what makes a
+   * correction (same key, later timestamp) replace the booking it fixes.
    */
-  async revenue(distinctId: string, event: RevenueEvent, options: CaptureOptions = {}): Promise<void> {
-    await this.capture(distinctId, 'revenue', { ...event }, options);
+  async revenue(distinctId: string, revenue: RevenueFacts, options: RevenueOptions): Promise<void> {
+    assertRevenueFacts(revenue, REVENUE_EVENT);
+    // `options?.` — a plain-JS caller can omit the object the types require;
+    // the guard must answer with the documented error, not a TypeError from
+    // inside the SDK.
+    assertIdempotencyKey(options?.idempotencyKey, REVENUE_EVENT);
+    await this.capture(distinctId, REVENUE_EVENT, { ...revenue }, options);
+  }
+
+  /**
+   * Record money that came back — a refund, chargeback, or clawback — under
+   * {@link REVENUE_REVERSED_EVENT}. `amount` is the positive sum actually
+   * returned and the kind defaults to `refund`.
+   *
+   *   await ar.revenueReversed('user-123', { amount: 1900, currency: 'USD' },
+   *     { idempotencyKey: `refund:${refund.id}` });
+   *
+   * Pass a key distinct from the booking's: re-using it would make the read
+   * treat the reversal as a correction of the booking, replacing it instead of
+   * netting against it.
+   */
+  async revenueReversed(
+    distinctId: string,
+    reversal: RevenueReversalFacts,
+    options: RevenueOptions,
+  ): Promise<void> {
+    assertReversalFacts(reversal, REVENUE_REVERSED_EVENT);
+    assertIdempotencyKey(options?.idempotencyKey, REVENUE_REVERSED_EVENT);
+    await this.capture(
+      distinctId,
+      REVENUE_REVERSED_EVENT,
+      { ...reversal, kind: reversal.kind ?? REFUND_KIND },
+      options,
+    );
   }
 
   /** Set durable traits on a user (plan, signup source, …) without an event. */
@@ -171,7 +219,11 @@ export class AgentRayServerClient {
         properties: {
           ...(e.properties ?? {}),
           platform: this.platform,
-          $insert_id: e.options?.idempotencyKey ?? generateId(),
+          // A caller-supplied key wins wherever it arrives — the option or
+          // `$insert_id` in properties (the raw-HTTP convention this SDK
+          // shares). Minting one is only for a keyless event, and must never
+          // overwrite a real key: that key is what stops a retry double-booking.
+          $insert_id: e.options?.idempotencyKey ?? e.properties?.$insert_id ?? generateId(),
         },
         timestamp: e.options?.timestamp ?? new Date().toISOString(),
       })),

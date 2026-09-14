@@ -38,27 +38,45 @@ const ar = new AgentRayServerClient({
 });
 
 // In a payment webhook handler:
-await ar.revenue('user-123', { amount: 19, currency: 'USD', plan: 'pro', kind: 'subscription' }, {
-  idempotencyKey: webhook.id, // provider event id — see "Idempotency" below
+await ar.revenue('user-123', { amount: 1900, currency: 'USD', kind: 'subscription', plan: 'pro' }, {
+  idempotencyKey: webhook.id, // required — the provider event id
+});
+
+// Money that came back: a refund, chargeback, or clawback. Its own key, so it
+// nets against the booking instead of replacing it.
+await ar.revenueReversed('user-123', { amount: 1900, currency: 'USD' }, {
+  idempotencyKey: `refund:${refund.id}`,
 });
 ```
 
+`amount` is an integer in the smallest unit of the currency you declare — `1900`
+is $19.00 — and `kind` is one of the documented booking kinds (`payment`,
+`in_app_purchase`, `subscription`, `wallet_topup`, `donation`), or a
+customer-defined kind you already emit. Both methods throw on a payload the read
+could only book as zero. Full taxonomy: [`docs/ANALYTICS.md`](ANALYTICS.md).
+
 Differences from the browser client: identity is explicit (`distinctId` on every
-call), payments must be retryable, and every event carries an idempotency key.
+call), payments must be retryable, and every money event carries an idempotency
+key.
 
 ### Idempotency (`$insert_id`)
 
 Revenue webhooks retry, so the same payment can arrive several times. Pass the
 provider's event id as `idempotencyKey`; it is sent as `$insert_id` and stored on
-the event's `insert_id` column. De-duplicate at read time — one row per payment
-even if the webhook fired twice:
+the event's `insert_id` column. **Every read de-duplicates on it, once**, so a
+retried delivery is one booking:
 
-```sql
-SELECT sum(amount) AS revenue FROM (
-  SELECT arg_max(coalesce(try_cast(json_extract_string(properties, '$.amount') AS DOUBLE), 0), "timestamp") AS amount
-  FROM events WHERE event_name = 'revenue' GROUP BY insert_id
-)
-```
+- rows are grouped by `coalesce(nullif(insert_id, ''), event_id)` and the last
+  write wins (greatest `timestamp`), which also makes a correction — the same key
+  re-sent later — replace the value it fixes;
+- `revenue_reversed` rows, and `revenue` rows with `kind: 'refund'` or a negative
+  `amount`, are subtracted from the bookings;
+- the result is reported per declared currency, with no FX and no cross-currency
+  total, and never clamped at zero.
+
+The Overview **Net revenue** tile and the SQL recipe in
+[`docs/ANALYTICS.md`](ANALYTICS.md) are the same contract, so an agent answering
+"what did we earn last week?" and the dashboard agree.
 
 
 ## Browser client (`@agentray/browser`, `sdk/browser/`)
@@ -105,6 +123,34 @@ and serve it yourself, or paste the no-npm snippet from
 ar.capture('user.pageview', { path: '/pricing' });
 ar.capture('button.click',  { label: 'Start free trial' });
 ```
+
+### Track money
+
+Money created in the browser uses the same `capture()` — there is no privileged
+money helper, because a browser is forgeable and its claims about money are worth
+exactly as much as its other claims:
+
+```ts
+import { init, REVENUE_EVENT, REVENUE_REVERSED_EVENT } from '@agentray/browser';
+
+ar.capture(REVENUE_EVENT, {
+  amount: 1900,                        // smallest unit: $19.00
+  currency: 'USD',                     // uppercase ISO 4217
+  kind: 'in_app_purchase',
+  $insert_id: receipt.transactionId,   // stable: the read de-duplicates on it
+});
+
+ar.capture(REVENUE_REVERSED_EVENT, {
+  amount: 1900,
+  currency: 'USD',
+  kind: 'refund',
+  $insert_id: `refund:${refund.id}`,   // its own key, not the booking's
+});
+```
+
+The SDK supplies `distinct_id`, `timestamp` and `platform`; the caller supplies
+`$insert_id`. Payments whose truth lives on your server belong to
+`@agentray/server` instead. Full taxonomy: [`docs/ANALYTICS.md`](ANALYTICS.md).
 
 ### Identify on login
 

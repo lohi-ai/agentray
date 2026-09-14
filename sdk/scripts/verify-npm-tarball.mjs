@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 
-const required = new Set(['LICENSE', 'README.md']);
+const required = new Set(['LICENSE', 'README.md', 'CHANGELOG.md']);
 const rel = (p) => (p ?? '').replace(/^\.\//, '');
 for (const p of [pkg.main, pkg.module, pkg.types, pkg.unpkg, pkg.jsdelivr]) {
   if (p) required.add(rel(p));
@@ -33,6 +33,17 @@ if (missing.length) {
   console.error(`${pkg.name}@${pkg.version} tarball is missing: ${missing.join(', ')}`);
   console.error(`present: ${files.join(', ')}`);
   console.error('see docs/RELEASING-SDK.md');
+  process.exit(1);
+}
+
+// The changelog must actually describe the version being published — a bumped
+// manifest with last release's entry ships a customer a migration note that
+// does not mention the change they are installing, and the registry does not
+// let you take the version back.
+const changelog = readFileSync('CHANGELOG.md', 'utf8');
+if (!changelog.includes(pkg.version)) {
+  console.error(`CHANGELOG.md does not mention ${pkg.version}`);
+  console.error('see the version policy in docs/RELEASING-SDK.md');
   process.exit(1);
 }
 
