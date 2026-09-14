@@ -200,6 +200,11 @@ type writeScope struct {
 	// refusal can say that instead of asking for a login the caller never
 	// intended to use.
 	badKey bool
+	// badBearer marks a Bearer credential that was supplied and did not
+	// resolve. Like badKey it refuses rather than falling through, and it is
+	// separate only so the refusal can name the credential the caller actually
+	// sent.
+	badBearer bool
 }
 
 // demoWriteGuard refuses a mutating request that cannot prove the caller may
@@ -242,6 +247,9 @@ func demoWriteGuard(g writeGuardStore, demoRunsPerDay int) echo.MiddlewareFunc {
 				// have given), and an authenticated one whose scope will not
 				// resolve hears a refusal rather than being let through on the
 				// assumption it was harmless.
+				if scope.badBearer {
+					return echo.NewHTTPError(http.StatusUnauthorized, "invalid credential")
+				}
 				if scope.badKey {
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
 				}
@@ -353,14 +361,24 @@ func resolveWriteScope(c echo.Context, g writeGuardStore) (writeScope, error) {
 	// reject the request before the principal resolver sees the Bearer. They
 	// are private scoped credentials, not the public capture key, so the
 	// demo's public-key refusal does not apply.
-	if tok, present := bearerToken(c); present && tok != "" {
+	//
+	// A Bearer that is present but is NOT an agm_ credential is denied, not
+	// absent: principalFromRequest answers it 401 rather than falling through
+	// to the cookie, and if this resolver fell through instead it would approve
+	// a write on a session the handler is about to refuse. Two resolvers over
+	// one request must reach one answer, so the denial is reported here and
+	// resolves to the same 401.
+	if tok, present := bearerToken(c); present {
+		if tok == "" {
+			return writeScope{badBearer: true}, nil
+		}
 		cred, err := g.CredentialBySecret(ctx, tok)
 		if err != nil {
-			return writeScope{badKey: true}, nil
+			return writeScope{badBearer: true}, nil
 		}
 		project, err := g.ProjectByID(ctx, cred.ProjectID)
 		if err != nil {
-			return writeScope{badKey: true}, nil
+			return writeScope{badBearer: true}, nil
 		}
 		return writeScope{workspaceID: project.WorkspaceID, projectID: project.ID, byManagementKey: true}, nil
 	}

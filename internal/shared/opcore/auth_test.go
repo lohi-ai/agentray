@@ -125,6 +125,88 @@ func toolNames(specs []Spec) []string {
 	return out
 }
 
+// Allow is Authorize stated over an access class instead of an operation name,
+// and the legacy REST routes that have no operation to name depend on the two
+// agreeing. The matrix is Authorize's, plus the derivation the class form needs:
+// a legacy project key holds the classes its frozen allowlist covers and no
+// others.
+func TestAllowMatrix(t *testing.T) {
+	r := authRegistry()
+	session := func(role string, grants ...Access) Principal {
+		return Principal{Kind: CredSession, Role: role, Grants: grants}
+	}
+	management := func(grants ...Access) Principal {
+		return Principal{Kind: CredManagement, Grants: grants}
+	}
+	cases := []struct {
+		name string
+		p    Principal
+		req  Requirement
+		want bool
+	}{
+		// capture: denied every class, the same way it is denied every op.
+		{"capture denied a read", Principal{Kind: CredCapture}, Requirement{Access: AccessAnalyticsRead}, false},
+		{"capture denied a write", Principal{Kind: CredCapture}, Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, false},
+		// deny-by-default, as in Authorize.
+		{"no class is unreachable", session("owner", AccessAnalyticsRead), Requirement{}, false},
+		{"unknown kind denied", Principal{Kind: CredentialKind("robot")}, Requirement{Access: AccessAnalyticsRead}, false},
+
+		// legacy: what the frozen allowlist covers, and nothing else — the
+		// class is derived from the allowlist rather than listed a second time.
+		{"legacy holds a frozen class", Principal{Kind: CredLegacy}, Requirement{Access: AccessAnalyticsRead}, true},
+		{"legacy refused an unfrozen class", Principal{Kind: CredLegacy}, Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, false},
+		{"legacy refused sources:manage", Principal{Kind: CredLegacy}, Requirement{Access: AccessSourcesManage, MinSessionRole: "admin"}, false},
+
+		// management: the class must be granted — analytics:read alone never
+		// reaches a write, which is the hole this closes.
+		{"reader allowed a read", management(AccessAnalyticsRead), Requirement{Access: AccessAnalyticsRead}, true},
+		{"reader refused a plan write", management(AccessAnalyticsRead), Requirement{Access: AccessPlansWrite, MinSessionRole: "member"}, false},
+		{"writer allowed its class", management(AccessDashboardsWrite), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, true},
+		{"writer refused another class", management(AccessDashboardsWrite), Requirement{Access: AccessPlansWrite, MinSessionRole: "member"}, false},
+
+		// sessions: the class and the role floor together. A viewer holds no
+		// write class, and an unknown role writes nothing.
+		{"viewer may read", session("viewer", AccessAnalyticsRead, AccessSourcesRead), Requirement{Access: AccessAnalyticsRead}, true},
+		{"viewer may not write", session("viewer", AccessAnalyticsRead, AccessSourcesRead), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, false},
+		{"member may write", session("member", AccessAnalyticsRead, AccessDashboardsWrite, AccessPlansWrite), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, true},
+		{"member cannot take an admin floor", session("member", AccessAnalyticsRead, AccessSourcesRead, AccessSourcesManage), Requirement{Access: AccessSourcesManage, MinSessionRole: "admin"}, false},
+		{"unknown role may read", session("superuser", AccessAnalyticsRead), Requirement{Access: AccessAnalyticsRead}, true},
+		{"unknown role may not write", session("superuser", AccessAnalyticsRead, AccessDashboardsWrite), Requirement{Access: AccessDashboardsWrite, MinSessionRole: "member"}, false},
+	}
+	for _, tc := range cases {
+		if got := r.Allow(tc.p, tc.req); got != tc.want {
+			t.Errorf("%s: Allow = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The class form must not be a second decision beside the operation form: for
+// every registered operation and every credential kind that has no name-based
+// rule of its own, Allow(access, floor) answers what Authorize(name) answers.
+// Legacy is excluded because its rule IS the name — the freeze is a list.
+func TestAllowAgreesWithAuthorize(t *testing.T) {
+	r := authRegistry()
+	principals := []Principal{
+		{Kind: CredCapture},
+		{Kind: CredManagement, Grants: []Access{AccessAnalyticsRead}},
+		{Kind: CredManagement, Grants: []Access{AccessDashboardsWrite}},
+		{Kind: CredManagement, Grants: []Access{AccessSourcesRead}},
+		{Kind: CredManagement, Grants: []Access{AccessPlansWrite}},
+		{Kind: CredSession, Role: "viewer", Grants: []Access{AccessAnalyticsRead, AccessSourcesRead}},
+		{Kind: CredSession, Role: "member", Grants: []Access{AccessAnalyticsRead, AccessDashboardsWrite, AccessGrowthWrite, AccessPlansWrite, AccessSourcesRead}},
+		{Kind: CredSession, Role: "admin", Grants: []Access{AccessAnalyticsRead, AccessDashboardsWrite, AccessGrowthWrite, AccessPlansWrite, AccessSourcesRead, AccessSourcesManage}},
+		{Kind: CredentialKind("robot")},
+	}
+	for _, spec := range r.Specs() {
+		req := Requirement{Access: spec.OpAccess(), MinSessionRole: spec.OpMinSessionRole()}
+		for _, p := range principals {
+			if got, want := r.Allow(p, req), r.Authorize(p, spec.OpName()); got != want {
+				t.Errorf("%s for %+v: Allow = %v, Authorize = %v", spec.OpName(), p, got, want)
+			}
+		}
+	}
+}
+
 // tools/call must re-authorize: a principal cannot invoke an operation
 // tools/list never advertised.
 func TestMCPCallReauthorizes(t *testing.T) {
