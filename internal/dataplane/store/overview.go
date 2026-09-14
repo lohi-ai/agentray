@@ -338,13 +338,15 @@ func (s *Store) Overview(ctx context.Context, projectID, period, platform string
 	qualWhere := where + " AND " + overviewQualifying
 
 	// --- data status (all events, no qualifying clause) ---
+	var moneySeen uint64
 	{
 		var total uint64
 		var lastEvent, lastReceived sql.NullTime
 		err = s.duckQueryRow(ctx, `
-SELECT count(*), max("timestamp"), max(coalesce(inserted_at, "timestamp"))
+SELECT count(*), max("timestamp"), max(coalesce(inserted_at, "timestamp")),
+	count(*) FILTER (WHERE event_name IN ('`+moneyBookingEvent+`', '`+moneyReversalEvent+`'))
 FROM events
-WHERE project_id = ?`, []any{projectID}, &total, &lastEvent, &lastReceived)
+WHERE project_id = ?`, []any{projectID}, &total, &lastEvent, &lastReceived, &moneySeen)
 		if err != nil {
 			return res, err
 		}
@@ -468,10 +470,9 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 			}
 		}
 	}
-
 	// --- money: one deduplicated, per-currency, signed net ---
 	{
-		metric, detail, err := s.overviewRevenue(ctx, projectID, r, prev, platform)
+		metric, detail, err := s.overviewRevenue(ctx, projectID, r, prev, platform, moneySeen > 0)
 		if err != nil {
 			return res, err
 		}

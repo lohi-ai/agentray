@@ -220,7 +220,14 @@ ORDER BY gross DESC, currency ASC`, args, func(rows *sql.Rows) error {
 // overviewRevenue reads the window's money and, for complete-day ranges, the
 // previous window's net in the same headline currency. It returns the tile's
 // metric plus the signed detail block.
-func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev OverviewRange, platform string) (OverviewMetric, *OverviewRevenueDetail, error) {
+//
+// instrumented is the lifetime signal, not a window fact: it is true when the
+// project has EVER delivered a money-shaped event (revenue or
+// revenue_reversed, any platform, any window). A project that never has is
+// "unconfigured" — the metric is defined but nothing was connected — while an
+// instrumented project whose window holds no money row is "no_data". The
+// distinction is what the tile renders: Set up versus No data.
+func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev OverviewRange, platform string, instrumented bool) (OverviewMetric, *OverviewRevenueDetail, error) {
 	win, err := s.overviewMoney(ctx, projectID, r, platform)
 	if err != nil {
 		return OverviewMetric{}, nil, err
@@ -265,6 +272,17 @@ func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev O
 		Notes:      revenueNotes(win),
 	}
 	if win.moneyRows == 0 {
+		if !instrumented {
+			// Never a money-shaped event: the tile is Set up, and the first
+			// note names the instrumentation that would change it — the
+			// "nothing arrived in this range" note would be a false claim
+			// about a project that has never sent one.
+			metric.State = OverviewStateUnconfigured
+			metric.Notes = append([]string{
+				"requires a trusted, deduplicated server or billing source that sends " + moneyBookingEvent + " events with a declared currency and gross/net basis",
+			}, metric.Notes[:len(metric.Notes)-1]...)
+			return metric, detail, nil
+		}
 		metric.State = OverviewStateNoData
 		return metric, detail, nil
 	}
