@@ -15,6 +15,21 @@ export interface BatchEvent {
   timestamp?: string;
 }
 
+/**
+ * A batch the transport gave up on. An event batch has no durable copy — unlike
+ * an alias, which waits out a page load in `localStorage` — so once the budget
+ * is spent these events are gone, and this record is the only trace that they
+ * existed.
+ */
+export interface DroppedBatch {
+  /** The events that were not delivered. */
+  events: BatchEvent[];
+  /** Delivery attempts made before giving up. */
+  attempts: number;
+  /** The last failure: an HTTP status, or the network error's message. */
+  reason: string;
+}
+
 export interface TransportOptions {
   /** Base URL of the AgentRay server (no trailing slash needed). */
   host: string;
@@ -24,20 +39,45 @@ export interface TransportOptions {
   batchSize?: number;
   /** Flush at most this many ms after the first buffered event (default 3000). */
   flushIntervalMs?: number;
-  /** Max delivery attempts per batch before dropping (default 3). */
-  maxRetries?: number;
+  /**
+   * How long a batch keeps retrying a transient failure before it is abandoned
+   * (default 60000).
+   *
+   * A deadline rather than an attempt count, because what the budget has to
+   * outlast is a *window*, not a number of tries: a container restart is
+   * process start + store open, and the backoff curve is capped at 8 s, so an
+   * attempt count silently means a different amount of time on every failure
+   * pattern. The default covers a restart with margin — the deploy's own
+   * healthcheck expects the API to answer within its 30 s `start_period`, and
+   * a blue/green roll keeps the old colour serving, so a reader's outage is a
+   * restart, not a deploy. Raise it if a longer window is worth holding a
+   * batch in memory for; the cost of a longer budget is that `flush()` a caller
+   * awaits is bounded by it, and that a page which navigates mid-outage loses
+   * the batch anyway (see `onBatchDropped`).
+   */
+  retryBudgetMs?: number;
+  /**
+   * Called when a batch is abandoned, after the budget is spent or on a 4xx the
+   * server will never accept. Wire it to the host's error reporting: without it
+   * a dropped batch is still warned about on the console and announced as an
+   * `agentray:batch_dropped` window event, but nothing durable records it.
+   */
+  onBatchDropped?: (drop: DroppedBatch) => void;
   /** Injected for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
 }
 
 /**
  * Bounded exponential backoff between delivery attempts, shared by both lanes
- * so an event batch and an alias wait the same way. Deliberately the promise
- * constructor rather than `Promise.withResolvers`: this bundle targets ES2018
- * and ships to browsers we do not get to choose.
+ * so an event batch and an alias wait the same way. `capMs` lets the batch lane
+ * stop a wait at its deadline rather than sleeping past it. Deliberately the
+ * promise constructor rather than `Promise.withResolvers`: this bundle targets
+ * ES2018 and ships to browsers we do not get to choose.
  */
-function backoffDelay(attempt: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 8000)));
+function backoffDelay(attempt: number, capMs = 8000): Promise<void> {
+  return new Promise((resolve) =>
+    setTimeout(resolve, Math.min(1000 * 2 ** attempt, 8000, capMs)),
+  );
 }
 
 export class BatchTransport {
@@ -45,7 +85,8 @@ export class BatchTransport {
   private readonly apiKey: string;
   private readonly batchSize: number;
   private readonly flushIntervalMs: number;
-  private readonly maxRetries: number;
+  private readonly retryBudgetMs: number;
+  private readonly onBatchDropped?: (drop: DroppedBatch) => void;
   private readonly fetchImpl: typeof fetch;
 
   /**
@@ -57,18 +98,26 @@ export class BatchTransport {
 
   private queue: BatchEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The tail of the delivery chain. A batch that is still retrying must not be
+   * joined by a second loop for the events captured meanwhile: with a budget
+   * measured in tens of seconds, one loop per flush interval would multiply the
+   * requests an outage is already refusing and land a burst of batches the
+   * moment the server answers again.
+   */
+  private delivering: Promise<void> | null = null;
 
   constructor(opts: TransportOptions) {
     this.host = opts.host.replace(/\/$/, '');
     this.apiKey = opts.apiKey;
     this.batchSize = opts.batchSize ?? 20;
     this.flushIntervalMs = opts.flushIntervalMs ?? 3000;
-    this.maxRetries = opts.maxRetries ?? 3;
+    this.retryBudgetMs = opts.retryBudgetMs ?? 60_000;
+    this.onBatchDropped = opts.onBatchDropped;
     this.fetchImpl = opts.fetchImpl ?? ((...a) => fetch(...a));
     this.identity = new IdentityQueue({
       host: this.host,
       apiKey: this.apiKey,
-      maxRetries: this.maxRetries,
       fetchImpl: this.fetchImpl,
     });
     this.installUnloadFlush();
@@ -82,39 +131,91 @@ export class BatchTransport {
       return;
     }
     if (this.timer === null) {
-      this.timer = setTimeout(() => void this.flush(), this.flushIntervalMs);
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        void this.flush();
+      }, this.flushIntervalMs);
     }
   }
 
-  /** Send everything currently buffered. Safe to call when empty (no-op). */
+  /**
+   * Send everything currently buffered, behind any batch already being retried.
+   * Safe to call when empty (no-op), and resolves when the delivery it started
+   * has settled — delivered, or abandoned and reported.
+   */
   async flush(): Promise<void> {
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.queue.length === 0) return;
+    if (this.queue.length === 0) return this.delivering ?? undefined;
     const batch = this.queue;
     this.queue = [];
-    await this.deliver(batch, 0);
+    const run = (this.delivering ?? Promise.resolve()).then(() => this.deliver(batch));
+    this.delivering = run;
+    try {
+      await run;
+    } finally {
+      if (this.delivering === run) this.delivering = null;
+    }
   }
 
-  private async deliver(batch: BatchEvent[], attempt: number): Promise<void> {
+  /**
+   * Deliver one batch, retrying a transient failure until the budget is spent.
+   * A 4xx is terminal — resending a bad key cannot fix it — but it is still a
+   * batch the product will never see, so it is reported like any other drop.
+   */
+  private async deliver(batch: BatchEvent[]): Promise<void> {
     const body = JSON.stringify({ api_key: this.apiKey, batch });
-    try {
-      const res = await this.fetchImpl(`${this.host}/batch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        keepalive: true,
-      });
-      // 4xx (bad key, malformed) is not retryable — retrying can't fix it.
-      if (res.ok || (res.status >= 400 && res.status < 500)) return;
-      throw new Error(`status ${res.status}`);
-    } catch (err) {
-      if (attempt + 1 >= this.maxRetries) return; // give up; drop rather than loop
-      await backoffDelay(attempt);
-      await this.deliver(batch, attempt + 1);
+    const deadline = Date.now() + this.retryBudgetMs;
+    let attempts = 0;
+    let reason = 'unknown';
+    for (;;) {
+      attempts++;
+      try {
+        const res = await this.fetchImpl(`${this.host}/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        });
+        if (res.ok) return;
+        reason = `status ${res.status}`;
+        if (res.status >= 400 && res.status < 500) break;
+      } catch (err) {
+        reason = err instanceof Error ? err.message : String(err);
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await backoffDelay(attempts - 1, remaining);
     }
+    this.reportDropped({ events: batch, attempts, reason });
+  }
+
+  /**
+   * Say so when a batch is abandoned. A dropped batch is data the reader
+   * generated and the product will never see, so it must not be silent: the
+   * callback is for the host's own error reporting, the warning is for whoever
+   * has the console open, and the event is for anything already listening.
+   */
+  private reportDropped(drop: DroppedBatch): void {
+    // Nothing here may throw. `deliver` is the tail of the flush chain, so an
+    // exception escaping it would reject `flush()` — and an analytics SDK must
+    // never be the reason the host page breaks. The callback is isolated from
+    // the rest so a bad one cannot also hide the console signal.
+    try {
+      this.onBatchDropped?.(drop);
+    } catch {}
+    try {
+      if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(
+          `[agentray] dropped ${drop.events.length} event(s) after ${drop.attempts} attempt(s): ${drop.reason}`,
+        );
+      }
+      if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('agentray:batch_dropped', { detail: drop }));
+      }
+    } catch {}
   }
 
   /**
@@ -326,19 +427,34 @@ export class IdentityQueue {
 
   private pump(): Promise<void> {
     if (this.pumping !== null) return this.pumping;
-    this.pumping = this.drain().finally(() => {
+    const pumping = (async () => {
+      // Keep draining while the queue came up empty but something arrived
+      // meanwhile. An operation enqueued while the previous drain was finishing
+      // finds `pumping` still set and so starts nothing of its own; this loop,
+      // not that enqueue, is what delivers it — and `flush()` waits for it.
+      let drained: boolean;
+      do {
+        drained = await this.drain();
+      } while (drained && this.queue.length > 0);
+    })().finally(() => {
       this.pumping = null;
     });
-    return this.pumping;
+    this.pumping = pumping;
+    return pumping;
   }
 
-  private async drain(): Promise<void> {
+  /**
+   * Deliver the queue front to back. Resolves `true` when it ran out of work
+   * and `false` when the head is still unacknowledged — what tells `pump()`
+   * "gone" apart from "stalled", since a stalled head would otherwise loop.
+   */
+  private async drain(): Promise<boolean> {
     while (this.queue.length > 0) {
       const queued = this.queue[0];
       const outcome = await this.deliver(queued, 0);
       // Still unacknowledged: keep it for the next flush or the unload beacon
       // rather than dropping the only record of how two ids are related.
-      if (outcome === 'unsent') return;
+      if (outcome === 'unsent') return false;
       this.queue.shift();
       const { op } = queued;
       if (op.kind !== 'alias') continue;
@@ -349,6 +465,7 @@ export class IdentityQueue {
       } catch {}
       if (outcome === 'ok') this.onAliasConfirmed?.(op);
     }
+    return true;
   }
 
   private async deliver(queued: QueuedOperation, attempt: number): Promise<DeliveryOutcome> {

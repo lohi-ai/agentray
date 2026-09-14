@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { BatchTransport, IdentityQueue, type BatchEvent } from '../transport';
+import { BatchTransport, IdentityQueue, type BatchEvent, type DroppedBatch } from '../transport';
 import { deferred } from './deferred';
 
 function event(name: string): BatchEvent {
@@ -73,6 +73,7 @@ describe('BatchTransport', () => {
 
   it('does not retry a 4xx', async () => {
     vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchImpl = vi.fn(async () => new Response('', { status: 401 }));
     const transport = new BatchTransport({ ...base, batchSize: 1, fetchImpl });
 
@@ -85,15 +86,143 @@ describe('BatchTransport', () => {
     vi.useRealTimers();
   });
 
-  it('gives up after maxRetries rather than looping forever', async () => {
+  it('gives up after the retry budget rather than looping forever', async () => {
     vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchImpl = vi.fn(async () => new Response('', { status: 500 }));
-    const transport = new BatchTransport({ ...base, batchSize: 1, maxRetries: 3, fetchImpl });
+    const transport = new BatchTransport({ ...base, batchSize: 1, retryBudgetMs: 3000, fetchImpl });
 
     transport.enqueue(event('a'));
     await vi.advanceTimersByTimeAsync(60_000);
 
+    // Attempts at t, t+1 s, t+3 s: the deadline is what stops it, not a count.
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it('delivers a batch that outlasts the old three-attempt budget', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 502 }))
+      .mockResolvedValueOnce(new Response('', { status: 502 }))
+      .mockResolvedValueOnce(new Response('', { status: 502 }))
+      .mockResolvedValue(new Response('', { status: 200 }));
+    const dropped: DroppedBatch[] = [];
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      fetchImpl,
+      onBatchDropped: (drop) => dropped.push(drop),
+    });
+
+    transport.enqueue(event('a'));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // The pre-fix transport stopped after three attempts (~3 s) and dropped the
+    // batch with no persistence and no signal. The fourth attempt lands at
+    // t+7 s, well past that, and the reader's event survives.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(dropped).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it('reports a batch it abandons instead of dropping it silently', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () => new Response('', { status: 502 }));
+    const dropped: DroppedBatch[] = [];
+    const heard: DroppedBatch[] = [];
+    const onDrop = (e: Event) => heard.push((e as CustomEvent<DroppedBatch>).detail);
+    window.addEventListener('agentray:batch_dropped', onDrop);
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      retryBudgetMs: 3000,
+      fetchImpl,
+      onBatchDropped: (drop) => dropped.push(drop),
+    });
+
+    transport.enqueue(event('a'));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    // An event batch has no durable copy, so a drop is data the product will
+    // never see — the callback, the warning and the window event are the only
+    // trace it leaves.
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatchObject({ attempts: 3, reason: 'status 502' });
+    expect(dropped[0].events.map((e) => e.event)).toEqual(['a']);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('dropped 1 event(s)'));
+    expect(heard).toHaveLength(1);
+    expect(heard[0].events.map((e) => e.event)).toEqual(['a']);
+    window.removeEventListener('agentray:batch_dropped', onDrop);
+    vi.useRealTimers();
+  });
+
+  it('reports a 4xx drop too, because a rejected batch is still lost', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () => new Response('', { status: 401 }));
+    const dropped: DroppedBatch[] = [];
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      fetchImpl,
+      onBatchDropped: (drop) => dropped.push(drop),
+    });
+
+    transport.enqueue(event('a'));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatchObject({ attempts: 1, reason: 'status 401' });
+    vi.useRealTimers();
+  });
+
+  it('does not let a throwing drop callback break the flush', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () => new Response('', { status: 502 }));
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      retryBudgetMs: 0,
+      fetchImpl,
+      onBatchDropped: () => {
+        throw new Error('host reporter is broken');
+      },
+    });
+
+    transport.enqueue(event('a'));
+    // The signal runs at the tail of the flush chain, so an exception escaping
+    // it would reject `flush()` — an analytics SDK must never be the reason the
+    // host page breaks.
+    await expect(transport.flush()).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not multiply requests during an outage', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchImpl = vi.fn(async () => new Response('', { status: 502 }));
+    const transport = new BatchTransport({
+      ...base,
+      batchSize: 1,
+      flushIntervalMs: 100,
+      retryBudgetMs: 60_000,
+      fetchImpl,
+    });
+
+    // One event every 100 ms for 5 s while the ingest refuses. Serialized, the
+    // first batch's backoff (1 s, 2 s, 4 s) paces the requests; a loop per
+    // flush interval would be ~50 of them, all hammering a server that is
+    // already down.
+    for (let i = 0; i < 50; i++) {
+      transport.enqueue(event(`e${i}`));
+      await vi.advanceTimersByTimeAsync(100);
+    }
+
+    expect(fetchImpl.mock.calls.length).toBeLessThan(10);
     vi.useRealTimers();
   });
 
@@ -129,10 +258,11 @@ describe('BatchTransport', () => {
 
   it('does not throw when the network rejects outright', async () => {
     vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchImpl = vi.fn(async () => {
       throw new Error('offline');
     });
-    const transport = new BatchTransport({ ...base, batchSize: 1, maxRetries: 2, fetchImpl });
+    const transport = new BatchTransport({ ...base, batchSize: 1, retryBudgetMs: 1000, fetchImpl });
 
     transport.enqueue(event('a'));
     await expect(vi.advanceTimersByTimeAsync(30_000)).resolves.not.toThrow();
@@ -259,5 +389,33 @@ describe('IdentityQueue', () => {
     expect(sendBeacon).toHaveBeenCalledTimes(4);
     aliasInFlight.resolve();
     vi.unstubAllGlobals();
+  });
+
+  it('delivers an operation enqueued while the previous drain was finishing', async () => {
+    const paths: string[] = [];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      paths.push(new URL(String(url)).pathname);
+      return new Response('', { status: 200 });
+    });
+    const queue = new IdentityQueue({ ...base, fetchImpl });
+
+    let armed = false;
+    queue.onAliasConfirmed = () => {
+      if (armed) return;
+      armed = true;
+      // A caller that resolves the next login in a promise continuation lands
+      // exactly in this window: after the drain shifted its last operation and
+      // before the in-flight pump is cleared, so its own enqueue finds a pump
+      // that has already finished and starts nothing.
+      queueMicrotask(() => {
+        queue.enqueue({ kind: 'alias', anonymousId: 'anon-2', distinctId: 'user_2' });
+      });
+    };
+    queue.enqueue({ kind: 'alias', anonymousId: 'anon-1', distinctId: 'user_1' });
+    await queue.flush();
+
+    // Nothing else on this page will trigger the queue, so an operation the
+    // pump forgets is an alias that never reaches the server.
+    await vi.waitFor(() => expect(paths).toEqual(['/alias', '/alias']));
   });
 });
