@@ -50,22 +50,28 @@ GET /api/activity?project_id=xxx
 
 It answers **admission, not access** — which credential may address the project.
 That is the whole question for exactly one route, `GET /api/projects`, which
-returns the project a credential named and reads no analytics; it reaches the
-resolver through `projectForAdmission`, whose name says so. Every other route
-declares the class of its work and asks the same `Registry.Allow` decision
-`/api/op` makes: `projectForRead` for the reads (all `analytics:read`, the class
-`activity_summary` and `persons` carry) and `projectForWrite` for the mutations
-(`dashboards:write`, `plans:write`, `analytics:read`), with `legacyWrite` /
-`legacyRead` in `internal/app/op_adapter.go` stating the requirement. Without
-them a route ran for any credential that could reach the project — a management
-key minted `sources:read` alone read every analytics route and a key minted
-`analytics:read` alone created and deleted audiences and saved queries, while
-`/api/op` refused the identical calls. The routes that predate the registry
-(cohort audiences, saved queries, templates, the subscription mapping, activity,
-persons, events, sessions) state their class at the call site.
-`TestNoRouteResolvesThroughTheReadResolver` scans this package's source — reads
-as well as mutations — and fails when a route reaches `projectFromRequest`
-directly.
+returns the project a credential named and reads no analytics and is the only
+route that calls it: there is deliberately no wrapper with a reassuring name,
+because a named admission resolver is a hatch any later route could reuse to
+skip its class. Every other route declares the class of its work and asks the
+same `Registry.Allow` decision `/api/op` makes, through `authorizedProject` —
+one resolver, so the requirement decides and the name cannot disagree with the
+verb — with `legacyRead` / `legacyWrite` in `internal/app/op_adapter.go`
+stating the requirement: `analytics:read` for the reads (the class
+`activity_summary` and `persons` carry), `dashboards:write` / `plans:write` /
+`analytics:read` for the mutations. Without it a route ran for any credential
+that could reach the project — a management key minted `sources:read` alone
+read every analytics route and a key minted `analytics:read` alone created and
+deleted audiences and saved queries, while `/api/op` refused the identical
+calls. The routes that predate the registry (cohort audiences, saved queries,
+templates, the subscription mapping, activity, persons, events, sessions) state
+their class at the call site.
+`TestNoRouteResolvesThroughTheReadResolver` counts the admission-only resolver's
+call sites over this package's source — form-independently, so a helper cannot
+hide one — and requires the set to be exactly `GET /api/projects` and
+`authProject`, the modern surface's resolver; it separately requires every route
+that declares a class to have a behavioural case in the read or write matrix,
+and every case to still match a route.
 
 ### Writes: the guard in front of every handler
 
