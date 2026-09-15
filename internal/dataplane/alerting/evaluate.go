@@ -34,7 +34,9 @@ func (e *Evaluator) Tick(ctx context.Context, now time.Time) {
 		return
 	}
 	for _, r := range rules {
-		if !CronMatches(r.Schedule, now) {
+		scheduled := CronMatches(r.Schedule, now)
+		retryingFailedDigest := r.SourceKind == "digest" && r.LastEvalAt == nil && CronMatches(r.Schedule, now.Add(-time.Minute))
+		if !scheduled && !retryingFailedDigest {
 			continue
 		}
 		// Re-claim window: allow re-evaluation if the last claim is older than 50s
@@ -44,7 +46,9 @@ func (e *Evaluator) Tick(ctx context.Context, now time.Time) {
 		if err != nil || !claimed {
 			continue
 		}
-		_ = e.evaluateRule(ctx, r)
+		if err := e.evaluateRule(ctx, r, now.UTC()); err != nil && r.SourceKind == "digest" {
+			_ = e.store.ReleaseAlertRuleClaim(ctx, r.ID, now.UTC())
+		}
 	}
 }
 
@@ -52,7 +56,10 @@ func (e *Evaluator) Tick(ctx context.Context, now time.Time) {
 // on the ok→firing edge (and records the firing→ok recovery). Delivery failures
 // are recorded in the event payload but do not abort the edge transition — the
 // state still advances so a flapping channel doesn't wedge the rule.
-func (e *Evaluator) evaluateRule(ctx context.Context, r storage.AlertRule) error {
+func (e *Evaluator) evaluateRule(ctx context.Context, r storage.AlertRule, now time.Time) error {
+	if r.SourceKind == "digest" {
+		return e.evaluateDigest(ctx, r, now)
+	}
 	series, err := e.metricSeries(ctx, r)
 	if err != nil {
 		return err
@@ -93,6 +100,37 @@ func (e *Evaluator) evaluateRule(ctx context.Context, r storage.AlertRule) error
 	}
 	pb, _ := json.Marshal(payload)
 	return e.store.RecordAlertEvent(ctx, r.ID, newState, current, pb)
+}
+
+func (e *Evaluator) evaluateDigest(ctx context.Context, r storage.AlertRule, now time.Time) error {
+	since := now.AddDate(0, 0, -7)
+	if watermark, ok, err := e.store.LastDigestAlertEvent(ctx, r.ID); err != nil {
+		return err
+	} else if ok {
+		since = watermark
+	}
+	overview, err := e.store.Overview(ctx, r.ProjectID, "7d", "", now)
+	if err != nil {
+		return err
+	}
+	data, err := e.store.DigestDataSince(ctx, r.ProjectID, since, now)
+	if err != nil {
+		return err
+	}
+	notification, hasChanges := digestNotification(r.Name, overview, data)
+	payload := map[string]any{
+		"window_start": since,
+		"window_end":   now,
+		"has_changes":  hasChanges,
+		"data":         notification.Data,
+	}
+	if hasChanges || r.Params.SendEmpty {
+		if err := e.fanOut(ctx, r, notification); err != nil {
+			payload["delivery_error"] = err.Error()
+		}
+	}
+	pb, _ := json.Marshal(payload)
+	return e.store.RecordDigestAlertEventAt(ctx, r.ID, pb, now)
 }
 
 // fanOut delivers n to every channel the rule references, aggregating errors so
