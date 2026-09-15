@@ -1,8 +1,10 @@
 # Implementation spec: value-first Overview
 
-Status: revised 2026-09-13. Companion to [strategy.md](strategy.md) and [design.md](design.md). Prototype: [overview-states.html](overview-states.html) — open locally, use the state switcher at the top. Every figure in the prototype is illustrative; production renders a metric's state label, never a number without a verified source.
+Status: as-built 2026-09-15 (see [as-built.md](as-built.md)). Companion to [strategy.md](strategy.md) and [design.md](design.md). Prototype: [overview-states.html](overview-states.html) — sample data only. Production renders a metric's state label, never a number without a verified source.
 
-> **Scope correction (2026-09-13, authoritative).** The App Store Connect analytics screen was a **visual/layout and information-hierarchy reference only** — never a request to connect a store source. Every App Store Connect connector, credential flow, report-ingestion path, Apple API call, Apple-specific metric, Apple provenance line, Apple-only route, iOS-only gating rule and Apple-branded surface that earlier revisions of this spec carried is **superseded and must not be implemented**. AgentRay builds its own dashboard from existing AgentRay events, sources and Plans data. The AgentRay-only successor spec is the child ticket **`bs-neaqk9f0` — "Template-inspired AgentRay dashboard using AgentRay data only"**; this document keeps the generic Overview/IA guidance that child reuses. Unsupported acquisition, revenue, subscription or crash metrics stay honestly `Not available` / `Set up` — never invented, never attributed to a store.
+> **Scope correction (2026-09-13) — superseded 2026-09-14 by tickets 007 `bs-nrwjyctw` and 008 `bs-y892eezp`.** The App Store Connect screen remains a layout/hierarchy reference only: there is still no store connector, credential, report ingest, Apple API, Apple provenance, Apple-only route, or iOS-only gate. **What the user then overrode is naming.** Tile titles on the analysis boards follow App Store Connect labels verbatim (First-time downloads, Proceeds, Active devices, …). Values stay AgentRay catalog metrics. The honesty rule did **not** fall: an unsourced or immature tile renders `Set up` / `Not ready` / `Not available` — never a fabricated, sampled or zero-filled number.
+
+> **Data contract (this document, 2026-09-13) — superseded 2026-09-14 by ticket 007.** "`OverviewResult` is unchanged … no new response block, no second query path" is replaced by the declarative board model in [DESIGN-BOARD-CONTENT-MODEL.md](../DESIGN-BOARD-CONTENT-MODEL.md). Overview still reads the deterministic Overview operation. Acquisition / Monetization / Usage are `get_board` documents addressed by `board_key`; tiles name catalog metrics computed by `read_metric`.
 
 ## User, job, entry point
 
@@ -15,23 +17,23 @@ Status: revised 2026-09-13. Companion to [strategy.md](strategy.md) and [design.
 Compose from existing components only: `AppShell`/`SideNav`, `PageShell`, `Panel`, `StatsStrip`, `Chart`, `BarRows`, `Callout`, `EmptyState`, `Segment`, `StatusPill`, `Button`, `ContextChips`. No new tokens, no new UI library.
 
 1. **Header** — `PageShell` title "Overview", sub = range label (`Sep 5–11 · 7 complete days · Asia/Ho_Chi_Minh`, or `Today so far · partial day, no comparison`). Actions: platform `Segment` (All platforms / Web / iOS / Android / Server / Unknown — always visible) and range `Segment` (Today / 7 days / 30 days). Both wrapped in the existing `TARGET_44` hit-area contract.
-2. **Freshness line** — `StatusPill` with word + dot: `Data fresh · last event received 2 min ago`, or `Quiet — nothing received for 3 days`.
-3. **Headline `StatsStrip`** — Active people, New people, Sessions, Activation, Revenue. Each tile renders `metricTile()` output: `ok` → value + delta; `no_data` → "No data"; `unconfigured` → "Set up" + reason; never a fabricated zero.
+2. **Freshness line** — `StatusPill` with word + dot and an **absolute** receipt stamp (`Data fresh · Last received 2026-09-12 11:59 UTC`). Relative copy ("2 min ago") is illustration only; production keeps an absolute stamp so an untouched tab cannot go stale. Quiet uses the same stamp plus the word Quiet.
+3. **Headline `StatsStrip`** — Active people, Sessions, New people (001 shipped this three-tile strip; Activation and Revenue live on the analysis boards, not duplicated here). Each tile renders `metricTile()` output: `ok` → value + delta; `no_data` → "No data"; `unconfigured` → "Set up" + reason; never a fabricated zero.
 4. **Definitions disclosure** — existing `<details>` "How these numbers are computed" listing each metric's `definition` + `notes`.
 5. **Trend + Retention grid** — `Chart` (area) with textual equivalent; Retention panel with D1/D7/D30 lines and cohort-window note.
 6. **Top pages / Top sources** — two `BarRows` panels, units declared, "Direct / unknown" explicit.
-7. **Best next step** — `Panel` rendering the top open `AgentRecommendation` (Plans contract): title, one-line observation with comparison, evidence line via `evidenceLine()` (query ref, metric version, range, timezone, watermark, warnings), and two actions: "Open the finding" → `/plans`, "Ask your agent to investigate" → `/chat` or MCP handoff. Absent findings → panel omitted, not stubbed.
+7. **Best next step** — `Panel` rendering the top open `AgentRecommendation` (Plans contract): title, one-line observation with comparison, evidence line via `evidenceLine()`, and two actions: "Open the finding" → `/plans`, "Ask your agent to investigate" → `/chat` (Agents alias) or MCP handoff. **No complete finding** → do not stub the finding branch; render the capability/value explanation instead (001 F3/F10). Never sample advice, price, paywall or ROI.
 8. **Data status** — existing panel: events in range, qualifying count, last occurred/received, pipeline lag ("not measured yet" until a watermark exists), per-source rows with `StatusPill` states.
 
-### Metric groups (AgentRay data only)
+### Metric groups
 
-The template's scan pattern is kept: three named groups of concise KPI tiles below the headline strip, each a `Panel` with a `See more` action. The groups are named and defined for AgentRay's own verified event data. **No tile is relabeled as a store metric** — no downloads, impressions, proceeds, store conversion, App Clip or benchmark figure appears anywhere in this product.
+The template's scan pattern is kept: three named groups, each a `Panel` with a `See more` action to a shipped destination. **Superseded 2026-09-14 (008):** the 2026-09-13 clause "No tile is relabeled as a store metric — no downloads, impressions, proceeds…" is naming-only override, not a licence to invent data. Seeded boards (`internal/dataplane/store/default_boards.go`) plus unserved labels (`web/lib/analysis.ts`):
 
-- **Acquisition** — New people, Top acquisition sources, Top landing pages, Activation rate. All derived from project-scoped events; "Direct / unknown" is shown explicitly, never dropped.
-- **Monetization** — Instrumented revenue, Paying people, Purchases, Purchase→repeat. Every tile requires a trusted billing source. With none connected the group renders `Set up` per tile with the required instrumentation named — never zero, never a sample figure, never a projection.
-- **Usage** — Active people, Sessions, D1/D7/D30 retention, Top actions. Retention points carry cohort-maturity semantics; an immature cohort renders `Not ready` rather than a partial number.
+- **Acquisition** (`/acquisition`, `board_key=acquisition`) — First-time downloads (`new_users`), Top pages, Top acquisition sources. Unserved (named empty, never zero): Redownloads, Conversion rate, Impressions / day, Product page views, Updates.
+- **Monetization** (`/monetization`, `board_key=monetization`) — Proceeds (`revenue`, trusted billing, deduplicated net). Unserved: Paying users, In-app purchases / day, Download→paid D1/D7/D35.
+- **Usage** (`/usage`, `board_key=usage`) — Active devices (`active_users`), Sessions, Average retention D1/D7/D30. Unserved: Average retention D14, Crashes by app version. Immature cohorts render `Not ready`, never a partial number.
 
-Acquisition, Monetization and Usage are shipped destinations (`/acquisition`, `/monetization`, `/usage`) declared as 007 boards. Overview **See more** opens them. Tile titles on those boards follow App Store Connect labels; values stay AgentRay catalog metrics with honest empty states.
+Overview **See more** opens those destinations. Direct / unknown sources stay visible.
 
 **Provenance contract (hard requirement):** every tile carries a provenance line naming the metric version, the range, the project timezone, the coverage and the freshness — the same `evidenceLine()` contract the Best next step panel uses. A metric with no verified source renders its state label (`no_data` / `not_ready` / `unconfigured`); it is never derived, estimated, sampled or zero-filled from unrelated events. There is exactly one day-boundary convention in this product: the project timezone.
 
@@ -61,7 +63,7 @@ Stale and the group modifiers are modifiers, not replacements: last-known data s
 
 ## Responsive and accessibility
 
-- Desktop: sidebar + content grid, max width per `PageShell`; stat strips 5-up (headline) / 3-up (groups) / 4-up (usage).
+- Desktop: sidebar + content grid, max width per `PageShell`; `StatsStrip` is a shared auto-fit grid (`AutoGrid min={140}`), not a fixed 5/3/4 column count.
 - ≤900px: single column, stat strips collapse to 2-up, nav becomes the library mobile navigation, tables scroll inside their panel.
 - All interactive targets ≥44px (`TARGET_44` wrapper); `Segment` used instead of `Selector` (Selector's trigger is keyboard-unreachable — recorded in the existing code comment).
 - Status is word + icon/dot, never color alone; trend has a textual equivalent; skip link present; `aria-current` on the active nav item and state; errors announced via `role="status"`/`Callout`.
@@ -85,7 +87,7 @@ Both branches are truthful about what is and is not measured. The paid-value sto
 
 ## Data contract
 
-`OverviewResult` is **unchanged** by this spec. The three groups are composed on the client from the existing deterministic Overview, Activity and Plans operations — no new response block, no second query path, no store-shaped field. Every value is an `OverviewMetric`-style state object (`ok | no_data | not_ready | unavailable`) — never a bare number. Retention points carry `eligible`/`mature` semantics like `OverviewRetentionPoint`. Currency is per-field; unlike currencies are never summed.
+Overview itself still serves `OverviewResult`. The three analysis destinations are **not** composed only from that envelope: they are 007 board documents (`get_board`) whose metric tiles call `read_metric` against the catalog. Every value is a state object (`ok | no_data | not_ready | unconfigured | unavailable`) — never a bare number. `unavailable` is the client's fallback for an unserved tile; the Overview Go path emits it for pipeline lag / schema status, not for KPI tiles. Retention points carry `eligible`/`mature` semantics. Currency is per-field; unlike currencies are never summed.
 
 ## Verification
 

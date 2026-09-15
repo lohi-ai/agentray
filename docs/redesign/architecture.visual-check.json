@@ -6,9 +6,9 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/Users/long/workspace/lohi/kiem-lai/agentray/docs/redesign/architecture.html",
-    "sha256": "73e00291ea110fae62783515a7cc458545812898b1d30f32d35ee71525f2b641",
-    "bytes": 814473
+    "path": "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-k6nps79r_005-docs-redesign-as-built/docs/redesign/architecture.html",
+    "sha256": "c200ef49d14911adc62c1a7ebc64479ffaafbc58b4936e219f19f3e2c0cec1fc",
+    "bytes": 814421
   },
   "state": {
     "detail": "read",
