@@ -83,8 +83,18 @@ export function usePersons() {
     commit();
   }
 
+  // The fan-out settles each endpoint to null on failure, so a rejected
+  // /api/persons read and a still-running one both arrive here as persons
+  // === null. `failed` separates them: the query resolved and the persons
+  // slice did not. Without it the page cannot tell "loading" from "dead" and
+  // spins forever on a transient error.
+  const failed = query.isSuccess && query.data != null && query.data.persons == null;
+
   return {
     persons: query.data?.persons?.persons ?? null,
+    loading: query.isLoading || query.isFetching,
+    failed,
+    retry: query.refetch,
     focusPerson,
   };
 }

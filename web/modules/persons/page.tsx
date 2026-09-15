@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import type { Person } from '@/lib/api';
 import { formatCompact, formatNumber, formatPercent, formatRelative } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
@@ -9,7 +10,7 @@ import { Chart } from '@/modules/shared/components/charts';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
-import { Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 
 // personLabel is the display identity used in the table and for global search:
 // a real name/email when we have it, otherwise the truncated distinct id.
@@ -51,7 +52,7 @@ function TraitChips({ traits }: { traits?: Record<string, unknown> }) {
 }
 
 export function PersonsPage() {
-  const { persons, focusPerson } = usePersons();
+  const { persons, loading, failed, retry, focusPerson } = usePersons();
   // Self-hiding for the same reason the filter bar's facet is: a single-app
   // product would get a column that only ever repeats itself. It earns its width
   // the moment a second app starts sending.
@@ -117,6 +118,21 @@ export function PersonsPage() {
       renderCell: (p) => <span className="font-mono text-[var(--color-text-secondary)]">{formatRelative(p.last_seen)}</span>,
     },
   ], [showApps]);
+
+  if (failed) {
+    return (
+      <AppShell title="People" sub="Who is behind the events — identified and anonymous.">
+        <Callout
+          tone="warn"
+          icon={<AlertTriangle size={18} />}
+          label="Unavailable"
+          title="People is unavailable"
+          detail="The people read failed. Retry; your data is unchanged."
+          action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { void retry(); }}>Retry</Button>}
+        />
+      </AppShell>
+    );
+  }
 
   if (!persons) {
     return (
