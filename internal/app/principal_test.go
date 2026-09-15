@@ -22,18 +22,31 @@ import (
 
 func openAppTestStore(t *testing.T) *storage.Store {
 	t.Helper()
+	return openAppTestStoreWith(t, nil)
+}
+
+// openAppTestStoreWith is openAppTestStore plus a config tweak — the demo
+// member tests need DemoProjectID set, and it must point at a project that
+// already exists, so callers create the account on a default store first and
+// reopen with the id.
+func openAppTestStoreWith(t *testing.T, tweak func(*config.Config)) *storage.Store {
+	t.Helper()
 	pgURL := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
 	if pgURL == "" {
 		pgURL = "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	s, err := storage.Open(ctx, config.Config{
+	cfg := config.Config{
 		PostgresURL:          pgURL,
 		DuckDBPath:           filepath.Join(t.TempDir(), "test.duckdb"),
 		DefaultProjectName:   "principal-test",
 		DefaultProjectAPIKey: "principal_test_default_" + fmt.Sprint(time.Now().UnixNano()),
-	})
+	}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	s, err := storage.Open(ctx, cfg)
 	if err != nil {
 		t.Skipf("test store unavailable (%v)", err)
 	}

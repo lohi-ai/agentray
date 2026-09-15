@@ -25,7 +25,7 @@ func MountHTTP(g *echo.Group, r *Registry, deps any, resolve PrincipalResolver) 
 				return err
 			}
 			if !r.Authorize(principal, spec.OpName()) {
-				return echo.NewHTTPError(http.StatusForbidden, "credential may not invoke "+spec.OpName())
+				return echo.NewHTTPError(http.StatusForbidden, RefusalMessage(spec.OpAccess()))
 			}
 			body, err := io.ReadAll(c.Request().Body)
 			if err != nil {

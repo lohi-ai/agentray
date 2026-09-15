@@ -27,6 +27,7 @@ const SOURCE_LABEL: Record<AlertSourceKind, string> = {
   insight: 'Insight / chart',
   sql: 'Saved SQL query',
   agent_ops: 'Agent ops metric',
+  digest: 'Weekly decision digest',
 };
 
 const OP_LABEL: Record<AlertOp, string> = {
@@ -40,6 +41,7 @@ const emptyDraft: AlertRuleInput = {
   source_kind: 'insight',
   source_ref: '',
   condition: { op: 'gt', value: 0 },
+  params: {},
   schedule_cron: '*/5 * * * *',
   channels: [],
   enabled: true,
@@ -55,7 +57,8 @@ export function AlertsPage() {
 
   const channelName = useMemo(() => new Map(channels.map((c) => [c.id, c.name])), [channels]);
 
-  const canSave = draft.name.trim() !== '' && draft.source_ref.trim() !== '';
+  const isDigest = draft.source_kind === 'digest';
+  const canSave = draft.name.trim() !== '' && (isDigest || draft.source_ref.trim() !== '');
   const canAddChannel = hookURL.trim() !== '';
 
   const submit = async () => {
@@ -152,46 +155,63 @@ export function AlertsPage() {
                 isLabelHidden
                 options={ALERT_SOURCE_KINDS.map((k) => ({ value: k, label: SOURCE_LABEL[k] }))}
                 value={draft.source_kind}
-                onChange={(v: string) => setDraft((d) => ({ ...d, source_kind: v as AlertSourceKind }))}
+                onChange={(v: string) => setDraft((d) => {
+                  const source_kind = v as AlertSourceKind;
+                  return source_kind === 'digest'
+                    ? { ...d, source_kind, source_ref: '', condition: { op: 'gt', value: 0 }, schedule_cron: '0 9 * * 1' }
+                    : { ...d, source_kind, condition: d.condition, schedule_cron: d.schedule_cron === '0 9 * * 1' ? '*/5 * * * *' : d.schedule_cron };
+                })}
                 width="100%"
               />
             </div>
-            <div>
-              <label className={labelCls}>
-                Source reference
-                <span className="ms-2 text-[var(--color-text-disabled)]">chart / query id or metric name</span>
-              </label>
-              <TextInput
-                label="Source reference"
-                isLabelHidden
-                value={draft.source_ref}
-                placeholder="chart_… / query_… / cost_usd"
-                onChange={(v: string) => setDraft((d) => ({ ...d, source_ref: v }))}
-                width="100%"
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Condition</label>
-              <Selector
-                label="Condition"
-                isLabelHidden
-                options={ALERT_OPS.map((o) => ({ value: o, label: OP_LABEL[o] }))}
-                value={draft.condition.op}
-                onChange={(v: string) => setDraft((d) => ({ ...d, condition: { ...d.condition, op: v as AlertOp } }))}
-                width="100%"
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Threshold value</label>
-              <TextInput
-                label="Threshold"
-                isLabelHidden
-                value={String(draft.condition.value)}
-                placeholder="0"
-                onChange={(v: string) => setDraft((d) => ({ ...d, condition: { ...d.condition, value: Number(v) || 0 } }))}
-                width="100%"
-              />
-            </div>
+            {!isDigest ? (
+              <>
+                <div>
+                  <label className={labelCls}>
+                    Source reference
+                    <span className="ms-2 text-[var(--color-text-disabled)]">chart / query id or metric name</span>
+                  </label>
+                  <TextInput
+                    label="Source reference"
+                    isLabelHidden
+                    value={draft.source_ref}
+                    placeholder="chart_… / query_… / cost_usd"
+                    onChange={(v: string) => setDraft((d) => ({ ...d, source_ref: v }))}
+                    width="100%"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Condition</label>
+                  <Selector
+                    label="Condition"
+                    isLabelHidden
+                    options={ALERT_OPS.map((o) => ({ value: o, label: OP_LABEL[o] }))}
+                    value={draft.condition.op}
+                    onChange={(v: string) => setDraft((d) => ({ ...d, condition: { ...d.condition, op: v as AlertOp } }))}
+                    width="100%"
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Threshold value</label>
+                  <TextInput
+                    label="Threshold"
+                    isLabelHidden
+                    value={String(draft.condition.value)}
+                    placeholder="0"
+                    onChange={(v: string) => setDraft((d) => ({ ...d, condition: { ...d.condition, value: Number(v) || 0 } }))}
+                    width="100%"
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center">
+                <CheckboxInput
+                  label="Send an “all quiet” digest when nothing changed"
+                  value={draft.params.send_empty ?? false}
+                  onChange={(send_empty: boolean) => setDraft((d) => ({ ...d, params: { ...d.params, send_empty } }))}
+                />
+              </div>
+            )}
           </AutoGrid>
 
           <div className="mt-4">
@@ -255,6 +275,7 @@ function toInput(rule: AlertRule, enabled: boolean): AlertRuleInput {
     source_kind: rule.source_kind,
     source_ref: rule.source_ref,
     condition: rule.condition,
+    params: rule.params,
     schedule_cron: rule.schedule_cron,
     channels: rule.channels,
     enabled,
@@ -272,7 +293,7 @@ function AlertRuleRow({
   onToggle: (enabled: boolean) => void;
   onDelete: () => void;
 }) {
-  const firing = rule.last_state === 'firing';
+  const firing = rule.source_kind !== 'digest' && rule.last_state === 'firing';
   const targets = rule.channels.map((id) => channelName.get(id) ?? id).join(', ') || 'no channel';
   const why = encodeURIComponent(`Why did the alert "${rule.name}" fire? Show the metric behind it.`);
   return (
@@ -283,13 +304,17 @@ function AlertRuleRow({
           <StatusPill status={firing ? 'attention' : rule.enabled ? 'healthy' : 'paused'} label={firing ? 'Firing' : rule.enabled ? 'OK' : 'Paused'} grow={false} />
         </div>
         <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
-          {SOURCE_LABEL[rule.source_kind]} · {rule.source_ref} {OP_LABEL[rule.condition.op]} {rule.condition.value} · every {rule.schedule_cron} · → {targets}
+          {rule.source_kind === 'digest'
+            ? `${SOURCE_LABEL[rule.source_kind]} · every ${rule.schedule_cron} · → ${targets}`
+            : `${SOURCE_LABEL[rule.source_kind]} · ${rule.source_ref} ${OP_LABEL[rule.condition.op as AlertOp]} ${rule.condition.value} · every ${rule.schedule_cron} · → ${targets}`}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Link href={`/chat?q=${why}`} className="text-xs text-[var(--color-primary)] hover:underline">
-          Why did this fire?
-        </Link>
+        {rule.source_kind !== 'digest' ? (
+          <Link href={`/chat?q=${why}`} className="text-xs text-[var(--color-primary)] hover:underline">
+            Why did this fire?
+          </Link>
+        ) : null}
         <CheckboxInput label="Enabled" isLabelHidden value={rule.enabled} onChange={(v: boolean) => onToggle(v)} />
         <button type="button" aria-label="Delete alert" className="text-[var(--color-text-disabled)] hover:text-[var(--color-danger)]" onClick={onDelete}>
           <Trash2 size={15} />

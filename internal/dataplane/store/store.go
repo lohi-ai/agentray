@@ -1095,6 +1095,11 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The project-scoped target history the overview read resolves against.
+	if err := s.migrateMetricTargets(ctx); err != nil {
+		return err
+	}
+
 	// Chart annotations sit beside the boards they mark: a project-scoped
 	// record, not a per-chart field, so one deploy shows on every temporal
 	// chart that spans it.

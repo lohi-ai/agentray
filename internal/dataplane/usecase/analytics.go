@@ -63,6 +63,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, readMetric())
 	opcore.Register(r, getBoard())
 	opcore.Register(r, saveBoard())
+	opcore.Register(r, setMetricTarget())
 	opcore.Register(r, testSource())
 	opcore.Register(r, previewSource())
 	opcore.Register(r, listSources())

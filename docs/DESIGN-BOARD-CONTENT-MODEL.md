@@ -93,7 +93,8 @@ onto REST (`POST /api/op/<name>`), the in-process agent tool, the CLI, and MCP:
 | `list_metrics` | `analytics:read` | The catalog: valid keys, labels, units, definitions, prerequisites, legal displays |
 | `read_metric` | `analytics:read` | One metric over a range, with its state, value/series/rows and the range's evidence |
 | `get_board` | `analytics:read` | A board by id or key: the document, the catalog entries and chart rows its tiles reference, and a warning per dangling reference |
-| `save_board` | `dashboards:write` | Declares the content in one write |
+| `save_board` | `dashboards:write` | Declares the content in one write; a metric tile's `target` object appends a version to the metric's project-scoped target history |
+| `set_metric_target` | `dashboards:write` | Declares or clears (`clear: true`) a metric's target directly — the only way to remove one |
 
 `read_metric` runs the **same deterministic overview read** the overview surface
 runs and projects one metric out of it. There is no second SQL path and no

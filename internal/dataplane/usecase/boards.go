@@ -173,3 +173,55 @@ func saveBoard() opcore.Operation[saveBoardInput, storage.BoardContent] {
 		},
 	}
 }
+
+type setMetricTargetInput struct {
+	Metric string `json:"metric" required:"true" desc:"catalog metric key — see list_metrics; only single-number (value) metrics carry a target"`
+	// The spec mirrors a board tile's target object: direction, value, the
+	// complete-day window it is judged over, and — for the per-currency
+	// revenue metric — the currency it names.
+	Direction string  `json:"direction" desc:"gte (at least) | lte (at most)"`
+	Value     float64 `json:"value" desc:"target value on the metric's own scale — percent metrics take 0-100, revenue takes the smallest unit of the named currency"`
+	Period    string  `json:"period" desc:"complete-day window the target is judged over: \"Nd\" (1-90), e.g. \"7d\" for weekly"`
+	Currency  string  `json:"currency" desc:"required when the metric is revenue; refused otherwise"`
+	// EffectiveAt schedules the version; empty takes force at write time. A
+	// window cites the highest version effective at or before its end.
+	EffectiveAt    string `json:"effective_at" desc:"RFC3339 instant this version takes force; empty = now"`
+	Clear          bool   `json:"clear" desc:"append a cleared version — the metric has no target from here"`
+	IdempotencyKey string `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
+}
+
+// setMetricTarget appends one version to a metric's project-scoped target
+// history. It is the only way to clear a target — a board tile that omits
+// `target` declares nothing — and the direct path when no board save is
+// otherwise happening.
+func setMetricTarget() opcore.Operation[setMetricTargetInput, storage.MetricTarget] {
+	return opcore.Operation[setMetricTargetInput, storage.MetricTarget]{
+		Name:           "set_metric_target",
+		Summary:        "Declare or clear a metric's target: appends a version to the project-scoped target history (value + direction + period, e.g. activation ≥ 40% weekly). The verdict a read serves cites the version in force for its window.",
+		Scope:          "analyze_build",
+		Access:         opcore.AccessDashboardsWrite,
+		MinSessionRole: "member",
+		Handler: func(ctx context.Context, cc opcore.CallContext, in setMetricTargetInput) (storage.MetricTarget, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.MetricTarget{}, err
+			}
+			hash, err := requestHash(in)
+			if err != nil {
+				return storage.MetricTarget{}, err
+			}
+			write := storage.MetricTargetWrite{
+				Metric: strings.TrimSpace(in.Metric),
+				Clear:  in.Clear,
+				Spec: storage.MetricTargetSpec{
+					Direction:   in.Direction,
+					Value:       in.Value,
+					Period:      in.Period,
+					Currency:    in.Currency,
+					EffectiveAt: in.EffectiveAt,
+				},
+			}
+			return d.Repo.SetMetricTargetIdempotent(ctx, cc.ProjectID, write, strings.TrimSpace(in.IdempotencyKey), hash)
+		},
+	}
+}

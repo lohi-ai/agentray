@@ -78,7 +78,7 @@ export function ContextChips({ range, extra }: { range: string; extra?: ReactNod
 // value (≈ the prototype's 21px metric). Semantic tones aren't in Text's color
 // enum, so toned values keep a token-backed inline color; deltas use the
 // success/danger brand tokens, which stay constant across light/dark by design.
-export function StatsStrip({ stats }: { stats: Array<{ label: string; value: string; tone?: Tone; delta?: string; deltaTone?: 'up' | 'down'; provenance?: string }> }) {
+export function StatsStrip({ stats }: { stats: Array<{ label: string; value: string; tone?: Tone; delta?: string; deltaTone?: 'up' | 'down'; badge?: { status: string; label: string }; provenance?: string }> }) {
   return (
     <Card padding={1}>
       <AutoGrid min={140} max={6} gap={0}>
@@ -86,6 +86,10 @@ export function StatsStrip({ stats }: { stats: Array<{ label: string; value: str
           <VStack key={stat.label} gap={1} className="px-4 py-3">
             <Text type="supporting" maxLines={1}>{stat.label}</Text>
             <Text weight="semibold" hasTabularNumbers className="text-[length:var(--font-size-xl)] leading-tight tracking-[-0.02em]" style={stat.tone ? { color: `var(--${stat.tone})` } : undefined}>{stat.value}</Text>
+            {/* The target verdict sits beneath the value and above the
+                delta/provenance — a static StatusPill (no pulse: a verdict is
+                a fact about the window, not a live process). */}
+            {stat.badge ? <StatusPill status={stat.badge.status} label={stat.badge.label} grow={false} pulse={false} /> : null}
             {stat.delta ? (
               <HStack align="center" gap={0.5} className={stat.deltaTone === 'down' ? 'text-danger' : 'text-success'}>
                 {stat.deltaTone === 'down' ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
@@ -106,13 +110,13 @@ export function StatsStrip({ stats }: { stats: Array<{ label: string; value: str
   );
 }
 
-const PILL_TONE: Record<string, string> = { working: 'text-agent', healthy: 'text-success', attention: 'text-warning', paused: 'text-[var(--color-text-secondary)]' };
-const DOT_TONE: Record<string, string> = { working: 'bg-agent text-agent', healthy: 'bg-success text-success', attention: 'bg-warning text-warning', paused: 'bg-[var(--color-text-disabled)]', idle: 'bg-[var(--color-text-disabled)]' };
+const PILL_TONE: Record<string, string> = { working: 'text-agent', healthy: 'text-success', attention: 'text-warning', danger: 'text-danger', paused: 'text-[var(--color-text-secondary)]' };
+const DOT_TONE: Record<string, string> = { working: 'bg-agent text-agent', healthy: 'bg-success text-success', attention: 'bg-warning text-warning', danger: 'bg-danger text-danger', paused: 'bg-[var(--color-text-disabled)]', idle: 'bg-[var(--color-text-disabled)]' };
 
-export function StatusPill({ status, label, grow = true }: { status: string; label: string; grow?: boolean }) {
+export function StatusPill({ status, label, grow = true, pulse = true }: { status: string; label: string; grow?: boolean; pulse?: boolean }) {
   return (
     <span className={`inline-flex items-center gap-2 rounded-[20px] bg-[var(--color-background-muted)] px-2 py-1 text-xs ${PILL_TONE[status] ?? ''} ${grow ? 'ms-auto' : ''}`}>
-      <span className={`relative inline-block h-2 w-2 flex-none rounded-full ${DOT_TONE[status] ?? ''} ${status !== 'paused' && status !== 'idle' ? "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" : ''}`} />
+      <span className={`relative inline-block h-2 w-2 flex-none rounded-full ${DOT_TONE[status] ?? ''} ${pulse && status !== 'paused' && status !== 'idle' ? "after:absolute after:inset-0 after:rounded-full after:[animation:pulse_2s_var(--ease)_infinite] after:content-['']" : ''}`} />
       {label}
     </span>
   );

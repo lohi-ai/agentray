@@ -28,6 +28,9 @@ type Notification struct {
 	// Level is informational metadata forwarded in the webhook envelope
 	// ("firing" | "ok" | "info").
 	Level string `json:"level"`
+	// Data carries machine-readable citations for webhook consumers. Channel
+	// renderers retain Title/Body as their human-readable contract.
+	Data map[string]any `json:"data,omitempty"`
 	// URL optionally deep-links back to the rule/dashboard.
 	URL string `json:"url,omitempty"`
 }

@@ -112,6 +112,10 @@ type DataSource interface {
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
 
+	// set_metric_target appends a version to the project-scoped target
+	// history; save_board declares targets through the same write.
+	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
+
 	// Chart annotations: the project-scoped marks behind add_annotation,
 	// list_annotations and delete_annotation. Mirrors usecase.Repo.
 	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
@@ -163,6 +167,7 @@ const (
 	ToolReadMetric         = "read_metric"
 	ToolGetBoard           = "get_board"
 	ToolSaveBoard          = "save_board"
+	ToolSetMetricTarget    = "set_metric_target"
 	ToolListSources        = "list_sources"
 	ToolArchiveSource      = "archive_source"
 	ToolUnarchiveSource    = "unarchive_source"
