@@ -24,7 +24,11 @@ function boardFilters(res: OverviewResult, platform: string): Filters {
   return {
     ...defaultFilters,
     from: res.context.range.from,
-    to: res.context.range.to,
+    // The overview range is half-open; the insight endpoint treats `to` as
+    // inclusive. One millisecond back is the same -1ns the store's own
+    // acquisition filter applies, so the funnel and the tiles above it always
+    // describe the same window.
+    to: new Date(new Date(res.context.range.to).getTime() - 1).toISOString(),
     platform,
   };
 }
@@ -77,11 +81,10 @@ export function UsageFunnelPanel({ res, platform }: { res: OverviewResult; platf
   const emptyCatalog = !namesLoading && eventNames.length === 0;
   const steps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames)), [emptyCatalog, eventNames]);
   const filters = useMemo(() => boardFilters(res, platform), [res, platform]);
-
   const funnelQuery = useQuery({
     queryKey: ['usage-funnel', projectID, filters, steps],
     queryFn: () => new AgentRayAPI(projectID!).insight('funnel', filters, 'events', steps),
-    enabled: !!projectID && steps.length > 0,
+    enabled: !!projectID && !namesLoading && steps.length > 0,
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
