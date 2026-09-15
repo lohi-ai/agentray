@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
-import { acquisitionStats, bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, rangeLabel, retentionTile, revenueBreakdownRows, revenueTile, sourcePill, tileProvenance } from './page';
+import { APIError, type AgentRecommendation, type ListFindingsResult, type MetricTargetView, type OverviewMetric, type OverviewResult, type OverviewRevenueDetail } from '@/lib/api';
+import { acquisitionStats, bestNextStep, firstEvidenceBackedFinding, freshnessLabel, metricTile, overviewViewState, rangeLabel, retentionTile, revenueBreakdownRows, revenueTile, sourcePill, targetBadge, tileProvenance } from './page';
 
 // freshnessLabel must age from the absolute receipt timestamp, not the cached
 // age or client occurrence time — delayed/offline events still prove capture
@@ -233,6 +233,17 @@ describe('bestNextStep', () => {
     // A real finding later in the ranked list still wins over the broken row.
     expect(bestNextStep([finding({ evidence_json: '' }), finding({ id: 'f2', impact_score: 8 })]).kind).toBe('finding');
   });
+
+  it('carries the project goal through the no_finding branch only', () => {
+    // The stored goal rewrites the no-finding capability copy; it must not
+    // leak into the other reasons or suppress a real finding.
+    expect(bestNextStep(undefined, false, 'retention')).toEqual({ kind: 'capability', reason: 'no_finding', goal: 'retention' });
+    expect(bestNextStep([finding({ evidence_json: '' })], false, 'retention')).toEqual({ kind: 'capability', reason: 'incomplete_finding', goal: 'retention' });
+    expect(bestNextStep(undefined, true, 'retention')).toEqual({ kind: 'capability', reason: 'unavailable' });
+    // 'skipped' means the owner declined — the branch behaves as if unset.
+    expect(bestNextStep(undefined, false, 'skipped')).toEqual({ kind: 'capability', reason: 'no_finding' });
+    expect(bestNextStep([finding()], false, 'retention').kind).toBe('finding');
+  });
 });
 
 describe('firstEvidenceBackedFinding', () => {
@@ -462,6 +473,35 @@ describe('tileProvenance', () => {
     const line = tileProvenance(servedRes(), { kind: 'unserved' });
     expect(line).toContain('not instrumented — no served metric');
     expect(line).not.toContain('coverage');
+  });
+});
+
+describe('targetBadge', () => {
+  const target = (verdict?: 'on_track' | 'at_risk' | 'off_track', verdict_reason?: MetricTargetView['verdict_reason']): MetricTargetView => ({
+    version: 2, direction: 'gte', value: 40, period_days: 7,
+    effective_at: '2026-09-05T00:00:00Z', label: '≥ 40% weekly',
+    ...(verdict ? { verdict } : {}), ...(verdict_reason ? { verdict_reason } : {}),
+  });
+
+  it('renders the served verdict word plus the server-rendered target label', () => {
+    expect(targetBadge(target('on_track'))).toEqual({ status: 'healthy', label: 'On track · ≥ 40% weekly' });
+    expect(targetBadge(target('at_risk'))).toEqual({ status: 'attention', label: 'At risk · ≥ 40% weekly' });
+    expect(targetBadge(target('off_track'))).toEqual({ status: 'danger', label: 'Off track · ≥ 40% weekly' });
+  });
+
+  it('renders no badge when the target could not judge the reading', () => {
+    // An unjudgeable target is still cited in provenance, but a colored
+    // verdict would claim a judgment the server never made.
+    expect(targetBadge(target(undefined, 'period_mismatch'))).toBeUndefined();
+    expect(targetBadge(undefined)).toBeUndefined();
+  });
+
+  it('cites the target version in the tile provenance', () => {
+    const r = servedRes();
+    const metric = { ...r.metrics.active_users, target: target('on_track') };
+    expect(tileProvenance(r, { kind: 'metric', metric })).toContain('metric overview.v3 · target v2');
+    // No target in force: the line is exactly today's wording.
+    expect(tileProvenance(r, { kind: 'metric', metric: r.metrics.active_users })).not.toContain('target v');
   });
 });
 

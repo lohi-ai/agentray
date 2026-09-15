@@ -15,20 +15,19 @@ export function useConsoleQuery() {
     queryKey: ['console', projectID, appliedFilters],
     queryFn: async () => {
       const client = new AgentRayAPI(projectID!);
-      // Resilient fan-out: a single failing panel endpoint (e.g. a 500 from
-      // web-analytics) must degrade only its own panel, not reject the whole
-      // aggregate and blank every console-derived surface. Each call falls back
-      // to `null` on rejection; consumers already null-check their slice.
+      // Resilient fan-out: a single failing panel endpoint must degrade only
+      // its own panel, not reject the whole aggregate and blank every
+      // console-derived surface. Each call falls back to `null` on rejection;
+      // consumers already null-check their slice.
       const settle = <T>(p: Promise<T>): Promise<T | null> => p.catch(() => null);
-      const [activity, templates, web, persons, explorer, dashboards] = await Promise.all([
+      const [activity, templates, persons, explorer, dashboards] = await Promise.all([
         settle(client.activity(appliedFilters)),
         settle(client.templates()),
-        settle(client.webAnalytics(appliedFilters)),
         settle(client.persons(appliedFilters)),
         settle(client.exploreEvents(appliedFilters)),
         settle(client.dashboards()),
       ]);
-      return { activity, templates, web, persons, explorer, dashboards };
+      return { activity, templates, persons, explorer, dashboards };
     },
     enabled: !!projectID,
     staleTime: 5 * 60 * 1000,
@@ -72,24 +71,6 @@ export function useActivity() {
   };
 }
 
-export function useWebAnalytics() {
-  const query = useConsoleQuery();
-  const web = query.data?.web?.web_analytics;
-  if (!web) return null;
-  // The API sends `null` for these arrays on an empty/fresh project, but the
-  // WebAnalytics type (and every consumer) treats them as non-null arrays.
-  // Normalize here so callers can `.reduce`/`.slice` without crashing.
-  return {
-    ...web,
-    top_paths: web.top_paths ?? [],
-    referrers: web.referrers ?? [],
-    traffic_by_class: web.traffic_by_class ?? [],
-    traffic_by_platform: web.traffic_by_platform ?? [],
-    traffic_by_provider: web.traffic_by_provider ?? [],
-    ai_top_paths: web.ai_top_paths ?? [],
-    referrers_by_channel: web.referrers_by_channel ?? [],
-  };
-}
 
 export function usePersons() {
   const router = useRouter();
@@ -360,43 +341,6 @@ export function useEventNames() {
   return { names: query.data?.names ?? [], loading: query.isLoading, error: query.isError };
 }
 
-// useFunnelByPlatform runs the same funnel once per platform, so a product that
-// ships more than one app can see which one leaks and where. It is the smallest
-// honest way to answer that: the blended funnel is the *average* of two curves
-// and describes neither, and until this existed the only route to the split was
-// asking the agent to write the SQL.
-//
-// Platforms come from the activity summary (computed ignoring the platform
-// filter), so this list does not collapse when a platform filter is applied.
-// Runs only when there really is more than one platform.
-export function useFunnelByPlatform(steps: string[], platforms: string[]) {
-  const projectID = useAuthStore((s) => s.project?.id);
-  const appliedFilters = useFiltersStore((s) => s.appliedFilters);
-  const enabled = !!projectID && platforms.length > 1 && steps.length > 0;
-
-  const query = useQuery({
-    queryKey: ['funnel-by-platform', projectID, appliedFilters, steps, platforms],
-    queryFn: async () => {
-      const client = new AgentRayAPI(projectID!);
-      // One failing platform must not blank the comparison — it drops out of the
-      // table instead, the same degrade-per-slice rule the console fan-out uses.
-      const results = await Promise.all(
-        platforms.map((platform) =>
-          client
-            .insight('funnel', { ...appliedFilters, platform }, 'events', steps)
-            .then((data) => ({ platform, funnel: data.insight?.funnel ?? [] }))
-            .catch(() => null),
-        ),
-      );
-      return results.filter((r): r is { platform: string; funnel: NonNullable<typeof r>['funnel'] } => r !== null);
-    },
-    enabled,
-    staleTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: false,
-  });
-
-  return { splits: query.data ?? [], loading: query.isFetching && enabled };
-}
 
 // useDailyReadout powers the agent-narrated slot on the dashboard home: the
 // latest run's plain-language summary (what the agent saw overnight) plus the
@@ -475,25 +419,6 @@ export function useAgentGrants(agentID: string) {
   };
 }
 
-export function useInsight() {
-  const projectID = useAuthStore((s) => s.project?.id);
-  const { appliedFilters } = useFiltersStore();
-  const { insight, setInsight } = useUIStore();
-
-  const runMutation = useMutation({
-    mutationFn: ({ type, metric, steps }: { type: string; metric: string; steps: string[] }) =>
-      new AgentRayAPI(projectID!).insight(type, appliedFilters, metric, steps),
-    onSuccess: (data) => setInsight(data.insight),
-  });
-
-  return {
-    insight,
-    setInsight,
-    runInsight: async (type: string, metric: string, steps: string[]) => {
-      await runMutation.mutateAsync({ type, metric, steps });
-    },
-  };
-}
 
 export function useReplay() {
   const projectID = useAuthStore((s) => s.project?.id);

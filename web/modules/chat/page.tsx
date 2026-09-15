@@ -50,6 +50,7 @@ const PANEL_SHEET = 'chat-panel';
 export function ChatPage() {
   const projectName = useAuthStore((s) => s.project?.name);
   const projectID = useAuthStore((s) => s.project?.id);
+  const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const router = useRouter();
   const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, runs, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
@@ -188,6 +189,7 @@ export function ChatPage() {
     eventNames,
     catalogReady,
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+    activationEvent,
   });
   // The guided tour. Every tick it reports is a server answer about the user's
   // OWN workspace, so it resumes on the right step after a reload and on a
@@ -595,6 +597,7 @@ export function ChatPage() {
       eventNames,
       catalogReady,
       hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+      activationEvent,
     }, prompt);
     if (instant) {
       const seeded: ChatMsg[] = [...messages,

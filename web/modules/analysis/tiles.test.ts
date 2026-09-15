@@ -17,7 +17,7 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       previous_range: { from: '2026-08-29T00:00:00Z', to: '2026-09-05T00:00:00Z', days: 7, complete_days: true },
       platform: '',
       generated_at: '2026-09-12T00:00:00Z',
-      metric_version: 'overview.v3',
+      metric_version: 'overview.v4',
     },
     metrics: {
       active_users: metric('ok', 1240),
@@ -25,8 +25,13 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       sessions: metric('ok', 2860),
       activation: metric('unconfigured'),
       revenue: metric('unconfigured'),
+      pageviews: metric('ok', 5128),
+      conversions: metric('ok', 41),
+      ai_share: { state: 'ok', rate: 6.4, definition: 'test' },
+      bounce_rate: { state: 'ok', rate: 38.2, definition: 'test' },
+      avg_session_duration: { state: 'ok', rate: 161, definition: 'test' },
     },
-    trend: [{ day: '2026-09-05', active_users: 180 }],
+    trend: [{ day: '2026-09-05', active_users: 180, events: 940 }],
     retention: {
       cohort_window: 'lifetime',
       d1: { state: 'ok', rate: 0.41, returned: 132, eligible: 320 },
@@ -36,6 +41,10 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
     content: {
       top_pages: { unit: 'pageviews', rows: [{ value: '/pricing', count: 612 }] },
       top_sources: { unit: 'pageviews', rows: [{ value: 'Direct / unknown', count: 540 }] },
+      traffic_by_class: { unit: 'pageviews', rows: [{ value: 'human', count: 4800 }, { value: 'ai-platform', count: 328 }] },
+      ai_top_paths: { unit: 'pageviews', rows: [{ value: '/pricing', count: 88 }] },
+      traffic_by_platform: { unit: 'pageviews', rows: [{ value: 'web', count: 5128 }] },
+      top_events: { unit: 'events', rows: [{ value: 'user.pageview', count: 5128 }] },
     },
     data_status: {
       last_received_at: '2026-09-12T00:02:00Z',
