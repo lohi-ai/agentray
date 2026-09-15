@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import { TextInput } from '@astryxdesign/core/TextInput';
+import { DateTimeInput, type ISODateTimeString } from '@astryxdesign/core/DateTimeInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { apiErrorMessage, type Annotation } from '@/lib/api';
 import { Modal, ConfirmDialog } from '@/modules/shared/components/modal';
@@ -83,32 +84,29 @@ export function AnnotationDialog({ annotations, onClose }: { annotations: Annota
           onChange={setKind}
           width="100%"
         />
-        <TextInput
+        <DateTimeInput
           label="When did it start?"
           isRequired
-          type="datetime-local"
           status={touched && startMissing ? { type: 'error', message: 'Pick the moment the change began.' } : undefined}
-          value={startsAt}
-          onChange={setStartsAt}
+          value={(startsAt || undefined) as ISODateTimeString | undefined}
+          onChange={(v) => setStartsAt(v ?? '')}
           width="100%"
         />
-        <TextInput
+        <DateTimeInput
           label="When did it end?"
           isOptional
-          type="datetime-local"
           status={
             touched && endBad ? { type: 'error', message: 'That is not a readable time.' }
               : touched && endBeforeStart ? { type: 'error', message: 'The end has to be after the start — leave it empty for an instant.' }
               : undefined
           }
-          value={endsAt}
-          onChange={setEndsAt}
+          value={(endsAt || undefined) as ISODateTimeString | undefined}
+          onChange={(v) => setEndsAt(v ?? '')}
           width="100%"
         />
         <TextInput
           label="Link"
           isOptional
-          type="url"
           value={link}
           placeholder="https://…"
           onChange={setLink}
