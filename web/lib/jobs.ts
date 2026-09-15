@@ -71,7 +71,7 @@ export const JOBS: readonly JobDef[] = [
     surfaces: [
       // First, because the second idea and the tenth land here too — /start
       // only ever shows one test, and this job recurs per feature.
-      { href: '/prototypes', label: 'Prototypes' },
+      { href: '/plans', label: 'Plans' },
       { href: '/settings?tab=keys', label: 'Instrument the test' },
       { href: '/events', label: 'Watch the first events land' },
     ],
@@ -314,7 +314,7 @@ export function jobSteps(job: JobDef, state: JobState): JobStep[] {
     // that nothing could ever read back.
     observable: true,
     action: state.testProposed
-      ? { label: 'Review it', href: state.testID ? `/prototypes/${encodeURIComponent(state.testID)}` : '/prototypes' }
+      ? { label: 'Review it', href: state.testID ? `/plans/${encodeURIComponent(state.testID)}` : '/plans' }
       : { label: 'Design the test', href: '/chat' },
   });
 

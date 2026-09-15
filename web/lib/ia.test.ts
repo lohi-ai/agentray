@@ -132,8 +132,9 @@ describe('matchActiveHref', () => {
     ['/chat', '/agents', 'Work'],
     ['/plans', '/plans', 'Work'],
     ['/plans/abc-123', '/plans', 'Work'],
-    ['/prototypes', '/plans', 'Work'],
-    ['/prototypes/abc-123', '/plans', 'Work'],
+    // /prototypes is a redirect, not a nav destination — nothing must light for it.
+    ['/prototypes', '', ''],
+    ['/prototypes/abc-123', '', ''],
     ['/usage', '/dashboard', 'Understand'],
     ['/operations', '/agents', 'Work'],
     ['/operations/config%3Aproj-1', '/agents', 'Work'],
@@ -472,12 +473,12 @@ describe('settingsPath', () => {
 });
 
 describe('projectDetailRoot', () => {
-  it('sends agent / team / ops / prototype detail to the list root', () => {
+  it('sends agent / team / ops / plan detail to the list root', () => {
     expect(projectDetailRoot('/agents/abc/setup')).toBe('/agents');
     expect(projectDetailRoot('/agents/abc/monitor')).toBe('/agents');
     expect(projectDetailRoot('/teams/t1')).toBe('/teams');
     expect(projectDetailRoot('/operations/op1')).toBe('/operations');
-    expect(projectDetailRoot('/prototypes/p1')).toBe('/prototypes');
+    expect(projectDetailRoot('/prototypes/p1')).toBeNull();
     expect(projectDetailRoot('/plans/p1')).toBe('/plans');
   });
 

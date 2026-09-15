@@ -7,7 +7,8 @@
 //
 // Every pre-redesign route stays reachable: old top-level items became either
 // an alias on the new destination (deep links light the right nav item) or a
-// child surface under it. Nothing redirects away and no saved layout moves.
+// child surface under it. The one exception is /prototypes, which permanently
+// redirects to /plans — the same validation_tests list under its product name.
 export type NavGroupId = 'Product' | 'Understand' | 'Work' | 'Workspace';
 
 export type NavItemDef = {
@@ -30,9 +31,9 @@ export const NAV_ITEMS: readonly NavItemDef[] = [
   { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
   // Data = connect and inspect: events, replay, SDK setup, connectors.
   { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
-  // Plans = findings and experiments. /prototypes stays reachable as an
-  // alias — the pre-slice-4 surface it names still serves its URLs.
-  { href: '/plans', label: 'Plans', group: 'Work', aliases: ['/prototypes'] },
+  // Plans = findings and experiments. /prototypes is not an alias: the route
+  // redirects here, so nothing in the product should still hand out that URL.
+  { href: '/plans', label: 'Plans', group: 'Work' },
   // Agents = every agent surface: chat, operations (triggers), Garden,
   // teams, marketplace, monitor, lab.
   { href: '/agents', label: 'Agents', group: 'Work', aliases: ['/teams', '/marketplace', '/monitor', '/agent', '/chat', '/operations'] },
@@ -754,7 +755,6 @@ export function projectDetailRoot(pathname: string): string | null {
   if (/^\/agents\/[^/]+/.test(path)) return '/agents';
   if (/^\/teams\/[^/]+/.test(path)) return '/teams';
   if (/^\/operations\/[^/]+/.test(path)) return '/operations';
-  if (/^\/prototypes\/[^/]+/.test(path)) return '/prototypes';
   if (/^\/plans\/[^/]+/.test(path)) return '/plans';
   return null;
 }

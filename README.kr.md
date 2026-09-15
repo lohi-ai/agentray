@@ -101,13 +101,15 @@ channel은 config와 adapter로 붙는다.
 | **Analytics** `/dashboard` | acquisition, engagement, funnel, retention 탐색, dashboard 저장 | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
 | **People** `/persons` | 개인의 활동과 비즈니스 속성 확인, audience 저장 | `/cohorts` |
 | **Data** `/events` | SDK와 source 연결, event·dataset·pipeline 상태 확인 | `/start` · `/replay` |
-| **Plans** `/plans` | finding과 근거, 제안한 실험, 결과 보관 | `/prototypes` |
+| **Plans** `/plans` | finding과 근거, 제안한 실험, 결과 보관 | |
 | **Agents** `/agents` | 외부 agent 연결, chat, operations, Garden, marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
 | **Settings** `/settings` | workspace 권한, credential, retention과 사용량 | `/alerts` · `/pricing` (hosted 전용) |
 
 리디자인 이전의 URL은 모두 그대로 열린다: 예전 최상위 항목은 새 목적지의
-alias가 되거나 그 아래 child surface가 됐다. 다른 곳으로 redirect되는 것도,
-저장된 layout이 움직이는 것도 없다. 페이지가 아직 없는 목적지는 링크 없는
+alias가 되거나 그 아래 child surface가 됐다. 유일한 예외는 `/prototypes`로,
+`/plans`로 영구 redirect된다 — 같은 테스트 목록의 제품 이름이다. 저장된
+layout은 움직이지 않는다.
+페이지가 아직 없는 목적지는 링크 없는
 "Coming soon" 표시로 렌더된다 — router가 열 수 없는 링크를 내놓지 않는다.
 
 ## 믿을 수 있는 숫자
