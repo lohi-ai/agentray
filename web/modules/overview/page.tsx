@@ -586,7 +586,6 @@ export function OverviewPage() {
   const project = useAuthStore((s) => s.project);
   const projectID = project?.id;
   const { updateProject } = useCurrentProject();
-  const access = projectAccess(project);
   const [period, setPeriod] = useState('7d');
   const [platform, setPlatform] = useState('');
 
