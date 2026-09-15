@@ -206,7 +206,7 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     if (end === null) {
       rangeLines.push({ name: m.annotation.label, xAxis: m.xTo });
     } else {
-      areaData.push([{ name: m.annotation.label, xAxis: m.xFrom }, { xAxis: end }]);
+      areaData.push([{ name: m.annotation.label, xAxis: m.xFrom }, { name: m.annotation.label, xAxis: end }]);
     }
   }
   const pointData = [

@@ -99,8 +99,6 @@ export const JOBS: readonly JobDef[] = [
       { href: '/monetization', label: 'Monetization' },
       { href: '/usage', label: 'Usage' },
       { href: '/persons', label: 'People' },
-      { href: '/web-analytics', label: 'Traffic' },
-      { href: '/product', label: 'Product' },
     ],
     prompts: [
       'What is the single weakest step in my activation funnel?',

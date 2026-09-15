@@ -4175,9 +4175,19 @@ func (s *Store) sessionQuality(ctx context.Context, projectID string, filter Eve
 		return 0, 0, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
+	duration, bounce, _, err := s.sessionQualityWhere(ctx, where, args)
+	return duration, bounce, err
+}
+
+// sessionQualityWhere runs the session-quality aggregate over a caller-built
+// window. The session count comes back beside the rates so a caller can tell
+// "every session bounced" from "there were no sessions" — the second is
+// no_data, never a 0% measurement.
+func (s *Store) sessionQualityWhere(ctx context.Context, where string, args []any) (float64, float64, uint64, error) {
 	var duration float64
 	var bounceRate float64
-	err = s.duckQueryRow(ctx, `
+	var sessions uint64
+	err := s.duckQueryRow(ctx, `
 WITH per_session AS (
 	SELECT
 		session_id,
@@ -4187,9 +4197,9 @@ WITH per_session AS (
 	WHERE `+where+` AND session_id <> ''
 	GROUP BY session_id
 )
-SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0)
-FROM per_session`, args, &duration, &bounceRate)
-	return duration, bounceRate, err
+SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0), count(*)
+FROM per_session`, args, &duration, &bounceRate, &sessions)
+	return duration, bounceRate, sessions, err
 }
 
 func (s *Store) propertyCounts(ctx context.Context, projectID string, filter EventFilter, property string, eventName string) ([]PathCount, error) {
