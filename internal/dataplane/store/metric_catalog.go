@@ -68,6 +68,18 @@ const (
 	MetricRetentionD30     = "retention_d30"
 	MetricTopPages         = "top_pages"
 	MetricTopSources       = "top_sources"
+	// The reads the retired /traffic, /web-analytics and /product surfaces
+	// served, absorbed into the overview contract (overview.v4).
+	MetricPageviews         = "pageviews"
+	MetricConversions       = "conversions"
+	MetricAIShare           = "ai_share"
+	MetricAITopPaths        = "ai_top_paths"
+	MetricTrafficByClass    = "traffic_by_class"
+	MetricTrafficByPlatform = "traffic_by_platform"
+	MetricBounceRate        = "bounce_rate"
+	MetricAvgSession        = "avg_session_duration"
+	MetricTopEvents         = "top_events"
+	MetricEventVolumeDaily  = "event_volume_daily"
 )
 
 // ErrMetricUnknown is returned when a caller names a metric the catalog does
@@ -123,15 +135,25 @@ const (
 // money.go before this catalog existed; keeping two copies is how a tile ends
 // up explaining itself with semantics the server no longer implements.
 const (
-	metricDefActiveUsers = "Distinct people (canonical identity) with qualifying human product activity per complete project-local calendar-day range."
-	metricDefNewUsers    = "People whose first-ever observed qualifying activity falls inside the range. First observed, not signup or download."
-	metricDefSessions    = "Distinct session ids on qualifying activity; sessions end after 30 minutes of inactivity (server sessionizer)."
-	metricDefDailyActive = "Distinct people with qualifying activity per local calendar day inside the selected range. Daily counts are never summed into a period total — a person active on two days is one person, not two."
-	metricDefActivation  = "Share of a cohort completing the project's chosen activation event inside a conversion window."
-	metricDefRevenue     = "Deduplicated net revenue per declared currency: rows de-duplicate by $insert_id (last write wins, event_id fallback), refunds and revenue_reversed rows net against bookings, and the headline is the currency with the largest deduplicated gross. No FX — currencies are never summed together."
-	metricDefRetention   = "Return rate for mature lifetime first-activity cohorts: those who came back on day N over those whose day N had fully elapsed. Cohorts too young to have reached day N are excluded, not counted as zero."
-	metricDefTopPages    = "Pageviews of human product activity grouped by path, ranked. Direct and unattributed traffic is not dropped — it is its own row."
-	metricDefTopSources  = "Pageviews of human product activity grouped by referrer channel, with a missing channel reported as unknown rather than inferred."
+	metricDefActiveUsers       = "Distinct people (canonical identity) with qualifying human product activity per complete project-local calendar-day range."
+	metricDefNewUsers          = "People whose first-ever observed qualifying activity falls inside the range. First observed, not signup or download."
+	metricDefSessions          = "Distinct session ids on qualifying activity; sessions end after 30 minutes of inactivity (server sessionizer)."
+	metricDefDailyActive       = "Distinct people with qualifying activity per local calendar day inside the selected range. Daily counts are never summed into a period total — a person active on two days is one person, not two."
+	metricDefActivation        = "Share of a cohort completing the project's chosen activation event inside a conversion window."
+	metricDefRevenue           = "Deduplicated net revenue per declared currency: rows de-duplicate by $insert_id (last write wins, event_id fallback), refunds and revenue_reversed rows net against bookings, and the headline is the currency with the largest deduplicated gross. No FX — currencies are never summed together."
+	metricDefRetention         = "Return rate for mature lifetime first-activity cohorts: those who came back on day N over those whose day N had fully elapsed. Cohorts too young to have reached day N are excluded, not counted as zero."
+	metricDefTopPages          = "Pageviews of human product activity grouped by path, ranked. Direct and unattributed traffic is not dropped — it is its own row."
+	metricDefTopSources        = "Pageviews of human product activity grouped by referrer channel, with a missing channel reported as unknown rather than inferred."
+	metricDefPageviews         = "Every received user.pageview event in the range, all visitor classes — a crawler's pageview is still a pageview. The traffic_by_class breakdown is the human/non-human split."
+	metricDefConversions       = "Every received user.conversion or user.signup event in the range, all visitor classes."
+	metricDefAIShare           = "Non-human share of classified pageviews: search-bot and ai-platform pageviews over all pageviews, as a percent."
+	metricDefAITopPaths        = "Pageviews from AI crawlers (visitor_class ai-platform) and AI referrals (referrer_channel ai-referral), grouped by path, ranked."
+	metricDefTrafficByClass    = "Pageviews grouped by visitor class (human / search-bot / ai-platform), ranked. The non-human rows are the point — this list is deliberately not humans-filtered."
+	metricDefTrafficByPlatform = "Pageviews grouped by the app that sent them (web / ios / android / server / unknown), ranked."
+	metricDefBounceRate        = "Share of sessions with a single event, as a percent of every session in the range."
+	metricDefAvgSession        = "Mean session length in seconds over every session in the range; sessions end after 30 minutes of inactivity (server sessionizer)."
+	metricDefTopEvents         = "Every received event name ranked by volume — all event types and visitor classes, no qualifying filter."
+	metricDefEventVolume       = "Every received event per local calendar day inside the selected range. Volume is an ingestion fact: non-qualifying rows count, and a crawler wave is the answer when the question is how much arrived."
 )
 
 // Prerequisite texts — what must be instrumented before the metric can compute.
@@ -180,6 +202,56 @@ var metricCatalogDecl = []MetricDefinition{
 		Key: MetricRetentionD7, Label: "D7 retention", Unit: "percent", Kind: MetricKindValue,
 		Group: MetricGroupUsage, Definition: metricDefRetention, Prerequisite: metricPrereqRetention,
 		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricPageviews, Label: "Pageviews", Unit: "pageviews", Kind: MetricKindValue,
+		Group: MetricGroupAcquisition, Definition: metricDefPageviews,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricConversions, Label: "Conversions", Unit: "events", Kind: MetricKindValue,
+		Group: MetricGroupAcquisition, Definition: metricDefConversions,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricAIShare, Label: "AI traffic share", Unit: "percent", Kind: MetricKindValue,
+		Group: MetricGroupAcquisition, Definition: metricDefAIShare,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricBounceRate, Label: "Bounce rate", Unit: "percent", Kind: MetricKindValue,
+		Group: MetricGroupAcquisition, Definition: metricDefBounceRate,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricAvgSession, Label: "Avg session duration", Unit: "seconds", Kind: MetricKindValue,
+		Group: MetricGroupAcquisition, Definition: metricDefAvgSession,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricTrafficByClass, Label: "Traffic by type", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTrafficByClass,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricAITopPaths, Label: "AI-cited pages", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefAITopPaths,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTrafficByPlatform, Label: "Pageviews by platform", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTrafficByPlatform,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTopEvents, Label: "Top events", Unit: "events", Kind: MetricKindBreakdown,
+		Group: MetricGroupUsage, Definition: metricDefTopEvents,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricEventVolumeDaily, Label: "Events per day", Unit: "events/day", Kind: MetricKindSeries,
+		Group: MetricGroupUsage, Definition: metricDefEventVolume,
+		Displays: []string{DisplayLine, DisplayArea, DisplayBar},
 	},
 	{
 		Key: MetricRetentionD30, Label: "D30 retention", Unit: "percent", Kind: MetricKindValue,
@@ -415,12 +487,18 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 		MetricSessions:    func() OverviewMetric { return res.Metrics.Sessions },
 		MetricActivation:  func() OverviewMetric { return res.Metrics.Activation },
 		MetricRevenue:     func() OverviewMetric { return res.Metrics.Revenue },
+		MetricPageviews:   func() OverviewMetric { return res.Metrics.Pageviews },
+		MetricConversions: func() OverviewMetric { return res.Metrics.Conversions },
+		MetricAIShare:     func() OverviewMetric { return res.Metrics.AIShare },
+		MetricBounceRate:  func() OverviewMetric { return res.Metrics.BounceRate },
+		MetricAvgSession:  func() OverviewMetric { return res.Metrics.AvgSessionDuration },
 	}
 	if get, ok := valueMetrics[def.Key]; ok {
 		m := get()
 		reading.State = m.State
 		reading.Value = m.Value
 		reading.Previous = m.Previous
+		reading.Rate = m.Rate
 		reading.Notes = m.Notes
 		if def.Key == MetricRevenue {
 			reading.Revenue = res.Metrics.RevenueDetail
@@ -429,12 +507,22 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 	}
 
 	switch def.Key {
-	case MetricActiveUsersDaily:
-		reading.State = overviewMetricState(res.DataStatus.EverReceived, res.DataStatus.QualifyingInRange)
+	case MetricActiveUsersDaily, MetricEventVolumeDaily:
+		// Event volume counts every received event, not qualifying activity —
+		// the same population split the trend point carries.
+		inRange := res.DataStatus.QualifyingInRange
+		if def.Key == MetricEventVolumeDaily {
+			inRange = res.DataStatus.EventsInRange
+		}
+		reading.State = overviewMetricState(res.DataStatus.EverReceived, inRange)
 		if reading.State == OverviewStateOK {
 			reading.Series = make([]MetricPoint, 0, len(res.Trend))
 			for _, p := range res.Trend {
-				reading.Series = append(reading.Series, MetricPoint{Label: p.Day, Value: p.ActiveUsers})
+				value := p.ActiveUsers
+				if def.Key == MetricEventVolumeDaily {
+					value = p.Events
+				}
+				reading.Series = append(reading.Series, MetricPoint{Label: p.Day, Value: value})
 			}
 		}
 		return reading, nil
@@ -459,12 +547,29 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			reading.Rate = &rate
 		}
 		return reading, nil
-	case MetricTopPages, MetricTopSources:
+	case MetricTopPages, MetricTopSources, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
 		list := res.Content.TopPages
-		if def.Key == MetricTopSources {
+		// The retired-surface breakdowns count every received event — their
+		// no-data gate is the range's event population, not qualifying
+		// activity, so a crawler-only project still reports its traffic.
+		inRange := res.DataStatus.QualifyingInRange
+		switch def.Key {
+		case MetricTopSources:
 			list = res.Content.TopSources
+		case MetricTrafficByClass:
+			list = res.Content.TrafficByClass
+			inRange = res.DataStatus.EventsInRange
+		case MetricAITopPaths:
+			list = res.Content.AITopPaths
+			inRange = res.DataStatus.EventsInRange
+		case MetricTrafficByPlatform:
+			list = res.Content.TrafficByPlatform
+			inRange = res.DataStatus.EventsInRange
+		case MetricTopEvents:
+			list = res.Content.TopEvents
+			inRange = res.DataStatus.EventsInRange
 		}
-		reading.State = overviewMetricState(res.DataStatus.EverReceived, res.DataStatus.QualifyingInRange)
+		reading.State = overviewMetricState(res.DataStatus.EverReceived, inRange)
 		reading.Unit = list.Unit
 		reading.Rows = list.Rows
 		return reading, nil

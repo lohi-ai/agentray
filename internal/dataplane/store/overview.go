@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +28,11 @@ import (
 // saved chart or agent finding can name the semantics it was computed under.
 // v3 is the money release: revenue stops being "unconfigured" and becomes a
 // deduplicated, per-currency, signed net (see money.go).
-const OverviewMetricVersion = "overview.v3"
+// v4 absorbs the reads the retired /traffic, /web-analytics and /product
+// surfaces served — pageviews, conversions, traffic class, AI share, session
+// quality, platform split, top events and event volume — so the declared
+// boards and read_metric answer them from the same deterministic pass.
+const OverviewMetricVersion = "overview.v4"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -83,10 +89,15 @@ type OverviewContext struct {
 // OverviewMetric is one headline number plus the trust metadata the UI must
 // render beside it. Value/Previous are nil unless State is "ok" — a metric
 // that cannot be computed honestly carries no number, never a fabricated zero.
+// Rate is the float channel for metrics whose honest value is not a count —
+// a share, a rate or a duration — served on the scale the catalog unit
+// declares (percent for shares, seconds for durations). A metric carries
+// Value XOR Rate, never both.
 type OverviewMetric struct {
 	State      string   `json:"state"`
 	Value      *uint64  `json:"value,omitempty"`
 	Previous   *uint64  `json:"previous,omitempty"`
+	Rate       *float64 `json:"rate,omitempty"`
 	Definition string   `json:"definition"`
 	Notes      []string `json:"notes,omitempty"`
 }
@@ -94,6 +105,11 @@ type OverviewMetric struct {
 type OverviewTrendPoint struct {
 	Day         string `json:"day"` // YYYY-MM-DD in Context.Timezone
 	ActiveUsers uint64 `json:"active_users"`
+	// Events is every received event that day — the event-volume series the
+	// retired Product page's trend question charted. It deliberately counts
+	// non-qualifying rows too: volume is an ingestion fact, and a crawler wave
+	// IS the answer when the question is "how much arrived".
+	Events uint64 `json:"events"`
 }
 
 // OverviewRetentionPoint is one daily-cohort return rate. Eligible counts only
@@ -167,6 +183,18 @@ type OverviewMetrics struct {
 	Sessions    OverviewMetric `json:"sessions"`
 	Activation  OverviewMetric `json:"activation"`
 	Revenue     OverviewMetric `json:"revenue"`
+	// Pageviews and Conversions are the retired Traffic page's headline counts.
+	// Unlike the people metrics they count every received event — a crawler's
+	// pageview is still a pageview, and the traffic-by-class breakdown beside
+	// them is where the human/non-human split lives.
+	Pageviews   OverviewMetric `json:"pageviews"`
+	Conversions OverviewMetric `json:"conversions"`
+	// AIShare is the non-human share of classified pageviews, on the percent
+	// scale (Rate). Session quality is the retired page's bounce rate and
+	// average session duration, computed over every session in the window.
+	AIShare            OverviewMetric `json:"ai_share"`
+	BounceRate         OverviewMetric `json:"bounce_rate"`
+	AvgSessionDuration OverviewMetric `json:"avg_session_duration"`
 	// RevenueDetail carries the signed arithmetic behind Revenue — the
 	// per-currency gross/reversed/net, the exclusions, and the previous
 	// window's net. Revenue.Value is unsigned (the field is shared with every
@@ -189,6 +217,18 @@ type OverviewRetention struct {
 type OverviewContent struct {
 	TopPages   OverviewList `json:"top_pages"`
 	TopSources OverviewList `json:"top_sources"`
+	// The retired Traffic page's remaining breakdowns. TrafficByClass counts
+	// pageviews per visitor class (human / search-bot / ai-platform) — the
+	// non-human rows are the point, so this list is not humans-filtered.
+	// AITopPaths is the pages AI crawlers and AI referrals actually hit.
+	// TrafficByPlatform is pageviews per app; per-platform people stay on the
+	// page's platform segment, which scopes every metric on the board.
+	TrafficByClass    OverviewList `json:"traffic_by_class"`
+	AITopPaths        OverviewList `json:"ai_top_paths"`
+	TrafficByPlatform OverviewList `json:"traffic_by_platform"`
+	// TopEvents is the retired Product page's raw event ranking — every
+	// received event name by volume, no qualifying filter.
+	TopEvents OverviewList `json:"top_events"`
 }
 
 type OverviewResult struct {
@@ -272,6 +312,18 @@ func overviewWindowWhere(projectID string, r OverviewRange, platform string) (st
 // event. It is a fragment (not a filter flag) because it must compose with the
 // half-open range bounds this package builds itself.
 const overviewQualifying = `event_type = 'user' AND coalesce(visitor_class, 'human') = 'human' AND event_name != '` + overviewVerificationEvent + `'`
+
+func float64Ptr(v float64) *float64 { return &v }
+
+// overviewEventState is the no-data gate for metrics whose population is every
+// received event, not qualifying activity — a project that only ever received
+// crawler pageviews still has pageviews to report.
+func overviewEventState(everReceived bool, eventsInRange uint64) string {
+	if !everReceived || eventsInRange == 0 {
+		return OverviewStateNoData
+	}
+	return OverviewStateOK
+}
 
 // overviewDataState maps receipt facts to the data-status label. "quiet" is an
 // age statement (nothing received lately), never a pipeline-lag claim.
@@ -452,6 +504,70 @@ WHERE project_id = ? AND "timestamp" >= ? AND "timestamp" < ? AND `+overviewQual
 		}
 	}
 
+	// --- pageviews + conversions: the retired Traffic page's headline counts ---
+	// Every received event counts — the class split below is where the
+	// human/non-human question is answered, so filtering here would make the
+	// headline disagree with the breakdown under it.
+	{
+		platClause, platArg := overviewPlatform(platform)
+		var pageviews, pageviewsPrev, conversions, conversionsPrev uint64
+		qargs := []any{r.From, r.To, prev.From, prev.To, r.From, r.To, prev.From, prev.To,
+			projectID, prev.From, r.To}
+		if platArg != nil {
+			qargs = append(qargs, platArg)
+		}
+		err = s.duckQueryRow(ctx, `
+SELECT
+	count(*) FILTER (WHERE event_name = 'user.pageview' AND "timestamp" >= ? AND "timestamp" < ?),
+	count(*) FILTER (WHERE event_name = 'user.pageview' AND "timestamp" >= ? AND "timestamp" < ?),
+	count(*) FILTER (WHERE event_name IN ('user.conversion', 'user.signup') AND "timestamp" >= ? AND "timestamp" < ?),
+	count(*) FILTER (WHERE event_name IN ('user.conversion', 'user.signup') AND "timestamp" >= ? AND "timestamp" < ?)
+FROM events
+WHERE project_id = ? AND "timestamp" >= ? AND "timestamp" < ?`+platClause,
+			qargs,
+			&pageviews, &pageviewsPrev, &conversions, &conversionsPrev)
+		if err != nil {
+			return res, err
+		}
+		eventState := overviewEventState(res.DataStatus.EverReceived, res.DataStatus.EventsInRange)
+		res.Metrics.Pageviews = OverviewMetric{State: eventState, Definition: metricDefPageviews}
+		res.Metrics.Conversions = OverviewMetric{State: eventState, Definition: metricDefConversions}
+		if eventState == OverviewStateOK {
+			res.Metrics.Pageviews.Value = uint64Ptr(pageviews)
+			res.Metrics.Conversions.Value = uint64Ptr(conversions)
+			if r.CompleteDays {
+				res.Metrics.Pageviews.Previous = uint64Ptr(pageviewsPrev)
+				res.Metrics.Conversions.Previous = uint64Ptr(conversionsPrev)
+			}
+		}
+	}
+
+	// --- session quality: bounce rate + average duration over every session ---
+	{
+		duration, bounce, sessionCount, err := s.sessionQualityWhere(ctx, where, args)
+		if err != nil {
+			return res, err
+		}
+		if math.IsNaN(duration) || math.IsInf(duration, 0) {
+			duration = 0
+		}
+		if math.IsNaN(bounce) || math.IsInf(bounce, 0) {
+			bounce = 0
+		}
+		// Zero sessions is no_data, not a 0% bounce — a rate over an empty
+		// population is a fabricated measurement.
+		sessionState := OverviewStateNoData
+		if res.DataStatus.EverReceived && sessionCount > 0 {
+			sessionState = OverviewStateOK
+		}
+		res.Metrics.BounceRate = OverviewMetric{State: sessionState, Definition: metricDefBounceRate}
+		res.Metrics.AvgSessionDuration = OverviewMetric{State: sessionState, Definition: metricDefAvgSession}
+		if sessionState == OverviewStateOK {
+			res.Metrics.BounceRate.Rate = float64Ptr(bounce * 100)
+			res.Metrics.AvgSessionDuration.Rate = float64Ptr(duration)
+		}
+	}
+
 	// --- new users: first-ever qualifying event inside the range ---
 	{
 		_, platArg := overviewPlatform(platform)
@@ -504,21 +620,27 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		Notes:      []string{metricPrereqActivation},
 	}
 
-	// --- daily active-user trend ---
+	// --- daily trend: active people + raw event volume in one pass ---
+	// Events counts every received row (resolved_events is events LEFT JOIN
+	// aliases, so count(*) is still one per event); ActiveUsers stays the
+	// qualifying-people count. One query, two populations, each labelled.
 	{
-		byDay := map[string]uint64{}
+		byDay := map[string]OverviewTrendPoint{}
 		err := s.duckQuery(ctx, `
-SELECT CAST(timezone(?, "timestamp") AS DATE) AS day, count(DISTINCT `+canonicalID+`) AS users
+SELECT CAST(timezone(?, "timestamp") AS DATE) AS day,
+	count(DISTINCT `+canonicalID+`) FILTER (WHERE `+overviewQualifying+`) AS users,
+	count(*) AS events
 FROM resolved_events
-WHERE `+qualWhere+`
+WHERE `+where+`
 GROUP BY day
 ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 			var day time.Time
-			var users uint64
-			if err := rows.Scan(&day, &users); err != nil {
+			var point OverviewTrendPoint
+			if err := rows.Scan(&day, &point.ActiveUsers, &point.Events); err != nil {
 				return err
 			}
-			byDay[day.Format("2006-01-02")] = users
+			point.Day = day.Format("2006-01-02")
+			byDay[point.Day] = point
 			return nil
 		})
 		if err != nil {
@@ -528,7 +650,9 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 		// gap in the series must read as a zero day, not a missing interpolation.
 		for d := r.From.In(loc); d.Before(r.To); d = d.AddDate(0, 0, 1) {
 			key := d.Format("2006-01-02")
-			res.Trend = append(res.Trend, OverviewTrendPoint{Day: key, ActiveUsers: byDay[key]})
+			point := byDay[key]
+			point.Day = key
+			res.Trend = append(res.Trend, point)
 		}
 	}
 
@@ -571,6 +695,71 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 			return res, err
 		}
 		res.Content.TopSources = OverviewList{Unit: "pageviews", Rows: sources}
+	}
+
+	// --- content: the retired Traffic/Product breakdowns ---
+	// These reuse the legacy reads verbatim, scoped to the overview's own
+	// window fragment: traffic class and AI-cited pages keep their all-classes
+	// population (the non-human rows are the answer), the platform split keeps
+	// its per-app pageview count, and top events ranks every received name.
+	{
+		byClass, err := s.trafficByClass(ctx, where, args)
+		if err != nil {
+			return res, err
+		}
+		classRows := make([]PathCount, 0, len(byClass))
+		var totalClass, nonHuman uint64
+		for _, c := range byClass {
+			classRows = append(classRows, PathCount{Value: c.Class, Count: c.Count})
+			totalClass += c.Count
+			if c.Class != "human" {
+				nonHuman += c.Count
+			}
+		}
+		res.Content.TrafficByClass = OverviewList{Unit: "pageviews", Rows: classRows}
+
+		// AI share is the non-human share of classified pageviews — the same
+		// population the breakdown above serves, so the headline and the rows
+		// can never disagree about the denominator.
+		aiState := OverviewStateNoData
+		if res.DataStatus.EverReceived && totalClass > 0 {
+			aiState = OverviewStateOK
+		}
+		res.Metrics.AIShare = OverviewMetric{State: aiState, Definition: metricDefAIShare}
+		if aiState == OverviewStateOK {
+			res.Metrics.AIShare.Rate = float64Ptr(float64(nonHuman) / float64(totalClass) * 100)
+		}
+
+		aiPaths, err := s.aiTopPaths(ctx, where, args)
+		if err != nil {
+			return res, err
+		}
+		res.Content.AITopPaths = OverviewList{Unit: "pageviews", Rows: aiPaths}
+
+		resolver, err := s.identityResolver(ctx, projectID)
+		if err != nil {
+			return res, err
+		}
+		byPlatform, err := s.trafficByPlatform(ctx, resolver, where, args)
+		if err != nil {
+			return res, err
+		}
+		platformRows := make([]PathCount, 0, len(byPlatform))
+		for _, p := range byPlatform {
+			platformRows = append(platformRows, PathCount{Value: p.Platform, Count: p.Pageviews})
+		}
+		sort.Slice(platformRows, func(i, j int) bool { return platformRows[i].Count > platformRows[j].Count })
+		res.Content.TrafficByPlatform = OverviewList{Unit: "pageviews", Rows: platformRows}
+
+		topEvents, err := s.eventCounts(ctx, where, args)
+		if err != nil {
+			return res, err
+		}
+		eventRows := make([]PathCount, 0, len(topEvents))
+		for _, e := range topEvents {
+			eventRows = append(eventRows, PathCount{Value: e.EventName, Count: e.Count})
+		}
+		res.Content.TopEvents = OverviewList{Unit: "events", Rows: eventRows}
 	}
 
 	return res, nil

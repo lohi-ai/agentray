@@ -11,6 +11,7 @@ import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, Callout, Loading, Segment } from '@/modules/shared/components/signal-primitives';
 import { AnalysisBoard } from './board';
+import { AnalysisSystemSections } from './system';
 
 const PERIODS = [
   { value: 'today', label: 'Today' },
@@ -85,6 +86,11 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
         />
       ) : null}
       {!loading && !error && res && board ? <BoardOrEmpty board={board} res={res} boardKey={boardKey} /> : null}
+      {/* The retired /traffic, /web-analytics and /product surfaces redirect
+          here; these sections are what they used to answer, rendered from the
+          same overview read the declared tiles use. Page-level, not a board
+          declaration, so seeded and unseeded projects see them alike. */}
+      {!loading && !error && res ? <AnalysisSystemSections boardKey={boardKey} res={res} platform={platform} /> : null}
     </AppShell>
   );
 }

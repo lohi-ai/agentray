@@ -141,6 +141,12 @@ export type TileInput =
   | { kind: 'metric'; metric: OverviewMetric }
   | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
   | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
+  // Every received event — the population the retired-surface reads (traffic
+  // class, AI-cited pages, platform split, top events, event volume) count.
+  | { kind: 'events' }
+  // A metric over that same all-events population: the metric's own state
+  // decides the label, the coverage line counts events, not qualifying rows.
+  | { kind: 'eventsMetric'; metric: OverviewMetric }
   | { kind: 'unserved' };
 
 // A calendar date in the project timezone.
@@ -223,6 +229,11 @@ function tileRange(res: OverviewResult, input: TileInput): string {
 // from another tile's coverage.
 function tileCoverage(res: OverviewResult, input: TileInput): string {
   if (input.kind === 'unserved') return 'not instrumented — no served metric';
+  if (input.kind === 'events') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+  if (input.kind === 'eventsMetric') {
+    if (input.metric.state === 'ok') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+    return res.data_status.ever_received ? 'no events in range' : 'no events received yet';
+  }
   if (input.kind === 'retention') {
     return input.point.eligible === 0
       ? `no mature ${input.day}-day cohort yet`
