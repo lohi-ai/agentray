@@ -651,8 +651,10 @@ export function OverviewPage() {
   }, [res]);
 
   const hasReceivedEvents = (eventNames && eventNames.length > 0) || !!res?.data_status.ever_received;
-  const showGoalPrompt = !!project && !project.goal && access.canWrite && hasReceivedEvents;
-  const goalPromptPanel = showGoalPrompt ? (
+  // The goal gate lives inside GoalPrompt, not here: gating on !project.goal
+  // unmounts the panel the moment the goal write lands, which kills the
+  // activation-event mapping stage before it can render.
+  const goalPromptPanel = project && access.canWrite && hasReceivedEvents ? (
     <GoalPrompt
       project={project}
       eventNames={eventNames}
