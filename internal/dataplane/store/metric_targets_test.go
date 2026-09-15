@@ -144,6 +144,19 @@ func TestMetricTargetHistoryIsAppendOnly(t *testing.T) {
 		t.Fatalf("identical write appended a version: %+v", again)
 	}
 
+	// The dedup compares the normalized spec: a padded or differently-cased
+	// declaration of the same target still restates v1.
+	padded := write
+	padded.Spec.Direction = " GTE "
+	padded.Spec.Period = " 7d "
+	deduped, err := s.SetMetricTargetIdempotent(ctx, projectID, padded, "", "")
+	if err != nil {
+		t.Fatalf("padded set: %v", err)
+	}
+	if deduped.Version != 1 {
+		t.Fatalf("unnormalized-but-identical write appended v%d", deduped.Version)
+	}
+
 	// A changed spec appends v2; the history keeps v1.
 	write.Spec.Value = 800
 	second, err := s.SetMetricTargetIdempotent(ctx, projectID, write, "", "")

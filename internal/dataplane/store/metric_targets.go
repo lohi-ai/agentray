@@ -211,29 +211,30 @@ func normalizeMetricTargetSpec(def MetricDefinition, spec MetricTargetSpec) (Met
 
 // sameMetricTarget reports whether a write restates the latest version —
 // the dedup that keeps a repeated identical board save from appending a
-// duplicate version. EffectiveAt is excluded when the write leaves it unset:
-// "the same target from now" restates "the same target from whenever it
-// started", not a new schedule.
-func sameMetricTarget(latest *MetricTarget, in MetricTargetWrite) bool {
+// duplicate version. spec is the already-normalized declaration, so a
+// differently-cased or padded input still dedups. EffectiveAt is excluded
+// when the write leaves it unset: "the same target from now" restates "the
+// same target from whenever it started", not a new schedule.
+func sameMetricTarget(latest *MetricTarget, clear bool, spec MetricTargetSpec) bool {
 	if latest == nil {
 		return false
 	}
-	if in.Clear {
+	if clear {
 		return latest.Cleared
 	}
 	if latest.Cleared {
 		return false
 	}
-	if latest.Direction != in.Spec.Direction ||
-		latest.Value != in.Spec.Value ||
-		latest.PeriodDays != mustPeriodDays(in.Spec.Period) ||
-		latest.Currency != in.Spec.Currency {
+	if latest.Direction != spec.Direction ||
+		latest.Value != spec.Value ||
+		latest.PeriodDays != mustPeriodDays(spec.Period) ||
+		latest.Currency != spec.Currency {
 		return false
 	}
-	if in.Spec.EffectiveAt == "" {
+	if spec.EffectiveAt == "" {
 		return true
 	}
-	at, err := time.Parse(time.RFC3339, in.Spec.EffectiveAt)
+	at, err := time.Parse(time.RFC3339, spec.EffectiveAt)
 	return err == nil && latest.EffectiveAt.Equal(at)
 }
 
@@ -256,7 +257,16 @@ func setMetricTarget(ctx context.Context, tx pgx.Tx, projectID string, in Metric
 		return MetricTarget{}, fmt.Errorf("%w: metric %q is not in the catalog (known metrics: %s)", ErrMetricTargetInvalid, metric, strings.Join(MetricKeys(), ", "))
 	}
 	spec := in.Spec
-	if !in.Clear {
+	if in.Clear {
+		// A tombstone carries no spec, but a declared effective_at is still
+		// validated — a garbage instant must not silently become "now".
+		spec.EffectiveAt = strings.TrimSpace(spec.EffectiveAt)
+		if spec.EffectiveAt != "" {
+			if _, err := time.Parse(time.RFC3339, spec.EffectiveAt); err != nil {
+				return MetricTarget{}, fmt.Errorf("%w: effective_at %q is not an RFC3339 instant", ErrMetricTargetInvalid, spec.EffectiveAt)
+			}
+		}
+	} else {
 		var err error
 		spec, err = normalizeMetricTargetSpec(def, in.Spec)
 		if err != nil {
@@ -279,7 +289,7 @@ ORDER BY version DESC LIMIT 1`, projectID, metric).Scan(metricTargetScanDest(&ro
 	default:
 		return MetricTarget{}, err
 	}
-	if sameMetricTarget(latest, in) {
+	if sameMetricTarget(latest, in.Clear, spec) {
 		return *latest, nil
 	}
 	version := int64(1)
