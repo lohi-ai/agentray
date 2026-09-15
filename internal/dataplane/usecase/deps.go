@@ -115,6 +115,12 @@ type Repo interface {
 	ListDataConnectorsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.DataConnector, error)
 	ArchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 	UnarchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	// Findings engine (ticket 001): the funnel-watch declarations the drop-off
+	// detector re-runs. The scan itself needs no Repo additions — the
+	// per-project surface it reads (Overview, RunInsight, CreateRecommendation)
+	// is already declared above.
+	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
+	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
 
 	// Chart annotations: the project-scoped marks a member drops on a trend.
 	// The window read is the overlap contract every temporal chart asks for;
