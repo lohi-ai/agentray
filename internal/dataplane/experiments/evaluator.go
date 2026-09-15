@@ -181,7 +181,7 @@ func (e *Evaluator) closeOne(ctx context.Context, t storage.ValidationTest, now 
 		status = storage.TestInconclusive
 	}
 
-	note := decisionNote(t, p, status, from, until, now)
+	note := decisionNote(t, p, status, from, until)
 	guardrail, gerr := e.guardrail(ctx, t, from, until)
 	if gerr != nil {
 		// A guardrail that cannot be measured is reported, not silently
@@ -221,7 +221,7 @@ func (e *Evaluator) closeOne(ctx context.Context, t storage.ValidationTest, now 
 // decisionNote is the "why" a reader gets a month later: the measured number
 // against the agreed number, and — for an inconclusive close — the reason the
 // review fired before the window could answer.
-func decisionNote(t storage.ValidationTest, p storage.TestProgress, status string, from, until, now time.Time) string {
+func decisionNote(t storage.ValidationTest, p storage.TestProgress, status string, from, until time.Time) string {
 	head := fmt.Sprintf("Auto-closed at review date %s: %d of %d people fired %s over %s – %s.",
 		t.ReviewDate.UTC().Format("2006-01-02"), p.Metric, t.TargetCount, t.MetricEvent,
 		from.UTC().Format("2006-01-02"), until.UTC().Format("2006-01-02"))
