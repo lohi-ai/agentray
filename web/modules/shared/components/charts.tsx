@@ -191,29 +191,48 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     formatter: (p: { name?: string }) => p.name ?? '',
   };
   const markEmphasis = { label: { show: true, formatter: (p: { name?: string }) => p.name ?? '' } };
-  const markLine = marks.some((m) => m.kind === 'point')
+  // A markArea spans category positions, so ending it at the last overlapped
+  // bucket would clip that bucket — and a single-bucket range would collapse
+  // to zero width. Extend the band to the next bucket's start; when the range
+  // ends on the final x value there is no next bucket, so it renders as a
+  // line at that bucket instead of vanishing.
+  const xVals = spec.x ?? [];
+  const areaData: { name: string; xAxis: string | number }[][] = [];
+  const rangeLines: { name: string; xAxis: string | number }[] = [];
+  for (const m of marks) {
+    if (m.kind !== 'range') continue;
+    const lastIdx = xVals.indexOf(m.xTo);
+    const end = lastIdx >= 0 && lastIdx + 1 < xVals.length ? xVals[lastIdx + 1] : null;
+    if (end === null) {
+      rangeLines.push({ name: m.annotation.label, xAxis: m.xTo });
+    } else {
+      areaData.push([{ name: m.annotation.label, xAxis: m.xFrom }, { xAxis: end }]);
+    }
+  }
+  const pointData = [
+    ...marks.filter((m) => m.kind === 'point').map((m) => ({
+      name: m.annotation.label,
+      xAxis: m.kind === 'point' ? m.x : '',
+    })),
+    ...rangeLines,
+  ];
+  const markLine = pointData.length
     ? {
         silent: false,
         symbol: 'none',
         lineStyle: { color: markColor, width: 1.5, type: 'dashed' as const },
         label: markLabel,
         emphasis: markEmphasis,
-        data: marks.filter((m) => m.kind === 'point').map((m) => ({
-          name: m.annotation.label,
-          xAxis: m.kind === 'point' ? m.x : '',
-        })),
+        data: pointData,
       }
     : undefined;
-  const markArea = marks.some((m) => m.kind === 'range')
+  const markArea = areaData.length
     ? {
         silent: false,
         itemStyle: { color: markColor, opacity: 0.08 },
         label: markLabel,
         emphasis: markEmphasis,
-        data: marks.filter((m) => m.kind === 'range').map((m) => ([
-          { name: m.annotation.label, xAxis: m.kind === 'range' ? m.xFrom : '' },
-          { xAxis: m.kind === 'range' ? m.xTo : '' },
-        ])),
+        data: areaData,
       }
     : undefined;
 
