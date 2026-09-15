@@ -10,6 +10,7 @@ import { useAuthStore } from '@/lib/app-state';
 import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, Callout, Loading, Segment } from '@/modules/shared/components/signal-primitives';
+import { useAnnotations, type AnnotationsController } from '@/modules/annotations';
 import { AnalysisBoard } from './board';
 import { AnalysisSystemSections } from './system';
 
@@ -51,6 +52,13 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
   const loading = overviewQuery.isLoading || boardQuery.isLoading;
   const error = overviewQuery.error || boardQuery.error;
 
+  // The board's annotation window is the served overview range — the same
+  // window every tile's series covers.
+  const annotationRange = res?.context.range ?? null;
+  const annotations = useAnnotations(
+    annotationRange ? { from: annotationRange.from, to: annotationRange.to } : null,
+  );
+
   return (
     <AppShell
       title={meta.label}
@@ -85,7 +93,7 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
           action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { void overviewQuery.refetch(); void boardQuery.refetch(); }}>Retry</Button>}
         />
       ) : null}
-      {!loading && !error && res && board ? <BoardOrEmpty board={board} res={res} boardKey={boardKey} /> : null}
+      {!loading && !error && res && board ? <BoardOrEmpty board={board} res={res} boardKey={boardKey} annotations={annotations} /> : null}
       {/* The retired /traffic, /web-analytics and /product surfaces redirect
           here; these sections are what they used to answer, rendered from the
           same overview read the declared tiles use. Page-level, not a board
@@ -95,7 +103,7 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
   );
 }
 
-function BoardOrEmpty({ board, res, boardKey }: { board: BoardContent; res: OverviewResult; boardKey: AnalysisBoardKey }) {
+function BoardOrEmpty({ board, res, boardKey, annotations }: { board: BoardContent; res: OverviewResult; boardKey: AnalysisBoardKey; annotations: AnnotationsController }) {
   if (!board.has_definition) {
     return (
       <Callout
@@ -107,5 +115,5 @@ function BoardOrEmpty({ board, res, boardKey }: { board: BoardContent; res: Over
       />
     );
   }
-  return <AnalysisBoard board={board} res={res} boardKey={boardKey} />;
+  return <AnalysisBoard board={board} res={res} boardKey={boardKey} annotations={annotations} />;
 }

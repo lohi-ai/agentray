@@ -23,7 +23,85 @@ export type ChartSpec = {
   // Force whole-number y-axis ticks. Pair with smooth: false for count series —
   // otherwise ECharts' auto interval can still land on 0.5 steps.
   integerY?: boolean;
+  // Annotations the chart may mark — resolved against the x-axis by
+  // annotationMarks; a non-temporal axis renders none.
+  annotations?: ChartAnnotation[];
 };
+
+// ChartAnnotation is the mark a member recorded on the project's timeline —
+// a deploy, campaign, price change or other event. ends_at absent = an
+// instant; set = a range. Mirrors the API's Annotation minus the fields a
+// chart never reads.
+export type ChartAnnotation = {
+  id: string;
+  label: string;
+  kind: string;
+  link?: string;
+  starts_at: string;
+  ends_at?: string | null;
+};
+
+// AnnotationMark is one resolved mark: the x-bucket an instant lands in, or
+// the first/last buckets a range overlaps. Resolution happens once in
+// annotationMarks so buildOption only ever draws resolved marks.
+export type AnnotationMark =
+  | { kind: 'point'; x: string | number; annotation: ChartAnnotation }
+  | { kind: 'range'; xFrom: string | number; xTo: string | number; annotation: ChartAnnotation };
+
+// TEMPORAL_X is the x-value shape a mark can resolve against: an ISO date or
+// datetime. Anything else (labels like "Top pages", indices, free text) makes
+// the axis categorical and no marks render — a mark on the wrong bucket is
+// worse than none.
+const TEMPORAL_X = /^\d{4}-\d{2}-\d{2}/;
+
+// annotationMarks resolves annotations against a temporal x-axis. Each x
+// value is a half-open bucket [start_i, start_{i+1}); the last bucket extends
+// by the median gap (one day when the axis is a single point). An instant
+// marks the bucket containing it; a range marks the first and last buckets it
+// overlaps. Annotations outside the axis produce no mark — the caller's
+// window read already bounds them, this is the renderer's own guarantee.
+export function annotationMarks(x: (string | number)[] | undefined, annotations: ChartAnnotation[] | undefined): AnnotationMark[] {
+  if (!annotations?.length || !x?.length) return [];
+  const starts: number[] = [];
+  for (const v of x) {
+    if (typeof v !== 'string' || !TEMPORAL_X.test(v)) return [];
+    const t = new Date(v).getTime();
+    if (Number.isNaN(t)) return [];
+    starts.push(t);
+  }
+  const gaps = starts.slice(1).map((s, i) => s - starts[i]).filter((g) => g > 0).sort((a, b) => a - b);
+  const step = gaps.length ? gaps[Math.floor(gaps.length / 2)] : DAY_MS;
+  const bucketEnd = (i: number) => (i + 1 < starts.length ? starts[i + 1] : starts[i] + step);
+
+  const marks: AnnotationMark[] = [];
+  for (const a of annotations) {
+    const from = new Date(a.starts_at).getTime();
+    if (Number.isNaN(from)) continue;
+    const to = a.ends_at ? new Date(a.ends_at).getTime() : NaN;
+    if (a.ends_at && Number.isNaN(to)) continue;
+    if (a.ends_at) {
+      // Range: the buckets [start_i, end_i) overlapping [from, to).
+      let first = -1;
+      let last = -1;
+      for (let i = 0; i < starts.length; i++) {
+        if (starts[i] < to && bucketEnd(i) > from) {
+          if (first === -1) first = i;
+          last = i;
+        }
+      }
+      if (first !== -1) marks.push({ kind: 'range', xFrom: x[first], xTo: x[last], annotation: a });
+    } else {
+      // Instant: the one bucket containing it.
+      for (let i = 0; i < starts.length; i++) {
+        if (from >= starts[i] && from < bucketEnd(i)) {
+          marks.push({ kind: 'point', x: x[i], annotation: a });
+          break;
+        }
+      }
+    }
+  }
+  return marks;
+}
 
 // cssVar reads a design token at runtime so charts match the app theme instead
 // of hardcoding hex. Falls back to a sane value during SSR / before paint.
@@ -99,6 +177,65 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     };
   }
 
+  // Annotation marks resolve against the x-axis before the option is built:
+  // a temporal axis gets a markLine per instant and a markArea per range, a
+  // categorical axis gets neither. The marks ride the first series so they
+  // share its tooltip lane; their label shows on hover and in the axis
+  // tooltip as the mark's name.
+  const marks = annotationMarks(spec.x, spec.annotations);
+  const markColor = cssVar('--warning', '#E8A23C');
+  const markLabel = {
+    show: false,
+    color: text,
+    fontSize: 12,
+    formatter: (p: { name?: string }) => p.name ?? '',
+  };
+  const markEmphasis = { label: { show: true, formatter: (p: { name?: string }) => p.name ?? '' } };
+  // A markArea spans category positions, so ending it at the last overlapped
+  // bucket would clip that bucket — and a single-bucket range would collapse
+  // to zero width. Extend the band to the next bucket's start; when the range
+  // ends on the final x value there is no next bucket, so it renders as a
+  // line at that bucket instead of vanishing.
+  const xVals = spec.x ?? [];
+  const areaData: { name: string; xAxis: string | number }[][] = [];
+  const rangeLines: { name: string; xAxis: string | number }[] = [];
+  for (const m of marks) {
+    if (m.kind !== 'range') continue;
+    const lastIdx = xVals.indexOf(m.xTo);
+    const end = lastIdx >= 0 && lastIdx + 1 < xVals.length ? xVals[lastIdx + 1] : null;
+    if (end === null) {
+      rangeLines.push({ name: m.annotation.label, xAxis: m.xTo });
+    } else {
+      areaData.push([{ name: m.annotation.label, xAxis: m.xFrom }, { xAxis: end }]);
+    }
+  }
+  const pointData = [
+    ...marks.filter((m) => m.kind === 'point').map((m) => ({
+      name: m.annotation.label,
+      xAxis: m.kind === 'point' ? m.x : '',
+    })),
+    ...rangeLines,
+  ];
+  const markLine = pointData.length
+    ? {
+        silent: false,
+        symbol: 'none',
+        lineStyle: { color: markColor, width: 1.5, type: 'dashed' as const },
+        label: markLabel,
+        emphasis: markEmphasis,
+        data: pointData,
+      }
+    : undefined;
+  const markArea = areaData.length
+    ? {
+        silent: false,
+        itemStyle: { color: markColor, opacity: 0.08 },
+        label: markLabel,
+        emphasis: markEmphasis,
+        data: areaData,
+      }
+    : undefined;
+
   return {
     color: colors,
     tooltip,
@@ -137,6 +274,10 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
           { offset: 1, color: 'transparent' },
         ]),
       } : undefined,
+      // The marks ride the first series: they belong to the axis, not to any
+      // one line, and the first series is always present when marks resolved.
+      markLine: i === 0 ? markLine : undefined,
+      markArea: i === 0 ? markArea : undefined,
     })),
   };
 }

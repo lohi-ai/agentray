@@ -3,6 +3,7 @@
 import type { BoardContent, OverviewResult } from '@/lib/api';
 import type { AnalysisBoardKey } from '@/lib/analysis';
 import { UNSERVED_TILES } from '@/lib/analysis';
+import { AddAnnotationButton, type AnnotationsController } from '@/modules/annotations';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { analysisBars, analysisSeries, analysisStat, unservedStat } from './tiles';
@@ -11,10 +12,12 @@ export function AnalysisBoard({
   board,
   res,
   boardKey,
+  annotations,
 }: {
   board: BoardContent;
   res: OverviewResult;
   boardKey: AnalysisBoardKey;
+  annotations: AnnotationsController;
 }) {
   const unserved = UNSERVED_TILES[boardKey].map((tile) => unservedStat(res, tile.label));
   return (
@@ -24,7 +27,7 @@ export function AnalysisBoard({
         const bars = section.tiles.map((tile) => analysisBars(res, tile)).filter((s): s is NonNullable<typeof s> => s !== null);
         const series = section.tiles.map((tile) => analysisSeries(res, tile)).filter((s): s is NonNullable<typeof s> => s !== null);
         return (
-          <Panel key={section.key} title={section.title}>
+          <Panel key={section.key} title={section.title} action={series.length > 0 ? <AddAnnotationButton annotations={annotations} /> : undefined}>
             <div className="flex flex-col gap-4">
               {section.description ? (
                 <p className="text-xs text-[var(--color-text-secondary)]">{section.description}</p>
@@ -41,6 +44,7 @@ export function AnalysisBoard({
                           series: [{ name: item.label, data: item.points.map((p) => p.value) }],
                           smooth: false,
                           integerY: true,
+                          annotations: annotations.annotations,
                         }}
                       />
                       <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
