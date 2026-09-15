@@ -151,12 +151,26 @@ the table is what every consumer reads (web, MCP, `run_sql`). A metric's
 `definition` text is the same constant the overview read prints beside the
 number, so the explanation cannot outlive the computation.
 
-Four operations serve the model, each declared once in
+Five operations serve the model, each declared once in
 `internal/dataplane/usecase/boards.go` and projected onto REST, the agent tool,
 the CLI and MCP by opcore: `list_metrics`, `read_metric` and `get_board`
-(`analytics:read`), and `save_board` (`dashboards:write`, revision-fenced and
-idempotent). `read_metric` projects the metric out of the shared
-`Store.Overview` read — there is no second computation behind a board tile.
+(`analytics:read`), and `save_board` + `set_metric_target`
+(`dashboards:write`, revision-fenced and idempotent). `read_metric` projects
+the metric out of the shared `Store.Overview` read — there is no second
+computation behind a board tile.
+
+`metric_targets` is the project-scoped, append-only target history
+(`store/metric_targets.go`): a target is a direction, a value on the metric's
+own scale, and the complete-day window it is judged over — plus a currency for
+the per-currency revenue metric. Changing or clearing a target appends a
+version; a read cites the highest version whose `effective_at` is at or before
+the window's end, and the verdict (on_track / at_risk / off_track, or a named
+reason it cannot judge) is computed once in `Overview` and served on
+`OverviewMetric`, `OverviewRetentionPoint` and `MetricReading`. A board tile's
+`target` object declares through the same write — an identical declaration
+restates the latest version instead of duplicating it — and only
+`set_metric_target` with `clear` removes one: a board never clears by
+omission.
 
 ### Event retention (`internal/dataplane/store/retention.go`)
 

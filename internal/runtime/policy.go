@@ -17,7 +17,7 @@ type Scopes struct {
 var scopeTools = map[string][]string{
 	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview, ToolListSources},
-	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolListMetrics, ToolReadMetric, ToolGetBoard, ToolSaveBoard, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
+	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolListMetrics, ToolReadMetric, ToolGetBoard, ToolSaveBoard, ToolSetMetricTarget, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
 }
 

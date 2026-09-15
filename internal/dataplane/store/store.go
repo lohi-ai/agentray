@@ -1095,6 +1095,11 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The project-scoped target history the overview read resolves against.
+	if err := s.migrateMetricTargets(ctx); err != nil {
+		return err
+	}
+
 	// Boards seeded before the "guest vs identified" query was corrected still
 	// read `properties.email`; the seed only ever runs once, so they have to be
 	// repaired here. Needs the revision column migrateLifecycle just added.

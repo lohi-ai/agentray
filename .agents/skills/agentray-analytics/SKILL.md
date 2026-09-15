@@ -51,7 +51,10 @@ Read first, then build:
   hand-writing SQL for a number the catalog already defines.
 - `get_board` / `save_board`: read a board's declared content (sections and
   tiles, with the revision) and declare it back in one write. `save_board`
-  replaces the board's content, so read it first.
+  replaces the board's content, so read it first. A metric tile's `target`
+  object declares the metric's target (direction + value + period, e.g.
+  `{direction:"gte", value:40, period:"7d"}`); `set_metric_target` does the
+  same directly and is the only way to clear one (`clear: true`).
 - `create_dashboard` / `create_chart`: pin a worthwhile view. Create the
   dashboard first if none fits, then add charts to it.
 - `submit_recommendation`: file a growth/marketing recommendation with the
