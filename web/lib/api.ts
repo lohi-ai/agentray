@@ -26,6 +26,11 @@ export type Project = {
   // Validated IANA timezone when the project owner configured one; absent for
   // legacy nullable rows, whose overview context labels its UTC fallback.
   timezone?: string;
+  // Goal is the owner's answer to "what are you trying to improve?" (007) —
+  // activation | retention | revenue | traffic | skipped. Undefined = never asked.
+  goal?: 'activation' | 'retention' | 'revenue' | 'traffic' | 'skipped';
+  // ActivationEvent is the catalog event the owner says counts as "activated" (007).
+  activation_event?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo visitor never receives the demo's write key.
   api_key: string;
@@ -221,6 +226,14 @@ export type OverviewRevenueDetail = {
   by_currency: OverviewRevenueCurrency[];
 };
 
+export type OverviewActivationDetail = {
+  event: string;
+  window_days: number;
+  eligible: number;
+  activated: number;
+  rate: number;
+};
+
 export type VerifySDKResult = {
   found: boolean;
   event_name?: string;
@@ -269,6 +282,7 @@ export type OverviewResult = {
     activation: OverviewMetric;
     revenue: OverviewMetric;
     revenue_detail?: OverviewRevenueDetail | null;
+    activation_detail?: OverviewActivationDetail | null;
   };
   trend: Array<{ day: string; active_users: number }>;
   retention: {
@@ -1870,10 +1884,13 @@ export class AgentRayAPI {
   }
 
 
-  updateProject(projectID: string, name: string) {
+  updateProject(
+    projectID: string,
+    patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },
+  ) {
     return this.request<{ project: Project }>(`/api/projects/${projectID}`, {
       method: 'PUT',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(patch),
     });
   }
 

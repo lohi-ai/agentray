@@ -479,15 +479,22 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 			return err
 		}
 		var payload struct {
-			Name     *string `json:"name"`
-			Timezone *string `json:"timezone"`
+			Name            *string `json:"name"`
+			Timezone        *string `json:"timezone"`
+			Goal            *string `json:"goal"`
+			ActivationEvent *string `json:"activation_event"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), payload.Name, payload.Timezone)
+		project, err := store.UpdateProjectForUser(c.Request().Context(), ctx.User.ID, c.Param("project_id"), storage.ProjectUpdate{
+			Name:            payload.Name,
+			Timezone:        payload.Timezone,
+			Goal:            payload.Goal,
+			ActivationEvent: payload.ActivationEvent,
+		})
 		if err != nil {
-			if errors.Is(err, storage.ErrInvalidProjectTimezone) || errors.Is(err, storage.ErrNoProjectFields) {
+			if errors.Is(err, storage.ErrInvalidProjectTimezone) || errors.Is(err, storage.ErrNoProjectFields) || errors.Is(err, storage.ErrInvalidProjectGoal) || errors.Is(err, storage.ErrInvalidActivationEvent) {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 			return echo.NewHTTPError(http.StatusForbidden, "project permission denied")

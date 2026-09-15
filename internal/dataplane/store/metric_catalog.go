@@ -127,7 +127,7 @@ const (
 	metricDefNewUsers    = "People whose first-ever observed qualifying activity falls inside the range. First observed, not signup or download."
 	metricDefSessions    = "Distinct session ids on qualifying activity; sessions end after 30 minutes of inactivity (server sessionizer)."
 	metricDefDailyActive = "Distinct people with qualifying activity per local calendar day inside the selected range. Daily counts are never summed into a period total — a person active on two days is one person, not two."
-	metricDefActivation  = "Share of a cohort completing the project's chosen activation event inside a conversion window."
+	metricDefActivation  = "Share of a cohort completing the project's chosen activation event inside a fixed 7-day conversion window."
 	metricDefRevenue     = "Deduplicated net revenue per declared currency: rows de-duplicate by $insert_id (last write wins, event_id fallback), refunds and revenue_reversed rows net against bookings, and the headline is the currency with the largest deduplicated gross. No FX — currencies are never summed together."
 	metricDefRetention   = "Return rate for mature lifetime first-activity cohorts: those who came back on day N over those whose day N had fully elapsed. Cohorts too young to have reached day N are excluded, not counted as zero."
 	metricDefTopPages    = "Pageviews of human product activity grouped by path, ranked. Direct and unattributed traffic is not dropped — it is its own row."
@@ -424,6 +424,12 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 		reading.Notes = m.Notes
 		if def.Key == MetricRevenue {
 			reading.Revenue = res.Metrics.RevenueDetail
+		}
+		if def.Key == MetricActivation && res.Metrics.ActivationDetail != nil && m.State == OverviewStateOK {
+			// Like retention, Activation's catalog unit is percent, so the
+			// reading scales the 0–1 fraction by 100.
+			rate := res.Metrics.ActivationDetail.Rate * 100
+			reading.Rate = &rate
 		}
 		return reading, nil
 	}

@@ -14,7 +14,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import { Chart } from '@/modules/shared/components/charts';
 import { funnelStepNames, retentionAnchorEvent } from '@/lib/ia';
-import { useFiltersStore } from '@/lib/app-state';
+import { useAuthStore, useFiltersStore } from '@/lib/app-state';
 import { useActivity, useEventNames, useFunnelByPlatform, useInsight } from '@/modules/app/hooks';
 import { platformLabel } from '@/lib/platform';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -41,6 +41,7 @@ export function ProductPage() {
   const { insight, runInsight } = useInsight();
   const { names: eventNames, loading: namesLoading } = useEventNames();
   const { summary } = useActivity();
+  const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const emptyCatalog = !namesLoading && eventNames.length === 0;
   const [active, setActive] = useState<Mode | null>(null);
   const [running, setRunning] = useState(false);
@@ -58,7 +59,7 @@ export function ProductPage() {
     () => (applied.platform ? [applied.platform] : summary?.platforms ?? []),
     [applied.platform, summary?.platforms],
   );
-  const funnelSteps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames)), [emptyCatalog, eventNames]);
+  const funnelSteps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames, activationEvent)), [emptyCatalog, eventNames, activationEvent]);
   const { splits: platformFunnels, loading: splitsLoading } = useFunnelByPlatform(
     active === 'funnel' ? funnelSteps : [],
     platforms,
@@ -72,8 +73,8 @@ export function ProductPage() {
     // metric string and asked about an event called "events" — nothing emits
     // that, so the curve was 0% forever under a hard-coded "Week 0: 100%".
     const steps =
-      mode === 'funnel' ? funnelStepNames(eventNames)
-      : mode === 'retention' ? [retentionAnchorEvent(eventNames)]
+      mode === 'funnel' ? funnelStepNames(eventNames, activationEvent)
+      : mode === 'retention' ? [retentionAnchorEvent(eventNames, activationEvent)]
       : [];
     try {
       await runInsight(mode, 'events', steps);

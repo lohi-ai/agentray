@@ -588,7 +588,7 @@ func TestOverviewAdaptersShareProjectTimezoneContract(t *testing.T) {
 		t.Fatalf("account: %v", err)
 	}
 	zone := "Asia/Ho_Chi_Minh"
-	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, nil, &zone); err != nil {
+	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, storage.ProjectUpdate{Timezone: &zone}); err != nil {
 		t.Fatalf("set timezone: %v", err)
 	}
 	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})
@@ -674,7 +674,7 @@ func TestOverviewAdaptersShareMoneyContract(t *testing.T) {
 		t.Fatalf("account: %v", err)
 	}
 	zone := "Asia/Ho_Chi_Minh"
-	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, nil, &zone); err != nil {
+	if _, err := s.UpdateProjectForUser(ctx, boot.User.ID, boot.Project.ID, storage.ProjectUpdate{Timezone: &zone}); err != nil {
 		t.Fatalf("set timezone: %v", err)
 	}
 	_, secret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "reader", []string{"analytics:read"})

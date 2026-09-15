@@ -32,6 +32,7 @@ function spanClass(span: number): string {
 export function DashboardPage() {
   const projectID = useAuthStore((s) => s.project?.id);
   const projectName = useAuthStore((s) => s.project?.name);
+  const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const router = useRouter();
   const { dashboards, selectedDashboard, charts, loading, setSelectedDashboardID, createDashboard, saveChart, deleteChart, reorderCharts } = useDashboards();
   const { summary } = useActivity();
@@ -43,6 +44,7 @@ export function DashboardPage() {
     eventNames,
     catalogReady,
     hasModelKey: modelsLoading ? undefined : !!models?.has_key,
+    activationEvent,
   });
   // Whether this board can be edited at all. A visitor reading the shared demo
   // owns none of these charts, and the API refuses every write to them.

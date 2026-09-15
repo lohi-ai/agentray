@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Beaker, Lightbulb, Target, TriangleAlert } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
@@ -9,6 +9,7 @@ import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
 import type { AgentRecommendation, MeasuredTest } from '@/lib/api';
+import { useAuthStore } from '@/lib/app-state';
 import { formatCompact, formatDate, formatRelative } from '@/lib/format';
 import { useProjectAccess } from '@/modules/app/hooks';
 import { AppShell } from '@/modules/shared/components/app-shell';
@@ -16,7 +17,7 @@ import { DataTable, type DataColumn } from '@/modules/shared/components/data-tab
 import { Button, Callout, EmptyState, Loading, Panel, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { chatHref, groupTests, stateOf } from '@/modules/prototypes/lib/prototype';
 import { useExperiments, useFindings } from './hooks';
-import { baselineLine, evidenceLine, EXPERIMENT_LABEL, EXPERIMENT_PILL, FINDING_LABEL, FINDING_PILL } from './lib/plans';
+import { baselineLine, evidenceLine, goalSuggestion, EXPERIMENT_LABEL, EXPERIMENT_PILL, FINDING_LABEL, FINDING_PILL } from './lib/plans';
 
 // /plans — findings and experiments: what the agents noticed, and the bets the
 // owner has agreed to be judged by. Experiments are the validation_tests rows
@@ -29,8 +30,9 @@ const DESIGN_PROMPT = 'Design the cheapest test that could prove my next feature
 export function PlansPage() {
   const router = useRouter();
   const access = useProjectAccess();
+  const project = useAuthStore((s) => s.project);
+  const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const experiments = useExperiments();
-  const findings = useFindings();
 
   const { waiting, running, decided } = groupTests(experiments.tests);
   const openFindings = findings.findings.filter((f) => f.status === 'open');
@@ -93,6 +95,11 @@ export function PlansPage() {
   const error = experiments.error ?? findings.error;
   const empty = experiments.tests.length === 0 && findings.findings.length === 0;
 
+  // The goal-seeded suggestion (007): shown when the owner answered the
+  // onboarding goal prompt but no experiment exists yet. It is a suggestion,
+  // not a propose_test row — committing a threshold is the owner's act.
+  const suggestion = !suggestionDismissed && experiments.tests.length === 0 ? goalSuggestion(project) : null;
+
   return (
     <AppShell
       title="Plans"
@@ -151,6 +158,31 @@ export function PlansPage() {
         <Text type="supporting" className="block">
           Showing the {experiments.tests.length} most recent of {experiments.total} experiments — proposals and running tests first.
         </Text>
+      ) : null}
+
+      {suggestion ? (
+        <Panel
+          title="Suggested first experiment"
+          action={<span className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">From your goal · {suggestion.goal}</span>}
+        >
+          <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
+            Nothing is being measured yet. This is a starting point, not a commitment —
+            committing writes the threshold you’ll be judged against.
+          </p>
+          <div className="mb-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
+            <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Suggestion — not running</p>
+            <p className="mt-1 text-sm"><strong>{suggestion.title}:</strong> {suggestion.body}</p>
+            <p className="mt-1 text-xs text-[var(--color-text-secondary)]">{suggestion.metricLine}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 [&_button]:min-h-[44px]">
+            <Button variant="outline" size="sm" onClick={() => router.push(chatHref(suggestion.prompt))}>
+              Shape it with your agent
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setSuggestionDismissed(true)}>
+              Dismiss
+            </Button>
+          </div>
+        </Panel>
       ) : null}
 
       {isLoading && empty ? (
