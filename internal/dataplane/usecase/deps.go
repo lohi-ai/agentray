@@ -86,6 +86,9 @@ type Repo interface {
 	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
+	// The project-scoped metric target history: set_metric_target appends a
+	// version, and save_board declares targets through the same write.
+	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
 	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
 
