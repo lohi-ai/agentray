@@ -103,13 +103,15 @@ pack と channel は config と adapter として扱う。
 | **Analytics** `/dashboard` | acquisition、engagement、funnel、retention を掘る。dashboard を保存する | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
 | **People** `/persons` | person の行動とビジネス属性を見る。audience を保存する | `/cohorts` |
 | **Data** `/events` | SDK と source をつなぐ。event、dataset、pipeline の状態を見る | `/start` · `/replay` |
-| **Plans** `/plans` | finding、根拠、提案中の experiment、結果を残す | `/prototypes` |
+| **Plans** `/plans` | finding、根拠、提案中の experiment、結果を残す | |
 | **Agents** `/agents` | 外部 agent をつなぐ。chat、operations、Garden、marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
 | **Settings** `/settings` | workspace のアクセス権、credential、retention、使用量 | `/alerts` · `/pricing`（hosted のみ） |
 
 リニューアル前の URL はすべて今も解決する。旧トップレベルの項目は、新しい画
-面の alias になるか、その下の子画面になった。リダイレクトで飛ばされるものは
-無く、保存済みのレイアウトも動かない。ページがまだ無い画面は、リンクの付いて
+面の alias になるか、その下の子画面になった。唯一の例外は `/prototypes`
+で、`/plans` へ恒久的にリダイレクトされる —— 同じテスト一覧の製品名だ。
+保存済みのレイアウトは動かない。
+ページがまだ無い画面は、リンクの付いて
 いない "Coming soon" として表示される —— router が捌けないリンクは絶対に出さ
 ない。
 

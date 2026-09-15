@@ -214,7 +214,7 @@ describe('jobSteps', () => {
       .find((s) => s.id === 'threshold')!;
     expect(proposed.done).toBe(false);
     expect(proposed.action.label).toBe('Review it');
-    expect(proposed.action.href).toBe('/prototypes/t-1');
+    expect(proposed.action.href).toBe('/plans/t-1');
   });
 
   // The campaign teammate is an ADDITIONAL hire, not an alternative one. If it

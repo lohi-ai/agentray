@@ -100,13 +100,14 @@ plane，pack 和 channel 都是配置加 adapter。
 | **Analytics** `/dashboard` | 探索获客、活跃、funnel、retention；保存 dashboard | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
 | **People** `/persons` | 查看某人的行为和业务属性；保存 audience | `/cohorts` |
 | **Data** `/events` | 接 SDK 和数据源；查看 event、dataset 和管道健康度 | `/start` · `/replay` |
-| **Plans** `/plans` | 存放结论、证据、待验证的实验和结果 | `/prototypes` |
+| **Plans** `/plans` | 存放结论、证据、待验证的实验和结果 | |
 | **Agents** `/agents` | 接外部 agent；chat、operations、Garden、marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
 | **Settings** `/settings` | workspace 权限、凭证、retention 和用量 | `/alerts` · `/pricing`（仅托管版） |
 
 改版前的 URL 全都还能解析：老的顶级入口，要么变成新入口上的一个别名，要
-么沉成它下面的子页面。没有东西会被重定向走，存好的布局也不会挪。页面还没
-做出来的入口，渲染成一个不可点的“Coming soon”占位，绝不给路由接不住的
+么沉成它下面的子页面。唯一的例外是 `/prototypes`，它永久重定向到
+`/plans` —— 同一份测试列表，只是换了产品里的名字。存好的布局不会挪。
+页面还没做出来的入口，渲染成一个不可点的“Coming soon”占位，绝不给路由接不住的
 链接。
 
 ## 可信的数字

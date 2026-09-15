@@ -104,13 +104,15 @@ không theo tầng backend phục vụ nó ([`web/lib/ia.ts`](web/lib/ia.ts)):
 | **Analytics** `/dashboard` | Khám phá acquisition, engagement, funnel, retention; lưu dashboard | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
 | **People** `/persons` | Xem hoạt động và thuộc tính nghiệp vụ của một người; lưu audience | `/cohorts` |
 | **Data** `/events` | Nối SDK và source; xem event, dataset và sức khỏe pipeline | `/start` · `/replay` |
-| **Plans** `/plans` | Giữ finding, bằng chứng, experiment đề xuất và kết quả | `/prototypes` |
+| **Plans** `/plans` | Giữ finding, bằng chứng, experiment đề xuất và kết quả | |
 | **Agents** `/agents` | Nối một agent bên ngoài; chat, operations, Garden, marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
 | **Settings** `/settings` | Quyền vào workspace, credential, retention và usage | `/alerts` · `/pricing` (chỉ bản hosted) |
 
 Mọi URL từ trước đợt redesign vẫn vào được: mục cũ ở cấp cao nhất hoặc thành alias
-trên đích đến mới, hoặc thành một màn con nằm dưới nó. Không có gì redirect đi chỗ
-khác, và không layout đã lưu nào bị xê dịch. Đích đến nào chưa có trang thì hiện
+trên đích đến mới, hoặc thành một màn con nằm dưới nó. Ngoại lệ duy nhất là
+`/prototypes`, redirect vĩnh viễn sang `/plans` — cùng một danh sách test dưới
+tên sản phẩm của nó. Không layout đã lưu nào bị xê dịch.
+Đích đến nào chưa có trang thì hiện
 một chỗ "Coming soon" không phải link — nhất quyết không phải một link mà router
 không phục vụ được.
 

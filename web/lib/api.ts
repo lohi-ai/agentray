@@ -2796,8 +2796,9 @@ export class AgentRayAPI {
     return this.get<ValidationStatus>('/api/validation/status');
   }
 
-  // The plural read behind /prototypes. Every row arrives already measured and
-  // already carrying its verdict — computed server-side so this page and any
+  // The plural read behind /plans (and the /prototypes surface it replaced).
+  // Every row arrives already measured and already carrying its verdict —
+  // computed server-side so this page and any
   // agent reading list_tests cannot disagree about whether a test passed.
   validationTests() {
     return this.get<ValidationTestsResponse>('/api/validation/tests');

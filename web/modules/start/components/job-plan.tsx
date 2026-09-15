@@ -121,11 +121,11 @@ function NextTime({ job, state }: { job: JobDef; state: JobState }) {
   const edge =
     job.id === 'validate' && (state.testCommitted || state.testProposed)
       ? {
-          href: '/prototypes',
-          label: 'Open Prototypes',
+          href: '/plans',
+          label: 'Open Plans',
           title: 'You’ve set a kill/keep number once.',
           detail:
-            'Every idea after this one gets its own bet, with its own number agreed before the data arrives. They all live in Prototypes — this page only ever holds the first.',
+            'Every idea after this one gets its own bet, with its own number agreed before the data arrives. They all live in Plans — this page only ever holds the first.',
         }
       : job.id === 'operate' && state.scheduled
         ? {

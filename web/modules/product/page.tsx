@@ -156,9 +156,9 @@ export function ProductPage() {
           icon={<Sparkles size={22} style={{ color: 'var(--agent)' }} />}
           title="Pick a question to begin"
           detail={emptyCatalog
-            ? 'No product yet? Prove the idea first → Prototypes. Market a landing page, paste the snippet, collect the waitlist — then this page has something to chart.'
+            ? 'No product yet? Prove the idea first → Plans. Market a landing page, paste the snippet, collect the waitlist — then this page has something to chart.'
             : 'Each question runs against this project\'s events and returns a chart plus the underlying numbers — no SQL required.'}
-          action={emptyCatalog ? <Button variant="outline" size="sm" onClick={() => router.push('/prototypes')}>Prototypes</Button> : undefined}
+          action={emptyCatalog ? <Button variant="outline" size="sm" onClick={() => router.push('/plans')}>Plans</Button> : undefined}
         />
       )}
     </AppShell>

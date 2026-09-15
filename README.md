@@ -103,13 +103,15 @@ layer that serves it ([`web/lib/ia.ts`](web/lib/ia.ts)):
 | **Analytics** `/dashboard` | Explore acquisition, engagement, funnels, retention; save dashboards | `/traffic` · `/product` · `/templates` · `/sql` · `/web-analytics` |
 | **People** `/persons` | Inspect a person's activity and business attributes; save audiences | `/cohorts` |
 | **Data** `/events` | Connect SDKs and sources; inspect events, datasets and pipeline health | `/start` · `/replay` |
-| **Plans** `/plans` | Keep findings, evidence, proposed experiments and results | `/prototypes` |
+| **Plans** `/plans` | Keep findings, evidence, proposed experiments and results | |
 | **Agents** `/agents` | Connect an external agent; chat, operations, Garden, marketplace | `/chat` · `/operations` · `/marketplace` · `/teams` · `/monitor` |
 | **Settings** `/settings` | Workspace access, credentials, retention and usage | `/alerts` · `/pricing` (hosted only) |
 
 Every pre-redesign URL still resolves: old top-level items became either an alias
-on the new destination or a child surface under it. Nothing redirects away, and
-no saved layout moves. A destination whose page does not exist yet renders as a
+on the new destination or a child surface under it. The one exception is
+`/prototypes`, which permanently redirects to `/plans` — the same test list
+under its product name. No saved layout moves.
+A destination whose page does not exist yet renders as a
 non-linked "Coming soon" affordance — never a link the router cannot serve.
 
 ## Numbers you can trust

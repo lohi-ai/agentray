@@ -268,7 +268,7 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				out.ConversionPct = -1
 				out.DaysElapsed, out.DaysLeft = 0, 0
 				out.Note = "This test is still only PROPOSED — the owner has not committed to the number, " +
-					"so nothing is being counted yet. Ask them to commit it on /prototypes."
+					"so nothing is being counted yet. Ask them to commit it on /plans."
 				return out, nil
 			}
 			if test.Status != storage.TestCommitted {
@@ -389,7 +389,7 @@ func listTests() opcore.Operation[listTestsInput, listTestsOutput] {
 				out.Note = "No prototypes yet. Design one with propose_test — one idea, one number, agreed before the data arrives."
 			case waiting > 0:
 				out.Note = fmt.Sprintf("%d of these are still only PROPOSED — the owner has not agreed to the number, "+
-					"so nothing is being counted for them. Say which ones, and that they commit on /prototypes. "+
+					"so nothing is being counted for them. Say which ones, and that they commit on /plans. "+
 					"Call test_status with a test_id for the numbers on any one of them.", waiting)
 			default:
 				out.Note = "Call test_status with a test_id for how any one of these is doing. " +
