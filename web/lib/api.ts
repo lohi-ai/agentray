@@ -814,7 +814,7 @@ export type WorkspaceModelTiersInput = {
 
 // --- Alerting (#1) ---
 
-export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops'] as const;
+export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops', 'digest'] as const;
 export type AlertSourceKind = (typeof ALERT_SOURCE_KINDS)[number];
 export const ALERT_OPS = ['gt', 'lt', 'z_score'] as const;
 export type AlertOp = (typeof ALERT_OPS)[number];
@@ -828,6 +828,10 @@ export type AlertCondition = {
   min_events?: number;
 };
 
+export type AlertRuleParams = {
+  send_empty?: boolean;
+};
+
 export type AlertRule = {
   id: string;
   project_id: string;
@@ -835,6 +839,7 @@ export type AlertRule = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -848,6 +853,7 @@ export type AlertRuleInput = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;

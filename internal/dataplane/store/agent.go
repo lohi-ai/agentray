@@ -239,6 +239,8 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		// recommendationsPageOrder. This index must be that key in that order
 		// (project equality first), or the page is unindexed.
 		recommendationsPlansPageIndexDDL,
+		`CREATE INDEX IF NOT EXISTS agent_recommendations_digest_created_idx
+ON agent_recommendations (project_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS agent_sessions (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	scope_id UUID NOT NULL,
