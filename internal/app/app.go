@@ -13,8 +13,9 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/internal/dataplane/alerting"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
-	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
+	"github.com/lohi-ai/agentray/internal/dataplane/experiments"
 	"github.com/lohi-ai/agentray/internal/dataplane/findings"
+	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/config"
@@ -254,6 +255,11 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// detector pass that files findings with no agent and no LLM. Like
 	// retention it admits at most one pass and runs it off the clock.
 	findingsScan := findings.NewScanner(store)
+	// The experiment auto-close (ticket 002) rides the same tick: committed
+	// tests whose review date has arrived are re-measured and closed with the
+	// measured outcome cited — the observe→experiment→outcome loop closing
+	// itself. Same admission shape as the findings scan.
+	experimentReview := experiments.NewEvaluator(store)
 	// Event retention rides the same minute tick for ADMISSION only — it starts
 	// at most one daily sweep, on its own goroutine, because a multi-minute
 	// delete must not hold the clock alert evaluation and connector syncs share.
@@ -263,6 +269,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		connectorEngine.Tick(tickCtx, now)
 		retention.Tick(tickCtx, now)
 		findingsScan.Tick(tickCtx, now)
+		experimentReview.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
 		store.Close()

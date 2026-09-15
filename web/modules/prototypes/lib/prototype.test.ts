@@ -40,6 +40,7 @@ describe('stateOf', () => {
   it('keeps the owner’s recorded decision over any later verdict', () => {
     expect(stateOf(test({ status: 'abandoned', verdict: 'passed' }))).toBe('abandoned');
     expect(stateOf(test({ status: 'failed', verdict: 'passed' }))).toBe('failed');
+    expect(stateOf(test({ status: 'inconclusive', verdict: 'passed' }))).toBe('inconclusive');
   });
 });
 

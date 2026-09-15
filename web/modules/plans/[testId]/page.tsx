@@ -344,6 +344,7 @@ function Field({ label, value, mono = false }: { label: string; value?: string; 
 }
 
 function OutcomeRow({ entry }: { entry: TestOutcomeEntry }) {
+  const author = entry.author_kind === 'user' ? 'you' : entry.author_kind === 'system' ? 'auto-review' : 'agent';
   return (
     <div className="rounded-[var(--radius-md)] bg-[var(--color-background-muted)] px-3 py-2">
       <HStack gap={2} align="center" justify="between" className="flex-wrap">
@@ -353,9 +354,10 @@ function OutcomeRow({ entry }: { entry: TestOutcomeEntry }) {
         </Text>
         <Text type="supporting">
           {entry.window ? `${entry.window} · ` : ''}
-          {entry.author_kind === 'user' ? 'you' : 'agent'} · {formatRelative(entry.recorded_at)}
+          {author} · {formatRelative(entry.recorded_at)}
         </Text>
       </HStack>
+      {entry.note ? <Text type="supporting" className="mt-1 block">{entry.note}</Text> : null}
       {entry.evidence_ref ? (
         <Text type="supporting" className="mt-1 block font-mono">{entry.evidence_ref}</Text>
       ) : null}

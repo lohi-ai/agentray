@@ -81,6 +81,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, addAnnotation())
 	opcore.Register(r, listAnnotations())
 	opcore.Register(r, deleteAnnotation())
+	opcore.Register(r, runExperimentReview())
 	r.SetLegacyAllowlist(legacyOperationAllowlist)
 	r.SetErrorClassifier(classifyOpError)
 	r.SetErrorMapper(MapOpError)

@@ -187,4 +187,5 @@ const (
 	ToolAddAnnotation      = "add_annotation"
 	ToolListAnnotations    = "list_annotations"
 	ToolDeleteAnnotation   = "delete_annotation"
+	ToolRunExperimentReview = "run_experiment_review"
 )

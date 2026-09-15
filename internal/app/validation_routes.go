@@ -138,7 +138,7 @@ func registerValidationRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter
 			return err
 		}
 		var payload struct {
-			Status string `json:"status"` // passed | failed | abandoned
+			Status string `json:"status"` // passed | failed | abandoned | inconclusive
 			Note   string `json:"note"`
 		}
 		if err := c.Bind(&payload); err != nil {
