@@ -111,6 +111,13 @@ type DataSource interface {
 	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
+
+	// Chart annotations: the project-scoped marks behind add_annotation,
+	// list_annotations and delete_annotation. Mirrors usecase.Repo.
+	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
+	AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]storage.Annotation, error)
+	AnnotationForProject(ctx context.Context, projectID, id string) (storage.Annotation, error)
+	DeleteAnnotationIdempotent(ctx context.Context, projectID, id, idemKey, requestHash string) (storage.Annotation, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -164,4 +171,7 @@ const (
 	ToolAbandonTest        = "abandon_test"
 	ToolListFindings       = "list_findings"
 	ToolDatasetPreview     = "dataset_preview"
+	ToolAddAnnotation      = "add_annotation"
+	ToolListAnnotations    = "list_annotations"
+	ToolDeleteAnnotation   = "delete_annotation"
 )
