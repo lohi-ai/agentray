@@ -130,7 +130,6 @@ export const CRAWLER_DISALLOW = [
   '/operations',
   '/persons',
   '/pricing',
-  '/product',
   '/prototypes',
   '/replay',
   '/settings',
@@ -138,9 +137,7 @@ export const CRAWLER_DISALLOW = [
   '/start',
   '/teams',
   '/templates',
-  '/traffic',
   '/usage',
-  '/web-analytics',
 ] as const;
 
 // JSON-LD. `SoftwareApplication` is the honest type — this is an app you run,

@@ -186,6 +186,10 @@ export type OverviewMetric = {
   state: 'ok' | 'no_data' | 'not_ready' | 'unconfigured' | 'unavailable';
   value?: number;
   previous?: number;
+  // The float channel for metrics whose honest value is not a count — a share
+  // or rate on the percent scale, a duration in seconds. A metric carries
+  // value XOR rate, never both.
+  rate?: number;
   definition: string;
   notes?: string[];
   // The declared target version in force for this window, with the verdict
@@ -289,8 +293,18 @@ export type OverviewResult = {
     activation: OverviewMetric;
     revenue: OverviewMetric;
     revenue_detail?: OverviewRevenueDetail | null;
+    // The retired Traffic page's headline counts — every received event, all
+    // visitor classes (the class split beside them is the human/non-human
+    // answer).
+    pageviews: OverviewMetric;
+    conversions: OverviewMetric;
+    // Rate metrics: ai_share and bounce_rate on the percent scale,
+    // avg_session_duration in seconds.
+    ai_share: OverviewMetric;
+    bounce_rate: OverviewMetric;
+    avg_session_duration: OverviewMetric;
   };
-  trend: Array<{ day: string; active_users: number }>;
+  trend: Array<{ day: string; active_users: number; events: number }>;
   retention: {
     cohort_window: string;
     d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
@@ -300,6 +314,12 @@ export type OverviewResult = {
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
     top_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+    // The retired Traffic page's remaining breakdowns — all-classes pageview
+    // populations, and the retired Product page's raw event ranking.
+    traffic_by_class: { unit: string; rows: Array<{ value: string; count: number }> };
+    ai_top_paths: { unit: string; rows: Array<{ value: string; count: number }> };
+    traffic_by_platform: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_events: { unit: string; rows: Array<{ value: string; count: number }> };
   };
   data_status: {
     last_event_at?: string;
@@ -497,6 +517,8 @@ export type AgentPreset = {
   tools?: string[];
 };
 
+// The legacy /api/web-analytics payload is served to external consumers only —
+// the console reads the same numbers through OverviewResult (overview.v4).
 export type TrafficClass = {
   class: string;
   count: number;
@@ -1981,9 +2003,8 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/agent/agents/${agentID}/grant`), { method: 'DELETE' });
   }
 
-  webAnalytics(filters: Filters) {
-    return this.get<{ project: Project; web_analytics: WebAnalytics }>(`/api/web-analytics?${new URLSearchParams(filterParams(filters)).toString()}`);
-  }
+  // GET /api/web-analytics stays for external consumers; the console reads the
+  // same numbers through overview() — no client method, nothing fans out on it.
 
   persons(filters: Filters) {
     return this.get<{ project: Project; persons: PersonsSummary }>(`/api/persons?${new URLSearchParams(filterParams(filters)).toString()}`);

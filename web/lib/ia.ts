@@ -23,8 +23,10 @@ export type NavItemDef = {
 export const NAV_ITEMS: readonly NavItemDef[] = [
   // Overview is the front door — the deterministic product read, not a chat.
   { href: '/overview', label: 'Overview', group: 'Product' },
-  // Analytics = explore: dashboards, traffic, product views, templates, SQL.
-  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/web-analytics', '/traffic', '/product', '/acquisition', '/monetization', '/usage'] },
+  // Analytics = explore: dashboards, the declared boards, templates, SQL. The
+  // retired /traffic, /web-analytics and /product routes 308 to their boards
+  // (next.config.ts), so they are not aliases — nothing in-app links them.
+  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/acquisition', '/monetization', '/usage'] },
   { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
   // Data = connect and inspect: events, replay, SDK setup, connectors.
   { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
@@ -135,8 +137,6 @@ export const CHILD_SURFACES: readonly ChildSurface[] = [
   { href: '/agents/monitor', label: 'Monitor', parentHref: '/agents' },
   { href: '/templates', label: 'Templates', parentHref: '/dashboard' },
   { href: '/sql', label: 'SQL', parentHref: '/dashboard' },
-  { href: '/web-analytics', label: 'Traffic', parentHref: '/dashboard' },
-  { href: '/product', label: 'Product', parentHref: '/dashboard' },
   { href: '/alerts', label: 'Alerts', parentHref: '/settings' },
   { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },

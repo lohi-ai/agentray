@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import type { AgentReplay, AuthState, Filters, InsightResult, Project, SavedQueryResult, Workspace } from '@/lib/api';
+import type { AgentReplay, AuthState, Filters, Project, SavedQueryResult, Workspace } from '@/lib/api';
 import { defaultFilters } from '@/lib/api';
 import { pickPreferredProject, readPreferredProjectID } from '@/lib/project-preference';
 
@@ -66,14 +66,12 @@ type UISlice = {
   message: string;
   error: string;
   selectedDashboardID: string;
-  insight: InsightResult | null;
   replay: AgentReplay | null;
   sqlRows: Array<Record<string, unknown>>;
   savedResult: SavedQueryResult | null;
   setMessage: (value: string) => void;
   setError: (value: string) => void;
   setSelectedDashboardID: (id: string) => void;
-  setInsight: (value: InsightResult | null) => void;
   setReplay: (value: AgentReplay | null) => void;
   setSQLRows: (rows: Array<Record<string, unknown>>) => void;
   setSavedResult: (value: SavedQueryResult | null) => void;
@@ -83,7 +81,6 @@ export const useUIStore = create<UISlice>((set) => ({
   message: '',
   error: '',
   selectedDashboardID: '',
-  insight: null,
   replay: null,
   sqlRows: [],
   savedResult: null,
@@ -96,7 +93,6 @@ export const useUIStore = create<UISlice>((set) => ({
     if (error) toast.error(error);
   },
   setSelectedDashboardID: (selectedDashboardID) => set({ selectedDashboardID }),
-  setInsight: (insight) => set({ insight }),
   setReplay: (replay) => set({ replay }),
   setSQLRows: (sqlRows) => set({ sqlRows }),
   setSavedResult: (savedResult) => set({ savedResult }),

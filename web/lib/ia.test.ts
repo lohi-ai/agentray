@@ -80,7 +80,7 @@ describe('nav grouping', () => {
     const hrefs = CHILD_SURFACES.map((s) => s.href);
     expect(hrefs).toEqual(expect.arrayContaining([
       '/alerts', '/teams', '/marketplace', '/cohorts', '/agents/monitor',
-      '/chat', '/operations', '/start', '/web-analytics', '/product', '/pricing',
+      '/chat', '/operations', '/start', '/pricing',
     ]));
     expect(childSurfacesFor('/agents').map((s) => s.label)).toEqual(
       expect.arrayContaining(['Chat', 'Operations', 'Hire a teammate', 'Teams', 'Monitor']),
@@ -93,7 +93,7 @@ describe('nav grouping', () => {
     );
     expect(childSurfacesFor('/persons').map((s) => s.href)).toContain('/cohorts');
     expect(childSurfacesFor('/dashboard').map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
+      expect.arrayContaining(['/templates', '/sql', '/acquisition', '/monetization', '/usage']),
     );
     expect(childSurfacesFor('/events').map((s) => s.href)).toEqual(
       expect.arrayContaining(['/replay', '/start']),
@@ -119,7 +119,7 @@ describe('nav grouping', () => {
       expect(navHrefs.has(surface.parentHref)).toBe(true);
     }
     expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product', '/acquisition', '/monetization', '/usage']),
+      expect.arrayContaining(['/templates', '/sql', '/acquisition', '/monetization', '/usage']),
     );
   });
 });
@@ -134,7 +134,7 @@ describe('matchActiveHref', () => {
     ['/plans/abc-123', '/plans', 'Work'],
     ['/prototypes', '/plans', 'Work'],
     ['/prototypes/abc-123', '/plans', 'Work'],
-    ['/product', '/dashboard', 'Understand'],
+    ['/usage', '/dashboard', 'Understand'],
     ['/operations', '/agents', 'Work'],
     ['/operations/config%3Aproj-1', '/agents', 'Work'],
     ['/agents', '/agents', 'Work'],
@@ -145,7 +145,6 @@ describe('matchActiveHref', () => {
     ['/marketplace', '/agents', 'Work'],
     ['/agent', '/agents', 'Work'],
     ['/dashboard', '/dashboard', 'Understand'],
-    ['/web-analytics', '/dashboard', 'Understand'],
     ['/sql', '/dashboard', 'Understand'],
     ['/acquisition', '/dashboard', 'Understand'],
     ['/monetization', '/dashboard', 'Understand'],

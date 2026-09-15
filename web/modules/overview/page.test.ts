@@ -466,7 +466,7 @@ describe('tileProvenance', () => {
 });
 
 describe('targetBadge', () => {
-  const target = (verdict?: 'on_track' | 'at_risk' | 'off_track', verdict_reason?: string): MetricTargetView => ({
+  const target = (verdict?: 'on_track' | 'at_risk' | 'off_track', verdict_reason?: MetricTargetView['verdict_reason']): MetricTargetView => ({
     version: 2, direction: 'gte', value: 40, period_days: 7,
     effective_at: '2026-09-05T00:00:00Z', label: '≥ 40% weekly',
     ...(verdict ? { verdict } : {}), ...(verdict_reason ? { verdict_reason } : {}),
