@@ -111,6 +111,22 @@ type DataSource interface {
 	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
+
+	// set_metric_target appends a version to the project-scoped target
+	// history; save_board declares targets through the same write.
+	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
+	// Findings engine (ticket 001): the funnel-watch declarations the drop-off
+	// detector re-runs. Mirrors usecase.Repo — the interface is assigned to
+	// Deps.Repo, so it must declare everything the ops reach for.
+	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
+	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
+
+	// Chart annotations: the project-scoped marks behind add_annotation,
+	// list_annotations and delete_annotation. Mirrors usecase.Repo.
+	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
+	AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]storage.Annotation, error)
+	AnnotationForProject(ctx context.Context, projectID, id string) (storage.Annotation, error)
+	DeleteAnnotationIdempotent(ctx context.Context, projectID, id, idemKey, requestHash string) (storage.Annotation, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -156,6 +172,7 @@ const (
 	ToolReadMetric         = "read_metric"
 	ToolGetBoard           = "get_board"
 	ToolSaveBoard          = "save_board"
+	ToolSetMetricTarget    = "set_metric_target"
 	ToolListSources        = "list_sources"
 	ToolArchiveSource      = "archive_source"
 	ToolUnarchiveSource    = "unarchive_source"
@@ -164,4 +181,10 @@ const (
 	ToolAbandonTest        = "abandon_test"
 	ToolListFindings       = "list_findings"
 	ToolDatasetPreview     = "dataset_preview"
+	ToolRunFindingsScan   = "run_findings_scan"
+	ToolWatchFunnel       = "watch_funnel"
+	ToolListFunnelWatches = "list_funnel_watches"
+	ToolAddAnnotation      = "add_annotation"
+	ToolListAnnotations    = "list_annotations"
+	ToolDeleteAnnotation   = "delete_annotation"
 )

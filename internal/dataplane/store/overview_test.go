@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // overview_test.go locks the metric-semantics contract: range boundaries,
@@ -205,5 +208,109 @@ func TestOverviewAcquisitionCountsHumanUserPageviews(t *testing.T) {
 	// inclusive upper bound would pull the next local midnight into the range.
 	if !strings.Contains(where, `"timestamp" <= ?`) || !strings.Contains(where, `"timestamp" >= ?`) {
 		t.Fatalf("acquisition window must stay bounded: %s", where)
+	}
+}
+
+func TestOverviewActivationUnconfigured(t *testing.T) {
+	s := &Store{}
+	m, detail, err := s.overviewActivation(context.Background(), "p1", "", "UTC", time.Now(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.State != OverviewStateUnconfigured {
+		t.Fatalf("state = %q, want unconfigured", m.State)
+	}
+	if detail != nil {
+		t.Fatalf("detail = %+v, want nil", detail)
+	}
+	if len(m.Notes) == 0 || m.Notes[0] != metricPrereqActivation {
+		t.Fatalf("notes = %v, want %q", m.Notes, metricPrereqActivation)
+	}
+}
+
+// TestOverviewActivationCohortShare proves the activation read against real
+// DuckDB: eligibility is a matured 7-day window from first qualifying
+// activity, the chosen event counts inside that window only, and a bot firing
+// it under a human's id does not activate them.
+func TestOverviewActivationCohortShare(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	day := func(d int) time.Time { return time.Date(2026, 9, d, 12, 0, 0, 0, time.UTC) }
+	ev := func(person, name string, at time.Time, class string) Event {
+		return Event{
+			ProjectID: "aaaaaaaa-1111-2222-3333-444444444444", EventID: uuid.NewString(), EventName: name,
+			EventType: "user", DistinctID: person, VisitorClass: class, Timestamp: at,
+		}
+	}
+	to := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	events := []Event{
+		// u1: cohort Sep 1 (mature), activation Sep 3 — inside window.
+		ev("u1", "user.pageview", day(1), "human"),
+		ev("u1", "onboarding.completed", day(3), "human"),
+		// u2: cohort Sep 2 (mature), activation Sep 10 — day 8, outside window.
+		ev("u2", "user.pageview", day(2), "human"),
+		ev("u2", "onboarding.completed", day(10), "human"),
+		// u3: cohort Sep 2 (mature), activation Sep 9 — exactly day 7, inside.
+		ev("u3", "user.pageview", day(2), "human"),
+		ev("u3", "onboarding.completed", day(9), "human"),
+		// u4: cohort Sep 10 — window has not closed by `to`, not eligible.
+		ev("u4", "user.pageview", day(10), "human"),
+		ev("u4", "onboarding.completed", day(10), "human"),
+		// u5: human cohort Sep 1, but the activation event arrived as a bot —
+		// a crawler completing onboarding is not an activated person.
+		ev("u5", "user.pageview", day(1), "human"),
+		ev("u5", "onboarding.completed", day(3), "bot"),
+	}
+	if err := d.SinkEvents(context.Background(), events, AppliedMark{}); err != nil {
+		t.Fatalf("SinkEvents: %v", err)
+	}
+
+	metric, detail, err := s.overviewActivation(context.Background(), "aaaaaaaa-1111-2222-3333-444444444444", "", "UTC", to, "onboarding.completed")
+	if err != nil {
+		t.Fatalf("overviewActivation: %v", err)
+	}
+	if metric.State != OverviewStateOK {
+		t.Fatalf("state = %q, want ok (notes: %v)", metric.State, metric.Notes)
+	}
+	if detail == nil {
+		t.Fatal("activation_detail is nil — the tile cannot render the rate without it")
+	}
+	if detail.Eligible != 4 {
+		t.Fatalf("eligible = %d, want 4 (u4's window has not closed)", detail.Eligible)
+	}
+	if detail.Activated != 2 {
+		t.Fatalf("activated = %d, want 2 (u2 fired on day 8, u5's event was a bot)", detail.Activated)
+	}
+	if detail.Rate != 0.5 {
+		t.Fatalf("rate = %v, want 0.5", detail.Rate)
+	}
+	if detail.Event != "onboarding.completed" || detail.WindowDays != 7 {
+		t.Fatalf("detail = %+v, want event onboarding.completed window 7", detail)
+	}
+}
+
+// TestOverviewActivationNoMatureCohort: a configured event with only young
+// cohorts reports not_ready, never a fabricated 0%.
+func TestOverviewActivationNoMatureCohort(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	now := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	events := []Event{{
+		ProjectID: "bbbbbbbb-1111-2222-3333-444444444444", EventID: uuid.NewString(), EventName: "user.pageview",
+		EventType: "user", DistinctID: "fresh", VisitorClass: "human",
+		Timestamp: now.Add(-24 * time.Hour),
+	}}
+	if err := d.SinkEvents(context.Background(), events, AppliedMark{}); err != nil {
+		t.Fatalf("SinkEvents: %v", err)
+	}
+	metric, detail, err := s.overviewActivation(context.Background(), "bbbbbbbb-1111-2222-3333-444444444444", "", "UTC", now, "onboarding.completed")
+	if err != nil {
+		t.Fatalf("overviewActivation: %v", err)
+	}
+	if metric.State != OverviewStateNotReady {
+		t.Fatalf("state = %q, want not_ready", metric.State)
+	}
+	if detail == nil || detail.Eligible != 0 {
+		t.Fatalf("detail = %+v, want eligible 0", detail)
 	}
 }

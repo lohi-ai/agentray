@@ -209,7 +209,7 @@ func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, 
 	// tools/call re-authorizes by name: a principal cannot invoke an operation
 	// tools/list never advertised to it.
 	if !r.Authorize(principal, params.Name) {
-		return ok(req.ID, errorResult("credential may not invoke "+params.Name, ""))
+		return ok(req.ID, errorResult(RefusalMessage(spec.OpAccess()), ""))
 	}
 
 	args := string(params.Arguments)

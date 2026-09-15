@@ -234,11 +234,24 @@ func (s *Store) migrateAgent(ctx context.Context) error {
 		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS revision BIGINT`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_title_trgm ON agent_recommendations USING gin (title gin_trgm_ops)`,
 		`CREATE INDEX IF NOT EXISTS agent_recommendations_open_idx ON agent_recommendations (project_id, status, last_seen_at DESC)`,
+		// Findings engine (ticket 001): source distinguishes a rule-derived
+		// finding ('engine') from an agent-submitted one ('agent', the default
+		// every existing row honestly is), and dedupe_key is the engine's
+		// stable condition identity — createRecommendation folds a re-fire on
+		// the key instead of guessing at title similarity. Both additive:
+		// source's constant default is metadata-only on Postgres 11+, and
+		// dedupe_key stays NULL on agent rows so the partial index only ever
+		// holds engine keys.
+		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'agent'`,
+		`ALTER TABLE agent_recommendations ADD COLUMN IF NOT EXISTS dedupe_key TEXT`,
+		`CREATE INDEX IF NOT EXISTS agent_recommendations_dedupe_idx ON agent_recommendations (project_id, dedupe_key) WHERE dedupe_key IS NOT NULL`,
 		// The Plans keyset walks open findings first, then impact, then the
 		// last_seen_at recurrence rewrites, with id as the total tiebreak —
 		// recommendationsPageOrder. This index must be that key in that order
 		// (project equality first), or the page is unindexed.
 		recommendationsPlansPageIndexDDL,
+		`CREATE INDEX IF NOT EXISTS agent_recommendations_digest_created_idx
+ON agent_recommendations (project_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS agent_sessions (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	scope_id UUID NOT NULL,

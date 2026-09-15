@@ -78,6 +78,9 @@ func proposeTest() opcore.Operation[proposeTestInput, proposeTestOutput] {
 			if verr := validateEvidenceEnvelope(in.Evidence); verr != nil {
 				return proposeTestOutput{}, verr
 			}
+			if rerr := annotationRefsInEnvelope(ctx, d, cc.ProjectID, in.Evidence); rerr != nil {
+				return proposeTestOutput{}, rerr
+			}
 			var baselineValue *float64
 			if in.BaselineValue != 0 {
 				baselineValue = &in.BaselineValue

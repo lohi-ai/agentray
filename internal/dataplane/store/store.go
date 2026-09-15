@@ -112,6 +112,14 @@ type Project struct {
 	// Timezone is a validated IANA name when set. Empty means an existing
 	// nullable row, which Overview reports as its explicit UTC fallback.
 	Timezone  string    `json:"timezone,omitempty"`
+	// Goal is the owner's answer to "what are you trying to improve?" —
+	// activation | retention | revenue | traffic | skipped. A nil Goal means
+	// the prompt was never answered (the column is NULL); "skipped" means the
+	// owner declined, so the prompt must not reappear. ActivationEvent names
+	// the catalog event the owner says counts as "activated"; empty means
+	// unset, and it is what the activation overview metric computes against.
+	Goal            *string   `json:"goal,omitempty"`
+	ActivationEvent string    `json:"activation_event,omitempty"`
 	APIKey    string    `json:"api_key"`
 	CreatedAt time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
@@ -854,6 +862,17 @@ CREATE TABLE IF NOT EXISTS projects (
 	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)`); err != nil {
 		return err
 	}
+	// goal and activation_event are the onboarding answers (007): NULL goal
+	// means the prompt was never answered, 'skipped' means declined.
+	// activation_event names the event the owner says counts as "activated" —
+	// it is what unlocks the activation overview metric. Both nullable so the
+	// ALTER never rewrites the table.
+	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS goal VARCHAR(32)`); err != nil {
+		return err
+	}
+	if _, err := s.pg.Exec(ctx, `ALTER TABLE projects ADD COLUMN IF NOT EXISTS activation_event VARCHAR(255)`); err != nil {
+		return err
+	}
 	if _, err := s.pg.Exec(ctx, `
 CREATE INDEX IF NOT EXISTS projects_workspace_created_idx
 ON projects (workspace_id, created_at DESC)`); err != nil {
@@ -1095,6 +1114,18 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The project-scoped target history the overview read resolves against.
+	if err := s.migrateMetricTargets(ctx); err != nil {
+		return err
+	}
+
+	// Chart annotations sit beside the boards they mark: a project-scoped
+	// record, not a per-chart field, so one deploy shows on every temporal
+	// chart that spans it.
+	if err := s.migrateAnnotations(ctx); err != nil {
+		return err
+	}
+
 	// Boards seeded before the "guest vs identified" query was corrected still
 	// read `properties.email`; the seed only ever runs once, so they have to be
 	// repaired here. Needs the revision column migrateLifecycle just added.
@@ -1114,6 +1145,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
+		return err
+	}
+
+	// Findings-engine substrate (finding_scan_state, funnel_watches). New
+	// tables only; after migrateAgent so the recommendations table it writes
+	// already exists on a fresh boot.
+	if err := s.migrateFindings(ctx); err != nil {
 		return err
 	}
 
@@ -1314,8 +1352,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 		return Project{}, fmt.Errorf("missing api key")
 	}
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at FROM projects WHERE api_key = $1`, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.Goal, &p.ActivationEvent, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1327,8 +1365,8 @@ func (s *Store) ProjectByAPIKey(ctx context.Context, apiKey string) (Project, er
 // ProjectByIDForUser.
 func (s *Store) ProjectByID(ctx context.Context, projectID string) (Project, error) {
 	var p Project
-	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at FROM projects WHERE id = $1`, projectID).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
+	err := s.pg.QueryRow(ctx, `SELECT id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at FROM projects WHERE id = $1`, projectID).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.Goal, &p.ActivationEvent, &p.APIKey, &p.CreatedAt)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1344,8 +1382,8 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO projects (name, api_key)
 VALUES ($1, $2)
-RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, name, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at`, name, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.Goal, &p.ActivationEvent, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -1356,8 +1394,8 @@ func (s *Store) RotateProjectAPIKey(ctx context.Context, projectID string) (Proj
 UPDATE projects
 SET api_key = $2
 WHERE id = $1
-RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), api_key, created_at`, projectID, apiKey).
-		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.APIKey, &p.CreatedAt)
+RETURNING id::text, coalesce(workspace_id::text, ''), name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at`, projectID, apiKey).
+		Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Timezone, &p.Goal, &p.ActivationEvent, &p.APIKey, &p.CreatedAt)
 	return p, err
 }
 
@@ -4163,9 +4201,19 @@ func (s *Store) sessionQuality(ctx context.Context, projectID string, filter Eve
 		return 0, 0, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
+	duration, bounce, _, err := s.sessionQualityWhere(ctx, where, args)
+	return duration, bounce, err
+}
+
+// sessionQualityWhere runs the session-quality aggregate over a caller-built
+// window. The session count comes back beside the rates so a caller can tell
+// "every session bounced" from "there were no sessions" — the second is
+// no_data, never a 0% measurement.
+func (s *Store) sessionQualityWhere(ctx context.Context, where string, args []any) (float64, float64, uint64, error) {
 	var duration float64
 	var bounceRate float64
-	err = s.duckQueryRow(ctx, `
+	var sessions uint64
+	err := s.duckQueryRow(ctx, `
 WITH per_session AS (
 	SELECT
 		session_id,
@@ -4175,9 +4223,9 @@ WITH per_session AS (
 	WHERE `+where+` AND session_id <> ''
 	GROUP BY session_id
 )
-SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0)
-FROM per_session`, args, &duration, &bounceRate)
-	return duration, bounceRate, err
+SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0), count(*)
+FROM per_session`, args, &duration, &bounceRate, &sessions)
+	return duration, bounceRate, sessions, err
 }
 
 func (s *Store) propertyCounts(ctx context.Context, projectID string, filter EventFilter, property string, eventName string) ([]PathCount, error) {

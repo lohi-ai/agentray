@@ -211,7 +211,7 @@ func TestMCPCallReauthorizes(t *testing.T) {
 		t.Fatalf("capture tools/call not denied: %v", resp)
 	}
 	content := result["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(content, "may not invoke") {
+	if !strings.Contains(content, "may not perform") {
 		t.Fatalf("denial text = %q", content)
 	}
 }

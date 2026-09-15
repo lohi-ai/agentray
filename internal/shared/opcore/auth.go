@@ -158,6 +158,22 @@ func (r *Registry) Authorize(p Principal, opName string) bool {
 	return r.Allow(p, Requirement{Access: spec.OpAccess(), MinSessionRole: spec.OpMinSessionRole()})
 }
 
+// RefusalMessage is the one sentence every adapter answers a credential-scope
+// denial with: the caller authenticated, and the access class it lacks is the
+// reason. /api/op, MCP, the legacy REST routes and the write floor all produce
+// it through this function so a denied caller can write one branch — the F3
+// contract — instead of parsing a different refusal per surface.
+//
+// An empty class means the operation is unreachable by construction (no
+// registered access), not that a grant is missing, so the message drops the
+// parenthetical rather than naming an empty requirement.
+func RefusalMessage(access Access) string {
+	if access == "" {
+		return "credential may not perform this action"
+	}
+	return "credential may not perform this action (requires " + string(access) + ")"
+}
+
 // legacyAllowsClass reports whether an operation of this access class was in
 // the frozen allowlist — i.e. whether a pre-split project key ever held this
 // power at all. A class no pre-split operation carried (sources:manage is the

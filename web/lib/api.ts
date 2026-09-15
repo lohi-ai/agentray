@@ -26,6 +26,11 @@ export type Project = {
   // Validated IANA timezone when the project owner configured one; absent for
   // legacy nullable rows, whose overview context labels its UTC fallback.
   timezone?: string;
+  // Goal is the owner's answer to "what are you trying to improve?" (007) —
+  // activation | retention | revenue | traffic | skipped. Undefined = never asked.
+  goal?: 'activation' | 'retention' | 'revenue' | 'traffic' | 'skipped';
+  // ActivationEvent is the catalog event the owner says counts as "activated" (007).
+  activation_event?: string;
   // Blank for a membership that may not write (store/auth.go
   // redactAPIKeyForRole) — a demo visitor never receives the demo's write key.
   api_key: string;
@@ -186,8 +191,32 @@ export type OverviewMetric = {
   state: 'ok' | 'no_data' | 'not_ready' | 'unconfigured' | 'unavailable';
   value?: number;
   previous?: number;
+  // The float channel for metrics whose honest value is not a count — a share
+  // or rate on the percent scale, a duration in seconds. A metric carries
+  // value XOR rate, never both.
+  rate?: number;
   definition: string;
   notes?: string[];
+  // The declared target version in force for this window, with the verdict
+  // the server computed. Absent when no target is in force or the metric is
+  // an honest empty state (no_data, not_ready).
+  target?: MetricTargetView;
+};
+
+// The target version a read cites, mirroring storage.MetricTargetView. The
+// label is server-rendered ("≥ 40% weekly") so every surface prints the same
+// words; verdict is empty when the reading could not be judged, and
+// verdict_reason says why.
+export type MetricTargetView = {
+  version: number;
+  direction: 'gte' | 'lte';
+  value: number;
+  period_days: number;
+  currency?: string;
+  effective_at: string;
+  label: string;
+  verdict?: 'on_track' | 'at_risk' | 'off_track';
+  verdict_reason?: 'metric_unavailable' | 'partial_window' | 'period_mismatch' | 'currency_mismatch';
 };
 
 // One declared currency's deduplicated money arithmetic. Amounts are integers
@@ -219,6 +248,14 @@ export type OverviewRevenueDetail = {
   excluded_rows: number;
   excluded_currencies?: string[];
   by_currency: OverviewRevenueCurrency[];
+};
+
+export type OverviewActivationDetail = {
+  event: string;
+  window_days: number;
+  eligible: number;
+  activated: number;
+  rate: number;
 };
 
 export type VerifySDKResult = {
@@ -269,17 +306,34 @@ export type OverviewResult = {
     activation: OverviewMetric;
     revenue: OverviewMetric;
     revenue_detail?: OverviewRevenueDetail | null;
+    activation_detail?: OverviewActivationDetail | null;
+    // The retired Traffic page's headline counts — every received event, all
+    // visitor classes (the class split beside them is the human/non-human
+    // answer).
+    pageviews: OverviewMetric;
+    conversions: OverviewMetric;
+    // Rate metrics: ai_share and bounce_rate on the percent scale,
+    // avg_session_duration in seconds.
+    ai_share: OverviewMetric;
+    bounce_rate: OverviewMetric;
+    avg_session_duration: OverviewMetric;
   };
-  trend: Array<{ day: string; active_users: number }>;
+  trend: Array<{ day: string; active_users: number; events: number }>;
   retention: {
     cohort_window: string;
-    d1: { state: string; rate: number; returned: number; eligible: number };
-    d7: { state: string; rate: number; returned: number; eligible: number };
-    d30: { state: string; rate: number; returned: number; eligible: number };
+    d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d30: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
   };
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
     top_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+    // The retired Traffic page's remaining breakdowns — all-classes pageview
+    // populations, and the retired Product page's raw event ranking.
+    traffic_by_class: { unit: string; rows: Array<{ value: string; count: number }> };
+    ai_top_paths: { unit: string; rows: Array<{ value: string; count: number }> };
+    traffic_by_platform: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_events: { unit: string; rows: Array<{ value: string; count: number }> };
   };
   data_status: {
     last_event_at?: string;
@@ -340,6 +394,9 @@ export type BoardTile = {
   display?: string;
   span?: number;
   metric?: string;
+  // Declared target spec — writing it appends a version to the metric's
+  // project-scoped target history (see set_metric_target).
+  target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
   params?: { period?: string; platform?: string };
 };
@@ -375,7 +432,24 @@ export type BoardContent = {
   definition: BoardDefinition;
   metrics: MetricDefinition[];
   charts: Chart[];
+  // Latest declared target version per referenced metric (tombstones
+  // included) — what a re-declaration would be restating.
+  targets: Record<string, { version: number; cleared: boolean; direction?: string; value?: number; period_days?: number; currency?: string; effective_at: string }>;
   warnings: string[];
+};
+
+// Annotation is one marked change on the project's timeline — a deploy,
+// campaign, price change or other event a member recorded so "did X cause
+// this movement" is answerable on the chart. ends_at absent = an instant.
+export type Annotation = {
+  id: string;
+  project_id: string;
+  label: string;
+  kind: 'deploy' | 'campaign' | 'price' | 'other';
+  link?: string;
+  starts_at: string;
+  ends_at?: string | null;
+  created_at: string;
 };
 
 export type ChartInput = Pick<Chart, 'name' | 'kind' | 'metric' | 'event_name' | 'event_type' | 'sql' | 'x_field' | 'y_field' | 'col_span'>;
@@ -457,6 +531,8 @@ export type AgentPreset = {
   tools?: string[];
 };
 
+// The legacy /api/web-analytics payload is served to external consumers only —
+// the console reads the same numbers through OverviewResult (overview.v4).
 export type TrafficClass = {
   class: string;
   count: number;
@@ -788,7 +864,7 @@ export type WorkspaceModelTiersInput = {
 
 // --- Alerting (#1) ---
 
-export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops'] as const;
+export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops', 'digest'] as const;
 export type AlertSourceKind = (typeof ALERT_SOURCE_KINDS)[number];
 export const ALERT_OPS = ['gt', 'lt', 'z_score'] as const;
 export type AlertOp = (typeof ALERT_OPS)[number];
@@ -802,6 +878,10 @@ export type AlertCondition = {
   min_events?: number;
 };
 
+export type AlertRuleParams = {
+  send_empty?: boolean;
+};
+
 export type AlertRule = {
   id: string;
   project_id: string;
@@ -809,6 +889,7 @@ export type AlertRule = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -822,6 +903,7 @@ export type AlertRuleInput = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -1870,10 +1952,13 @@ export class AgentRayAPI {
   }
 
 
-  updateProject(projectID: string, name: string) {
+  updateProject(
+    projectID: string,
+    patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },
+  ) {
     return this.request<{ project: Project }>(`/api/projects/${projectID}`, {
       method: 'PUT',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(patch),
     });
   }
 
@@ -1935,9 +2020,8 @@ export class AgentRayAPI {
     return this.request<void>(this.withProject(`/api/agent/agents/${agentID}/grant`), { method: 'DELETE' });
   }
 
-  webAnalytics(filters: Filters) {
-    return this.get<{ project: Project; web_analytics: WebAnalytics }>(`/api/web-analytics?${new URLSearchParams(filterParams(filters)).toString()}`);
-  }
+  // GET /api/web-analytics stays for external consumers; the console reads the
+  // same numbers through overview() — no client method, nothing fans out on it.
 
   persons(filters: Filters) {
     return this.get<{ project: Project; persons: PersonsSummary }>(`/api/persons?${new URLSearchParams(filterParams(filters)).toString()}`);
@@ -2163,6 +2247,29 @@ export class AgentRayAPI {
 
   getBoard(input: { board_id?: string; board_key?: string }) {
     return this.callOp<BoardContent>('get_board', input);
+  }
+
+  // --- Chart annotations (add_annotation / list_annotations / delete_annotation) ---
+  //
+  // The overlap-window read every temporal chart performs: the marks whose
+  // instant or range intersects [from, to]. Writes are idempotency-keyed like
+  // every other retryable mutation.
+  listAnnotations(input: { from: string; to: string; limit?: number }) {
+    return this.callOp<{ annotations: Annotation[] }>('list_annotations', input as Record<string, unknown>);
+  }
+
+  addAnnotation(input: { label: string; kind: string; link?: string; starts_at: string; ends_at?: string; idempotency_key?: string }) {
+    return this.callOp<Annotation>('add_annotation', {
+      ...input,
+      idempotency_key: input.idempotency_key ?? newIdempotencyKey(),
+    });
+  }
+
+  deleteAnnotation(annotationID: string, opts: { idempotencyKey?: string } = {}) {
+    return this.callOp<Annotation>('delete_annotation', {
+      annotation_id: annotationID,
+      idempotency_key: opts.idempotencyKey ?? newIdempotencyKey(),
+    });
   }
 
   // recordOutcome appends one measured observation to a committed or decided

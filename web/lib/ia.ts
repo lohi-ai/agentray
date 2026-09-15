@@ -24,8 +24,10 @@ export type NavItemDef = {
 export const NAV_ITEMS: readonly NavItemDef[] = [
   // Overview is the front door — the deterministic product read, not a chat.
   { href: '/overview', label: 'Overview', group: 'Product' },
-  // Analytics = explore: dashboards, traffic, product views, templates, SQL.
-  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/web-analytics', '/traffic', '/product', '/acquisition', '/monetization', '/usage'] },
+  // Analytics = explore: dashboards, the declared boards, templates, SQL. The
+  // retired /traffic, /web-analytics and /product routes 308 to their boards
+  // (next.config.ts), so they are not aliases — nothing in-app links them.
+  { href: '/dashboard', label: 'Analytics', group: 'Understand', aliases: ['/dashboards', '/templates', '/sql', '/acquisition', '/monetization', '/usage'] },
   { href: '/persons', label: 'People', group: 'Understand', aliases: ['/cohorts'] },
   // Data = connect and inspect: events, replay, SDK setup, connectors.
   { href: '/events', label: 'Data', group: 'Understand', aliases: ['/replay', '/start'] },
@@ -136,8 +138,6 @@ export const CHILD_SURFACES: readonly ChildSurface[] = [
   { href: '/agents/monitor', label: 'Monitor', parentHref: '/agents' },
   { href: '/templates', label: 'Templates', parentHref: '/dashboard' },
   { href: '/sql', label: 'SQL', parentHref: '/dashboard' },
-  { href: '/web-analytics', label: 'Traffic', parentHref: '/dashboard' },
-  { href: '/product', label: 'Product', parentHref: '/dashboard' },
   { href: '/alerts', label: 'Alerts', parentHref: '/settings' },
   { href: '/pricing', label: 'Billing', parentHref: '/settings', hostedOnly: true },
   { href: '/cohorts', label: 'Cohorts', parentHref: '/persons' },
@@ -214,6 +214,9 @@ export type FirstRunInput = {
   catalogReady: boolean;
   // false = we know there is no workspace model key. undefined = still loading.
   hasModelKey?: boolean;
+  // Stored activation_event from the project setting (007). When present, it
+  // overrides the heuristic regex for the activation funnel stage.
+  activationEvent?: string;
 };
 
 export type FirstValuePath = {
@@ -544,19 +547,26 @@ const DEFAULT_FUNNEL_STEPS = ['user.pageview', 'user.signup', 'user.conversion']
 
 type FunnelMatch = { id: string; label: string; event: string; count: number; users: number; order: number };
 
-function stageOfName(name: string): number {
+function stageOfName(name: string, activationEvent?: string): number {
+  const act = (activationEvent ?? '').trim();
+  if (act && name === act) {
+    return FUNNEL_STAGES.findIndex((s) => s.id === 'activation');
+  }
   let claimed = -1;
   FUNNEL_STAGES.forEach((stage, order) => {
+    // When an explicit activationEvent is configured, the regex heuristic
+    // is disabled for the activation stage — only the configured event qualifies.
+    if (stage.id === 'activation' && act) return;
     if (stage.match.test(name)) claimed = order;
   });
   return claimed;
 }
 
-function matchedFunnelSteps(names: FirstRunInput['eventNames']): FunnelMatch[] {
+function matchedFunnelSteps(names: FirstRunInput['eventNames'], activationEvent?: string): FunnelMatch[] {
   const events = catalogEvents(names);
   const steps: FunnelMatch[] = [];
   FUNNEL_STAGES.forEach((stage, order) => {
-    const matched = events.filter((e) => stageOfName(e.name) === order);
+    const matched = events.filter((e) => stageOfName(e.name, activationEvent) === order);
     if (matched.length === 0) return;
     // The catalog arrives volume-descending, so matched[0] is the busiest event
     // for this stage — and it is the one `funnelStepNames` actually queries. The
@@ -577,24 +587,20 @@ function matchedFunnelSteps(names: FirstRunInput['eventNames']): FunnelMatch[] {
 
 // funnelStepNames is the honest Product-page funnel: matched activation stages
 // in order, or the default contract when the catalog has fewer than two.
-export function funnelStepNames(names: FirstRunInput['eventNames']): string[] {
-  const steps = matchedFunnelSteps(names);
+export function funnelStepNames(names: FirstRunInput['eventNames'], activationEvent?: string): string[] {
+  const steps = matchedFunnelSteps(names, activationEvent);
   if (steps.length >= 2) return steps.map((s) => s.event);
   return [...DEFAULT_FUNNEL_STEPS];
 }
 
-// retentionAnchorEvent is the event a retention cohort is defined by: "people who
-// first did THIS". The first matched funnel stage is the right anchor — it is the
-// entry step, so the cohort is people who arrived, not people who already
-// converted. Falls back to the busiest event in the catalog, then to the default
-// contract, so this never resolves to a name nothing emits.
-export function retentionAnchorEvent(names: FirstRunInput['eventNames']): string {
-  const steps = matchedFunnelSteps(names);
+export function retentionAnchorEvent(names: FirstRunInput['eventNames'], activationEvent?: string): string {
+  const steps = matchedFunnelSteps(names, activationEvent);
   if (steps.length > 0) return steps[0].event;
   const events = catalogEvents(names);
   if (events.length > 0) return events[0].name;
   return DEFAULT_FUNNEL_STEPS[0];
 }
+
 
 export type WeakestLink = {
   from: string;
@@ -624,8 +630,8 @@ export type WeakestLink = {
 // weakestLink finds the biggest drop in a recognised activation funnel from
 // catalog names + counts. No model required — this is the written opinion the
 // empty-state used to fake with a "track activation" hint.
-export function weakestLink(names: FirstRunInput['eventNames']): WeakestLink | null {
-  const steps = matchedFunnelSteps(names);
+export function weakestLink(names: FirstRunInput['eventNames'], activationEvent?: string): WeakestLink | null {
+  const steps = matchedFunnelSteps(names, activationEvent);
   if (steps.length === 0) return null;
 
   if (steps.length >= 2) {
@@ -789,7 +795,7 @@ export function firstSessionNotice(input: FirstRunInput): FirstSessionNotice | n
       ask: 'What should we track first to see if people activate?',
     };
   }
-  const link = weakestLink(input.eventNames);
+  const link = weakestLink(input.eventNames, input.activationEvent);
   const notice = link ? weakestNotice(link) : namesNotice(names);
   if (input.hasModelKey === false) {
     notice.detail = `${notice.detail} Add an AI key in Settings to ask me to go deeper.`;
@@ -853,7 +859,7 @@ export function threadNeedsRecovery(
 // writtenOpinion is the sentence a customer would pay for: one weakest step,
 // grounded in catalog counts, no model required.
 export function writtenOpinion(input: FirstRunInput): string {
-  const link = weakestLink(input.eventNames);
+  const link = weakestLink(input.eventNames, input.activationEvent);
   if (link?.missing) {
     const who = link.fromCount > 0 ? countLabel(link.fromCount) : 'People';
     return [

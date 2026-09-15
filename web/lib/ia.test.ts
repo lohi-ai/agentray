@@ -80,7 +80,7 @@ describe('nav grouping', () => {
     const hrefs = CHILD_SURFACES.map((s) => s.href);
     expect(hrefs).toEqual(expect.arrayContaining([
       '/alerts', '/teams', '/marketplace', '/cohorts', '/agents/monitor',
-      '/chat', '/operations', '/start', '/web-analytics', '/product', '/pricing',
+      '/chat', '/operations', '/start', '/pricing',
     ]));
     expect(childSurfacesFor('/agents').map((s) => s.label)).toEqual(
       expect.arrayContaining(['Chat', 'Operations', 'Hire a teammate', 'Teams', 'Monitor']),
@@ -93,7 +93,7 @@ describe('nav grouping', () => {
     );
     expect(childSurfacesFor('/persons').map((s) => s.href)).toContain('/cohorts');
     expect(childSurfacesFor('/dashboard').map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product']),
+      expect.arrayContaining(['/templates', '/sql', '/acquisition', '/monetization', '/usage']),
     );
     expect(childSurfacesFor('/events').map((s) => s.href)).toEqual(
       expect.arrayContaining(['/replay', '/start']),
@@ -119,7 +119,7 @@ describe('nav grouping', () => {
       expect(navHrefs.has(surface.parentHref)).toBe(true);
     }
     expect(childSurfacesFor('/dashboard').filter(isLinkedSurface).map((s) => s.href)).toEqual(
-      expect.arrayContaining(['/templates', '/sql', '/web-analytics', '/product', '/acquisition', '/monetization', '/usage']),
+      expect.arrayContaining(['/templates', '/sql', '/acquisition', '/monetization', '/usage']),
     );
   });
 });
@@ -135,7 +135,7 @@ describe('matchActiveHref', () => {
     // /prototypes is a redirect, not a nav destination — nothing must light for it.
     ['/prototypes', '', ''],
     ['/prototypes/abc-123', '', ''],
-    ['/product', '/dashboard', 'Understand'],
+    ['/usage', '/dashboard', 'Understand'],
     ['/operations', '/agents', 'Work'],
     ['/operations/config%3Aproj-1', '/agents', 'Work'],
     ['/agents', '/agents', 'Work'],
@@ -146,7 +146,6 @@ describe('matchActiveHref', () => {
     ['/marketplace', '/agents', 'Work'],
     ['/agent', '/agents', 'Work'],
     ['/dashboard', '/dashboard', 'Understand'],
-    ['/web-analytics', '/dashboard', 'Understand'],
     ['/sql', '/dashboard', 'Understand'],
     ['/acquisition', '/dashboard', 'Understand'],
     ['/monetization', '/dashboard', 'Understand'],
@@ -391,6 +390,30 @@ describe('weakestLink', () => {
       rate: 0,
       missing: true,
     }));
+  });
+
+  it('lets a stored activation_event override the name heuristic', () => {
+    // The owner mapped 'feature.used' as activation. Without the override the
+    // regex would claim 'onboarding.completed' for that stage and the funnel
+    // would measure a step the owner did not choose.
+    const names = [
+      { event_name: 'user.pageview', count: 100, users: 80 },
+      { event_name: 'onboarding.completed', count: 50, users: 40 },
+      { event_name: 'feature.used', count: 30, users: 20 },
+    ];
+    const link = weakestLink(names, 'feature.used');
+    expect(link?.to).toBe('feature.used');
+    expect(link?.toCount).toBe(20);
+    // The heuristic event must not also claim the activation stage.
+    expect(funnelStepNames(names, 'feature.used')).toEqual(['user.pageview', 'feature.used']);
+  });
+
+  it('keeps the heuristic when no activation_event is stored', () => {
+    const names = [
+      { event_name: 'user.pageview', count: 100, users: 80 },
+      { event_name: 'onboarding.completed', count: 50, users: 40 },
+    ];
+    expect(funnelStepNames(names)).toEqual(['user.pageview', 'onboarding.completed']);
   });
 });
 

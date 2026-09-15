@@ -161,7 +161,7 @@ export function useCurrentProject() {
   const pathname = usePathname() ?? '';
   const { auth, workspaces, projects, selectedWorkspaceID, project } = useAuthStore();
   const { setWorkspaces, setProjects, setSelectedWorkspaceID, setProject, applyAuth } = useAuthStore();
-  const { setInsight, setReplay, setSQLRows, setSavedResult } = useUIStore();
+  const { setReplay, setSQLRows, setSavedResult } = useUIStore();
   const projectID = project?.id;
   const { setMessage, setError } = useUIStore();
 
@@ -173,7 +173,6 @@ export function useCurrentProject() {
     if (next.id === project?.id) return;
     setProject(next);
     writePreferredProjectID(next.id);
-    setInsight(null);
     setReplay(null);
     setSQLRows([]);
     setSavedResult(null);
@@ -231,12 +230,16 @@ export function useCurrentProject() {
   });
 
   const updateProjectMutation = useMutation({
-    mutationFn: (name: string) => api.updateProject(project!.id, name),
+    mutationFn: (patch: string | { name?: string; timezone?: string; goal?: string; activation_event?: string }) => {
+      const body = typeof patch === 'string' ? { name: patch } : patch;
+      return api.updateProject(project!.id, body);
+    },
     onSuccess: async (data) => {
       setProject(data.project);
       setProjects(projects.map((p) => (p.id === data.project.id ? data.project : p)));
       setMessage('Project updated.');
       await queryClient.invalidateQueries({ queryKey: ['workspace-audit-logs', selectedWorkspaceID] });
+      await queryClient.invalidateQueries({ queryKey: ['overview'] });
     },
   });
 
@@ -269,7 +272,7 @@ export function useCurrentProject() {
     createWorkspace: async (name: string) => { await createWorkspaceMutation.mutateAsync(name); },
     updateWorkspace: async (name: string) => { await updateWorkspaceMutation.mutateAsync(name); },
     createProject: async (name: string) => { await createProjectMutation.mutateAsync(name); },
-    updateProject: async (name: string) => { await updateProjectMutation.mutateAsync(name); },
+    updateProject: async (patch: string | { name?: string; timezone?: string; goal?: string; activation_event?: string }) => { await updateProjectMutation.mutateAsync(patch); },
     updateUser: async (name: string) => { await updateUserMutation.mutateAsync(name); },
     rotateKey: async () => { await rotateKeyMutation.mutateAsync(); },
   };

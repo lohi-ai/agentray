@@ -11,7 +11,7 @@ import { Text } from '@astryxdesign/core/Text';
 import { AgentRayAPI, type ActivitySummary, type Chart, type Filters } from '@/lib/api';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
-import { Chart as Graph, type ChartSpec } from '@/modules/shared/components/charts';
+import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
 
 // withTimeWindow injects the dashboard's applied range into a chart's SQL so
 // SQL-backed charts honour the global filter, the same way metric charts do.
@@ -56,14 +56,14 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
 // SeriesChart leads with the graph — that's the point of the card. A single
 // compact "latest" figure anchors the trend; peak/avg are left to the ECharts
 // hover tooltip rather than crowding the card with always-on labels.
-function SeriesChart({ values, labels, type }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type'] }) {
+function SeriesChart({ values, labels, type, annotations }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[] }) {
   if (values.length === 0) {
     return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
   const latest = values[values.length - 1];
   return (
     <div>
-      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168 }} />
+      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations }} />
       <div className="mt-2">
         <Text type="supporting">
           latest <span className="font-mono tabular-nums font-semibold text-primary">{formatCompact(latest)}</span>
@@ -75,7 +75,7 @@ function SeriesChart({ values, labels, type }: { values: number[]; labels?: (str
 
 // SqlGraph runs the chart's saved query and plots its y column against an x label
 // column (the first non-numeric field, or x_field if set).
-function SqlGraph({ chart, projectID }: { chart: Chart; projectID: string }) {
+function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[] }) {
   const api = useMemo(() => new AgentRayAPI(projectID), [projectID]);
   const applied = useFiltersStore((s) => s.appliedFilters);
   const sql = useMemo(() => withTimeWindow(chart.sql, applied), [chart.sql, applied]);
@@ -99,13 +99,13 @@ function SqlGraph({ chart, projectID }: { chart: Chart; projectID: string }) {
   }, [api, sql, chart.y_field, chart.x_field]);
 
   if (data === null) return <div className="grid w-full place-items-center" style={{ height: 140 }}><Text type="supporting">Running query…</Text></div>;
-  return <SeriesChart values={data.values} labels={data.labels} type={specType(chart.kind)} />;
+  return <SeriesChart values={data.values} labels={data.labels} type={specType(chart.kind)} annotations={annotations} />;
 }
 
 // ChartCard renders one saved chart. In `preview` mode (used by the editor) the
 // action row is hidden so the same render path drives both the live board and
 // the editor preview — one source of truth for how a chart looks.
-export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean }) {
+export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false, annotations }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean; annotations?: ChartAnnotation[] }) {
   const router = useRouter();
 
   // Hand the chart to the agent chat to explain what it shows. Only offered for
@@ -144,12 +144,13 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
       {chart.kind === 'stat' ? (
         <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
       ) : chart.sql ? (
-        projectID ? <SqlGraph chart={chart} projectID={projectID} /> : <SeriesChart values={[]} type={specType(chart.kind)} />
+        projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} /> : <SeriesChart values={[]} type={specType(chart.kind)} />
       ) : (
         <SeriesChart
           values={(summary?.timeline ?? []).map((p) => p.count)}
           labels={(summary?.timeline ?? []).map((p) => p.hour)}
           type={specType(chart.kind)}
+          annotations={annotations}
         />
       )}
     </Card>

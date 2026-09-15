@@ -137,3 +137,68 @@ export const EXPERIMENT_PILL: Record<string, string> = {
   failed: 'attention',
   abandoned: 'paused',
 };
+
+// ---- Goal-seeded first experiment (007) ------------------------------------
+// When the owner answered the onboarding goal prompt but no validation_tests
+// row exists yet, /plans renders a suggestion card — deliberately NOT a
+// propose_test row: a proposed test needs a real metric_event + target_count
+// the owner agreed to, and fabricating one writes a threshold nobody chose.
+
+export type GoalSuggestion = {
+  goal: string;
+  title: string;
+  body: string;
+  metricLine: string;
+  prompt: string;
+};
+
+// goalSuggestion maps the stored project goal to the first experiment worth
+// shaping with the agent. 'skipped' and unknown values yield null — a declined
+// goal seeds nothing.
+export function goalSuggestion(project: { goal?: string; activation_event?: string } | null | undefined): GoalSuggestion | null {
+  const goal = project?.goal;
+  if (!goal || goal === 'skipped') return null;
+  const act = project?.activation_event?.trim();
+  switch (goal) {
+    case 'activation':
+      return {
+        goal,
+        title: 'Lift activation',
+        body: act
+          ? `More new signups firing ${act} within their first week.`
+          : 'More new signups reaching the moment the product proves itself within their first week.',
+        metricLine: act
+          ? `Metric: share of the weekly signup cohort reaching ${act} · Baseline: measured on commit`
+          : 'Metric: share of the weekly signup cohort reaching the activation event · Baseline: measured on commit',
+        prompt: act
+          ? `My goal is activation. Design the cheapest test that lifts the share of new signups firing ${act} within their first week.`
+          : 'My goal is activation. Design the cheapest test that lifts the share of new signups reaching first value within their first week.',
+      };
+    case 'retention':
+      return {
+        goal,
+        title: 'Lift retention',
+        body: 'More new users coming back on day 1 and day 7 after their first session.',
+        metricLine: 'Metric: D1/D7 return rate of the weekly first-activity cohort · Baseline: measured on commit',
+        prompt: 'My goal is retention. Design the cheapest test that lifts day-1 and day-7 return rates for new users.',
+      };
+    case 'revenue':
+      return {
+        goal,
+        title: 'Lift revenue',
+        body: 'More checkouts, upgrades, and net revenue from the same traffic.',
+        metricLine: 'Metric: deduplicated net revenue per declared currency · Baseline: measured on commit',
+        prompt: 'My goal is revenue. Design the cheapest test that lifts net revenue or paying conversion.',
+      };
+    case 'traffic':
+      return {
+        goal,
+        title: 'Grow the right traffic',
+        body: 'More sessions from the referrer channels that actually convert.',
+        metricLine: 'Metric: sessions and new people by referrer channel · Baseline: measured on commit',
+        prompt: 'My goal is traffic. Design the cheapest test that grows sessions from the channels that convert.',
+      };
+    default:
+      return null;
+  }
+}

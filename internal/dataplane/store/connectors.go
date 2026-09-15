@@ -127,6 +127,9 @@ func (s *Store) migrateConnectors(ctx context.Context) error {
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS deletion_mode VARCHAR(16) NOT NULL DEFAULT 'none'`,
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_column VARCHAR(128) NOT NULL DEFAULT ''`,
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS soft_delete_semantics VARCHAR(16) NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS connector_syncs_stale_project_idx
+ON connector_syncs (project_id, created_at DESC)
+WHERE enabled AND (last_status = 'error' OR last_success_at IS NULL)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {

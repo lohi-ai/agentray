@@ -3,18 +3,21 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewMetric, type OverviewRange, type OverviewResult, type OverviewRevenueDetail, type OverviewSourceStatus } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type MetricTargetView, type OverviewActivationDetail, type OverviewMetric, type OverviewRange, type OverviewResult, type OverviewRevenueDetail, type OverviewSourceStatus } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatCompact, formatNumber } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
-import { firstValuePath, settingsPath } from '@/lib/ia';
-import { useEventNames } from '@/modules/app/hooks';
+import { firstValuePath, projectAccess, settingsPath } from '@/lib/ia';
+import { useCurrentProject, useEventNames } from '@/modules/app/hooks';
+import { GoalPrompt } from './goal-prompt';
 import { evidenceAvailable, evidenceLine } from '@/modules/plans/lib/plans';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
+import { AddAnnotationButton, useAnnotations } from '@/modules/annotations';
+import { useProjectAccess } from '@/modules/app/hooks';
 
 // The range control always offers Today plus the complete-day windows. Today
 // is the explicit partial period: the backend returns no comparison for it
@@ -56,6 +59,21 @@ export function metricTile(label: string, m: OverviewMetric): { label: string; v
     tile.deltaTone = pct >= 0 ? 'up' : 'down';
   }
   return tile;
+}
+
+// --- Targets ---------------------------------------------------------------
+// The verdict badge a stat carries when the server judged the reading. The
+// label is the served verdict word plus the server-rendered target label —
+// "On track · ≥ 40% weekly" — so no client re-derives the target's wording.
+const VERDICT_WORD: Record<string, string> = { on_track: 'On track', at_risk: 'At risk', off_track: 'Off track' };
+const VERDICT_STATUS: Record<string, string> = { on_track: 'healthy', at_risk: 'attention', off_track: 'danger' };
+
+export function targetBadge(target?: MetricTargetView): { status: string; label: string } | undefined {
+  if (!target?.verdict) return undefined;
+  const word = VERDICT_WORD[target.verdict];
+  const status = VERDICT_STATUS[target.verdict];
+  if (!word || !status) return undefined;
+  return { status, label: `${word} · ${target.label}` };
 }
 
 // --- Money ---------------------------------------------------------------
@@ -136,11 +154,17 @@ export function retentionTile(label: string, p: { state: string; rate: number; r
 // the coverage and the freshness. Composed here from served fields only.
 
 // A tile's input population. Provenance names what the tile actually measured —
-// one blanket percentage across the page would be a claim no tile can support.
 export type TileInput =
   | { kind: 'metric'; metric: OverviewMetric }
   | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
-  | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
+  | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number; target?: MetricTargetView } }
+  | { kind: 'activation' }
+  // Every received event — the population the retired-surface reads (traffic
+  // class, AI-cited pages, platform split, top events, event volume) count.
+  | { kind: 'events' }
+  // A metric over that same all-events population: the metric's own state
+  // decides the label, the coverage line counts events, not qualifying rows.
+  | { kind: 'eventsMetric'; metric: OverviewMetric }
   | { kind: 'unserved' };
 
 // A calendar date in the project timezone.
@@ -210,6 +234,9 @@ function tileRange(res: OverviewResult, input: TileInput): string {
   if (input.kind === 'retention') {
     return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
   }
+  if (input.kind === 'activation') {
+    return 'lifetime cohorts · 7-day conversion window';
+  }
   // The money read serves its own window; stamping the context range on it
   // would be a claim about a window the arithmetic never covered.
   const range = input.kind === 'money' && input.detail ? input.detail.window : res.context.range;
@@ -223,12 +250,26 @@ function tileRange(res: OverviewResult, input: TileInput): string {
 // from another tile's coverage.
 function tileCoverage(res: OverviewResult, input: TileInput): string {
   if (input.kind === 'unserved') return 'not instrumented — no served metric';
+  if (input.kind === 'activation') {
+    const detail = res.metrics.activation_detail;
+    if (!detail || res.metrics.activation.state === 'unconfigured') {
+      return res.metrics.activation.notes?.[0] || 'no activation condition is stored for projects yet — configure it before this metric can compute';
+    }
+    if (res.metrics.activation.state === 'not_ready') {
+      return `no mature ${detail.window_days}-day cohort yet`;
+    }
+    return `coverage ${formatCompact(detail.eligible)} mature members · ${formatCompact(detail.activated)} activated`;
+  }
+  if (input.kind === 'events') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+  if (input.kind === 'eventsMetric') {
+    if (input.metric.state === 'ok') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+    return res.data_status.ever_received ? 'no events in range' : 'no events received yet';
+  }
   if (input.kind === 'retention') {
     return input.point.eligible === 0
       ? `no mature ${input.day}-day cohort yet`
       : `coverage ${formatCompact(input.point.eligible)} mature members`;
   }
-  // Money coverage is the money read's own population — the deduplicated
   // bookings the arithmetic ran on, never the page's event count.
   if (input.kind === 'money') {
     const detail = input.detail;
@@ -264,8 +305,12 @@ export function tileProvenance(res: OverviewResult, input: TileInput): string {
   const timezone = res.context.timezone_source === 'fallback'
     ? 'UTC fallback — no project timezone set'
     : res.context.timezone;
+  // The target version the verdict cites, when one is in force — the same
+  // "target vN" the prototype's provenance line prints.
+  const target = input.kind === 'retention' ? input.point.target : input.kind === 'unserved' || input.kind === 'events' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
   return [
     `metric ${res.context.metric_version}`,
+    ...(target ? [`target v${target.version}`] : []),
     tileRange(res, input),
     timezone,
     tileCoverage(res, input),
@@ -283,17 +328,40 @@ export function acquisitionStats(res: OverviewResult) {
   return [metricStat(res, 'New people', res.metrics.new_users)];
 }
 function metricStat(res: OverviewResult, label: string, m: OverviewMetric) {
-  return { ...metricTile(label, m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+  return { ...metricTile(label, m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
 }
 
 function revenueStat(res: OverviewResult) {
   const metric = res.metrics.revenue;
   const detail = res.metrics.revenue_detail;
-  return { ...revenueTile(metric, detail), provenance: tileProvenance(res, { kind: 'money', metric, detail }) };
+  return { ...revenueTile(metric, detail), badge: targetBadge(metric.target), provenance: tileProvenance(res, { kind: 'money', metric, detail }) };
 }
 
-function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number }) {
-  return { ...retentionTile(label, p), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
+export function activationTile(
+  m: OverviewMetric,
+  detail?: OverviewActivationDetail | null,
+): { label: string; value: string } {
+  if (m.state === 'ok' && detail) {
+    return { label: 'Activation', value: `${Math.round(detail.rate * 100)}%` };
+  }
+  const stateLabel =
+    m.state === 'unconfigured' ? 'Set up'
+    : m.state === 'not_ready' ? 'Not ready'
+    : m.state === 'no_data' ? 'No data'
+    : 'Not available';
+  return { label: 'Activation', value: stateLabel };
+}
+
+function activationStat(res: OverviewResult) {
+  return {
+    ...activationTile(res.metrics.activation, res.metrics.activation_detail),
+    badge: targetBadge(res.metrics.activation.target),
+    provenance: tileProvenance(res, { kind: 'activation' }),
+  };
+}
+
+function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView }) {
+  return { ...retentionTile(label, p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
 }
 
 function unservedStat(res: OverviewResult, label: string) {
@@ -456,7 +524,7 @@ export function overviewViewState(input: {
 // explanation, never a fabricated live number.
 export type NextStep =
   | { kind: 'finding'; title: string; observation: string; evidence: string }
-  | { kind: 'capability'; reason: 'no_finding' | 'incomplete_finding' | 'unavailable' };
+  | { kind: 'capability'; reason: 'no_finding' | 'incomplete_finding' | 'unavailable'; goal?: string };
 
 function isEvidenceBackedFinding(candidate: AgentRecommendation): boolean {
   return candidate.status === 'open'
@@ -465,7 +533,11 @@ function isEvidenceBackedFinding(candidate: AgentRecommendation): boolean {
     && evidenceAvailable(candidate);
 }
 
-export function bestNextStep(findings: readonly AgentRecommendation[] | undefined, unavailable = false): NextStep {
+export function bestNextStep(
+  findings: readonly AgentRecommendation[] | undefined,
+  unavailable = false,
+  goal?: string,
+): NextStep {
   if (unavailable) return { kind: 'capability', reason: 'unavailable' };
   // list_findings is open-first and impact-ranked. A malformed legacy row must
   // not hide the next real, evidence-backed action.
@@ -473,9 +545,15 @@ export function bestNextStep(findings: readonly AgentRecommendation[] | undefine
   if (finding) {
     return { kind: 'finding', title: finding.title.trim(), observation: finding.rationale.trim(), evidence: evidenceLine(finding) };
   }
+  const cleanGoal = (goal ?? '').trim().toLowerCase();
+  const effectiveGoal = cleanGoal && cleanGoal !== 'skipped' ? cleanGoal : undefined;
   // Rows arrived but none is display-complete is a different fact from "no
   // findings yet" — the capability copy names which one happened.
-  return { kind: 'capability', reason: findings && findings.length > 0 ? 'incomplete_finding' : 'no_finding' };
+  return {
+    kind: 'capability',
+    reason: findings && findings.length > 0 ? 'incomplete_finding' : 'no_finding',
+    ...(effectiveGoal ? { goal: effectiveGoal } : {}),
+  };
 }
 // list_findings is keyset-paginated and open-first. Stop as soon as its ranking
 // yields the first display-complete open finding or the settled-history
@@ -505,7 +583,9 @@ export async function firstEvidenceBackedFinding(
 const TARGET_44 = '[&_button]:min-h-[44px] [&_[role=radio]]:min-h-[44px] [&_[role=combobox]]:min-h-[44px]';
 
 export function OverviewPage() {
-  const projectID = useAuthStore((s) => s.project?.id);
+  const project = useAuthStore((s) => s.project);
+  const projectID = project?.id;
+  const { updateProject } = useCurrentProject();
   const [period, setPeriod] = useState('7d');
   const [platform, setPlatform] = useState('');
 
@@ -522,7 +602,16 @@ export function OverviewPage() {
     staleTime: 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
   const res = query.data ?? null;
+
+  // The trend's annotation window is the served range — the same window the
+  // figures cover, so a mark outside it is absent rather than mispositioned.
+  const annotationRange = res?.context.range ?? null;
+  const annotations = useAnnotations(
+    annotationRange ? { from: annotationRange.from, to: annotationRange.to } : null,
+  );
+  const access = useProjectAccess();
 
   const viewState = overviewViewState({
     projectID,
@@ -549,7 +638,11 @@ export function OverviewPage() {
     staleTime: 60 * 1000,
     refetchOnWindowFocus: false,
   });
-  const nextStep = bestNextStep(findingsQuery.data ? [findingsQuery.data] : undefined, findingsQuery.isError);
+  const nextStep = bestNextStep(
+    findingsQuery.data ? [findingsQuery.data] : undefined,
+    findingsQuery.isError,
+    project?.goal,
+  );
 
   const freshness = res ? freshnessLabel(res) : null;
   const occurredAt = res?.data_status.last_event_at
@@ -574,7 +667,7 @@ export function OverviewPage() {
     : [];
   const usageStats = res
     ? [
-        metricStat(res, 'Activation', res.metrics.activation),
+        activationStat(res),
         retentionStat(res, 'D1 retention', 1, res.retention.d1),
         retentionStat(res, 'D7 retention', 7, res.retention.d7),
         retentionStat(res, 'D30 retention', 30, res.retention.d30),
@@ -595,8 +688,22 @@ export function OverviewPage() {
       smooth: false,
       integerY: true,
       height: 220,
+      annotations: annotations.annotations,
     };
-  }, [res]);
+  }, [res, annotations.annotations]);
+
+  const hasReceivedEvents = (eventNames && eventNames.length > 0) || !!res?.data_status.ever_received;
+  // The goal gate lives inside GoalPrompt, not here: gating on !project.goal
+  // unmounts the panel the moment the goal write lands, which kills the
+  // activation-event mapping stage before it can render.
+  const goalPromptPanel = project && access.canWrite && hasReceivedEvents ? (
+    <GoalPrompt
+      project={project}
+      eventNames={eventNames}
+      onUpdateProject={updateProject}
+      access={access}
+    />
+  ) : null;
   const trend = res ? trendMeaning(res) : 'empty';
 
   const headerRange = res ? rangeLabel(res) : '';
@@ -702,27 +809,68 @@ export function OverviewPage() {
   // no complete finding exists the page explains what the connected data makes
   // possible, with a clearly labeled example — never a fabricated live number,
   // an upgrade CTA, a price, or an ROI claim.
-  const capabilityExplanation = (reason: 'no_finding' | 'incomplete_finding' | 'unavailable') => (
-    <div className="flex flex-col gap-3">
-      <p className="text-sm text-[var(--color-text-secondary)]">
-        {reason === 'unavailable'
-          ? 'Findings are unavailable right now. The numbers above are unaffected.'
-          : reason === 'incomplete_finding'
-            ? 'A finding exists but its evidence is not readable yet. Once your agent has read enough of this project it files a complete one here — the observation, the comparison behind it, and the evidence line.'
-            : 'No complete finding yet. Once your agent has read enough of this project it files one here — the observation, the comparison behind it, and the evidence line.'}
-      </p>
-      {/* A labeled example, never a live number: the panel explains what a
-          finding looks like without claiming this project has one. */}
-      <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
-        <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Example — not your data</p>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">“Activation fell 12% week over week, driven by the signup → first-project step.”</p>
+  const capabilityExplanation = (
+    reason: 'no_finding' | 'incomplete_finding' | 'unavailable',
+    goal?: string,
+  ) => {
+    if (reason === 'no_finding' && goal && goal !== 'skipped') {
+      const goalConfig: Record<string, { copy: string; ctaLabel: string; href: string }> = {
+        activation: {
+          copy: 'No complete finding yet. Your goal is activation — the first thing worth watching is whether new users reach first value within their first week.',
+          ctaLabel: project?.activation_event ? 'See usage' : 'Set activation event',
+          href: project?.activation_event ? '/usage' : settingsPath('projects'),
+        },
+        retention: {
+          copy: 'No complete finding yet. Your goal is retention — the first thing worth watching is whether new users come back on day 1 and day 7.',
+          ctaLabel: 'See retention',
+          href: '/usage',
+        },
+        revenue: {
+          copy: 'No complete finding yet. Your goal is revenue — the first thing worth watching is your net bookings and paying conversion.',
+          ctaLabel: 'See monetization',
+          href: '/monetization',
+        },
+        traffic: {
+          copy: 'No complete finding yet. Your goal is traffic — the first thing worth watching is which referrer channels bring converting sessions.',
+          ctaLabel: 'See acquisition',
+          href: '/acquisition',
+        },
+      };
+      const cfg = goalConfig[goal];
+      if (cfg) {
+        return (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-[var(--color-text-secondary)]">{cfg.copy}</p>
+            <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+              <Button variant="outline" size="sm" onClick={() => { window.location.href = cfg.href; }}>{cfg.ctaLabel}</Button>
+              <Button variant="ghost" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
+            </div>
+          </div>
+        );
+      }
+    }
+    return (
+      <div className="flex flex-col gap-3">
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          {reason === 'unavailable'
+            ? 'Findings are unavailable right now. The numbers above are unaffected.'
+            : reason === 'incomplete_finding'
+              ? 'A finding exists but its evidence is not readable yet. Once your agent has read enough of this project it files a complete one here — the observation, the comparison behind it, and the evidence line.'
+              : 'No complete finding yet. Once your agent has read enough of this project it files one here — the observation, the comparison behind it, and the evidence line.'}
+        </p>
+        {/* A labeled example, never a live number: the panel explains what a
+            finding looks like without claiming this project has one. */}
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-background-muted)] p-3">
+          <p className="text-2xs uppercase tracking-[0.06em] text-[var(--color-text-secondary)]">Example — not your data</p>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">“Activation fell 12% week over week, driven by the signup → first-project step.”</p>
+        </div>
+        <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
+          <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
+          <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
+        </div>
       </div>
-      <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
-        <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = settingsPath('ai'); }}>Connect your agent (MCP)</Button>
-        <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask in chat</Button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   // The unified empty the receipt_only/empty states share: the chart slot says
   // why it is flat without pretending a group of state tiles is a measurement.
@@ -805,12 +953,13 @@ export function OverviewPage() {
 
         {viewState === 'first_run' ? (
           <>
+            {goalPromptPanel}
             <FirstEventQuickstart />
             {/* §Value-first story names the first-run state explicitly: the
                 capability explanation renders here too, with the labeled
                 example — never a fabricated number. */}
             <Panel title="What this overview will show you">
-              {capabilityExplanation('no_finding')}
+              {capabilityExplanation('no_finding', project?.goal)}
             </Panel>
             {/* A first-run project with a result still gets its data status:
                 "nothing has arrived" is a receipt fact worth showing, not a
@@ -857,6 +1006,7 @@ export function OverviewPage() {
 
         {viewState === 'data' && res ? (
           <>
+            {goalPromptPanel}
             {freshnessCallout}
 
             <StatsStrip stats={stats} />
@@ -867,7 +1017,7 @@ export function OverviewPage() {
                 the order both prototypes and this doc's item list share. */}
             <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
               <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
-                <Panel title="Active people per day">
+                <Panel title="Active people per day" action={access.canWrite ? <AddAnnotationButton annotations={annotations} /> : undefined}>
                   {trendSpec ? (
                     <>
                       <Chart spec={trendSpec} />
@@ -975,7 +1125,7 @@ export function OverviewPage() {
                 </Panel>
               ) : (
                 <Panel title="Best next step">
-                  {capabilityExplanation(nextStep.reason)}
+                  {capabilityExplanation(nextStep.reason, nextStep.goal)}
                 </Panel>
               )}
             </div>

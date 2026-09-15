@@ -185,6 +185,8 @@ func (s *Store) migrateValidation(ctx context.Context) error {
 		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS review_date TIMESTAMPTZ`,
 		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS outcome_json JSONB`,
 		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS revision BIGINT`,
+		`CREATE INDEX IF NOT EXISTS validation_tests_digest_decided_idx
+ON validation_tests (project_id, decided_at DESC) WHERE decided_at IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS waitlist_signups (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -773,7 +775,6 @@ FROM waitlist_signups WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2`, 
 	return out, rows.Err()
 }
 
-
 // CountWaitlistSignups counts subscribed addresses — the number the threshold is
 // judged against. Unsubscribes are excluded: someone who left is not demand.
 func (s *Store) CountWaitlistSignups(ctx context.Context, projectID string) (int, error) {
@@ -782,7 +783,6 @@ func (s *Store) CountWaitlistSignups(ctx context.Context, projectID string) (int
 SELECT count(*) FROM waitlist_signups WHERE project_id = $1 AND status = 'subscribed'`, projectID).Scan(&n)
 	return n, err
 }
-
 
 // plausibleEmail is a shape check, not a validity check — nothing short of
 // delivery proves an address, and a stricter regex mostly rejects real people.

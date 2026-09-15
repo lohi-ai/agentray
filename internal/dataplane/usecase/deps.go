@@ -86,6 +86,9 @@ type Repo interface {
 	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
+	// The project-scoped metric target history: set_metric_target appends a
+	// version, and save_board declares targets through the same write.
+	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
 	DistinctIDLinked(ctx context.Context, projectID, distinctID string) (bool, error)
 	RecentEventsForVerification(ctx context.Context, projectID string, limit int, since time.Time) ([]storage.Event, error)
 
@@ -112,6 +115,21 @@ type Repo interface {
 	ListDataConnectorsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.DataConnector, error)
 	ArchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
 	UnarchiveDataConnectorIdempotent(ctx context.Context, projectID, connectorID string, expectedRevision int64, idemKey, requestHash string) (storage.DataConnector, error)
+	// Findings engine (ticket 001): the funnel-watch declarations the drop-off
+	// detector re-runs. The scan itself needs no Repo additions — the
+	// per-project surface it reads (Overview, RunInsight, CreateRecommendation)
+	// is already declared above.
+	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
+	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
+
+	// Chart annotations: the project-scoped marks a member drops on a trend.
+	// The window read is the overlap contract every temporal chart asks for;
+	// the by-id read resolves evidence references without ever crossing a
+	// project boundary.
+	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
+	AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]storage.Annotation, error)
+	AnnotationForProject(ctx context.Context, projectID, id string) (storage.Annotation, error)
+	DeleteAnnotationIdempotent(ctx context.Context, projectID, id, idemKey, requestHash string) (storage.Annotation, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification
