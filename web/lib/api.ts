@@ -1453,9 +1453,12 @@ export type TestOutcomeEntry = {
   unit: string;
   window: string;
   evidence_ref: string;
-  author_kind: string; // 'agent' | 'user'
+  author_kind: string; // 'agent' | 'user' | 'system' (scheduled auto-close)
   author_id: string;
   recorded_at: string;
+  // note carries the prose the numbers alone cannot — the auto-close writes
+  // the guardrail delta and the reason for an inconclusive close here.
+  note?: string;
 };
 
 // ListFindingsResult is the list_findings op output — a keyset page of

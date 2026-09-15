@@ -275,11 +275,12 @@ func testStatus() opcore.Operation[testStatusInput, testStatusOutput] {
 				return out, nil
 			}
 			if test.Status != storage.TestCommitted {
-				// Already decided. The verdict is what the owner CALLED it, never a
-				// recomputation — a late-arriving event must not turn a test the
-				// owner closed as failed into a pass the product now claims.
+				// Already decided — by the owner's call or the scheduled
+				// auto-close. The verdict is what was RECORDED, never a
+				// recomputation: a late-arriving event must not turn a closed
+				// test into a different answer the product now claims.
 				out.Verdict = test.Status
-				out.Note = "The owner already decided this one: " + test.Status + "." +
+				out.Note = "This test is already decided: " + test.Status + "." +
 					decisionNoteSuffix(test.DecisionNote) +
 					" Report the decision as it stands; do not re-judge it from the counts."
 				return out, nil

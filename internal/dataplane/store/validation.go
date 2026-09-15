@@ -86,13 +86,17 @@ type ValidationTest struct {
 
 // Test lifecycle. `proposed` is the agent's draft; `committed` is the owner
 // having agreed to it in advance, which is the whole point of the row; the
-// three terminal states are the decision.
+// terminal states are the decision. `inconclusive` is the one terminal state a
+// human never picks: the scheduled auto-close writes it when the review date
+// arrived but the committed window is still open, so the record says "measured,
+// not yet answerable" instead of pretending the number settled.
 const (
-	TestProposed  = "proposed"
-	TestCommitted = "committed"
-	TestPassed    = "passed"
-	TestFailed    = "failed"
-	TestAbandoned = "abandoned"
+	TestProposed     = "proposed"
+	TestCommitted    = "committed"
+	TestPassed       = "passed"
+	TestFailed       = "failed"
+	TestAbandoned    = "abandoned"
+	TestInconclusive = "inconclusive"
 )
 
 // validationOpenStates is the one definition of "the owner has not closed this
@@ -187,6 +191,10 @@ func (s *Store) migrateValidation(ctx context.Context) error {
 		`ALTER TABLE validation_tests ADD COLUMN IF NOT EXISTS revision BIGINT`,
 		`CREATE INDEX IF NOT EXISTS validation_tests_digest_decided_idx
 ON validation_tests (project_id, decided_at DESC) WHERE decided_at IS NOT NULL`,
+		// The auto-close pass reads committed tests whose review date has
+		// arrived; the partial index keeps that scan off the decided history.
+		`CREATE INDEX IF NOT EXISTS validation_tests_review_due_idx
+ON validation_tests (review_date) WHERE status = 'committed' AND review_date IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS waitlist_signups (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -532,10 +540,12 @@ WHERE id = $1 AND project_id = $2 AND status = 'proposed'`, id, project.ID)
 }
 
 // DecideValidationTest closes a committed test. The note is kept because "why"
-// is the part worth reading a month later.
+// is the part worth reading a month later. `inconclusive` is accepted so the
+// owner can record the same call the scheduled auto-close makes — a review
+// that arrived while the window was still open.
 func (s *Store) DecideValidationTest(ctx context.Context, userID, projectID, id, status, note string) error {
-	if status != TestPassed && status != TestFailed && status != TestAbandoned {
-		return errors.New("status must be passed, failed or abandoned")
+	if status != TestPassed && status != TestFailed && status != TestAbandoned && status != TestInconclusive {
+		return errors.New("status must be passed, failed, abandoned or inconclusive")
 	}
 	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
 	if err != nil {
@@ -551,6 +561,57 @@ WHERE id = $1 AND project_id = $2 AND status = 'committed'`, id, project.ID, sta
 		return errors.New("no committed test with that id")
 	}
 	return nil
+}
+
+// DueValidationTests returns the committed tests whose review date has arrived
+// — the set the scheduled auto-close pass re-measures. projectID empty means
+// fleet-wide (the tick); a project id scopes the on-demand review op to one
+// project. Proposed tests are never returned (a review date on a draft is a
+// plan, not a running clock) and decided tests are unreachable by the status
+// guard, so a re-run can never re-close a test.
+func (s *Store) DueValidationTests(ctx context.Context, projectID string, now time.Time) ([]ValidationTest, error) {
+	where := `status = 'committed' AND review_date IS NOT NULL AND review_date <= $1`
+	args := []any{now}
+	if projectID != "" {
+		where += ` AND project_id = $2`
+		args = append(args, projectID)
+	}
+	rows, err := s.pg.Query(ctx, `
+SELECT `+validationTestCols+`
+FROM validation_tests
+WHERE `+where+`
+ORDER BY review_date ASC, id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ValidationTest{}
+	for rows.Next() {
+		t, err := scanValidationTest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CountEventPeople counts distinct people firing one event inside [from, to) —
+// the guardrail half of the auto-close measurement. It deliberately counts the
+// raw distinct_id the test's own progress read uses (validation.go), not the
+// stitched canonical id: the guardrail and the threshold must be measured on
+// the same population or the comparison invents a gap.
+func (s *Store) CountEventPeople(ctx context.Context, projectID, eventName string, from, to time.Time) (int, error) {
+	if s.duck == nil {
+		return 0, errDuckDBNotOpen
+	}
+	var people uint64
+	err := s.duckQueryRow(ctx, `
+SELECT count(DISTINCT distinct_id)
+FROM events
+WHERE project_id = ? AND event_name = ? AND "timestamp" >= ? AND "timestamp" < ?`,
+		[]any{projectID, eventName, from, to}, &people)
+	return int(people), err
 }
 
 // TestProgress is a committed test measured against reality.

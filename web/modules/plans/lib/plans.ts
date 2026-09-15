@@ -128,6 +128,7 @@ export const EXPERIMENT_LABEL: Record<string, string> = {
   passed: 'Passed',
   failed: 'Failed',
   abandoned: 'Abandoned',
+  inconclusive: 'Inconclusive',
 };
 
 export const EXPERIMENT_PILL: Record<string, string> = {
@@ -136,6 +137,7 @@ export const EXPERIMENT_PILL: Record<string, string> = {
   passed: 'healthy',
   failed: 'attention',
   abandoned: 'paused',
+  inconclusive: 'paused',
 };
 
 // ---- Goal-seeded first experiment (007) ------------------------------------

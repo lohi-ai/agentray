@@ -8,7 +8,7 @@ import type { MeasuredTest } from '@/lib/api';
 // one validation_tests row — the concept already existed, it just had room for
 // one at a time.
 
-export type PrototypeState = 'proposed' | 'running' | 'passed' | 'failed' | 'abandoned';
+export type PrototypeState = 'proposed' | 'running' | 'passed' | 'failed' | 'abandoned' | 'inconclusive';
 
 /**
  * stateOf reads the row's state from the SERVER's verdict, never from a local
@@ -25,6 +25,8 @@ export function stateOf(t: MeasuredTest): PrototypeState {
   if (t.status === 'passed') return 'passed';
   if (t.status === 'failed') return 'failed';
   if (t.status === 'abandoned') return 'abandoned';
+  // The scheduled auto-close's terminal state: measured, window still open.
+  if (t.status === 'inconclusive') return 'inconclusive';
   // Committed: the server's verdict says whether the window has already settled
   // it. `committed` back means still running — too early to call.
   if (t.verdict === 'passed') return 'passed';
@@ -39,8 +41,8 @@ export const STATE_LABEL: Record<PrototypeState, string> = {
   passed: 'Passed',
   failed: 'Failed',
   abandoned: 'Abandoned',
+  inconclusive: 'Inconclusive',
 };
-
 // StatusPill's four states, mapped so a prototype's pill reads like every other
 // pill in the product rather than inventing a fifth vocabulary.
 export const STATE_PILL: Record<PrototypeState, string> = {
@@ -49,6 +51,8 @@ export const STATE_PILL: Record<PrototypeState, string> = {
   passed: 'healthy',
   failed: 'attention',
   abandoned: 'paused',
+  // Inconclusive is a measured non-answer, not a failure: paused, not attention.
+  inconclusive: 'paused',
 };
 
 // Left-rule and progress-bar color. Tokens only — never a hex.
@@ -60,15 +64,15 @@ export const STATE_TONE: Record<PrototypeState, string> = {
   passed: 'var(--success)',
   failed: 'var(--danger)',
   abandoned: 'var(--color-text-disabled)',
+  inconclusive: 'var(--color-text-disabled)',
 };
-
-// isRecorded is whether the OWNER has closed the test, as opposed to the number
-// having settled it. The gap between the two matters: a committed test whose
-// window closed short of target already reads "Failed", but until the owner
-// writes down which of the three failures it was, the most useful thing the
-// product can do is ask.
+// isRecorded is whether the test is CLOSED — by the owner's decide or by the
+// scheduled auto-close — as opposed to the number having merely settled it.
+// The gap between the two matters: a committed test whose window closed short
+// of target already reads "Failed", but until someone writes down which of the
+// three failures it was, the most useful thing the product can do is ask.
 export function isRecorded(t: MeasuredTest): boolean {
-  return t.status === 'passed' || t.status === 'failed' || t.status === 'abandoned';
+  return t.status === 'passed' || t.status === 'failed' || t.status === 'abandoned' || t.status === 'inconclusive';
 }
 
 // Exactly one action per card, and it is the next honest move: agree to the

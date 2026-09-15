@@ -143,9 +143,13 @@ type TestOutcomeEntry struct {
 	Unit        string  `json:"unit"`
 	Window      string  `json:"window"`
 	EvidenceRef string  `json:"evidence_ref"`
-	AuthorKind  string  `json:"author_kind"` // 'agent' | 'user'
+	AuthorKind  string  `json:"author_kind"` // 'agent' | 'user' | 'system'
 	AuthorID    string  `json:"author_id"`
 	RecordedAt  string  `json:"recorded_at"`
+	// Note carries the prose the numbers alone cannot: the auto-close writes
+	// the guardrail delta and the reason an inconclusive close happened here,
+	// so the append-only list is self-explanatory without the decision note.
+	Note string `json:"note,omitempty"`
 }
 
 const (
@@ -175,7 +179,7 @@ UPDATE validation_tests SET
 	outcome_json = coalesce(outcome_json, '[]'::jsonb) || $3::jsonb,
 	revision = coalesce(revision, 1) + 1
 WHERE project_id = $1 AND id = $2
-  AND status IN ('committed','passed','failed','abandoned')
+  AND status IN ('committed','passed','failed','abandoned','inconclusive')
   AND coalesce(revision, 1) = $4
   AND coalesce(jsonb_array_length(coalesce(outcome_json, '[]'::jsonb)), 0) < $5
 RETURNING `+validationTestCols,
@@ -265,6 +269,80 @@ func (s *Store) AbandonValidationTestIdempotent(ctx context.Context, projectID, 
 	raw, err := s.runIdempotent(ctx, projectID, "abandon_test", idemKey, requestHash,
 		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
 			t, err := abandonValidationTest(ctx, q, projectID, id, reason, expectedRevision)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(t)
+		})
+	if err != nil {
+		return ValidationTest{}, err
+	}
+	var t ValidationTest
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return ValidationTest{}, err
+	}
+	return t, nil
+}
+
+// closeValidationTestSystem is the scheduled auto-close's write: the measured
+// outcome entry and the terminal status land in ONE statement, so a crash can
+// never leave a decided test without its evidence or an open test with a
+// closing entry. The `status = 'committed'` guard is the whole concurrency
+// contract — a test the owner decided between the due-read and this write is
+// unreachable, and a replayed tick re-selects nothing.
+//
+// The outcome append is best-effort inside the same statement: a test whose
+// outcome list is already at the cap still closes (the measurement lives in
+// decision_note), because a full evidence list must not pin a test open
+// forever.
+func closeValidationTestSystem(ctx context.Context, q pgQuerier, projectID, id, status, note string, entry TestOutcomeEntry) (ValidationTest, error) {
+	if status != TestPassed && status != TestFailed && status != TestInconclusive {
+		return ValidationTest{}, fmt.Errorf("system close must be passed, failed or inconclusive, got %q", status)
+	}
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return ValidationTest{}, err
+	}
+	if len(entryJSON) > outcomeEntryBytes {
+		return ValidationTest{}, fmt.Errorf("outcome entry exceeds %d bytes", outcomeEntryBytes)
+	}
+	var t ValidationTest
+	err = q.QueryRow(ctx, `
+UPDATE validation_tests SET
+	outcome_json = CASE
+		WHEN coalesce(jsonb_array_length(coalesce(outcome_json, '[]'::jsonb)), 0) < $6
+		THEN coalesce(outcome_json, '[]'::jsonb) || $5::jsonb
+		ELSE outcome_json END,
+	status = $3, decided_at = now(), decision_note = $4,
+	revision = coalesce(revision, 1) + 1
+WHERE project_id = $1 AND id = $2 AND status = 'committed'
+RETURNING `+validationTestCols,
+		projectID, id, status, note, string(entryJSON), outcomeEntryCap).
+		Scan(scanValidationTestDest(&t)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Not committed anymore — the owner's decide won the race, or a
+			// previous pass already closed it. Either way there is nothing to
+			// do and nothing to retry.
+			return ValidationTest{}, ErrTestNoLongerCommitted
+		}
+		return ValidationTest{}, err
+	}
+	return t, nil
+}
+
+// ErrTestNoLongerCommitted marks the benign race where a test left the
+// committed state between the due-read and the close write — the owner's
+// decide or an earlier pass got there first.
+var ErrTestNoLongerCommitted = errors.New("test is no longer committed")
+
+// CloseValidationTestSystemIdempotent is closeValidationTestSystem under an
+// idempotency claim — the auto-close always passes its deterministic key, so a
+// crashed pass replays the stored receipt instead of double-appending.
+func (s *Store) CloseValidationTestSystemIdempotent(ctx context.Context, projectID, id, status, note string, entry TestOutcomeEntry, idemKey, requestHash string) (ValidationTest, error) {
+	raw, err := s.runIdempotent(ctx, projectID, "autoclose_test", idemKey, requestHash,
+		func(ctx context.Context, q pgQuerier) (json.RawMessage, error) {
+			t, err := closeValidationTestSystem(ctx, q, projectID, id, status, note, entry)
 			if err != nil {
 				return nil, err
 			}
