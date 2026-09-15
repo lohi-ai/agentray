@@ -75,6 +75,12 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, runSource())
 	opcore.Register(r, sourceStatus())
 	opcore.Register(r, cancelSourceRun())
+	opcore.Register(r, runFindingsScan())
+	opcore.Register(r, watchFunnel())
+	opcore.Register(r, listFunnelWatches())
+	opcore.Register(r, addAnnotation())
+	opcore.Register(r, listAnnotations())
+	opcore.Register(r, deleteAnnotation())
 	r.SetLegacyAllowlist(legacyOperationAllowlist)
 	r.SetErrorClassifier(classifyOpError)
 	r.SetErrorMapper(MapOpError)
@@ -510,6 +516,11 @@ func submitRecommendation() opcore.Operation[submitRecInput, submitRecOutput] {
 			d, err := depsFrom(cc)
 			if err != nil {
 				return submitRecOutput{}, err
+			}
+			if len(in.Evidence) > 0 {
+				if rerr := resolveAnnotationEnvelope(ctx, d, cc.ProjectID, in.Evidence); rerr != nil {
+					return submitRecOutput{}, rerr
+				}
 			}
 			// title is enforced as required by opcore before the handler runs.
 			ev := "{}"

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, ChevronUp, LayoutGrid, Plus, Sparkles } from 'lucide-react';
-import { useAuthStore } from '@/lib/app-state';
+import { useAuthStore, useFiltersStore } from '@/lib/app-state';
 import type { Chart } from '@/lib/api';
 import { formatCompact } from '@/lib/format';
 import { firstSessionNotice, firstValuePath, settingsPath } from '@/lib/ia';
@@ -20,6 +20,7 @@ import { ChartCard } from './chart-card';
 import { ChartEditor } from './chart-editor';
 import { DailyReadout } from './daily-readout';
 import { FirstEventQuickstart } from './first-event-quickstart';
+import { useAnnotations, annotationWindow } from '@/modules/annotations';
 
 // spanClass maps a chart's column span onto the 3-column board grid; it collapses
 // to a single column on narrow screens where the grid itself is one column.
@@ -49,6 +50,17 @@ export function DashboardPage() {
   // Whether this board can be edited at all. A visitor reading the shared demo
   // owns none of these charts, and the API refuses every write to them.
   const access = useProjectAccess();
+
+  // The board's annotation window is the applied filter range — the same
+  // window withTimeWindow injects into every SQL chart. The raw filter fields
+  // key the query; the "now" fallback resolves inside it, not during render.
+  const appliedFilters = useFiltersStore((s) => s.appliedFilters);
+  const annotations = useAnnotations({
+    from: appliedFilters.from || undefined,
+    to: appliedFilters.to || undefined,
+    hours: appliedFilters.hours,
+  });
+
   // Provenance, not decoration: a stranger arrives here from the tour, and the
   // subtitle has to say whose board they are reading.
   const boardSubtitle = access.isDemo
@@ -210,6 +222,7 @@ export function DashboardPage() {
                 chart={chart}
                 summary={summary}
                 projectID={projectID}
+                annotations={annotations.annotations}
                 onEdit={access.canWrite ? () => setEditing(chart) : undefined}
                 onDelete={access.canWrite ? () => void deleteChart(chart.id) : undefined}
                 handle={access.canWrite ? (

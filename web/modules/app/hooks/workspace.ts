@@ -161,7 +161,7 @@ export function useCurrentProject() {
   const pathname = usePathname() ?? '';
   const { auth, workspaces, projects, selectedWorkspaceID, project } = useAuthStore();
   const { setWorkspaces, setProjects, setSelectedWorkspaceID, setProject, applyAuth } = useAuthStore();
-  const { setInsight, setReplay, setSQLRows, setSavedResult } = useUIStore();
+  const { setReplay, setSQLRows, setSavedResult } = useUIStore();
   const projectID = project?.id;
   const { setMessage, setError } = useUIStore();
 
@@ -173,7 +173,6 @@ export function useCurrentProject() {
     if (next.id === project?.id) return;
     setProject(next);
     writePreferredProjectID(next.id);
-    setInsight(null);
     setReplay(null);
     setSQLRows([]);
     setSavedResult(null);

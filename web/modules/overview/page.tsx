@@ -16,6 +16,8 @@ import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
+import { AddAnnotationButton, useAnnotations } from '@/modules/annotations';
+import { useProjectAccess } from '@/modules/app/hooks';
 
 // The range control always offers Today plus the complete-day windows. Today
 // is the explicit partial period: the backend returns no comparison for it
@@ -157,6 +159,12 @@ export type TileInput =
   | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
   | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number; target?: MetricTargetView } }
   | { kind: 'activation' }
+  // Every received event — the population the retired-surface reads (traffic
+  // class, AI-cited pages, platform split, top events, event volume) count.
+  | { kind: 'events' }
+  // A metric over that same all-events population: the metric's own state
+  // decides the label, the coverage line counts events, not qualifying rows.
+  | { kind: 'eventsMetric'; metric: OverviewMetric }
   | { kind: 'unserved' };
 
 // A calendar date in the project timezone.
@@ -252,6 +260,11 @@ function tileCoverage(res: OverviewResult, input: TileInput): string {
     }
     return `coverage ${formatCompact(detail.eligible)} mature members · ${formatCompact(detail.activated)} activated`;
   }
+  if (input.kind === 'events') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+  if (input.kind === 'eventsMetric') {
+    if (input.metric.state === 'ok') return `coverage ${formatCompact(res.data_status.events_in_range)} events in range`;
+    return res.data_status.ever_received ? 'no events in range' : 'no events received yet';
+  }
   if (input.kind === 'retention') {
     return input.point.eligible === 0
       ? `no mature ${input.day}-day cohort yet`
@@ -294,7 +307,7 @@ export function tileProvenance(res: OverviewResult, input: TileInput): string {
     : res.context.timezone;
   // The target version the verdict cites, when one is in force — the same
   // "target vN" the prototype's provenance line prints.
-  const target = input.kind === 'retention' ? input.point.target : input.kind === 'unserved' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
+  const target = input.kind === 'retention' ? input.point.target : input.kind === 'unserved' || input.kind === 'events' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
   return [
     `metric ${res.context.metric_version}`,
     ...(target ? [`target v${target.version}`] : []),
@@ -590,7 +603,16 @@ export function OverviewPage() {
     staleTime: 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
   const res = query.data ?? null;
+
+  // The trend's annotation window is the served range — the same window the
+  // figures cover, so a mark outside it is absent rather than mispositioned.
+  const annotationRange = res?.context.range ?? null;
+  const annotations = useAnnotations(
+    annotationRange ? { from: annotationRange.from, to: annotationRange.to } : null,
+  );
+  const access = useProjectAccess();
 
   const viewState = overviewViewState({
     projectID,
@@ -667,8 +689,9 @@ export function OverviewPage() {
       smooth: false,
       integerY: true,
       height: 220,
+      annotations: annotations.annotations,
     };
-  }, [res]);
+  }, [res, annotations.annotations]);
 
   const hasReceivedEvents = (eventNames && eventNames.length > 0) || !!res?.data_status.ever_received;
   // The goal gate lives inside GoalPrompt, not here: gating on !project.goal
@@ -995,7 +1018,7 @@ export function OverviewPage() {
                 the order both prototypes and this doc's item list share. */}
             <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
               <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
-                <Panel title="Active people per day">
+                <Panel title="Active people per day" action={access.canWrite ? <AddAnnotationButton annotations={annotations} /> : undefined}>
                   {trendSpec ? (
                     <>
                       <Chart spec={trendSpec} />

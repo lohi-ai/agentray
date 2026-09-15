@@ -1119,6 +1119,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// Chart annotations sit beside the boards they mark: a project-scoped
+	// record, not a per-chart field, so one deploy shows on every temporal
+	// chart that spans it.
+	if err := s.migrateAnnotations(ctx); err != nil {
+		return err
+	}
+
 	// Boards seeded before the "guest vs identified" query was corrected still
 	// read `properties.email`; the seed only ever runs once, so they have to be
 	// repaired here. Needs the revision column migrateLifecycle just added.
@@ -1138,6 +1145,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
+		return err
+	}
+
+	// Findings-engine substrate (finding_scan_state, funnel_watches). New
+	// tables only; after migrateAgent so the recommendations table it writes
+	// already exists on a fresh boot.
+	if err := s.migrateFindings(ctx); err != nil {
 		return err
 	}
 
@@ -4187,9 +4201,19 @@ func (s *Store) sessionQuality(ctx context.Context, projectID string, filter Eve
 		return 0, 0, err
 	}
 	where, args := filteredWhereWithDistinctIDs(projectID, filter, true, resolver.relatedDistinctIDs(filter.DistinctID))
+	duration, bounce, _, err := s.sessionQualityWhere(ctx, where, args)
+	return duration, bounce, err
+}
+
+// sessionQualityWhere runs the session-quality aggregate over a caller-built
+// window. The session count comes back beside the rates so a caller can tell
+// "every session bounced" from "there were no sessions" — the second is
+// no_data, never a 0% measurement.
+func (s *Store) sessionQualityWhere(ctx context.Context, where string, args []any) (float64, float64, uint64, error) {
 	var duration float64
 	var bounceRate float64
-	err = s.duckQueryRow(ctx, `
+	var sessions uint64
+	err := s.duckQueryRow(ctx, `
 WITH per_session AS (
 	SELECT
 		session_id,
@@ -4199,9 +4223,9 @@ WITH per_session AS (
 	WHERE `+where+` AND session_id <> ''
 	GROUP BY session_id
 )
-SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0)
-FROM per_session`, args, &duration, &bounceRate)
-	return duration, bounceRate, err
+SELECT coalesce(avg(duration_seconds), 0), coalesce(avg(if(events <= 1, 1, 0)), 0), count(*)
+FROM per_session`, args, &duration, &bounceRate, &sessions)
+	return duration, bounceRate, sessions, err
 }
 
 func (s *Store) propertyCounts(ctx context.Context, projectID string, filter EventFilter, property string, eventName string) ([]PathCount, error) {

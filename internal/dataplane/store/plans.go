@@ -404,7 +404,7 @@ const recommendationsPlansPageIndexDDL = `CREATE INDEX IF NOT EXISTS agent_recom
 const recommendationsPageSQL = `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
        evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
-       coalesce(revision, 1)
+       coalesce(revision, 1), source, coalesce(dedupe_key, '')
 FROM agent_recommendations
 WHERE project_id = $1
   AND ($2::text = '' OR
@@ -472,7 +472,7 @@ func (s *Store) ListRecommendationsPage(ctx context.Context, projectID, cursor s
 		var r AgentRecommendation
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.RunID, &r.Category, &r.Title, &r.Rationale,
 			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt,
-			&r.SeenCount, &r.LastSeenAt, &r.Revision); err != nil {
+			&r.SeenCount, &r.LastSeenAt, &r.Revision, &r.Source, &r.DedupeKey); err != nil {
 			return nil, "", err
 		}
 		out = append(out, r)
@@ -501,11 +501,11 @@ func (s *Store) RecommendationForProject(ctx context.Context, projectID, id stri
 	err := s.pg.QueryRow(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
        evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
-       coalesce(revision, 1)
+       coalesce(revision, 1), source, coalesce(dedupe_key, '')
 FROM agent_recommendations WHERE project_id = $1 AND id = $2`, projectID, id).
 		Scan(&r.ID, &r.ProjectID, &r.RunID, &r.Category, &r.Title, &r.Rationale,
 			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt,
-			&r.SeenCount, &r.LastSeenAt, &r.Revision)
+			&r.SeenCount, &r.LastSeenAt, &r.Revision, &r.Source, &r.DedupeKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentRecommendation{}, errNoSuchTest
 	}

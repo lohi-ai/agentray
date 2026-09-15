@@ -623,14 +623,24 @@ type AgentRecommendation struct {
 	Status       string    `json:"status"`
 	AckNote      string    `json:"ack_note"`
 	CreatedAt    time.Time `json:"created_at"`
-	// SeenCount is how many times the agent has re-derived this same finding.
-	// 1 means "said once"; a high count means a standing problem the owner has
-	// not acted on, which is worth surfacing rather than hiding.
+	// SeenCount is how many times the same finding has been re-derived — by an
+	// agent's repeated runs or by the engine's dedupe-key fold. 1 means "said
+	// once"; a high count means a standing problem the owner has not acted on,
+	// which is worth surfacing rather than hiding.
 	SeenCount  int       `json:"seen_count"`
 	LastSeenAt time.Time `json:"last_seen_at"`
 	// Revision is the optimistic-concurrency counter; NULL on legacy rows
 	// reads as 1.
 	Revision int64 `json:"revision"`
+	// Source is 'agent' for findings an agent submitted and 'engine' for the
+	// deterministic detector pass — the provenance a reader uses to tell a
+	// rule firing from a model's opinion.
+	Source string `json:"source"`
+	// DedupeKey is the engine's stable condition identity (e.g.
+	// "wow:active_users"). Set, it replaces trigram title similarity as the
+	// fold key: the same condition re-firing inside the repeat window bumps
+	// seen_count instead of opening a second card. Empty on agent rows.
+	DedupeKey string `json:"dedupe_key,omitempty"`
 }
 
 // recommendationSimilarity is the trigram score above which two titles are
@@ -673,21 +683,40 @@ func createRecommendation(ctx context.Context, q pgQuerier, rec AgentRecommendat
 	if category == "" {
 		category = "growth"
 	}
+	source := rec.Source
+	if source == "" {
+		source = "agent"
+	}
 	var runArg any
 	if rec.RunID != "" {
 		runArg = rec.RunID
 	}
 
-	// Fold into the closest open match, if one is close enough. The trigram
-	// index serves the candidate lookup, so this stays cheap as the table grows.
+	// Fold into the closest open match, if one is close enough. A finding with
+	// a dedupe key matches on the key — the engine's stable condition identity
+	// — across every status inside the window, so a condition that keeps
+	// holding after the owner dismissed the card folds into that row (cooldown)
+	// instead of re-filing a card they already settled. Without a key the
+	// trigram index serves the candidate lookup, so the check stays cheap as
+	// the table grows.
 	var existing string
-	err := q.QueryRow(ctx, `
+	var err error
+	if rec.DedupeKey != "" {
+		err = q.QueryRow(ctx, `
+SELECT id::text FROM agent_recommendations
+WHERE project_id = $1 AND dedupe_key = $2
+  AND last_seen_at > now() - $3::interval
+ORDER BY last_seen_at DESC
+LIMIT 1`, rec.ProjectID, rec.DedupeKey, recommendationRepeatWindow.String()).Scan(&existing)
+	} else {
+		err = q.QueryRow(ctx, `
 SELECT id::text FROM agent_recommendations
 WHERE project_id = $1 AND category = $2 AND status = 'open'
   AND last_seen_at > now() - $3::interval
   AND similarity(title, $4) >= $5
 ORDER BY similarity(title, $4) DESC
 LIMIT 1`, rec.ProjectID, category, recommendationRepeatWindow.String(), rec.Title, recommendationSimilarity).Scan(&existing)
+	}
 	if err == nil && existing != "" {
 		if _, err := q.Exec(ctx, `
 UPDATE agent_recommendations
@@ -709,9 +738,9 @@ WHERE id = $1::uuid`, existing, rec.ImpactScore, rec.Title, rec.Rationale, evide
 
 	var id string
 	err = q.QueryRow(ctx, `
-INSERT INTO agent_recommendations (project_id, run_id, category, title, rationale, evidence_json, impact_score)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-RETURNING id::text`, rec.ProjectID, runArg, category, rec.Title, rec.Rationale, evidence, rec.ImpactScore).Scan(&id)
+INSERT INTO agent_recommendations (project_id, run_id, category, title, rationale, evidence_json, impact_score, source, dedupe_key)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NULLIF($9, ''))
+RETURNING id::text`, rec.ProjectID, runArg, category, rec.Title, rec.Rationale, evidence, rec.ImpactScore, source, rec.DedupeKey).Scan(&id)
 	return id, err
 }
 
@@ -729,7 +758,7 @@ func (s *Store) ListRecommendations(ctx context.Context, userID, projectID strin
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, project_id::text, coalesce(run_id::text,''), category, title, rationale,
        evidence_json::text, impact_score, status, ack_note, created_at, seen_count, last_seen_at,
-       coalesce(revision, 1)
+       coalesce(revision, 1), source, coalesce(dedupe_key, '')
 FROM agent_recommendations WHERE project_id = $1
 ORDER BY `+recommendationsPageOrder+`
 LIMIT $2`, project.ID, recommendationListLimit)
@@ -742,7 +771,7 @@ LIMIT $2`, project.ID, recommendationListLimit)
 		var r AgentRecommendation
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.RunID, &r.Category, &r.Title, &r.Rationale,
 			&r.EvidenceJSON, &r.ImpactScore, &r.Status, &r.AckNote, &r.CreatedAt,
-			&r.SeenCount, &r.LastSeenAt, &r.Revision); err != nil {
+			&r.SeenCount, &r.LastSeenAt, &r.Revision, &r.Source, &r.DedupeKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

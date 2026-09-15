@@ -77,6 +77,9 @@ func updateTest() opcore.Operation[updateTestInput, updateTestOutput] {
 				if verr := validateEvidenceEnvelope(*in.Evidence); verr != nil {
 					return updateTestOutput{}, verr
 				}
+				if rerr := annotationRefsInEnvelope(ctx, d, cc.ProjectID, *in.Evidence); rerr != nil {
+					return updateTestOutput{}, rerr
+				}
 			}
 			upd := storage.ValidationTestUpdate{
 				Hypothesis: in.Hypothesis, MetricEvent: in.MetricEvent,
@@ -147,6 +150,11 @@ func recordOutcome() opcore.Operation[recordOutcomeInput, recordOutcomeOutput] {
 				AuthorKind:  authorKind,
 				AuthorID:    authorID,
 				RecordedAt:  time.Now().UTC().Format(time.RFC3339),
+			}
+			if strings.HasPrefix(strings.TrimSpace(in.EvidenceRef), annotationRefPrefix) {
+				if rerr := resolveAnnotationRef(ctx, d, cc.ProjectID, in.EvidenceRef); rerr != nil {
+					return recordOutcomeOutput{}, rerr
+				}
 			}
 			hash, err := requestHash(in)
 			if err != nil {
