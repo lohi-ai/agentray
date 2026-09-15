@@ -182,17 +182,18 @@ func (s *Store) CreateAnnotationIdempotent(ctx context.Context, projectID string
 }
 
 // AnnotationsForWindow returns the project's annotations whose instant or
-// range overlaps [from, to], oldest first. Overlap is the half-open contract
-// the chart windows use: an annotation starting exactly at `to` is outside,
-// one ending exactly at `from` is outside, and an instant is a zero-width
-// range at starts_at.
+// range overlaps [from, to), oldest first — the half-open contract the chart
+// windows use: an annotation starting exactly at `to` is outside, a range
+// ending exactly at `from` is outside, and an instant is a zero-width mark at
+// starts_at (inside when from <= starts_at < to).
 func (s *Store) AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]Annotation, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT `+annotationColumns+` FROM annotations
-WHERE project_id = $1 AND starts_at < $3 AND COALESCE(ends_at, starts_at) >= $2
+WHERE project_id = $1 AND starts_at < $3
+  AND ((ends_at IS NULL AND starts_at >= $2) OR (ends_at IS NOT NULL AND ends_at > $2))
 ORDER BY starts_at ASC, id ASC
 LIMIT $4`, projectID, from, to, limit)
 	if err != nil {

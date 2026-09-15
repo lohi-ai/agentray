@@ -149,6 +149,7 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
         <SeriesChart
           values={(summary?.timeline ?? []).map((p) => p.count)}
           labels={(summary?.timeline ?? []).map((p) => p.hour)}
+          type={specType(chart.kind)}
           annotations={annotations}
         />
       )}

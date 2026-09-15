@@ -209,7 +209,6 @@ export function DashboardPage() {
             )}
           />
         </div>
-
       ) : (
         <div className="grid gap-4 grid-cols-3 [@media(max-width:980px)]:grid-cols-1">
           {order.map((chart, i) => (
