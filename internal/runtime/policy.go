@@ -15,10 +15,10 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources, ToolListFunnelWatches},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview, ToolListSources},
 	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolListMetrics, ToolReadMetric, ToolGetBoard, ToolSaveBoard, ToolSetMetricTarget, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
-	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification},
+	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification, ToolRunFindingsScan, ToolWatchFunnel},
 }
 
 // readTools classifies which scope-granted tools READ project data, versus the
@@ -46,6 +46,10 @@ var readTools = map[string]bool{
 	ToolListFindings:   true,
 	ToolDatasetPreview: true,
 	ToolVerifySDK:      true,
+	// list_funnel_watches reads the declared watches — evidence, not a side
+	// effect. run_findings_scan and watch_funnel are deliberately absent: they
+	// write findings and declarations.
+	ToolListFunnelWatches: true,
 	// Source probes/status read the source's schema and the project's run
 	// rows — evidence for the data-quality agent, not side effects.
 	ToolTestSource:    true,

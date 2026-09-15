@@ -114,6 +114,11 @@ type DataSource interface {
 	// set_metric_target appends a version to the project-scoped target
 	// history; save_board declares targets through the same write.
 	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
+	// Findings engine (ticket 001): the funnel-watch declarations the drop-off
+	// detector re-runs. Mirrors usecase.Repo — the interface is assigned to
+	// Deps.Repo, so it must declare everything the ops reach for.
+	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
+	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -168,4 +173,7 @@ const (
 	ToolAbandonTest        = "abandon_test"
 	ToolListFindings       = "list_findings"
 	ToolDatasetPreview     = "dataset_preview"
+	ToolRunFindingsScan   = "run_findings_scan"
+	ToolWatchFunnel       = "watch_funnel"
+	ToolListFunnelWatches = "list_funnel_watches"
 )

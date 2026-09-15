@@ -1122,6 +1122,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// Findings-engine substrate (finding_scan_state, funnel_watches). New
+	// tables only; after migrateAgent so the recommendations table it writes
+	// already exists on a fresh boot.
+	if err := s.migrateFindings(ctx); err != nil {
+		return err
+	}
+
 	// The pre-product tables. validation_tests references agent_runs, so this
 	// has to follow migrateAgent rather than sit with the other feature
 	// migrations above.
