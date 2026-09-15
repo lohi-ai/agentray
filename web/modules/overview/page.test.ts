@@ -233,6 +233,17 @@ describe('bestNextStep', () => {
     // A real finding later in the ranked list still wins over the broken row.
     expect(bestNextStep([finding({ evidence_json: '' }), finding({ id: 'f2', impact_score: 8 })]).kind).toBe('finding');
   });
+
+  it('carries the project goal through the no_finding branch only', () => {
+    // The stored goal rewrites the no-finding capability copy; it must not
+    // leak into the other reasons or suppress a real finding.
+    expect(bestNextStep(undefined, false, 'retention')).toEqual({ kind: 'capability', reason: 'no_finding', goal: 'retention' });
+    expect(bestNextStep([finding({ evidence_json: '' })], false, 'retention')).toEqual({ kind: 'capability', reason: 'incomplete_finding', goal: 'retention' });
+    expect(bestNextStep(undefined, true, 'retention')).toEqual({ kind: 'capability', reason: 'unavailable' });
+    // 'skipped' means the owner declined — the branch behaves as if unset.
+    expect(bestNextStep(undefined, false, 'skipped')).toEqual({ kind: 'capability', reason: 'no_finding' });
+    expect(bestNextStep([finding()], false, 'retention').kind).toBe('finding');
+  });
 });
 
 describe('firstEvidenceBackedFinding', () => {

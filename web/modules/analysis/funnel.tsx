@@ -77,9 +77,10 @@ function useFunnelByPlatform(steps: string[], platforms: string[], filters: Filt
 // question no catalog metric answers.
 export function UsageFunnelPanel({ res, platform }: { res: OverviewResult; platform: string }) {
   const projectID = useAuthStore((s) => s.project?.id);
+  const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const { names: eventNames, loading: namesLoading } = useEventNames();
   const emptyCatalog = !namesLoading && eventNames.length === 0;
-  const steps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames)), [emptyCatalog, eventNames]);
+  const steps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames, activationEvent)), [emptyCatalog, eventNames, activationEvent]);
   const filters = useMemo(() => boardFilters(res, platform), [res, platform]);
   const funnelQuery = useQuery({
     queryKey: ['usage-funnel', projectID, filters, steps],

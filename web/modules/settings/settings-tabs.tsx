@@ -12,10 +12,12 @@ import { apiBase, type Project, type WorkspaceAuditLog, type WorkspaceMember, ty
 import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { formatCompact, formatNumber, formatRelative } from '@/lib/format';
 import { projectAccess } from '@/lib/ia';
+import { GOAL_OPTIONS } from '@/modules/overview/goal-prompt';
+import { EventNameCombobox } from '@/modules/shared/components/event-name-picker';
 import { useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { Button, EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 const ROLES: WorkspaceRole[] = ['owner', 'admin', 'member'];
@@ -112,15 +114,100 @@ export function ProjectsTab() {
           <EmptyState title="No projects" detail="Create a project to start ingesting events." />
         </Panel>
       ) : (
-        <DataTable
-          title="Projects"
-          columns={columns}
-          data={projects}
-          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDialog('create')}>New project</Button>}
-          onRowClick={(p) => void selectProject(p.id)}
-        />
+        <>
+          <DataTable
+            title="Projects"
+            columns={columns}
+            data={projects}
+            action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDialog('create')}>New project</Button>}
+            onRowClick={(p) => void selectProject(p.id)}
+          />
+          {/* key remounts the panel on project switch so the activation-event
+              draft never carries the previous project's value into a save. */}
+          {project ? <ProjectGoalPanel key={project.id} project={project} access={access} updateProject={updateProject} /> : null}
+        </>
       )}
     </>
+  );
+}
+
+// ProjectGoalPanel edits the onboarding answers (007): the improvement goal
+// Segment and, when the goal is activation, the activation-event mapping.
+// Writes go through the same updateProject path as rename — owner/admin only.
+function ProjectGoalPanel({
+  project,
+  access,
+  updateProject,
+}: {
+  project: Project;
+  access: { canWrite: boolean; reason: string };
+  updateProject: (patch: { name?: string; timezone?: string; goal?: string; activation_event?: string }) => Promise<void>;
+}) {
+  const [eventDraft, setEventDraft] = useState(project.activation_event ?? '');
+  const [saving, setSaving] = useState(false);
+  const goalValue = project.goal && project.goal !== 'skipped' ? project.goal : 'none';
+
+  return (
+    <Panel title="Improvement goal">
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-[440px]">
+            <div className="font-semibold">Improvement goal</div>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              What this project is trying to improve. Drives the suggested experiment and the overview’s best next step.
+            </p>
+          </div>
+          <div className="[&_[role=radio]]:min-h-[44px]">
+            <Segment
+              label="Improvement goal"
+              options={[
+                ...GOAL_OPTIONS.map((g) => ({ value: g.id, label: g.label })),
+                { value: 'none', label: 'None' },
+              ]}
+              value={goalValue}
+              onChange={(v) => {
+                if (!access.canWrite || saving) return;
+                setSaving(true);
+                void updateProject({ goal: v === 'none' ? 'skipped' : v }).finally(() => setSaving(false));
+              }}
+            />
+          </div>
+        </div>
+        {!access.canWrite ? (
+          <Text type="supporting" className="block">{access.reason}</Text>
+        ) : null}
+        {project.goal === 'activation' ? (
+          <div className="flex flex-wrap items-start justify-between gap-4 border-t border-[var(--color-border)] pt-4">
+            <div className="max-w-[440px]">
+              <div className="font-semibold">Activation event</div>
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                The event that counts as a new user reaching first value. The overview activation tile computes once this is set.
+              </p>
+            </div>
+            <div className="flex min-w-[280px] items-center gap-2">
+              <EventNameCombobox
+                value={eventDraft}
+                onChange={setEventDraft}
+                placeholder="e.g. onboarding.completed"
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[44px]"
+                disabled={!access.canWrite || saving || eventDraft.trim() === (project.activation_event ?? '')}
+                onClick={() => {
+                  setSaving(true);
+                  void updateProject({ activation_event: eventDraft.trim() }).finally(() => setSaving(false));
+                }}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </Panel>
   );
 }
 

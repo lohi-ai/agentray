@@ -390,6 +390,30 @@ describe('weakestLink', () => {
       missing: true,
     }));
   });
+
+  it('lets a stored activation_event override the name heuristic', () => {
+    // The owner mapped 'feature.used' as activation. Without the override the
+    // regex would claim 'onboarding.completed' for that stage and the funnel
+    // would measure a step the owner did not choose.
+    const names = [
+      { event_name: 'user.pageview', count: 100, users: 80 },
+      { event_name: 'onboarding.completed', count: 50, users: 40 },
+      { event_name: 'feature.used', count: 30, users: 20 },
+    ];
+    const link = weakestLink(names, 'feature.used');
+    expect(link?.to).toBe('feature.used');
+    expect(link?.toCount).toBe(20);
+    // The heuristic event must not also claim the activation stage.
+    expect(funnelStepNames(names, 'feature.used')).toEqual(['user.pageview', 'feature.used']);
+  });
+
+  it('keeps the heuristic when no activation_event is stored', () => {
+    const names = [
+      { event_name: 'user.pageview', count: 100, users: 80 },
+      { event_name: 'onboarding.completed', count: 50, users: 40 },
+    ];
+    expect(funnelStepNames(names)).toEqual(['user.pageview', 'onboarding.completed']);
+  });
 });
 
 describe('funnelStepNames', () => {

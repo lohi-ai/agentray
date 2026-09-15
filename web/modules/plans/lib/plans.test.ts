@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evidenceAvailable, evidenceLine } from './plans';
+import { evidenceAvailable, evidenceLine, goalSuggestion } from './plans';
 
 describe('evidenceLine', () => {
   it('keeps every typed provenance field visible', () => {
@@ -71,6 +71,36 @@ describe('evidenceAvailable', () => {
     ];
     for (const row of rows) {
       expect(evidenceAvailable(row)).toBe(!evidenceLine(row).startsWith('evidence unavailable'));
+    }
+  });
+});
+
+describe('goalSuggestion', () => {
+  it('seeds nothing for unset, skipped, or unknown goals', () => {
+    expect(goalSuggestion(null)).toBeNull();
+    expect(goalSuggestion({})).toBeNull();
+    expect(goalSuggestion({ goal: 'skipped' })).toBeNull();
+    expect(goalSuggestion({ goal: 'make_billions' })).toBeNull();
+  });
+
+  it('names the stored activation event in the suggestion and the agent prompt', () => {
+    const s = goalSuggestion({ goal: 'activation', activation_event: 'onboarding.completed' });
+    expect(s?.body).toContain('onboarding.completed');
+    expect(s?.metricLine).toContain('onboarding.completed');
+    expect(s?.prompt).toContain('onboarding.completed');
+  });
+
+  it('stays honest when the activation event is not mapped yet', () => {
+    const s = goalSuggestion({ goal: 'activation' });
+    expect(s?.body).not.toContain('undefined');
+    expect(s?.metricLine).toContain('the activation event');
+  });
+
+  it('gives every real goal a suggestion with a prompt', () => {
+    for (const goal of ['activation', 'retention', 'revenue', 'traffic']) {
+      const s = goalSuggestion({ goal });
+      expect(s?.goal).toBe(goal);
+      expect(s?.prompt.length).toBeGreaterThan(0);
     }
   });
 });

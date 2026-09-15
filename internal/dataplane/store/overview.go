@@ -32,7 +32,10 @@ import (
 // surfaces served — pageviews, conversions, traffic class, AI share, session
 // quality, platform split, top events and event volume — so the declared
 // boards and read_metric answer them from the same deterministic pass.
-const OverviewMetricVersion = "overview.v4"
+// v5 is the activation release: the activation tile stops being permanently
+// "unconfigured" and computes against the project's stored activation_event
+// over a fixed 7-day window.
+const OverviewMetricVersion = "overview.v5"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -207,6 +210,24 @@ type OverviewMetrics struct {
 	// other tile), so a negative net can only be read from here. Additive: a
 	// client that does not know the block ignores it.
 	RevenueDetail *OverviewRevenueDetail `json:"revenue_detail,omitempty"`
+	// ActivationDetail carries the cohort arithmetic behind Activation — the
+	// matured cohort size, how many fired the activation event inside the
+	// window, and the 0–1 rate. Activation.Value stays nil (a percent is not
+	// a count), so the tile and the catalog read the rate from here.
+	ActivationDetail *OverviewActivationDetail `json:"activation_detail,omitempty"`
+}
+
+// OverviewActivationDetail is the arithmetic behind the activation metric:
+// of the people whose first-ever qualifying activity matured past the
+// conversion window, how many fired the project's chosen activation event
+// inside it. Rate is the 0–1 fraction; the catalog rescales it to the
+// declared percent unit, the same convention retention uses.
+type OverviewActivationDetail struct {
+	Event      string  `json:"event"`
+	WindowDays int     `json:"window_days"`
+	Eligible   uint64  `json:"eligible"`
+	Activated  uint64  `json:"activated"`
+	Rate       float64 `json:"rate"`
 }
 
 type OverviewRetention struct {
@@ -374,8 +395,8 @@ func uint64Ptr(v uint64) *uint64 { return &v }
 // project-local calendar boundary; production callers pass time.Now().
 func (s *Store) Overview(ctx context.Context, projectID, period, platform string, now time.Time) (OverviewResult, error) {
 	res := OverviewResult{Trend: []OverviewTrendPoint{}}
-	var storedTimezone string
-	if err := s.pg.QueryRow(ctx, `SELECT coalesce(timezone, '') FROM projects WHERE id = $1`, projectID).Scan(&storedTimezone); err != nil {
+	var storedTimezone, activationEvent string
+	if err := s.pg.QueryRow(ctx, `SELECT coalesce(timezone, ''), coalesce(activation_event, '') FROM projects WHERE id = $1`, projectID).Scan(&storedTimezone, &activationEvent); err != nil {
 		return res, err
 	}
 	timezone, timezoneSource, loc, err := overviewProjectTimezone(storedTimezone)
@@ -619,11 +640,14 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		res.Metrics.RevenueDetail = detail
 	}
 
-	// --- activation: still unconfigured, and says so rather than inventing 0 ---
-	res.Metrics.Activation = OverviewMetric{
-		State:      OverviewStateUnconfigured,
-		Definition: metricDefActivation,
-		Notes:      []string{metricPrereqActivation},
+	// --- activation: configured event over a fixed 7-day cohort window ---
+	{
+		metric, detail, err := s.overviewActivation(ctx, projectID, platform, timezone, r.To, activationEvent)
+		if err != nil {
+			return res, err
+		}
+		res.Metrics.Activation = metric
+		res.Metrics.ActivationDetail = detail
 	}
 
 	// --- daily trend: active people + raw event volume in one pass ---
@@ -1031,4 +1055,102 @@ func platformArgs(arg any) []any {
 		return nil
 	}
 	return []any{arg}
+}
+
+// overviewActivation computes the project's activation metric. It is
+// unconfigured when the project carries no activation_event, not_ready when
+// no first-seen cohort has reached the 7-day conversion window, and ok once
+// mature cohort members exist. Like retention, cohorts are lifetime
+// first-qualifying activity, scoped to the first event's platform.
+func (s *Store) overviewActivation(ctx context.Context, projectID, platform, timezone string, to time.Time, activationEvent string) (OverviewMetric, *OverviewActivationDetail, error) {
+	activationEvent = strings.TrimSpace(activationEvent)
+	if activationEvent == "" {
+		return OverviewMetric{
+			State:      OverviewStateUnconfigured,
+			Definition: metricDefActivation,
+			Notes:      []string{metricPrereqActivation},
+		}, nil, nil
+	}
+
+	platClause, platArg := overviewPlatform(platform)
+	firstClause := firstPlatformClause(platform)
+	canonicalID := "canonical_distinct_id"
+	canonicalE := "e.canonical_distinct_id"
+
+	firsts := `
+SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
+FROM (
+	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
+		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+	FROM resolved_events
+	WHERE project_id = ? AND ` + overviewQualifying + `
+	GROUP BY cid
+)
+WHERE 1 = 1` + firstClause
+	firstArgs := []any{timezone, projectID}
+	if platArg != nil {
+		firstArgs = append(firstArgs, platArg)
+	}
+
+	// Eligible: members whose local calendar 7-day window has fully closed by `to`
+	var eligible uint64
+	err := s.duckQueryRow(ctx, `
+SELECT count(*) FILTER (WHERE cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE))
+FROM (`+firsts+`)`, append([]any{timezone, to}, firstArgs...), &eligible)
+	if err != nil {
+		return OverviewMetric{}, nil, err
+	}
+
+	detail := &OverviewActivationDetail{
+		Event:      activationEvent,
+		WindowDays: 7,
+		Eligible:   eligible,
+	}
+
+	note := fmt.Sprintf("event: %s; 7-day conversion window; %d activated of %d eligible", activationEvent, 0, eligible)
+
+	if eligible == 0 {
+		return OverviewMetric{
+			State:      OverviewStateNotReady,
+			Definition: metricDefActivation,
+			Notes:      []string{note, "no mature 7-day cohort yet"},
+		}, detail, nil
+	}
+
+	// Activated: eligible members who fired the activation_event within 7 local
+	// days of their cohort day. Placeholder order follows the SQL text: the
+	// FROM-clause `firsts` subquery binds first (timezone, projectID, platform),
+	// then the WHERE clause (timezone, to, timezone, timezone, projectID,
+	// event name, platform).
+	var activated uint64
+	qargs := append([]any{}, firstArgs...)
+	qargs = append(qargs, timezone, to, timezone, timezone, projectID, activationEvent)
+	if platArg != nil {
+		qargs = append(qargs, platArg)
+	}
+
+	err = s.duckQueryRow(ctx, `
+SELECT count(DISTINCT `+canonicalE+`)
+FROM resolved_events e
+INNER JOIN (`+firsts+`) f ON `+canonicalE+` = f.cid
+WHERE f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)
+  AND CAST(timezone(?, e."timestamp") AS DATE) >= f.cohort_day
+  AND CAST(timezone(?, e."timestamp") AS DATE) <= f.cohort_day + INTERVAL '7 days'
+  AND coalesce(e.visitor_class, 'human') = 'human'
+  AND e.project_id = ? AND e.event_name = ?`+platClause,
+		qargs, &activated)
+	if err != nil {
+		return OverviewMetric{}, nil, err
+	}
+
+	rate := float64(activated) / float64(eligible)
+	detail.Activated = activated
+	detail.Rate = rate
+
+	note = fmt.Sprintf("event: %s; 7-day conversion window; %d activated of %d eligible", activationEvent, activated, eligible)
+	return OverviewMetric{
+		State:      OverviewStateOK,
+		Definition: metricDefActivation,
+		Notes:      []string{note},
+	}, detail, nil
 }

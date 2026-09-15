@@ -142,8 +142,8 @@ VALUES ($1, $2, 'owner')`, out.Workspace.ID, out.User.ID); err != nil {
 	if err := tx.QueryRow(ctx, `
 INSERT INTO projects (workspace_id, owner_id, name, api_key, credential_split_at)
 VALUES ($1, $2, $3, $4, now())
-RETURNING id::text, workspace_id::text, name, coalesce(timezone, ''), api_key, created_at`, out.Workspace.ID, out.User.ID, projectName, key).
-		Scan(&own.ID, &own.WorkspaceID, &own.Name, &own.Timezone, &own.APIKey, &own.CreatedAt); err != nil {
+RETURNING id::text, workspace_id::text, name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at`, out.Workspace.ID, out.User.ID, projectName, key).
+		Scan(&own.ID, &own.WorkspaceID, &own.Name, &own.Timezone, &own.Goal, &own.ActivationEvent, &own.APIKey, &own.CreatedAt); err != nil {
 		return AccountBootstrap{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -439,7 +439,7 @@ func (s *Store) ListWorkspaceProjects(ctx context.Context, userID string, worksp
 	// the order has to be stable: p.id breaks the created_at tie rather than
 	// leaving it to the planner.
 	rows, err := s.pg.Query(ctx, `
-SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.api_key, p.created_at, wm.role
+SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.goal, coalesce(p.activation_event, ''), p.api_key, p.created_at, wm.role
 FROM projects p
 JOIN workspace_members wm ON wm.workspace_id = p.workspace_id
 WHERE wm.user_id = $1 AND p.workspace_id = $2
@@ -451,7 +451,7 @@ ORDER BY p.created_at ASC, p.id ASC`, userID, workspaceID)
 	projects := []Project{}
 	for rows.Next() {
 		var project Project
-		if err := rows.Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt, &project.Role); err != nil {
+		if err := rows.Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt, &project.Role); err != nil {
 			return nil, err
 		}
 		project.IsDemo = s.isDemoWorkspace(project.WorkspaceID)
@@ -477,8 +477,8 @@ func (s *Store) CreateWorkspaceProject(ctx context.Context, userID string, works
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO projects (workspace_id, owner_id, name, api_key, credential_split_at)
 VALUES ($1, $2, $3, $4, now())
-RETURNING id::text, workspace_id::text, name, coalesce(timezone, ''), api_key, created_at`, workspaceID, userID, name, apiKey).
-		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt)
+RETURNING id::text, workspace_id::text, name, coalesce(timezone, ''), goal, coalesce(activation_event, ''), api_key, created_at`, workspaceID, userID, name, apiKey).
+		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt)
 	if err != nil {
 		return project, err
 	}
@@ -496,11 +496,11 @@ RETURNING id::text, workspace_id::text, name, coalesce(timezone, ''), api_key, c
 func (s *Store) ProjectByIDForUser(ctx context.Context, userID string, projectID string) (Project, error) {
 	var project Project
 	err := s.pg.QueryRow(ctx, `
-SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.api_key, p.created_at, wm.role
+SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.goal, coalesce(p.activation_event, ''), p.api_key, p.created_at, wm.role
 FROM projects p
 JOIN workspace_members wm ON wm.workspace_id = p.workspace_id
 WHERE wm.user_id = $1 AND p.id = $2`, userID, projectID).
-		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt, &project.Role)
+		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt, &project.Role)
 	project.IsDemo = s.isDemoWorkspace(project.WorkspaceID)
 	project.redactAPIKeyForRole()
 	return project, err
@@ -513,35 +513,62 @@ func (s *Store) DefaultProjectForUser(ctx context.Context, userID string) (Proje
 	// someone else's site the default project of every new signup. The demo is
 	// pushed last; p.id keeps the order stable after that.
 	err := s.pg.QueryRow(ctx, `
-SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.api_key, p.created_at, wm.role
+SELECT p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.goal, coalesce(p.activation_event, ''), p.api_key, p.created_at, wm.role
 FROM projects p
 JOIN workspace_members wm ON wm.workspace_id = p.workspace_id
 WHERE wm.user_id = $1
 ORDER BY (p.workspace_id = NULLIF($2, '')::uuid) ASC, p.created_at ASC, p.id ASC
 LIMIT 1`, userID, s.demoWorkspaceID).
-		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt, &project.Role)
+		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt, &project.Role)
 	project.IsDemo = s.isDemoWorkspace(project.WorkspaceID)
 	project.redactAPIKeyForRole()
 	return project, err
 }
 
-func (s *Store) UpdateProjectForUser(ctx context.Context, userID string, projectID string, name, timezone *string) (Project, error) {
+// ProjectUpdate is the patch PUT /api/projects/:id applies. A nil field means
+// "leave it alone"; a non-nil field is validated then written. Goal accepts
+// the fixed onboarding vocabulary plus 'skipped' (declined — the prompt must
+// not reappear); ActivationEvent accepts a catalog event name or '' to clear.
+type ProjectUpdate struct {
+	Name            *string
+	Timezone        *string
+	Goal            *string
+	ActivationEvent *string
+}
+
+func (s *Store) UpdateProjectForUser(ctx context.Context, userID string, projectID string, update ProjectUpdate) (Project, error) {
 	sets := []string{}
 	args := []any{userID, projectID}
-	if name != nil {
-		value := strings.TrimSpace(*name)
+	if update.Name != nil {
+		value := strings.TrimSpace(*update.Name)
 		if value == "" {
 			value = "Untitled project"
 		}
 		sets = append(sets, fmt.Sprintf("name = $%d", len(args)+1))
 		args = append(args, value)
 	}
-	if timezone != nil {
-		value, err := normalizeProjectTimezone(*timezone)
+	if update.Timezone != nil {
+		value, err := normalizeProjectTimezone(*update.Timezone)
 		if err != nil {
 			return Project{}, err
 		}
 		sets = append(sets, fmt.Sprintf("timezone = $%d", len(args)+1))
+		args = append(args, value)
+	}
+	if update.Goal != nil {
+		value, err := normalizeProjectGoal(*update.Goal)
+		if err != nil {
+			return Project{}, err
+		}
+		sets = append(sets, fmt.Sprintf("goal = $%d", len(args)+1))
+		args = append(args, value)
+	}
+	if update.ActivationEvent != nil {
+		value, err := normalizeActivationEvent(*update.ActivationEvent)
+		if err != nil {
+			return Project{}, err
+		}
+		sets = append(sets, fmt.Sprintf("activation_event = $%d", len(args)+1))
 		args = append(args, value)
 	}
 	if len(sets) == 0 {
@@ -554,14 +581,23 @@ SET `+strings.Join(sets, ", ")+`
 FROM workspace_members wm
 WHERE p.id = $2 AND wm.workspace_id = p.workspace_id AND wm.user_id = $1
 	AND wm.role IN ('owner', 'admin')
-RETURNING p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.api_key, p.created_at, wm.role`, args...).
-		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt, &project.Role)
+RETURNING p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.goal, coalesce(p.activation_event, ''), p.api_key, p.created_at, wm.role`, args...).
+		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt, &project.Role)
 	project.IsDemo = s.isDemoWorkspace(project.WorkspaceID)
 	if err == nil {
 		event, details := "project.renamed", "{}"
-		if name == nil {
+		switch {
+		case update.Name == nil && update.Timezone != nil:
 			event, details = "project.timezone_updated", fmt.Sprintf(`{"timezone":%q}`, project.Timezone)
-		} else if timezone != nil {
+		case update.Name == nil && update.Goal != nil:
+			goal := ""
+			if project.Goal != nil {
+				goal = *project.Goal
+			}
+			event, details = "project.goal_updated", fmt.Sprintf(`{"goal":%q}`, goal)
+		case update.Name == nil && update.ActivationEvent != nil:
+			event, details = "project.activation_event_updated", fmt.Sprintf(`{"activation_event":%q}`, project.ActivationEvent)
+		case update.Name != nil && update.Timezone != nil:
 			details = fmt.Sprintf(`{"timezone":%q}`, project.Timezone)
 		}
 		_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, event, "project", project.ID, project.Name, details)
@@ -578,8 +614,8 @@ SET api_key = $3
 FROM workspace_members wm
 WHERE p.id = $2 AND wm.workspace_id = p.workspace_id AND wm.user_id = $1
 	AND wm.role IN ('owner', 'admin')
-RETURNING p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.api_key, p.created_at, wm.role`, userID, projectID, apiKey).
-		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.APIKey, &project.CreatedAt, &project.Role)
+RETURNING p.id::text, p.workspace_id::text, p.name, coalesce(p.timezone, ''), p.goal, coalesce(p.activation_event, ''), p.api_key, p.created_at, wm.role`, userID, projectID, apiKey).
+		Scan(&project.ID, &project.WorkspaceID, &project.Name, &project.Timezone, &project.Goal, &project.ActivationEvent, &project.APIKey, &project.CreatedAt, &project.Role)
 	project.IsDemo = s.isDemoWorkspace(project.WorkspaceID)
 	if err == nil {
 		_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "project.key_rotated", "project", project.ID, project.Name, "{}")
