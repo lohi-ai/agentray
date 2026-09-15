@@ -329,24 +329,19 @@ func do(e *echo.Echo, method, target, token string) *httptest.ResponseRecorder {
 
 // Every class of mutation the contract names, aimed at the demo project. A
 // viewer must be refused all of them, and the demo's own operator must not be.
+// The classed routes — the ones that ask the registry their own Allow
+// question — are deliberately absent: the floor passes them to their own
+// authorizer, and their demo-member denial is asserted against the real route
+// table in direct_mutator_authorization_test.go.
 func TestViewerIsRefusedEveryClassOfDemoMutation(t *testing.T) {
 	cases := []struct {
 		name   string
 		method string
 		target string
 	}{
-		{"create a dashboard", http.MethodPost, "/api/dashboards"},
-		{"delete a dashboard", http.MethodDelete, "/api/dashboards/d1"},
-		{"edit a chart", http.MethodPut, "/api/charts/c1"},
-		{"delete a chart", http.MethodDelete, "/api/charts/c1"},
-		{"reorder charts", http.MethodPut, "/api/dashboards/d1/charts/order"},
-		{"save a query", http.MethodPost, "/api/saved-queries"},
-		{"delete a saved query", http.MethodDelete, "/api/saved-queries/q1"},
 		{"create an alert rule", http.MethodPost, "/api/alerts/rules"},
 		{"delete an alert rule", http.MethodDelete, "/api/alerts/rules/r1"},
 		{"create an alert channel", http.MethodPost, "/api/alerts/channels"},
-		{"create a cohort audience", http.MethodPost, "/api/cohorts/audiences"},
-		{"delete a cohort audience", http.MethodDelete, "/api/cohorts/audiences/a1"},
 		{"hire an agent", http.MethodPost, "/api/agent/agents"},
 		{"install a marketplace agent", http.MethodPost, "/api/marketplace/agents/growth/install"},
 		{"configure an agent", http.MethodPut, "/api/agent/config"},
@@ -361,14 +356,9 @@ func TestViewerIsRefusedEveryClassOfDemoMutation(t *testing.T) {
 		{"create a schedule", http.MethodPost, "/api/agent/triggers"},
 		{"edit a schedule", http.MethodPut, "/api/agent/triggers/t1"},
 		{"delete a schedule", http.MethodDelete, "/api/agent/triggers/t1"},
-		{"connect a data source", http.MethodPost, "/api/connectors"},
-		{"test a data source", http.MethodPost, "/api/connectors/c1/test"},
 		{"schedule a sync", http.MethodPost, "/api/connectors/c1/syncs"},
-		{"run a sync", http.MethodPost, "/api/connector-syncs/s1/run"},
 		{"change the model pool", http.MethodPut, "/api/workspace/models"},
 		{"delete a provider key", http.MethodDelete, "/api/workspace/providers/p1"},
-		{"apply a template", http.MethodPost, "/api/templates/t1/apply"},
-		{"change the subscription mapping", http.MethodPut, "/api/subscription/mapping"},
 		{"run an operation", http.MethodPost, "/api/operations/o1/run"},
 		{"edit someone else's turn", http.MethodPost, "/api/agent/conversations/c1/messages/e1/edit"},
 		{"regenerate someone else's turn", http.MethodPost, "/api/agent/conversations/c1/messages/e1/regenerate"},
@@ -387,6 +377,48 @@ func TestViewerIsRefusedEveryClassOfDemoMutation(t *testing.T) {
 			}
 			if rec := do(e, tc.method, target, operatorTok); rec.Code != reachedHandler {
 				t.Errorf("operator (owner of the demo) %s: status %d, want the handler to be reached", tc.name, rec.Code)
+			}
+		})
+	}
+}
+
+// The classed routes are exempt from the floor because they ask the registry
+// their own Allow question — the floor's generic dashboards:write check would
+// preempt it and refuse a plans:write credential on a plans:write route. The
+// floor must pass them to the handler untouched, for the demo member and the
+// operator alike; the refusal itself is the handler's, asserted against the
+// real route table in direct_mutator_authorization_test.go.
+func TestClassedRoutesPassTheFloorToTheirOwnAuthorizer(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{"create a dashboard", http.MethodPost, "/api/dashboards"},
+		{"delete a dashboard", http.MethodDelete, "/api/dashboards/d1"},
+		{"edit a chart", http.MethodPut, "/api/charts/c1"},
+		{"reorder charts", http.MethodPut, "/api/dashboards/d1/charts/order"},
+		{"save a query", http.MethodPost, "/api/saved-queries"},
+		{"delete a saved query", http.MethodDelete, "/api/saved-queries/q1"},
+		{"create a cohort audience", http.MethodPost, "/api/cohorts/audiences"},
+		{"delete a cohort audience", http.MethodDelete, "/api/cohorts/audiences/a1"},
+		{"connect a data source", http.MethodPost, "/api/connectors"},
+		{"test a data source", http.MethodPost, "/api/connectors/c1/test"},
+		{"run a sync", http.MethodPost, "/api/connector-syncs/s1/run"},
+		{"apply a template", http.MethodPost, "/api/templates/t1/apply"},
+		{"change the subscription mapping", http.MethodPut, "/api/subscription/mapping"},
+		{"commit a validation test", http.MethodPost, "/api/validation/tests/v1/commit"},
+		{"decide a validation test", http.MethodPost, "/api/validation/tests/v1/decide"},
+	}
+
+	e := guardedEcho(t, newFakeGuardStore(), 5)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target := tc.target + "?project_id=" + demoProject
+			for _, token := range []string{visitorToken, operatorTok} {
+				if rec := do(e, tc.method, target, token); rec.Code != reachedHandler {
+					t.Errorf("%s: status %d, want the floor to pass the route to its own authorizer", tc.name, rec.Code)
+				}
 			}
 		})
 	}
@@ -609,7 +641,6 @@ func TestTheDemoOperatorIsNotMetered(t *testing.T) {
 	}
 }
 
-
 // --- fail-closed properties ------------------------------------------------
 
 // The floor is demo-unaware: with no demo configured it still refuses
@@ -620,10 +651,10 @@ func TestWithNoDemoMembersStillWrite(t *testing.T) {
 	fake.demoProjectID = ""
 	e := guardedEcho(t, fake, 5)
 
-	if rec := do(e, http.MethodPost, "/api/dashboards?project_id="+homeProject, visitorToken); rec.Code != reachedHandler {
+	if rec := do(e, http.MethodPost, "/api/teams?project_id="+homeProject, visitorToken); rec.Code != reachedHandler {
 		t.Fatalf("owner of home with no demo: status %d, want the handler", rec.Code)
 	}
-	if rec := do(e, http.MethodPost, "/api/dashboards?project_id="+homeProject, ""); rec.Code != http.StatusUnauthorized {
+	if rec := do(e, http.MethodPost, "/api/teams?project_id="+homeProject, ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated write with no demo: status %d, want 401", rec.Code)
 	}
 }
@@ -632,7 +663,7 @@ func TestWithNoDemoMembersStillWrite(t *testing.T) {
 // handler on the strength of not being attributable to anyone.
 func TestUnauthenticatedWritesAreRefused(t *testing.T) {
 	e := guardedEcho(t, newFakeGuardStore(), 5)
-	for _, target := range []string{"/api/dashboards", "/api/dashboards?project_id=" + demoProject, "/api/agent/chat"} {
+	for _, target := range []string{"/api/teams", "/api/teams?project_id=" + demoProject, "/api/agent/chat"} {
 		if rec := do(e, http.MethodPost, target, ""); rec.Code != http.StatusUnauthorized {
 			t.Errorf("POST %s with no session: status %d, want %d", target, rec.Code, http.StatusUnauthorized)
 		}
@@ -650,7 +681,7 @@ func TestUnauthenticatedWritesAreRefused(t *testing.T) {
 func TestUnresolvableScopeIsRefused(t *testing.T) {
 	e := guardedEcho(t, newFakeGuardStore(), 5)
 	for _, target := range []string{
-		"/api/dashboards?project_id=99999999-9999-9999-9999-999999999999",
+		"/api/teams?project_id=99999999-9999-9999-9999-999999999999",
 		"/api/workspaces/99999999-9999-9999-9999-999999999999/members",
 	} {
 		if rec := do(e, http.MethodPost, target, visitorToken); rec.Code != http.StatusForbidden {
@@ -663,8 +694,8 @@ func TestUnresolvableScopeIsRefused(t *testing.T) {
 // refuses it on a guarded mutation. Collection stays open.
 func TestTheDemoAPIKeyCannotDriveTheAPI(t *testing.T) {
 	e := guardedEcho(t, newFakeGuardStore(), 5)
-	if rec := do(e, http.MethodPost, "/api/dashboards?api_key="+demoKey, ""); rec.Code != http.StatusForbidden {
-		t.Fatalf("POST /api/dashboards with the demo key: status %d, want 403", rec.Code)
+	if rec := do(e, http.MethodPost, "/api/teams?api_key="+demoKey, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/teams with the demo key: status %d, want 403", rec.Code)
 	}
 	for _, target := range []string{"/capture?api_key=" + demoKey, "/batch?api_key=" + demoKey} {
 		if rec := do(e, http.MethodPost, target, ""); rec.Code != reachedHandler {
@@ -672,7 +703,6 @@ func TestTheDemoAPIKeyCannotDriveTheAPI(t *testing.T) {
 		}
 	}
 }
-
 
 // The guard's whole security property is its default arm. A route nobody has
 // classified must be denied, not allowed.
@@ -870,11 +900,11 @@ func TestWriteGuardRefusesADeniedBearerInsteadOfFallingThrough(t *testing.T) {
 			// The cookie alone is a valid write: the visitor owns homeProject.
 			// Without the header this request reaches the handler, so what the
 			// assertion below measures is the header and nothing else.
-			if rec := do(e, http.MethodPost, "/api/saved-queries", visitorToken); rec.Code != reachedHandler {
+			if rec := do(e, http.MethodPost, "/api/teams", visitorToken); rec.Code != reachedHandler {
 				t.Fatalf("session without a bearer: status %d, want %d", rec.Code, reachedHandler)
 			}
 
-			req := httptest.NewRequest(http.MethodPost, "/api/saved-queries", strings.NewReader("{}"))
+			req := httptest.NewRequest(http.MethodPost, "/api/teams", strings.NewReader("{}"))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			req.Header.Set("Authorization", tc.header)
 			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: visitorToken})
@@ -887,7 +917,7 @@ func TestWriteGuardRefusesADeniedBearerInsteadOfFallingThrough(t *testing.T) {
 			// The same header with a project key behind it is refused too —
 			// the fall-through is closed for every credential, not just the
 			// cookie.
-			req = httptest.NewRequest(http.MethodPost, "/api/saved-queries", strings.NewReader("{}"))
+			req = httptest.NewRequest(http.MethodPost, "/api/teams", strings.NewReader("{}"))
 			req.Header.Set("Authorization", tc.header)
 			req.Header.Set("X-API-Key", demoKey)
 			rec = httptest.NewRecorder()

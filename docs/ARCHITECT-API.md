@@ -88,12 +88,20 @@ itself stays demo-blind. The demo fact lives on the project.
 
 **It is fail-closed by default.** A route is exempt only by being named in
 `writeClasses` with a reason: session lifecycle, the caller's own account, a
-public collection endpoint, a read that carries a body, or the agent-ask
+public collection endpoint, a read that carries a body, the agent-ask
 surface (open to demo visitors, and metered in the chat handler against
-`AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY`). Anything unlisted — including a
-route added next year — is denied for a caller without the write class.
-`TestTheRouteTableMatchesTheSource` scans this package's source and fails when
-a mutating route is registered that the floor's table does not name.
+`AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY`), or a route that asks the registry
+its own Allow question (`writeClassed` — the floor's generic dashboards:write
+check would preempt the class the route declares). Anything unlisted —
+including a route added next year — is denied for a caller without the write
+class. `TestTheRouteTableMatchesTheSource` scans this package's source and
+fails when a mutating route is registered that the floor's table does not
+name.
+
+Every credential-scope denial on every surface is one sentence —
+`opcore.RefusalMessage`, "credential may not perform this action (requires
+\<class\>)" — so a refused caller writes one branch whether it asked a direct
+route, `/api/op`, or MCP.
 
 The floor is demo-unaware: it does not return early when no demo is configured.
 A Bearer that is present but does not resolve is a denial rather than an

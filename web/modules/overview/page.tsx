@@ -15,6 +15,8 @@ import { PageShell } from '@/modules/shared/components/page-shell';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Button, Callout, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { FirstEventQuickstart } from '@/modules/dashboard/first-event-quickstart';
+import { AddAnnotationButton, useAnnotations } from '@/modules/annotations';
+import { useProjectAccess } from '@/modules/app/hooks';
 
 // The range control always offers Today plus the complete-day windows. Today
 // is the explicit partial period: the backend returns no comparison for it
@@ -541,7 +543,16 @@ export function OverviewPage() {
     staleTime: 60 * 1000,
     refetchOnWindowFocus: false,
   });
+
   const res = query.data ?? null;
+
+  // The trend's annotation window is the served range — the same window the
+  // figures cover, so a mark outside it is absent rather than mispositioned.
+  const annotationRange = res?.context.range ?? null;
+  const annotations = useAnnotations(
+    annotationRange ? { from: annotationRange.from, to: annotationRange.to } : null,
+  );
+  const access = useProjectAccess();
 
   const viewState = overviewViewState({
     projectID,
@@ -614,8 +625,9 @@ export function OverviewPage() {
       smooth: false,
       integerY: true,
       height: 220,
+      annotations: annotations.annotations,
     };
-  }, [res]);
+  }, [res, annotations.annotations]);
   const trend = res ? trendMeaning(res) : 'empty';
 
   const headerRange = res ? rangeLabel(res) : '';
@@ -886,7 +898,7 @@ export function OverviewPage() {
                 the order both prototypes and this doc's item list share. */}
             <div className="grid grid-cols-3 gap-4 [@media(max-width:980px)]:grid-cols-1">
               <div className="col-span-2 [@media(max-width:980px)]:col-span-1">
-                <Panel title="Active people per day">
+                <Panel title="Active people per day" action={access.canWrite ? <AddAnnotationButton annotations={annotations} /> : undefined}>
                   {trendSpec ? (
                     <>
                       <Chart spec={trendSpec} />

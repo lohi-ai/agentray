@@ -404,6 +404,20 @@ export type BoardContent = {
   warnings: string[];
 };
 
+// Annotation is one marked change on the project's timeline — a deploy,
+// campaign, price change or other event a member recorded so "did X cause
+// this movement" is answerable on the chart. ends_at absent = an instant.
+export type Annotation = {
+  id: string;
+  project_id: string;
+  label: string;
+  kind: 'deploy' | 'campaign' | 'price' | 'other';
+  link?: string;
+  starts_at: string;
+  ends_at?: string | null;
+  created_at: string;
+};
+
 export type ChartInput = Pick<Chart, 'name' | 'kind' | 'metric' | 'event_name' | 'event_type' | 'sql' | 'x_field' | 'y_field' | 'col_span'>;
 
 export type Filters = {
@@ -814,7 +828,7 @@ export type WorkspaceModelTiersInput = {
 
 // --- Alerting (#1) ---
 
-export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops'] as const;
+export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops', 'digest'] as const;
 export type AlertSourceKind = (typeof ALERT_SOURCE_KINDS)[number];
 export const ALERT_OPS = ['gt', 'lt', 'z_score'] as const;
 export type AlertOp = (typeof ALERT_OPS)[number];
@@ -828,6 +842,10 @@ export type AlertCondition = {
   min_events?: number;
 };
 
+export type AlertRuleParams = {
+  send_empty?: boolean;
+};
+
 export type AlertRule = {
   id: string;
   project_id: string;
@@ -835,6 +853,7 @@ export type AlertRule = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -848,6 +867,7 @@ export type AlertRuleInput = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -2189,6 +2209,29 @@ export class AgentRayAPI {
 
   getBoard(input: { board_id?: string; board_key?: string }) {
     return this.callOp<BoardContent>('get_board', input);
+  }
+
+  // --- Chart annotations (add_annotation / list_annotations / delete_annotation) ---
+  //
+  // The overlap-window read every temporal chart performs: the marks whose
+  // instant or range intersects [from, to]. Writes are idempotency-keyed like
+  // every other retryable mutation.
+  listAnnotations(input: { from: string; to: string; limit?: number }) {
+    return this.callOp<{ annotations: Annotation[] }>('list_annotations', input as Record<string, unknown>);
+  }
+
+  addAnnotation(input: { label: string; kind: string; link?: string; starts_at: string; ends_at?: string; idempotency_key?: string }) {
+    return this.callOp<Annotation>('add_annotation', {
+      ...input,
+      idempotency_key: input.idempotency_key ?? newIdempotencyKey(),
+    });
+  }
+
+  deleteAnnotation(annotationID: string, opts: { idempotencyKey?: string } = {}) {
+    return this.callOp<Annotation>('delete_annotation', {
+      annotation_id: annotationID,
+      idempotency_key: opts.idempotencyKey ?? newIdempotencyKey(),
+    });
   }
 
   // recordOutcome appends one measured observation to a committed or decided

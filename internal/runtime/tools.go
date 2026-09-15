@@ -111,6 +111,7 @@ type DataSource interface {
 	BoardContentForProject(ctx context.Context, projectID, boardID string) (storage.BoardContent, error)
 	BoardContentByKey(ctx context.Context, projectID, boardKey string) (storage.BoardContent, error)
 	SaveBoardDefinition(ctx context.Context, projectID string, in storage.BoardDefinitionWrite, idemKey, requestHash string) (storage.BoardContent, error)
+
 	// set_metric_target appends a version to the project-scoped target
 	// history; save_board declares targets through the same write.
 	SetMetricTargetIdempotent(ctx context.Context, projectID string, in storage.MetricTargetWrite, idemKey, requestHash string) (storage.MetricTarget, error)
@@ -119,6 +120,13 @@ type DataSource interface {
 	// Deps.Repo, so it must declare everything the ops reach for.
 	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
 	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
+
+	// Chart annotations: the project-scoped marks behind add_annotation,
+	// list_annotations and delete_annotation. Mirrors usecase.Repo.
+	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
+	AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]storage.Annotation, error)
+	AnnotationForProject(ctx context.Context, projectID, id string) (storage.Annotation, error)
+	DeleteAnnotationIdempotent(ctx context.Context, projectID, id, idemKey, requestHash string) (storage.Annotation, error)
 }
 
 // Tool names — the stable identifiers the model calls and the policy permits.
@@ -176,4 +184,7 @@ const (
 	ToolRunFindingsScan   = "run_findings_scan"
 	ToolWatchFunnel       = "watch_funnel"
 	ToolListFunnelWatches = "list_funnel_watches"
+	ToolAddAnnotation      = "add_annotation"
+	ToolListAnnotations    = "list_annotations"
+	ToolDeleteAnnotation   = "delete_annotation"
 )

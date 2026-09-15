@@ -1100,6 +1100,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// Chart annotations sit beside the boards they mark: a project-scoped
+	// record, not a per-chart field, so one deploy shows on every temporal
+	// chart that spans it.
+	if err := s.migrateAnnotations(ctx); err != nil {
+		return err
+	}
+
 	// Boards seeded before the "guest vs identified" query was corrected still
 	// read `properties.email`; the seed only ever runs once, so they have to be
 	// repaired here. Needs the revision column migrateLifecycle just added.

@@ -77,8 +77,12 @@ func (a *opAdapter) invoke(c echo.Context, principal opcore.Principal, opName st
 // Registry.Authorize call MountHTTP makes on /api/op — and it answers with the
 // same refusal those adapters return, so the two cannot drift apart.
 func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
+	spec, ok := a.reg.Get(opName)
+	if !ok {
+		return echo.NewHTTPError(http.StatusInternalServerError, "operation "+opName+" not registered")
+	}
 	if !a.reg.Authorize(principal, opName) {
-		return echo.NewHTTPError(http.StatusForbidden, "credential may not invoke "+opName)
+		return echo.NewHTTPError(http.StatusForbidden, opcore.RefusalMessage(spec.OpAccess()))
 	}
 	return nil
 }
@@ -89,22 +93,13 @@ func (a *opAdapter) authorize(principal opcore.Principal, opName string) error {
 // there is no operation to ask about, so the route states the class its work
 // belongs to instead of naming an operation. The decision is the registry's
 // (Allow), not a second implementation of it here: a management credential
-// without the class is refused exactly as /api/op refuses it, and a viewer's
-// session is refused on every write for the same reason /api/op refuses one.
+// without the class is refused exactly as /api/op refuses it — same status,
+// same body, because both answers come from opcore.RefusalMessage.
 func (a *opAdapter) authorizeAccess(principal opcore.Principal, req opcore.Requirement) error {
 	if a.reg.Allow(principal, req) {
 		return nil
 	}
-	// A session refused on a write hears why: the class is not the missing
-	// piece, the membership is. It is the sentence the demo write guard
-	// answers a viewer with, for the same situation. A read requirement carries
-	// no floor (legacyRead leaves MinSessionRole empty), so a session refused a
-	// read is told which class it lacks instead of being told its role is
-	// read-only — which would be the wrong sentence for a read.
-	if principal.Kind == opcore.CredSession && req.MinSessionRole != "" && !storage.RoleMayWrite(principal.Role) {
-		return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
-	}
-	return echo.NewHTTPError(http.StatusForbidden, "credential may not perform this action (requires "+string(req.Access)+")")
+	return echo.NewHTTPError(http.StatusForbidden, opcore.RefusalMessage(req.Access))
 }
 
 // legacyWrite is what a legacy mutating route requires: the access class its

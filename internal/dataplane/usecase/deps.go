@@ -121,6 +121,15 @@ type Repo interface {
 	// is already declared above.
 	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
 	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
+
+	// Chart annotations: the project-scoped marks a member drops on a trend.
+	// The window read is the overlap contract every temporal chart asks for;
+	// the by-id read resolves evidence references without ever crossing a
+	// project boundary.
+	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
+	AnnotationsForWindow(ctx context.Context, projectID string, from, to time.Time, limit int) ([]storage.Annotation, error)
+	AnnotationForProject(ctx context.Context, projectID, id string) (storage.Annotation, error)
+	DeleteAnnotationIdempotent(ctx context.Context, projectID, id, idemKey, requestHash string) (storage.Annotation, error)
 }
 
 // Notifier delivers a message to a saved alert channel. It is the send_notification
