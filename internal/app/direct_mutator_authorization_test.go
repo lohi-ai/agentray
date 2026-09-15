@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 // The legacy REST mutators that write through storage.Store without an
@@ -101,6 +103,10 @@ type directMutatorCase struct {
 	method string
 	path   func(f directMutatorFixture) string
 	body   func(f directMutatorFixture) string
+	// denied is the exact refusal body a credential without the route's class
+	// hears — the same sentence /api/op answers, so the two surfaces cannot
+	// drift apart (F3). Asserted, not described.
+	denied string
 	// accepted is the status the owner's session sees. Every refusal below is
 	// asserted against a route that provably works for the owner in the same
 	// run, so a route broken by a typo cannot masquerade as a closed hole.
@@ -201,6 +207,7 @@ func directMutatorCases() []directMutatorCase {
 			path:   func(f directMutatorFixture) string { return "/api/templates/" + f.templateID + "/apply" },
 			body:   func(directMutatorFixture) string { return `{}` },
 			// 201 Created — the clone creates the dashboard and its charts.
+			denied:   "credential may not perform this action (requires dashboards:write)",
 			accepted: http.StatusCreated,
 		},
 		{
@@ -211,6 +218,7 @@ func directMutatorCases() []directMutatorCase {
 				return "/api/templates/" + f.templateID + "/charts/" + f.templateChartID + "/clone"
 			},
 			body:     func(f directMutatorFixture) string { return `{"dashboard_id":"` + f.dashboardID + `"}` },
+			denied:   "credential may not perform this action (requires dashboards:write)",
 			accepted: http.StatusCreated,
 		},
 		{
@@ -220,6 +228,7 @@ func directMutatorCases() []directMutatorCase {
 			path:     func(directMutatorFixture) string { return "/api/cohorts/audiences" },
 			body:     func(directMutatorFixture) string { return `{"label":"Payers","kind":"paid","plans":[]}` },
 			accepted: http.StatusCreated,
+			denied:   "credential may not perform this action (requires plans:write)",
 		},
 		{
 			name:     "update a cohort audience",
@@ -227,6 +236,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodPut,
 			path:     func(f directMutatorFixture) string { return "/api/cohorts/audiences/" + f.audienceID },
 			body:     func(directMutatorFixture) string { return `{"label":"Beta testers","kind":"paid","plans":[]}` },
+			denied:   "credential may not perform this action (requires plans:write)",
 			accepted: http.StatusOK,
 		},
 		{
@@ -235,6 +245,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodDelete,
 			path:     func(f directMutatorFixture) string { return "/api/cohorts/audiences/" + f.audienceID },
 			body:     func(directMutatorFixture) string { return "" },
+			denied:   "credential may not perform this action (requires plans:write)",
 			accepted: http.StatusNoContent,
 		},
 		{
@@ -245,6 +256,7 @@ func directMutatorCases() []directMutatorCase {
 			body: func(directMutatorFixture) string {
 				return `{"start_event":"subscription_started","period_end_prop":"current_period_end","plan_prop":"plan","grace_days":3}`
 			},
+			denied:   "credential may not perform this action (requires plans:write)",
 			accepted: http.StatusOK,
 		},
 		{
@@ -255,6 +267,7 @@ func directMutatorCases() []directMutatorCase {
 			body: func(directMutatorFixture) string {
 				return `{"natural_language":"Count events","generated_sql":"` + countEventsSQL + `","verified":true}`
 			},
+			denied:   "credential may not perform this action (requires dashboards:write)",
 			accepted: http.StatusCreated,
 		},
 		{
@@ -263,6 +276,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodPatch,
 			path:     func(f directMutatorFixture) string { return "/api/saved-queries/" + f.renameQueryID },
 			body:     func(directMutatorFixture) string { return `{"natural_language":"Renamed"}` },
+			denied:   "credential may not perform this action (requires dashboards:write)",
 			accepted: http.StatusOK,
 		},
 		{
@@ -271,6 +285,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodDelete,
 			path:     func(f directMutatorFixture) string { return "/api/saved-queries/" + f.deleteQueryID },
 			body:     func(directMutatorFixture) string { return "" },
+			denied:   "credential may not perform this action (requires dashboards:write)",
 			accepted: http.StatusNoContent,
 		},
 		{
@@ -279,6 +294,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodPost,
 			path:     func(f directMutatorFixture) string { return "/api/saved-queries/" + f.renameQueryID + "/run" },
 			body:     func(directMutatorFixture) string { return `{}` },
+			denied:   "credential may not perform this action (requires analytics:read)",
 			accepted: http.StatusOK,
 		},
 		{
@@ -287,6 +303,7 @@ func directMutatorCases() []directMutatorCase {
 			method:   http.MethodPost,
 			path:     func(directMutatorFixture) string { return "/api/sql/run" },
 			body:     func(directMutatorFixture) string { return `{"sql":"` + countEventsSQL + `"}` },
+			denied:   "credential may not perform this action (requires analytics:read)",
 			accepted: http.StatusOK,
 		},
 	}
@@ -340,6 +357,18 @@ func TestDirectMutatorsRefuseCredentialsThatMayNotWrite(t *testing.T) {
 			rec := who.request(t, e, tc.method, tc.path(fixture), tc.body(fixture))
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("%s %s as %s = %d %s, want 403", tc.method, tc.path(fixture), who.name, rec.Code, rec.Body.String())
+				continue
+			}
+			// The body is the contract, not a detail: the same credential asking
+			// /api/op for the same class hears this exact sentence, so a client
+			// writes one branch for a refused call on either surface.
+			var refusal struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+				t.Errorf("%s %s as %s: refusal body %q is not the {message} envelope", tc.method, tc.path(fixture), who.name, rec.Body.String())
+			} else if refusal.Message != tc.denied {
+				t.Errorf("%s %s as %s: refusal %q, want %q", tc.method, tc.path(fixture), who.name, refusal.Message, tc.denied)
 			}
 		}
 	}
@@ -974,30 +1003,45 @@ func TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation(t *testing.T) {
 		name         string
 		method, path string
 		body         string
+		// denied is the exact refusal sentence — the same one /api/op answers
+		// for the same class, so the assertion is the F3 contract itself.
+		denied string
 	}{
 		// Malformed body: the parse must not run first.
-		{"malformed body", http.MethodPost, "/api/cohorts/audiences", `{"label":`},
-		{"malformed body, saved query", http.MethodPost, "/api/saved-queries", `{"natural_language":`},
-		{"malformed body, mapping", http.MethodPut, "/api/subscription/mapping", `{"start_event":`},
+		{"malformed body", http.MethodPost, "/api/cohorts/audiences", `{"label":`, "credential may not perform this action (requires plans:write)"},
+		{"malformed body, saved query", http.MethodPost, "/api/saved-queries", `{"natural_language":`, "credential may not perform this action (requires dashboards:write)"},
+		{"malformed body, mapping", http.MethodPut, "/api/subscription/mapping", `{"start_event":`, "credential may not perform this action (requires plans:write)"},
 		// Missing row: the lookup must not run first.
-		{"missing audience", http.MethodPut, "/api/cohorts/audiences/" + missingID, `{"label":"x","kind":"paid"}`},
-		{"missing audience, delete", http.MethodDelete, "/api/cohorts/audiences/" + missingID, ""},
-		{"missing saved query", http.MethodPatch, "/api/saved-queries/" + missingID, `{"natural_language":"x"}`},
-		{"missing saved query, delete", http.MethodDelete, "/api/saved-queries/" + missingID, ""},
-		{"missing template", http.MethodPost, "/api/templates/" + missingID + "/apply", `{}`},
+		{"missing audience", http.MethodPut, "/api/cohorts/audiences/" + missingID, `{"label":"x","kind":"paid"}`, "credential may not perform this action (requires plans:write)"},
+		{"missing audience, delete", http.MethodDelete, "/api/cohorts/audiences/" + missingID, "", "credential may not perform this action (requires plans:write)"},
+		{"missing saved query", http.MethodPatch, "/api/saved-queries/" + missingID, `{"natural_language":"x"}`, "credential may not perform this action (requires dashboards:write)"},
+		{"missing saved query, delete", http.MethodDelete, "/api/saved-queries/" + missingID, "", "credential may not perform this action (requires dashboards:write)"},
+		{"missing template", http.MethodPost, "/api/templates/" + missingID + "/apply", `{}`, "credential may not perform this action (requires dashboards:write)"},
 	}
 	for _, tc := range refused {
 		rec := callREST(t, e, tc.method, tc.path, tc.body, sources)
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s with a sources:read credential = %d %s, want 403 (the authorization answer, not a parse or existence verdict)",
 				tc.name, rec.Code, rec.Body.String())
+			continue
+		}
+		var refusal struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+			t.Errorf("%s: refusal body %q is not the {message} envelope", tc.name, rec.Body.String())
+		} else if refusal.Message != tc.denied {
+			t.Errorf("%s: refusal %q, want %q — the same sentence /api/op answers", tc.name, refusal.Message, tc.denied)
 		}
 	}
 
-	// The registry surface answers the same credential the same way, so the two
-	// surfaces agree on the status of a refused caller.
-	if rec := postJSON(t, e, "/api/op/create_dashboard", `{"name":"denied"}`, bearer(sources)); rec.Code != http.StatusForbidden {
+	// The registry surface answers the same credential the same way — same
+	// status AND the same sentence, so a refused caller writes one branch.
+	rec := postJSON(t, e, "/api/op/create_dashboard", `{"name":"denied"}`, bearer(sources))
+	if rec.Code != http.StatusForbidden {
 		t.Errorf("sources:read create_dashboard via /api/op = %d %s, want 403", rec.Code, rec.Body.String())
+	} else if body := strings.TrimSpace(rec.Body.String()); body != `{"message":"credential may not perform this action (requires dashboards:write)"}` {
+		t.Errorf("sources:read create_dashboard via /api/op body = %s, want the grant refusal the direct surface answers", body)
 	}
 
 	// 403 is the refusal of a caller that authenticated. 401 stays reserved for
@@ -1011,7 +1055,7 @@ func TestDeniedCallersGetTheAuthorizationAnswerBeforeValidation(t *testing.T) {
 
 	// A management credential that HOLDS the class keeps its access: the
 	// cutover ends undocumented machine-key writes, not scoped ones.
-	rec := callREST(t, e, http.MethodPost, "/api/saved-queries",
+	rec = callREST(t, e, http.MethodPost, "/api/saved-queries",
 		`{"natural_language":"Authorised","generated_sql":"SELECT 1 AS n","verified":true}`, author)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("dashboards:write credential create saved query = %d %s, want 201", rec.Code, rec.Body.String())
@@ -1089,5 +1133,88 @@ func TestAReadOnlyQueryRunDoesNotWriteTheCacheWithoutADemo(t *testing.T) {
 	}
 	if got := cached(); !bytes.Equal(got, ownerCached) {
 		t.Errorf("a read-only run rewrote the owner's cached result: %s, want %s", got, ownerCached)
+	}
+}
+
+// TestADemoMemberHearsTheGrantRefusal is the member-without-grant half of the
+// body contract. A demo member holds a real session and a real membership —
+// the denial is a grant refusal, not a role statement — so the body must be
+// the same sentence a denied credential hears, on the store-direct route and
+// on the op-backed route alike. The stale "your role in this workspace is
+// read-only" copy named a role that no longer exists; this test fails if it
+// returns.
+//
+// The demo flag lives on the store, so the demo project must exist before the
+// store opens: the first store creates it, the second is opened with
+// DemoProjectID set, and the routes mount over that one.
+func TestADemoMemberHearsTheGrantRefusal(t *testing.T) {
+	ctx := context.Background()
+	stamp := time.Now().UnixNano()
+
+	setup := openAppTestStore(t)
+	demoOwner, err := setup.CreateAccount(ctx, fmt.Sprintf("demo-owner-%d@test.local", stamp), "Demo Owner", "password-123", "demo-ws", "demo-proj")
+	if err != nil {
+		t.Fatalf("demo owner account: %v", err)
+	}
+	member, err := setup.CreateAccount(ctx, fmt.Sprintf("demo-member-%d@test.local", stamp), "Member", "password-123", "home-ws", "home-proj")
+	if err != nil {
+		t.Fatalf("member account: %v", err)
+	}
+	if _, err := setup.AddWorkspaceMemberByEmail(ctx, demoOwner.User.ID, demoOwner.Workspace.ID, member.User.Email, "member"); err != nil {
+		t.Fatalf("add member to demo workspace: %v", err)
+	}
+
+	s := openAppTestStoreWith(t, func(cfg *config.Config) { cfg.DemoProjectID = demoOwner.Project.ID })
+	e := mountServerRoutes(t, s)
+
+	_, memberToken, err := s.CreateUserSession(ctx, member.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("member session: %v", err)
+	}
+	asMember := caller{
+		name:      "demo member session",
+		cookies:   []*http.Cookie{{Name: sessionCookieName, Value: memberToken}},
+		projectID: demoOwner.Project.ID,
+	}
+
+	// The store-direct write and the op-backed write are the same refusal
+	// class, so the member hears the same sentence a denied credential does.
+	denied := []struct {
+		method, path, body, want string
+	}{
+		{http.MethodPost, "/api/cohorts/audiences", `{"label":"x","kind":"paid","plans":[]}`,
+			"credential may not perform this action (requires plans:write)"},
+		{http.MethodPost, "/api/dashboards", `{"name":"member board"}`,
+			"credential may not perform this action (requires dashboards:write)"},
+	}
+	for _, tc := range denied {
+		rec := asMember.request(t, e, tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("demo member %s %s = %d %s, want 403", tc.method, tc.path, rec.Code, rec.Body.String())
+			continue
+		}
+		var refusal struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+			t.Errorf("demo member %s %s: refusal body %q is not the {message} envelope", tc.method, tc.path, rec.Body.String())
+		} else if refusal.Message != tc.want {
+			t.Errorf("demo member %s %s: refusal %q, want %q", tc.method, tc.path, refusal.Message, tc.want)
+		}
+	}
+
+	// The read the demo exists for still works, and the member's own project
+	// is unaffected — the refusal is scoped to the demo's grants, not the
+	// person.
+	if rec := asMember.request(t, e, http.MethodGet, "/api/activity", ""); rec.Code != http.StatusOK {
+		t.Errorf("demo member GET /api/activity = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	atHome := caller{
+		name:      "member at home",
+		cookies:   asMember.cookies,
+		projectID: member.Project.ID,
+	}
+	if rec := atHome.request(t, e, http.MethodPost, "/api/cohorts/audiences", `{"label":"home","kind":"paid","plans":[]}`); rec.Code != http.StatusCreated {
+		t.Errorf("member POST /api/cohorts/audiences on own project = %d %s, want 201", rec.Code, rec.Body.String())
 	}
 }

@@ -18,7 +18,7 @@ import (
 // re-notify every tick. Follows the agent_triggers.go conventions: raw pgx,
 // inline SQL, scope checks via project/workspace ownership.
 
-var errAlertInvalidSource = errors.New("alert source_kind must be 'insight', 'sql', or 'agent_ops'")
+var errAlertInvalidSource = errors.New("alert source_kind must be 'insight', 'sql', 'agent_ops', or 'digest'")
 var errAlertInvalidOp = errors.New("alert condition op must be 'gt', 'lt', or 'z_score'")
 
 // AlertCondition is the threshold test for a rule. For gt/lt, Value is the
@@ -27,27 +27,34 @@ var errAlertInvalidOp = errors.New("alert condition op must be 'gt', 'lt', or 'z
 // below which the anomaly test is suppressed (low-volume metrics are noisy and
 // would over-fire).
 type AlertCondition struct {
-	Op        string  `json:"op"` // gt | lt | z_score
+	Op        string  `json:"op"` // gt | lt | z_score | none (digest only)
 	Value     float64 `json:"value"`
 	Window    int     `json:"window,omitempty"`
 	MinEvents int     `json:"min_events,omitempty"`
 }
 
+// AlertRuleParams holds source-specific options. Digest rules may deliver an
+// explicit quiet week; all other rules leave this false.
+type AlertRuleParams struct {
+	SendEmpty bool `json:"send_empty,omitempty"`
+}
+
 // AlertRule is one saved condition. SourceKind + SourceRef name what to measure;
 // Condition how; Channels where to deliver. LastState edge-triggers delivery.
 type AlertRule struct {
-	ID         string         `json:"id"`
-	ProjectID  string         `json:"project_id"`
-	Name       string         `json:"name"`
-	SourceKind string         `json:"source_kind"` // insight | sql | agent_ops
-	SourceRef  string         `json:"source_ref"`  // chart/saved-query id or ops metric name
-	Condition  AlertCondition `json:"condition"`
-	Schedule   string         `json:"schedule_cron"`
-	Channels   []string       `json:"channels"` // alert_channels ids
-	Enabled    bool           `json:"enabled"`
-	LastEvalAt *time.Time     `json:"last_eval_at,omitempty"`
-	LastState  string         `json:"last_state"` // ok | firing
-	CreatedAt  time.Time      `json:"created_at"`
+	ID         string          `json:"id"`
+	ProjectID  string          `json:"project_id"`
+	Name       string          `json:"name"`
+	SourceKind string          `json:"source_kind"` // insight | sql | agent_ops | digest
+	SourceRef  string          `json:"source_ref"`  // chart/saved-query id or ops metric name
+	Condition  AlertCondition  `json:"condition"`
+	Params     AlertRuleParams `json:"params"`
+	Schedule   string          `json:"schedule_cron"`
+	Channels   []string        `json:"channels"` // alert_channels ids
+	Enabled    bool            `json:"enabled"`
+	LastEvalAt *time.Time      `json:"last_eval_at,omitempty"`
+	LastState  string          `json:"last_state"` // ok | firing | digest
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 // AlertChannel is a delivery target. Config holds the webhook URL / email address
@@ -97,6 +104,7 @@ func (s *Store) migrateAlerts(ctx context.Context) error {
 	last_state VARCHAR(8) NOT NULL DEFAULT 'ok',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`,
+		`ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS params JSONB NOT NULL DEFAULT '{}'::jsonb`,
 		`CREATE INDEX IF NOT EXISTS alert_rules_project_idx ON alert_rules (project_id)`,
 		`CREATE TABLE IF NOT EXISTS alert_events (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -107,6 +115,8 @@ func (s *Store) migrateAlerts(ctx context.Context) error {
 	payload JSONB NOT NULL DEFAULT '{}'::jsonb
 )`,
 		`CREATE INDEX IF NOT EXISTS alert_events_rule_fired_idx ON alert_events (rule_id, fired_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS alert_events_digest_rule_fired_idx
+ON alert_events (rule_id, fired_at DESC) WHERE state = 'digest'`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -118,7 +128,7 @@ func (s *Store) migrateAlerts(ctx context.Context) error {
 
 func validateAlertSource(kind string) error {
 	switch kind {
-	case "insight", "sql", "agent_ops":
+	case "insight", "sql", "agent_ops", "digest":
 		return nil
 	default:
 		return errAlertInvalidSource
@@ -180,7 +190,7 @@ func (s *Store) ListAlertRules(ctx context.Context, userID, projectID string) ([
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, source_kind, source_ref, condition, schedule_cron,
+SELECT id::text, project_id::text, name, source_kind, source_ref, condition, params, schedule_cron,
        channels, enabled, last_eval_at, last_state, created_at
 FROM alert_rules WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
@@ -194,12 +204,13 @@ func scanAlertRules(rows pgx.Rows) ([]AlertRule, error) {
 	out := make([]AlertRule, 0)
 	for rows.Next() {
 		var r AlertRule
-		var cond, chans []byte
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Name, &r.SourceKind, &r.SourceRef, &cond,
+		var cond, params, chans []byte
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Name, &r.SourceKind, &r.SourceRef, &cond, &params,
 			&r.Schedule, &chans, &r.Enabled, &r.LastEvalAt, &r.LastState, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(cond, &r.Condition)
+		_ = json.Unmarshal(params, &r.Params)
 		_ = json.Unmarshal(chans, &r.Channels)
 		out = append(out, r)
 	}
@@ -222,33 +233,43 @@ func (s *Store) CreateAlertRule(ctx context.Context, userID, projectID string, r
 	if err := validateAlertSource(r.SourceKind); err != nil {
 		return AlertRule{}, err
 	}
-	if err := validateAlertOp(r.Condition.Op); err != nil {
-		return AlertRule{}, err
-	}
-	if r.Condition.Op == "z_score" && r.Condition.MinEvents <= 0 {
-		return AlertRule{}, fmt.Errorf("z_score alerts require min_events > 0 to avoid over-firing on low-volume metrics")
+	if r.SourceKind == "digest" {
+		r.SourceRef = ""
+	} else {
+		if err := validateAlertOp(r.Condition.Op); err != nil {
+			return AlertRule{}, err
+		}
+		if r.Condition.Op == "z_score" && r.Condition.MinEvents <= 0 {
+			return AlertRule{}, fmt.Errorf("z_score alerts require min_events > 0 to avoid over-firing on low-volume metrics")
+		}
 	}
 	if err := s.validateChannelsInWorkspace(ctx, project.WorkspaceID, r.Channels); err != nil {
 		return AlertRule{}, err
 	}
 	if r.Schedule == "" {
-		r.Schedule = "*/5 * * * *"
+		if r.SourceKind == "digest" {
+			r.Schedule = "0 9 * * 1"
+		} else {
+			r.Schedule = "*/5 * * * *"
+		}
 	}
 	cond, _ := json.Marshal(r.Condition)
+	params, _ := json.Marshal(r.Params)
 	chans, _ := json.Marshal(r.Channels)
 	var out AlertRule
-	var oCond, oChans []byte
+	var oCond, oParams, oChans []byte
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO alert_rules (project_id, name, source_kind, source_ref, condition, schedule_cron, channels, enabled)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8)
-RETURNING id::text, project_id::text, name, source_kind, source_ref, condition, schedule_cron, channels, enabled, last_eval_at, last_state, created_at`,
-		projectID, r.Name, r.SourceKind, r.SourceRef, cond, r.Schedule, chans, r.Enabled).
-		Scan(&out.ID, &out.ProjectID, &out.Name, &out.SourceKind, &out.SourceRef, &oCond, &out.Schedule,
+INSERT INTO alert_rules (project_id, name, source_kind, source_ref, condition, params, schedule_cron, channels, enabled)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9)
+RETURNING id::text, project_id::text, name, source_kind, source_ref, condition, params, schedule_cron, channels, enabled, last_eval_at, last_state, created_at`,
+		projectID, r.Name, r.SourceKind, r.SourceRef, cond, params, r.Schedule, chans, r.Enabled).
+		Scan(&out.ID, &out.ProjectID, &out.Name, &out.SourceKind, &out.SourceRef, &oCond, &oParams, &out.Schedule,
 			&oChans, &out.Enabled, &out.LastEvalAt, &out.LastState, &out.CreatedAt)
 	if err != nil {
 		return AlertRule{}, err
 	}
 	_ = json.Unmarshal(oCond, &out.Condition)
+	_ = json.Unmarshal(oParams, &out.Params)
 	_ = json.Unmarshal(oChans, &out.Channels)
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "alert.rule.create", "project", project.ID, project.Name, "{}")
 	return out, nil
@@ -270,19 +291,25 @@ func (s *Store) UpdateAlertRule(ctx context.Context, userID, projectID, ruleID s
 	if err := validateAlertSource(r.SourceKind); err != nil {
 		return err
 	}
-	if err := validateAlertOp(r.Condition.Op); err != nil {
+	if r.SourceKind == "digest" {
+		r.SourceRef = ""
+	} else if err := validateAlertOp(r.Condition.Op); err != nil {
 		return err
+	}
+	if r.Schedule == "" && r.SourceKind == "digest" {
+		r.Schedule = "0 9 * * 1"
 	}
 	if err := s.validateChannelsInWorkspace(ctx, project.WorkspaceID, r.Channels); err != nil {
 		return err
 	}
 	cond, _ := json.Marshal(r.Condition)
+	params, _ := json.Marshal(r.Params)
 	chans, _ := json.Marshal(r.Channels)
 	_, err = s.pg.Exec(ctx, `
-UPDATE alert_rules SET name=$3, source_kind=$4, source_ref=$5, condition=$6::jsonb,
-	schedule_cron=$7, channels=$8::jsonb, enabled=$9
+UPDATE alert_rules SET name=$3, source_kind=$4, source_ref=$5, condition=$6::jsonb, params=$7::jsonb,
+	schedule_cron=$8, channels=$9::jsonb, enabled=$10
 WHERE project_id=$1 AND id=$2`,
-		projectID, ruleID, r.Name, r.SourceKind, r.SourceRef, cond, r.Schedule, chans, r.Enabled)
+		projectID, ruleID, r.Name, r.SourceKind, r.SourceRef, cond, params, r.Schedule, chans, r.Enabled)
 	return err
 }
 
@@ -302,7 +329,6 @@ func (s *Store) DeleteAlertRule(ctx context.Context, userID, projectID, ruleID s
 	_, err = s.pg.Exec(ctx, `DELETE FROM alert_rules WHERE project_id=$1 AND id=$2`, projectID, ruleID)
 	return err
 }
-
 
 // --- channels CRUD ---
 
@@ -362,7 +388,6 @@ RETURNING id::text, workspace_id::text, kind, name, config, created_at`,
 	return out, err
 }
 
-
 // --- evaluation-support reads (internal, used by the alerting worker) ---
 
 // ClaimAlertRuleForEval attempts to claim a rule for evaluation at now, returning
@@ -381,12 +406,21 @@ WHERE id = $1 AND (last_eval_at IS NULL OR last_eval_at < $3)`, ruleID, now, due
 	return tag.RowsAffected() == 1, nil
 }
 
+// ReleaseAlertRuleClaim makes a failed scheduled evaluation eligible for the
+// one-minute retry window. The timestamp guard never clears a newer claim.
+func (s *Store) ReleaseAlertRuleClaim(ctx context.Context, ruleID string, claimedAt time.Time) error {
+	_, err := s.pg.Exec(ctx, `
+UPDATE alert_rules SET last_eval_at = NULL
+WHERE id = $1 AND last_eval_at = $2`, ruleID, claimedAt)
+	return err
+}
+
 // DueAlertRules returns all enabled rules across projects with their schedule, for
 // the worker to match against the current minute. Internal trusted path (no RBAC)
 // — called only by the in-process evaluator.
 func (s *Store) DueAlertRules(ctx context.Context) ([]AlertRule, error) {
 	rows, err := s.pg.Query(ctx, `
-SELECT id::text, project_id::text, name, source_kind, source_ref, condition, schedule_cron,
+SELECT id::text, project_id::text, name, source_kind, source_ref, condition, params, schedule_cron,
        channels, enabled, last_eval_at, last_state, created_at
 FROM alert_rules WHERE enabled ORDER BY created_at ASC`)
 	if err != nil {
@@ -399,16 +433,166 @@ FROM alert_rules WHERE enabled ORDER BY created_at ASC`)
 // RecordAlertEvent appends a firing/recovery event and updates the rule's edge
 // state in one call (internal trusted path). state is 'firing' or 'ok'.
 func (s *Store) RecordAlertEvent(ctx context.Context, ruleID, state string, value float64, payload json.RawMessage) error {
+	return s.RecordAlertEventAt(ctx, ruleID, state, value, payload, time.Now().UTC())
+}
+
+// RecordAlertEventAt records a threshold transition at a supplied time.
+func (s *Store) RecordAlertEventAt(ctx context.Context, ruleID, state string, value float64, payload json.RawMessage, firedAt time.Time) error {
+	return s.recordAlertEventAt(ctx, ruleID, state, value, payload, firedAt, true)
+}
+
+// RecordDigestAlertEventAt records a digest watermark without changing the
+// threshold edge state. A rule converted back to a threshold must not emit a
+// false recovery solely because it previously ran as a digest.
+func (s *Store) RecordDigestAlertEventAt(ctx context.Context, ruleID string, payload json.RawMessage, firedAt time.Time) error {
+	return s.recordAlertEventAt(ctx, ruleID, "digest", 0, payload, firedAt, false)
+}
+
+func (s *Store) recordAlertEventAt(ctx context.Context, ruleID, state string, value float64, payload json.RawMessage, firedAt time.Time, updateState bool) error {
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
 	if _, err := s.pg.Exec(ctx, `
-INSERT INTO alert_events (rule_id, state, value, payload) VALUES ($1, $2, $3, $4::jsonb)`,
-		ruleID, state, value, []byte(payload)); err != nil {
+INSERT INTO alert_events (rule_id, fired_at, state, value, payload) VALUES ($1, $2, $3, $4, $5::jsonb)`,
+		ruleID, firedAt, state, value, []byte(payload)); err != nil {
 		return err
+	}
+	if !updateState {
+		return nil
 	}
 	_, err := s.pg.Exec(ctx, `UPDATE alert_rules SET last_state = $2 WHERE id = $1`, ruleID, state)
 	return err
+}
+
+// DigestData is the bounded, worker-only decision input for a digest window.
+// Each item contains only the fields the notification cites.
+type DigestData struct {
+	Recommendations          []DigestRecommendation
+	RecommendationsTruncated bool
+	Decisions                []DigestDecision
+	DecisionsTruncated       bool
+	StaleSyncs               []DigestStaleSync
+	StaleSyncsTruncated      bool
+}
+
+type DigestRecommendation struct {
+	ID    string
+	Title string
+}
+
+type DigestDecision struct {
+	ID         string
+	Hypothesis string
+	Status     string
+}
+
+type DigestStaleSync struct {
+	ID          string
+	SourceTable string
+}
+
+// LastDigestAlertEvent returns this rule's delivery watermark. It deliberately
+// reads alert_events rather than last_eval_at: a claim updates last_eval_at
+// before delivery, so using it would lose a week after a crash.
+func (s *Store) LastDigestAlertEvent(ctx context.Context, ruleID string) (time.Time, bool, error) {
+	var firedAt time.Time
+	err := s.pg.QueryRow(ctx, `
+SELECT fired_at FROM alert_events
+WHERE rule_id = $1 AND state = 'digest'
+ORDER BY fired_at DESC LIMIT 1`, ruleID).Scan(&firedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	return firedAt, err == nil, err
+}
+
+// DigestDataSince returns decision-shaped inputs in the half-open [since, until)
+// window. The explicit upper bound is the evaluator's watermark: records
+// committed during assembly are picked up exactly once by the next digest.
+func (s *Store) DigestDataSince(ctx context.Context, projectID string, since, until time.Time) (DigestData, error) {
+	data := DigestData{
+		Recommendations: []DigestRecommendation{},
+		Decisions:       []DigestDecision{},
+		StaleSyncs:      []DigestStaleSync{},
+	}
+	recommendations, err := s.pg.Query(ctx, `
+SELECT id::text, title
+FROM agent_recommendations
+WHERE project_id = $1 AND created_at >= $2 AND created_at < $3
+ORDER BY created_at DESC
+LIMIT 21`, projectID, since, until)
+	if err != nil {
+		return data, err
+	}
+	for recommendations.Next() {
+		var recommendation DigestRecommendation
+		if err := recommendations.Scan(&recommendation.ID, &recommendation.Title); err != nil {
+			recommendations.Close()
+			return data, err
+		}
+		if len(data.Recommendations) == 20 {
+			data.RecommendationsTruncated = true
+			break
+		}
+		data.Recommendations = append(data.Recommendations, recommendation)
+	}
+	if err := recommendations.Err(); err != nil {
+		recommendations.Close()
+		return data, err
+	}
+	recommendations.Close()
+
+	decisions, err := s.pg.Query(ctx, `
+SELECT id::text, hypothesis, status
+FROM validation_tests
+WHERE project_id = $1 AND decided_at >= $2 AND decided_at < $3
+ORDER BY decided_at DESC
+LIMIT 21`, projectID, since, until)
+	if err != nil {
+		return data, err
+	}
+	for decisions.Next() {
+		var decision DigestDecision
+		if err := decisions.Scan(&decision.ID, &decision.Hypothesis, &decision.Status); err != nil {
+			decisions.Close()
+			return data, err
+		}
+		if len(data.Decisions) == 20 {
+			data.DecisionsTruncated = true
+			break
+		}
+		data.Decisions = append(data.Decisions, decision)
+	}
+	if err := decisions.Err(); err != nil {
+		decisions.Close()
+		return data, err
+	}
+	decisions.Close()
+
+	rows, err := s.pg.Query(ctx, `
+SELECT cs.id::text, cs.source_table
+FROM connector_syncs cs
+JOIN data_connectors dc ON dc.id = cs.connector_id
+WHERE cs.project_id = $1 AND cs.enabled AND dc.archived_at IS NULL
+  AND (cs.last_status = 'error' OR cs.last_success_at IS NULL)
+ORDER BY cs.created_at DESC
+LIMIT 21`, projectID)
+	if err != nil {
+		return data, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sync DigestStaleSync
+		if err := rows.Scan(&sync.ID, &sync.SourceTable); err != nil {
+			return data, err
+		}
+		if len(data.StaleSyncs) == 20 {
+			data.StaleSyncsTruncated = true
+			break
+		}
+		data.StaleSyncs = append(data.StaleSyncs, sync)
+	}
+	return data, rows.Err()
 }
 
 // AlertChannelsByID resolves a set of channel ids to full channel rows (internal

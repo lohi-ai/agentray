@@ -3,7 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, ArrowUpRight, Clock, Lock, RefreshCw } from 'lucide-react';
-import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type OverviewActivationDetail, type OverviewMetric, type OverviewRange, type OverviewResult, type OverviewRevenueDetail, type OverviewSourceStatus } from '@/lib/api';
+import { AgentRayAPI, APIError, type AgentRecommendation, type ListFindingsResult, type MetricTargetView, type OverviewActivationDetail, type OverviewMetric, type OverviewRange, type OverviewResult, type OverviewRevenueDetail, type OverviewSourceStatus } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatCompact, formatNumber } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
@@ -57,6 +57,21 @@ export function metricTile(label: string, m: OverviewMetric): { label: string; v
     tile.deltaTone = pct >= 0 ? 'up' : 'down';
   }
   return tile;
+}
+
+// --- Targets ---------------------------------------------------------------
+// The verdict badge a stat carries when the server judged the reading. The
+// label is the served verdict word plus the server-rendered target label —
+// "On track · ≥ 40% weekly" — so no client re-derives the target's wording.
+const VERDICT_WORD: Record<string, string> = { on_track: 'On track', at_risk: 'At risk', off_track: 'Off track' };
+const VERDICT_STATUS: Record<string, string> = { on_track: 'healthy', at_risk: 'attention', off_track: 'danger' };
+
+export function targetBadge(target?: MetricTargetView): { status: string; label: string } | undefined {
+  if (!target?.verdict) return undefined;
+  const word = VERDICT_WORD[target.verdict];
+  const status = VERDICT_STATUS[target.verdict];
+  if (!word || !status) return undefined;
+  return { status, label: `${word} · ${target.label}` };
 }
 
 // --- Money ---------------------------------------------------------------
@@ -140,7 +155,7 @@ export function retentionTile(label: string, p: { state: string; rate: number; r
 export type TileInput =
   | { kind: 'metric'; metric: OverviewMetric }
   | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
-  | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number } }
+  | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number; target?: MetricTargetView } }
   | { kind: 'activation' }
   | { kind: 'unserved' };
 
@@ -277,8 +292,12 @@ export function tileProvenance(res: OverviewResult, input: TileInput): string {
   const timezone = res.context.timezone_source === 'fallback'
     ? 'UTC fallback — no project timezone set'
     : res.context.timezone;
+  // The target version the verdict cites, when one is in force — the same
+  // "target vN" the prototype's provenance line prints.
+  const target = input.kind === 'retention' ? input.point.target : input.kind === 'unserved' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
   return [
     `metric ${res.context.metric_version}`,
+    ...(target ? [`target v${target.version}`] : []),
     tileRange(res, input),
     timezone,
     tileCoverage(res, input),
@@ -296,13 +315,13 @@ export function acquisitionStats(res: OverviewResult) {
   return [metricStat(res, 'New people', res.metrics.new_users)];
 }
 function metricStat(res: OverviewResult, label: string, m: OverviewMetric) {
-  return { ...metricTile(label, m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+  return { ...metricTile(label, m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
 }
 
 function revenueStat(res: OverviewResult) {
   const metric = res.metrics.revenue;
   const detail = res.metrics.revenue_detail;
-  return { ...revenueTile(metric, detail), provenance: tileProvenance(res, { kind: 'money', metric, detail }) };
+  return { ...revenueTile(metric, detail), badge: targetBadge(metric.target), provenance: tileProvenance(res, { kind: 'money', metric, detail }) };
 }
 
 export function activationTile(
@@ -323,12 +342,13 @@ export function activationTile(
 function activationStat(res: OverviewResult) {
   return {
     ...activationTile(res.metrics.activation, res.metrics.activation_detail),
+    badge: targetBadge(res.metrics.activation.target),
     provenance: tileProvenance(res, { kind: 'activation' }),
   };
 }
 
-function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number }) {
-  return { ...retentionTile(label, p), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
+function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView }) {
+  return { ...retentionTile(label, p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
 }
 
 function unservedStat(res: OverviewResult, label: string) {

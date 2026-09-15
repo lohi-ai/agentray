@@ -223,6 +223,135 @@ func TestBoardContentModelEndToEnd(t *testing.T) {
 	}
 }
 
+// TestMetricTargetsEndToEnd drives the target contract through the shared
+// registry: declare a target, read the metric, and the verdict the overview
+// computed rides the reading — on_track, at_risk, off_track, and the named
+// reasons a reading cannot be judged.
+func TestMetricTargetsEndToEnd(t *testing.T) {
+	s := openE2EStore(t)
+	ctx := context.Background()
+	reg := Registry()
+
+	acct, err := s.CreateAccount(ctx, fmt.Sprintf("targets-%d@test.local", time.Now().UnixNano()), "Targets E2E", "password-1234", "targets-ws", "targets-proj")
+	if err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	cc := opcore.CallContext{ProjectID: acct.Project.ID, Deps: &Deps{Repo: s}}
+	// Three readers inside the previous complete local day — the "1d" window —
+	// plus one today, so the partial window is a measured reading rather than
+	// no_data (which serves no target at all).
+	loc := time.UTC
+	localNow := time.Now().In(loc)
+	midnight := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
+	seedBoardEvents(t, s, acct.Project.ID, midnight.Add(-12*time.Hour))
+	if err := s.InsertEvents(ctx, []storage.Event{{
+		ProjectID: acct.Project.ID, EventID: fmt.Sprintf("%s-0000-0000-0000-000000000099", acct.Project.ID[:8]),
+		DistinctID: "reader-today", SessionID: "session-today", EventName: "user.pageview", EventType: "user",
+		Properties: `{"path":"/today"}`, Timestamp: midnight.Add(time.Hour).UTC(),
+		VisitorClass: "human", Platform: storage.PlatformWeb,
+	}}); err != nil {
+		t.Fatalf("seed today event: %v", err)
+	}
+
+	// A target only judges windows that end after it took force, so the test
+	// declares it effective before the window's end.
+	effective := midnight.Add(-48 * time.Hour).Format(time.RFC3339)
+	set := invoke(t, reg, cc, "set_metric_target",
+		fmt.Sprintf(`{"metric":"active_users","direction":"gte","value":2,"period":"1d","effective_at":%q,"idempotency_key":"t-1"}`, effective))
+	if num(set, "version") != 1 || set["cleared"] != false {
+		t.Fatalf("set_metric_target = %v, want v1", set)
+	}
+
+	// 3 measured against ≥ 2: on track, citing v1.
+	reading := invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"1d"}`)
+	target, _ := reading["target"].(map[string]any)
+	if reading["state"] != "ok" || num(reading, "value") != 3 {
+		t.Fatalf("reading = %v, want ok 3", reading)
+	}
+	if target == nil || target["verdict"] != "on_track" || num(target, "version") != 1 || target["label"] != "≥ 2 daily" {
+		t.Fatalf("target = %v, want on_track v1 \"≥ 2 daily\"", target)
+	}
+
+	// Raising the target appends v2; 3 of ≥ 3.3 sits inside the 10% band.
+	invoke(t, reg, cc, "set_metric_target",
+		fmt.Sprintf(`{"metric":"active_users","direction":"gte","value":3.3,"period":"1d","effective_at":%q}`, effective))
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"1d"}`)
+	target, _ = reading["target"].(map[string]any)
+	if target == nil || target["verdict"] != "at_risk" || num(target, "version") != 2 {
+		t.Fatalf("at-risk read = %v, want at_risk v2", target)
+	}
+
+	// Well past the band: off track.
+	invoke(t, reg, cc, "set_metric_target",
+		fmt.Sprintf(`{"metric":"active_users","direction":"gte","value":10,"period":"1d","effective_at":%q}`, effective))
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"1d"}`)
+	target, _ = reading["target"].(map[string]any)
+	if target == nil || target["verdict"] != "off_track" || num(target, "version") != 3 {
+		t.Fatalf("off-track read = %v, want off_track v3", target)
+	}
+
+	// A window the target's period does not match, and the partial "today",
+	// carry the target with a named reason instead of a verdict.
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"7d"}`)
+	target, _ = reading["target"].(map[string]any)
+	if target == nil || target["verdict"] != nil || target["verdict_reason"] != "period_mismatch" {
+		t.Fatalf("period-mismatched read = %v, want period_mismatch", target)
+	}
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"today"}`)
+	target, _ = reading["target"].(map[string]any)
+	if target == nil || target["verdict"] != nil || target["verdict_reason"] != "partial_window" {
+		t.Fatalf("partial read = %v, want partial_window", target)
+	}
+
+	// Clearing is a version, and it obeys the same in-force rule: effective
+	// before the window's end, the window cites the tombstone and serves no
+	// target. (A clear effective now would still leave v3 in force for the
+	// complete window that already ended — history is not rewritten.)
+	clearedAt := midnight.Add(-47 * time.Hour).Format(time.RFC3339)
+	invoke(t, reg, cc, "set_metric_target", fmt.Sprintf(`{"metric":"active_users","clear":true,"effective_at":%q}`, clearedAt))
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"1d"}`)
+	if _, present := reading["target"]; present {
+		t.Fatalf("cleared read still serves a target: %v", reading["target"])
+	}
+
+	// A board tile can declare the same target — and get_board serves the
+	// version the declaration wrote (v5, effective at write time).
+	invoke(t, reg, cc, "save_board", `{"board_key":"targeted-board","name":"Targeted","definition":{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"people","metric":"active_users","display":"stat","target":{"direction":"gte","value":2,"period":"1d"}}]}]}}`)
+	board := invoke(t, reg, cc, "get_board", `{"board_key":"targeted-board"}`)
+	targets, _ := board["targets"].(map[string]any)
+	declared, _ := targets["active_users"].(map[string]any)
+	if declared == nil || num(declared, "version") != 5 || num(declared, "value") != 2 {
+		t.Fatalf("board targets = %v, want active_users v5 = 2", targets)
+	}
+	// v5 took force at write time — after the window ended — so the read still
+	// cites the tombstone: no target for a window that predates it.
+	reading = invoke(t, reg, cc, "read_metric", `{"metric":"active_users","period":"1d"}`)
+	if _, present := reading["target"]; present {
+		t.Fatalf("a future-effective target judged an earlier window: %v", reading["target"])
+	}
+
+	// --- Non-happy paths ---
+	if err := invokeErr(t, reg, cc, "set_metric_target", `{"metric":"crashes","direction":"gte","value":1,"period":"7d"}`); !strings.Contains(err.Error(), "not in the catalog") {
+		t.Fatalf("unknown metric err = %v, want a catalog refusal", err)
+	}
+	if err := invokeErr(t, reg, cc, "set_metric_target", `{"metric":"revenue","direction":"gte","value":100,"period":"7d"}`); !strings.Contains(err.Error(), "currency") {
+		t.Fatalf("currency-less revenue target err = %v, want a currency refusal", err)
+	}
+	if err := invokeErr(t, reg, cc, "set_metric_target", `{"metric":"active_users","direction":"gte","value":1,"period":"today"}`); !strings.Contains(err.Error(), "partial") {
+		t.Fatalf("partial-period target err = %v, want a period refusal", err)
+	}
+
+	// --- Access classes: the write is dashboards:write, member-only ---
+	reader := opcore.Principal{ProjectID: acct.Project.ID, Kind: opcore.CredManagement, Grants: []opcore.Access{opcore.AccessAnalyticsRead}}
+	if reg.Authorize(reader, "set_metric_target") {
+		t.Fatal("an analytics:read credential set a metric target")
+	}
+	capture := opcore.Principal{ProjectID: acct.Project.ID, Kind: opcore.CredCapture}
+	if reg.Authorize(capture, "set_metric_target") {
+		t.Fatal("a capture credential reached set_metric_target")
+	}
+}
+
 // TestSaveBoardSchemaTeachesTheDocument: the advertised schema is what a model
 // composes from, so the definition field must describe the document rather than
 // saying "object".
