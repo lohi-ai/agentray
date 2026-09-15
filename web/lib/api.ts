@@ -192,6 +192,26 @@ export type OverviewMetric = {
   rate?: number;
   definition: string;
   notes?: string[];
+  // The declared target version in force for this window, with the verdict
+  // the server computed. Absent when no target is in force or the metric is
+  // an honest empty state (no_data, not_ready).
+  target?: MetricTargetView;
+};
+
+// The target version a read cites, mirroring storage.MetricTargetView. The
+// label is server-rendered ("≥ 40% weekly") so every surface prints the same
+// words; verdict is empty when the reading could not be judged, and
+// verdict_reason says why.
+export type MetricTargetView = {
+  version: number;
+  direction: 'gte' | 'lte';
+  value: number;
+  period_days: number;
+  currency?: string;
+  effective_at: string;
+  label: string;
+  verdict?: 'on_track' | 'at_risk' | 'off_track';
+  verdict_reason?: 'metric_unavailable' | 'partial_window' | 'period_mismatch' | 'currency_mismatch';
 };
 
 // One declared currency's deduplicated money arithmetic. Amounts are integers
@@ -287,9 +307,9 @@ export type OverviewResult = {
   trend: Array<{ day: string; active_users: number; events: number }>;
   retention: {
     cohort_window: string;
-    d1: { state: string; rate: number; returned: number; eligible: number };
-    d7: { state: string; rate: number; returned: number; eligible: number };
-    d30: { state: string; rate: number; returned: number; eligible: number };
+    d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d30: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
   };
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
@@ -360,6 +380,9 @@ export type BoardTile = {
   display?: string;
   span?: number;
   metric?: string;
+  // Declared target spec — writing it appends a version to the metric's
+  // project-scoped target history (see set_metric_target).
+  target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
   params?: { period?: string; platform?: string };
 };
@@ -395,6 +418,9 @@ export type BoardContent = {
   definition: BoardDefinition;
   metrics: MetricDefinition[];
   charts: Chart[];
+  // Latest declared target version per referenced metric (tombstones
+  // included) — what a re-declaration would be restating.
+  targets: Record<string, { version: number; cleared: boolean; direction?: string; value?: number; period_days?: number; currency?: string; effective_at: string }>;
   warnings: string[];
 };
 
@@ -810,7 +836,7 @@ export type WorkspaceModelTiersInput = {
 
 // --- Alerting (#1) ---
 
-export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops'] as const;
+export const ALERT_SOURCE_KINDS = ['insight', 'sql', 'agent_ops', 'digest'] as const;
 export type AlertSourceKind = (typeof ALERT_SOURCE_KINDS)[number];
 export const ALERT_OPS = ['gt', 'lt', 'z_score'] as const;
 export type AlertOp = (typeof ALERT_OPS)[number];
@@ -824,6 +850,10 @@ export type AlertCondition = {
   min_events?: number;
 };
 
+export type AlertRuleParams = {
+  send_empty?: boolean;
+};
+
 export type AlertRule = {
   id: string;
   project_id: string;
@@ -831,6 +861,7 @@ export type AlertRule = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;
@@ -844,6 +875,7 @@ export type AlertRuleInput = {
   source_kind: AlertSourceKind;
   source_ref: string;
   condition: AlertCondition;
+  params: AlertRuleParams;
   schedule_cron: string;
   channels: string[];
   enabled: boolean;

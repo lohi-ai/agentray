@@ -93,13 +93,18 @@ type OverviewContext struct {
 // a share, a rate or a duration — served on the scale the catalog unit
 // declares (percent for shares, seconds for durations). A metric carries
 // Value XOR Rate, never both.
+//
+// Target is the project-declared target version in force for this window,
+// with its verdict when the reading is judgeable; absent when no target is in
+// force or the metric's state is an honest empty one (no_data, not_ready).
 type OverviewMetric struct {
-	State      string   `json:"state"`
-	Value      *uint64  `json:"value,omitempty"`
-	Previous   *uint64  `json:"previous,omitempty"`
-	Rate       *float64 `json:"rate,omitempty"`
-	Definition string   `json:"definition"`
-	Notes      []string `json:"notes,omitempty"`
+	State      string            `json:"state"`
+	Value      *uint64           `json:"value,omitempty"`
+	Previous   *uint64           `json:"previous,omitempty"`
+	Rate       *float64          `json:"rate,omitempty"`
+	Definition string            `json:"definition"`
+	Notes      []string          `json:"notes,omitempty"`
+	Target     *MetricTargetView `json:"target,omitempty"`
 }
 
 type OverviewTrendPoint struct {
@@ -120,9 +125,10 @@ type OverviewRetentionPoint struct {
 	State string `json:"state"` // ok | not_ready
 	// Rate is serialized even when 0 — a measured 0% is a fact, not a missing
 	// value; omitempty would silently drop it.
-	Rate     float64 `json:"rate"`
-	Returned uint64  `json:"returned"`
-	Eligible uint64  `json:"eligible"`
+	Rate     float64           `json:"rate"`
+	Returned uint64            `json:"returned"`
+	Eligible uint64            `json:"eligible"`
+	Target   *MetricTargetView `json:"target,omitempty"`
 }
 
 // OverviewList is a ranked breakdown with its unit declared, so a pageview
@@ -762,7 +768,100 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 		res.Content.TopEvents = OverviewList{Unit: "events", Rows: eventRows}
 	}
 
+	// --- declared targets: the version in force at the window's end, judged
+	// against the measured value when the reading can be judged ---
+	if err := s.attachMetricTargets(ctx, projectID, &res); err != nil {
+		return res, err
+	}
+
 	return res, nil
+}
+
+// attachMetricTargets resolves each catalog metric's target version in force
+// at the read window's end and hangs it on the metric it judges. The verdict
+// is computed here — the one place the measured value exists — so a board
+// tile, the overview headline and read_metric can never disagree about the
+// same number's standing.
+//
+// A metric in an honest empty state (no_data, not_ready) serves no target at
+// all: the tile's state already says what is true, and a target line beside
+// "No data" would pretend a measurement exists. A metric that is defined but
+// not measurable (unconfigured) serves the target with no verdict — the
+// declaration is real, the reading is not.
+func (s *Store) attachMetricTargets(ctx context.Context, projectID string, res *OverviewResult) error {
+	targets, err := metricTargetsInForce(ctx, s.pg, projectID, res.Context.Range.To)
+	if err != nil {
+		return err
+	}
+	attach := func(key string, m *OverviewMetric, unit string, measured float64, currency string) {
+		t, ok := targets[key]
+		if !ok || t.Cleared {
+			return
+		}
+		if m.State == OverviewStateNoData || m.State == OverviewStateNotReady {
+			return
+		}
+		if m.State != OverviewStateOK {
+			m.Target = &MetricTargetView{
+				Version: t.Version, Direction: t.Direction, Value: t.Value,
+				PeriodDays: t.PeriodDays, Currency: t.Currency, EffectiveAt: t.EffectiveAt,
+				Label:         metricTargetLabel(t, unit),
+				VerdictReason: TargetReasonMetricUnavailable,
+			}
+			return
+		}
+		view := judgeMetricTarget(t, unit, res.Context.Range, measured, currency)
+		m.Target = &view
+	}
+	// measured reads whichever channel the metric's honest value lives on —
+	// Value for counts, Rate for shares/durations. When the state is not ok
+	// the value is ignored anyway (attach serves the target with no verdict),
+	// so a nil channel collapses to 0 rather than needing a branch per metric.
+	measured := func(m OverviewMetric) float64 {
+		if m.Value != nil {
+			return float64(*m.Value)
+		}
+		if m.Rate != nil {
+			return *m.Rate
+		}
+		return 0
+	}
+	attach(MetricActiveUsers, &res.Metrics.ActiveUsers, "people", measured(res.Metrics.ActiveUsers), "")
+	attach(MetricNewUsers, &res.Metrics.NewUsers, "people", measured(res.Metrics.NewUsers), "")
+	attach(MetricSessions, &res.Metrics.Sessions, "sessions", measured(res.Metrics.Sessions), "")
+	// The retired-surface metrics are judged on the same scale the catalog
+	// declares: counts on their own unit, shares on percent, duration in
+	// seconds — the same scale read_metric serves.
+	attach(MetricPageviews, &res.Metrics.Pageviews, "pageviews", measured(res.Metrics.Pageviews), "")
+	attach(MetricConversions, &res.Metrics.Conversions, "events", measured(res.Metrics.Conversions), "")
+	attach(MetricAIShare, &res.Metrics.AIShare, "percent", measured(res.Metrics.AIShare), "")
+	attach(MetricBounceRate, &res.Metrics.BounceRate, "percent", measured(res.Metrics.BounceRate), "")
+	attach(MetricAvgSession, &res.Metrics.AvgSessionDuration, "seconds", measured(res.Metrics.AvgSessionDuration), "")
+	// Activation is a percent metric with no measured value yet — the target
+	// still serves (unconfigured), just never a verdict.
+	attach(MetricActivation, &res.Metrics.Activation, "percent", 0, "")
+	// Revenue is judged on the signed net in the headline currency — the
+	// unsigned headline Value cannot express a net reversal.
+	if d := res.Metrics.RevenueDetail; d != nil {
+		attach(MetricRevenue, &res.Metrics.Revenue, "currency", float64(d.Net), d.Currency)
+	} else {
+		attach(MetricRevenue, &res.Metrics.Revenue, "currency", 0, "")
+	}
+	// Retention rates are judged on the percent scale the catalog declares —
+	// the same scale read_metric serves — never the 0-1 fraction.
+	for key, point := range map[string]*OverviewRetentionPoint{
+		MetricRetentionD1:  &res.Retention.D1,
+		MetricRetentionD7:  &res.Retention.D7,
+		MetricRetentionD30: &res.Retention.D30,
+	} {
+		t, ok := targets[key]
+		if !ok || t.Cleared || point.State != OverviewStateOK {
+			continue
+		}
+		view := judgeMetricTarget(t, "percent", res.Context.Range, point.Rate*100, "")
+		point.Target = &view
+	}
+	return nil
 }
 
 const overviewSourceLimit = 20

@@ -451,7 +451,10 @@ type MetricReading struct {
 	// headline Value is unsigned and shared by every tile, so a negative net
 	// exists only here.
 	Revenue *OverviewRevenueDetail `json:"revenue,omitempty"`
-	Context OverviewContext        `json:"context"`
+	// Target is the declared target version in force for this window, with
+	// the verdict the overview read computed — the detector input 001 reads.
+	Target  *MetricTargetView `json:"target,omitempty"`
+	Context OverviewContext    `json:"context"`
 }
 
 // MetricReadingFor projects one catalog metric out of an Overview result. It is
@@ -500,6 +503,7 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 		reading.Previous = m.Previous
 		reading.Rate = m.Rate
 		reading.Notes = m.Notes
+		reading.Target = m.Target
 		if def.Key == MetricRevenue {
 			reading.Revenue = res.Metrics.RevenueDetail
 		}
@@ -535,6 +539,7 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			point = res.Retention.D30
 		}
 		reading.State = point.State
+		reading.Target = point.Target
 		reading.Notes = []string{fmt.Sprintf("cohort window: %s; %d returned of %d eligible", res.Retention.CohortWindow, point.Returned, point.Eligible)}
 		if point.State == OverviewStateOK {
 			// The overview read serves the return rate as a 0–1 fraction

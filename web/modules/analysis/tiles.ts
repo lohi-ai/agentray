@@ -1,13 +1,14 @@
 import type { BoardTile, OverviewMetric, OverviewResult } from '@/lib/api';
 import { formatDuration, formatPercent } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
-import { metricTile, retentionTile, revenueTile, tileProvenance } from '@/modules/overview/page';
+import { metricTile, retentionTile, revenueTile, targetBadge, tileProvenance } from '@/modules/overview/page';
 
 export type AnalysisStat = {
   label: string;
   value: string;
   delta?: string;
   deltaTone?: 'up' | 'down';
+  badge?: { status: string; label: string };
   provenance: string;
 };
 
@@ -49,52 +50,52 @@ export function analysisStat(res: OverviewResult, tile: BoardTile): AnalysisStat
   if (!metric) return null;
   if (metric === 'new_users') {
     const m = res.metrics.new_users;
-    return { ...metricTile(titleOf(tile, 'First-time downloads'), m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'First-time downloads'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
   }
   if (metric === 'active_users') {
     const m = res.metrics.active_users;
-    return { ...metricTile(titleOf(tile, 'Active devices'), m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'Active devices'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
   }
   if (metric === 'sessions') {
     const m = res.metrics.sessions;
-    return { ...metricTile(titleOf(tile, 'Sessions'), m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'Sessions'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
   }
   if (metric === 'pageviews') {
     const m = res.metrics.pageviews;
-    return { ...metricTile(titleOf(tile, 'Pageviews'), m), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'Pageviews'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
   }
   if (metric === 'conversions') {
     const m = res.metrics.conversions;
-    return { ...metricTile(titleOf(tile, 'Conversions'), m), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'Conversions'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
   }
   if (metric === 'ai_share') {
     const m = res.metrics.ai_share;
-    return { ...rateTile(titleOf(tile, 'AI traffic'), m, 'percent'), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
+    return { ...rateTile(titleOf(tile, 'AI traffic'), m, 'percent'), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
   }
   if (metric === 'bounce_rate') {
     const m = res.metrics.bounce_rate;
-    return { ...rateTile(titleOf(tile, 'Bounce rate'), m, 'percent'), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
+    return { ...rateTile(titleOf(tile, 'Bounce rate'), m, 'percent'), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
   }
   if (metric === 'avg_session_duration') {
     const m = res.metrics.avg_session_duration;
-    return { ...rateTile(titleOf(tile, 'Avg session'), m, 'seconds'), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
+    return { ...rateTile(titleOf(tile, 'Avg session'), m, 'seconds'), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'eventsMetric', metric: m }) };
   }
   if (metric === 'activation') {
     const m = res.metrics.activation;
-    return { ...metricTile(titleOf(tile, 'Activation'), m), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+    return { ...metricTile(titleOf(tile, 'Activation'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
   }
   if (metric === 'revenue') {
     const labelled = { ...revenueTile(res.metrics.revenue, res.metrics.revenue_detail), label: titleOf(tile, 'Proceeds') };
-    return { ...labelled, provenance: tileProvenance(res, { kind: 'money', metric: res.metrics.revenue, detail: res.metrics.revenue_detail }) };
+    return { ...labelled, badge: targetBadge(res.metrics.revenue.target), provenance: tileProvenance(res, { kind: 'money', metric: res.metrics.revenue, detail: res.metrics.revenue_detail }) };
   }
   if (metric === 'retention_d1') {
-    return { ...retentionTile(titleOf(tile, 'Average retention D1'), res.retention.d1), provenance: tileProvenance(res, { kind: 'retention', day: 1, point: res.retention.d1 }) };
+    return { ...retentionTile(titleOf(tile, 'Average retention D1'), res.retention.d1), badge: targetBadge(res.retention.d1.target), provenance: tileProvenance(res, { kind: 'retention', day: 1, point: res.retention.d1 }) };
   }
   if (metric === 'retention_d7') {
-    return { ...retentionTile(titleOf(tile, 'Average retention D7'), res.retention.d7), provenance: tileProvenance(res, { kind: 'retention', day: 7, point: res.retention.d7 }) };
+    return { ...retentionTile(titleOf(tile, 'Average retention D7'), res.retention.d7), badge: targetBadge(res.retention.d7.target), provenance: tileProvenance(res, { kind: 'retention', day: 7, point: res.retention.d7 }) };
   }
   if (metric === 'retention_d30') {
-    return { ...retentionTile(titleOf(tile, 'Average retention D30'), res.retention.d30), provenance: tileProvenance(res, { kind: 'retention', day: 30, point: res.retention.d30 }) };
+    return { ...retentionTile(titleOf(tile, 'Average retention D30'), res.retention.d30), badge: targetBadge(res.retention.d30.target), provenance: tileProvenance(res, { kind: 'retention', day: 30, point: res.retention.d30 }) };
   }
   return null;
 }

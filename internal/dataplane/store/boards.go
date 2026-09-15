@@ -85,6 +85,11 @@ type BoardTile struct {
 	Span int `json:"span,omitempty"`
 	// Metric is a catalog key (see list_metrics). Required for metric tiles.
 	Metric string `json:"metric,omitempty"`
+	// Target declares the project-scoped target for this metric (see
+	// metric_targets.go). Declaring one appends a version to the metric's
+	// target history; omitting it leaves the history untouched — a board
+	// never clears a target, only set_metric_target does.
+	Target  *MetricTargetSpec `json:"target,omitempty"`
 	// ChartID places a saved chart that already belongs to this board.
 	ChartID string           `json:"chart_id,omitempty"`
 	Params  *BoardTileParams `json:"params,omitempty"`
@@ -115,7 +120,12 @@ type BoardContent struct {
 	Definition    BoardDefinition    `json:"definition"`
 	Metrics       []MetricDefinition `json:"metrics"`
 	Charts        []Chart            `json:"charts"`
-	Warnings      []string           `json:"warnings"`
+	// Targets is the latest declared target version per metric the tiles
+	// reference — including a cleared tombstone, so a declarer can read what
+	// it would be restating. The in-force version for a read window is
+	// resolved at read time, not here.
+	Targets  map[string]MetricTarget `json:"targets"`
+	Warnings []string                `json:"warnings"`
 }
 
 // BoardDefinitionWrite is one declaration: the document, the board it belongs
@@ -261,6 +271,7 @@ func resolveBoardContent(ctx context.Context, q boardQuerier, board Dashboard, r
 		Definition:    BoardDefinition{Version: BoardDefinitionVersion, Sections: []BoardSection{}},
 		Metrics:       []MetricDefinition{},
 		Charts:        []Chart{},
+		Targets:       map[string]MetricTarget{},
 		Warnings:      []string{},
 	}
 	definition, err := decodeBoardDefinition(raw)
@@ -293,6 +304,11 @@ func resolveBoardContent(ctx context.Context, q boardQuerier, board Dashboard, r
 	if err != nil {
 		return BoardContent{}, err
 	}
+	targets, err := latestMetricTargets(ctx, q, board.ProjectID, metricKeys)
+	if err != nil {
+		return BoardContent{}, err
+	}
+	content.Targets = targets
 
 	metricsSeen := map[string]bool{}
 	chartsSeen := map[string]bool{}
@@ -446,6 +462,8 @@ func saveBoardDefinition(ctx context.Context, tx pgx.Tx, projectID string, in Bo
 		return BoardContent{}, fmt.Errorf("%w: declare a board_id to update an existing board, or a board_key to create one", ErrBoardDefinitionInvalid)
 	}
 
+	var board Dashboard
+	var stored []byte
 	existing, err := lockBoard(ctx, tx, projectID, in.BoardID, key)
 	switch {
 	case err == nil:
@@ -462,7 +480,7 @@ func saveBoardDefinition(ctx context.Context, tx pgx.Tx, projectID string, in Bo
 		if err := checkChartReferences(ctx, tx, projectID, existing.ID, definition); err != nil {
 			return BoardContent{}, err
 		}
-		return updateBoardDefinition(ctx, tx, projectID, existing, key, in, definition)
+		board, stored, err = updateBoardDefinition(ctx, tx, projectID, existing, key, in, definition)
 	case errors.Is(err, pgx.ErrNoRows):
 		if in.BoardID != "" {
 			return BoardContent{}, pgx.ErrNoRows
@@ -478,10 +496,38 @@ func saveBoardDefinition(ctx context.Context, tx pgx.Tx, projectID string, in Bo
 		if err := checkChartReferences(ctx, tx, projectID, "", definition); err != nil {
 			return BoardContent{}, err
 		}
-		return insertBoardDefinition(ctx, tx, projectID, key, in, definition)
+		board, stored, err = insertBoardDefinition(ctx, tx, projectID, key, in, definition)
 	default:
 		return BoardContent{}, err
 	}
+	if err != nil {
+		return BoardContent{}, err
+	}
+	// The board row is written; now append the target versions the tiles
+	// declare, inside the same transaction — a refused target rolls the board
+	// write back with it, so a declaration is never half-applied.
+	if err := applyBoardTargets(ctx, tx, projectID, definition); err != nil {
+		return BoardContent{}, err
+	}
+	return resolveBoardContent(ctx, tx, board, stored)
+}
+
+// applyBoardTargets appends one target version per metric the document
+// declares a target for. A tile without a target declares nothing — the
+// project-scoped history is never cleared by omission, so one board cannot
+// silently remove a target another surface set.
+func applyBoardTargets(ctx context.Context, tx pgx.Tx, projectID string, definition BoardDefinition) error {
+	for _, section := range definition.Sections {
+		for _, tile := range section.Tiles {
+			if tile.Kind != TileKindMetric || tile.Target == nil {
+				continue
+			}
+			if _, err := setMetricTarget(ctx, tx, projectID, MetricTargetWrite{Metric: tile.Metric, Spec: *tile.Target}); err != nil {
+				return fmt.Errorf("section %q tile %q: %w", section.Key, tile.Key, err)
+			}
+		}
+	}
+	return nil
 }
 
 func boardLabel(d Dashboard) string {
@@ -509,7 +555,7 @@ func lockBoard(ctx context.Context, tx pgx.Tx, projectID, id, key string) (Dashb
 	return board, err
 }
 
-func insertBoardDefinition(ctx context.Context, tx pgx.Tx, projectID, key string, in BoardDefinitionWrite, definition BoardDefinition) (BoardContent, error) {
+func insertBoardDefinition(ctx context.Context, tx pgx.Tx, projectID, key string, in BoardDefinitionWrite, definition BoardDefinition) (Dashboard, []byte, error) {
 	name := "Untitled dashboard"
 	if in.Name != nil && strings.TrimSpace(*in.Name) != "" {
 		name = strings.TrimSpace(*in.Name)
@@ -520,7 +566,7 @@ func insertBoardDefinition(ctx context.Context, tx pgx.Tx, projectID, key string
 	}
 	payload, err := json.Marshal(definition)
 	if err != nil {
-		return BoardContent{}, err
+		return Dashboard{}, nil, err
 	}
 	var board Dashboard
 	var stored []byte
@@ -535,17 +581,17 @@ RETURNING `+boardDefinitionColumns, projectID, name, description, key, payload).
 		// and a conflict is what the loser needs to hear, so it can re-read the
 		// board the winner created instead of parsing a constraint name.
 		if isUniqueViolation(err) {
-			return BoardContent{}, fmt.Errorf("%w: board key %q was just taken — read it with get_board and declare with its revision", ErrRevisionConflict, key)
+			return Dashboard{}, nil, fmt.Errorf("%w: board key %q was just taken — read it with get_board and declare with its revision", ErrRevisionConflict, key)
 		}
-		return BoardContent{}, err
+		return Dashboard{}, nil, err
 	}
-	return resolveBoardContent(ctx, tx, board, stored)
+	return board, stored, nil
 }
 
-func updateBoardDefinition(ctx context.Context, tx pgx.Tx, projectID string, existing Dashboard, key string, in BoardDefinitionWrite, definition BoardDefinition) (BoardContent, error) {
+func updateBoardDefinition(ctx context.Context, tx pgx.Tx, projectID string, existing Dashboard, key string, in BoardDefinitionWrite, definition BoardDefinition) (Dashboard, []byte, error) {
 	payload, err := json.Marshal(definition)
 	if err != nil {
-		return BoardContent{}, err
+		return Dashboard{}, nil, err
 	}
 	var board Dashboard
 	var stored []byte
@@ -568,16 +614,16 @@ RETURNING `+boardDefinitionColumns,
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Either the revision moved or the board was archived underneath
 			// the declaration — both are "the board changed, re-read it".
-			return BoardContent{}, fmt.Errorf("%w: board %q changed under the declaration (expected revision %d)", ErrRevisionConflict, boardLabel(existing), in.ExpectedRevision)
+			return Dashboard{}, nil, fmt.Errorf("%w: board %q changed under the declaration (expected revision %d)", ErrRevisionConflict, boardLabel(existing), in.ExpectedRevision)
 		}
 		// A declaration may name the board it updates; if that key belongs to
 		// another board, the index refuses and the declarer has to choose.
 		if isUniqueViolation(err) {
-			return BoardContent{}, fmt.Errorf("%w: board key %q belongs to another board", ErrRevisionConflict, key)
+			return Dashboard{}, nil, fmt.Errorf("%w: board key %q belongs to another board", ErrRevisionConflict, key)
 		}
-		return BoardContent{}, err
+		return Dashboard{}, nil, err
 	}
-	return resolveBoardContent(ctx, tx, board, stored)
+	return board, stored, nil
 }
 
 // checkChartReferences rejects a chart tile whose chart is not on this board.
@@ -642,6 +688,10 @@ func normalizeBoardDefinition(def BoardDefinition) (BoardDefinition, error) {
 	}
 	sectionKeys := map[string]bool{}
 	tileKeys := map[string]bool{}
+	// One document may place the same metric twice, but it may not declare two
+	// different targets for it: the history is project-scoped, so the second
+	// write would overwrite the first inside one save.
+	targetDecls := map[string]MetricTargetSpec{}
 	for i := range def.Sections {
 		section := &def.Sections[i]
 		section.Key = strings.TrimSpace(section.Key)
@@ -668,6 +718,12 @@ func normalizeBoardDefinition(def BoardDefinition) (BoardDefinition, error) {
 				return BoardDefinition{}, fmt.Errorf("%w: tile key %q is declared twice", ErrBoardDefinitionInvalid, tile.Key)
 			}
 			tileKeys[tile.Key] = true
+			if tile.Kind == TileKindMetric && tile.Target != nil {
+				if prev, ok := targetDecls[tile.Metric]; ok && prev != *tile.Target {
+					return BoardDefinition{}, fmt.Errorf("%w: tiles declare two different targets for metric %q — a target is project-scoped, so one document can only declare it once", ErrBoardDefinitionInvalid, tile.Metric)
+				}
+				targetDecls[tile.Metric] = *tile.Target
+			}
 		}
 	}
 	return def, nil
@@ -721,6 +777,13 @@ func normalizeBoardTile(tile *BoardTile) error {
 				return fmt.Errorf("tile %q: %w", tile.Key, err)
 			}
 		}
+		if tile.Target != nil {
+			spec, err := normalizeMetricTargetSpec(def, *tile.Target)
+			if err != nil {
+				return fmt.Errorf("tile %q: %w", tile.Key, err)
+			}
+			*tile.Target = spec
+		}
 	case TileKindChart:
 		if tile.Metric != "" {
 			return fmt.Errorf("%w: tile %q is a chart tile and cannot also reference a metric", ErrBoardDefinitionInvalid, tile.Key)
@@ -738,6 +801,9 @@ func normalizeBoardTile(tile *BoardTile) error {
 		}
 		if tile.Params != nil {
 			return fmt.Errorf("%w: tile %q sets params on a chart tile; the chart's own query and the reader's range decide its window", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Target != nil {
+			return fmt.Errorf("%w: tile %q sets a target on a chart tile; a target belongs to a catalog metric", ErrBoardDefinitionInvalid, tile.Key)
 		}
 	default:
 		return fmt.Errorf("%w: tile %q has kind %q; a tile is %q or %q", ErrBoardDefinitionInvalid, tile.Key, tile.Kind, TileKindMetric, TileKindChart)
