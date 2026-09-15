@@ -315,6 +315,10 @@ function retentionStat(res: OverviewResult, label: string, day: 1 | 7 | 30, p: {
   return { ...retentionTile(label, p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'retention', day, point: p }) };
 }
 
+function unservedStat(res: OverviewResult, label: string) {
+  return { label, value: 'Not available', provenance: tileProvenance(res, { kind: 'unserved' }) };
+}
+
 // A local composition, not a shared primitive: every dashboard category needs
 // a real destination or explicit state explanation, while its contents reuse
 // the shipped Panel, StatsStrip, Chart, and BarRows primitives.
