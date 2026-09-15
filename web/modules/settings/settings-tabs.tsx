@@ -122,7 +122,9 @@ export function ProjectsTab() {
             action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDialog('create')}>New project</Button>}
             onRowClick={(p) => void selectProject(p.id)}
           />
-          {project ? <ProjectGoalPanel project={project} access={access} updateProject={updateProject} /> : null}
+          {/* key remounts the panel on project switch so the activation-event
+              draft never carries the previous project's value into a save. */}
+          {project ? <ProjectGoalPanel key={project.id} project={project} access={access} updateProject={updateProject} /> : null}
         </>
       )}
     </>

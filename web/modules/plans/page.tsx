@@ -33,6 +33,7 @@ export function PlansPage() {
   const project = useAuthStore((s) => s.project);
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const experiments = useExperiments();
+  const findings = useFindings();
 
   const { waiting, running, decided } = groupTests(experiments.tests);
   const openFindings = findings.findings.filter((f) => f.status === 'open');
