@@ -155,7 +155,7 @@ func (s *Scanner) scanAll(ctx context.Context, now time.Time) {
 // (current and prior 7d windows); the funnel detector additionally re-runs
 // each declared watch over both windows.
 func ScanProject(ctx context.Context, st ProjectStore, projectID string, now time.Time) (ScanResult, error) {
-	res := ScanResult{ProjectID: projectID, Detectors: []string{"wow_delta", "target_off_track", "source_shift", "stale_data", "funnel_drop"}}
+	res := ScanResult{ProjectID: projectID, Detectors: []string{"wow_delta", "target_off_track", "source_shift", "stale_data", "funnel_drop"}, Findings: []string{}}
 
 	cur, err := st.Overview(ctx, projectID, "7d", "", now)
 	if err != nil {

@@ -201,7 +201,8 @@ func detectSourceShift(cur, prior storage.OverviewResult) []finding {
 	}
 
 	out := []finding{}
-	if top := curRows[0].Value; top != priorRows[0].Value {
+	topChanged := curRows[0].Value != priorRows[0].Value
+	if top := curRows[0].Value; topChanged {
 		out = append(out, finding{
 			dedupeKey: "source_shift:top",
 			category:  "growth",
@@ -214,6 +215,11 @@ func detectSourceShift(cur, prior storage.OverviewResult) []finding {
 		})
 	}
 	for channel, cs := range curShare {
+		// The channel that just took the top spot already has its finding —
+		// a second card for the same move is noise.
+		if topChanged && channel == curRows[0].Value {
+			continue
+		}
 		move := cs - priorShare[channel]
 		if move < SourceShiftSharePP && move > -SourceShiftSharePP {
 			continue
@@ -261,7 +267,12 @@ func detectStaleData(cur storage.OverviewResult, now time.Time) []finding {
 		var reason, detail string
 		switch {
 		case src.State == "error":
-			reason, detail = "error", fmt.Sprintf("its last sync failed (%s)", src.LastError)
+			reason = "error"
+			if src.LastError != "" {
+				detail = fmt.Sprintf("its last sync failed (%s)", src.LastError)
+			} else {
+				detail = "its last sync failed"
+			}
 		case src.State == "paused":
 			reason, detail = "paused", "the sync is paused"
 		case src.SyncConfigured && src.Enabled && src.LastSuccessAt != nil && now.Sub(*src.LastSuccessAt) > StaleSourceAfter:

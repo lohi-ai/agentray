@@ -623,6 +623,10 @@ type AgentRecommendation struct {
 	Status       string    `json:"status"`
 	AckNote      string    `json:"ack_note"`
 	CreatedAt    time.Time `json:"created_at"`
+	// SeenCount is how many times the same finding has been re-derived — by an
+	// agent's repeated runs or by the engine's dedupe-key fold. 1 means "said
+	// once"; a high count means a standing problem the owner has not acted on,
+	// which is worth surfacing rather than hiding.
 	SeenCount  int       `json:"seen_count"`
 	LastSeenAt time.Time `json:"last_seen_at"`
 	// Revision is the optimistic-concurrency counter; NULL on legacy rows
