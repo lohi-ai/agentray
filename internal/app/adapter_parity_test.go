@@ -160,7 +160,7 @@ func classifyOpError(msg string) string {
 		return "not_found"
 	case strings.Contains(msg, "archived"):
 		return "archived"
-	case strings.Contains(msg, "may not invoke"),
+	case strings.Contains(msg, "may not perform"),
 		strings.Contains(msg, "authentication failed"),
 		strings.Contains(msg, "invalid credential"),
 		strings.Contains(msg, "invalid api key"):

@@ -21,7 +21,9 @@ import (
 // write class — Allow itself stays demo-blind.
 //
 // FAIL CLOSED. classifyWrite's default arm is writeGuarded. A path is exempt
-// only by being named below with a reason. Scope resolution fails closed too.
+// only by being named below with a reason — including writeClassed, the routes
+// that ask the registry their own Allow question and would be preempted by the
+// floor's generic one. Scope resolution fails closed too.
 
 // TRACE and CONNECT are absent deliberately: Echo never routes them to a
 // handler in this app, and if that changed they would fall into the mutating
@@ -60,6 +62,14 @@ const (
 	// quota — and refusing the stop would leave a viewer unable to end a run
 	// the instance owner is paying for.
 	writeAgentControl
+	// writeClassed is a mutating route that asks the registry its own Allow
+	// question — authorizedProject / authProjectForWrite / the op adapters
+	// declare the access class the work belongs to. The floor's generic
+	// dashboards:write question must not run in front of them: it would deny
+	// a plans:write credential on a plans:write route, and its refusal would
+	// cite a class the route never asked about. The route's own authorizer
+	// answers instead, so the floor passes these through untouched.
+	writeClassed
 )
 
 // writeClasses is the exemption list, keyed by Echo's matched route path (the
@@ -130,6 +140,30 @@ var writeClasses = map[string]writeClass{
 	// transport as a write would reject reads the matrix allows. Classified
 	// read-only so the request reaches the real authorizer; inside the demo
 	// the read-only caller flag still suppresses any cache write-back. ---
+
+	// --- routes that ask the registry their own Allow question. The floor's
+	// generic write question would preempt the class the route declares: a
+	// plans:write credential was refused on the plans:write audience routes
+	// because the floor asked about dashboards:write. The route's authorizer
+	// is the decision; the floor stays out of its way. ---
+	"/api/templates/:template_id/apply":                  writeClassed,
+	"/api/templates/:template_id/charts/:chart_id/clone": writeClassed,
+	"/api/cohorts/audiences":                             writeClassed,
+	"/api/cohorts/audiences/:audience_id":                writeClassed,
+	"/api/subscription/mapping":                          writeClassed,
+	"/api/saved-queries":                                 writeClassed,
+	"/api/saved-queries/:query_id":                       writeClassed,
+	"/api/validation/tests/:id/commit":                   writeClassed,
+	"/api/validation/tests/:id/decide":                   writeClassed,
+	"/api/dashboards":                                    writeClassed,
+	"/api/dashboards/:dashboard_id":                      writeClassed,
+	"/api/dashboards/:dashboard_id/charts":               writeClassed,
+	"/api/dashboards/:dashboard_id/charts/order":         writeClassed,
+	"/api/charts/:chart_id":                              writeClassed,
+	"/api/connectors":                                    writeClassed,
+	"/api/connectors/:connector_id":                      writeClassed,
+	"/api/connectors/:connector_id/test":                 writeClassed,
+	"/api/connector-syncs/:sync_id/run":                  writeClassed,
 }
 
 // classifyWrite answers what a matched route is. The default arm is the
@@ -166,13 +200,13 @@ type writeGuardStore interface {
 
 // writeScope is the target a mutating request resolved to.
 type writeScope struct {
-	user        string
-	workspaceID string
-	projectID   string
-	role        string
-	isDemo      bool
-	grants      []opcore.Access
-	split       bool
+	user            string
+	workspaceID     string
+	projectID       string
+	role            string
+	isDemo          bool
+	grants          []opcore.Access
+	split           bool
 	byAPIKey        bool
 	byManagementKey bool
 	badKey          bool
@@ -228,7 +262,7 @@ func demoWriteGuard(g writeGuardStore, reg *opcore.Registry) echo.MiddlewareFunc
 				return next(c)
 			}
 			class := classifyWrite(c.Path())
-			if class == writeUnscoped {
+			if class == writeUnscoped || class == writeClassed {
 				return next(c)
 			}
 
@@ -260,7 +294,7 @@ func demoWriteGuard(g writeGuardStore, reg *opcore.Registry) echo.MiddlewareFunc
 				if mayWrite {
 					return next(c)
 				}
-				return echo.NewHTTPError(http.StatusForbidden, "your role in this workspace is read-only")
+				return echo.NewHTTPError(http.StatusForbidden, opcore.RefusalMessage(opcore.AccessDashboardsWrite))
 			}
 		}
 	}
