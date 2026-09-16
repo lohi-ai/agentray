@@ -420,12 +420,13 @@ VALUES ($1, 'Weekly decision digest', 'digest', '', '{"op":"none"}'::jsonb, '{}'
 // detached keep their (non-empty) channel list untouched — only the
 // never-delivered empty set is filled.
 func (s *Store) attachChannelToDigestRules(ctx context.Context, workspaceID, channelID string) error {
+	chans, _ := json.Marshal([]string{channelID})
 	_, err := s.pg.Exec(ctx, `
 UPDATE alert_rules r SET channels = $2::jsonb
 FROM projects p
 WHERE r.project_id = p.id AND p.workspace_id = $1
   AND r.source_kind = 'digest' AND r.channels = '[]'::jsonb`,
-		workspaceID, `["`+channelID+`"]`)
+		workspaceID, string(chans))
 	return err
 }
 
