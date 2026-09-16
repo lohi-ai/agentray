@@ -4,8 +4,9 @@ import { useMemo, useState } from 'react';
 import { AlertTriangle, ArrowUpRight, DollarSign, Repeat, Sparkles } from 'lucide-react';
 import type { EventCatalogEntry, Project } from '@/lib/api';
 import type { ProjectAccess } from '@/lib/ia';
+import { useActivationCandidates } from '@/modules/app/hooks';
+import { ActivationSuggestionRow, ActivationSuggestionsNotice } from '@/modules/shared/components/activation-suggestions';
 import { Button, Callout, Panel } from '@/modules/shared/components/signal-primitives';
-
 export const GOAL_OPTIONS = [
   {
     id: 'activation',
@@ -74,7 +75,14 @@ export function GoalPrompt({
       }
     }
     return list.slice(0, 8);
+
   }, [eventNames]);
+
+  // Server-ranked suggestions take precedence over the raw catalog when the
+  // cohort has matured; not_ready and a failed fetch both fall back to the
+  // catalog list so the pick is never blocked by the ranking read.
+  const suggestions = useActivationCandidates();
+  const ranked = suggestions.data?.state === 'ok' ? suggestions.data.candidates : null;
 
   // Hide if the prompt was dismissed, or goal is already recorded and not in active flow,
   // or user cannot write
@@ -158,30 +166,49 @@ export function GoalPrompt({
         ) : null}
 
         <div className="flex flex-col gap-2" role="group" aria-label="Select activation event">
-          {catalogEvents.map((evt) => {
-            const isPicked = selectedEvent === evt.name;
-            return (
-              <button
-                key={evt.name}
-                type="button"
-                aria-pressed={isPicked}
-                onClick={() => setSelectedEvent(evt.name)}
+          {ranked ? (
+            ranked.map((c) => (
+              <ActivationSuggestionRow
+                key={c.event_name}
+                candidate={c}
+                picked={selectedEvent === c.event_name}
+                onPick={() => setSelectedEvent(c.event_name)}
                 disabled={saving}
-                className={`flex min-h-[44px] w-full items-center justify-between gap-3 rounded-[var(--radius-md)] border px-4 py-3 text-left transition-[border-color,background-color] ${
-                  isPicked
-                    ? 'border-[var(--agent)] bg-[color-mix(in_srgb,var(--agent)_6%,transparent)]'
-                    : 'border-[var(--color-border)] bg-[var(--color-background-surface)] hover:border-[var(--color-border-strong)]'
-                }`}
-              >
-                <span className="font-mono text-sm">{evt.name}</span>
-                {evt.users > 0 ? (
-                  <span className="text-xs text-[var(--color-text-secondary)]">
-                    {evt.users === 1 ? '1 person' : `${evt.users.toLocaleString()} people`}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+              />
+            ))
+          ) : (
+            <>
+              {suggestions.error ? (
+                <ActivationSuggestionsNotice kind="error" />
+              ) : suggestions.data?.state === 'not_ready' ? (
+                <ActivationSuggestionsNotice kind="not_ready" />
+              ) : null}
+              {catalogEvents.map((evt) => {
+                const isPicked = selectedEvent === evt.name;
+                return (
+                  <button
+                    key={evt.name}
+                    type="button"
+                    aria-pressed={isPicked}
+                    onClick={() => setSelectedEvent(evt.name)}
+                    disabled={saving}
+                    className={`flex min-h-[44px] w-full items-center justify-between gap-3 rounded-[var(--radius-md)] border px-4 py-3 text-left transition-[border-color,background-color] ${
+                      isPicked
+                        ? 'border-[var(--agent)] bg-[color-mix(in_srgb,var(--agent)_6%,transparent)]'
+                        : 'border-[var(--color-border)] bg-[var(--color-background-surface)] hover:border-[var(--color-border-strong)]'
+                    }`}
+                  >
+                    <span className="font-mono text-sm">{evt.name}</span>
+                    {evt.users > 0 ? (
+                      <span className="text-xs text-[var(--color-text-secondary)]">
+                        {evt.users === 1 ? '1 person' : `${evt.users.toLocaleString()} people`}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </>
+          )}
 
           <button
             type="button"

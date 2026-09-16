@@ -1,5 +1,5 @@
 export { useAuth, useUser } from './hooks/auth';
-export { useFilters, useActivity, usePersons, useCohorts, useCohortAudiences, useSubscriptionMapping, useLiveEvents, useTemplates, useMarketplace, useEventNames, useDailyReadout, useAgentGrants, useReplay } from './hooks/console';
+export { useFilters, useActivity, usePersons, useCohorts, useCohortAudiences, useSubscriptionMapping, useLiveEvents, useTemplates, useMarketplace, useEventNames, useActivationCandidates, useDailyReadout, useAgentGrants, useReplay } from './hooks/console';
 export { useAlertRules, useAlertChannels } from './hooks/alerts';
 export { useDashboards } from './hooks/dashboards';
 export { useSavedQueries, useSQL } from './hooks/sql';
