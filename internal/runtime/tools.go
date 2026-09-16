@@ -24,6 +24,9 @@ type DataSource interface {
 	Persons(ctx context.Context, projectID string, filter storage.EventFilter) (storage.PersonsSummary, error)
 	ExploreEvents(ctx context.Context, projectID string, filter storage.EventFilter) (storage.EventExplorer, error)
 	RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error)
+	// SuggestActivationEvents mirrors usecase.Repo — the activation_candidates
+	// op ranks event names for the picker and for agents on every adapter.
+	SuggestActivationEvents(ctx context.Context, projectID string, now time.Time) (storage.ActivationCandidates, error)
 
 	// Insight + authoring (P1, analyze_build).
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
@@ -152,6 +155,7 @@ const (
 	ToolSendNotification   = "send_notification"
 	ToolOverview           = "overview"
 	ToolVerifySDK          = "verify_sdk"
+	ToolActivationCandidates = "activation_candidates"
 	ToolUpdateDashboard    = "update_dashboard"
 	ToolArchiveDashboard   = "archive_dashboard"
 	ToolUnarchiveDashboard = "unarchive_dashboard"

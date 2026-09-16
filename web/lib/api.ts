@@ -733,6 +733,25 @@ export type EventCatalogEntry = {
   last_seen: string;
 };
 
+// One server-ranked activation-event suggestion. Rates are 0–1 fractions —
+// render with formatFractionAsPercent, never formatPercent. `users` is
+// distinct new users who fired the event inside their first 7 days; `lift`
+// is their D7 return rate minus the cohort baseline.
+export type ActivationCandidate = {
+  event_name: string;
+  users: number;
+  reach: number;
+  d7_return: number;
+  baseline_d7: number;
+  lift: number;
+};
+
+export type ActivationCandidates = {
+  state: 'ok' | 'not_ready';
+  cohort_size: number;
+  candidates: ActivationCandidate[];
+};
+
 export type AgentReplay = {
   session_id: string;
   distinct_id: string;
@@ -1973,11 +1992,6 @@ export class AgentRayAPI {
     return this.request<void>(`/api/workspaces/${workspaceID}/members/${userID}`, { method: 'DELETE' });
   }
 
-  createWorkspaceProject(workspaceID: string, name: string) {
-    return this.post<{ project: Project }>(`/api/workspaces/${workspaceID}/projects`, { name });
-  }
-
-
   updateProject(
     projectID: string,
     patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },
@@ -1990,6 +2004,17 @@ export class AgentRayAPI {
 
   rotateKey(projectID: string) {
     return this.post<{ project: Project }>(`/api/projects/${projectID}/rotate-key`, {});
+  }
+
+  // activationCandidates returns the server-ranked activation-event
+  // suggestions (reach + D7 lift evidence). state "not_ready" means the
+  // mature cohort is too small to rank — the picker falls back to the raw
+  // catalog, never an empty list presented as a ranking. The path carries
+  // the project id, so this deliberately skips withProject: a query-param
+  // project_id would outrank the path in principalFromRequest and 404 the
+  // session's own project on a stale value.
+  activationCandidates(projectID: string) {
+    return this.get<ActivationCandidates>(`/api/projects/${projectID}/activation-candidates`);
   }
 
   activity(filters: Filters) {

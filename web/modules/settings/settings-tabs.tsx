@@ -16,7 +16,8 @@ import { formatCompact, formatNumber, formatRelative } from '@/lib/format';
 import { projectAccess } from '@/lib/ia';
 import { GOAL_OPTIONS } from '@/modules/overview/goal-prompt';
 import { EventNameCombobox } from '@/modules/shared/components/event-name-picker';
-import { useAlertChannels, useAlertRules, useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
+import { ActivationSuggestionRow } from '@/modules/shared/components/activation-suggestions';
+import { useActivationCandidates, useAlertChannels, useAlertRules, useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
 import { Button, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
@@ -302,6 +303,8 @@ function ProjectGoalPanel({
   updateProject: (patch: { name?: string; timezone?: string; goal?: string; activation_event?: string }) => Promise<void>;
 }) {
   const [eventDraft, setEventDraft] = useState(project.activation_event ?? '');
+  const suggestions = useActivationCandidates();
+  const ranked = suggestions.data?.state === 'ok' && suggestions.data.candidates.length > 0 ? suggestions.data.candidates.slice(0, 3) : null;
   const [saving, setSaving] = useState(false);
   const goalValue = project.goal && project.goal !== 'skipped' ? project.goal : 'none';
 
@@ -341,26 +344,43 @@ function ProjectGoalPanel({
               <p className="text-xs text-[var(--color-text-secondary)]">
                 The event that counts as a new user reaching first value. The overview activation tile computes once this is set.
               </p>
+              {ranked ? (
+                <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                  Suggested from your data — ranked by how many new users reach it and how much it predicts day-7 return.
+                </p>
+              ) : null}
             </div>
-            <div className="flex min-w-[280px] items-center gap-2">
-              <EventNameCombobox
-                value={eventDraft}
-                onChange={setEventDraft}
-                placeholder="e.g. onboarding.completed"
-                className="flex-1"
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                className="min-h-[44px]"
-                disabled={!access.canWrite || saving || eventDraft.trim() === (project.activation_event ?? '')}
-                onClick={() => {
-                  setSaving(true);
-                  void updateProject({ activation_event: eventDraft.trim() }).finally(() => setSaving(false));
-                }}
-              >
-                Save
-              </Button>
+            <div className="flex min-w-[280px] flex-1 flex-col gap-2">
+              {ranked?.map((c) => (
+                <ActivationSuggestionRow
+                  key={c.event_name}
+                  candidate={c}
+                  picked={eventDraft === c.event_name}
+                  onPick={() => setEventDraft(c.event_name)}
+                  disabled={!access.canWrite || saving}
+                  action={<span className="shrink-0 text-xs text-[var(--color-text-secondary)]">Use</span>}
+                />
+              ))}
+              <div className="flex items-center gap-2">
+                <EventNameCombobox
+                  value={eventDraft}
+                  onChange={setEventDraft}
+                  placeholder="e.g. onboarding.completed"
+                  className="flex-1"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="min-h-[44px]"
+                  disabled={!access.canWrite || saving || eventDraft.trim() === (project.activation_event ?? '')}
+                  onClick={() => {
+                    setSaving(true);
+                    void updateProject({ activation_event: eventDraft.trim() }).finally(() => setSaving(false));
+                  }}
+                >
+                  Save
+                </Button>
+              </div>
             </div>
           </div>
         ) : null}
