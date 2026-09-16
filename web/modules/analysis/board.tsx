@@ -7,17 +7,20 @@ import { AddAnnotationButton, type AnnotationsController } from '@/modules/annot
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { analysisBars, analysisSeries, analysisStat, unservedStat } from './tiles';
+import { FunnelTile } from './funnel';
 
 export function AnalysisBoard({
   board,
   res,
   boardKey,
   annotations,
+  platform,
 }: {
   board: BoardContent;
   res: OverviewResult;
   boardKey: AnalysisBoardKey;
   annotations: AnnotationsController;
+  platform: string;
 }) {
   const unserved = UNSERVED_TILES[boardKey].map((tile) => unservedStat(res, tile.label));
   return (
@@ -26,6 +29,7 @@ export function AnalysisBoard({
         const stats = section.tiles.map((tile) => analysisStat(res, tile)).filter((s): s is NonNullable<typeof s> => s !== null);
         const bars = section.tiles.map((tile) => analysisBars(res, tile)).filter((s): s is NonNullable<typeof s> => s !== null);
         const series = section.tiles.map((tile) => analysisSeries(res, tile)).filter((s): s is NonNullable<typeof s> => s !== null);
+        const funnels = section.tiles.filter((tile) => tile.kind === 'funnel' && (tile.steps?.length ?? 0) > 0);
         return (
           <Panel key={section.key} title={section.title} action={series.length > 0 ? <AddAnnotationButton annotations={annotations} /> : undefined}>
             <div className="flex flex-col gap-4">
@@ -68,6 +72,12 @@ export function AnalysisBoard({
                   ))}
                 </div>
               ) : null}
+              {funnels.map((tile) => (
+                <div key={tile.key}>
+                  <h3 className="mb-2 text-sm font-medium">{tile.title || 'Funnel'}</h3>
+                  <FunnelTile tile={tile} res={res} platform={platform} />
+                </div>
+              ))}
             </div>
           </Panel>
         );

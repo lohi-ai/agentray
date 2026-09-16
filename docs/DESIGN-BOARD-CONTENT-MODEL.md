@@ -70,18 +70,23 @@ A board stays a `dashboards` row; its content is three columns added to it:
 | `definition` | The document: `{version, sections:[{key, title, description, tiles:[…]}]}` |
 | `definition_updated_at` | When the content was declared. `NULL` = never declared |
 
-A **tile** is a placement, and there are exactly two kinds:
+A **tile** is a placement, and there are exactly three kinds:
 
 - `kind: "metric"` — declares a catalog metric (`metric`), how to draw it
   (`display`), how wide it is (`span`), and optionally the range it covers
   (`params.period`, `params.platform`). The server computes it.
 - `kind: "chart"` — places a saved chart (`chart_id`) that already belongs to
   this board. The chart row keeps owning its query; a tile only positions it.
+- `kind: "funnel"` — declares an ordered event sequence (`steps`, 2–8
+  distinct names). The reader runs it through the funnel insight over the
+  board's selected range, so the tile stores the steps and never a result.
 
-The two kinds are not two ways of saying the same thing: a metric tile declares
-*what number this is*, a chart tile places *an artifact that already exists*.
+The three kinds are not three ways of saying the same thing: a metric tile
+declares *what number this is*, a chart tile places *an artifact that already
+exists*, and a funnel tile declares *which events to measure passage through*.
 That is why a chart tile may not carry a `display` (its chart kind decides) or
-`params` (its query and the reader's range decide).
+`params` (its query and the reader's range decide), and a funnel tile may not
+carry either (it has exactly one drawing, and the board's range decides).
 
 ## The operations
 

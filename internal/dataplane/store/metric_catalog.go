@@ -80,6 +80,18 @@ const (
 	MetricAvgSession        = "avg_session_duration"
 	MetricTopEvents         = "top_events"
 	MetricEventVolumeDaily  = "event_volume_daily"
+	// The App Store Connect reads the analysis boards adopted: sessions per
+	// device and its daily trend, the paying-people count, proceeds per
+	// paying user, and the download→paid cohort conversion. Each is computed
+	// from the same event store as every other metric — none is a store-only
+	// figure.
+	MetricSessionsPerUser      = "sessions_per_user"
+	MetricSessionsDaily        = "sessions_daily"
+	MetricPayingUsers          = "paying_users"
+	MetricProceedsPerPaying    = "proceeds_per_paying_user"
+	MetricDownloadToPaidD1     = "download_to_paid_d1"
+	MetricDownloadToPaidD7     = "download_to_paid_d7"
+	MetricDownloadToPaidD35    = "download_to_paid_d35"
 )
 
 // ErrMetricUnknown is returned when a caller names a metric the catalog does
@@ -154,6 +166,11 @@ const (
 	metricDefAvgSession        = "Mean session length in seconds over every session in the range; sessions end after 30 minutes of inactivity (server sessionizer)."
 	metricDefTopEvents         = "Every received event name ranked by volume — all event types and visitor classes, no qualifying filter."
 	metricDefEventVolume       = "Every received event per local calendar day inside the selected range. Volume is an ingestion fact: non-qualifying rows count, and a crawler wave is the answer when the question is how much arrived."
+	metricDefSessionsPerUser   = "Sessions per active person in the range: distinct session ids over distinct people on qualifying activity. App Store Connect's 'sessions per device' — the stickiness read."
+	metricDefSessionsDaily     = "Distinct session ids on qualifying activity per local calendar day inside the selected range. Daily counts are never summed into a period total."
+	metricDefPayingUsers       = "Distinct people with at least one deduplicated positive revenue booking in the range, any declared currency. A refund does not un-pay a person."
+	metricDefProceedsPerPaying = "Net proceeds in the headline currency divided by the distinct people who paid in that currency in the range. No FX — the ratio never mixes currencies."
+	metricDefDownloadToPaid    = "Share of a lifetime first-activity cohort that made a deduplicated positive revenue booking within N local days of first activity. Cohorts too young to have reached day N are excluded, not counted as zero."
 )
 
 // Prerequisite texts — what must be instrumented before the metric can compute.
@@ -163,6 +180,7 @@ const (
 	metricPrereqActivation = "no activation condition is stored for projects yet — configure it before this metric can compute"
 	metricPrereqRevenue    = "requires a trusted, deduplicated server or billing source that sends " + moneyBookingEvent + " events with a declared currency and gross/net basis"
 	metricPrereqRetention  = "needs a first-activity cohort whose day N has fully elapsed; recent cohorts report not_ready, never 0%"
+	metricPrereqPaidCohort = "needs a mature first-activity cohort AND a trusted revenue source; recent cohorts report not_ready, never 0%"
 )
 
 // metricCatalogDecl is the catalog, in display order. SortOrder is the slice
@@ -272,6 +290,41 @@ var metricCatalogDecl = []MetricDefinition{
 		Key: MetricTopSources, Label: "Top sources", Unit: "pageviews", Kind: MetricKindBreakdown,
 		Group: MetricGroupAcquisition, Definition: metricDefTopSources,
 		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricSessionsPerUser, Label: "Sessions per person", Unit: "sessions/person", Kind: MetricKindValue,
+		Group: MetricGroupUsage, Definition: metricDefSessionsPerUser,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricSessionsDaily, Label: "Sessions per day", Unit: "sessions/day", Kind: MetricKindSeries,
+		Group: MetricGroupUsage, Definition: metricDefSessionsDaily,
+		Displays: []string{DisplayLine, DisplayArea, DisplayBar},
+	},
+	{
+		Key: MetricPayingUsers, Label: "Paying people", Unit: "people", Kind: MetricKindValue,
+		Group: MetricGroupMonetization, Definition: metricDefPayingUsers, Prerequisite: metricPrereqRevenue,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricProceedsPerPaying, Label: "Proceeds per paying person", Unit: "currency", Kind: MetricKindValue,
+		Group: MetricGroupMonetization, Definition: metricDefProceedsPerPaying, Prerequisite: metricPrereqRevenue,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricDownloadToPaidD1, Label: "Download→paid D1", Unit: "percent", Kind: MetricKindValue,
+		Group: MetricGroupMonetization, Definition: metricDefDownloadToPaid, Prerequisite: metricPrereqPaidCohort,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricDownloadToPaidD7, Label: "Download→paid D7", Unit: "percent", Kind: MetricKindValue,
+		Group: MetricGroupMonetization, Definition: metricDefDownloadToPaid, Prerequisite: metricPrereqPaidCohort,
+		Displays: []string{DisplayStat},
+	},
+	{
+		Key: MetricDownloadToPaidD35, Label: "Download→paid D35", Unit: "percent", Kind: MetricKindValue,
+		Group: MetricGroupMonetization, Definition: metricDefDownloadToPaid, Prerequisite: metricPrereqPaidCohort,
+		Displays: []string{DisplayStat},
 	},
 }
 
@@ -485,16 +538,19 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 	// notes: those are the fields the overview tile renders, and re-deriving
 	// them here would be a second opinion about the same number.
 	valueMetrics := map[string]func() OverviewMetric{
-		MetricActiveUsers: func() OverviewMetric { return res.Metrics.ActiveUsers },
-		MetricNewUsers:    func() OverviewMetric { return res.Metrics.NewUsers },
-		MetricSessions:    func() OverviewMetric { return res.Metrics.Sessions },
-		MetricActivation:  func() OverviewMetric { return res.Metrics.Activation },
-		MetricRevenue:     func() OverviewMetric { return res.Metrics.Revenue },
-		MetricPageviews:   func() OverviewMetric { return res.Metrics.Pageviews },
-		MetricConversions: func() OverviewMetric { return res.Metrics.Conversions },
-		MetricAIShare:     func() OverviewMetric { return res.Metrics.AIShare },
-		MetricBounceRate:  func() OverviewMetric { return res.Metrics.BounceRate },
-		MetricAvgSession:  func() OverviewMetric { return res.Metrics.AvgSessionDuration },
+		MetricActiveUsers:       func() OverviewMetric { return res.Metrics.ActiveUsers },
+		MetricNewUsers:          func() OverviewMetric { return res.Metrics.NewUsers },
+		MetricSessions:          func() OverviewMetric { return res.Metrics.Sessions },
+		MetricSessionsPerUser:   func() OverviewMetric { return res.Metrics.SessionsPerUser },
+		MetricPayingUsers:       func() OverviewMetric { return res.Metrics.PayingUsers },
+		MetricProceedsPerPaying: func() OverviewMetric { return res.Metrics.ProceedsPerPaying },
+		MetricActivation:        func() OverviewMetric { return res.Metrics.Activation },
+		MetricRevenue:           func() OverviewMetric { return res.Metrics.Revenue },
+		MetricPageviews:         func() OverviewMetric { return res.Metrics.Pageviews },
+		MetricConversions:       func() OverviewMetric { return res.Metrics.Conversions },
+		MetricAIShare:           func() OverviewMetric { return res.Metrics.AIShare },
+		MetricBounceRate:        func() OverviewMetric { return res.Metrics.BounceRate },
+		MetricAvgSession:        func() OverviewMetric { return res.Metrics.AvgSessionDuration },
 	}
 	if get, ok := valueMetrics[def.Key]; ok {
 		m := get()
@@ -517,9 +573,10 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 	}
 
 	switch def.Key {
-	case MetricActiveUsersDaily, MetricEventVolumeDaily:
+	case MetricActiveUsersDaily, MetricEventVolumeDaily, MetricSessionsDaily:
 		// Event volume counts every received event, not qualifying activity —
-		// the same population split the trend point carries.
+		// the same population split the trend point carries. Sessions daily is
+		// qualifying-only, like active users.
 		inRange := res.DataStatus.QualifyingInRange
 		if def.Key == MetricEventVolumeDaily {
 			inRange = res.DataStatus.EventsInRange
@@ -529,8 +586,11 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			reading.Series = make([]MetricPoint, 0, len(res.Trend))
 			for _, p := range res.Trend {
 				value := p.ActiveUsers
-				if def.Key == MetricEventVolumeDaily {
+				switch def.Key {
+				case MetricEventVolumeDaily:
 					value = p.Events
+				case MetricSessionsDaily:
+					value = p.Sessions
 				}
 				reading.Series = append(reading.Series, MetricPoint{Label: p.Day, Value: value})
 			}
@@ -554,6 +614,24 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			// the reading is served on the percent scale the unit promises —
 			// a consumer must never have to know which surface's convention it
 			// happens to be holding.
+			rate := point.Rate * 100
+			reading.Rate = &rate
+		}
+		return reading, nil
+	case MetricDownloadToPaidD1, MetricDownloadToPaidD7, MetricDownloadToPaidD35:
+		point := res.PaidConversion.D1
+		switch def.Key {
+		case MetricDownloadToPaidD7:
+			point = res.PaidConversion.D7
+		case MetricDownloadToPaidD35:
+			point = res.PaidConversion.D35
+		}
+		reading.State = point.State
+		reading.Target = point.Target
+		reading.Notes = []string{fmt.Sprintf("cohort window: %s; %d paid of %d eligible", res.PaidConversion.CohortWindow, point.Returned, point.Eligible)}
+		if point.State == OverviewStateOK {
+			// Same convention as retention: the overview serves the 0–1
+			// fraction, the catalog unit is percent, so the reading is scaled.
 			rate := point.Rate * 100
 			reading.Rate = &rate
 		}

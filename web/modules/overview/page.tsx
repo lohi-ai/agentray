@@ -159,6 +159,9 @@ export type TileInput =
   | { kind: 'money'; metric: OverviewMetric; detail?: OverviewRevenueDetail | null }
   | { kind: 'retention'; day: 1 | 7 | 30; point: { state: string; eligible: number; target?: MetricTargetView } }
   | { kind: 'activation' }
+  // The download→paid cohort read: same maturity contract as retention, but
+  // the cohort window and points live on res.paid_conversion.
+  | { kind: 'paidConversion'; day: 1 | 7 | 35; point: { state: string; eligible: number; target?: MetricTargetView } }
   // Every received event — the population the retired-surface reads (traffic
   // class, AI-cited pages, platform split, top events, event volume) count.
   | { kind: 'events' }
@@ -234,6 +237,9 @@ function tileRange(res: OverviewResult, input: TileInput): string {
   if (input.kind === 'retention') {
     return res.retention.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.retention.cohort_window} cohorts`;
   }
+  if (input.kind === 'paidConversion') {
+    return res.paid_conversion.cohort_window === 'lifetime' ? 'lifetime cohorts' : `${res.paid_conversion.cohort_window} cohorts`;
+  }
   if (input.kind === 'activation') {
     return 'lifetime cohorts · 7-day conversion window';
   }
@@ -266,6 +272,12 @@ function tileCoverage(res: OverviewResult, input: TileInput): string {
     return res.data_status.ever_received ? 'no events in range' : 'no events received yet';
   }
   if (input.kind === 'retention') {
+    return input.point.eligible === 0
+      ? `no mature ${input.day}-day cohort yet`
+      : `coverage ${formatCompact(input.point.eligible)} mature members`;
+  }
+  if (input.kind === 'paidConversion') {
+    if (input.point.state === 'unconfigured') return 'no revenue source connected';
     return input.point.eligible === 0
       ? `no mature ${input.day}-day cohort yet`
       : `coverage ${formatCompact(input.point.eligible)} mature members`;
@@ -307,7 +319,7 @@ export function tileProvenance(res: OverviewResult, input: TileInput): string {
     : res.context.timezone;
   // The target version the verdict cites, when one is in force — the same
   // "target vN" the prototype's provenance line prints.
-  const target = input.kind === 'retention' ? input.point.target : input.kind === 'unserved' || input.kind === 'events' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
+  const target = input.kind === 'retention' || input.kind === 'paidConversion' ? input.point.target : input.kind === 'unserved' || input.kind === 'events' ? undefined : input.kind === 'activation' ? res.metrics.activation.target : input.metric.target;
   return [
     `metric ${res.context.metric_version}`,
     ...(target ? [`target v${target.version}`] : []),

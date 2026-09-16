@@ -25,14 +25,11 @@ export const UNSERVED_TILES: Record<AnalysisBoardKey, readonly UnservedTile[]> =
     { label: 'Updates', reason: 'No app-update event exists in the catalog.' },
   ],
   monetization: [
-    { label: 'Paying users', reason: 'No paying-person metric is computed.' },
-    { label: 'In-app purchases / day', reason: 'No purchase metric is computed; SDK event volume is not money.' },
-    { label: 'Download→paid D1', reason: 'No download-to-paid cohort exists.' },
-    { label: 'Download→paid D7', reason: 'No download-to-paid cohort exists.' },
-    { label: 'Download→paid D35', reason: 'No download-to-paid cohort exists.' },
+    { label: 'In-app purchases / day', reason: 'No purchase-count metric is computed; SDK event volume is not money.' },
   ],
   usage: [
     { label: 'Average retention D14', reason: 'AgentRay serves D1, D7 and D30. D14 is not computed.' },
     { label: 'Crashes by app version', reason: 'No verified crash event with a normalized app-version contract exists.' },
+    { label: 'Deletions', reason: 'An uninstall is not an event the SDK can send; no deletion signal exists.' },
   ],
 };

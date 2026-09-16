@@ -1142,6 +1142,16 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	// The seed only writes absent keys, so a project created before a metric
+	// existed keeps the old board forever — Monetization saying "Not available"
+	// beside a working revenue read. Upgrade the rows that still hold the
+	// untouched seed; edited boards stop matching and are left alone.
+	if boards, projects, err := s.RepairDefaultBoards(ctx); err != nil {
+		return err
+	} else if boards > 0 {
+		fmt.Printf("default board repair: upgraded %d board(s) across %d project(s)\n", boards, projects)
+	}
+
 	// Agent schema (including workspace_providers) lives in Postgres. Run it
 	// here so a PG-only boot still creates the tables; the call is idempotent.
 	if err := s.migrateAgent(ctx); err != nil {
@@ -1861,16 +1871,14 @@ func (s *Store) SeedProjectFromTemplate(ctx context.Context, projectID string) e
 			return seedErr
 		}
 	}
-	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
-		return err
+	// The weekly decision digest is part of what a new project is: seeded
+	// channel-less so it computes from day one and starts delivering when the
+	// workspace adds its first channel. Non-fatal like the agent seed above —
+	// a project without it still works.
+	if err := s.ensureDigestRule(ctx, projectID); err != nil {
+		fmt.Printf("warn: ensureDigestRule(%s): %v\n", projectID, err)
 	}
-	// Seed the weekly decision digest so a new project gets the Monday summary
-	// without setup; non-fatal like the agent seed — a missing rule is
-	// recoverable from Settings, a failed signup is not.
-	if err := s.EnsureDefaultWeeklyDigest(ctx, projectID); err != nil {
-		fmt.Printf("warn: EnsureDefaultWeeklyDigest(%s): %v\n", projectID, err)
-	}
-	return nil
+	return s.EnsureDefaultBoards(ctx, projectID)
 }
 
 // InsertEvents durably stores a raw event batch in DuckDB (no person
