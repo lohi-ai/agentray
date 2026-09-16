@@ -11,7 +11,7 @@ import { platformLabel } from '@/lib/platform';
 import { useEventNames } from '@/modules/app/hooks';
 import { Chart } from '@/modules/shared/components/charts';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { EmptyState, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { Text } from '@astryxdesign/core/Text';
 import { headlineStats } from './headline';
 
