@@ -390,7 +390,7 @@ export type Chart = {
 export type BoardTile = {
   key: string;
   title?: string;
-  kind?: 'metric' | 'chart';
+  kind?: 'metric' | 'chart' | 'funnel';
   display?: string;
   span?: number;
   metric?: string;
@@ -398,6 +398,9 @@ export type BoardTile = {
   // project-scoped target history (see set_metric_target).
   target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
+  // Funnel tile's ordered event names. Absent on a funnel tile means the
+  // server derives the activation funnel from the event catalog at read time.
+  steps?: string[];
   params?: { period?: string; platform?: string };
 };
 

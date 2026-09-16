@@ -41,6 +41,7 @@ const BoardDefinitionVersion = 1
 const (
 	TileKindMetric = "metric"
 	TileKindChart  = "chart"
+	TileKindFunnel = "funnel"
 )
 
 // Bounds on one declaration. A board is rendered, not paginated, so an
@@ -50,6 +51,10 @@ const (
 	boardMaxTilesPerSection = 24
 	boardMaxSpan            = 3
 	boardKeyMaxLen          = 64
+	// funnelMaxSteps bounds one funnel tile's step list. The funnel query
+	// chains one correlated subquery per step, so an unbounded list is an
+	// unbounded query.
+	funnelMaxSteps = 12
 )
 
 // ErrBoardDefinitionInvalid wraps every rejected declaration, so an adapter can
@@ -70,16 +75,19 @@ type BoardTileParams struct {
 	Platform string `json:"platform,omitempty"`
 }
 
-// BoardTile is one placement: a metric the server computes, or a saved chart.
+// BoardTile is one placement: a metric the server computes, a saved chart, or
+// a funnel over named events.
 type BoardTile struct {
 	Key   string `json:"key"`
 	Title string `json:"title,omitempty"`
-	// Kind is "metric" or "chart". Empty is inferred from which of Metric /
-	// ChartID is set, and is an error when both or neither are.
+	// Kind is "metric", "chart" or "funnel". Empty is inferred from which of
+	// Metric / ChartID / Steps is set, and is an error when more than one or
+	// none are.
 	Kind string `json:"kind,omitempty"`
 	// Display is required for metric tiles (stat/line/bar/area/table) and
-	// must be empty for chart tiles — a chart is drawn the way its own kind
-	// says, so an override here would be a second, quieter chart contract.
+	// must be empty for chart and funnel tiles — a chart is drawn the way its
+	// own kind says and a funnel has one shape, so an override here would be
+	// a second, quieter contract.
 	Display string `json:"display,omitempty"`
 	// Span is the grid width, 1..3; empty means 1.
 	Span int `json:"span,omitempty"`
@@ -89,10 +97,15 @@ type BoardTile struct {
 	// metric_targets.go). Declaring one appends a version to the metric's
 	// target history; omitting it leaves the history untouched — a board
 	// never clears a target, only set_metric_target does.
-	Target  *MetricTargetSpec `json:"target,omitempty"`
+	Target *MetricTargetSpec `json:"target,omitempty"`
 	// ChartID places a saved chart that already belongs to this board.
-	ChartID string           `json:"chart_id,omitempty"`
-	Params  *BoardTileParams `json:"params,omitempty"`
+	ChartID string `json:"chart_id,omitempty"`
+	// Steps is the funnel tile's ordered event names. Absent means "derive
+	// the activation funnel from the project's event catalog" — resolved at
+	// read time (see funnel_steps.go), never stored, so the tile tracks the
+	// catalog as it grows. Declared means at least two non-empty names.
+	Steps  []string         `json:"steps,omitempty"`
+	Params *BoardTileParams `json:"params,omitempty"`
 }
 
 // BoardSection groups tiles under a heading.
@@ -257,7 +270,15 @@ func (s *Store) boardContent(ctx context.Context, q boardQuerier, projectID, boa
 	if err != nil {
 		return BoardContent{}, err
 	}
-	return resolveBoardContent(ctx, q, board, definition)
+	content, err := resolveBoardContent(ctx, q, board, definition)
+	if err != nil {
+		return BoardContent{}, err
+	}
+	// Funnel tiles that declared no steps derive them from the event catalog
+	// here, outside any transaction — the catalog lives in DuckDB, which the
+	// board querier cannot reach.
+	s.resolveFunnelSteps(ctx, projectID, &content)
+	return content, nil
 }
 
 // resolveBoardContent decodes the stored document and resolves everything the
@@ -446,6 +467,11 @@ func (s *Store) SaveBoardDefinition(ctx context.Context, projectID string, in Bo
 	if err := json.Unmarshal(raw, &content); err != nil {
 		return BoardContent{}, fmt.Errorf("stored board receipt is unreadable: %w", err)
 	}
+	// Resolve funnel steps after the transaction, the same way a read does:
+	// the catalog lives in DuckDB, which the save transaction cannot reach —
+	// and a replayed declaration returns its stored receipt, so resolution
+	// must happen on the served copy or a replay would serve empty steps.
+	s.resolveFunnelSteps(ctx, projectID, &content)
 	return content, nil
 }
 
@@ -736,25 +762,39 @@ func normalizeBoardTile(tile *BoardTile) error {
 	tile.Display = strings.ToLower(strings.TrimSpace(tile.Display))
 	tile.Metric = strings.TrimSpace(tile.Metric)
 	tile.ChartID = strings.TrimSpace(tile.ChartID)
+	for i := range tile.Steps {
+		tile.Steps[i] = strings.TrimSpace(tile.Steps[i])
+	}
 	if !boardKeyRe.MatchString(tile.Key) {
 		return fmt.Errorf("%w: tile key %q must be 1-%d characters of lower-case letters, digits, dash or underscore, starting with a letter or digit", ErrBoardDefinitionInvalid, tile.Key, boardKeyMaxLen)
 	}
 	if tile.Kind == "" {
+		declared := 0
+		for _, set := range []bool{tile.Metric != "", tile.ChartID != "", tile.Steps != nil} {
+			if set {
+				declared++
+			}
+		}
 		switch {
-		case tile.Metric != "" && tile.ChartID == "":
+		case declared > 1:
+			return fmt.Errorf("%w: tile %q declares more than one of metric, chart_id and steps; a tile is one subject", ErrBoardDefinitionInvalid, tile.Key)
+		case tile.Metric != "":
 			tile.Kind = TileKindMetric
-		case tile.ChartID != "" && tile.Metric == "":
+		case tile.ChartID != "":
 			tile.Kind = TileKindChart
-		case tile.Metric != "" && tile.ChartID != "":
-			return fmt.Errorf("%w: tile %q declares both a metric and a chart; a tile is one or the other", ErrBoardDefinitionInvalid, tile.Key)
+		case tile.Steps != nil:
+			tile.Kind = TileKindFunnel
 		default:
-			return fmt.Errorf("%w: tile %q declares neither a metric nor a chart", ErrBoardDefinitionInvalid, tile.Key)
+			return fmt.Errorf("%w: tile %q declares neither a metric nor a chart nor funnel steps", ErrBoardDefinitionInvalid, tile.Key)
 		}
 	}
 	switch tile.Kind {
 	case TileKindMetric:
 		if tile.ChartID != "" {
 			return fmt.Errorf("%w: tile %q is a metric tile and cannot also place a chart", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Steps != nil {
+			return fmt.Errorf("%w: tile %q is a metric tile and cannot also declare funnel steps", ErrBoardDefinitionInvalid, tile.Key)
 		}
 		def, ok := MetricCatalogEntry(tile.Metric)
 		if !ok {
@@ -788,6 +828,9 @@ func normalizeBoardTile(tile *BoardTile) error {
 		if tile.Metric != "" {
 			return fmt.Errorf("%w: tile %q is a chart tile and cannot also reference a metric", ErrBoardDefinitionInvalid, tile.Key)
 		}
+		if tile.Steps != nil {
+			return fmt.Errorf("%w: tile %q is a chart tile and cannot also declare funnel steps", ErrBoardDefinitionInvalid, tile.Key)
+		}
 		if tile.ChartID == "" {
 			return fmt.Errorf("%w: tile %q is a chart tile with no chart_id", ErrBoardDefinitionInvalid, tile.Key)
 		}
@@ -805,8 +848,40 @@ func normalizeBoardTile(tile *BoardTile) error {
 		if tile.Target != nil {
 			return fmt.Errorf("%w: tile %q sets a target on a chart tile; a target belongs to a catalog metric", ErrBoardDefinitionInvalid, tile.Key)
 		}
+	case TileKindFunnel:
+		if tile.Metric != "" {
+			return fmt.Errorf("%w: tile %q is a funnel tile and cannot also reference a metric", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.ChartID != "" {
+			return fmt.Errorf("%w: tile %q is a funnel tile and cannot also place a chart", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Display != "" {
+			return fmt.Errorf("%w: tile %q sets display %q on a funnel tile; a funnel has one shape", ErrBoardDefinitionInvalid, tile.Key, tile.Display)
+		}
+		if tile.Params != nil {
+			return fmt.Errorf("%w: tile %q sets params on a funnel tile; the reader's range and platform decide its window", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Target != nil {
+			return fmt.Errorf("%w: tile %q sets a target on a funnel tile; a target belongs to a catalog metric", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Steps != nil {
+			// Declared steps are the funnel verbatim — every entry must name
+			// an event, and a funnel needs at least two stages to say
+			// anything. Absent (nil) means auto-resolve at read time.
+			if len(tile.Steps) < 2 {
+				return fmt.Errorf("%w: tile %q declares %d funnel step; a funnel needs at least 2 — omit steps to derive them from the event catalog", ErrBoardDefinitionInvalid, tile.Key, len(tile.Steps))
+			}
+			if len(tile.Steps) > funnelMaxSteps {
+				return fmt.Errorf("%w: tile %q declares %d funnel steps, more than the maximum of %d", ErrBoardDefinitionInvalid, tile.Key, len(tile.Steps), funnelMaxSteps)
+			}
+			for i, step := range tile.Steps {
+				if step == "" {
+					return fmt.Errorf("%w: tile %q has an empty funnel step at position %d", ErrBoardDefinitionInvalid, tile.Key, i+1)
+				}
+			}
+		}
 	default:
-		return fmt.Errorf("%w: tile %q has kind %q; a tile is %q or %q", ErrBoardDefinitionInvalid, tile.Key, tile.Kind, TileKindMetric, TileKindChart)
+		return fmt.Errorf("%w: tile %q has kind %q; a tile is %q, %q or %q", ErrBoardDefinitionInvalid, tile.Key, tile.Kind, TileKindMetric, TileKindChart, TileKindFunnel)
 	}
 	switch {
 	case tile.Span == 0:
