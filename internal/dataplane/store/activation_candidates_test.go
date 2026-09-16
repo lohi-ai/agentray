@@ -83,6 +83,64 @@ func TestSuggestActivationEventsRanksByLift(t *testing.T) {
 	}
 }
 
+// TestSuggestActivationEventsLiftJoin: a low-reach event whose users all
+// returned on day 7 must report d7_return 1.0 — the LEFT JOIN to the returned
+// CTE is what carries that, and a join that silently misses them would report
+// a confident negative lift for the best event in the list.
+func TestSuggestActivationEventsLiftJoin(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	projectID := "eeeeeeee-1111-2222-3333-444444444444"
+	day := func(d int) time.Time { return time.Date(2026, 9, d, 12, 0, 0, 0, time.UTC) }
+	ev := func(person, name string, at time.Time) Event {
+		return Event{
+			ProjectID: projectID, EventID: uuid.NewString(), EventName: name,
+			EventType: "user", DistinctID: person, VisitorClass: "human", Timestamp: at,
+		}
+	}
+	now := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
+
+	events := []Event{}
+	// 20 mature members on Sep 1; the last 3 fire invite.sent on day 2 and
+	// return on day 7 (Sep 8); the first 17 never return.
+	for i := range 20 {
+		u := fmt.Sprintf("m%02d", i)
+		events = append(events, ev(u, "page_view", day(1)))
+		if i >= 17 {
+			events = append(events,
+				ev(u, "invite.sent", day(3)),
+				ev(u, "page_view", day(8)),
+			)
+		}
+	}
+	if err := d.SinkEvents(context.Background(), events, AppliedMark{}); err != nil {
+		t.Fatalf("SinkEvents: %v", err)
+	}
+
+	res, err := s.SuggestActivationEvents(context.Background(), projectID, now)
+	if err != nil {
+		t.Fatalf("SuggestActivationEvents: %v", err)
+	}
+	if res.State != OverviewStateOK {
+		t.Fatalf("state = %q, want ok", res.State)
+	}
+	var invite *ActivationCandidate
+	for i := range res.Candidates {
+		if res.Candidates[i].EventName == "invite.sent" {
+			invite = &res.Candidates[i]
+		}
+	}
+	if invite == nil {
+		t.Fatalf("invite.sent missing from candidates: %+v", res.Candidates)
+	}
+	if invite.Users != 3 || invite.D7Return != 1.0 {
+		t.Fatalf("invite.sent users/d7 = %d/%v, want 3/1.0 (all three returned on day 7)", invite.Users, invite.D7Return)
+	}
+	if invite.Lift <= 0 {
+		t.Fatalf("invite.sent lift = %v, want positive (baseline %v)", invite.Lift, invite.BaselineD7)
+	}
+}
+
 // TestSuggestActivationEventsNotReady: a project whose cohorts have not
 // matured reports not_ready with no candidates — never an empty ok list.
 func TestSuggestActivationEventsNotReady(t *testing.T) {
