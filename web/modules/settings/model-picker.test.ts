@@ -1,55 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
-  decodeTierValue,
-  encodeTierValue,
-  effectiveTierWindow,
   formatTokens,
   friendlyProviderError,
   listedModelsToItems,
-  listedModelsToPickerOptions,
-  savedModelItem,
   searchModelItems,
   type ListedModel,
 } from './model-picker';
 
-describe('listedModelsToPickerOptions', () => {
-  it('maps listed models of two providers onto picker options and invents none', () => {
-    const listed: ListedModel[] = [
-      { provider_id: 'prov-a', provider_name: 'OpenAI work', provider_vendor: 'openai', id: 'stub-from-a' },
-      { provider_id: 'prov-a', provider_name: 'OpenAI work', provider_vendor: 'openai', id: 'other-from-a' },
-      { provider_id: 'prov-b', provider_name: 'Anthropic work', provider_vendor: 'anthropic', id: 'stub-from-b' },
-    ];
-    const options = listedModelsToPickerOptions(listed);
-    const ids = options.map((o) => o.modelId);
-    expect(ids).toEqual(['stub-from-a', 'other-from-a', 'stub-from-b']);
-    expect(options.every((o) => listed.some((m) => m.id === o.modelId && m.provider_id === o.providerId))).toBe(true);
-    expect(options.find((o) => o.modelId === 'stub-from-a')?.label).toContain('OpenAI work');
-    expect(options.find((o) => o.modelId === 'stub-from-b')?.label).toContain('Anthropic work');
-    // Must not invent IDs that were not listed.
-    expect(ids).not.toContain('gpt-4o');
-    expect(ids).not.toContain('claude-opus');
-    expect(options).toHaveLength(listed.length);
-  });
-
-  it('drops incomplete rows rather than fabricating an id', () => {
-    const options = listedModelsToPickerOptions([
-      { provider_id: '', provider_name: 'X', provider_vendor: 'openai', id: 'orphan' },
-      { provider_id: 'p', provider_name: 'X', provider_vendor: 'openai', id: '' },
-      { provider_id: 'p', provider_name: 'X', provider_vendor: 'openai', id: 'kept' },
-    ]);
-    expect(options.map((o) => o.modelId)).toEqual(['kept']);
-  });
-
-  it('round-trips the encoded tier value', () => {
-    const value = encodeTierValue('prov-a', 'stub-from-a');
-    expect(decodeTierValue(value)).toEqual({ providerId: 'prov-a', modelId: 'stub-from-a' });
-  });
-});
-
 describe('listedModelsToItems', () => {
   // Two providers listing the same model id is the normal case behind a
-  // gateway — the Typeahead item id has to stay unique or selecting one picks
-  // the other's provider.
+  // gateway — the item id has to stay unique or selecting one picks the
+  // other's provider.
   const listed: ListedModel[] = [
     { provider_id: 'prov-a', provider_name: 'Main key', provider_vendor: 'openai', id: 'shared-model' },
     { provider_id: 'prov-b', provider_name: 'Team gateway', provider_vendor: 'openai-compat', id: 'shared-model' },
@@ -62,9 +23,13 @@ describe('listedModelsToItems', () => {
     expect(items.map((i) => i.auxiliaryData.provider)).toEqual(['Main key', 'Team gateway']);
   });
 
-  it('decodes back to the provider that listed the model', () => {
-    const items = listedModelsToItems(listed);
-    expect(decodeTierValue(items[1].id)).toEqual({ providerId: 'prov-b', modelId: 'shared-model' });
+  it('drops incomplete rows rather than fabricating an id', () => {
+    const items = listedModelsToItems([
+      { provider_id: '', provider_name: 'X', provider_vendor: 'openai', id: 'orphan' },
+      { provider_id: 'p', provider_name: 'X', provider_vendor: 'openai', id: '' },
+      { provider_id: 'p', provider_name: 'X', provider_vendor: 'openai', id: 'kept' },
+    ]);
+    expect(items.map((i) => i.label)).toEqual(['kept']);
   });
 
   it('falls back to the vendor when the provider has no name', () => {
@@ -118,19 +83,6 @@ describe('searchModelItems', () => {
   });
 });
 
-describe('savedModelItem', () => {
-  it('keeps a saved-but-unlisted selection visible instead of blanking the field', () => {
-    const item = savedModelItem('prov-a', 'retired-model', 'Main key');
-    expect(item.id).toBe(encodeTierValue('prov-a', 'retired-model'));
-    expect(item.label).toBe('retired-model');
-    expect(item.auxiliaryData.provider).toBe('Main key · saved');
-  });
-
-  it('still renders when the provider name is unknown', () => {
-    expect(savedModelItem('prov-a', 'm', '').auxiliaryData.provider).toBe('saved');
-  });
-});
-
 describe('friendlyProviderError', () => {
   it('lifts the vendor message out of the raw list-models envelope', () => {
     const raw =
@@ -150,25 +102,6 @@ describe('friendlyProviderError', () => {
   it('passes plain text through and never renders an empty alert', () => {
     expect(friendlyProviderError('dial tcp: connection refused')).toBe('dial tcp: connection refused');
     expect(friendlyProviderError('')).toBe('Could not reach this provider.');
-  });
-});
-
-describe('effectiveTierWindow', () => {
-  it('prefers the operator override over what was detected', () => {
-    // The whole point of the override: an endpoint may serve a model truncated,
-    // and only the operator knows. Detection must not win over a typed number.
-    expect(effectiveTierWindow(200_000, 64_000)).toBe(64_000);
-  });
-
-  it('uses the detected window when there is no override', () => {
-    expect(effectiveTierWindow(200_000, 0)).toBe(200_000);
-  });
-
-  it('reports 0 when nobody knows, rather than inventing a default', () => {
-    // 0 renders as "not known" and makes the run fall back to the workspace
-    // ceiling. Substituting a plausible number here is how a run ends up
-    // budgeting a window its model does not have.
-    expect(effectiveTierWindow(0, 0)).toBe(0);
   });
 });
 

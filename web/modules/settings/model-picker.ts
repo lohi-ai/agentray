@@ -1,6 +1,6 @@
-// Pure mapping from listed models of active providers → 3-tier picker options.
-// Options are exactly the IDs the list-models API returned (labeled with the
-// provider). This module must not invent model IDs.
+// Pure mapping from listed models of active providers → searchable picker
+// items for the model browser. Items are exactly the IDs the list-models API
+// returned (labeled with the provider). This module must not invent model IDs.
 
 export type ListedModel = {
   provider_id: string;
@@ -15,63 +15,25 @@ export type ListedModel = {
   context_window?: number;
 };
 
-export type TierPickerOption = {
-  value: string;
-  label: string;
-  providerId: string;
-  modelId: string;
-  contextWindow: number;
-};
-
-export function encodeTierValue(providerId: string, modelId: string): string {
-  return `${providerId}::${modelId}`;
-}
-
-export function decodeTierValue(value: string): { providerId: string; modelId: string } {
-  const i = value.indexOf('::');
-  if (i < 0) return { providerId: '', modelId: value };
-  return { providerId: value.slice(0, i), modelId: value.slice(i + 2) };
-}
-
-export function listedModelsToPickerOptions(models: ListedModel[]): TierPickerOption[] {
-  return models
-    .filter((m) => m && m.id && m.provider_id)
-    .map((m) => ({
-      value: encodeTierValue(m.provider_id, m.id),
-      label: `${m.id} · ${m.provider_name || m.provider_vendor || m.provider_id}`,
-      providerId: m.provider_id,
-      modelId: m.id,
-      contextWindow: m.context_window || 0,
-    }));
-}
-
-// --- Typeahead shape -------------------------------------------------------
-// The tier picker is an Astryx <Typeahead>, so the same listed models are also
-// exposed as SearchableItem: `id` is the encoded provider::model pair (two
-// providers routinely list the same model id, so the model alone is not
-// unique), `label` is the bare model id, and the provider name rides along in
-// auxiliaryData for the second line of the row.
-
 export type ModelPickerItem = {
+  /** `provider::model` — two providers routinely list the same model id, so the model alone is not unique. */
   id: string;
+  /** The bare model id, what the row renders. */
   label: string;
   auxiliaryData: { provider: string; contextWindow: number };
 };
 
 export function listedModelsToItems(models: ListedModel[]): ModelPickerItem[] {
-  return listedModelsToPickerOptions(models).map((o) => ({
-    id: o.value,
-    label: o.modelId,
-    auxiliaryData: { provider: providerLabelFor(models, o.providerId), contextWindow: o.contextWindow },
-  }));
-}
-
-// How much transcript a tier may accumulate before the agent compacts it. The
-// operator's override wins when they set one; otherwise it is whatever the
-// provider or the model catalog reported; 0 means nobody knows, and the run
-// falls back to the workspace-wide ceiling.
-export function effectiveTierWindow(detected: number, override: number): number {
-  return override > 0 ? override : detected > 0 ? detected : 0;
+  return models
+    .filter((m) => m && m.id && m.provider_id)
+    .map((m) => ({
+      id: `${m.provider_id}::${m.id}`,
+      label: m.id,
+      auxiliaryData: {
+        provider: m.provider_name || m.provider_vendor || m.provider_id,
+        contextWindow: m.context_window || 0,
+      },
+    }));
 }
 
 // Token counts are read as magnitudes, not exact figures — "200K" is what an
@@ -87,25 +49,6 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
-function providerLabelFor(models: ListedModel[], providerId: string): string {
-  const m = models.find((x) => x.provider_id === providerId);
-  return m?.provider_name || m?.provider_vendor || providerId;
-}
-
-// A tier can point at a model the provider no longer lists (key revoked, model
-// retired, list call failing). Keep the saved choice visible instead of
-// silently blanking the field.
-export function savedModelItem(providerId: string, modelId: string, providerName: string): ModelPickerItem {
-  return {
-    id: encodeTierValue(providerId, modelId),
-    label: modelId,
-    // No window: the provider is not listing this model, so there is nothing to
-    // detect. 0 reads as "not known", which is the honest state and is exactly
-    // when an operator would want to set one by hand.
-    auxiliaryData: { provider: providerName ? `${providerName} · saved` : 'saved', contextWindow: 0 },
-  };
-}
-
 // Fold a haystack or a needle to a comparable key: accent-stripped, lowercased,
 // separators dropped. Dropping separators is what makes `gpt4o` find `gpt-4o`
 // and `claude35` find `claude-3-5-haiku` — model ids are punctuation-heavy and
@@ -113,7 +56,7 @@ export function savedModelItem(providerId: string, modelId: string, providerName
 function foldSearchKey(s: string): string {
   return s
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
 }
