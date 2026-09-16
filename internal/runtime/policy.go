@@ -15,7 +15,7 @@ type Scopes struct {
 // are read-only; analyze_build adds insight + chart/dashboard authoring;
 // growth_suggest adds the recommendation + memory writes.
 var scopeTools = map[string][]string{
-	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolListFindings, ToolListSources, ToolListFunnelWatches, ToolListAnnotations},
+	"monitor":        {ToolActivitySummary, ToolRecentEvents, ToolVerifySDK, ToolSourceStatus, ToolOverview, ToolActivationCandidates, ToolListFindings, ToolListSources, ToolListFunnelWatches, ToolListAnnotations},
 	"data_quality":   {ToolExploreEvents, ToolPersons, ToolRunSQL, ToolTestSource, ToolPreviewSource, ToolSourceStatus, ToolDatasetPreview, ToolListSources},
 	"analyze_build":  {ToolRunSQL, ToolRunInsight, ToolRunFunnel, ToolRunRetention, ToolListDashboards, ToolCreateDashboard, ToolCreateChart, ToolUpdateDashboard, ToolArchiveDashboard, ToolUnarchiveDashboard, ToolListCharts, ToolUpdateChart, ToolArchiveChart, ToolUnarchiveChart, ToolReorderCharts, ToolListMetrics, ToolReadMetric, ToolGetBoard, ToolSaveBoard, ToolSetMetricTarget, ToolPauseSource, ToolRunSource, ToolCancelSourceRun, ToolListSources, ToolCreateSource, ToolUpdateSource, ToolArchiveSource, ToolUnarchiveSource},
 	"growth_suggest": {ToolActivitySummary, ToolPersons, ToolSubmitRec, ToolProposeTest, ToolTestStatus, ToolListTests, ToolUpdateTest, ToolRecordOutcome, ToolAbandonTest, ToolRemember, ToolSendNotification, ToolRunFindingsScan, ToolWatchFunnel, ToolAddAnnotation, ToolDeleteAnnotation, ToolRunExperimentReview},
@@ -31,6 +31,9 @@ var readTools = map[string]bool{
 	ToolActivitySummary: true,
 	ToolRecentEvents:    true,
 	ToolOverview:        true,
+	// activation_candidates is a read: it ranks event names with evidence and
+	// never writes activation_event — the owner accepts a suggestion.
+	ToolActivationCandidates: true,
 	ToolExploreEvents:   true,
 	ToolPersons:         true,
 	ToolRunSQL:          true,

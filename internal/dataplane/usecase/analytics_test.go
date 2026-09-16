@@ -59,7 +59,7 @@ func TestFunnelRetentionOpsDelegate(t *testing.T) {
 func TestRegistryHasEveryOperation(t *testing.T) {
 	reg := Registry()
 	want := []string{
-		"activity_summary", "recent_events", "persons", "explore_events", "run_sql",
+		"activity_summary", "recent_events", "persons", "explore_events", "run_sql", "activation_candidates",
 		"run_insight", "run_funnel", "run_retention", "list_dashboards", "create_dashboard", "create_chart",
 		"submit_recommendation", "propose_test", "test_status", "list_tests", "remember", "send_notification", "overview",
 		"verify_sdk", "update_dashboard", "archive_dashboard", "unarchive_dashboard",

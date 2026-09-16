@@ -30,6 +30,9 @@ type Repo interface {
 	RecentEvents(ctx context.Context, projectID string, limit int) ([]storage.Event, error)
 	Persons(ctx context.Context, projectID string, filter storage.EventFilter) (storage.PersonsSummary, error)
 	ExploreEvents(ctx context.Context, projectID string, filter storage.EventFilter) (storage.EventExplorer, error)
+	// SuggestActivationEvents ranks event names as activation candidates
+	// (first-7d reach + D7 retention lift) behind the activation_candidates op.
+	SuggestActivationEvents(ctx context.Context, projectID string, now time.Time) (storage.ActivationCandidates, error)
 	RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error)
 	RunInsight(ctx context.Context, projectID, insightType, metric string, steps []string, filter storage.EventFilter) (storage.InsightResult, error)
 	ListDashboardsFiltered(ctx context.Context, projectID string, includeArchived bool) ([]storage.Dashboard, error)

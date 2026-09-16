@@ -319,9 +319,10 @@ function moneyDetail(over: Partial<OverviewRevenueDetail> = {}): OverviewRevenue
     excluded_rows: 1,
     excluded_currencies: ['LT'],
     by_currency: [
-      { currency: 'VND', gross: 80000, reversed: 30000, net: 50000, rows: 2 },
-      { currency: 'USD', gross: 100, reversed: 0, net: 100, rows: 1 },
+      { currency: 'VND', gross: 80000, reversed: 30000, net: 50000, rows: 2, payers: 1 },
+      { currency: 'USD', gross: 100, reversed: 0, net: 100, rows: 1, payers: 1 },
     ],
+    paying_users: 2,
     ...over,
   };
 }
@@ -523,12 +524,12 @@ describe('revenue tile', () => {
     // OverviewMetric.value is unsigned, so a refund-only window has no
     // `value` at all — reading the tile off it would print "No data" over a
     // measured loss.
-    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1 }] });
+    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1, payers: 0 }] });
     expect(revenueTile(ok(), reversed).value).toBe('\u221230 VND');
   });
 
   it('keeps a measured zero distinct from no data', () => {
-    const zero = moneyDetail({ gross: 0, reversed: 0, net: 0, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 0, net: 0, rows: 1 }] });
+    const zero = moneyDetail({ gross: 0, reversed: 0, net: 0, deduped_rows: 1, by_currency: [{ currency: 'VND', gross: 0, reversed: 0, net: 0, rows: 1, payers: 0 }] });
     expect(revenueTile(ok(0), zero).value).toBe('0 VND');
     expect(revenueTile({ state: 'no_data', definition: '' }, moneyDetail({ currency: undefined, gross: 0, reversed: 0, net: 0, deduped_rows: 0, excluded_rows: 0, by_currency: [] })).value).toBe('No data');
   });
@@ -556,7 +557,7 @@ describe('revenue tile', () => {
     expect(revenueTile(ok(50000), moneyDetail({ previous_net: -30 })).delta).toBeUndefined();
     // A signed net keeps its absolute reading and still gets the comparison:
     // reversals exceeded bookings by 130% of last window's net.
-    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, previous_net: 100, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1 }] });
+    const reversed = moneyDetail({ gross: 0, reversed: 30, net: -30, previous_net: 100, by_currency: [{ currency: 'VND', gross: 0, reversed: 30, net: -30, rows: 1, payers: 0 }] });
     expect(revenueTile(ok(), reversed)).toMatchObject({ value: '\u221230 VND', delta: '-130%', deltaTone: 'down' });
   });
 

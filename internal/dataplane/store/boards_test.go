@@ -30,11 +30,14 @@ func TestBoardDefinitionJSONRejectsUnknownFields(t *testing.T) {
 		}
 	}
 	var ok BoardDefinition
-	if err := json.Unmarshal([]byte(`{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"t","metric":"active_users","display":"stat","params":{"period":"7d","platform":"web"}}]}]}`), &ok); err != nil {
+	if err := json.Unmarshal([]byte(`{"version":1,"sections":[{"key":"s","title":"S","tiles":[{"key":"t","metric":"active_users","display":"stat","params":{"period":"7d","platform":"web"}},{"key":"f","kind":"funnel","steps":["a","b"]}]}]}`), &ok); err != nil {
 		t.Fatalf("known fields refused: %v", err)
 	}
-	if len(ok.Sections) != 1 || len(ok.Sections[0].Tiles) != 1 || ok.Sections[0].Tiles[0].Metric != "active_users" {
+	if len(ok.Sections) != 1 || len(ok.Sections[0].Tiles) != 2 || ok.Sections[0].Tiles[0].Metric != "active_users" {
 		t.Fatalf("known-fields decode = %+v", ok)
+	}
+	if ok.Sections[0].Tiles[1].Kind != TileKindFunnel || len(ok.Sections[0].Tiles[1].Steps) != 2 {
+		t.Fatalf("funnel tile decode = %+v", ok.Sections[0].Tiles[1])
 	}
 }
 func metricTile(key, metric, display string, span int) BoardTile {
@@ -369,14 +372,77 @@ func TestBoardDeclarationValidation(t *testing.T) {
 			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
 				{Key: "t"},
 			}}}},
-			wantErr: "neither a metric nor a chart",
+			wantErr: "neither a metric nor a chart nor funnel steps",
 		},
 		{
 			name: "tile that declares both",
 			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
 				{Key: "t", Metric: MetricActiveUsers, ChartID: otherChart.ID},
 			}}}},
-			wantErr: "both a metric and a chart",
+			wantErr: "more than one of metric, chart_id and steps",
+		},
+		{
+			name: "funnel tile with one step",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"user.pageview"}},
+			}}}},
+			wantErr: "at least 2",
+		},
+		{
+			name: "funnel tile with an empty step",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"user.pageview", "  "}},
+			}}}},
+			wantErr: "empty funnel step",
+		},
+		{
+			name: "funnel tile carrying a metric",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Metric: MetricActiveUsers, Steps: []string{"a", "b"}},
+			}}}},
+			wantErr: "funnel tile",
+		},
+		{
+			name: "funnel tile carrying a display",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Display: DisplayBar},
+			}}}},
+			wantErr: "funnel tile",
+		},
+		{
+			name: "funnel tile carrying params",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Params: &BoardTileParams{Period: "7d"}},
+			}}}},
+			wantErr: "funnel tile",
+		},
+		{
+			name: "funnel tile carrying a target",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Target: &MetricTargetSpec{Direction: "gte", Value: 1, Period: "7d"}},
+			}}}},
+			wantErr: "funnel tile",
+		},
+		{
+			name: "metric tile carrying steps",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Metric: MetricActiveUsers, Steps: []string{"a", "b"}},
+			}}}},
+			wantErr: "more than one of metric, chart_id and steps",
+		},
+		{
+			name: "chart tile carrying steps",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindChart, ChartID: uuid.NewString(), Steps: []string{"a", "b"}},
+			}}}},
+			wantErr: "cannot also declare funnel steps",
+		},
+		{
+			name: "funnel tile over the step bound",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"}},
+			}}}},
+			wantErr: "maximum",
 		},
 		{
 			name: "chart_id that is not a uuid",
@@ -399,6 +465,34 @@ func TestBoardDeclarationValidation(t *testing.T) {
 			}}}},
 			wantErr: "unknown",
 		},
+		{
+			name: "funnel tile with one step",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"user.pageview"}},
+			}}}},
+			wantErr: "funnel needs",
+		},
+		{
+			name: "funnel tile carrying a metric",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Metric: MetricActiveUsers, Steps: []string{"a", "b"}},
+			}}}},
+			wantErr: "cannot also reference",
+		},
+		{
+			name: "funnel tile carrying params",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Params: &BoardTileParams{Period: "7d"}},
+			}}}},
+			wantErr: "params on a funnel tile",
+		},
+		{
+			name: "kind that is none of the three",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: "gauge", Metric: MetricActiveUsers},
+			}}}},
+			wantErr: "has kind",
+		},
 	}
 	for _, tc := range cases {
 		if _, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
@@ -412,6 +506,51 @@ func TestBoardDeclarationValidation(t *testing.T) {
 	cur, err := s.BoardContentForProject(ctx, projectID, board.Board.ID)
 	if err != nil || cur.Board.Revision != 1 || len(cur.Definition.Sections) != 0 {
 		t.Fatalf("a refused declaration changed the board: %+v (%v)", cur, err)
+	}
+}
+
+// TestFunnelTileRoundTrip declares a funnel tile and reads it back: the kind
+// is inferred from steps, the steps are stored verbatim (trimmed), and the
+// resolved content carries no metric or chart references for it — a funnel
+// tile is a declaration the reader computes, not a stored reference.
+func TestFunnelTileRoundTrip(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+
+	content, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
+		BoardKey: "funnels",
+		Definition: BoardDefinition{Sections: []BoardSection{{
+			Key: "s", Title: "S",
+			Tiles: []BoardTile{{
+				Key:   "signup-to-paid",
+				Title: "Signup → paid",
+				Steps: []string{" user_signed_in ", "subscription_started", "subscription_activated"},
+				Span:  2,
+			}},
+		}}},
+	}, "", "")
+	if err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	tile := content.Definition.Sections[0].Tiles[0]
+	if tile.Kind != TileKindFunnel {
+		t.Fatalf("kind = %q, want funnel", tile.Kind)
+	}
+	want := []string{"user_signed_in", "subscription_started", "subscription_activated"}
+	if len(tile.Steps) != len(want) {
+		t.Fatalf("steps = %v, want %v", tile.Steps, want)
+	}
+	for i := range want {
+		if tile.Steps[i] != want[i] {
+			t.Fatalf("steps = %v, want %v", tile.Steps, want)
+		}
+	}
+	if tile.Span != 2 {
+		t.Fatalf("span = %d, want 2", tile.Span)
+	}
+	if len(content.Metrics) != 0 || len(content.Charts) != 0 || len(content.Warnings) != 0 {
+		t.Fatalf("funnel tile resolved references: metrics=%v charts=%v warnings=%v", content.Metrics, content.Charts, content.Warnings)
 	}
 }
 
@@ -519,6 +658,115 @@ func TestUndeclaredBoardKeepsRenderingFromItsCharts(t *testing.T) {
 	}
 	if _, err := s.BoardContentByKey(ctx, projectID, "never-declared"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("unknown key err = %v, want ErrNoRows", err)
+	}
+}
+
+// TestFunnelTileKindInferenceAndRoundTrip: steps alone infer the funnel kind,
+// declared steps are stored verbatim, and a funnel tile that declares none is
+// served with steps resolved at read time — or a warning when the event
+// catalog is unreachable (the test store has no DuckDB).
+func TestFunnelTileKindInferenceAndRoundTrip(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+
+	name := "Funnels"
+	content, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
+		BoardKey: "funnels", Name: &name,
+		Definition: BoardDefinition{Sections: []BoardSection{{
+			Key: "f", Title: "F", Tiles: []BoardTile{
+				// No kind: steps alone infer funnel.
+				{Key: "declared", Steps: []string{"user.pageview", "user.signup"}},
+				// No steps: kind must be explicit — nothing else to infer from.
+				{Key: "derived", Kind: TileKindFunnel},
+			},
+		}}},
+	}, "", "")
+	if err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	tiles := content.Definition.Sections[0].Tiles
+	if tiles[0].Kind != TileKindFunnel {
+		t.Fatalf("steps did not infer the funnel kind: %+v", tiles[0])
+	}
+	if len(tiles[0].Steps) != 2 || tiles[0].Steps[0] != "user.pageview" {
+		t.Fatalf("declared steps = %v, want them stored verbatim", tiles[0].Steps)
+	}
+	// No DuckDB in this store: the derived tile keeps steps unset and the read
+	// says why, instead of failing the whole board.
+	if tiles[1].Steps != nil {
+		t.Fatalf("derived steps = %v, want unresolved without a catalog", tiles[1].Steps)
+	}
+	foundWarning := false
+	for _, w := range content.Warnings {
+		if strings.Contains(w, "funnel steps could not be derived") {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("no derivation warning on the receipt: %v", content.Warnings)
+	}
+
+	// A read resolves the same way — and the stored document still has no
+	// steps, so a later read re-derives rather than serving a frozen list.
+	read, err := s.BoardContentForProject(ctx, projectID, content.Board.ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if read.Definition.Sections[0].Tiles[1].Steps != nil {
+		t.Fatalf("stored steps = %v, want the derivation to stay read-time", read.Definition.Sections[0].Tiles[1].Steps)
+	}
+}
+
+// TestFunnelStepNamesMirrorsTheWebHeuristic pins the Go port of
+// web/lib/ia.ts's funnelStepNames: busiest event per matched stage in stage
+// order, the activation_event override, the onboarding_verified exclusion,
+// and the default contract under two matched stages.
+func TestFunnelStepNamesMirrorsTheWebHeuristic(t *testing.T) {
+	entry := func(name string) EventCatalogEntry { return EventCatalogEntry{EventName: name} }
+
+	// Volume-descending catalog: the first match per stage is the busiest.
+	catalog := []EventCatalogEntry{
+		entry("page_view"), entry("app_open"), // both visit — page_view wins
+		entry("sign_up"),                      // signup
+		entry("onboarding_completed"),         // activation
+		entry("checkout"),                     // revenue
+		entry("onboarding_verified"),          // receipt, never a step
+	}
+	got := funnelStepNames(catalog, "")
+	want := []string{"page_view", "sign_up", "onboarding_completed", "checkout"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("steps = %v, want %v", got, want)
+	}
+
+	// A configured activation event claims the activation stage by exact
+	// match and disables the regex there: onboarding_completed no longer
+	// qualifies, and the unconfigured name does.
+	got = funnelStepNames(catalog, "my_aha_moment")
+	want = []string{"page_view", "sign_up", "checkout"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("steps with unconfigured activation = %v, want %v", got, want)
+	}
+	got = funnelStepNames(append(catalog, entry("my_aha_moment")), "my_aha_moment")
+	want = []string{"page_view", "sign_up", "my_aha_moment", "checkout"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("steps with configured activation = %v, want %v", got, want)
+	}
+
+	// Fewer than two matched stages serves the default contract.
+	got = funnelStepNames([]EventCatalogEntry{entry("page_view")}, "")
+	if strings.Join(got, ",") != strings.Join(defaultFunnelSteps, ",") {
+		t.Fatalf("thin catalog steps = %v, want %v", got, defaultFunnelSteps)
+	}
+	got = funnelStepNames(nil, "")
+	if strings.Join(got, ",") != strings.Join(defaultFunnelSteps, ",") {
+		t.Fatalf("empty catalog steps = %v, want %v", got, defaultFunnelSteps)
+	}
+
+	// A name matching several stages is claimed by the last one — the web's
+	// `claimed` loop, not the first match.
+	if stage := funnelStageOfName("subscription_started", ""); stage != 4 {
+		t.Fatalf("subscription_started stage = %d, want 4 (revenue)", stage)
 	}
 }
 

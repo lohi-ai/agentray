@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -35,14 +36,20 @@ func TestDefaultAnalysisBoardsAreValidDeclarations(t *testing.T) {
 		}
 		for _, section := range normalized.Sections {
 			for _, tile := range section.Tiles {
-				if tile.Kind != TileKindMetric {
-					t.Errorf("board %q tile %q is %q; default boards declare catalog metrics only", board.Key, tile.Key, tile.Kind)
-				}
 				if tile.Title == "" {
 					t.Errorf("board %q tile %q has no App Store Connect label", board.Key, tile.Key)
 				}
-				if _, ok := MetricCatalogEntry(tile.Metric); !ok {
-					t.Errorf("board %q tile %q names metric %q, which is not in the catalog", board.Key, tile.Key, tile.Metric)
+				switch tile.Kind {
+				case TileKindMetric:
+					if _, ok := MetricCatalogEntry(tile.Metric); !ok {
+						t.Errorf("board %q tile %q names metric %q, which is not in the catalog", board.Key, tile.Key, tile.Metric)
+					}
+				case TileKindFunnel:
+					// The usage board's activation funnel is the one
+					// non-metric tile a default board may declare: its steps
+					// derive from the project's event catalog at read time.
+				default:
+					t.Errorf("board %q tile %q is %q; default boards declare catalog metrics and the usage funnel only", board.Key, tile.Key, tile.Kind)
 				}
 			}
 		}
@@ -56,8 +63,15 @@ func TestDefaultAnalysisBoardsUseAppStoreConnectLabels(t *testing.T) {
 	want := map[string]string{
 		"first-time-downloads": "First-time downloads",
 		"proceeds":             "Proceeds",
+		"paying-users":         "Paying users",
+		"proceeds-per-paying":  "Proceeds per paying user",
+		"download-to-paid-d1":  "Download→paid D1",
+		"download-to-paid-d7":  "Download→paid D7",
+		"download-to-paid-d35": "Download→paid D35",
 		"active-devices":       "Active devices",
 		"sessions":             "Sessions",
+		"sessions-per-device":  "Sessions per device",
+		"sessions-daily":       "Sessions per day",
 		"retention-d1":         "Average retention D1",
 		"retention-d7":         "Average retention D7",
 		"retention-d30":        "Average retention D30",
@@ -77,7 +91,7 @@ func TestDefaultAnalysisBoardsUseAppStoreConnectLabels(t *testing.T) {
 	}
 	// Apple-shaped metrics with no AgentRay implementation must not sneak in
 	// as catalog tiles — that would be a number nobody computes.
-	for _, forbidden := range []string{"redownloads", "impressions", "updates", "paying-users", "in-app-purchases", "crashes", "retention-d14", "retention-d28"} {
+	for _, forbidden := range []string{"redownloads", "impressions", "updates", "in-app-purchases", "crashes", "retention-d14", "retention-d28"} {
 		if _, ok := got[forbidden]; ok {
 			t.Errorf("tile %q is declared; it has no catalog metric and must stay an honest empty state", forbidden)
 		}
@@ -147,6 +161,104 @@ func TestEnsureDefaultBoardsLeavesAnEditedBoardAlone(t *testing.T) {
 	}
 	if len(got.Definition.Sections) != 0 {
 		t.Fatalf("re-seed restored sections = %+v; an edited board must stay edited", got.Definition.Sections)
+	}
+}
+
+func TestRepairDefaultBoardsUpgradesTheUntouchedSeed(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Roll Monetization back to the previously-shipped definition — the state
+	// every project created before the v6 metrics is actually in.
+	stale, err := json.Marshal(previousDefaultBoards()[BoardKeyMonetization])
+	if err != nil {
+		t.Fatalf("marshal stale: %v", err)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE dashboards SET definition = $1::jsonb WHERE project_id = $2 AND board_key = $3`,
+		stale, projectID, BoardKeyMonetization); err != nil {
+		t.Fatalf("roll back: %v", err)
+	}
+
+	rows, projects, err := s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if rows != 1 || projects != 1 {
+		t.Fatalf("repair = %d rows / %d projects, want 1/1", rows, projects)
+	}
+
+	got, err := s.BoardContentByKey(ctx, projectID, BoardKeyMonetization)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	want := DefaultAnalysisBoards()[1].Definition
+	if len(got.Definition.Sections) != len(want.Sections) ||
+		len(got.Definition.Sections[0].Tiles) != len(want.Sections[0].Tiles) {
+		t.Fatalf("monetization tiles = %+v, want the %d-tile v6 declaration",
+			got.Definition.Sections, len(want.Sections[0].Tiles))
+	}
+
+	// Idempotent: the fresh definition matches nothing in previousDefaultBoards.
+	rows, _, err = s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("second repair: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("second repair touched %d rows, want 0", rows)
+	}
+}
+
+func TestRepairDefaultBoardsLeavesAnEditedBoardAlone(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Roll back to the stale seed, then edit one tile — the board is now
+	// customized and must never be rewritten by boot.
+	stale, err := json.Marshal(previousDefaultBoards()[BoardKeyUsage])
+	if err != nil {
+		t.Fatalf("marshal stale: %v", err)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE dashboards SET definition = $1::jsonb WHERE project_id = $2 AND board_key = $3`,
+		stale, projectID, BoardKeyUsage); err != nil {
+		t.Fatalf("roll back: %v", err)
+	}
+	current, err := s.BoardContentByKey(ctx, projectID, BoardKeyUsage)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	edited := current.Definition
+	edited.Sections[0].Tiles[0].Title = "My devices"
+	if _, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
+		BoardID:          current.Board.ID,
+		Definition:       edited,
+		ExpectedRevision: current.Board.Revision,
+	}, "", ""); err != nil {
+		t.Fatalf("owner edit: %v", err)
+	}
+
+	rows, _, err := s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("repair touched %d rows on an edited board, want 0", rows)
+	}
+	got, err := s.BoardContentByKey(ctx, projectID, BoardKeyUsage)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if got.Definition.Sections[0].Tiles[0].Title != "My devices" {
+		t.Fatalf("edited title = %q, want the owner's edit kept", got.Definition.Sections[0].Tiles[0].Title)
 	}
 }
 

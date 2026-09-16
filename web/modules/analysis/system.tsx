@@ -1,10 +1,10 @@
 'use client';
 
-import type { BoardTile, OverviewResult } from '@/lib/api';
+import type { BoardContent, BoardTile, OverviewResult } from '@/lib/api';
 import type { AnalysisBoardKey } from '@/lib/analysis';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
-import { UsageFunnelPanel } from './funnel';
+import { FunnelTile } from './funnel';
 import { analysisBars, analysisSeries, analysisStat } from './tiles';
 
 // System sections are the reads the retired /traffic, /web-analytics and
@@ -14,17 +14,24 @@ import { analysisBars, analysisSeries, analysisStat } from './tiles';
 // sections render for every project, seeded or not. Each row reuses the same
 // composers a declared tile would, so a system section and a declared tile can
 // never disagree about the same metric.
-const SYSTEM_TILES: Record<AnalysisBoardKey, { stats: string[]; bars: string[]; series: string[] }> = {
+const SYSTEM_TILES: Record<AnalysisBoardKey, { title: string; stats: string[]; bars: string[]; series: string[] }> = {
   acquisition: {
+    title: 'Traffic',
     stats: ['pageviews', 'conversions', 'ai_share', 'bounce_rate', 'avg_session_duration'],
     bars: ['traffic_by_class', 'ai_top_paths', 'traffic_by_platform'],
     series: [],
   },
-  monetization: { stats: [], bars: [], series: [] },
+  monetization: {
+    title: 'Monetization',
+    stats: ['paying_users', 'proceeds_per_paying', 'download_to_paid_d1', 'download_to_paid_d7', 'download_to_paid_d35'],
+    bars: [],
+    series: [],
+  },
   usage: {
-    stats: [],
+    title: 'Engagement',
+    stats: ['sessions_per_user'],
     bars: ['top_events'],
-    series: ['event_volume_daily'],
+    series: ['sessions_daily', 'event_volume_daily'],
   },
 };
 
@@ -34,10 +41,12 @@ function systemTile(metric: string): BoardTile {
 
 export function AnalysisSystemSections({
   boardKey,
+  board,
   res,
   platform,
 }: {
   boardKey: AnalysisBoardKey;
+  board: BoardContent | null;
   res: OverviewResult;
   platform: string;
 }) {
@@ -51,11 +60,18 @@ export function AnalysisSystemSections({
   const series = spec.series
     .map((metric) => analysisSeries(res, systemTile(metric)))
     .filter((s): s is NonNullable<typeof s> => s !== null);
+  // The usage board's funnel is a declared tile now, but stored definitions
+  // predate it — EnsureDefaultBoards never rewrites an existing key. Render
+  // the same funnel page-level until the declaration carries it, and stop
+  // once it does so the funnel never shows twice.
+  const declaredFunnel = board?.definition.sections.some((section) =>
+    section.tiles.some((tile) => tile.kind === 'funnel'),
+  ) ?? false;
 
   return (
     <>
       {stats.length > 0 ? (
-        <Panel title="Traffic">
+        <Panel title={spec.title}>
           <StatsStrip stats={stats} />
         </Panel>
       ) : null}
@@ -90,7 +106,11 @@ export function AnalysisSystemSections({
           <p className="mt-2 font-mono text-xs text-[var(--color-text-secondary)]">{item.provenance}</p>
         </Panel>
       ))}
-      {boardKey === 'usage' ? <UsageFunnelPanel res={res} platform={platform} /> : null}
+      {boardKey === 'usage' && !declaredFunnel ? (
+        <Panel title="Where do new users drop off?">
+          <FunnelTile res={res} platform={platform} />
+        </Panel>
+      ) : null}
     </>
   );
 }

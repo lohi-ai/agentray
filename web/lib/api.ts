@@ -228,6 +228,9 @@ export type OverviewRevenueCurrency = {
   reversed: number;
   net: number;
   rows: number;
+  // Distinct people with a positive booking in this currency — the
+  // denominator proceeds-per-paying-user divides by.
+  payers: number;
 };
 
 // OverviewRange mirrors the Go store.OverviewRange: the complete-day window a
@@ -248,6 +251,9 @@ export type OverviewRevenueDetail = {
   excluded_rows: number;
   excluded_currencies?: string[];
   by_currency: OverviewRevenueCurrency[];
+  // Distinct people with a positive deduplicated booking in the window,
+  // across every declared currency — not the sum of by_currency payers.
+  paying_users: number;
 };
 
 export type OverviewActivationDetail = {
@@ -317,13 +323,26 @@ export type OverviewResult = {
     ai_share: OverviewMetric;
     bounce_rate: OverviewMetric;
     avg_session_duration: OverviewMetric;
+    // App Store Connect reads (overview.v6): sessions per person is a ratio
+    // on `rate`; paying_users is a count; proceeds_per_paying is a rate in
+    // the headline currency's smallest unit.
+    sessions_per_user: OverviewMetric;
+    paying_users: OverviewMetric;
+    proceeds_per_paying: OverviewMetric;
   };
-  trend: Array<{ day: string; active_users: number; events: number }>;
+  trend: Array<{ day: string; active_users: number; sessions: number; events: number }>;
   retention: {
     cohort_window: string;
     d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d30: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+  };
+  // Download→paid cohort conversion — same point shape as retention.
+  paid_conversion: {
+    cohort_window: string;
+    d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d35: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
   };
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
@@ -393,14 +412,17 @@ export type Chart = {
 export type BoardTile = {
   key: string;
   title?: string;
-  kind?: 'metric' | 'chart';
+  kind?: 'metric' | 'chart' | 'funnel';
   display?: string;
   span?: number;
   metric?: string;
   // Declared target spec — writing it appends a version to the metric's
-  // project-scoped target history (see set_metric_target).
+  // target history (see set_metric_target).
   target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
+  // Funnel tile's ordered event names. Absent on a funnel tile means the
+  // server derives the activation funnel from the event catalog at read time.
+  steps?: string[];
   params?: { period?: string; platform?: string };
 };
 
@@ -715,6 +737,25 @@ export type EventCatalogEntry = {
   last_seen: string;
 };
 
+// One server-ranked activation-event suggestion. Rates are 0–1 fractions —
+// render with formatFractionAsPercent, never formatPercent. `users` is
+// distinct new users who fired the event inside their first 7 days; `lift`
+// is their D7 return rate minus the cohort baseline.
+export type ActivationCandidate = {
+  event_name: string;
+  users: number;
+  reach: number;
+  d7_return: number;
+  baseline_d7: number;
+  lift: number;
+};
+
+export type ActivationCandidates = {
+  state: 'ok' | 'not_ready';
+  cohort_size: number;
+  candidates: ActivationCandidate[];
+};
+
 export type AgentReplay = {
   session_id: string;
   distinct_id: string;
@@ -875,7 +916,9 @@ export const ALERT_CHANNEL_KINDS = ['slack', 'email', 'webhook'] as const;
 export type AlertChannelKind = (typeof ALERT_CHANNEL_KINDS)[number];
 
 export type AlertCondition = {
-  op: AlertOp;
+  // 'none' is the digest marker the server stores (validateAlertOp only gates
+  // non-digest rules); it is not a selectable op in the rule form.
+  op: AlertOp | 'none';
   value: number;
   window?: number;
   min_events?: number;
@@ -1953,11 +1996,6 @@ export class AgentRayAPI {
     return this.request<void>(`/api/workspaces/${workspaceID}/members/${userID}`, { method: 'DELETE' });
   }
 
-  createWorkspaceProject(workspaceID: string, name: string) {
-    return this.post<{ project: Project }>(`/api/workspaces/${workspaceID}/projects`, { name });
-  }
-
-
   updateProject(
     projectID: string,
     patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },
@@ -1970,6 +2008,17 @@ export class AgentRayAPI {
 
   rotateKey(projectID: string) {
     return this.post<{ project: Project }>(`/api/projects/${projectID}/rotate-key`, {});
+  }
+
+  // activationCandidates returns the server-ranked activation-event
+  // suggestions (reach + D7 lift evidence). state "not_ready" means the
+  // mature cohort is too small to rank — the picker falls back to the raw
+  // catalog, never an empty list presented as a ranking. The path carries
+  // the project id, so this deliberately skips withProject: a query-param
+  // project_id would outrank the path in principalFromRequest and 404 the
+  // session's own project on a stale value.
+  activationCandidates(projectID: string) {
+    return this.get<ActivationCandidates>(`/api/projects/${projectID}/activation-candidates`);
   }
 
   activity(filters: Filters) {

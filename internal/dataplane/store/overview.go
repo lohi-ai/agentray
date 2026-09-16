@@ -35,10 +35,13 @@ import (
 // v5 is the activation release: the activation tile stops being permanently
 // "unconfigured" and computes against the project's stored activation_event
 // over a fixed 7-day window.
-// v6 adds acquisition detail: utm_source/utm_medium/utm_campaign columns on
+// v6 adopts the App Store Connect reads the analysis boards were shaped
+// after: sessions per person and its daily trend, paying people, proceeds
+// per paying person, and the download→paid cohort conversion (D1/D7/D35).
+// v7 adds acquisition detail: utm_source/utm_medium/utm_campaign columns on
 // events, plus top_utm_sources, top_campaigns and top_referrers breakdowns
 // over the same human pageview population as top_sources.
-const OverviewMetricVersion = "overview.v6"
+const OverviewMetricVersion = "overview.v7"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -116,6 +119,9 @@ type OverviewMetric struct {
 type OverviewTrendPoint struct {
 	Day         string `json:"day"` // YYYY-MM-DD in Context.Timezone
 	ActiveUsers uint64 `json:"active_users"`
+	// Sessions is the distinct qualifying session ids that day — the daily
+	// companion to ActiveUsers (App Store Connect's sessions-per-day trend).
+	Sessions uint64 `json:"sessions"`
 	// Events is every received event that day — the event-volume series the
 	// retired Product page's trend question charted. It deliberately counts
 	// non-qualifying rows too: volume is an ingestion fact, and a crawler wave
@@ -201,6 +207,16 @@ type OverviewMetrics struct {
 	// them is where the human/non-human split lives.
 	Pageviews   OverviewMetric `json:"pageviews"`
 	Conversions OverviewMetric `json:"conversions"`
+	// SessionsPerUser is App Store Connect's "sessions per device": distinct
+	// session ids over distinct people on qualifying activity, carried on the
+	// Rate channel because the honest value is a ratio, not a count.
+	SessionsPerUser OverviewMetric `json:"sessions_per_user"`
+	// PayingUsers counts the distinct people with a positive deduplicated
+	// booking in the window; ProceedsPerPaying is the headline currency's net
+	// over the people who paid in it (Rate, smallest unit). Both share the
+	// revenue metric's unconfigured/no_data gate.
+	PayingUsers       OverviewMetric `json:"paying_users"`
+	ProceedsPerPaying OverviewMetric `json:"proceeds_per_paying"`
 	// AIShare is the non-human share of classified pageviews, on the percent
 	// scale (Rate). Session quality is the retired page's bounce rate and
 	// average session duration, computed over every session in the window.
@@ -267,13 +283,27 @@ type OverviewContent struct {
 	TopEvents OverviewList `json:"top_events"`
 }
 
+// OverviewPaidConversion is the download→paid cohort read: D1/D7/D35 points
+// with the same maturity contract as retention.
+type OverviewPaidConversion struct {
+	CohortWindow string                 `json:"cohort_window"`
+	D1           OverviewRetentionPoint `json:"d1"`
+	D7           OverviewRetentionPoint `json:"d7"`
+	D35          OverviewRetentionPoint `json:"d35"`
+}
+
 type OverviewResult struct {
 	Context    OverviewContext      `json:"context"`
 	Metrics    OverviewMetrics      `json:"metrics"`
 	Trend      []OverviewTrendPoint `json:"trend"`
 	Retention  OverviewRetention    `json:"retention"`
-	Content    OverviewContent      `json:"content"`
-	DataStatus OverviewDataStatus   `json:"data_status"`
+	// PaidConversion is App Store Connect's download→paid cohort read: the
+	// share of a lifetime first-activity cohort that booked positive revenue
+	// within N local days. Same point shape as retention — eligible is the
+	// matured denominator, never a blended one.
+	PaidConversion OverviewPaidConversion `json:"paid_conversion"`
+	Content        OverviewContent        `json:"content"`
+	DataStatus     OverviewDataStatus     `json:"data_status"`
 }
 
 var overviewPeriodRe = regexp.MustCompile(`^(\d{1,2})d$`)
@@ -538,6 +568,22 @@ WHERE project_id = ? AND "timestamp" >= ? AND "timestamp" < ? AND `+overviewQual
 				res.Metrics.Sessions.Previous = uint64Ptr(sessionsPrev)
 			}
 		}
+		// Sessions per person is the same two counts divided — it exists only
+		// when both halves are measured, so it inherits their state and never
+		// divides by an empty population.
+		res.Metrics.SessionsPerUser = OverviewMetric{
+			State:      metricState,
+			Definition: metricDefSessionsPerUser,
+			Notes:      []string{exclusionNote},
+		}
+		if metricState == OverviewStateOK && active > 0 {
+			res.Metrics.SessionsPerUser.Rate = float64Ptr(float64(sessions) / float64(active))
+			if r.CompleteDays && activePrev > 0 {
+				prev := float64(sessionsPrev) / float64(activePrev)
+				res.Metrics.SessionsPerUser.Notes = append(res.Metrics.SessionsPerUser.Notes,
+					fmt.Sprintf("previous window: %.2f sessions per person", prev))
+			}
+		}
 	}
 
 	// --- pageviews + conversions: the retired Traffic page's headline counts ---
@@ -647,6 +693,42 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		}
 		res.Metrics.Revenue = metric
 		res.Metrics.RevenueDetail = detail
+
+		// Paying users and proceeds-per-paying-person ride the revenue gate:
+		// a project that never sent a money row is unconfigured, one whose
+		// window holds none is no_data. The payer counts live on the detail
+		// the same pass already computed — no second query.
+		payingNotes := []string{"a refund does not un-pay a person; the count is distinct people with a positive deduplicated booking"}
+		if metric.State == OverviewStateUnconfigured {
+			payingNotes = []string{metricPrereqRevenue}
+		}
+		res.Metrics.PayingUsers = OverviewMetric{
+			State:      metric.State,
+			Definition: metricDefPayingUsers,
+			Notes:      payingNotes,
+		}
+		res.Metrics.ProceedsPerPaying = OverviewMetric{
+			State:      metric.State,
+			Definition: metricDefProceedsPerPaying,
+			Notes:      payingNotes,
+		}
+		if metric.State == OverviewStateOK {
+			res.Metrics.PayingUsers.Value = uint64Ptr(detail.PayingUsers)
+			for _, row := range detail.ByCurrency {
+				if row.Currency == detail.Currency && row.Payers > 0 {
+					res.Metrics.ProceedsPerPaying.Rate = float64Ptr(float64(row.Net) / float64(row.Payers))
+					res.Metrics.ProceedsPerPaying.Notes = []string{fmt.Sprintf(
+						"net %d over %d paying people in %s", row.Net, row.Payers, row.Currency)}
+					break
+				}
+			}
+			if res.Metrics.ProceedsPerPaying.Rate == nil {
+				// Money arrived but nobody booked positively in the headline
+				// currency — a real no_data, not a 0.
+				res.Metrics.ProceedsPerPaying.State = OverviewStateNoData
+				res.Metrics.ProceedsPerPaying.Notes = []string{"no positive booking in the headline currency this window"}
+			}
+		}
 	}
 
 	// --- activation: configured event over a fixed 7-day cohort window ---
@@ -668,6 +750,7 @@ WHERE 1 = 1`+firstPlatformClause(platform), qargs, &newUsers, &newUsersPrev)
 		err := s.duckQuery(ctx, `
 SELECT CAST(timezone(?, "timestamp") AS DATE) AS day,
 	count(DISTINCT `+canonicalID+`) FILTER (WHERE `+overviewQualifying+`) AS users,
+	count(DISTINCT session_id) FILTER (WHERE session_id <> '' AND `+overviewQualifying+`) AS sessions,
 	count(*) AS events
 FROM resolved_events
 WHERE `+where+`
@@ -675,7 +758,7 @@ GROUP BY day
 ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 			var day time.Time
 			var point OverviewTrendPoint
-			if err := rows.Scan(&day, &point.ActiveUsers, &point.Events); err != nil {
+			if err := rows.Scan(&day, &point.ActiveUsers, &point.Sessions, &point.Events); err != nil {
 				return err
 			}
 			point.Day = day.Format("2006-01-02")
@@ -694,7 +777,6 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 			res.Trend = append(res.Trend, point)
 		}
 	}
-
 	// --- D1/D7/D30 retention: per-cohort-day maturity ---
 	{
 		ret, err := s.overviewRetention(ctx, projectID, platform, timezone, r.To)
@@ -702,6 +784,15 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 			return res, err
 		}
 		res.Retention = ret
+	}
+
+	// --- download→paid: the same cohorts, converted by the money grid ---
+	{
+		paid, err := s.overviewPaidConversion(ctx, projectID, platform, timezone, r.To, moneySeen > 0)
+		if err != nil {
+			return res, err
+		}
+		res.PaidConversion = paid
 	}
 
 	// --- content: top pages + sources (pageview units, declared) ---
@@ -886,6 +977,8 @@ func (s *Store) attachMetricTargets(ctx context.Context, projectID string, res *
 	// seconds — the same scale read_metric serves.
 	attach(MetricPageviews, &res.Metrics.Pageviews, "pageviews", measured(res.Metrics.Pageviews), "")
 	attach(MetricConversions, &res.Metrics.Conversions, "events", measured(res.Metrics.Conversions), "")
+	attach(MetricSessionsPerUser, &res.Metrics.SessionsPerUser, "sessions/person", measured(res.Metrics.SessionsPerUser), "")
+	attach(MetricPayingUsers, &res.Metrics.PayingUsers, "people", measured(res.Metrics.PayingUsers), "")
 	attach(MetricAIShare, &res.Metrics.AIShare, "percent", measured(res.Metrics.AIShare), "")
 	attach(MetricBounceRate, &res.Metrics.BounceRate, "percent", measured(res.Metrics.BounceRate), "")
 	attach(MetricAvgSession, &res.Metrics.AvgSessionDuration, "seconds", measured(res.Metrics.AvgSessionDuration), "")
@@ -896,15 +989,22 @@ func (s *Store) attachMetricTargets(ctx context.Context, projectID string, res *
 	// unsigned headline Value cannot express a net reversal.
 	if d := res.Metrics.RevenueDetail; d != nil {
 		attach(MetricRevenue, &res.Metrics.Revenue, "currency", float64(d.Net), d.Currency)
+		// Proceeds per paying person is judged in the headline currency's
+		// smallest unit — the same scale the currency unit declares.
+		attach(MetricProceedsPerPaying, &res.Metrics.ProceedsPerPaying, "currency", measured(res.Metrics.ProceedsPerPaying), d.Currency)
 	} else {
 		attach(MetricRevenue, &res.Metrics.Revenue, "currency", 0, "")
+		attach(MetricProceedsPerPaying, &res.Metrics.ProceedsPerPaying, "currency", 0, "")
 	}
 	// Retention rates are judged on the percent scale the catalog declares —
 	// the same scale read_metric serves — never the 0-1 fraction.
 	for key, point := range map[string]*OverviewRetentionPoint{
-		MetricRetentionD1:  &res.Retention.D1,
-		MetricRetentionD7:  &res.Retention.D7,
-		MetricRetentionD30: &res.Retention.D30,
+		MetricRetentionD1:       &res.Retention.D1,
+		MetricRetentionD7:       &res.Retention.D7,
+		MetricRetentionD30:      &res.Retention.D30,
+		MetricDownloadToPaidD1:  &res.PaidConversion.D1,
+		MetricDownloadToPaidD7:  &res.PaidConversion.D7,
+		MetricDownloadToPaidD35: &res.PaidConversion.D35,
 	} {
 		t, ok := targets[key]
 		if !ok || t.Cleared || point.State != OverviewStateOK {
@@ -1075,6 +1175,86 @@ WHERE e.project_id = ? AND `+overviewQualifying+platClause,
 	out.D1 = overviewRetentionPoint(elig[0], ret[0])
 	out.D7 = overviewRetentionPoint(elig[1], ret[1])
 	out.D30 = overviewRetentionPoint(elig[2], ret[2])
+	return out, nil
+}
+
+// overviewPaidConversion computes App Store Connect's download→paid read:
+// the share of a lifetime first-activity cohort that made a deduplicated
+// positive revenue booking within N local days of first activity. Cohorts
+// are the same firsts subquery retention uses; the conversion event is the
+// money grid's positive-booking predicate, so "paid" can never disagree with
+// the revenue tile. instrumented is the lifetime money signal — a project
+// that never sent a money row reports unconfigured, not not_ready.
+func (s *Store) overviewPaidConversion(ctx context.Context, projectID, platform, timezone string, to time.Time, instrumented bool) (OverviewPaidConversion, error) {
+	out := OverviewPaidConversion{CohortWindow: "lifetime"}
+	if !instrumented {
+		out.D1 = OverviewRetentionPoint{State: OverviewStateUnconfigured}
+		out.D7 = OverviewRetentionPoint{State: OverviewStateUnconfigured}
+		out.D35 = OverviewRetentionPoint{State: OverviewStateUnconfigured}
+		return out, nil
+	}
+	platClause, platArg := overviewPlatform(platform)
+	firstClause := firstPlatformClause(platform)
+	canonicalID := "canonical_distinct_id"
+
+	firsts := `
+SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
+FROM (
+	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
+		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+	FROM resolved_events
+	WHERE project_id = ? AND ` + overviewQualifying + `
+	GROUP BY cid
+)
+WHERE 1 = 1` + firstClause
+	firstArgs := []any{timezone, projectID}
+	if platArg != nil {
+		firstArgs = append(firstArgs, platArg)
+	}
+
+	// eligible_N = members whose local calendar day-N window has fully closed
+	// by `to` — the same per-cohort-day maturity retention uses.
+	var elig [3]uint64
+	err := s.duckQueryRow(ctx, `
+SELECT
+	count(*) FILTER (WHERE cohort_day + INTERVAL '2 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(*) FILTER (WHERE cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(*) FILTER (WHERE cohort_day + INTERVAL '36 days' <= CAST(timezone(?, ?) AS DATE))
+FROM (`+firsts+`)`, append([]any{timezone, to, timezone, to, timezone, to}, firstArgs...), &elig[0], &elig[1], &elig[2])
+	if err != nil {
+		return out, err
+	}
+
+	// paid_N = eligible members with a deduplicated positive booking on or
+	// before cohort_day + N. The money grid is scoped by project and platform
+	// only — the window is the cohort's own day range, not the read's range.
+	var paid [3]uint64
+	moneyWhere := "project_id = ?" + platClause
+	moneyArgs := append([]any{projectID}, platformArgs(platArg)...)
+	err = s.duckQueryRow(ctx, `
+WITH `+moneyRowsCTE(moneyWhere)+`
+SELECT
+	count(DISTINCT m.person_id) FILTER (WHERE CAST(timezone(?, m.occurred_at) AS DATE) <= f.cohort_day + INTERVAL '1 day' AND f.cohort_day + INTERVAL '2 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(DISTINCT m.person_id) FILTER (WHERE CAST(timezone(?, m.occurred_at) AS DATE) <= f.cohort_day + INTERVAL '7 days' AND f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)),
+	count(DISTINCT m.person_id) FILTER (WHERE CAST(timezone(?, m.occurred_at) AS DATE) <= f.cohort_day + INTERVAL '35 days' AND f.cohort_day + INTERVAL '36 days' <= CAST(timezone(?, ?) AS DATE))
+FROM money_rows m
+INNER JOIN (`+firsts+`) f ON m.person_id = f.cid
+WHERE m.write_rank = 1
+  AND m.event_name = '`+moneyBookingEvent+`'
+  AND NOT `+moneyReverses+`
+  AND m.amount > 0
+  AND m.currency <> ''
+  AND m.currency <> '`+moneyNonCurrency+`'
+  AND CAST(timezone(?, m.occurred_at) AS DATE) >= f.cohort_day`,
+		append(append(moneyArgs, timezone, timezone, to, timezone, timezone, to, timezone, timezone, to), append(firstArgs, timezone)...),
+		&paid[0], &paid[1], &paid[2])
+	if err != nil {
+		return out, err
+	}
+
+	out.D1 = overviewRetentionPoint(elig[0], paid[0])
+	out.D7 = overviewRetentionPoint(elig[1], paid[1])
+	out.D35 = overviewRetentionPoint(elig[2], paid[2])
 	return out, nil
 }
 
