@@ -11,7 +11,7 @@ import { platformLabel } from '@/lib/platform';
 import { useEventNames } from '@/modules/app/hooks';
 import { Chart } from '@/modules/shared/components/charts';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { EmptyState, Loading, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { EmptyState, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
 import { Text } from '@astryxdesign/core/Text';
 import { headlineStats } from './headline';
 
@@ -70,17 +70,21 @@ function useFunnelByPlatform(steps: string[], platforms: string[], filters: Filt
   return { splits: query.data ?? [], loading: query.isFetching && enabled };
 }
 
-// UsageFunnelPanel is the retired Product page's drop-off question, pinned to
-// the Usage board: the catalog-derived activation funnel, its per-step table,
-// and the per-platform split. The trend/retention/table questions it used to
-// sit beside are covered by the board's own tiles — this panel is the one
-// question no catalog metric answers.
-export function UsageFunnelPanel({ res, platform }: { res: OverviewResult; platform: string }) {
+// FunnelTile is the funnel a board tile declares: the ordered steps, the
+// per-step table, and the per-platform split. `steps` is what the tile
+// declared — or what the server derived from the event catalog when the tile
+// declared none. When it is absent entirely (the page-level fallback, or a
+// catalog the server could not reach) the tile derives the same default
+// client-side, so the two paths can never disagree about which funnel runs.
+export function FunnelTile({ steps: declaredSteps, res, platform }: { steps?: string[]; res: OverviewResult; platform: string }) {
   const projectID = useAuthStore((s) => s.project?.id);
   const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const { names: eventNames, loading: namesLoading } = useEventNames();
   const emptyCatalog = !namesLoading && eventNames.length === 0;
-  const steps = useMemo(() => (emptyCatalog ? [] : funnelStepNames(eventNames, activationEvent)), [emptyCatalog, eventNames, activationEvent]);
+  const steps = useMemo(
+    () => declaredSteps ?? (emptyCatalog ? [] : funnelStepNames(eventNames, activationEvent)),
+    [declaredSteps, emptyCatalog, eventNames, activationEvent],
+  );
   const filters = useMemo(() => boardFilters(res, platform), [res, platform]);
   const funnelQuery = useQuery({
     queryKey: ['usage-funnel', projectID, filters, steps],
@@ -101,53 +105,45 @@ export function UsageFunnelPanel({ res, platform }: { res: OverviewResult; platf
   const { splits, loading: splitsLoading } = useFunnelByPlatform(steps, platforms, filters);
 
   if (namesLoading) {
-    return (
-      <Panel title="Where do new users drop off?">
-        <Loading label="Loading event catalog…" />
-      </Panel>
-    );
+    return <Loading label="Loading event catalog…" />;
   }
   if (emptyCatalog) {
     return (
-      <Panel title="Where do new users drop off?">
-        <EmptyState
-          icon={<Filter size={22} style={{ color: 'var(--agent)' }} />}
-          title="No events yet"
-          detail="The funnel is derived from this project’s event catalog. Send product events and the activation steps appear here."
-        />
-      </Panel>
+      <EmptyState
+        icon={<Filter size={22} style={{ color: 'var(--agent)' }} />}
+        title="No events yet"
+        detail="The funnel is derived from this project’s event catalog. Send product events and the activation steps appear here."
+      />
     );
   }
 
   const stats = insight ? headlineStats(insight) : [];
   return (
-    <Panel title="Where do new users drop off?">
-      <div className="flex flex-col gap-4">
-        <p className="text-xs text-[var(--color-text-secondary)]">
-          Step-by-step conversion over the board’s selected range, derived from the event catalog.
-        </p>
-        {funnelQuery.isLoading ? <Loading label="Running funnel…" /> : null}
-        {funnelQuery.isError ? (
-          <Text type="supporting">The funnel read failed. Retry by changing the range or reloading the page.</Text>
-        ) : null}
-        {stats.length > 0 ? <StatsStrip stats={stats} /> : null}
-        {insight?.funnel?.length ? (
-          <>
-            <Chart spec={{
-              type: 'bar',
-              x: insight.funnel.map((f) => f.event_name),
-              series: [{ name: 'Users', data: insight.funnel.map((f) => f.users) }],
-              height: 240,
-            }} />
-            <FunnelTable funnel={insight.funnel} />
-          </>
-        ) : null}
-        {insight && !insight.funnel?.length && !funnelQuery.isLoading ? (
-          <Text type="supporting">No one entered this funnel in the selected range.</Text>
-        ) : null}
-        <PlatformFunnels splits={splits} loading={splitsLoading} />
-      </div>
-    </Panel>
+    <div className="flex flex-col gap-4">
+      <p className="text-xs text-[var(--color-text-secondary)]">
+        Step-by-step conversion over the board’s selected range, derived from the event catalog.
+      </p>
+      {funnelQuery.isLoading ? <Loading label="Running funnel…" /> : null}
+      {funnelQuery.isError ? (
+        <Text type="supporting">The funnel read failed. Retry by changing the range or reloading the page.</Text>
+      ) : null}
+      {stats.length > 0 ? <StatsStrip stats={stats} /> : null}
+      {insight?.funnel?.length ? (
+        <>
+          <Chart spec={{
+            type: 'bar',
+            x: insight.funnel.map((f) => f.event_name),
+            series: [{ name: 'Users', data: insight.funnel.map((f) => f.users) }],
+            height: 240,
+          }} />
+          <FunnelTable funnel={insight.funnel} />
+        </>
+      ) : null}
+      {insight && !insight.funnel?.length && !funnelQuery.isLoading ? (
+        <Text type="supporting">No one entered this funnel in the selected range.</Text>
+      ) : null}
+      <PlatformFunnels splits={splits} loading={splitsLoading} />
+    </div>
   );
 }
 

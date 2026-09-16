@@ -417,7 +417,8 @@ export type BoardTile = {
   // target history (see set_metric_target).
   target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
-  // Ordered event names a funnel tile runs through the funnel insight.
+  // Funnel tile's ordered event names. Absent on a funnel tile means the
+  // server derives the activation funnel from the event catalog at read time.
   steps?: string[];
   params?: { period?: string; platform?: string };
 };

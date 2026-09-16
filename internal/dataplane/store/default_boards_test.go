@@ -36,14 +36,20 @@ func TestDefaultAnalysisBoardsAreValidDeclarations(t *testing.T) {
 		}
 		for _, section := range normalized.Sections {
 			for _, tile := range section.Tiles {
-				if tile.Kind != TileKindMetric {
-					t.Errorf("board %q tile %q is %q; default boards declare catalog metrics only", board.Key, tile.Key, tile.Kind)
-				}
 				if tile.Title == "" {
 					t.Errorf("board %q tile %q has no App Store Connect label", board.Key, tile.Key)
 				}
-				if _, ok := MetricCatalogEntry(tile.Metric); !ok {
-					t.Errorf("board %q tile %q names metric %q, which is not in the catalog", board.Key, tile.Key, tile.Metric)
+				switch tile.Kind {
+				case TileKindMetric:
+					if _, ok := MetricCatalogEntry(tile.Metric); !ok {
+						t.Errorf("board %q tile %q names metric %q, which is not in the catalog", board.Key, tile.Key, tile.Metric)
+					}
+				case TileKindFunnel:
+					// The usage board's activation funnel is the one
+					// non-metric tile a default board may declare: its steps
+					// derive from the project's event catalog at read time.
+				default:
+					t.Errorf("board %q tile %q is %q; default boards declare catalog metrics and the usage funnel only", board.Key, tile.Key, tile.Kind)
 				}
 			}
 		}

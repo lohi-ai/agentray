@@ -1,10 +1,10 @@
 'use client';
 
-import type { BoardTile, OverviewResult } from '@/lib/api';
+import type { BoardContent, BoardTile, OverviewResult } from '@/lib/api';
 import type { AnalysisBoardKey } from '@/lib/analysis';
 import { Chart } from '@/modules/shared/components/charts';
 import { BarRows, Panel, StatsStrip } from '@/modules/shared/components/signal-primitives';
-import { UsageFunnelPanel } from './funnel';
+import { FunnelTile } from './funnel';
 import { analysisBars, analysisSeries, analysisStat } from './tiles';
 
 // System sections are the reads the retired /traffic, /web-analytics and
@@ -41,10 +41,12 @@ function systemTile(metric: string): BoardTile {
 
 export function AnalysisSystemSections({
   boardKey,
+  board,
   res,
   platform,
 }: {
   boardKey: AnalysisBoardKey;
+  board: BoardContent | null;
   res: OverviewResult;
   platform: string;
 }) {
@@ -58,6 +60,13 @@ export function AnalysisSystemSections({
   const series = spec.series
     .map((metric) => analysisSeries(res, systemTile(metric)))
     .filter((s): s is NonNullable<typeof s> => s !== null);
+  // The usage board's funnel is a declared tile now, but stored definitions
+  // predate it — EnsureDefaultBoards never rewrites an existing key. Render
+  // the same funnel page-level until the declaration carries it, and stop
+  // once it does so the funnel never shows twice.
+  const declaredFunnel = board?.definition.sections.some((section) =>
+    section.tiles.some((tile) => tile.kind === 'funnel'),
+  ) ?? false;
 
   return (
     <>
@@ -97,7 +106,11 @@ export function AnalysisSystemSections({
           <p className="mt-2 font-mono text-xs text-[var(--color-text-secondary)]">{item.provenance}</p>
         </Panel>
       ))}
-      {boardKey === 'usage' ? <UsageFunnelPanel res={res} platform={platform} /> : null}
+      {boardKey === 'usage' && !declaredFunnel ? (
+        <Panel title="Where do new users drop off?">
+          <FunnelTile res={res} platform={platform} />
+        </Panel>
+      ) : null}
     </>
   );
 }

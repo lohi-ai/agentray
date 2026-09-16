@@ -115,6 +115,14 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 							defaultTile("sessions-daily", MetricSessionsDaily, DisplayArea, "Sessions per day", 3),
 						},
 					},
+					{
+						Key:         "funnel",
+						Title:       "Where do new users drop off?",
+						Description: "Step-by-step conversion over the selected range. No declared steps — the funnel is derived from the project's event catalog at read time.",
+						Tiles: []BoardTile{
+							{Key: "activation-funnel", Kind: TileKindFunnel, Title: "Activation funnel", Span: 3},
+						},
+					},
 				},
 			},
 		},
