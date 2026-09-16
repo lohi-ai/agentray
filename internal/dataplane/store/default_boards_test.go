@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -154,6 +155,104 @@ func TestEnsureDefaultBoardsLeavesAnEditedBoardAlone(t *testing.T) {
 	}
 	if len(got.Definition.Sections) != 0 {
 		t.Fatalf("re-seed restored sections = %+v; an edited board must stay edited", got.Definition.Sections)
+	}
+}
+
+func TestRepairDefaultBoardsUpgradesTheUntouchedSeed(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Roll Monetization back to the previously-shipped definition — the state
+	// every project created before the v6 metrics is actually in.
+	stale, err := json.Marshal(previousDefaultBoards()[BoardKeyMonetization])
+	if err != nil {
+		t.Fatalf("marshal stale: %v", err)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE dashboards SET definition = $1::jsonb WHERE project_id = $2 AND board_key = $3`,
+		stale, projectID, BoardKeyMonetization); err != nil {
+		t.Fatalf("roll back: %v", err)
+	}
+
+	rows, projects, err := s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if rows != 1 || projects != 1 {
+		t.Fatalf("repair = %d rows / %d projects, want 1/1", rows, projects)
+	}
+
+	got, err := s.BoardContentByKey(ctx, projectID, BoardKeyMonetization)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	want := DefaultAnalysisBoards()[1].Definition
+	if len(got.Definition.Sections) != len(want.Sections) ||
+		len(got.Definition.Sections[0].Tiles) != len(want.Sections[0].Tiles) {
+		t.Fatalf("monetization tiles = %+v, want the %d-tile v6 declaration",
+			got.Definition.Sections, len(want.Sections[0].Tiles))
+	}
+
+	// Idempotent: the fresh definition matches nothing in previousDefaultBoards.
+	rows, _, err = s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("second repair: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("second repair touched %d rows, want 0", rows)
+	}
+}
+
+func TestRepairDefaultBoardsLeavesAnEditedBoardAlone(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Roll back to the stale seed, then edit one tile — the board is now
+	// customized and must never be rewritten by boot.
+	stale, err := json.Marshal(previousDefaultBoards()[BoardKeyUsage])
+	if err != nil {
+		t.Fatalf("marshal stale: %v", err)
+	}
+	if _, err := s.pg.Exec(ctx,
+		`UPDATE dashboards SET definition = $1::jsonb WHERE project_id = $2 AND board_key = $3`,
+		stale, projectID, BoardKeyUsage); err != nil {
+		t.Fatalf("roll back: %v", err)
+	}
+	current, err := s.BoardContentByKey(ctx, projectID, BoardKeyUsage)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	edited := current.Definition
+	edited.Sections[0].Tiles[0].Title = "My devices"
+	if _, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
+		BoardID:          current.Board.ID,
+		Definition:       edited,
+		ExpectedRevision: current.Board.Revision,
+	}, "", ""); err != nil {
+		t.Fatalf("owner edit: %v", err)
+	}
+
+	rows, _, err := s.RepairDefaultBoards(ctx)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("repair touched %d rows on an edited board, want 0", rows)
+	}
+	got, err := s.BoardContentByKey(ctx, projectID, BoardKeyUsage)
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if got.Definition.Sections[0].Tiles[0].Title != "My devices" {
+		t.Fatalf("edited title = %q, want the owner's edit kept", got.Definition.Sections[0].Tiles[0].Title)
 	}
 }
 
