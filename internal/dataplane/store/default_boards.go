@@ -68,15 +68,20 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 		{
 			Key:         BoardKeyMonetization,
 			Name:        "Monetization",
-			Description: "Proceeds is AgentRay net revenue from a trusted billing source. Paying users, in-app purchases and download→paid cohorts are Not available until those metrics exist.",
+			Description: "Proceeds is AgentRay net revenue from a trusted billing source. Paying users, proceeds per paying user and download→paid cohorts compute from the same deduplicated money grid; in-app purchase counts are Not available until a purchase metric exists.",
 			Definition: BoardDefinition{
 				Version: BoardDefinitionVersion,
 				Sections: []BoardSection{{
 					Key:         "kpis",
 					Title:       "Monetization",
-					Description: "Proceeds uses AgentRay's deduplicated net-money read. Unlike currencies are never summed.",
+					Description: "Proceeds uses AgentRay's deduplicated net-money read. Unlike currencies are never summed; proceeds per paying person stays inside the headline currency.",
 					Tiles: []BoardTile{
 						defaultTile("proceeds", MetricRevenue, DisplayStat, "Proceeds", 1),
+						defaultTile("paying-users", MetricPayingUsers, DisplayStat, "Paying users", 1),
+						defaultTile("proceeds-per-paying", MetricProceedsPerPaying, DisplayStat, "Proceeds per paying user", 1),
+						defaultTile("download-to-paid-d1", MetricDownloadToPaidD1, DisplayStat, "Download→paid D1", 1),
+						defaultTile("download-to-paid-d7", MetricDownloadToPaidD7, DisplayStat, "Download→paid D7", 1),
+						defaultTile("download-to-paid-d35", MetricDownloadToPaidD35, DisplayStat, "Download→paid D35", 1),
 					},
 				}},
 			},
@@ -91,10 +96,11 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 					{
 						Key:         "kpis",
 						Title:       "Usage",
-						Description: "Active devices is AgentRay active people. Retention points are mature lifetime first-activity cohorts; immature cohorts render Not ready, never 0%.",
+						Description: "Active devices is AgentRay active people. Sessions per person is App Store Connect's sessions-per-device read. Retention points are mature lifetime first-activity cohorts; immature cohorts render Not ready, never 0%.",
 						Tiles: []BoardTile{
 							defaultTile("active-devices", MetricActiveUsers, DisplayStat, "Active devices", 1),
 							defaultTile("sessions", MetricSessions, DisplayStat, "Sessions", 1),
+							defaultTile("sessions-per-device", MetricSessionsPerUser, DisplayStat, "Sessions per device", 1),
 							defaultTile("retention-d1", MetricRetentionD1, DisplayStat, "Average retention D1", 1),
 							defaultTile("retention-d7", MetricRetentionD7, DisplayStat, "Average retention D7", 1),
 							defaultTile("retention-d30", MetricRetentionD30, DisplayStat, "Average retention D30", 1),
@@ -102,10 +108,11 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 					},
 					{
 						Key:         "trend",
-						Title:       "Active devices per day",
-						Description: "Daily distinct people. Daily counts are never summed into the period total.",
+						Title:       "Daily activity",
+						Description: "Daily distinct people and sessions. Daily counts are never summed into the period total.",
 						Tiles: []BoardTile{
 							defaultTile("active-devices-daily", MetricActiveUsersDaily, DisplayArea, "Active devices per day", 3),
+							defaultTile("sessions-daily", MetricSessionsDaily, DisplayArea, "Sessions per day", 3),
 						},
 					},
 				},

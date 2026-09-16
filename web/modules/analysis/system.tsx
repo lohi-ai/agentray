@@ -14,17 +14,24 @@ import { analysisBars, analysisSeries, analysisStat } from './tiles';
 // sections render for every project, seeded or not. Each row reuses the same
 // composers a declared tile would, so a system section and a declared tile can
 // never disagree about the same metric.
-const SYSTEM_TILES: Record<AnalysisBoardKey, { stats: string[]; bars: string[]; series: string[] }> = {
+const SYSTEM_TILES: Record<AnalysisBoardKey, { title: string; stats: string[]; bars: string[]; series: string[] }> = {
   acquisition: {
+    title: 'Traffic',
     stats: ['pageviews', 'conversions', 'ai_share', 'bounce_rate', 'avg_session_duration'],
     bars: ['traffic_by_class', 'ai_top_paths', 'traffic_by_platform'],
     series: [],
   },
-  monetization: { stats: [], bars: [], series: [] },
+  monetization: {
+    title: 'Monetization',
+    stats: ['paying_users', 'proceeds_per_paying', 'download_to_paid_d1', 'download_to_paid_d7', 'download_to_paid_d35'],
+    bars: [],
+    series: [],
+  },
   usage: {
-    stats: [],
+    title: 'Engagement',
+    stats: ['sessions_per_user'],
     bars: ['top_events'],
-    series: ['event_volume_daily'],
+    series: ['sessions_daily', 'event_volume_daily'],
   },
 };
 
@@ -55,7 +62,7 @@ export function AnalysisSystemSections({
   return (
     <>
       {stats.length > 0 ? (
-        <Panel title="Traffic">
+        <Panel title={spec.title}>
           <StatsStrip stats={stats} />
         </Panel>
       ) : null}

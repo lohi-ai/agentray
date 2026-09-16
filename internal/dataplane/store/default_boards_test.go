@@ -56,8 +56,15 @@ func TestDefaultAnalysisBoardsUseAppStoreConnectLabels(t *testing.T) {
 	want := map[string]string{
 		"first-time-downloads": "First-time downloads",
 		"proceeds":             "Proceeds",
+		"paying-users":         "Paying users",
+		"proceeds-per-paying":  "Proceeds per paying user",
+		"download-to-paid-d1":  "Download→paid D1",
+		"download-to-paid-d7":  "Download→paid D7",
+		"download-to-paid-d35": "Download→paid D35",
 		"active-devices":       "Active devices",
 		"sessions":             "Sessions",
+		"sessions-per-device":  "Sessions per device",
+		"sessions-daily":       "Sessions per day",
 		"retention-d1":         "Average retention D1",
 		"retention-d7":         "Average retention D7",
 		"retention-d30":        "Average retention D30",
@@ -77,7 +84,7 @@ func TestDefaultAnalysisBoardsUseAppStoreConnectLabels(t *testing.T) {
 	}
 	// Apple-shaped metrics with no AgentRay implementation must not sneak in
 	// as catalog tiles — that would be a number nobody computes.
-	for _, forbidden := range []string{"redownloads", "impressions", "updates", "paying-users", "in-app-purchases", "crashes", "retention-d14", "retention-d28"} {
+	for _, forbidden := range []string{"redownloads", "impressions", "updates", "in-app-purchases", "crashes", "retention-d14", "retention-d28"} {
 		if _, ok := got[forbidden]; ok {
 			t.Errorf("tile %q is declared; it has no catalog metric and must stay an honest empty state", forbidden)
 		}

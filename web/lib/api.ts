@@ -228,6 +228,9 @@ export type OverviewRevenueCurrency = {
   reversed: number;
   net: number;
   rows: number;
+  // Distinct people with a positive booking in this currency — the
+  // denominator proceeds-per-paying-user divides by.
+  payers: number;
 };
 
 // OverviewRange mirrors the Go store.OverviewRange: the complete-day window a
@@ -248,6 +251,9 @@ export type OverviewRevenueDetail = {
   excluded_rows: number;
   excluded_currencies?: string[];
   by_currency: OverviewRevenueCurrency[];
+  // Distinct people with a positive deduplicated booking in the window,
+  // across every declared currency — not the sum of by_currency payers.
+  paying_users: number;
 };
 
 export type OverviewActivationDetail = {
@@ -317,13 +323,26 @@ export type OverviewResult = {
     ai_share: OverviewMetric;
     bounce_rate: OverviewMetric;
     avg_session_duration: OverviewMetric;
+    // App Store Connect reads (overview.v6): sessions per person is a ratio
+    // on `rate`; paying_users is a count; proceeds_per_paying is a rate in
+    // the headline currency's smallest unit.
+    sessions_per_user: OverviewMetric;
+    paying_users: OverviewMetric;
+    proceeds_per_paying: OverviewMetric;
   };
-  trend: Array<{ day: string; active_users: number; events: number }>;
+  trend: Array<{ day: string; active_users: number; sessions: number; events: number }>;
   retention: {
     cohort_window: string;
     d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d30: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+  };
+  // Download→paid cohort conversion — same point shape as retention.
+  paid_conversion: {
+    cohort_window: string;
+    d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d35: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
   };
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
