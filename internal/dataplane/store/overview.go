@@ -38,7 +38,10 @@ import (
 // v6 adopts the App Store Connect reads the analysis boards were shaped
 // after: sessions per person and its daily trend, paying people, proceeds
 // per paying person, and the download→paid cohort conversion (D1/D7/D35).
-const OverviewMetricVersion = "overview.v6"
+// v7 adds acquisition detail: utm_source/utm_medium/utm_campaign columns on
+// events, plus top_utm_sources, top_campaigns and top_referrers breakdowns
+// over the same human pageview population as top_sources.
+const OverviewMetricVersion = "overview.v7"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -260,6 +263,12 @@ type OverviewRetention struct {
 type OverviewContent struct {
 	TopPages   OverviewList `json:"top_pages"`
 	TopSources OverviewList `json:"top_sources"`
+	// UTM-tagged acquisition detail and the external referrer hosts behind it —
+	// the same human pageview population as TopSources, grouped by the new
+	// columns instead of the classified channel.
+	TopUTMSources OverviewList `json:"top_utm_sources"`
+	TopCampaigns  OverviewList `json:"top_campaigns"`
+	TopReferrers  OverviewList `json:"top_referrers"`
 	// The retired Traffic page's remaining breakdowns. TrafficByClass counts
 	// pageviews per visitor class (human / search-bot / ai-platform) — the
 	// non-human rows are the point, so this list is not humans-filtered.
@@ -812,10 +821,29 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 			sources = append(sources, item)
 			return nil
 		})
+
 		if err != nil {
 			return res, err
 		}
 		res.Content.TopSources = OverviewList{Unit: "pageviews", Rows: sources}
+		utmSources, err := s.acquisitionBreakdown(ctx, qualWhere, args, "utm_source", "")
+		if err != nil {
+			return res, err
+		}
+		res.Content.TopUTMSources = OverviewList{Unit: "pageviews", Rows: utmSources}
+
+		campaigns, err := s.acquisitionBreakdown(ctx, qualWhere, args, "utm_campaign", "")
+		if err != nil {
+			return res, err
+		}
+		res.Content.TopCampaigns = OverviewList{Unit: "pageviews", Rows: campaigns}
+
+		referrers, err := s.acquisitionBreakdown(ctx, qualWhere, args, "referrer_host",
+			"referrer_channel NOT IN ('', 'direct', 'internal') AND referrer_host IS NOT NULL AND referrer_host <> ''")
+		if err != nil {
+			return res, err
+		}
+		res.Content.TopReferrers = OverviewList{Unit: "pageviews", Rows: referrers}
 	}
 
 	// --- content: the retired Traffic/Product breakdowns ---

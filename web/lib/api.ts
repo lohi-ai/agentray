@@ -347,6 +347,9 @@ export type OverviewResult = {
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
     top_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_utm_sources: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_campaigns: { unit: string; rows: Array<{ value: string; count: number }> };
+    top_referrers: { unit: string; rows: Array<{ value: string; count: number }> };
     // The retired Traffic page's remaining breakdowns — all-classes pageview
     // populations, and the retired Product page's raw event ranking.
     traffic_by_class: { unit: string; rows: Array<{ value: string; count: number }> };

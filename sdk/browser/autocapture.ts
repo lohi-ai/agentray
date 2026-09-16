@@ -7,9 +7,12 @@
  * client (AgentRay, PostHog-compatible, or a typed-emitter sink).
  *
  * What it tracks:
- *  - Pageviews   → `user.pageview` { path, $referrer, title } on load and on
- *                  every SPA navigation (history.pushState/replaceState/popstate),
- *                  deduped by path. Powers AgentRay's Web analytics tab.
+ *  - Pageviews   → `user.pageview` { path, $referrer, title, $utm_* } on load
+ *                  and on every SPA navigation (history.pushState/replaceState/
+ *                  popstate), deduped by path. UTM parameters are read from
+ *                  location.search per view — an SPA navigation can change the
+ *                  query string without a reload. Powers AgentRay's Web
+ *                  analytics tab.
  *  - Clicks      → `$autocapture` { tag, label, href, path } via one delegated
  *                  listener on links, buttons, role="button", submit inputs,
  *                  summary, and anything with [data-track]. Opt out per subtree
@@ -65,6 +68,21 @@ function normalizeReferrer(referrer: string, internalHosts: string[]): string {
   return referrer;
 }
 
+const UTM_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'] as const;
+
+// utmProperties reads the campaign tags off the current URL. Only present
+// params are attached — an untagged view carries no $utm_* keys at all, so the
+// ingest columns stay empty rather than storing ''.
+function utmProperties(): Record<string, string> {
+  const params = new URLSearchParams(location.search);
+  const out: Record<string, string> = {};
+  for (const key of UTM_PARAMS) {
+    const value = params.get(key);
+    if (value) out['$' + key] = value;
+  }
+  return out;
+}
+
 const MAX_LABEL_LENGTH = 80;
 
 function elementLabel(el: Element): string {
@@ -102,6 +120,7 @@ export function installAutocapture(
         path,
         $referrer: normalizeReferrer(lastUrl, internalHosts),
         title: document.title,
+        ...utmProperties(),
       });
       lastUrl = location.href;
     };

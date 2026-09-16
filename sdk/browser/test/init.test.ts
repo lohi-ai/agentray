@@ -172,6 +172,28 @@ describe('init()', () => {
     expect(pageview.properties.$referrer).toBe('https://google.com/');
   });
 
+  it('attaches the pageview\'s UTM tags from location.search', async () => {
+    const calls = stubFetch();
+    history.replaceState({}, '', '/landing?utm_source=newsletter&utm_campaign=launch-week');
+    const ar = init({ ...base, autocapture: true });
+    await ar.flush();
+
+    const pageview = calls.find((c) => c.path === '/batch')!.body.batch.find((e) => e.event === 'user.pageview')!;
+    expect(pageview.properties.$utm_source).toBe('newsletter');
+    expect(pageview.properties.$utm_campaign).toBe('launch-week');
+    // Untagged params are absent, not empty — the ingest columns stay ''.
+    expect(pageview.properties.$utm_medium).toBeUndefined();
+
+    // An SPA navigation that changes the query string re-reads it per view.
+    calls.length = 0;
+    history.pushState({}, '', '/pricing?utm_source=google');
+    await ar.flush();
+    const second = calls.find((c) => c.path === '/batch')!.body.batch.find((e) => e.event === 'user.pageview')!;
+    expect(second.properties.$utm_source).toBe('google');
+    expect(second.properties.$utm_campaign).toBeUndefined();
+    history.replaceState({}, '', '/');
+  });
+
   it('lets an explicit autocapture config override the init default', async () => {
     const calls = stubFetch();
     document.body.innerHTML = '<button>Plain</button>';

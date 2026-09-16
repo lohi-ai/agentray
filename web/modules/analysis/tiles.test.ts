@@ -50,6 +50,9 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
     content: {
       top_pages: { unit: 'pageviews', rows: [{ value: '/pricing', count: 612 }] },
       top_sources: { unit: 'pageviews', rows: [{ value: 'Direct / unknown', count: 540 }] },
+      top_utm_sources: { unit: 'pageviews', rows: [{ value: 'newsletter', count: 210 }] },
+      top_campaigns: { unit: 'pageviews', rows: [{ value: 'launch-week', count: 180 }] },
+      top_referrers: { unit: 'pageviews', rows: [{ value: 'google.com', count: 300 }] },
       traffic_by_class: { unit: 'pageviews', rows: [{ value: 'human', count: 4800 }, { value: 'ai-platform', count: 328 }] },
       ai_top_paths: { unit: 'pageviews', rows: [{ value: '/pricing', count: 88 }] },
       traffic_by_platform: { unit: 'pageviews', rows: [{ value: 'web', count: 5128 }] },
