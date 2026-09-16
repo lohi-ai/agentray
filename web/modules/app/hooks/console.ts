@@ -358,6 +358,7 @@ export function useEventNames() {
 export function useActivationCandidates() {
   const projectID = useAuthStore((s) => s.project?.id);
   const query = useQuery({
+    queryKey: ['activation-candidates', projectID],
     queryFn: () => new AgentRayAPI().activationCandidates(projectID!),
     enabled: !!projectID,
     staleTime: 10 * 60 * 1000,

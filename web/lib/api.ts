@@ -1996,6 +1996,10 @@ export class AgentRayAPI {
     return this.request<void>(`/api/workspaces/${workspaceID}/members/${userID}`, { method: 'DELETE' });
   }
 
+  createWorkspaceProject(workspaceID: string, name: string) {
+    return this.post<{ project: Project }>(`/api/workspaces/${workspaceID}/projects`, { name });
+  }
+
   updateProject(
     projectID: string,
     patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },

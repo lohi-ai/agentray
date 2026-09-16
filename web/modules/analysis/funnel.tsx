@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Filter } from 'lucide-react';
-import { AgentRayAPI, defaultFilters, type BoardTile, type Filters, type InsightResult, type OverviewResult } from '@/lib/api';
+import { AgentRayAPI, defaultFilters, type Filters, type InsightResult, type OverviewResult } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { formatFractionAsPercent } from '@/lib/format';
 import { funnelStepNames } from '@/lib/ia';
@@ -143,52 +143,6 @@ export function FunnelTile({ steps: declaredSteps, res, platform }: { steps?: st
         <Text type="supporting">No one entered this funnel in the selected range.</Text>
       ) : null}
       <PlatformFunnels splits={splits} loading={splitsLoading} />
-    </div>
-  );
-}
-
-// FunnelTile renders a board-declared funnel: the tile's steps are the
-// declaration, the insight read is the live computation over the board's
-// selected range — the same contract the metric tiles hold (the board serves
-// references, the client computes values). Drawn with the same pieces the
-// Usage funnel uses so a declared funnel is indistinguishable from the
-// derived one.
-export function FunnelTile({ tile, res, platform }: { tile: BoardTile; res: OverviewResult; platform: string }) {
-  const projectID = useAuthStore((s) => s.project?.id);
-  const steps = useMemo(() => tile.steps ?? [], [tile.steps]);
-  const filters = useMemo(() => boardFilters(res, platform), [res, platform]);
-  const funnelQuery = useQuery({
-    queryKey: ['board-funnel', projectID, filters, steps],
-    queryFn: () => new AgentRayAPI(projectID!).insight('funnel', filters, 'events', steps),
-    enabled: !!projectID && steps.length > 0,
-    staleTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: false,
-  });
-  const insight = funnelQuery.data?.insight ?? null;
-  const stats = insight ? headlineStats(insight) : [];
-
-  return (
-    <div className="flex flex-col gap-4">
-      {funnelQuery.isLoading ? <Loading label="Running funnel…" /> : null}
-      {funnelQuery.isError ? (
-        <Text type="supporting">The funnel read failed. Retry by changing the range or reloading the page.</Text>
-      ) : null}
-      {stats.length > 0 ? <StatsStrip stats={stats} /> : null}
-      {insight?.funnel?.length ? (
-        <>
-          <Chart spec={{
-            type: 'bar',
-            x: insight.funnel.map((f) => f.event_name),
-            series: [{ name: 'Users', data: insight.funnel.map((f) => f.users) }],
-            height: 240,
-          }} />
-          <FunnelTable funnel={insight.funnel} />
-        </>
-      ) : null}
-      {insight && !insight.funnel?.length && !funnelQuery.isLoading ? (
-        <Text type="supporting">No one entered this funnel in the selected range.</Text>
-      ) : null}
-      <p className="font-mono text-xs text-[var(--color-text-secondary)]">funnel · {steps.join(' → ')}</p>
     </div>
   );
 }
