@@ -120,15 +120,15 @@ function WeeklyDigestPanel({ canWrite, reason }: { canWrite: boolean; reason: st
 
   const addChannel = async () => {
     if (!canAddChannel) return;
-    const created = await createChannel.mutateAsync({
+    // The server attaches a workspace's first channel to every channel-less
+    // digest rule (attachChannelToDigestRules), so creating one here already
+    // wires the digest — no follow-up rule write.
+    await createChannel.mutateAsync({
       kind: 'slack',
       name: hookName.trim() || 'Slack',
       config: { webhook_url: hookURL.trim() },
     });
     setHookURL('');
-    // A channel added from this card is meant for the digest — attach it
-    // immediately instead of making the user tick it afterwards.
-    if (rule) save({ channels: [...rule.channels, created.channel.id] });
   };
 
   const schedule = rule?.schedule_cron === '0 9 * * 1' ? 'Mondays at 09:00 UTC' : (rule?.schedule_cron ?? 'Mondays at 09:00 UTC');
