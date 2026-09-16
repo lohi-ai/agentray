@@ -139,6 +139,19 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 // board somebody edited is never rewritten by boot.
 func previousDefaultBoards() map[string]BoardDefinition {
 	return map[string]BoardDefinition{
+		BoardKeyAcquisition: {
+			Version: BoardDefinitionVersion,
+			Sections: []BoardSection{{
+				Key:         "kpis",
+				Title:       "Acquisition",
+				Description: "First-time downloads is AgentRay new people (first observed qualifying activity). Ranked pages and sources stay visible, including Direct / unknown.",
+				Tiles: []BoardTile{
+					defaultTile("first-time-downloads", MetricNewUsers, DisplayStat, "First-time downloads", 1),
+					defaultTile("top-pages", MetricTopPages, DisplayBar, "Top pages", 2),
+					defaultTile("top-sources", MetricTopSources, DisplayBar, "Top acquisition sources", 2),
+				},
+			}},
+		},
 		BoardKeyMonetization: {
 			Version: BoardDefinitionVersion,
 			Sections: []BoardSection{{
