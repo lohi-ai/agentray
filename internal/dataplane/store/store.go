@@ -1861,7 +1861,16 @@ func (s *Store) SeedProjectFromTemplate(ctx context.Context, projectID string) e
 			return seedErr
 		}
 	}
-	return s.EnsureDefaultBoards(ctx, projectID)
+	if err := s.EnsureDefaultBoards(ctx, projectID); err != nil {
+		return err
+	}
+	// Seed the weekly decision digest so a new project gets the Monday summary
+	// without setup; non-fatal like the agent seed — a missing rule is
+	// recoverable from Settings, a failed signup is not.
+	if err := s.EnsureDefaultWeeklyDigest(ctx, projectID); err != nil {
+		fmt.Printf("warn: EnsureDefaultWeeklyDigest(%s): %v\n", projectID, err)
+	}
+	return nil
 }
 
 // InsertEvents durably stores a raw event batch in DuckDB (no person

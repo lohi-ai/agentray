@@ -872,7 +872,9 @@ export const ALERT_CHANNEL_KINDS = ['slack', 'email', 'webhook'] as const;
 export type AlertChannelKind = (typeof ALERT_CHANNEL_KINDS)[number];
 
 export type AlertCondition = {
-  op: AlertOp;
+  // 'none' is the digest marker the server stores (validateAlertOp only gates
+  // non-digest rules); it is not a selectable op in the rule form.
+  op: AlertOp | 'none';
   value: number;
   window?: number;
   min_events?: number;

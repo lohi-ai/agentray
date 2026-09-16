@@ -182,6 +182,22 @@ func uniqueStrings(ids []string) []string {
 	return out
 }
 
+// EnsureDefaultWeeklyDigest seeds the "Weekly Decision Digest" rule onto a new
+// project — every project gets the digest without setup. Idempotent: the
+// INSERT … WHERE NOT EXISTS on (project_id, source_kind='digest') makes a
+// re-run a no-op, and a rule the owner edited or paused is left alone. The
+// seeded rule has no channels; fanOut no-ops on an empty list, and the
+// settings card is where a destination gets attached.
+func (s *Store) EnsureDefaultWeeklyDigest(ctx context.Context, projectID string) error {
+	_, err := s.pg.Exec(ctx, `
+INSERT INTO alert_rules (project_id, name, source_kind, source_ref, condition, params, schedule_cron, channels, enabled)
+SELECT $1::uuid, 'Weekly Decision Digest', 'digest', '', '{"op":"none"}'::jsonb, '{"send_empty":false}'::jsonb, '0 9 * * 1', '[]'::jsonb, true
+WHERE NOT EXISTS (
+  SELECT 1 FROM alert_rules r WHERE r.project_id = $1::uuid AND r.source_kind = 'digest'
+)`, projectID)
+	return err
+}
+
 // --- rules CRUD ---
 
 // ListAlertRules returns a project's rules (member-readable).

@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { Plus } from 'lucide-react';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
@@ -8,16 +9,17 @@ import { VStack } from '@astryxdesign/core/VStack';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Selector } from '@astryxdesign/core/Selector';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
-import { apiBase, type Project, type WorkspaceAuditLog, type WorkspaceMember, type WorkspaceRole } from '@/lib/api';
+import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
+import { apiBase, type AlertRule, type AlertRuleInput, type Project, type WorkspaceAuditLog, type WorkspaceMember, type WorkspaceRole } from '@/lib/api';
 import { InstrumentSnippet } from '@/modules/start/components/instrument-snippet';
 import { formatCompact, formatNumber, formatRelative } from '@/lib/format';
 import { projectAccess } from '@/lib/ia';
 import { GOAL_OPTIONS } from '@/modules/overview/goal-prompt';
 import { EventNameCombobox } from '@/modules/shared/components/event-name-picker';
-import { useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
+import { useAlertChannels, useAlertRules, useCurrentProject, useProjectAccess, useWorkspaceAuditLogs, useWorkspaceMembers, useWorkspaceUsage } from '@/modules/app/hooks';
 import { ConfirmDialog, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { Button, EmptyState, Loading, Panel, Segment, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel, Segment, StatsStrip, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { AutoGrid } from '@/modules/shared/components/page-shell';
 
 const ROLES: WorkspaceRole[] = ['owner', 'admin', 'member'];
@@ -64,7 +66,163 @@ export function WorkspaceTab() {
           </Text>
         </VStack>
       </Panel>
+      <WeeklyDigestPanel canWrite={access.canWrite} reason={access.reason} />
     </AutoGrid>
+  );
+}
+
+const digestLabelCls = 'mb-1 block text-xs font-medium text-[var(--color-text-secondary)]';
+
+// The seeded digest rule's shape — identical to what EnsureDefaultWeeklyDigest
+// writes at project creation, so a legacy project's "Turn on" produces the
+// same row a new project gets for free.
+const DIGEST_RULE_INPUT: AlertRuleInput = {
+  name: 'Weekly Decision Digest',
+  source_kind: 'digest',
+  source_ref: '',
+  condition: { op: 'none', value: 0 },
+  params: { send_empty: false },
+  schedule_cron: '0 9 * * 1',
+  channels: [],
+  enabled: true,
+};
+
+function digestRuleInput(rule: AlertRule, patch: Partial<AlertRuleInput>): AlertRuleInput {
+  return {
+    name: rule.name,
+    source_kind: rule.source_kind,
+    source_ref: rule.source_ref,
+    condition: rule.condition,
+    params: rule.params,
+    schedule_cron: rule.schedule_cron,
+    channels: rule.channels,
+    enabled: rule.enabled,
+    ...patch,
+  };
+}
+
+// WeeklyDigestPanel surfaces the auto-provisioned digest rule where a user
+// looks for it — settings, not the alert-rule list. Channels are the shared
+// workspace alert_channels; attaching one here is the same row the Alerts
+// page manages.
+function WeeklyDigestPanel({ canWrite, reason }: { canWrite: boolean; reason: string }) {
+  const { rules, loading, create, update } = useAlertRules();
+  const { channels, create: createChannel } = useAlertChannels();
+  const [hookName, setHookName] = useState('Slack');
+  const [hookURL, setHookURL] = useState('');
+  const rule = rules.find((r) => r.source_kind === 'digest');
+  const canAddChannel = hookURL.trim() !== '' && canWrite;
+
+  const save = (patch: Partial<AlertRuleInput>) => {
+    if (!rule) return;
+    update.mutate({ id: rule.id, input: digestRuleInput(rule, patch) });
+  };
+
+  const addChannel = async () => {
+    if (!canAddChannel) return;
+    const created = await createChannel.mutateAsync({
+      kind: 'slack',
+      name: hookName.trim() || 'Slack',
+      config: { webhook_url: hookURL.trim() },
+    });
+    setHookURL('');
+    // A channel added from this card is meant for the digest — attach it
+    // immediately instead of making the user tick it afterwards.
+    if (rule) save({ channels: [...rule.channels, created.channel.id] });
+  };
+
+  const schedule = rule?.schedule_cron === '0 9 * * 1' ? 'Mondays at 09:00 UTC' : (rule?.schedule_cron ?? 'Mondays at 09:00 UTC');
+
+  return (
+    <Panel
+      title="Weekly digest"
+      action={rule ? (
+        <StatusPill status={rule.enabled ? 'healthy' : 'paused'} label={rule.enabled ? 'Enabled' : 'Paused'} grow={false} />
+      ) : loading ? undefined : (
+        <StatusPill status="attention" label="Not set up" grow={false} />
+      )}
+    >
+      {loading ? (
+        <Loading />
+      ) : !rule ? (
+        <>
+          <Text type="supporting">
+            A Monday-morning summary of what changed in this project — signups, retention, revenue — delivered to a channel.
+          </Text>
+          <div className="mt-3">
+            <Button variant="primary" size="sm" disabled={!canWrite || create.isPending} tooltip={reason || undefined}
+              onClick={() => create.mutate({ ...DIGEST_RULE_INPUT, channels: channels.slice(0, 1).map((c) => c.id) })}>
+              {create.isPending ? 'Turning on…' : 'Turn on weekly digest'}
+            </Button>
+          </div>
+          <Text type="supporting" className="mt-2 block">
+            Creates the same “Weekly Decision Digest” rule new projects get automatically. You can pause or delete it anytime from Alerts.
+          </Text>
+        </>
+      ) : (
+        <>
+          <Text type="supporting">{schedule} · a summary of what changed, delivered to a channel.</Text>
+
+          <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+            <span className={digestLabelCls}>Deliver to</span>
+            {channels.length === 0 ? (
+              <Text type="supporting">
+                No channel attached — the digest is computed but goes nowhere. Add a Slack webhook below, or manage channels on the{' '}
+                <Link href="/alerts" className="text-[var(--color-primary)] hover:underline">Alerts</Link> page.
+              </Text>
+            ) : (
+              <VStack gap={2} align="stretch">
+                {channels.map((c) => (
+                  <CheckboxInput
+                    key={c.id}
+                    label={`${c.name} (${c.kind})`}
+                    value={rule.channels.includes(c.id)}
+                    isDisabled={!canWrite || !rule.enabled}
+                    onChange={(v: boolean) =>
+                      save({ channels: v ? [...rule.channels, c.id] : rule.channels.filter((id) => id !== c.id) })
+                    }
+                  />
+                ))}
+                <Text type="supporting">
+                  Channels are shared with every alert rule in this workspace — manage them on the{' '}
+                  <Link href="/alerts" className="text-[var(--color-primary)] hover:underline">Alerts</Link> page.
+                </Text>
+              </VStack>
+            )}
+            {channels.length === 0 ? (
+              <>
+                <AutoGrid min={220} max={2} gap={3}>
+                  <div>
+                    <label className={digestLabelCls}>Name</label>
+                    <TextInput label="Channel name" isLabelHidden value={hookName} placeholder="Slack" onChange={setHookName} width="100%" isDisabled={!canWrite} />
+                  </div>
+                  <div>
+                    <label className={digestLabelCls}>Slack webhook URL</label>
+                    <TextInput label="Webhook URL" isLabelHidden value={hookURL} placeholder="https://hooks.slack.com/services/…" onChange={setHookURL} width="100%" isDisabled={!canWrite} />
+                  </div>
+                </AutoGrid>
+                <div className="mt-3">
+                  <Button variant="outline" size="sm" onClick={() => void addChannel()} disabled={!canAddChannel || createChannel.isPending} tooltip={reason || undefined}>
+                    {createChannel.isPending ? 'Adding…' : 'Add Slack webhook'}
+                  </Button>
+                </div>
+              </>
+            ) : null}
+          </div>
+
+          <HStack align="center" justify="between" className="mt-3 border-t border-[var(--color-border)] pt-3">
+            <Text type="supporting">{rule.enabled ? 'Pause the digest without deleting it.' : 'Paused — nothing is computed or sent.'}</Text>
+            <CheckboxInput
+              label="Digest enabled"
+              isLabelHidden
+              value={rule.enabled}
+              isDisabled={!canWrite || update.isPending}
+              onChange={(enabled: boolean) => save({ enabled })}
+            />
+          </HStack>
+        </>
+      )}
+    </Panel>
   );
 }
 
