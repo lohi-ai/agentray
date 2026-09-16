@@ -68,6 +68,9 @@ const (
 	MetricRetentionD30     = "retention_d30"
 	MetricTopPages         = "top_pages"
 	MetricTopSources       = "top_sources"
+	MetricTopUTMSources    = "top_utm_sources"
+	MetricTopCampaigns     = "top_campaigns"
+	MetricTopReferrers     = "top_referrers"
 	// The reads the retired /traffic, /web-analytics and /product surfaces
 	// served, absorbed into the overview contract (overview.v4).
 	MetricPageviews         = "pageviews"
@@ -144,6 +147,9 @@ const (
 	metricDefRetention         = "Return rate for mature lifetime first-activity cohorts: those who came back on day N over those whose day N had fully elapsed. Cohorts too young to have reached day N are excluded, not counted as zero."
 	metricDefTopPages          = "Pageviews of human product activity grouped by path, ranked. Direct and unattributed traffic is not dropped — it is its own row."
 	metricDefTopSources        = "Pageviews of human product activity grouped by referrer channel, with a missing channel reported as unknown rather than inferred."
+	metricDefTopUTMSources     = "Pageviews of human product activity grouped by the visit's utm_source tag, with untagged traffic reported as unknown rather than dropped."
+	metricDefTopCampaigns      = "Pageviews of human product activity grouped by the visit's utm_campaign tag, with untagged traffic reported as unknown rather than dropped."
+	metricDefTopReferrers      = "Pageviews of human product activity grouped by external referrer host; direct, internal and unattributed visits are excluded rather than ranked."
 	metricDefPageviews         = "Every received user.pageview event in the range, all visitor classes — a crawler's pageview is still a pageview. The traffic_by_class breakdown is the human/non-human split."
 	metricDefConversions       = "Every received user.conversion or user.signup event in the range, all visitor classes."
 	metricDefAIShare           = "Non-human share of classified pageviews: search-bot and ai-platform pageviews over all pageviews, as a percent."
@@ -271,6 +277,21 @@ var metricCatalogDecl = []MetricDefinition{
 	{
 		Key: MetricTopSources, Label: "Top sources", Unit: "pageviews", Kind: MetricKindBreakdown,
 		Group: MetricGroupAcquisition, Definition: metricDefTopSources,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTopUTMSources, Label: "Top UTM sources", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTopUTMSources,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTopCampaigns, Label: "Top campaigns", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTopCampaigns,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTopReferrers, Label: "Top referrers", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTopReferrers,
 		Displays: []string{DisplayTable, DisplayBar},
 	},
 }
@@ -558,7 +579,7 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			reading.Rate = &rate
 		}
 		return reading, nil
-	case MetricTopPages, MetricTopSources, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
+	case MetricTopPages, MetricTopSources, MetricTopUTMSources, MetricTopCampaigns, MetricTopReferrers, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
 		list := res.Content.TopPages
 		// The retired-surface breakdowns count every received event — their
 		// no-data gate is the range's event population, not qualifying
@@ -567,6 +588,12 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 		switch def.Key {
 		case MetricTopSources:
 			list = res.Content.TopSources
+		case MetricTopUTMSources:
+			list = res.Content.TopUTMSources
+		case MetricTopCampaigns:
+			list = res.Content.TopCampaigns
+		case MetricTopReferrers:
+			list = res.Content.TopReferrers
 		case MetricTrafficByClass:
 			list = res.Content.TrafficByClass
 			inRange = res.DataStatus.EventsInRange

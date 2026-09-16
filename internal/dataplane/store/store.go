@@ -210,6 +210,13 @@ type Event struct {
 	// two audiences added together. Empty means undetermined; it is rendered as
 	// "unknown" rather than folded into web.
 	Platform string `json:"platform,omitempty"`
+	// UTM campaign tags, lifted out of properties at ingest ($utm_source,
+	// $utm_medium, $utm_campaign — the browser SDK's autocapture names) so the
+	// acquisition board can group on a column instead of a JSON extract. Empty
+	// means the visit carried no tag; utm_term/utm_content stay in properties.
+	UTMSource   string `json:"utm_source,omitempty"`
+	UTMMedium   string `json:"utm_medium,omitempty"`
+	UTMCampaign string `json:"utm_campaign,omitempty"`
 	// InsertID is the caller-supplied idempotency key ($insert_id). Every money
 	// read de-duplicates on it — `coalesce(nullif(insert_id, ''), event_id)` in
 	// money.go's grid, keeping the greatest `(timestamp, event_id)` per key — so
@@ -2704,6 +2711,38 @@ WHERE `+where+` AND event_name = 'user.pageview'
 GROUP BY value
 ORDER BY count DESC
 LIMIT 20`, args, func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		result = append(result, item)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// acquisitionBreakdown is the shared ranked-list read behind the acquisition
+// board's breakdown tiles: human user pageviews in the window, grouped by one
+// events column. column is always a constant from this package — never caller
+// input. extra is an optional additional WHERE fragment (top_referrers uses it
+// to drop direct/internal/empty hosts so the tile ranks real referrers).
+func (s *Store) acquisitionBreakdown(ctx context.Context, where string, args []any, column, extra string) ([]PathCount, error) {
+	result := []PathCount{}
+	query := `
+SELECT if(` + column + ` = '', 'unknown', ` + column + `) AS value, count(*) AS count
+FROM events
+WHERE ` + where + ` AND event_name = 'user.pageview'`
+	if extra != "" {
+		query += ` AND ` + extra
+	}
+	query += `
+GROUP BY value
+ORDER BY count DESC
+LIMIT 20`
+	err := s.duckQuery(ctx, query, args, func(rows *sql.Rows) error {
 		var item PathCount
 		if err := rows.Scan(&item.Value, &item.Count); err != nil {
 			return err

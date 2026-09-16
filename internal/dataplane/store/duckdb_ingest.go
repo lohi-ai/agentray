@@ -49,7 +49,8 @@ func eventValueBytes(e Event) int {
 		len(e.DistinctID) + len(e.SessionID) + len(e.EventName) + len(e.EventType) +
 		len(e.AgentID) + len(e.ToolName) + len(e.ModelName) + len(e.BotName) +
 		len(e.ReferrerHost) + len(e.UserAgent) + len(e.InsertID) + len(e.Platform) +
-		len(e.VisitorClass) + len(e.ReferrerChannel)
+		len(e.VisitorClass) + len(e.ReferrerChannel) +
+		len(e.UTMSource) + len(e.UTMMedium) + len(e.UTMCampaign)
 	return n + 64
 }
 
@@ -60,14 +61,15 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	const cols = 27
+	const cols = 30
 	row := placeholders(cols)
 	prefix := `INSERT OR IGNORE INTO events (
 	project_id, event_id, distinct_id, session_id, event_name, event_type,
 	properties, agent_id, tool_name, tool_input, tool_output, tokens_input,
 	tokens_output, cost_usd, latency_ms, model_name, is_error, error_message,
 	"timestamp", visitor_class, bot_name, referrer_host, referrer_channel,
-	user_agent, insert_id, is_unplanned, platform
+	user_agent, insert_id, is_unplanned, platform,
+	utm_source, utm_medium, utm_campaign
 ) VALUES `
 	for start := 0; start < len(events); {
 		end, bytes := start, 0
@@ -119,6 +121,9 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 				nullableString(event.InsertID),
 				event.IsUnplanned,
 				event.Platform,
+				event.UTMSource,
+				event.UTMMedium,
+				event.UTMCampaign,
 			)
 		}
 		stmt := prefix + strings.TrimSuffix(strings.Repeat(row+",", len(chunk)), ",")

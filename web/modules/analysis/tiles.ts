@@ -119,6 +119,33 @@ export function analysisBars(res: OverviewResult, tile: BoardTile): AnalysisBars
       empty: 'No attributed sources in this range',
     };
   }
+  if (tile.metric === 'top_utm_sources') {
+    return {
+      label: titleOf(tile, 'Top UTM sources'),
+      unit: res.content.top_utm_sources.unit,
+      rows: res.content.top_utm_sources.rows,
+      provenance: tileProvenance(res, { kind: 'unserved' }),
+      empty: 'No UTM-tagged visits in this range',
+    };
+  }
+  if (tile.metric === 'top_campaigns') {
+    return {
+      label: titleOf(tile, 'Top campaigns'),
+      unit: res.content.top_campaigns.unit,
+      rows: res.content.top_campaigns.rows,
+      provenance: tileProvenance(res, { kind: 'unserved' }),
+      empty: 'No campaign-tagged visits in this range',
+    };
+  }
+  if (tile.metric === 'top_referrers') {
+    return {
+      label: titleOf(tile, 'Top referrers'),
+      unit: res.content.top_referrers.unit,
+      rows: res.content.top_referrers.rows,
+      provenance: tileProvenance(res, { kind: 'unserved' }),
+      empty: 'No external referrers in this range',
+    };
+  }
   if (tile.metric === 'traffic_by_class') {
     return {
       label: titleOf(tile, 'Traffic by type'),

@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/shared/config"
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -163,6 +165,29 @@ type insightResponse struct {
 			Rate   float64 `json:"rate"`
 		} `json:"retention"`
 	} `json:"insight"`
+}
+
+type overviewResponse struct {
+	Content struct {
+		TopUTMSources struct {
+			Rows []struct {
+				Value string `json:"value"`
+				Count uint64 `json:"count"`
+			} `json:"rows"`
+		} `json:"top_utm_sources"`
+		TopCampaigns struct {
+			Rows []struct {
+				Value string `json:"value"`
+				Count uint64 `json:"count"`
+			} `json:"rows"`
+		} `json:"top_campaigns"`
+		TopReferrers struct {
+			Rows []struct {
+				Value string `json:"value"`
+				Count uint64 `json:"count"`
+			} `json:"rows"`
+		} `json:"top_referrers"`
+	} `json:"content"`
 }
 
 type templatesResponse struct {
@@ -340,20 +365,23 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, pgPort))
+	waitForTCP(t, ctx, net.JoinHostPort(infraHost, fmt.Sprintf("%d", pgPort)))
+	waitForPostgres(t, ctx, fmt.Sprintf("postgres://lohi:lohi@%s/lohi_analytics?sslmode=disable", net.JoinHostPort(infraHost, fmt.Sprintf("%d", pgPort))))
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, redisPort))
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, natsPort))
+	waitForNATS(t, ctx, fmt.Sprintf("nats://%s:%d", infraHost, natsPort))
 
 	cfg := config.Config{
-		PostgresURL:          fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort),
-		DuckDBPath:           filepath.Join(t.TempDir(), "e2e.duckdb"),
-		RedisURL:             fmt.Sprintf("redis://%s:%d/0", infraHost, redisPort),
-		NATSURL:              fmt.Sprintf("nats://%s:%d", infraHost, natsPort),
-		IngestSubject:        "agentray.e2e.events.ingest",
-		RateLimitPerMinute:   100,
-		DefaultProjectName:   "AgentRay e2e",
-		DefaultProjectAPIKey: "agentray_e2e_token",
-		AllowedOrigins:       "http://localhost:3100,http://127.0.0.1:3100",
+		PostgresURL:            fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort),
+		DuckDBPath:             filepath.Join(t.TempDir(), "e2e.duckdb"),
+		RedisURL:               fmt.Sprintf("redis://%s:%d/0", infraHost, redisPort),
+		NATSURL:                fmt.Sprintf("nats://%s:%d", infraHost, natsPort),
+		IngestSubject:          "agentray.e2e.events.ingest",
+		IngestConnectorSubject: "agentray.e2e.events.ingest.connectors",
+		RateLimitPerMinute:     100,
+		DefaultProjectName:     "AgentRay e2e",
+		DefaultProjectAPIKey:   "agentray_e2e_token",
+		AllowedOrigins:         "http://localhost:3100,http://127.0.0.1:3100",
 	}
 	redisClient, err := openRedis(cfg.RedisURL)
 	if err != nil {
@@ -404,19 +432,12 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		t.Fatalf("unexpected auth/me response: %+v", me)
 	}
 
-	if signup.Project.Name != "Demo" {
-		t.Fatalf("first session should land on the published Demo workspace, got %q", signup.Project.Name)
+	// The caller's own project is the landing project — the shared demo is a
+	// separate membership (demo.go), not a synthetic project in their workspace.
+	if signup.Project.Name != "AgentRay bootstrap e2e" {
+		t.Fatalf("first session should land on the caller's project, got %q", signup.Project.Name)
 	}
-	emptyID := ""
-	for _, p := range signup.Projects {
-		if p.Name == "AgentRay bootstrap e2e" {
-			emptyID = p.ID
-			break
-		}
-	}
-	if emptyID == "" {
-		t.Fatalf("signup did not also create the caller's empty project: %+v", signup.Projects)
-	}
+	emptyID := signup.Project.ID
 	var emptyWeb webAnalyticsResponse
 	getJSONMust(t, client, ts.URL+"/api/web-analytics?project_id="+emptyID, &emptyWeb)
 	if emptyWeb.WebAnalytics.Visitors != 0 || emptyWeb.WebAnalytics.Pageviews != 0 {
@@ -504,7 +525,9 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 	activeKey := rotatedProject.Project.APIKey
 	noSessionClient := &http.Client{Timeout: 5 * time.Second}
-	assertStatus(t, noSessionClient, http.MethodPost, fmt.Sprintf("%s/api/projects/%s/rotate-key?api_key=%s", ts.URL, createdProject.Project.ID, activeKey), []byte(`{}`), http.StatusUnauthorized)
+	// A capture credential is a real credential — it authenticates (not 401)
+	// but carries no management grant, so rotate-key refuses it with 403.
+	assertStatus(t, noSessionClient, http.MethodPost, fmt.Sprintf("%s/api/projects/%s/rotate-key?api_key=%s", ts.URL, createdProject.Project.ID, activeKey), []byte(`{}`), http.StatusForbidden)
 
 	postE2EJSON(t, client, ts.URL+"/identify", map[string]any{
 		"api_key":     activeKey,
@@ -594,7 +617,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	var events eventsResponse
 	waitForCondition(t, ctx, "events readback", func() error {
-		return getJSON(client, ts.URL+"/api/events?api_key="+activeKey+"&limit=10", &events)
+		return getJSON(client, ts.URL+"/api/events?project_id="+createdProject.Project.ID+"&limit=10", &events)
 	}, func() bool {
 		names := make([]string, 0, len(events.Events))
 		for _, event := range events.Events {
@@ -608,7 +631,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	var sessions sessionsResponse
 	waitForCondition(t, ctx, "session aggregates", func() error {
-		return getJSON(client, ts.URL+"/api/sessions?api_key="+activeKey+"&limit=10", &sessions)
+		return getJSON(client, ts.URL+"/api/sessions?project_id="+createdProject.Project.ID+"&limit=10", &sessions)
 	}, func() bool {
 		for _, session := range sessions.Sessions {
 			if session.SessionID != "session-e2e-1" {
@@ -625,7 +648,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	var activity activityResponse
 	waitForCondition(t, ctx, "activity summary", func() error {
-		return getJSON(client, ts.URL+"/api/activity?api_key="+activeKey+"&hours=24", &activity)
+		return getJSON(client, ts.URL+"/api/activity?project_id="+createdProject.Project.ID+"&hours=24", &activity)
 	}, func() bool {
 		return activity.Summary.EventCount == 5 &&
 			activity.Summary.AgentEvents == 2 &&
@@ -638,7 +661,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	})
 
 	var filteredActivity activityResponse
-	getJSONMust(t, client, ts.URL+"/api/activity?api_key="+activeKey+"&hours=24&event_type=agent", &filteredActivity)
+	getJSONMust(t, client, ts.URL+"/api/activity?project_id="+createdProject.Project.ID+"&hours=24&event_type=agent", &filteredActivity)
 	if filteredActivity.Summary.EventCount != 2 ||
 		filteredActivity.Summary.AgentEvents != 2 ||
 		filteredActivity.Summary.TotalTokensIn != 23 ||
@@ -647,37 +670,37 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var userActivity activityResponse
-	getJSONMust(t, client, ts.URL+"/api/activity?api_key="+activeKey+"&hours=24&distinct_id=user-e2e-1", &userActivity)
+	getJSONMust(t, client, ts.URL+"/api/activity?project_id="+createdProject.Project.ID+"&hours=24&distinct_id=user-e2e-1", &userActivity)
 	if userActivity.Summary.EventCount != 5 {
 		t.Fatalf("filtered activity ignored distinct_id: %+v", userActivity.Summary)
 	}
 
 	var trend insightResponse
-	getJSONMust(t, client, ts.URL+"/api/insights/run?api_key="+activeKey+"&type=trend&hours=24", &trend)
+	getJSONMust(t, client, ts.URL+"/api/insights/run?project_id="+createdProject.Project.ID+"&type=trend&hours=24", &trend)
 	if trend.Insight.Type != "trend" || len(trend.Insight.Series) == 0 {
 		t.Fatalf("trend insight did not return a series: %+v", trend.Insight)
 	}
 
 	var funnel insightResponse
-	getJSONMust(t, client, ts.URL+"/api/insights/run?api_key="+activeKey+"&type=funnel&steps=user.pageview,user.conversion&hours=24", &funnel)
+	getJSONMust(t, client, ts.URL+"/api/insights/run?project_id="+createdProject.Project.ID+"&type=funnel&steps=user.pageview,user.conversion&hours=24", &funnel)
 	if len(funnel.Insight.Funnel) != 2 || funnel.Insight.Funnel[0].Users == 0 {
 		t.Fatalf("funnel insight did not return expected steps: %+v", funnel.Insight.Funnel)
 	}
 
 	var agentInsight insightResponse
-	getJSONMust(t, client, ts.URL+"/api/insights/run?api_key="+activeKey+"&type=agent&hours=24", &agentInsight)
+	getJSONMust(t, client, ts.URL+"/api/insights/run?project_id="+createdProject.Project.ID+"&type=agent&hours=24", &agentInsight)
 	if len(agentInsight.Insight.Rows) == 0 {
 		t.Fatalf("agent insight returned no rows")
 	}
 
 	var retention insightResponse
-	getJSONMust(t, client, ts.URL+"/api/insights/run?api_key="+activeKey+"&type=retention&metric=user.pageview&hours=24", &retention)
+	getJSONMust(t, client, ts.URL+"/api/insights/run?project_id="+createdProject.Project.ID+"&type=retention&metric=user.pageview&hours=24", &retention)
 	if retention.Insight.Type != "retention" || len(retention.Insight.Retention) == 0 {
 		t.Fatalf("unexpected retention insight: %+v", retention.Insight)
 	}
 
 	var tableInsight insightResponse
-	getJSONMust(t, client, ts.URL+"/api/insights/run?api_key="+activeKey+"&type=table&hours=24&limit=10", &tableInsight)
+	getJSONMust(t, client, ts.URL+"/api/insights/run?project_id="+createdProject.Project.ID+"&type=table&hours=24&limit=10", &tableInsight)
 	if len(tableInsight.Insight.Rows) == 0 {
 		t.Fatalf("table insight returned no rows")
 	}
@@ -695,7 +718,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	var webAnalytics webAnalyticsResponse
 	waitForCondition(t, ctx, "web analytics provider split", func() error {
-		return getJSON(client, ts.URL+"/api/web-analytics?api_key="+activeKey+"&hours=24", &webAnalytics)
+		return getJSON(client, ts.URL+"/api/web-analytics?project_id="+createdProject.Project.ID+"&hours=24", &webAnalytics)
 	}, func() bool {
 		if webAnalytics.WebAnalytics.Pageviews != 2 ||
 			webAnalytics.WebAnalytics.Conversions != 1 ||
@@ -711,27 +734,63 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		return false
 	})
 
+	// A UTM-tagged pageview rides the same ingest path as every other event:
+	// the tags land in dedicated columns and the acquisition breakdowns group
+	// on them — the acceptance path for the UTM capture ticket.
+	postE2EJSON(t, client, ts.URL+"/capture", map[string]any{
+		"api_key":     activeKey,
+		"event":       "user.pageview",
+		"distinct_id": "user-e2e-1",
+		"properties": map[string]any{
+			"path":          "/landing",
+			"$referrer":     "https://news.example.com/story",
+			"$utm_source":   "newsletter",
+			"$utm_medium":   "email",
+			"$utm_campaign": "launch-week",
+		},
+	})
+
+	var overview overviewResponse
+	waitForCondition(t, ctx, "overview UTM breakdowns", func() error {
+		return getJSON(client, ts.URL+"/api/overview?project_id="+createdProject.Project.ID+"&period=today", &overview)
+	}, func() bool {
+		hasRow := func(rows []struct {
+			Value string `json:"value"`
+			Count uint64 `json:"count"`
+		}, value string) bool {
+			for _, row := range rows {
+				if row.Value == value && row.Count >= 1 {
+					return true
+				}
+			}
+			return false
+		}
+		return hasRow(overview.Content.TopUTMSources.Rows, "newsletter") &&
+			hasRow(overview.Content.TopCampaigns.Rows, "launch-week") &&
+			hasRow(overview.Content.TopReferrers.Rows, "news.example.com")
+	})
+
 	var explorer explorerResponse
-	getJSONMust(t, client, ts.URL+"/api/events/explore?api_key="+activeKey+"&session_id=session-e2e-1&limit=20", &explorer)
+	getJSONMust(t, client, ts.URL+"/api/events/explore?project_id="+createdProject.Project.ID+"&session_id=session-e2e-1&limit=20", &explorer)
 	if len(explorer.Explorer.Events) != 2 || len(explorer.Explorer.Timeline) != 2 {
 		t.Fatalf("unexpected explorer result: %+v", explorer.Explorer)
 	}
 
 	var unfocusedExplorer explorerResponse
-	getJSONMust(t, client, ts.URL+"/api/events/explore?api_key="+activeKey+"&limit=20", &unfocusedExplorer)
+	getJSONMust(t, client, ts.URL+"/api/events/explore?project_id="+createdProject.Project.ID+"&limit=20", &unfocusedExplorer)
 	if unfocusedExplorer.Explorer.Timeline == nil {
 		t.Fatal("unfocused explorer timeline should serialize as an empty array, not null")
 	}
 
 	var replay replayResponse
-	getJSONMust(t, client, ts.URL+"/api/sessions/session-e2e-1/replay?api_key="+activeKey, &replay)
+	getJSONMust(t, client, ts.URL+"/api/sessions/session-e2e-1/replay?project_id="+createdProject.Project.ID, &replay)
 	if replay.Replay.EventCount != 2 || replay.Replay.TotalTokensIn != 23 || replay.Replay.TotalTokensOut != 10 || len(replay.Replay.Events) != 2 {
 		t.Fatalf("unexpected replay: %+v", replay.Replay)
 	}
 
 	var oldReplay replayResponse
 	waitForCondition(t, ctx, "old replay", func() error {
-		return getJSON(client, ts.URL+"/api/sessions/"+oldSessionID+"/replay?api_key="+activeKey, &oldReplay)
+		return getJSON(client, ts.URL+"/api/sessions/"+oldSessionID+"/replay?project_id="+createdProject.Project.ID, &oldReplay)
 	}, func() bool {
 		return oldReplay.Replay.EventCount == 1 &&
 			oldReplay.Replay.TotalTokensIn == 5 &&
@@ -740,9 +799,9 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	})
 
 	var saved savedQueryResponse
-	requestJSON(t, client, http.MethodPost, ts.URL+"/api/saved-queries?api_key="+activeKey, map[string]any{
+	requestJSON(t, client, http.MethodPost, ts.URL+"/api/saved-queries?project_id="+createdProject.Project.ID, map[string]any{
 		"natural_language": "Events by type",
-		"generated_sql":    "SELECT event_type, count() AS events FROM events WHERE project_id = {project_id} GROUP BY event_type",
+		"generated_sql":    "SELECT event_type, count() AS event_count FROM events WHERE project_id = {project_id} GROUP BY event_type",
 		"verified":         true,
 	}, &saved, http.StatusCreated)
 	if saved.SavedQuery.ID == "" {
@@ -750,13 +809,13 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var savedRun savedQueryRunResponse
-	requestJSON(t, client, http.MethodPost, ts.URL+"/api/saved-queries/"+saved.SavedQuery.ID+"/run?api_key="+activeKey, map[string]any{}, &savedRun, http.StatusOK)
+	requestJSON(t, client, http.MethodPost, ts.URL+"/api/saved-queries/"+saved.SavedQuery.ID+"/run?project_id="+createdProject.Project.ID, map[string]any{}, &savedRun, http.StatusOK)
 	if len(savedRun.Result.Rows) == 0 {
 		t.Fatalf("saved query returned no rows")
 	}
 
 	var createdDashboard dashboardResponse
-	requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards?api_key="+activeKey, map[string]any{
+	requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards?project_id="+createdProject.Project.ID, map[string]any{
 		"name":        "Agent ops",
 		"description": "Agent usage and cost",
 	}, &createdDashboard, http.StatusCreated)
@@ -765,7 +824,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var updatedDashboard dashboardResponse
-	requestJSON(t, client, http.MethodPut, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"?api_key="+activeKey, map[string]any{
+	requestJSON(t, client, http.MethodPut, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"?project_id="+createdProject.Project.ID, map[string]any{
 		"name":        "Agent operations",
 		"description": "Live agent usage and cost",
 	}, &updatedDashboard, http.StatusOK)
@@ -774,7 +833,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var dashboards dashboardsResponse
-	getJSONMust(t, client, ts.URL+"/api/dashboards?api_key="+activeKey, &dashboards)
+	getJSONMust(t, client, ts.URL+"/api/dashboards?project_id="+createdProject.Project.ID, &dashboards)
 	hasCreatedDashboard := false
 	for _, dashboard := range dashboards.Dashboards {
 		if dashboard.ID == createdDashboard.Dashboard.ID {
@@ -787,7 +846,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var createdChart chartResponse
-	requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"/charts?api_key="+activeKey, map[string]any{
+	requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"/charts?project_id="+createdProject.Project.ID, map[string]any{
 		"name":       "Tool calls",
 		"kind":       "bar",
 		"metric":     "event_breakdown",
@@ -799,7 +858,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var updatedChart chartResponse
-	requestJSON(t, client, http.MethodPut, ts.URL+"/api/charts/"+createdChart.Chart.ID+"?api_key="+activeKey, map[string]any{
+	requestJSON(t, client, http.MethodPut, ts.URL+"/api/charts/"+createdChart.Chart.ID+"?project_id="+createdProject.Project.ID, map[string]any{
 		"name":       "Agent events",
 		"kind":       "line",
 		"metric":     "events",
@@ -811,16 +870,16 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var charts chartsResponse
-	getJSONMust(t, client, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"/charts?api_key="+activeKey, &charts)
+	getJSONMust(t, client, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"/charts?project_id="+createdProject.Project.ID, &charts)
 	if len(charts.Charts) != 1 || charts.Charts[0].Name != "Agent events" {
 		t.Fatalf("unexpected chart list: %+v", charts.Charts)
 	}
 
-	assertStatus(t, client, http.MethodDelete, ts.URL+"/api/charts/"+createdChart.Chart.ID+"?api_key="+activeKey, nil, http.StatusNoContent)
-	assertStatus(t, client, http.MethodDelete, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"?api_key="+activeKey, nil, http.StatusNoContent)
+	assertStatus(t, client, http.MethodDelete, ts.URL+"/api/charts/"+createdChart.Chart.ID+"?project_id="+createdProject.Project.ID, nil, http.StatusNoContent)
+	assertStatus(t, client, http.MethodDelete, ts.URL+"/api/dashboards/"+createdDashboard.Dashboard.ID+"?project_id="+createdProject.Project.ID, nil, http.StatusNoContent)
 
 	var templates templatesResponse
-	getJSONMust(t, client, ts.URL+"/api/templates?api_key="+activeKey, &templates)
+	getJSONMust(t, client, ts.URL+"/api/templates?project_id="+createdProject.Project.ID, &templates)
 	if len(templates.Templates) < 4 {
 		t.Fatalf("expected dashboard templates, got %+v", templates.Templates)
 	}
@@ -837,7 +896,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var applied templateApplyResponse
-	requestJSON(t, client, http.MethodPost, ts.URL+"/api/templates/"+aiAgentOpsID+"/apply?api_key="+activeKey, map[string]any{}, &applied, http.StatusCreated)
+	requestJSON(t, client, http.MethodPost, ts.URL+"/api/templates/"+aiAgentOpsID+"/apply?project_id="+createdProject.Project.ID, map[string]any{}, &applied, http.StatusCreated)
 	if applied.Dashboard.ID == "" || len(applied.Charts) == 0 {
 		t.Fatalf("template did not create dashboard/charts: %+v", applied)
 	}
@@ -848,7 +907,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	// ── Templates: all 4 system templates with correct chart counts ───────────
 	t.Run("TestTemplatesFromDB", func(t *testing.T) {
 		var tmplsResp templatesResponse
-		getJSONMust(t, client, ts.URL+"/api/templates?api_key="+activeKey, &tmplsResp)
+		getJSONMust(t, client, ts.URL+"/api/templates?project_id="+createdProject.Project.ID, &tmplsResp)
 		want := map[string]int{
 			"Product Overview": 8,
 			"AI Agent Ops":     4,
@@ -869,7 +928,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	// ── Templates: clone a single chart into a dashboard ─────────────────────
 	t.Run("TestCloneTemplateChart", func(t *testing.T) {
 		var tmplsResp templatesResponse
-		getJSONMust(t, client, ts.URL+"/api/templates?api_key="+activeKey, &tmplsResp)
+		getJSONMust(t, client, ts.URL+"/api/templates?project_id="+createdProject.Project.ID, &tmplsResp)
 
 		var templateID, chartID string
 		for _, tmpl := range tmplsResp.Templates {
@@ -891,7 +950,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 			} `json:"dashboard"`
 		}
 		var newDash createDashResp
-		requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards?api_key="+activeKey,
+		requestJSON(t, client, http.MethodPost, ts.URL+"/api/dashboards?project_id="+createdProject.Project.ID,
 			map[string]any{"name": "Clone target", "description": ""}, &newDash, http.StatusCreated)
 		if newDash.Dashboard.ID == "" {
 			t.Fatal("failed to create target dashboard")
@@ -906,7 +965,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		}
 		var cloned cloneChartResp
 		requestJSON(t, client, http.MethodPost,
-			ts.URL+"/api/templates/"+templateID+"/charts/"+chartID+"/clone?api_key="+activeKey,
+			ts.URL+"/api/templates/"+templateID+"/charts/"+chartID+"/clone?project_id="+createdProject.Project.ID,
 			map[string]any{"dashboard_id": newDash.Dashboard.ID}, &cloned, http.StatusCreated)
 		if cloned.Chart.ID == "" || cloned.Chart.DashboardID != newDash.Dashboard.ID {
 			t.Fatalf("cloned chart incorrect: %+v", cloned)
@@ -915,9 +974,16 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	// ── Templates: new project seeded from Product Overview template ──────────
 	t.Run("TestSeedProjectFromTemplate", func(t *testing.T) {
-		// Sign up a brand-new user to trigger SeedProjectFromTemplate.
+		// Sign up a brand-new user to trigger SeedProjectFromTemplate. The
+		// signup rotates the session cookie, so it goes through its own client —
+		// the shared one must stay the admin for the rest of the suite.
+		seedJar, err := cookiejar.New(nil)
+		if err != nil {
+			t.Fatalf("seed cookie jar: %v", err)
+		}
+		seedClient := &http.Client{Jar: seedJar, Timeout: 10 * time.Second}
 		var authResp authResponse
-		requestJSON(t, client, http.MethodPost, ts.URL+"/api/auth/signup",
+		requestJSON(t, seedClient, http.MethodPost, ts.URL+"/api/auth/signup",
 			map[string]any{
 				"email": "seed-test@example.com", "name": "Seed Tester",
 				"password": "SeedTest1!", "workspace_name": "SeedWS", "project_name": "SeedProj",
@@ -925,7 +991,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 		if len(authResp.Projects) == 0 {
 			t.Fatal("signup did not return a project")
 		}
-		seedKey := authResp.Projects[0].APIKey
+		seedProjectID := authResp.Projects[0].ID
 
 		type dashListResp struct {
 			Dashboards []struct {
@@ -935,7 +1001,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 			} `json:"dashboards"`
 		}
 		var dashList dashListResp
-		getJSONMust(t, client, ts.URL+"/api/dashboards?api_key="+seedKey, &dashList)
+		getJSONMust(t, seedClient, ts.URL+"/api/dashboards?project_id="+seedProjectID, &dashList)
 		if len(dashList.Dashboards) == 0 {
 			t.Fatal("new project has no dashboards")
 		}
@@ -963,7 +1029,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 			} `json:"charts"`
 		}
 		var chartList chartListResp
-		getJSONMust(t, client, ts.URL+"/api/dashboards/"+chartBoardID+"/charts?api_key="+seedKey, &chartList)
+		getJSONMust(t, seedClient, ts.URL+"/api/dashboards/"+chartBoardID+"/charts?project_id="+seedProjectID, &chartList)
 		if len(chartList.Charts) < 2 {
 			t.Fatalf("seeded dashboard has %d charts, want >= 2", len(chartList.Charts))
 		}
@@ -1014,7 +1080,7 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 
 	var persons personsResponse
 	waitForCondition(t, ctx, "alias persons merge", func() error {
-		return getJSON(client, ts.URL+"/api/persons?api_key="+activeKey, &persons)
+		return getJSON(client, ts.URL+"/api/persons?project_id="+createdProject.Project.ID, &persons)
 	}, func() bool {
 		// anon-pre-login must not appear as a separate person.
 		for _, p := range persons.Persons.Persons {
@@ -1038,19 +1104,19 @@ func TestAnalyticsServiceE2E(t *testing.T) {
 	}
 
 	var aliasActivity activityResponse
-	getJSONMust(t, client, ts.URL+"/api/activity?api_key="+activeKey+"&hours=24&distinct_id=user-after-login", &aliasActivity)
+	getJSONMust(t, client, ts.URL+"/api/activity?project_id="+createdProject.Project.ID+"&hours=24&distinct_id=user-after-login", &aliasActivity)
 	if aliasActivity.Summary.EventCount < 4 || aliasActivity.Summary.DistinctUsers != 1 {
 		t.Fatalf("aliased activity filter did not include anonymous history: %+v", aliasActivity.Summary)
 	}
 
 	var aliasWeb webAnalyticsResponse
-	getJSONMust(t, client, ts.URL+"/api/web-analytics?api_key="+activeKey+"&hours=24&distinct_id=user-after-login", &aliasWeb)
+	getJSONMust(t, client, ts.URL+"/api/web-analytics?project_id="+createdProject.Project.ID+"&hours=24&distinct_id=user-after-login", &aliasWeb)
 	if aliasWeb.WebAnalytics.Visitors != 1 || aliasWeb.WebAnalytics.Pageviews < 3 {
 		t.Fatalf("aliased web analytics did not canonicalize visitors: %+v", aliasWeb.WebAnalytics)
 	}
 
 	var aliasExplorer explorerResponse
-	getJSONMust(t, client, ts.URL+"/api/events/explore?api_key="+activeKey+"&hours=24&distinct_id=user-after-login&limit=20", &aliasExplorer)
+	getJSONMust(t, client, ts.URL+"/api/events/explore?project_id="+createdProject.Project.ID+"&hours=24&distinct_id=user-after-login&limit=20", &aliasExplorer)
 	hasRawAnonEvent := false
 	for _, event := range aliasExplorer.Explorer.Events {
 		if event.DistinctID == "anon-pre-login" {
@@ -1101,6 +1167,41 @@ func waitForTCP(t *testing.T, ctx context.Context, addr string) {
 			return err
 		}
 		_ = conn.Close()
+		return nil
+	}, func() bool {
+		return true
+	})
+}
+
+// waitForPostgres waits for the server to answer a real query, not just accept
+// a socket: postgres:16-alpine opens its port while initdb is still running and
+// resets connections that arrive early, which is exactly the failure a bare
+// waitForTCP produces.
+func waitForPostgres(t *testing.T, ctx context.Context, url string) {
+	t.Helper()
+	waitForCondition(t, ctx, "postgres "+url, func() error {
+		conn, err := pgx.Connect(ctx, url)
+		if err != nil {
+			return err
+		}
+		defer conn.Close(ctx)
+		return conn.Ping(ctx)
+	}, func() bool {
+		return true
+	})
+}
+
+// waitForNATS waits for a real client handshake: nats:2-alpine binds its port
+// before it is ready to serve, so a bare TCP dial can succeed and the app's
+// own connect still fail with "no servers available".
+func waitForNATS(t *testing.T, ctx context.Context, url string) {
+	t.Helper()
+	waitForCondition(t, ctx, "nats "+url, func() error {
+		nc, err := nats.Connect(url)
+		if err != nil {
+			return err
+		}
+		nc.Close()
 		return nil
 	}, func() bool {
 		return true

@@ -42,6 +42,9 @@ export const EVENTS_COLUMNS: EventColumn[] = [
   { name: 'insert_id', type: 'VARCHAR', note: 'Idempotency key' },
   { name: 'is_unplanned', type: 'BOOLEAN' },
   { name: 'platform', type: 'VARCHAR', note: 'web / ios / android / server' },
+  { name: 'utm_source', type: 'VARCHAR', note: 'Campaign source tag ($utm_source)' },
+  { name: 'utm_medium', type: 'VARCHAR', note: 'Campaign medium tag ($utm_medium)' },
+  { name: 'utm_campaign', type: 'VARCHAR', note: 'Campaign name tag ($utm_campaign)' },
 ];
 
 export const EVENTS_COLUMN_NAMES = EVENTS_COLUMNS.map((c) => c.name);

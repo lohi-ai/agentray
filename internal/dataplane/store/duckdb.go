@@ -41,7 +41,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 2
+const DuckDBSchemaVersion = 3
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -284,8 +284,25 @@ var duckDBSchema = []string{
 		insert_id VARCHAR,
 		is_unplanned BOOLEAN NOT NULL DEFAULT false,
 		platform VARCHAR NOT NULL DEFAULT '',
+		utm_source VARCHAR NOT NULL DEFAULT '',
+		utm_medium VARCHAR NOT NULL DEFAULT '',
+		utm_campaign VARCHAR NOT NULL DEFAULT '',
 		PRIMARY KEY (project_id, event_id)
 	)`,
+	// Column additions for files created before the UTM tags existed: CREATE
+	// TABLE IF NOT EXISTS leaves an existing events table alone, so the same
+	// three columns are added here idempotently. DuckDB cannot ADD COLUMN with
+	// NOT NULL in one statement, so each column lands nullable-with-default
+	// (existing rows backfill to '') and the constraint is applied after —
+	// both statements are safe on a file that already has the column.
+	// The sandbox schema (duckdb_sandbox.go) mirrors this column order
+	// exactly — its refresh copies SELECT *, so the two lists must never drift.
+	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_source VARCHAR DEFAULT ''`,
+	`ALTER TABLE events ALTER COLUMN utm_source SET NOT NULL`,
+	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_medium VARCHAR DEFAULT ''`,
+	`ALTER TABLE events ALTER COLUMN utm_medium SET NOT NULL`,
+	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR DEFAULT ''`,
+	`ALTER TABLE events ALTER COLUMN utm_campaign SET NOT NULL`,
 	// aliases mirrors the Postgres source of truth (reconciled at boot,
 	// upserted on write). resolved_events joins through it for canonical-id
 	// stitching.
