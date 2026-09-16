@@ -82,7 +82,7 @@ export function GoalPrompt({
   // cohort has matured; not_ready and a failed fetch both fall back to the
   // catalog list so the pick is never blocked by the ranking read.
   const suggestions = useActivationCandidates();
-  const ranked = suggestions.data?.state === 'ok' ? suggestions.data.candidates : null;
+  const ranked = suggestions.data?.state === 'ok' && suggestions.data.candidates.length > 0 ? suggestions.data.candidates : null;
 
   // Hide if the prompt was dismissed, or goal is already recorded and not in active flow,
   // or user cannot write
@@ -166,7 +166,14 @@ export function GoalPrompt({
         ) : null}
 
         <div className="flex flex-col gap-2" role="group" aria-label="Select activation event">
-          {ranked ? (
+          {suggestions.loading ? (
+            // Hold the list until the ranking read settles: rendering the
+            // catalog first would swap the rows out from under a click and
+            // could orphan a selection that is not in the ranked set.
+            <div className="flex min-h-[44px] items-center rounded-[var(--radius-md)] border border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
+              Ranking your events…
+            </div>
+          ) : ranked ? (
             ranked.map((c) => (
               <ActivationSuggestionRow
                 key={c.event_name}

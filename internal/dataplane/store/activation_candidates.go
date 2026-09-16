@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 )
+
 // ActivationCandidate is one event name ranked as a possible activation event,
 // with the evidence behind the rank: how many new users reached it inside
 // their first 7 days (reach), and how much likelier they were to return on
@@ -35,8 +36,38 @@ type ActivationCandidates struct {
 // so the picker serves the raw catalog instead of a confident-looking rank.
 const activationCohortFloor = 20
 
+// activationCandidatePool is how many event names the query returns ordered by
+// reach before Go ranks them by lift — wide enough that a high-lift,
+// lower-volume event is not truncated before its lift is measured.
+const activationCandidatePool = 64
+
 // activationCandidateCap bounds the suggestion list the picker renders.
 const activationCandidateCap = 8
+
+// activationFirstsCTE is the cohort both queries share: first-ever qualifying
+// activity per stitched identity (the same `firsts` overviewActivation and
+// overviewRetention build), narrowed to members whose local 7-day window has
+// fully closed by the bound `now` — identical eligibility to the activation
+// metric's `eligible`.
+const activationFirstsCTE = `
+WITH firsts AS (
+	SELECT canonical_distinct_id AS cid, min("timestamp") AS first_ts
+	FROM resolved_events
+	WHERE project_id = ? AND ` + overviewQualifying + `
+	GROUP BY cid
+),
+mature AS (
+	SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
+	FROM firsts
+	WHERE CAST(timezone(?, first_ts) AS DATE) + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)
+),
+returned AS (
+	SELECT DISTINCT r.canonical_distinct_id AS cid
+	FROM resolved_events r
+	INNER JOIN mature m ON r.canonical_distinct_id = m.cid
+	WHERE r.project_id = ? AND ` + overviewQualifying + `
+	  AND CAST(timezone(?, r."timestamp") AS DATE) = m.cohort_day + INTERVAL '7 days'
+)`
 
 // SuggestActivationEvents ranks a project's event names as activation-event
 // candidates. The cohort is the same one overviewActivation computes against —
@@ -46,7 +77,7 @@ const activationCandidateCap = 8
 // firing the event on cohort days 0–7; lift is the D7 return rate of the
 // users who fired it minus the cohort's own D7 rate. Read-only; the query
 // mirrors the overview's resolved_events shape and stays bounded by the
-// candidate cap.
+// candidate pool.
 func (s *Store) SuggestActivationEvents(ctx context.Context, projectID string, now time.Time) (ActivationCandidates, error) {
 	out := ActivationCandidates{State: OverviewStateNotReady, Candidates: []ActivationCandidate{}}
 	timezone, err := s.projectTimezone(ctx, projectID)
@@ -54,82 +85,50 @@ func (s *Store) SuggestActivationEvents(ctx context.Context, projectID string, n
 		return out, err
 	}
 
-	// The mature cohort: first-ever qualifying activity per identity, kept only
-	// when its local 7-day window has fully closed — identical eligibility to
-	// overviewActivation's `eligible`.
-	firsts := `
-SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
-FROM (
-	SELECT canonical_distinct_id AS cid, min("timestamp") AS first_ts
-	FROM resolved_events
-	WHERE project_id = ? AND ` + overviewQualifying + `
-	GROUP BY cid
-)`
-	var cohortSize uint64
-	err = s.duckQueryRow(ctx, `
-SELECT count(*)
-FROM (`+firsts+`) f
-WHERE f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)`,
-		[]any{timezone, projectID, timezone, now}, &cohortSize)
+	// Cohort size and baseline D7 in one pass: baseline is the share of the
+	// mature cohort with a qualifying event on local day 7 — the same day-N
+	// semantics overviewRetention uses.
+	var baselineReturned uint64
+	err = s.duckQueryRow(ctx, activationFirstsCTE+`
+SELECT (SELECT count(*) FROM mature), (SELECT count(*) FROM returned)`,
+		[]any{projectID, timezone, timezone, timezone, now, projectID, timezone},
+		&out.CohortSize, &baselineReturned)
 	if err != nil {
 		return out, err
 	}
-	out.CohortSize = cohortSize
-	if cohortSize < activationCohortFloor {
+	if out.CohortSize < activationCohortFloor {
 		return out, nil
 	}
-
-	// Baseline D7: share of the mature cohort with a qualifying event on local
-	// day 7 — the same day-N semantics overviewRetention uses.
-	var baselineReturned uint64
-	err = s.duckQueryRow(ctx, `
-SELECT count(DISTINCT e.canonical_distinct_id)
-FROM resolved_events e
-INNER JOIN (`+firsts+`) f ON e.canonical_distinct_id = f.cid
-WHERE e.project_id = ? AND `+overviewQualifying+`
-  AND CAST(timezone(?, e."timestamp") AS DATE) = f.cohort_day + INTERVAL '7 days'
-  AND f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)`,
-		[]any{timezone, projectID, projectID, timezone, timezone, now}, &baselineReturned)
-	if err != nil {
-		return out, err
-	}
-	baseline := float64(baselineReturned) / float64(cohortSize)
+	baseline := float64(baselineReturned) / float64(out.CohortSize)
 
 	// Per event: users = mature cohort members who fired it on cohort days 0–7;
-	// d7 = the day-7 return rate of exactly those members (EXISTS, so a member
-	// who never returned still lands in the denominator).
-	err = s.duckQuery(ctx, `
-SELECT e.event_name,
-	count(DISTINCT e.canonical_distinct_id) AS users,
-	count(DISTINCT e.canonical_distinct_id) FILTER (WHERE EXISTS (
-		SELECT 1 FROM resolved_events r
-		INNER JOIN (`+firsts+`) rf ON r.canonical_distinct_id = rf.cid
-		WHERE r.project_id = ? AND `+overviewQualifying+`
-		  AND r.canonical_distinct_id = e.canonical_distinct_id
-		  AND CAST(timezone(?, r."timestamp") AS DATE) = rf.cohort_day + INTERVAL '7 days'
-	)) AS returned_d7
-FROM resolved_events e
-INNER JOIN (`+firsts+`) f ON e.canonical_distinct_id = f.cid
-WHERE e.project_id = ? AND `+overviewQualifying+`
-  AND CAST(timezone(?, e."timestamp") AS DATE) >= f.cohort_day
-  AND CAST(timezone(?, e."timestamp") AS DATE) <= f.cohort_day + INTERVAL '7 days'
-  AND f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)
-GROUP BY e.event_name
+	// d7 = the day-7 return rate of exactly those members (LEFT JOIN, so a
+	// member who never returned still lands in the denominator). The pool is
+	// ordered by reach and capped wide; Go ranks by lift after.
+	err = s.duckQuery(ctx, activationFirstsCTE+`,
+reached AS (
+	SELECT e.event_name AS name, e.canonical_distinct_id AS cid
+	FROM resolved_events e
+	INNER JOIN mature m ON e.canonical_distinct_id = m.cid
+	WHERE e.project_id = ? AND `+overviewQualifying+` AND e.event_name <> ''
+	  AND CAST(timezone(?, e."timestamp") AS DATE) >= m.cohort_day
+	  AND CAST(timezone(?, e."timestamp") AS DATE) <= m.cohort_day + INTERVAL '7 days'
+	GROUP BY e.event_name, e.canonical_distinct_id
+)
+SELECT re.name, count(*) AS users, count(ret.cid) AS returned_d7
+FROM reached re
+LEFT JOIN returned ret ON ret.cid = re.cid
+GROUP BY re.name
 ORDER BY users DESC
 LIMIT ?`,
-		// Placeholder order follows the SQL text: the EXISTS-clause `firsts`
-		// subquery binds first (timezone, projectID), then the EXISTS WHERE
-		// (projectID, timezone), then the FROM-clause `firsts` (timezone,
-		// projectID), then the outer WHERE (projectID, timezone, timezone,
-		// timezone, now), then the cap.
-		[]any{timezone, projectID, projectID, timezone, timezone, projectID, projectID, timezone, timezone, timezone, now, activationCandidateCap},
+		[]any{projectID, timezone, timezone, timezone, now, projectID, timezone, projectID, timezone, timezone, activationCandidatePool},
 		func(rows *sql.Rows) error {
 			var c ActivationCandidate
 			var returned uint64
 			if err := rows.Scan(&c.EventName, &c.Users, &returned); err != nil {
 				return err
 			}
-			c.Reach = float64(c.Users) / float64(cohortSize)
+			c.Reach = float64(c.Users) / float64(out.CohortSize)
 			c.D7Return = float64(returned) / float64(c.Users)
 			c.BaselineD7 = baseline
 			c.Lift = c.D7Return - baseline
@@ -138,6 +137,9 @@ LIMIT ?`,
 		})
 	if err != nil {
 		return out, err
+	}
+	if len(out.Candidates) == 0 {
+		return out, nil
 	}
 
 	// Rank by lift, then reach: an event that predicts day-7 return is the
@@ -148,6 +150,9 @@ LIMIT ?`,
 		}
 		return out.Candidates[i].Reach > out.Candidates[j].Reach
 	})
+	if len(out.Candidates) > activationCandidateCap {
+		out.Candidates = out.Candidates[:activationCandidateCap]
+	}
 	out.State = OverviewStateOK
 	return out, nil
 }

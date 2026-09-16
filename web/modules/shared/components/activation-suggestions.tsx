@@ -49,11 +49,12 @@ export function ActivationSuggestionRow({
           {formatCompact(c.users)} people · {formatFractionAsPercent(c.reach, 0)} of new users · D7 {formatFractionAsPercent(c.d7_return, 0)} vs {formatFractionAsPercent(c.baseline_d7, 0)} baseline
         </span>
       </span>
-      {action ?? (
-        <span className="shrink-0 rounded-[var(--radius-md)] px-2 py-0.5 text-xs font-medium text-[var(--color-text-secondary)]">
+      <span className="flex shrink-0 items-center gap-2">
+        <span className="rounded-[var(--radius-md)] px-2 py-0.5 text-xs font-medium text-[var(--color-text-secondary)]">
           {c.lift > 0 ? `+${formatFractionAsPercent(c.lift, 0)} D7` : `${formatFractionAsPercent(c.lift, 0)} D7`}
         </span>
-      )}
+        {action}
+      </span>
     </button>
   );
 }
@@ -64,7 +65,7 @@ export function ActivationSuggestionRow({
 export function ActivationSuggestionsNotice({ kind }: { kind: 'not_ready' | 'error' }) {
   if (kind === 'error') {
     return (
-      <div className="mb-3" role="alert">
+      <div role="alert">
         <Callout
           tone="warn"
           icon={<AlertTriangle size={16} />}
@@ -76,14 +77,12 @@ export function ActivationSuggestionsNotice({ kind }: { kind: 'not_ready' | 'err
     );
   }
   return (
-    <div className="mb-3">
-      <Callout
-        tone="growth"
-        icon={<Sparkles size={16} />}
-        label="Suggestions"
-        title="Not enough data to rank yet"
-        detail="Suggestions appear once a 7-day cohort has matured. Until then, pick from the events already arriving."
-      />
-    </div>
+    <Callout
+      tone="growth"
+      icon={<Sparkles size={16} />}
+      label="Suggestions"
+      title="Not enough data to rank yet"
+      detail="Suggestions appear once a 7-day cohort has matured. Until then, pick from the events already arriving."
+    />
   );
 }

@@ -1969,11 +1969,6 @@ export class AgentRayAPI {
     return this.request<void>(`/api/workspaces/${workspaceID}/members/${userID}`, { method: 'DELETE' });
   }
 
-  createWorkspaceProject(workspaceID: string, name: string) {
-    return this.post<{ project: Project }>(`/api/workspaces/${workspaceID}/projects`, { name });
-  }
-
-
   updateProject(
     projectID: string,
     patch: { name?: string; timezone?: string; goal?: string; activation_event?: string },
@@ -1991,9 +1986,12 @@ export class AgentRayAPI {
   // activationCandidates returns the server-ranked activation-event
   // suggestions (reach + D7 lift evidence). state "not_ready" means the
   // mature cohort is too small to rank — the picker falls back to the raw
-  // catalog, never an empty list presented as a ranking.
-  activationCandidates() {
-    return this.get<ActivationCandidates>(`/api/projects/${this.projectID}/activation-candidates`);
+  // catalog, never an empty list presented as a ranking. The path carries
+  // the project id, so this deliberately skips withProject: a query-param
+  // project_id would outrank the path in principalFromRequest and 404 the
+  // session's own project on a stale value.
+  activationCandidates(projectID: string) {
+    return this.get<ActivationCandidates>(`/api/projects/${projectID}/activation-candidates`);
   }
 
   activity(filters: Filters) {

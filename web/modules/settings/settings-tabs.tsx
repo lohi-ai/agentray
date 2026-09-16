@@ -146,7 +146,7 @@ function ProjectGoalPanel({
 }) {
   const [eventDraft, setEventDraft] = useState(project.activation_event ?? '');
   const suggestions = useActivationCandidates();
-  const ranked = suggestions.data?.state === 'ok' ? suggestions.data.candidates.slice(0, 3) : null;
+  const ranked = suggestions.data?.state === 'ok' && suggestions.data.candidates.length > 0 ? suggestions.data.candidates.slice(0, 3) : null;
   const [saving, setSaving] = useState(false);
   const goalValue = project.goal && project.goal !== 'skipped' ? project.goal : 'none';
 
