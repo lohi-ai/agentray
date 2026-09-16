@@ -1,7 +1,7 @@
 import type { BoardTile, OverviewMetric, OverviewResult } from '@/lib/api';
 import { formatDuration, formatPercent } from '@/lib/format';
 import { platformLabel } from '@/lib/platform';
-import { metricTile, retentionTile, revenueTile, targetBadge, tileProvenance } from '@/modules/overview/page';
+import { formatMoney, metricTile, retentionTile, revenueTile, targetBadge, tileProvenance } from '@/modules/overview/page';
 
 export type AnalysisStat = {
   label: string;
@@ -33,7 +33,7 @@ function titleOf(tile: BoardTile, fallback: string): string {
 // rateTile renders a metric whose honest value is a float — a share or rate on
 // the percent scale, a duration in seconds — never a count. The unit decides
 // the format; a metric that is not "ok" shows its state, never a fabricated 0.
-export function rateTile(label: string, m: OverviewMetric, unit: 'percent' | 'seconds'): { label: string; value: string } {
+export function rateTile(label: string, m: OverviewMetric, unit: 'percent' | 'seconds' | 'number'): { label: string; value: string } {
   if (m.state !== 'ok' || m.rate === undefined) {
     const stateLabel =
       m.state === 'unconfigured' ? 'Set up'
@@ -42,7 +42,9 @@ export function rateTile(label: string, m: OverviewMetric, unit: 'percent' | 'se
       : 'Not available';
     return { label, value: stateLabel };
   }
-  return { label, value: unit === 'percent' ? formatPercent(m.rate) : formatDuration(m.rate) };
+  if (unit === 'percent') return { label, value: formatPercent(m.rate) };
+  if (unit === 'seconds') return { label, value: formatDuration(m.rate) };
+  return { label, value: m.rate.toFixed(2) };
 }
 
 export function analysisStat(res: OverviewResult, tile: BoardTile): AnalysisStat | null {
@@ -96,6 +98,35 @@ export function analysisStat(res: OverviewResult, tile: BoardTile): AnalysisStat
   }
   if (metric === 'retention_d30') {
     return { ...retentionTile(titleOf(tile, 'Average retention D30'), res.retention.d30), badge: targetBadge(res.retention.d30.target), provenance: tileProvenance(res, { kind: 'retention', day: 30, point: res.retention.d30 }) };
+  }
+  if (metric === 'sessions_per_user') {
+    const m = res.metrics.sessions_per_user;
+    return { ...rateTile(titleOf(tile, 'Sessions per device'), m, 'number'), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'metric', metric: m }) };
+  }
+  if (metric === 'paying_users') {
+    const m = res.metrics.paying_users;
+    return { ...metricTile(titleOf(tile, 'Paying users'), m), badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'money', metric: m, detail: res.metrics.revenue_detail }) };
+  }
+  if (metric === 'proceeds_per_paying') {
+    const m = res.metrics.proceeds_per_paying;
+    const currency = res.metrics.revenue_detail?.currency;
+    const base = rateTile(titleOf(tile, 'Proceeds per paying user'), m, 'number');
+    if (m.state === 'ok' && m.rate !== undefined && currency) {
+      base.value = `${formatMoney(Math.round(m.rate))} ${currency}`;
+    }
+    return { ...base, badge: targetBadge(m.target), provenance: tileProvenance(res, { kind: 'money', metric: m, detail: res.metrics.revenue_detail }) };
+  }
+  if (metric === 'download_to_paid_d1') {
+    const p = res.paid_conversion.d1;
+    return { ...retentionTile(titleOf(tile, 'Download→paid D1'), p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'paidConversion', day: 1, point: p }) };
+  }
+  if (metric === 'download_to_paid_d7') {
+    const p = res.paid_conversion.d7;
+    return { ...retentionTile(titleOf(tile, 'Download→paid D7'), p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'paidConversion', day: 7, point: p }) };
+  }
+  if (metric === 'download_to_paid_d35') {
+    const p = res.paid_conversion.d35;
+    return { ...retentionTile(titleOf(tile, 'Download→paid D35'), p), badge: targetBadge(p.target), provenance: tileProvenance(res, { kind: 'paidConversion', day: 35, point: p }) };
   }
   return null;
 }
@@ -171,6 +202,13 @@ export function analysisSeries(res: OverviewResult, tile: BoardTile): AnalysisSe
       label: titleOf(tile, 'Events per day'),
       points: res.trend.map((p) => ({ label: p.day, value: p.events })),
       provenance: tileProvenance(res, { kind: 'events' }),
+    };
+  }
+  if (tile.metric === 'sessions_daily') {
+    return {
+      label: titleOf(tile, 'Sessions per day'),
+      points: res.trend.map((p) => ({ label: p.day, value: p.sessions })),
+      provenance: tileProvenance(res, { kind: 'metric', metric: res.metrics.sessions }),
     };
   }
   return null;

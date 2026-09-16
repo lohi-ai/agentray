@@ -269,7 +269,7 @@ func TestOverviewRevenueContractVectors(t *testing.T) {
 			},
 			want: moneyWant{state: OverviewStateOK, value: uint64Ptr(90000), currency: "VND", gross: 90000, net: 90000,
 				dedupedRows: 1, excludedRows: 1, excluded: []string{"LT"},
-				byCurrency:   []OverviewRevenueCurrency{{Currency: "VND", Gross: 90000, Net: 90000, Rows: 1}},
+				byCurrency:   []OverviewRevenueCurrency{{Currency: "VND", Gross: 90000, Net: 90000, Rows: 1, Payers: 1}},
 				notesContain: []string{"platform credit rather than money"}},
 		},
 		{
@@ -285,8 +285,8 @@ func TestOverviewRevenueContractVectors(t *testing.T) {
 			seeds: []moneySeed{{amount: 100, currency: "USD", insertID: "usd-1"}, {amount: 90000, currency: "VND", insertID: "vnd-1"}},
 			want: moneyWant{state: OverviewStateOK, value: uint64Ptr(90000), currency: "VND", gross: 90000, net: 90000, dedupedRows: 2,
 				byCurrency: []OverviewRevenueCurrency{
-					{Currency: "VND", Gross: 90000, Net: 90000, Rows: 1},
-					{Currency: "USD", Gross: 100, Net: 100, Rows: 1},
+					{Currency: "VND", Gross: 90000, Net: 90000, Rows: 1, Payers: 1},
+					{Currency: "USD", Gross: 100, Net: 100, Rows: 1, Payers: 1},
 				},
 				notesContain: []string{"heads the tile"}},
 		},
@@ -475,8 +475,8 @@ func TestOverviewRevenueSQLReconciles(t *testing.T) {
 		t.Fatalf("detail = %d/%d/%d, want 80000/30000/50000", detail.Gross, detail.Reversed, detail.Net)
 	}
 	if !reflect.DeepEqual(detail.ByCurrency, []OverviewRevenueCurrency{
-		{Currency: "VND", Gross: 80000, Reversed: 30000, Net: 50000, Rows: 2},
-		{Currency: "USD", Gross: 100, Net: 100, Rows: 1},
+		{Currency: "VND", Gross: 80000, Reversed: 30000, Net: 50000, Rows: 2, Payers: 1},
+		{Currency: "USD", Gross: 100, Net: 100, Rows: 1, Payers: 1},
 	}) {
 		t.Fatalf("by_currency = %+v, want VND ahead of USD with the refund netted", detail.ByCurrency)
 	}
@@ -726,4 +726,99 @@ func blockWith(t *testing.T, blocks []string, marker string) string {
 	}
 	t.Fatalf("docs/ANALYTICS.md no longer publishes a sql block containing %q", marker)
 	return ""
+}
+
+// TestOverviewPaidConversion pins the download→paid cohort read: the cohort is
+// first-ever qualifying activity, conversion is a deduplicated positive
+// booking inside the member's own day-N window, and a project with no money
+// events at all reports unconfigured — never a 0% that looks measured.
+func TestOverviewPaidConversion(t *testing.T) {
+	// Cohort day is 2026-06-01; `to` is 2026-09-01, so D1/D7/D35 windows have
+	// all matured for every member.
+	cohortDay := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	day := func(n int) time.Time { return cohortDay.AddDate(0, 0, n) }
+
+	t.Run("members convert inside their own day-N window", func(t *testing.T) {
+		s := moneyStore(t,
+			// Three first-seen members on the cohort day.
+			moneySeed{event: "user.pageview", person: "a", at: cohortDay},
+			moneySeed{event: "user.pageview", person: "b", at: cohortDay},
+			moneySeed{event: "user.pageview", person: "c", at: cohortDay},
+			// a pays on day 1, b pays on day 5 (D7 but not D1), c never pays.
+			moneySeed{person: "a", amount: 100, currency: "VND", insertID: "a-1", at: day(1)},
+			moneySeed{person: "b", amount: 100, currency: "VND", insertID: "b-1", at: day(5)},
+		)
+		got, err := s.overviewPaidConversion(context.Background(), moneyProject, "", "UTC", to, true)
+		if err != nil {
+			t.Fatalf("overviewPaidConversion: %v", err)
+		}
+		if got.D1.State != OverviewStateOK || got.D1.Eligible != 3 || got.D1.Returned != 1 {
+			t.Fatalf("d1 = %+v, want ok 1/3", got.D1)
+		}
+		if got.D7.State != OverviewStateOK || got.D7.Eligible != 3 || got.D7.Returned != 2 {
+			t.Fatalf("d7 = %+v, want ok 2/3", got.D7)
+		}
+		if got.D35.State != OverviewStateOK || got.D35.Eligible != 3 || got.D35.Returned != 2 {
+			t.Fatalf("d35 = %+v, want ok 2/3", got.D35)
+		}
+	})
+
+	t.Run("a booking after the day-N window does not convert the member", func(t *testing.T) {
+		s := moneyStore(t,
+			moneySeed{event: "user.pageview", person: "a", at: cohortDay},
+			// a pays on day 40 — past D35, so no window counts it.
+			moneySeed{person: "a", amount: 100, currency: "VND", insertID: "a-1", at: day(40)},
+		)
+		got, err := s.overviewPaidConversion(context.Background(), moneyProject, "", "UTC", to, true)
+		if err != nil {
+			t.Fatalf("overviewPaidConversion: %v", err)
+		}
+		if got.D1.Returned != 0 || got.D7.Returned != 0 || got.D35.Returned != 0 {
+			t.Fatalf("returned = %d/%d/%d, want 0 — a day-40 booking is outside every window", got.D1.Returned, got.D7.Returned, got.D35.Returned)
+		}
+	})
+
+	t.Run("a refund does not count as paying", func(t *testing.T) {
+		s := moneyStore(t,
+			moneySeed{event: "user.pageview", person: "a", at: cohortDay},
+			moneySeed{event: "revenue_reversed", person: "a", amount: 100, currency: "VND", insertID: "r-1", at: day(1)},
+		)
+		got, err := s.overviewPaidConversion(context.Background(), moneyProject, "", "UTC", to, true)
+		if err != nil {
+			t.Fatalf("overviewPaidConversion: %v", err)
+		}
+		if got.D1.Returned != 0 {
+			t.Fatalf("d1 returned = %d, want 0 — a reversal is not a booking", got.D1.Returned)
+		}
+	})
+
+	t.Run("no money events ever is unconfigured, not not_ready", func(t *testing.T) {
+		s := moneyStore(t, moneySeed{event: "user.pageview", person: "a", at: cohortDay})
+		got, err := s.overviewPaidConversion(context.Background(), moneyProject, "", "UTC", to, false)
+		if err != nil {
+			t.Fatalf("overviewPaidConversion: %v", err)
+		}
+		for _, p := range []OverviewRetentionPoint{got.D1, got.D7, got.D35} {
+			if p.State != OverviewStateUnconfigured {
+				t.Fatalf("state = %q, want unconfigured", p.State)
+			}
+		}
+	})
+
+	t.Run("an immature cohort is not_ready, never 0%", func(t *testing.T) {
+		// Cohort day is yesterday: D1 cannot have matured by `to`.
+		recent := to.AddDate(0, 0, -1)
+		s := moneyStore(t,
+			moneySeed{event: "user.pageview", person: "a", at: recent},
+			moneySeed{person: "a", amount: 100, currency: "VND", insertID: "a-1", at: to},
+		)
+		got, err := s.overviewPaidConversion(context.Background(), moneyProject, "", "UTC", to, true)
+		if err != nil {
+			t.Fatalf("overviewPaidConversion: %v", err)
+		}
+		if got.D1.State != OverviewStateNotReady || got.D1.Eligible != 0 {
+			t.Fatalf("d1 = %+v, want not_ready with no eligible members", got.D1)
+		}
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -32,6 +33,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, persons())
 	opcore.Register(r, exploreEvents())
 	opcore.Register(r, runSQL())
+	opcore.Register(r, activationCandidates())
 	opcore.Register(r, runInsight())
 	opcore.Register(r, runFunnel())
 	opcore.Register(r, runRetention())
@@ -167,6 +169,26 @@ func recentEvents() opcore.Operation[recentEventsInput, recentEventsOutput] {
 				return recentEventsOutput{}, err
 			}
 			return recentEventsOutput{Events: events}, nil
+		},
+	}
+}
+
+// activationCandidates ranks the project's event names as activation-event
+// suggestions — first-7-day reach plus day-7 retention lift — so the picker
+// (and an agent) can offer evidence instead of asking the owner to recall a
+// name. Read-only; it never writes activation_event.
+func activationCandidates() opcore.Operation[struct{}, storage.ActivationCandidates] {
+	return opcore.Operation[struct{}, storage.ActivationCandidates]{
+		Name:    "activation_candidates",
+		Summary: "Rank the project's event names as activation-event candidates, with reach and day-7 retention lift evidence. state=not_ready means too little mature data to rank.",
+		Scope:   "monitor",
+		Access:  opcore.AccessAnalyticsRead,
+		Handler: func(ctx context.Context, cc opcore.CallContext, _ struct{}) (storage.ActivationCandidates, error) {
+			d, err := depsFrom(cc)
+			if err != nil {
+				return storage.ActivationCandidates{}, err
+			}
+			return d.Repo.SuggestActivationEvents(ctx, cc.ProjectID, time.Now())
 		},
 	}
 }

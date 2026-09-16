@@ -351,6 +351,21 @@ export function useEventNames() {
   return { names: query.data?.names ?? [], loading: query.isLoading, error: query.isError };
 }
 
+// useActivationCandidates loads the server-ranked activation-event
+// suggestions for the picker surfaces (GoalPrompt mapping stage, Settings →
+// Projects). Slower-moving than the event catalog — the ranking only shifts
+// as cohorts mature — so it caches for the session like useEventNames.
+export function useActivationCandidates() {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const query = useQuery({
+    queryFn: () => new AgentRayAPI().activationCandidates(projectID!),
+    enabled: !!projectID,
+    staleTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  return { data: query.data ?? null, loading: query.isLoading, error: query.isError };
+}
+
 
 // useDailyReadout powers the agent-narrated slot on the dashboard home: the
 // latest run's plain-language summary (what the agent saw overnight) plus the

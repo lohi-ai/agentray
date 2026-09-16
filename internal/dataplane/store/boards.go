@@ -41,6 +41,7 @@ const BoardDefinitionVersion = 1
 const (
 	TileKindMetric = "metric"
 	TileKindChart  = "chart"
+
 	TileKindFunnel = "funnel"
 )
 
@@ -767,6 +768,12 @@ func normalizeBoardTile(tile *BoardTile) error {
 	}
 	if !boardKeyRe.MatchString(tile.Key) {
 		return fmt.Errorf("%w: tile key %q must be 1-%d characters of lower-case letters, digits, dash or underscore, starting with a letter or digit", ErrBoardDefinitionInvalid, tile.Key, boardKeyMaxLen)
+	}
+	declared := 0
+	for _, set := range []bool{tile.Metric != "", tile.ChartID != "", len(tile.Steps) > 0} {
+		if set {
+			declared++
+		}
 	}
 	if tile.Kind == "" {
 		declared := 0

@@ -90,13 +90,17 @@ const moneyReverses = `(event_name = '` + moneyReversalEvent + `' OR kind = '` +
 
 // OverviewRevenueCurrency is one declared currency's arithmetic in the window.
 // Gross, Reversed and Net are integers in that currency's smallest unit, as the
-// sender declared them; they are never added to another currency's.
+// sender declared them; they are never added to another currency's. Payers is
+// the distinct people with a positive booking in THIS currency — the
+// denominator proceeds-per-paying-person divides by, so the ratio never mixes
+// currencies.
 type OverviewRevenueCurrency struct {
 	Currency string `json:"currency"`
 	Gross    int64  `json:"gross"`
 	Reversed int64  `json:"reversed"`
 	Net      int64  `json:"net"`
 	Rows     int64  `json:"rows"`
+	Payers   int64  `json:"payers"`
 }
 
 // OverviewRevenueDetail is the signed arithmetic behind the revenue headline:
@@ -131,6 +135,11 @@ type OverviewRevenueDetail struct {
 	// ExcludedRows but not named — there is nothing to name.
 	ExcludedCurrencies []string                  `json:"excluded_currencies,omitempty"`
 	ByCurrency         []OverviewRevenueCurrency `json:"by_currency"`
+	// PayingUsers is the distinct people with a positive deduplicated booking
+	// in the window, across every declared currency — the "Paying users" tile.
+	// It is not the sum of ByCurrency Payers: a person who paid in two
+	// currencies is one person.
+	PayingUsers uint64 `json:"paying_users"`
 }
 
 // overviewMoneyWindow is one window's money arithmetic, before the headline
@@ -144,6 +153,8 @@ type overviewMoneyWindow struct {
 	moneyRows  int64
 	noCurrency int64
 	ltRows     int64
+	// payers is the all-currency distinct-payer count for the window.
+	payers uint64
 }
 
 // excludedRows is every deduplicated money-shaped row the money test dropped —
@@ -170,12 +181,17 @@ SELECT
 	-- Net is the two columns above subtracted, not a third expression over the
 	-- rows: the tile renders all three side by side, so they can never disagree.
 	CAST(sum(gross) - sum(reversed) AS BIGINT) AS net,
-	CAST(count(*) AS BIGINT) AS rows
+	CAST(count(*) AS BIGINT) AS rows,
+	-- Payers is the distinct people with a positive booking in this currency —
+	-- the same predicate MoneyPaidAtRecipe uses, so "paying" means one thing.
+	CAST(count(DISTINCT person_id) FILTER (WHERE is_payer) AS BIGINT) AS payers
 FROM (
 	SELECT
 		`+moneyReverses+` AS reverses,
+		person_id,
 		currency,
 		amount,
+		event_name = '`+moneyBookingEvent+`' AND NOT `+moneyReverses+` AND amount > 0 AS is_payer,
 		CASE WHEN `+moneyReverses+` THEN 0 ELSE amount END AS gross,
 		CASE WHEN `+moneyReverses+` THEN abs(amount) ELSE 0 END AS reversed
 	FROM money_rows
@@ -184,12 +200,29 @@ FROM (
 GROUP BY currency
 ORDER BY gross DESC, currency ASC`, args, func(rows *sql.Rows) error {
 		var row OverviewRevenueCurrency
-		if err := rows.Scan(&row.Currency, &row.Gross, &row.Reversed, &row.Net, &row.Rows); err != nil {
+		if err := rows.Scan(&row.Currency, &row.Gross, &row.Reversed, &row.Net, &row.Rows, &row.Payers); err != nil {
 			return err
 		}
 		out.byCurrency = append(out.byCurrency, row)
 		return nil
 	})
+	if err != nil {
+		return out, err
+	}
+	// The all-currency payer count is its own aggregate: a person who paid in
+	// two currencies is one person, so it cannot be derived by summing the
+	// per-currency column. No-currency and LT rows are excluded here too —
+	// the same money test the Go classification below applies.
+	err = s.duckQueryRow(ctx, `
+WITH `+moneyRowsCTE(where)+`
+SELECT CAST(count(DISTINCT person_id) AS BIGINT)
+FROM money_rows
+WHERE write_rank = 1
+  AND event_name = '`+moneyBookingEvent+`'
+  AND NOT `+moneyReverses+`
+  AND amount > 0
+  AND currency <> ''
+  AND currency <> '`+moneyNonCurrency+`'`, args, &out.payers)
 	if err != nil {
 		return out, err
 	}
@@ -243,6 +276,7 @@ func (s *Store) overviewRevenue(ctx context.Context, projectID string, r, prev O
 		ExcludedRows:       win.excludedRows(),
 		ExcludedCurrencies: nil,
 		ByCurrency:         win.byCurrency,
+		PayingUsers:        win.payers,
 	}
 	if win.ltRows > 0 {
 		detail.ExcludedCurrencies = []string{moneyNonCurrency}

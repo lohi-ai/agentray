@@ -69,7 +69,13 @@ export function useAlertChannels() {
     enabled: !!projectID,
   });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['alert-channels', projectID] });
+  // Creating a channel can mutate rules too — the server auto-attaches a
+  // workspace's first channel to every channel-less digest rule — so the
+  // rules list must refetch alongside the channels list.
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['alert-channels', projectID] });
+    queryClient.invalidateQueries({ queryKey: ['alert-rules', projectID] });
+  };
 
   const create = useMutation({
     mutationFn: (input: AlertChannelInput) => new AgentRayAPI(projectID!).createAlertChannel(input),

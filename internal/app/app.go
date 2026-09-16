@@ -286,6 +286,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerOverviewRoutes(e, store, ops)
+	registerActivationRoutes(e, store, ops)
 	registerConnectorRoutes(e, store, ops)
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)

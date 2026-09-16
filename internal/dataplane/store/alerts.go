@@ -385,7 +385,49 @@ VALUES ($1, $2, $3, $4::jsonb)
 RETURNING id::text, workspace_id::text, kind, name, config, created_at`,
 		workspaceID, ch.Kind, ch.Name, []byte(ch.Config)).
 		Scan(&out.ID, &out.WorkspaceID, &out.Kind, &out.Name, &out.Config, &out.CreatedAt)
-	return out, err
+	if err != nil {
+		return AlertChannel{}, err
+	}
+	return out, s.attachChannelToDigestRules(ctx, workspaceID, out.ID)
+}
+
+// ensureDigestRule seeds the weekly decision digest onto a freshly created
+// project — one enabled rule, no channels yet, so it computes and watermarks
+// from day one and starts delivering the moment a channel exists (see
+// CreateAlertChannel, which attaches the workspace's first channel to it).
+// Idempotent: a project that already has a digest rule is left alone, so a
+// re-seed or a user-created digest never doubles up.
+func (s *Store) ensureDigestRule(ctx context.Context, projectID string) error {
+	var exists bool
+	if err := s.pg.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM alert_rules WHERE project_id = $1 AND source_kind = 'digest')`, projectID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err := s.pg.Exec(ctx, `
+INSERT INTO alert_rules (project_id, name, source_kind, source_ref, condition, params, schedule_cron, channels, enabled)
+VALUES ($1, 'Weekly decision digest', 'digest', '', '{"op":"none"}'::jsonb, '{}'::jsonb, '0 9 * * 1', '[]'::jsonb, true)`, projectID)
+	return err
+}
+
+// attachChannelToDigestRules wires a newly created channel onto every digest
+// rule in the workspace that has no delivery target yet. A digest with no
+// channels computes silently forever; the first channel a workspace adds is
+// the moment the digest can actually reach someone, so the rule is attached
+// rather than left for the owner to discover. Rules the owner deliberately
+// detached keep their (non-empty) channel list untouched — only the
+// never-delivered empty set is filled.
+func (s *Store) attachChannelToDigestRules(ctx context.Context, workspaceID, channelID string) error {
+	chans, _ := json.Marshal([]string{channelID})
+	_, err := s.pg.Exec(ctx, `
+UPDATE alert_rules r SET channels = $2::jsonb
+FROM projects p
+WHERE r.project_id = p.id AND p.workspace_id = $1
+  AND r.source_kind = 'digest' AND r.channels = '[]'::jsonb`,
+		workspaceID, string(chans))
+	return err
 }
 
 // --- evaluation-support reads (internal, used by the alerting worker) ---
