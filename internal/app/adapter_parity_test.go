@@ -768,8 +768,8 @@ func TestOverviewAdaptersShareMoneyContract(t *testing.T) {
 		t.Fatalf("detail = %+v, want VND 80000/30000/50 over 3 deduplicated rows", d)
 	}
 	if !reflect.DeepEqual(d.ByCurrency, []storage.OverviewRevenueCurrency{
-		{Currency: "VND", Gross: 80000, Reversed: 30000, Net: 50000, Rows: 2},
-		{Currency: "USD", Gross: 100, Net: 100, Rows: 1},
+		{Currency: "VND", Gross: 80000, Reversed: 30000, Net: 50000, Rows: 2, Payers: 1},
+		{Currency: "USD", Gross: 100, Net: 100, Rows: 1, Payers: 1},
 	}) {
 		t.Fatalf("by_currency = %+v, want VND ahead of USD with the refund netted", d.ByCurrency)
 	}

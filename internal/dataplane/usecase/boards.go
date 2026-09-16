@@ -135,9 +135,9 @@ type saveBoardInput struct {
 	Name        *string `json:"name" desc:"board name — required when the declaration creates the board; omit to keep the current name"`
 	Description *string `json:"description" desc:"board description; omit to keep, \"\" to clear"`
 	// The document is described field by field so a model composing it has the
-	// whole vocabulary in the schema: sections hold tiles; a tile is either a
-	// catalog metric or a saved chart of this board.
-	Definition     storage.BoardDefinition `json:"definition" required:"true" desc:"the board content: {version, sections:[{key, title, description, tiles:[{key, title, kind, display, span, metric, chart_id, params}]}]}. A metric tile sets kind=metric, metric=<catalog key from list_metrics>, display=<stat|line|bar|area|table>, span=1-3, and optional params {period, platform}. A chart tile sets kind=chart and chart_id=<a chart already on this board>. Tile and section keys are unique, lower-case, 1-64 characters."`
+	// whole vocabulary in the schema: sections hold tiles; a tile is a catalog
+	// metric, a saved chart of this board, or an ordered funnel of event names.
+	Definition     storage.BoardDefinition `json:"definition" required:"true" desc:"the board content: {version, sections:[{key, title, description, tiles:[{key, title, kind, display, span, metric, chart_id, steps, params}]}]}. A metric tile sets kind=metric, metric=<catalog key from list_metrics>, display=<stat|line|bar|area|table>, span=1-3, and optional params {period, platform}. A chart tile sets kind=chart and chart_id=<a chart already on this board>. A funnel tile sets kind=funnel and steps=<2-8 distinct event names in order> — the reader runs it through the funnel insight over the board's selected range. Tile and section keys are unique, lower-case, 1-64 characters."`
 	Revision       int64                   `json:"revision" desc:"the board's current revision from get_board; omit when creating, required to update — a stale revision conflicts instead of overwriting"`
 	IdempotencyKey string                  `json:"idempotency_key" desc:"retry key — a repeated identical request returns the first result"`
 }

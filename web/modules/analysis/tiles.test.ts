@@ -17,7 +17,7 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       previous_range: { from: '2026-08-29T00:00:00Z', to: '2026-09-05T00:00:00Z', days: 7, complete_days: true },
       platform: '',
       generated_at: '2026-09-12T00:00:00Z',
-      metric_version: 'overview.v4',
+      metric_version: 'overview.v6',
     },
     metrics: {
       active_users: metric('ok', 1240),
@@ -30,13 +30,22 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       ai_share: { state: 'ok', rate: 6.4, definition: 'test' },
       bounce_rate: { state: 'ok', rate: 38.2, definition: 'test' },
       avg_session_duration: { state: 'ok', rate: 161, definition: 'test' },
+      sessions_per_user: { state: 'ok', rate: 2.31, definition: 'test' },
+      paying_users: metric('unconfigured'),
+      proceeds_per_paying: metric('unconfigured'),
     },
-    trend: [{ day: '2026-09-05', active_users: 180, events: 940 }],
+    trend: [{ day: '2026-09-05', active_users: 180, sessions: 410, events: 940 }],
     retention: {
       cohort_window: 'lifetime',
       d1: { state: 'ok', rate: 0.41, returned: 132, eligible: 320 },
       d7: { state: 'ok', rate: 0.24, returned: 48, eligible: 200 },
       d30: { state: 'not_ready', rate: 0, returned: 0, eligible: 0 },
+    },
+    paid_conversion: {
+      cohort_window: 'lifetime',
+      d1: { state: 'unconfigured', rate: 0, returned: 0, eligible: 0 },
+      d7: { state: 'unconfigured', rate: 0, returned: 0, eligible: 0 },
+      d35: { state: 'unconfigured', rate: 0, returned: 0, eligible: 0 },
     },
     content: {
       top_pages: { unit: 'pageviews', rows: [{ value: '/pricing', count: 612 }] },
@@ -101,6 +110,11 @@ describe('analysisSeries', () => {
     const series = analysisSeries(res(), { key: 'trend', metric: 'active_users_daily', title: 'Active devices per day', kind: 'metric', display: 'area' });
     expect(series?.points).toEqual([{ label: '2026-09-05', value: 180 }]);
   });
+
+  it('projects the daily sessions trend', () => {
+    const series = analysisSeries(res(), { key: 'sessions-daily', metric: 'sessions_daily', title: 'Sessions per day', kind: 'metric', display: 'area' });
+    expect(series?.points).toEqual([{ label: '2026-09-05', value: 410 }]);
+  });
 });
 
 describe('UNSERVED_TILES', () => {
@@ -108,9 +122,11 @@ describe('UNSERVED_TILES', () => {
     expect(UNSERVED_TILES.acquisition.map((t) => t.label)).toEqual([
       'Redownloads', 'Conversion rate', 'Impressions / day', 'Product page views', 'Updates',
     ]);
-    expect(UNSERVED_TILES.monetization.map((t) => t.label)).toContain('Paying users');
+    // Paying users and download→paid are served metrics now — only the
+    // purchase-count tile stays unserved.
+    expect(UNSERVED_TILES.monetization.map((t) => t.label)).toEqual(['In-app purchases / day']);
     expect(UNSERVED_TILES.usage.map((t) => t.label)).toEqual([
-      'Average retention D14', 'Crashes by app version',
+      'Average retention D14', 'Crashes by app version', 'Deletions',
     ]);
   });
 });

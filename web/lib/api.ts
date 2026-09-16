@@ -228,6 +228,9 @@ export type OverviewRevenueCurrency = {
   reversed: number;
   net: number;
   rows: number;
+  // Distinct people with a positive booking in this currency — the
+  // denominator proceeds-per-paying-user divides by.
+  payers: number;
 };
 
 // OverviewRange mirrors the Go store.OverviewRange: the complete-day window a
@@ -248,6 +251,9 @@ export type OverviewRevenueDetail = {
   excluded_rows: number;
   excluded_currencies?: string[];
   by_currency: OverviewRevenueCurrency[];
+  // Distinct people with a positive deduplicated booking in the window,
+  // across every declared currency — not the sum of by_currency payers.
+  paying_users: number;
 };
 
 export type OverviewActivationDetail = {
@@ -317,13 +323,26 @@ export type OverviewResult = {
     ai_share: OverviewMetric;
     bounce_rate: OverviewMetric;
     avg_session_duration: OverviewMetric;
+    // App Store Connect reads (overview.v6): sessions per person is a ratio
+    // on `rate`; paying_users is a count; proceeds_per_paying is a rate in
+    // the headline currency's smallest unit.
+    sessions_per_user: OverviewMetric;
+    paying_users: OverviewMetric;
+    proceeds_per_paying: OverviewMetric;
   };
-  trend: Array<{ day: string; active_users: number; events: number }>;
+  trend: Array<{ day: string; active_users: number; sessions: number; events: number }>;
   retention: {
     cohort_window: string;
     d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
     d30: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+  };
+  // Download→paid cohort conversion — same point shape as retention.
+  paid_conversion: {
+    cohort_window: string;
+    d1: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d7: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
+    d35: { state: string; rate: number; returned: number; eligible: number; target?: MetricTargetView };
   };
   content: {
     top_pages: { unit: string; rows: Array<{ value: string; count: number }> };
@@ -390,14 +409,16 @@ export type Chart = {
 export type BoardTile = {
   key: string;
   title?: string;
-  kind?: 'metric' | 'chart';
+  kind?: 'metric' | 'chart' | 'funnel';
   display?: string;
   span?: number;
   metric?: string;
   // Declared target spec — writing it appends a version to the metric's
-  // project-scoped target history (see set_metric_target).
+  // target history (see set_metric_target).
   target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
+  // Ordered event names a funnel tile runs through the funnel insight.
+  steps?: string[];
   params?: { period?: string; platform?: string };
 };
 
@@ -891,7 +912,9 @@ export const ALERT_CHANNEL_KINDS = ['slack', 'email', 'webhook'] as const;
 export type AlertChannelKind = (typeof ALERT_CHANNEL_KINDS)[number];
 
 export type AlertCondition = {
-  op: AlertOp;
+  // 'none' is the digest marker the server stores (validateAlertOp only gates
+  // non-digest rules); it is not a selectable op in the rule form.
+  op: AlertOp | 'none';
   value: number;
   window?: number;
   min_events?: number;

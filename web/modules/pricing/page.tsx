@@ -1,7 +1,9 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { Check, ShieldCheck } from 'lucide-react';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Card } from '@astryxdesign/core/Card';
@@ -9,8 +11,12 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Text } from '@astryxdesign/core/Text';
 import { VStack } from '@astryxdesign/core/VStack';
+import { AgentRayAPI, type OverviewResult } from '@/lib/api';
+import { useAuthStore } from '@/lib/app-state';
+import { formatCompact } from '@/lib/format';
 import { PLANS, formatEvents, formatPrice, planByID, usageMeter, type Plan } from '@/lib/plans';
 import { useUpgradeRequest, useWorkspacePlan } from '@/modules/app/hooks';
+import { formatMoney } from '@/modules/overview/page';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PlanMeter } from '@/modules/shared/components/plan-meter';
 import { Button } from '@/modules/shared/components/signal-primitives';
@@ -89,6 +95,68 @@ function TierCard({
   );
 }
 
+/**
+ * What the project already measured — the reason to pay, stated in the
+ * customer's own numbers rather than adjectives. Renders nothing when the
+ * overview has no usable reading (a project with no events yet has no value
+ * to show, and a card of empty states is worse than no card).
+ */
+function ValueDeliveredCard() {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const query = useQuery({
+    queryKey: ['overview', projectID, '30d', ''],
+    queryFn: () => new AgentRayAPI(projectID!).overview('30d', ''),
+    enabled: !!projectID,
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const res: OverviewResult | undefined = query.data;
+  if (!res) return null;
+
+  const rows: { label: string; value: string }[] = [];
+  const detail = res.metrics.revenue_detail;
+  if (res.metrics.revenue.state === 'ok' && detail?.currency) {
+    rows.push({ label: 'Net revenue', value: `${formatMoney(detail.net)} ${detail.currency}` });
+  }
+  if (res.metrics.paying_users.state === 'ok' && res.metrics.paying_users.value !== undefined) {
+    rows.push({ label: 'Paying people', value: formatCompact(res.metrics.paying_users.value) });
+  }
+  if (res.metrics.active_users.state === 'ok' && res.metrics.active_users.value !== undefined) {
+    rows.push({ label: 'Active people', value: formatCompact(res.metrics.active_users.value) });
+  }
+  const d7 = res.paid_conversion?.d7;
+  if (d7?.state === 'ok' && d7.eligible > 0) {
+    rows.push({
+      label: 'Download→paid D7',
+      value: `${(d7.rate * 100).toFixed(1)}%`,
+    });
+  }
+  if (rows.length === 0) return null;
+
+  return (
+    <Card padding={4}>
+      <VStack gap={3} align="stretch">
+        <HStack gap={2} align="center" wrap="wrap">
+          <Text weight="medium">Your numbers, last 30 days</Text>
+          <Badge variant="neutral" label="measured" />
+        </HStack>
+        <HStack gap={4} wrap="wrap">
+          {rows.map((row) => (
+            <VStack key={row.label} gap={0.5} align="start">
+              <Text type="supporting">{row.label}</Text>
+              <Text weight="semibold" hasTabularNumbers className="text-[length:var(--font-size-xl)] leading-tight tracking-[-0.02em]">{row.value}</Text>
+            </VStack>
+          ))}
+        </HStack>
+        <Text type="supporting">
+          These are your events, already counted. A plan only changes how much history you keep —
+          the numbers above are already yours. <Link href="/overview" className="underline">Open the overview</Link>
+        </Text>
+      </VStack>
+    </Card>
+  );
+}
+
 export function PricingPage() {
   const router = useRouter();
   const { hosted, plan: planID, usage, failed, loading } = useWorkspacePlan();
@@ -137,6 +205,8 @@ export function PricingPage() {
           </VStack>
         </Card>
       ) : null}
+
+      <ValueDeliveredCard />
 
       <AutoGrid min={280} max={3} gap={4}>
         {PLANS.map((plan) => (
