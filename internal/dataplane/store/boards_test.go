@@ -369,14 +369,14 @@ func TestBoardDeclarationValidation(t *testing.T) {
 			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
 				{Key: "t"},
 			}}}},
-			wantErr: "neither a metric nor a chart",
+			wantErr: "neither a metric, a chart nor funnel steps",
 		},
 		{
 			name: "tile that declares both",
 			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
 				{Key: "t", Metric: MetricActiveUsers, ChartID: otherChart.ID},
 			}}}},
-			wantErr: "both a metric and a chart",
+			wantErr: "more than one of metric, chart_id and steps",
 		},
 		{
 			name: "chart_id that is not a uuid",
@@ -399,6 +399,55 @@ func TestBoardDeclarationValidation(t *testing.T) {
 			}}}},
 			wantErr: "unknown",
 		},
+		{
+			name: "funnel tile with one step",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"user.pageview"}},
+			}}}},
+			wantErr: "funnel needs",
+		},
+		{
+			name: "funnel tile over the step cap",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}},
+			}}}},
+			wantErr: "funnel needs",
+		},
+		{
+			name: "funnel tile repeating a step",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"user.pageview", "user.pageview"}},
+			}}}},
+			wantErr: "twice",
+		},
+		{
+			name: "funnel tile carrying a metric",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Metric: MetricActiveUsers, Steps: []string{"a", "b"}},
+			}}}},
+			wantErr: "cannot also reference",
+		},
+		{
+			name: "funnel tile carrying params",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Params: &BoardTileParams{Period: "7d"}},
+			}}}},
+			wantErr: "params on a funnel tile",
+		},
+		{
+			name: "funnel tile carrying a display",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: TileKindFunnel, Steps: []string{"a", "b"}, Display: DisplayBar},
+			}}}},
+			wantErr: "one drawing",
+		},
+		{
+			name: "kind that is none of the three",
+			def: BoardDefinition{Sections: []BoardSection{{Key: "s", Title: "S", Tiles: []BoardTile{
+				{Key: "t", Kind: "gauge", Metric: MetricActiveUsers},
+			}}}},
+			wantErr: "has kind",
+		},
 	}
 	for _, tc := range cases {
 		if _, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
@@ -412,6 +461,51 @@ func TestBoardDeclarationValidation(t *testing.T) {
 	cur, err := s.BoardContentForProject(ctx, projectID, board.Board.ID)
 	if err != nil || cur.Board.Revision != 1 || len(cur.Definition.Sections) != 0 {
 		t.Fatalf("a refused declaration changed the board: %+v (%v)", cur, err)
+	}
+}
+
+// TestFunnelTileRoundTrip declares a funnel tile and reads it back: the kind
+// is inferred from steps, the steps are stored verbatim (trimmed), and the
+// resolved content carries no metric or chart references for it — a funnel
+// tile is a declaration the reader computes, not a stored reference.
+func TestFunnelTileRoundTrip(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+
+	content, err := s.SaveBoardDefinition(ctx, projectID, BoardDefinitionWrite{
+		BoardKey: "funnels",
+		Definition: BoardDefinition{Sections: []BoardSection{{
+			Key: "s", Title: "S",
+			Tiles: []BoardTile{{
+				Key:   "signup-to-paid",
+				Title: "Signup → paid",
+				Steps: []string{" user_signed_in ", "subscription_started", "subscription_activated"},
+				Span:  2,
+			}},
+		}}},
+	}, "", "")
+	if err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	tile := content.Definition.Sections[0].Tiles[0]
+	if tile.Kind != TileKindFunnel {
+		t.Fatalf("kind = %q, want funnel", tile.Kind)
+	}
+	want := []string{"user_signed_in", "subscription_started", "subscription_activated"}
+	if len(tile.Steps) != len(want) {
+		t.Fatalf("steps = %v, want %v", tile.Steps, want)
+	}
+	for i := range want {
+		if tile.Steps[i] != want[i] {
+			t.Fatalf("steps = %v, want %v", tile.Steps, want)
+		}
+	}
+	if tile.Span != 2 {
+		t.Fatalf("span = %d, want 2", tile.Span)
+	}
+	if len(content.Metrics) != 0 || len(content.Charts) != 0 || len(content.Warnings) != 0 {
+		t.Fatalf("funnel tile resolved references: metrics=%v charts=%v warnings=%v", content.Metrics, content.Charts, content.Warnings)
 	}
 }
 

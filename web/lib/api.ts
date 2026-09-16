@@ -409,14 +409,16 @@ export type Chart = {
 export type BoardTile = {
   key: string;
   title?: string;
-  kind?: 'metric' | 'chart';
+  kind?: 'metric' | 'chart' | 'funnel';
   display?: string;
   span?: number;
   metric?: string;
   // Declared target spec — writing it appends a version to the metric's
-  // project-scoped target history (see set_metric_target).
+  // target history (see set_metric_target).
   target?: { direction: 'gte' | 'lte'; value: number; period: string; currency?: string; effective_at?: string };
   chart_id?: string;
+  // Ordered event names a funnel tile runs through the funnel insight.
+  steps?: string[];
   params?: { period?: string; platform?: string };
 };
 

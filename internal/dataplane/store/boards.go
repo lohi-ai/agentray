@@ -41,6 +41,10 @@ const BoardDefinitionVersion = 1
 const (
 	TileKindMetric = "metric"
 	TileKindChart  = "chart"
+	// TileKindFunnel declares an ordered event sequence the reader computes
+	// through the funnel insight — the tile stores the steps, never a result,
+	// so the number is always the live read over the board's selected range.
+	TileKindFunnel = "funnel"
 )
 
 // Bounds on one declaration. A board is rendered, not paginated, so an
@@ -50,6 +54,11 @@ const (
 	boardMaxTilesPerSection = 24
 	boardMaxSpan            = 3
 	boardKeyMaxLen          = 64
+	// A funnel needs at least two steps to measure a transition; the cap keeps
+	// one tile's correlated earliest-match chain bounded (each step is another
+	// join over the project's events).
+	boardFunnelMinSteps = 2
+	boardFunnelMaxSteps = 8
 )
 
 // ErrBoardDefinitionInvalid wraps every rejected declaration, so an adapter can
@@ -70,16 +79,19 @@ type BoardTileParams struct {
 	Platform string `json:"platform,omitempty"`
 }
 
-// BoardTile is one placement: a metric the server computes, or a saved chart.
+// BoardTile is one placement: a metric the server computes, a saved chart, or
+// a funnel the reader runs.
 type BoardTile struct {
 	Key   string `json:"key"`
 	Title string `json:"title,omitempty"`
-	// Kind is "metric" or "chart". Empty is inferred from which of Metric /
-	// ChartID is set, and is an error when both or neither are.
+	// Kind is "metric", "chart" or "funnel". Empty is inferred from which of
+	// Metric / ChartID / Steps is set, and is an error when more than one or
+	// none are.
 	Kind string `json:"kind,omitempty"`
 	// Display is required for metric tiles (stat/line/bar/area/table) and
-	// must be empty for chart tiles — a chart is drawn the way its own kind
-	// says, so an override here would be a second, quieter chart contract.
+	// must be empty for chart and funnel tiles — a chart is drawn the way its
+	// own kind says and a funnel has exactly one drawing, so an override here
+	// would be a second, quieter contract.
 	Display string `json:"display,omitempty"`
 	// Span is the grid width, 1..3; empty means 1.
 	Span int `json:"span,omitempty"`
@@ -91,7 +103,12 @@ type BoardTile struct {
 	// never clears a target, only set_metric_target does.
 	Target  *MetricTargetSpec `json:"target,omitempty"`
 	// ChartID places a saved chart that already belongs to this board.
-	ChartID string           `json:"chart_id,omitempty"`
+	ChartID string `json:"chart_id,omitempty"`
+	// Steps is the ordered event-name sequence a funnel tile runs — 2 to 8
+	// names, each a distinct event. The reader sends them to the funnel
+	// insight verbatim, so a step that names an event nobody has sent yet
+	// renders the funnel's empty state rather than failing the board.
+	Steps   []string         `json:"steps,omitempty"`
 	Params  *BoardTileParams `json:"params,omitempty"`
 }
 
@@ -739,16 +756,24 @@ func normalizeBoardTile(tile *BoardTile) error {
 	if !boardKeyRe.MatchString(tile.Key) {
 		return fmt.Errorf("%w: tile key %q must be 1-%d characters of lower-case letters, digits, dash or underscore, starting with a letter or digit", ErrBoardDefinitionInvalid, tile.Key, boardKeyMaxLen)
 	}
+	declared := 0
+	for _, set := range []bool{tile.Metric != "", tile.ChartID != "", len(tile.Steps) > 0} {
+		if set {
+			declared++
+		}
+	}
 	if tile.Kind == "" {
 		switch {
-		case tile.Metric != "" && tile.ChartID == "":
+		case declared > 1:
+			return fmt.Errorf("%w: tile %q declares more than one of metric, chart_id and steps; a tile is exactly one", ErrBoardDefinitionInvalid, tile.Key)
+		case tile.Metric != "":
 			tile.Kind = TileKindMetric
-		case tile.ChartID != "" && tile.Metric == "":
+		case tile.ChartID != "":
 			tile.Kind = TileKindChart
-		case tile.Metric != "" && tile.ChartID != "":
-			return fmt.Errorf("%w: tile %q declares both a metric and a chart; a tile is one or the other", ErrBoardDefinitionInvalid, tile.Key)
+		case len(tile.Steps) > 0:
+			tile.Kind = TileKindFunnel
 		default:
-			return fmt.Errorf("%w: tile %q declares neither a metric nor a chart", ErrBoardDefinitionInvalid, tile.Key)
+			return fmt.Errorf("%w: tile %q declares neither a metric, a chart nor funnel steps", ErrBoardDefinitionInvalid, tile.Key)
 		}
 	}
 	switch tile.Kind {
@@ -805,8 +830,38 @@ func normalizeBoardTile(tile *BoardTile) error {
 		if tile.Target != nil {
 			return fmt.Errorf("%w: tile %q sets a target on a chart tile; a target belongs to a catalog metric", ErrBoardDefinitionInvalid, tile.Key)
 		}
+	case TileKindFunnel:
+		if tile.Metric != "" || tile.ChartID != "" {
+			return fmt.Errorf("%w: tile %q is a funnel tile and cannot also reference a metric or a chart", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Display != "" {
+			return fmt.Errorf("%w: tile %q sets display %q on a funnel tile; a funnel has exactly one drawing", ErrBoardDefinitionInvalid, tile.Key, tile.Display)
+		}
+		if tile.Params != nil {
+			return fmt.Errorf("%w: tile %q sets params on a funnel tile; the board's selected range and platform decide its window", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		if tile.Target != nil {
+			return fmt.Errorf("%w: tile %q sets a target on a funnel tile; a target belongs to a catalog metric", ErrBoardDefinitionInvalid, tile.Key)
+		}
+		steps := make([]string, 0, len(tile.Steps))
+		seen := map[string]bool{}
+		for _, step := range tile.Steps {
+			step = strings.TrimSpace(step)
+			if step == "" {
+				continue
+			}
+			if seen[step] {
+				return fmt.Errorf("%w: tile %q lists step %q twice; a funnel step is a distinct event", ErrBoardDefinitionInvalid, tile.Key, step)
+			}
+			seen[step] = true
+			steps = append(steps, step)
+		}
+		if len(steps) < boardFunnelMinSteps || len(steps) > boardFunnelMaxSteps {
+			return fmt.Errorf("%w: tile %q declares %d funnel steps; a funnel needs %d to %d distinct events", ErrBoardDefinitionInvalid, tile.Key, len(steps), boardFunnelMinSteps, boardFunnelMaxSteps)
+		}
+		tile.Steps = steps
 	default:
-		return fmt.Errorf("%w: tile %q has kind %q; a tile is %q or %q", ErrBoardDefinitionInvalid, tile.Key, tile.Kind, TileKindMetric, TileKindChart)
+		return fmt.Errorf("%w: tile %q has kind %q; a tile is %q, %q or %q", ErrBoardDefinitionInvalid, tile.Key, tile.Kind, TileKindMetric, TileKindChart, TileKindFunnel)
 	}
 	switch {
 	case tile.Span == 0:

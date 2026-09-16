@@ -93,7 +93,7 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
           action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => { void overviewQuery.refetch(); void boardQuery.refetch(); }}>Retry</Button>}
         />
       ) : null}
-      {!loading && !error && res && board ? <BoardOrEmpty board={board} res={res} boardKey={boardKey} annotations={annotations} /> : null}
+      {!loading && !error && res && board ? <BoardOrEmpty board={board} res={res} boardKey={boardKey} annotations={annotations} platform={platform} /> : null}
       {/* The retired /traffic, /web-analytics and /product surfaces redirect
           here; these sections are what they used to answer, rendered from the
           same overview read the declared tiles use. Page-level, not a board
@@ -103,7 +103,7 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
   );
 }
 
-function BoardOrEmpty({ board, res, boardKey, annotations }: { board: BoardContent; res: OverviewResult; boardKey: AnalysisBoardKey; annotations: AnnotationsController }) {
+function BoardOrEmpty({ board, res, boardKey, annotations, platform }: { board: BoardContent; res: OverviewResult; boardKey: AnalysisBoardKey; annotations: AnnotationsController; platform: string }) {
   if (!board.has_definition) {
     return (
       <Callout
@@ -115,5 +115,5 @@ function BoardOrEmpty({ board, res, boardKey, annotations }: { board: BoardConte
       />
     );
   }
-  return <AnalysisBoard board={board} res={res} boardKey={boardKey} annotations={annotations} />;
+  return <AnalysisBoard board={board} res={res} boardKey={boardKey} annotations={annotations} platform={platform} />;
 }

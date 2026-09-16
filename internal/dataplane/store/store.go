@@ -1871,6 +1871,13 @@ func (s *Store) SeedProjectFromTemplate(ctx context.Context, projectID string) e
 			return seedErr
 		}
 	}
+	// The weekly decision digest is part of what a new project is: seeded
+	// channel-less so it computes from day one and starts delivering when the
+	// workspace adds its first channel. Non-fatal like the agent seed above —
+	// a project without it still works.
+	if err := s.ensureDigestRule(ctx, projectID); err != nil {
+		fmt.Printf("warn: ensureDigestRule(%s): %v\n", projectID, err)
+	}
 	return s.EnsureDefaultBoards(ctx, projectID)
 }
 
