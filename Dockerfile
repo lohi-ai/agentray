@@ -14,9 +14,12 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o /out/agentray ./cmd/server
 FROM debian:bookworm-slim
 # libstdc++ is the DuckDB static bundle's runtime C++ dependency; wget is the
 # healthcheck client the blue-green deploy's `wget --spider` probe needs —
-# bookworm-slim ships neither.
+# bookworm-slim ships neither. ca-certificates is the trust store every
+# outbound HTTPS call needs (LLM providers, OAuth token endpoints, webhooks):
+# without it the run path dies with "x509: certificate signed by unknown
+# authority" against any provider the workspace configures.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libstdc++6 wget \
+ && apt-get install -y --no-install-recommends libstdc++6 wget ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && adduser --system --no-create-home --group lohi \
  && mkdir -p /data && chown lohi:lohi /data
