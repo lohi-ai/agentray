@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 )
@@ -19,6 +20,15 @@ type Tool interface {
 	// (already truncated by the loop before reaching the model).
 	Run(ctx context.Context, args string) (string, error)
 }
+
+// ErrParked is the sentinel a tool returns to park the run on a human answer
+// (the ask tool): the loop records an EntryQuestion for the call, emits a
+// StreamQuestion, and ends the run WITHOUT a tool result — the call stays
+// dangling in the durable log until an EntryAnswer resolves it or a resume
+// re-issues it. A tool that parks must also be retry-safe (RetrySafeTool /
+// CallRetrySafeTool) or a crash-resume would close the call as interrupted
+// instead of re-parking.
+var ErrParked = errors.New("tool parked the run awaiting a human answer")
 
 // ArgPreparer is an optional Tool capability (pi's prepareArguments): it
 // normalizes the raw JSON argument string before validation and execution —

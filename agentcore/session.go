@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"time"
@@ -51,6 +52,16 @@ const (
 	// carries the gate's nudge messages. A leaf closes the goal along with the
 	// run, so later runs chained onto the same log are not gated by it.
 	EntryGoal SessionEntryKind = "goal"
+	// EntryQuestion records a tool call that parked the run waiting on a human
+	// (the ask tool): CallID links it to the dangling call, Question carries the
+	// validated arguments. The run ends without a tool result, so the call stays
+	// dangling in the log — a resume either closes it with a matching
+	// EntryAnswer or re-issues it when the tool is retry-safe (re-park).
+	EntryQuestion SessionEntryKind = "question"
+	// EntryAnswer records the human's answer to a parked EntryQuestion, keyed by
+	// the same CallID. Recovery closes the dangling call with Answer as its tool
+	// result — the answer IS the tool result, not a new user turn.
+	EntryAnswer SessionEntryKind = "answer"
 
 	// --- Side records (pi's intent/progress granularity) ---
 	//
@@ -107,7 +118,9 @@ type SessionEntry struct {
 	// Lane selects which queue an EntryInbox feeds: "steer" drains at the top
 	// of the next turn, "follow" drains when the run would stop.
 	Lane string `json:"lane,omitempty"`
-	// CallID links an EntryToolProgress to the tool call it reports on.
+	// CallID links a side record to the tool call it concerns: an
+	// EntryToolProgress reports on it, an EntryQuestion parks it, an
+	// EntryAnswer resolves it (the provider's call id, stable across a resume).
 	CallID string `json:"call_id,omitempty"`
 	// Content carries a side record's payload: the accumulated text for an
 	// EntryAssistantFrame, the accumulated partial output for an
@@ -144,7 +157,14 @@ type SessionEntry struct {
 	// Usage records what the summarization call itself cost (EntryCompaction
 	// completion / EntryBranchSummary). Compaction and branch summaries are real
 	// billable provider calls; without this they are invisible spend (pi #6671).
-	Usage     *Usage    `json:"usage,omitempty"`
+	Usage *Usage `json:"usage,omitempty"`
+	// Question is the parked call's validated arguments (EntryQuestion), kept
+	// verbatim so a consumer can re-render the prompt and options without
+	// knowing the tool's schema.
+	Question json.RawMessage `json:"question,omitempty"`
+	// Answer is the human's reply to a parked question (EntryAnswer): the text
+	// recovery feeds back as the call's tool result.
+	Answer    string    `json:"answer,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -537,6 +557,11 @@ type ResumePlan struct {
 	RerunCompaction bool       // an unfinished compaction must be re-run first
 	RetryCalls      []ToolCall // dangling calls whose tools are retry-safe
 	DroppedCalls    []ToolCall // dangling calls left for the model (not retry-safe)
+	// Answers is the out-of-band tool results recorded while the run was parked:
+	// call id -> the human's answer, from EntryAnswer entries. A dangling call
+	// with an entry here is closed with the answer as its result — it is neither
+	// retried nor interrupted.
+	Answers map[string]string
 	// Inbox holds steering/follow-up messages queued but never delivered before
 	// the crash (pi's durable inbox). The resumed run drains them at their
 	// lane's point and settles each with EntryInboxDone.
@@ -572,6 +597,19 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 		return plan // a leaf exists: the run finished, nothing to recover
 	}
 
+	// Answers recorded while the run was parked (EntryAnswer) close their calls
+	// before the retry/drop classification below: the answer IS the tool result,
+	// so an answered call is neither re-run nor interrupted.
+	answers := map[string]string{}
+	for _, e := range ActivePath(log) {
+		if e.Kind == EntryAnswer && e.CallID != "" {
+			answers[e.CallID] = e.Answer
+		}
+	}
+	if len(answers) > 0 {
+		plan.Answers = answers
+	}
+
 	// Find dangling tool calls: those issued by an assistant message that never
 	// received a tool result.
 	satisfied := map[string]bool{}
@@ -589,6 +627,9 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 				continue
 			}
 			plan.Interrupted = true
+			if _, answered := answers[c.ID]; answered {
+				continue // closed by its EntryAnswer at stitch time
+			}
 			if isRetrySafe(tools, c) {
 				plan.RetryCalls = append(plan.RetryCalls, c)
 			} else {
@@ -632,6 +673,7 @@ func CloseDanglingCalls(messages []Message) []Message {
 		if m.Role != RoleAssistant {
 			continue
 		}
+
 		for _, c := range m.ToolCalls {
 			if satisfied[c.ID] {
 				continue
@@ -646,6 +688,38 @@ func CloseDanglingCalls(messages []Message) []Message {
 		}
 	}
 	return out
+}
+
+// logHasQuestion reports whether the log already carries an EntryQuestion for
+// callID — the dedupe check a re-park runs before recording the question again.
+func logHasQuestion(log []SessionEntry, callID string) bool {
+	for _, e := range log {
+		if e.Kind == EntryQuestion && e.CallID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+// PendingQuestion returns the newest parked call still awaiting an answer: an
+// EntryQuestion with no matching EntryAnswer. The second return is the
+// question's validated arguments; the third reports whether one was found.
+// Consumers (the answer route, the reattach read) use it to render or resolve
+// the open question without knowing which tool asked it.
+func PendingQuestion(log []SessionEntry) (callID string, question json.RawMessage, found bool) {
+	answered := map[string]bool{}
+	for _, e := range log {
+		if e.Kind == EntryAnswer {
+			answered[e.CallID] = true
+		}
+	}
+	for i := len(log) - 1; i >= 0; i-- {
+		e := log[i]
+		if e.Kind == EntryQuestion && !answered[e.CallID] {
+			return e.CallID, e.Question, true
+		}
+	}
+	return "", nil, false
 }
 
 // The run's goal as durable STATE.

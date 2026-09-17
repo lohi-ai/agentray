@@ -1851,6 +1851,17 @@ export type AgentChatCommand = {
   handled: boolean;
 };
 
+export type AgentQuestionOption = {
+  label: string;
+  description?: string;
+};
+
+export type AgentQuestionPayload = {
+  question: string;
+  options?: AgentQuestionOption[];
+  multi?: boolean;
+};
+
 export type AgentChatResult = {
   run_id: string;
   final: string;
@@ -1863,6 +1874,8 @@ export type AgentChatResult = {
   // nothing was appended to the conversation, so the turn settles as a neutral
   // "Stopped" rather than a failure — including in a tab that didn't press Stop.
   stopped?: boolean;
+  waiting?: boolean;
+  question?: AgentQuestionPayload;
 };
 
 // AgentChatSteered is the auto-route outcome: the message was injected into a run
@@ -1901,6 +1914,8 @@ export type AgentChatStreamHandlers = {
   // A running tool's partial output, addressed to the call that produced it.
   onToolUpdate?: (call: { callID: string; note: string }) => void;
   // The agent rewrote its todo list. Fires on every revision, so the checklist on
+  // The agent parked on a structured question for the human (the ask tool).
+  onQuestion?: (question: AgentQuestionPayload) => void;
   // screen tracks the one the agent is actually working from.
   onPlan?: (items: AgentPlanItem[]) => void;
   // This turn is gated on a completion condition (`/goal …`): the agent may not
@@ -2758,7 +2773,11 @@ export class AgentRayAPI {
   // has no run yet. A done run's `summary` is the final answer; `tool_calls` is the
   // persisted tool trace, used to rebuild the step timeline lost on reload.
   sessionRun(sessionID: string) {
-    return this.get<{ run: AgentRun; tool_calls: AgentToolCall[] }>(`/api/agent/sessions/${encodeURIComponent(sessionID)}/run`);
+    return this.get<{
+      run: AgentRun;
+      tool_calls: AgentToolCall[];
+      pending_question?: { call_id: string; question: AgentQuestionPayload };
+    }>(`/api/agent/sessions/${encodeURIComponent(sessionID)}/run`);
   }
 
   // --- agent monitoring console (/agents/monitor) ---
@@ -2815,6 +2834,28 @@ export class AgentRayAPI {
     return this.consumeChatSSE(response, handlers);
   }
 
+  // answerChatStream answers a parked ask question and streams the resumed continuation.
+  async answerChatStream(
+    sessionID: string,
+    answer: string,
+    handlers: AgentChatStreamHandlers = {},
+    opts: { callID?: string; conversationID?: string; signal?: AbortSignal } = {},
+  ): Promise<AgentChatStreamResult> {
+    const response = await fetch(`${apiBase()}${this.withProject('/api/agent/chat/answer')}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({
+        session_id: sessionID,
+        call_id: opts.callID ?? '',
+        answer,
+        conversation_id: opts.conversationID ?? '',
+      }),
+      signal: opts.signal,
+    });
+    return this.consumeChatSSE(response, handlers);
+  }
+
   // consumeChatSSE reads the shared chat SSE contract (token/run/progress/card/
   // tool/tool_start/error/done/steered) off a streamed response and resolves with
   // the final run (or a steered ack). Shared by agentChatStream (legacy /chat) and
@@ -2861,6 +2902,9 @@ export class AgentRayAPI {
             handlers.onPlan?.((evt.data.items ?? []) as AgentPlanItem[]);
           } else if (evt.event === 'goal') {
             handlers.onGoal?.(String(evt.data.goal ?? ''));
+          }
+          else if (evt.event === 'question') {
+            handlers.onQuestion?.(evt.data.question as unknown as AgentQuestionPayload);
           }
           else if (evt.event === 'error') handlers.onError?.(String(evt.data.error ?? 'stream error'));
           else if (evt.event === 'done') result = evt.data as unknown as AgentChatResult;

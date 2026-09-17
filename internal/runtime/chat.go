@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -74,6 +75,19 @@ type ChatOptions struct {
 	OnGoal func(string)
 }
 
+// AnswerOptions parameterize answering a parked ask tool call.
+type AnswerOptions struct {
+	UserID         string
+	ProjectID      string
+	SessionID      string // client-held conversation id
+	CallID         string // tool call id being answered (optional if single pending)
+	Answer         string
+	ConversationID string
+	ReadOnly       bool
+	OnPlan         func([]PlanItem)
+	OnGoal         func(string)
+}
+
 // ChatResult is the outcome of one chat turn, shaped to the chat JSON/SSE
 // contract (run_id/final/route/tool_calls/usage/turns + the additive card).
 // RunID is empty for a direct small-talk reply, which never opens a run.
@@ -90,6 +104,12 @@ type ChatResult struct {
 	// the client renders a neutral "Stopped" marker rather than a red failure. A
 	// second tab learns the same fact from the run row's `stopped` status.
 	Stopped bool `json:"stopped,omitempty"`
+	// Waiting marks a turn that ended parked on an ask tool call awaiting a
+	// human answer. The client renders the question card rather than concluding
+	// the turn.
+	Waiting bool `json:"waiting,omitempty"`
+	// Question carries the parked question's prompt and options (when Waiting is true).
+	Question json.RawMessage `json:"question,omitempty"`
 }
 
 // chatDecision is the front-desk classifier's verdict for one turn. A non-empty
@@ -122,7 +142,8 @@ type chatWork struct {
 	// provider config; empty leaves the tier default.
 	ReasoningEffort string
 	// ReadOnly carries ChatOptions.ReadOnly into the run.
-	ReadOnly bool
+	ReadOnly        bool
+	ResumeFromRunID string
 }
 
 // ChatService owns one conversational turn of the general agent. It holds a
@@ -271,9 +292,85 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	res.Usage.OutputTokens += dec.Usage.OutputTokens
 	res.Usage.CostUSD += dec.Usage.CostUSD
 	res.Usage.CostUnpriced = res.Usage.CostUnpriced || dec.Usage.CostUnpriced
+	if res.Waiting {
+		return res, nil
+	}
 	s.persistAssistantTurn(ctx, opts, res.Final, res.RunID, res.Turns)
 	s.maybeCompact(ctx, opts)
 	return res, nil
+}
+
+// AnswerQuestion records the user's answer to a parked ask tool call, resumes
+// the run from its durable session log, and streams the continuation.
+func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, sink agentcore.StreamSink) (ChatResult, error) {
+	if s.runner == nil || s.runner.Store == nil {
+		return ChatResult{}, fmt.Errorf("runner store required for answer")
+	}
+	waitingRun, err := s.runner.Store.LatestWaitingRunForSession(ctx, opts.UserID, opts.ProjectID, opts.SessionID)
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("no parked question awaiting answer for session %q: %w", opts.SessionID, err)
+	}
+
+	logEntries, err := s.runner.Store.AgentSessionLog(ctx, waitingRun.ID)
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("reading durable session log: %w", err)
+	}
+	sessionLog := make([]agentcore.SessionEntry, len(logEntries))
+	for i, le := range logEntries {
+		_ = json.Unmarshal([]byte(le.PayloadJSON), &sessionLog[i])
+		sessionLog[i].Seq = le.Seq
+	}
+	pendingCallID, _, found := agentcore.PendingQuestion(sessionLog)
+	if !found {
+		return ChatResult{}, fmt.Errorf("no unanswered question in session log for run %s", waitingRun.ID)
+	}
+	if opts.CallID != "" && opts.CallID != pendingCallID {
+		return ChatResult{}, fmt.Errorf("call id mismatch: expected %q, got %q", pendingCallID, opts.CallID)
+	}
+
+	if s.runner.SessionStore != nil {
+		if err := s.runner.SessionStore.Append(ctx, waitingRun.ID, agentcore.SessionEntry{
+			Kind:   agentcore.EntryAnswer,
+			CallID: pendingCallID,
+			Answer: opts.Answer,
+		}); err != nil {
+			return ChatResult{}, fmt.Errorf("recording answer entry: %w", err)
+		}
+	}
+
+	convID := opts.ConversationID
+	if convID == "" {
+		convID = waitingRun.SessionID
+	}
+	if convID != "" {
+		_, _ = AppendMessageEntry(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0)
+	}
+
+	work := chatWork{
+		ProjectID:       opts.ProjectID,
+		AgentID:         waitingRun.AgentID,
+		Message:         "",
+		SessionID:       opts.SessionID,
+		ConversationID:  convID,
+		OnPlan:          opts.OnPlan,
+		ReadOnly:        opts.ReadOnly,
+		ResumeFromRunID: waitingRun.ID,
+	}
+	res, err := s.handle(ctx, work, sink)
+	res.Route = routeData
+
+	if err == nil && !res.Waiting {
+		_ = s.runner.Store.SetAgentRunStatus(ctx, waitingRun.ID, "done")
+		chatOpts := ChatOptions{
+			ProjectID:      opts.ProjectID,
+			AgentID:        waitingRun.AgentID,
+			SessionID:      opts.SessionID,
+			ConversationID: convID,
+		}
+		s.persistAssistantTurn(ctx, chatOpts, res.Final, res.RunID, res.Turns)
+		s.maybeCompact(ctx, chatOpts)
+	}
+	return res, err
 }
 
 // formatAgentError turns a run-setup failure into the same next-step sentence
@@ -441,6 +538,13 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 
 	lastNote := ""
 	wrapped := func(ev agentcore.StreamEvent) {
+		if ev.Type == agentcore.StreamQuestion {
+			emit(ev)
+			if req.ConversationID != "" && s.runner != nil && s.runner.Store != nil {
+				_, _ = AppendQuestionEntry(context.WithoutCancel(ctx), s.runner.Store, req.ConversationID, req.AgentID, runID, ev.Question, ev.Turn)
+			}
+			return
+		}
 		if ev.Type == agentcore.StreamTool {
 			emit(ev) // forward the raw trace (debug)
 			if ev.Tool != nil {
@@ -471,14 +575,15 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
-		ReasoningEffort: req.ReasoningEffort,
-		ReadOnly:        req.ReadOnly,
+		ReasoningEffort:  req.ReasoningEffort,
+		ReadOnly:         req.ReadOnly,
+		ResumeFromRunID:  req.ResumeFromRunID,
 	}, wrapped)
 	if runErr != nil {
 		// Final is carried even on the error return: a stopped run's partial answer
 		// is the whole point of stopping gracefully, and on a genuine failure it is
 		// empty anyway.
-		return ChatResult{RunID: run.ID, Final: res.Final, Tools: res.Tools, Turns: res.Turns}, runErr
+		return ChatResult{RunID: run.ID, Final: res.Final, Tools: res.Tools, Turns: res.Turns, Waiting: res.Parked, Question: res.Question}, runErr
 	}
 
 	card := cardFromMessages(res.Messages)
@@ -488,6 +593,7 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 	return ChatResult{
 		RunID: run.ID, Final: res.Final, Tools: res.Tools,
 		Usage: res.Usage, Turns: res.Turns, Card: card,
+		Waiting: res.Parked, Question: res.Question,
 	}, nil
 }
 

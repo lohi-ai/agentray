@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -103,6 +104,10 @@ type toolOutcome struct {
 	// are buffered and appended by the caller AFTER every result in the batch,
 	// so tool-call/result adjacency is never broken.
 	extra []Message
+	// parked marks a call that ended the run waiting on a human (ErrParked): no
+	// tool-result message is produced — the call stays dangling in the durable
+	// log behind an EntryQuestion until an EntryAnswer resolves it.
+	parked bool
 }
 
 // runToolCall takes a single model tool call through lookup -> prepareArguments
@@ -183,6 +188,15 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	trace.IdempotencyKey = ikey
 	execStart := time.Now()
 	out, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
+	// A parked call ends the run here: no interceptors, no after hooks, no
+	// result message — the caller records the EntryQuestion and stops. The
+	// validated args ride the trace so the question lands in the log exactly as
+	// the model will see it re-asked on a re-park.
+	if errors.Is(runErr, ErrParked) {
+		trace.Allowed = true
+		trace.ResultMeta = "parked"
+		return toolOutcome{trace: trace, parked: true, executed: true}
+	}
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
 	// Bound the result for the model. Interceptors see the RAW output first,
 	// because a lossless bounding strategy (persist the whole thing, hand back a

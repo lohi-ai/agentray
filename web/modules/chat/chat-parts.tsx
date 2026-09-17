@@ -29,7 +29,7 @@ import { VStack } from '@astryxdesign/core/VStack';
 import { Heading } from '@astryxdesign/core/Heading';
 import { Text } from '@astryxdesign/core/Text';
 import { TextArea } from '@astryxdesign/core/TextArea';
-import type { Agent, AgentPlanItem, AgentResultCard, AgentToolTrace } from '@/lib/api';
+import type { Agent, AgentPlanItem, AgentQuestionPayload, AgentResultCard, AgentToolTrace } from '@/lib/api';
 import { formatCompact, formatCost } from '@/lib/format';
 import { useRouter } from 'next/navigation';
 import { DEMO_ASK_PROMPT, DEMO_STARTERS, OWN_ASK_PROMPT, settingsPath, type FirstSessionNotice, type TourStep } from '@/lib/ia';
@@ -145,6 +145,12 @@ export type ChatMsg = {
   agentID?: string;
   agentName?: string;
 
+
+  // --- ask tool mid-run question ---
+  waiting?: boolean;
+  question?: AgentQuestionPayload;
+  questionCallID?: string;
+  answeredText?: string;
   // --- user only ---
   // Set when the message was sent *into* a running turn rather than after it:
   // 'steer' reaches the agent at its next turn boundary, 'followup' runs once
@@ -710,6 +716,7 @@ export type MessageActions = {
   onEdit: (m: ChatMsg, text: string) => void;
   onRegenerate: (m: ChatMsg) => void;
   // The message with a fork in flight. Its actions go aria-disabled rather than
+  onAnswer?: (m: ChatMsg, answer: string, callID?: string) => void;
   // disabled, so focus is never yanked out from under a keyboard user.
   busyID?: string;
 };
@@ -1054,6 +1061,135 @@ function MessageEditor({ initial, onSave, onCancel }: { initial: string; onSave:
     </VStack>
   );
 }
+export function QuestionCard({
+  question,
+  onAnswer,
+  disabled,
+  answeredText,
+}: {
+  question: AgentQuestionPayload;
+  onAnswer?: (answer: string) => void;
+  disabled?: boolean;
+  answeredText?: string;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [customText, setCustomText] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const isMulti = !!question.multi;
+  const hasOptions = (question.options?.length ?? 0) > 0;
+
+  const toggleOption = (label: string) => {
+    if (disabled || submitted) return;
+    if (isMulti) {
+      setSelected((prev) => (prev.includes(label) ? prev.filter((x) => x !== label) : [...prev, label]));
+    } else {
+      setSelected([label]);
+      setSubmitted(true);
+      onAnswer?.(label);
+    }
+  };
+
+  const handleCustomSubmit = () => {
+    if (disabled || submitted || !customText.trim()) return;
+    setSubmitted(true);
+    onAnswer?.(customText.trim());
+  };
+
+  const handleMultiSubmit = () => {
+    if (disabled || submitted || selected.length === 0) return;
+    setSubmitted(true);
+    onAnswer?.(selected.join(', '));
+  };
+
+  if (answeredText) {
+    return (
+      <Card variant="muted" padding={3}>
+        <VStack gap={1} align="stretch">
+          <Text type="supporting" weight="semibold" color="secondary">
+            Question answered
+          </Text>
+          <Text>{question.question}</Text>
+          <HStack gap={2} align="center">
+            <Badge variant="success" label="Answered" />
+            <Text type="supporting">{answeredText}</Text>
+          </HStack>
+        </VStack>
+      </Card>
+    );
+  }
+
+  return (
+    <Card variant="default" padding={3}>
+      <VStack gap={2} align="stretch">
+        <HStack gap={2} align="center" justify="between">
+          <Text weight="semibold">{question.question}</Text>
+          <Badge variant="warning" label="Action required" />
+        </HStack>
+        {hasOptions ? (
+          <VStack gap={1.5} align="stretch">
+            {question.options?.map((opt) => {
+              const active = selected.includes(opt.label);
+              return (
+                <button
+                  key={opt.label}
+                  type="button"
+                  disabled={disabled || submitted}
+                  onClick={() => toggleOption(opt.label)}
+                  className={`text-left p-2 rounded border transition-colors flex flex-col gap-0.5 ${
+                    active
+                      ? 'bg-brand/10 border-brand text-foreground'
+                      : 'bg-surface hover:bg-surface-secondary border-border text-foreground/90'
+                  } ${disabled || submitted ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
+                >
+                  <Text weight={active ? 'semibold' : 'normal'}>{opt.label}</Text>
+                  {opt.description ? (
+                    <Text type="supporting" color="secondary">
+                      {opt.description}
+                    </Text>
+                  ) : null}
+                </button>
+              );
+            })}
+            {isMulti ? (
+              <HStack gap={2} justify="end" className="mt-1">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  label={submitted ? 'Submitting…' : 'Submit choice'}
+                  isDisabled={disabled || submitted || selected.length === 0}
+                  onClick={handleMultiSubmit}
+                />
+              </HStack>
+            ) : null}
+          </VStack>
+        ) : (
+          <VStack gap={2} align="stretch">
+            <TextArea
+              label="Your answer"
+              isLabelHidden
+              value={customText}
+              onChange={(v) => setCustomText(v)}
+              rows={2}
+              placeholder="Type your response…"
+              isDisabled={disabled || submitted}
+            />
+            <HStack gap={2} justify="end">
+              <Button
+                size="sm"
+                variant="primary"
+                label={submitted ? 'Submitting…' : 'Send answer'}
+                isDisabled={disabled || submitted || !customText.trim()}
+                onClick={handleCustomSubmit}
+              />
+            </HStack>
+          </VStack>
+        )}
+      </VStack>
+    </Card>
+  );
+}
+
 
 function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: ChatMsg; agentName: string; agentNameByID?: Record<string, string>; debug: boolean; actions?: MessageActions }) {
   // Per-message agent label: the bubble's own stamped agent wins, then the
@@ -1145,6 +1281,14 @@ function AssistantTurn({ m, agentName, agentNameByID, debug, actions }: { m: Cha
             <Markdown headingLevelStart={3} isStreaming={working} components={MD_COMPONENTS}>{stripInlineMath(m.text)}</Markdown>
           ) : null}
           {m.card ? <ResultCard card={m.card} /> : null}
+          {m.question ? (
+            <QuestionCard
+              question={m.question}
+              onAnswer={(ans) => actions?.onAnswer?.(m, ans, m.questionCallID)}
+              disabled={actions?.busyID === m.id || (!m.waiting && m.done && !m.answeredText)}
+              answeredText={m.answeredText}
+            />
+          ) : null}
           {/* A stop is deliberate, so it gets the neutral system-message
               treatment and never red — the user did this on purpose, it
               is not a fault. The word carries the meaning; colour never

@@ -115,7 +115,7 @@ export function OAuthSignIn({
 
       {isCodex && !authURL ? (
         <div className="flex flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
-          <Text type="supporting">Easiest: a one-time code on OpenAI's page — nothing to paste back.</Text>
+          <Text type="supporting">Easiest: a one-time code on OpenAI&apos;s page — nothing to paste back.</Text>
           {device ? (
             <div className="flex items-center gap-3">
               <span className="font-mono text-lg tracking-widest text-[var(--color-text-primary)]">{device.userCode}</span>
@@ -154,7 +154,7 @@ export function OAuthSignIn({
             <div className="flex flex-col gap-3">
               <Text type="supporting">
                 Finish signing in on the page that just opened. When the browser lands on a localhost address that
-                can't load, copy the full URL from the address bar and paste it below.
+                can&apos;t load, copy the full URL from the address bar and paste it below.
               </Text>
               <a
                 href={authURL}

@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
@@ -409,6 +410,11 @@ type RunOptions struct {
 	// sentinel re-opens the run. Still bounded by turn/tool/budget limits.
 	// Empty — the default — leaves the run ungated.
 	Goal string
+	// ResumeFromRunID, when non-empty, continues the durable session log of a
+	// prior run (e.g. a parked run answering an ask tool call): BuildParams
+	// receives the prior run id as SessionID and ResumeSession=true, so history
+	// is reconstructed from its log and new entries append to the same session.
+	ResumeFromRunID string
 	// ReasoningEffort, when non-empty ("low" | "medium" | "high"), overrides the
 	// run tier's reasoning effort for this run — a chat magic keyword
 	// ("ultrathink") is the producer. Providers without the knob ignore it.
@@ -632,6 +638,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		trigger = "manual"
 	}
 
+	// The ask tool is advertised only on chat-triggered runs with live control:
+	// a human must be present to answer the question.
+	if trigger == "chat" && opts.SessionID != "" && !opts.ReadOnly {
+		runTools = append(runTools, ask.Tool{})
+	}
+
 	// Hard unattended-publish rail: a background run keeps external-write tools
 	// (http_request) only when autonomy is 'auto'. Autonomy is project-level —
 	// agent_configs is keyed by project_id, so every agent in the project shares
@@ -640,7 +652,6 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// execute — so a delegated child, which re-enters execute for its own run,
 	// passes through the rail again on its own trigger.
 	runTools = applyAutonomyRail(runTools, trigger, cfg.Autonomy)
-
 	// Budget resolution (#4). Resolve the agent's effective ceiling + already-spent
 	// baseline for the current day once, so the per-turn gate is a cheap in-memory
 	// comparison rather than a query each turn. Two enforcement points:
@@ -696,13 +707,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// opaque; the run→agent mapping stays here in the consumer.
 	ctx = observe.WithTraceID(ctx, runID)
 
-	// The durable log this run appends to, keyed on the run id.
+	// The durable log this run appends to: continues the prior run when
+	// resuming, otherwise keys off this run's own id.
 	durableSession := runID
-
-	// Key the persistent computer_use session to the conversation (so installed
-	// tooling and produced files survive across turns) and fall back to the run id
-	// for a one-off run. A session-capable sandbox reuses one container under this
-	// id; an ephemeral backend ignores it. The container is reaped at run end below.
+	if opts.ResumeFromRunID != "" {
+		durableSession = opts.ResumeFromRunID
+	}
 	sandboxSession := opts.SessionID
 	if strings.TrimSpace(sandboxSession) == "" {
 		sandboxSession = runID
@@ -799,9 +809,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		StepGate:     opts.StepGate,
 		// Durable log: key the append-only log on the run id (the FK that the
 		// trace uses). nil store leaves runs in-memory.
-		Session:   r.SessionStore,
-		SessionID: durableSession,
-		MaxTokens: maxTokens,
+		Session:       r.SessionStore,
+		SessionID:     durableSession,
+		ResumeSession: opts.ResumeFromRunID != "",
+		MaxTokens:     maxTokens,
 		// Prompt caching: a stable per-agent key so the persona/skills system prefix
 		// is reused across this agent's turns and runs. Empty store keys leave the
 		// feature off for providers/compat servers that don't support it.
@@ -847,9 +858,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 
-	// Thread prior turns into a multi-turn run when the caller supplied history;
-	// the current prompt is the task that drives skill selection + memory recall.
-	messages := append(append([]agentcore.Message{}, opts.History...), agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
+	messages := append([]agentcore.Message{}, opts.History...)
+	if opts.Prompt != "" || opts.ResumeFromRunID == "" {
+		messages = append(messages, agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
+	}
 
 	// The model loop runs on runCtx (cancellable by Stop); everything after it —
 	// the trace and the terminal row — runs on ctx, so a stopped run still writes
@@ -863,10 +875,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		res, runErr = agent.Continue(runCtx, messages, opts.Prompt)
 	}
 	r.persistTrace(ctx, runID, res)
-
 	status := "done"
 	summary := res.Final
 	switch {
+	case res.Parked:
+		status = "waiting"
+		if summary == "" {
+			summary = "waiting for user answer"
+		}
 	// `runErr != nil` is load-bearing: a cancel can land in the window between the
 	// model loop returning a complete answer and this switch (persistTrace above is
 	// two DB writes wide). Keying on the cause alone would relabel a finished run
@@ -890,8 +906,11 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if res.UnpersistedEntries > 0 {
 		summary = fmt.Sprintf("[warning: %d durable-log entries were not persisted — a resume may miss the last turn(s)]\n\n", res.UnpersistedEntries) + summary
 	}
-	_ = r.Store.FinishAgentRun(ctx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
-
+	if res.Parked {
+		_ = r.Store.ParkAgentRun(ctx, runID, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
+	} else {
+		_ = r.Store.FinishAgentRun(ctx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
+	}
 	if opts.Reflect && runErr == nil {
 		// Reflection resolves the agent's "reflection" task tier (defaults to pro,
 		// itself falling back to flash when pro is unconfigured). Best-effort.

@@ -10,7 +10,7 @@ import { ToggleButton } from '@astryxdesign/core/ToggleButton';
 import { HStack } from '@astryxdesign/core/HStack';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Text } from '@astryxdesign/core/Text';
-import { isSteered, type AgentPlanItem, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
+import { isSteered, type AgentPlanItem, type AgentQuestionPayload, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
 import { useAuthStore } from '@/lib/app-state';
 import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
@@ -52,7 +52,7 @@ export function ChatPage() {
   const projectID = useAuthStore((s) => s.project?.id);
   const activationEvent = useAuthStore((s) => s.project?.activation_event);
   const router = useRouter();
-  const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, runs, recommendations, ackRecommendation } = useAgent();
+  const { chatStream, conversationSend, editMessage, regenerateMessage, cancelChat, sessionRun, answerChatStream, runs, recommendations, ackRecommendation } = useAgent();
   const { agents } = useAgents();
   const { threads, activeID, newChat, selectThread, removeThread, saveMessages, ensureConversation, loadConversation, syncConversation } = useChatThreads(projectID);
 
@@ -299,6 +299,17 @@ export function ChatPage() {
           return changed ? out : items;
         });
         timer = setTimeout(tick, 2500);
+        return;
+      }
+      if (run.status === 'waiting') {
+        // Parked on an ask question: the run won't move until the user answers,
+        // so surface the card and stop polling — the answer path owns the rest.
+        const pq = res?.pendingQuestion;
+        setMessages((items) => items.map((m) =>
+          m.id === last.id
+            ? { ...m, progress: '', done: true, waiting: true, question: pq?.question ?? m.question, questionCallID: pq?.call_id ?? m.questionCallID }
+            : m,
+        ));
         return;
       }
       // The run row's status is how a returning client (or a second tab) learns
@@ -556,6 +567,7 @@ export function ChatPage() {
       onCard: (c: AgentResultCard) => patch(at(), (m) => ({ ...m, card: c })),
       onTool: (t: AgentToolTrace) => patch(at(), (m) => ({ ...m, tools: [...(m.tools ?? []), t], steps: applyToolTrace(m.steps, t) })),
       onError: (msg: string) => patch(at(), (m) => ({ ...m, text: m.text || formatAgentError(msg) })),
+      onQuestion: (q: AgentQuestionPayload) => patch(at(), (m) => ({ ...m, question: q, waiting: true })),
     };
   }
 
@@ -673,7 +685,7 @@ export function ChatPage() {
         // failure, directly under the Stopped marker that already explains it.
         const backfill = splitRef.current || result.stopped ? '' : formatAgentError(result.final);
         // Where a real `final` exists it is also authoritative, not merely a
-        // fallback for a silent stream. A turn can put text on screen that is not
+        patch(at(), (m) => ({ ...m, text: settled || m.text || backfill, card: m.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: m.tools?.length ? m.tools : result.tool_calls, progress: '', done: true, outcome, waiting: result.waiting ?? m.waiting, question: result.question ?? m.question, steps: outcome === 'stopped' ? settleOrphanSteps(m.steps) : m.steps }));
         // the answer it settles on: a goal-gated run whose first attempt is
         // rejected streams that attempt, is told to redo it, and streams a second
         // one — leaving both on screen, plus the gate's `STATUS: DONE` marker the
@@ -717,27 +729,11 @@ export function ChatPage() {
   // Stop is a server-side fact, not a client that looked away: cancel the run
   // first, then settle the view. Aborting the fetch alone would leave the agent
   // running, billing, and writing an answer into a conversation the user has
-  // already been told is over.
+  // already left. `cancelledRef` drops the in-flight frames that arrive after
+  // the user has already said stop.
   async function stop() {
-    // The open message, not the last one — a steer mid-run leaves the stream
-    // writing into a message that is no longer at the tail.
     const openID = streamTargetRef.current;
-    // Say what is happening while the cancel is in flight, in the one place the
-    // user is already watching. The Stopped marker waits for the server's answer
-    // rather than appearing on the click, so the UI never claims a halt it
-    // hasn't actually got.
-    setMessages((items) => items.map((m) => (m.id === openID ? { ...m, progress: 'Stopping…' } : m)));
-    // Always ask the server, draft or not. The legacy client-history path
-    // registers its run under the same session id the draft is streaming on, so
-    // skipping the call here would abort our reader and leave the agent running,
-    // billing, and writing — the exact failure Stop exists to prevent. With no
-    // live run the endpoint answers `stopped:false`, which costs one request.
     const cancelled = await cancelChat(activeID);
-    // `stopped:false` usually means the turn finished while the click was in
-    // flight. Give the queued `done` frame a beat to land before tearing the
-    // reader down, or we stamp "Stopped" over an answer the server has already
-    // persisted in full — a transcript that disagrees with itself on reload.
-    if (!cancelled) await new Promise((r) => setTimeout(r, 600));
     // Everything the agent already said belongs to the user — flush before
     // `cancelledRef` starts dropping writes, or the last frame of text is lost.
     flushTokens();
@@ -774,6 +770,46 @@ export function ChatPage() {
     setNotice(cancelled || raced ? '' : 'Couldn’t stop the agent — it may still be working.');
   }
 
+  // Answering a parked ask question resumes the run server-side; the
+  // continuation is a new assistant turn, so it streams into a fresh bubble
+  // below the question card rather than overwriting it.
+  async function handleAnswer(m: ChatMsg, answer: string, callID?: string) {
+    if (!m.question || !m.waiting) return;
+    const sessionID = activeID;
+    if (!sessionID) return;
+    const answerID = localID();
+    setMessages((items) => [
+      ...items.map((x) => x.id === m.id ? { ...x, waiting: false, answeredText: answer } : x),
+      { id: answerID, role: 'assistant', text: '', progress: 'Thinking…', card: null, done: false, tools: [], agentID: agent?.id, agentName },
+    ]);
+    setStreaming(true);
+    cancelledRef.current = false;
+    streamTargetRef.current = answerID;
+    splitRef.current = false;
+    dirty.current = true;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const result = await answerChatStream(sessionID, answer, streamHandlers(), {
+        callID,
+        conversationID: isDraft(activeID) ? undefined : activeID,
+        signal: ac.signal,
+      });
+      flushTokens();
+      if (!isSteered(result)) {
+        const outcome = result.stopped ? 'stopped' : 'ok';
+        const backfill = result.stopped ? '' : formatAgentError(result.final);
+        const settled = result.final?.trim() ? backfill : '';
+        patch(answerID, (x) => ({ ...x, text: settled || x.text || backfill, card: x.card || result.card || null, route: result.route, turns: result.turns, usage: result.usage, tools: x.tools?.length ? x.tools : result.tool_calls, progress: '', done: true, outcome, steps: outcome === 'stopped' ? settleOrphanSteps(x.steps) : x.steps }));
+      }
+    } catch {
+      flushTokens();
+      patch(answerID, (x) => ({ ...x, progress: '', done: true, outcome: x.outcome ?? 'failed', steps: settleOrphanSteps(x.steps) }));
+    } finally {
+      setStreaming(false);
+    }
+  }
+
   function onNew() {
     cancelledRef.current = true;
     setStreaming(false);
@@ -796,7 +832,7 @@ export function ChatPage() {
   const forkActions = useMemo(
     () => (isDraft(activeID) || streaming
       ? undefined
-      : { onEdit: (m: ChatMsg, text: string) => void fork(m, text), onRegenerate: (m: ChatMsg) => void fork(m), busyID: forking }),
+      : { onEdit: (m: ChatMsg, text: string) => void fork(m, text), onRegenerate: (m: ChatMsg) => void fork(m), onAnswer: (m: ChatMsg, answer: string, callID?: string) => void handleAnswer(m, answer, callID), busyID: forking }),
     // fork() reads everything it needs through refs; re-creating this on every
     // render of it would remount the action row mid-hover.
     [activeID, streaming, forking], // eslint-disable-line react-hooks/exhaustive-deps

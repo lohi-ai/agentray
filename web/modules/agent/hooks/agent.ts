@@ -100,6 +100,26 @@ export function useAgent() {
       throw err;
     }
   };
+  // answerChatStream answers a parked ask question and streams the resumed continuation.
+  const answerChatStream = async (
+    sessionID: string,
+    answer: string,
+    handlers: AgentChatStreamHandlers = {},
+    opts: { callID?: string; conversationID?: string; signal?: AbortSignal } = {},
+  ): Promise<AgentChatStreamResult> => {
+    try {
+      const result = await client().answerChatStream(sessionID, answer, handlers, opts);
+      if (!isSteered(result)) {
+        queryClient.invalidateQueries({ queryKey: ['agent-runs', projectID] });
+      }
+      return result;
+    } catch (e) {
+      const err = e as Error;
+      setError(err.message);
+      throw err;
+    }
+  };
+
 
   // editMessage / regenerateMessage re-run the conversation from an earlier
   // point, forking the tree there. They stream exactly like conversationSend, so
@@ -154,9 +174,10 @@ export function useAgent() {
     sessionRun: (sessionID: string) =>
       client()
         .sessionRun(sessionID)
-        .then((r) => ({ run: r.run, toolCalls: r.tool_calls ?? [] }))
+        .then((r) => ({ run: r.run, toolCalls: r.tool_calls ?? [], pendingQuestion: r.pending_question }))
         .catch(() => null),
     chatPending: chat.isPending,
+    answerChatStream,
     ackRecommendation: (id: string, status: 'accepted' | 'dismissed', note?: string) =>
       ack.mutateAsync({ id, status, note }),
   };

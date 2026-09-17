@@ -43,6 +43,10 @@ const (
 	// gated on. Human-only for the same reason — the gate itself is durable in the
 	// run's own session log (agentcore EntryGoal); this is how the thread shows it.
 	ConvKindGoal = "goal"
+	// ConvKindQuestion records a parked ask tool call awaiting a human answer.
+	// Human-only: the model receives the answer as the tool result on resume;
+	// this entry is how the thread shows the question card on reload.
+	ConvKindQuestion = "question"
 	// ConvKindKeyword records the magic keywords a turn fired ("ultrathink").
 	// Human-only: the words are stripped from the message the model sees, so this
 	// entry is the durable record that they fired — and why the turn ran at a
@@ -249,6 +253,24 @@ func AppendGoalEntry(ctx context.Context, store *storage.Store, convID, agentID,
 		AgentID:        agentID,
 		RunID:          runID,
 		PayloadJSON:    string(payload),
+	})
+}
+
+// AppendQuestionEntry mirrors a parked ask tool call into the conversation.
+// TokenEstimate is 0: the question is a human-only projection that renders the
+// question card on reload.
+func AppendQuestionEntry(ctx context.Context, store *storage.Store, convID, agentID, runID string, q json.RawMessage, turn int) (storage.AgentConversationEntry, error) {
+	payload := string(q)
+	if payload == "" {
+		payload = "{}"
+	}
+	return store.AppendConversationEntry(ctx, storage.AgentConversationEntry{
+		ConversationID: convID,
+		Kind:           ConvKindQuestion,
+		AgentID:        agentID,
+		RunID:          runID,
+		Turn:           turn,
+		PayloadJSON:    payload,
 	})
 }
 
