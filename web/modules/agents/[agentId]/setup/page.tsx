@@ -13,6 +13,7 @@ import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageTabs } from '@/modules/shared/components/page-shell';
 import { Button, EmptyState, Loading, Panel, Segment } from '@/modules/shared/components/signal-primitives';
+import { CronScheduleField } from '@/modules/shared/components/cron-schedule-field';
 
 // The per-agent setup surface (DESIGN: AgentGarden — zero backend code per agent).
 // Every section here drives an API that already existed but had no UI: the agent's
@@ -640,8 +641,8 @@ function TriggerRow({ trigger, secretNames, onSave, onDelete }: {
           </div>
         ) : (
           <div>
-            <label className={labelCls}>Cron schedule <span className="text-[var(--color-text-disabled)]">(minute hour day month weekday)</span></label>
-            <input className={`${inputCls} max-w-[320px] font-mono`} value={cron} placeholder="0 9 * * 1" onChange={(e) => setCron(e.target.value)} />
+            <label className={labelCls}>Cron schedule</label>
+            <CronScheduleField value={cron} onChange={setCron} />
           </div>
         )}
         <div>
@@ -694,8 +695,8 @@ function TriggersTab({ agentID }: { agentID: string }) {
           </div>
           {kind === 'schedule' ? (
             <div>
-              <label className={labelCls}>Cron schedule <span className="text-[var(--color-text-disabled)]">(minute hour day month weekday)</span></label>
-              <input className={`${inputCls} max-w-[320px] font-mono`} value={cron} placeholder="0 9 * * 1" onChange={(e) => setCron(e.target.value)} />
+              <label className={labelCls}>Cron schedule</label>
+              <CronScheduleField value={cron} onChange={setCron} />
             </div>
           ) : (
             <p className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]"><Webhook size={13} /> We&apos;ll generate a secret URL once you add this — you POST to it to fire the agent.</p>

@@ -125,6 +125,10 @@ type Repo interface {
 	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
 	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
 
+	// Triggers (slice 5): read an agent's schedules/webhooks so an agent can
+	// discover when it is slated to run without a human.
+	ListAgentTriggersForScope(ctx context.Context, scopeID string) ([]storage.AgentTrigger, error)
+
 	// Chart annotations: the project-scoped marks a member drops on a trend.
 	// The window read is the overlap contract every temporal chart asks for;
 	// the by-id read resolves evidence references without ever crossing a

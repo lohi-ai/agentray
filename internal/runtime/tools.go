@@ -124,6 +124,10 @@ type DataSource interface {
 	CreateFunnelWatch(ctx context.Context, projectID, name string, steps []string) (storage.FunnelWatch, error)
 	FunnelWatchesForProject(ctx context.Context, projectID string) ([]storage.FunnelWatch, error)
 
+
+	// Triggers: read an agent's schedules/webhooks so an agent can discover
+	// when it is slated to run without a human.
+	ListAgentTriggersForScope(ctx context.Context, scopeID string) ([]storage.AgentTrigger, error)
 	// Chart annotations: the project-scoped marks behind add_annotation,
 	// list_annotations and delete_annotation. Mirrors usecase.Repo.
 	CreateAnnotationIdempotent(ctx context.Context, projectID string, in storage.AnnotationWrite, idemKey, requestHash string) (storage.Annotation, error)
@@ -192,4 +196,5 @@ const (
 	ToolListAnnotations      = "list_annotations"
 	ToolDeleteAnnotation     = "delete_annotation"
 	ToolRunExperimentReview  = "run_experiment_review"
+	ToolListTriggers         = "list_triggers"
 )

@@ -81,6 +81,7 @@ func Registry() *opcore.Registry {
 	opcore.Register(r, watchFunnel())
 	opcore.Register(r, listFunnelWatches())
 	opcore.Register(r, addAnnotation())
+	opcore.Register(r, listTriggers())
 	opcore.Register(r, listAnnotations())
 	opcore.Register(r, deleteAnnotation())
 	opcore.Register(r, runExperimentReview())

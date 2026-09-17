@@ -114,3 +114,33 @@ WHERE project_id = $1 AND source_kind = 'digest'`, other.ID); err != nil {
 		t.Fatalf("digest channels after second channel = %+v, want [%s]", rules[0].Channels, ch.ID)
 	}
 }
+
+// A project created in a workspace that ALREADY has a channel inherits that
+// channel on its seeded digest immediately, so it doesn't deliver nowhere.
+func TestProjectSeedInheritsExistingChannel(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+	wsID := projectWorkspace(t, s, projectID)
+
+	ch, err := s.CreateAlertChannel(ctx, userID, wsID, AlertChannel{
+		Kind: "slack",
+		Name: "team-slack",
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+
+	// Now create a NEW project in the same workspace. Its digest should inherit ch.
+	newProj, err := s.CreateWorkspaceProject(ctx, userID, wsID, "digest-proj-after-ch")
+	if err != nil {
+		t.Fatalf("create second project: %v", err)
+	}
+	rules := digestRules(t, s, userID, newProj.ID)
+	if len(rules) != 1 {
+		t.Fatalf("digest rules = %d, want 1", len(rules))
+	}
+	if len(rules[0].Channels) != 1 || rules[0].Channels[0] != ch.ID {
+		t.Fatalf("new project digest channels = %+v, want [%s]", rules[0].Channels, ch.ID)
+	}
+}

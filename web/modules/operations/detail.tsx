@@ -15,6 +15,7 @@ import { AppShell } from '@/modules/shared/components/app-shell';
 import { Button, Callout, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { useOperator } from './hooks';
 import { cronToWords } from './lib/cron-words';
+import { CronScheduleField } from '@/modules/shared/components/cron-schedule-field';
 import { isEditableHere, isTeamRun, lastOutcome, operatorStatus, operatorTitle, runnerLabel } from './lib/operator';
 
 // /operations/[id] — one standing operator: what it does, what starts it, who
@@ -163,14 +164,7 @@ function OperatorForm({
               <label className={labelCls} htmlFor="op-cron">
                 Schedule (cron)
               </label>
-              <input
-                id="op-cron"
-                className={`${inputCls} max-w-[320px] font-mono`}
-                value={cron}
-                placeholder="0 9 * * 1"
-                onChange={(e) => setCron(e.target.value)}
-              />
-              <Text type="supporting">{cron.trim() ? cronToWords(cron) : 'Five fields: minute hour day-of-month month day-of-week.'}</Text>
+              <CronScheduleField id="op-cron" value={cron} onChange={setCron} />
             </VStack>
           ) : (
             <Text type="supporting" className="font-mono">
