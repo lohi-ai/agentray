@@ -44,6 +44,9 @@ type BuildParams struct {
 	Agents      string
 	Skills      []agentcore.Skill
 	SkillLoader agentcore.SkillLoader
+	// ResumeSession, when true, continues the existing durable log at SessionID
+	// rather than writing a fresh run from seeds.
+	ResumeSession bool
 	Data        DataSource
 	Memory      agentcore.MemoryStore // optional
 	Notifier    usecase.Notifier      // optional; backs send_notification
@@ -455,6 +458,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		// the analytics-only run is unchanged unless the runner wires these.
 		Session:              p.Session,
 		SessionID:            p.SessionID,
+		ResumeSession:        p.ResumeSession,
 		SeedDisabledTools:    p.SeedDisabledTools,
 		MaxTokens:            p.MaxTokens,
 		PromptCacheKey:       p.PromptCacheKey,

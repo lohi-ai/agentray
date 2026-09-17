@@ -110,6 +110,25 @@ FROM agent_runs WHERE project_id = $1 AND session_id = $2 ORDER BY started_at DE
 	return r, nil
 }
 
+// LatestWaitingRunForSession returns the newest run for a conversation that is
+// parked in status 'waiting', or pgx.ErrNoRows when none exists. Used by the
+// answer endpoint to locate the run awaiting a human response.
+func (s *Store) LatestWaitingRunForSession(ctx context.Context, userID, projectID, sessionID string) (AgentRun, error) {
+	project, err := s.ProjectByIDForUser(ctx, userID, projectID)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	var r AgentRun
+	err = s.pg.QueryRow(ctx, `
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
+FROM agent_runs WHERE project_id = $1 AND session_id = $2 AND status = 'waiting' ORDER BY started_at DESC LIMIT 1`, project.ID, sessionID).
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	return r, nil
+}
+
 // SweepStaleRuns marks runs stuck in 'running' past olderThan as errored, so a
 // run whose process died (or whose detached context hit its ceiling without
 // persisting a terminal status) doesn't linger forever in the UI. Returns the
@@ -135,6 +154,27 @@ func (s *Store) FinishAgentRun(ctx context.Context, runID, status, summary strin
 	_, err := s.pg.Exec(ctx, `
 UPDATE agent_runs SET status = $2, summary = $3, token_input = $4, token_output = $5, cost_usd = $6, cost_unpriced = $7, finished_at = now()
 WHERE id = $1`, runID, status, summary, tokenIn, tokenOut, costUSD, costUnpriced)
+	return err
+}
+
+// ParkAgentRun sets a run's status to 'waiting' without setting finished_at:
+// the run paused inside a tool call that is awaiting a human answer (the ask
+// tool). It is excluded from SweepStaleRuns (which sweeps only 'running' rows)
+// and resumes when the answer arrives.
+func (s *Store) ParkAgentRun(ctx context.Context, runID, summary string, tokenIn, tokenOut int, costUSD float64, costUnpriced bool) error {
+	_, err := s.pg.Exec(ctx, `
+UPDATE agent_runs SET status = 'waiting', summary = $2, token_input = $3, token_output = $4, cost_usd = $5, cost_unpriced = $6
+WHERE id = $1`, runID, summary, tokenIn, tokenOut, costUSD, costUnpriced)
+	return err
+}
+
+// SetAgentRunStatus transitions an existing run's status and, when moving to a
+// terminal status (done|error), sets finished_at = now(). Used when an answer
+// resumes a parked run to close out the original waiting run row.
+func (s *Store) SetAgentRunStatus(ctx context.Context, runID, status string) error {
+	_, err := s.pg.Exec(ctx, `
+UPDATE agent_runs SET status = $2, finished_at = CASE WHEN $2 = 'waiting' THEN finished_at ELSE now() END
+WHERE id = $1`, runID, status)
 	return err
 }
 

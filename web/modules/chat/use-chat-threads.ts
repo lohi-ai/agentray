@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AgentRayAPI, type AgentConversation, type AgentConversationEntry, type AgentPlanItem } from '@/lib/api';
+import { AgentRayAPI, type AgentConversation, type AgentConversationEntry, type AgentPlanItem, type AgentQuestionPayload } from '@/lib/api';
 import { formatAgentError } from '@/lib/ia';
 import type { ChatMsg, ChatStep } from './chat-parts';
 
@@ -167,6 +167,44 @@ export function renderEntries(all: AgentConversationEntry[], leafEntryID?: strin
         const items = (JSON.parse(e.payload_json || '{}') as { items?: AgentPlanItem[] }).items;
         if (items?.length) pendingPlan = items;
       } catch { /* a malformed plan entry is not worth failing a thread load over */ }
+      continue;
+    }
+    if (e.kind === 'question') {
+      try {
+        const payload = JSON.parse(e.payload_json || '{}') as { call_id: string; question: AgentQuestionPayload };
+        if (payload.question) {
+          out.push({
+            id: entryID(e),
+            role: 'assistant',
+            text: '',
+            done: true,
+            waiting: true,
+            question: payload.question,
+            questionCallID: payload.call_id,
+            steps: pending.length ? pending : undefined,
+            tokens: e.token_estimate,
+            plan: pendingPlan,
+            agentID: e.agent_id || undefined,
+          });
+          seq = Math.max(seq, e.seq);
+          pending = [];
+          pendingPlan = undefined;
+          continue;
+        }
+      } catch {}
+    }
+    if (e.kind === 'answer') {
+      try {
+        const payload = JSON.parse(e.payload_json || '{}') as { call_id: string; answer: string };
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (out[i].question && (!payload.call_id || out[i].questionCallID === payload.call_id)) {
+            out[i].waiting = false;
+            out[i].answeredText = payload.answer;
+            break;
+          }
+        }
+      } catch {}
+      seq = Math.max(seq, e.seq);
       continue;
     }
     if (e.kind !== 'message') { seq = Math.max(seq, e.seq); continue; }

@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -468,6 +469,8 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 					replay = nil
 				}
 				terminated := false
+				reparkedCall := ""
+				var reparkedArgs json.RawMessage
 				retried := map[string]Message{}
 				for _, call := range replay {
 					if ctx.Err() != nil || toolCallCount >= limits.MaxToolCalls {
@@ -478,6 +481,17 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						out = disabledOutcome(call)
 					} else {
 						out = a.runToolCall(ctx, exts, extExempt, tools, call, limits, emitUpdate)
+					}
+					if out.parked {
+						// A replayed ask re-parked: the question is still
+						// unanswered. Leave the call dangling (no stitched
+						// result), re-record the question if this log doesn't
+						// already carry it, and end the run parked again.
+						reparkedCall = call.ID
+						reparkedArgs = json.RawMessage(call.Arguments)
+						res.Tools = append(res.Tools, out.trace)
+						toolCallCount++
+						break
 					}
 					applyBreaker(out, &out.message)
 					if out.executed {
@@ -504,12 +518,21 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						continue
 					}
 					for _, c := range m.ToolCalls {
-						if satisfied[c.ID] {
+						if satisfied[c.ID] || c.ID == reparkedCall {
+							// A re-parked call stays dangling: its question is
+							// still open, so no closure is stitched or logged.
 							continue
 						}
 						closing, ok := retried[c.ID]
 						if !ok {
-							closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: interruptedCallNote}
+							if answer, answered := plan.Answers[c.ID]; answered {
+								// A parked call resolved out-of-band: the EntryAnswer
+								// IS its tool result — the model sees the human's
+								// answer exactly as if the tool had returned it.
+								closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: answer}
+							} else {
+								closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: interruptedCallNote}
+							}
 						}
 						stitched = append(stitched, closing)
 						appendEntry(SessionEntry{Kind: EntryMessage, Message: &closing})
@@ -527,6 +550,20 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 					// trailing flush.
 					res.Final = lastAssistantText(res.Messages)
 					appendEntry(SessionEntry{Kind: EntryLeaf})
+					return res, nil
+				}
+				if reparkedCall != "" {
+					// Re-park: the question may already be in the log (the run
+					// that crashed parked on it first) — record it only when
+					// absent so a resume doesn't duplicate the entry.
+					if !logHasQuestion(resumeLog, reparkedCall) {
+						appendEntry(SessionEntry{Kind: EntryQuestion, Turn: res.Turns, CallID: reparkedCall, Question: reparkedArgs})
+					}
+					emit(StreamEvent{Type: StreamQuestion, Question: reparkedArgs, Turn: res.Turns})
+					res.Parked = true
+					res.Question = reparkedArgs
+					res.StopReason = "parked"
+					flush()
 					return res, nil
 				}
 			}
@@ -1227,7 +1264,18 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// while a child the cancellation reached first is recorded as permanently
 		// failed. Same crash, same batch, opposite outcomes.
 		aborting := ctx.Err() != nil
+		parked := []int{}
 		for i := range outcomes {
+			if outcomes[i].parked {
+				// A parked call produces no tool-result message: it stays
+				// dangling in the log so a resume can close it with the human's
+				// answer. Its trace is recorded without a tool_execution_end —
+				// the call did not finish, it is waiting.
+				parked = append(parked, i)
+				res.Tools = append(res.Tools, outcomes[i].trace)
+				toolCallCount++
+				continue
+			}
 			msg := outcomes[i].message
 			applyBreaker(outcomes[i], &msg)
 			recordTool(outcomes[i].trace)
@@ -1244,6 +1292,24 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			terminate = terminate || outcomes[i].terminate
 		}
 
+		if len(parked) > 0 {
+			// Park: record each question durably, tell the viewer, and end the
+			// run without a leaf — the log reduces to "interrupted with a
+			// dangling call", which is exactly the state an answer-resume or a
+			// crash-resume knows how to continue.
+			for _, i := range parked {
+				call := calls[i]
+				q := json.RawMessage(outcomes[i].trace.Args)
+				res.Question = q
+				appendEntry(SessionEntry{Kind: EntryQuestion, Turn: res.Turns, CallID: call.ID, Question: q})
+				emit(StreamEvent{Type: StreamQuestion, Question: q, Turn: res.Turns})
+			}
+			res.Parked = true
+			res.StopReason = "parked"
+			endTurn(true)
+			flush()
+			return res, nil
+		}
 		if terminate {
 			res.Final = lastAssistantText(res.Messages)
 			endTurn(true)

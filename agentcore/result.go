@@ -1,5 +1,7 @@
 package agentcore
 
+import "encoding/json"
+
 // What a run hands back, and what it emits while running.
 //
 // These types are the loop's output vocabulary: the terminal RunResult, and
@@ -24,6 +26,14 @@ type RunResult struct {
 	// this run cannot be reconstructed (pi's Faulted state, degraded to a
 	// flagged result instead of a halt).
 	UnpersistedEntries int `json:"unpersisted_entries,omitempty"`
+	// Parked is true when the run ended inside a tool call that is waiting on a
+	// human (the ask tool): the call stays dangling in the durable log behind an
+	// EntryQuestion, and the run resumes when an EntryAnswer lands. Distinct
+	// from every other stop — the run is neither done nor failed, it is paused.
+	Parked bool `json:"parked,omitempty"`
+	// Question carries the parked call's validated arguments when Parked is
+	// true, so a consumer can render the prompt/options directly from RunResult.
+	Question json.RawMessage `json:"question,omitempty"`
 }
 
 // StreamEventType classifies an incremental event emitted during a streamed run.
@@ -49,6 +59,9 @@ const (
 	StreamTurnEnd        StreamEventType = "turn_end"              // the turn (reason + act) is complete
 	StreamSavePoint      StreamEventType = "save_point"            // a turn's buffered durable writes were flushed atomically
 	StreamAgentEnd       StreamEventType = "agent_end"             // run ends (any exit path)
+	// StreamQuestion carries a parked call's validated arguments: a tool asked
+	// the human a structured question and the run is now waiting on the answer.
+	StreamQuestion StreamEventType = "question"
 )
 
 // ResultCard is a compact, structured answer artifact a consumer may attach to a
@@ -82,12 +95,13 @@ type CardPoint struct {
 // Token/Tool are emitted by the core loop; Progress/Card are emitted by a
 // consumer wrapping the loop (the core never sets them).
 type StreamEvent struct {
-	Type  StreamEventType
-	Token string      // set when Type == StreamToken
-	Tool  *ToolTrace  // set when Type == StreamTool
-	Note  string      // set when Type == StreamProgress
-	Card  *ResultCard // set when Type == StreamCard
-	Turn  int
+	Type     StreamEventType
+	Token    string          // set when Type == StreamToken
+	Tool     *ToolTrace      // set when Type == StreamTool
+	Note     string          // set when Type == StreamProgress
+	Card     *ResultCard     // set when Type == StreamCard
+	Question json.RawMessage // set when Type == StreamQuestion (the parked call's args)
+	Turn     int
 }
 
 // StreamSink receives StreamEvents during a streamed run. A nil sink runs the

@@ -274,6 +274,7 @@ var mutatingRoutes = [][2]string{
 	{http.MethodDelete, "/api/agent/budgets/:period"},
 	{http.MethodPost, "/api/agent/recommendations/:id/ack"},
 	{http.MethodPost, "/api/agent/chat"},
+	{http.MethodPost, "/api/agent/chat/answer"},
 	{http.MethodPost, "/api/agent/chat/cancel"},
 	{http.MethodPost, "/api/agent/conversations"},
 	{http.MethodPost, "/api/agent/conversations/:id/messages"},

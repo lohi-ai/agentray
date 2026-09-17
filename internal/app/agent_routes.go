@@ -817,9 +817,20 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if callErr != nil {
 			calls = nil
 		}
-		return c.JSON(http.StatusOK, map[string]any{"run": run, "tool_calls": calls})
+		resp := map[string]any{"run": run, "tool_calls": calls}
+		if run.Status == "waiting" {
+			logEntries, _ := store.AgentSessionLog(c.Request().Context(), run.ID)
+			sessionLog := make([]agentcore.SessionEntry, len(logEntries))
+			for i, le := range logEntries {
+				_ = json.Unmarshal([]byte(le.PayloadJSON), &sessionLog[i])
+				sessionLog[i].Seq = le.Seq
+			}
+			if callID, q, found := agentcore.PendingQuestion(sessionLog); found {
+				resp["pending_question"] = map[string]any{"call_id": callID, "question": q}
+			}
+		}
+		return c.JSON(http.StatusOK, resp)
 	})
-
 	e.GET("/api/agent/runs/:run_id", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
@@ -976,6 +987,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.JSON(http.StatusOK, map[string]any{
 			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
 			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
+			"waiting": res.Waiting, "question": res.Question,
 		})
 	})
 
@@ -1000,6 +1012,48 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return echo.NewHTTPError(http.StatusBadRequest, "session_id required")
 		}
 		return c.JSON(http.StatusOK, map[string]any{"stopped": liveReg.Cancel(project.ID, payload.SessionID)})
+	})
+
+	// Answer a parked ask tool call: records the user's answer into the run's
+	// durable session log (EntryAnswer) and resumes the run, returning the final
+	// answer (or streaming it). Works for both standalone chats (session_id)
+	// and conversations (conversation_id or session_id).
+	e.POST("/api/agent/chat/answer", func(c echo.Context) error {
+		auth, project, err := authProject(c, store)
+		if err != nil {
+			return err
+		}
+		var payload struct {
+			SessionID      string `json:"session_id"`
+			CallID         string `json:"call_id"`
+			Answer         string `json:"answer"`
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := c.Bind(&payload); err != nil || payload.SessionID == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "session_id required")
+		}
+		svc := agentruntime.NewChatService(store, runnerOpts...)
+		opts := agentruntime.AnswerOptions{
+			UserID:         auth.User.ID,
+			ProjectID:      project.ID,
+			SessionID:      payload.SessionID,
+			CallID:         payload.CallID,
+			Answer:         payload.Answer,
+			ConversationID: payload.ConversationID,
+			ReadOnly:       !sessionAllowsWrite(project),
+		}
+		if wantsEventStream(c) {
+			return streamAnswer(c, svc, opts)
+		}
+		res, runErr := svc.AnswerQuestion(c.Request().Context(), opts, nil)
+		if runErr != nil {
+			return c.JSON(http.StatusBadGateway, map[string]any{"error": runErr.Error(), "run_id": res.RunID})
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
+			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
+			"waiting": res.Waiting, "question": res.Question,
+		})
 	})
 
 	// runConversationTurn appends a user message off the conversation's current leaf
@@ -1061,6 +1115,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		return c.JSON(http.StatusOK, map[string]any{
 			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
 			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
+			"waiting": res.Waiting, "question": res.Question,
 		})
 	}
 
@@ -1512,7 +1567,8 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 			if ev.Card != nil {
 				safeSSE("card", ev.Card)
 			}
-		case agentcore.StreamTool:
+		case agentcore.StreamQuestion:
+			safeSSE("question", map[string]any{"question": ev.Question, "turn": ev.Turn})
 			// The canonical completed tool-call trace (debug-only on the client).
 			// StreamToolExecEnd carries the same trace for the fine-grained lifecycle
 			// and must NOT also emit a `tool` frame — doing so double-rendered every
@@ -1598,12 +1654,112 @@ func streamChat(c echo.Context, svc *agentruntime.ChatService, opts agentruntime
 			// `stopped` tells a client that did not press Stop itself (a second tab,
 			// or the same tab after a cancel it couldn't confirm) that this turn ended
 			// deliberately — a neutral marker, not a failure.
-			"stopped": res.Stopped,
+			"stopped":  res.Stopped,
+			"waiting":  res.Waiting,
+			"question": res.Question,
 		})
 		return nil
 	case <-c.Request().Context().Done():
 		// Client navigated away: stop writing to the dead connection and return. The
 		// goroutine keeps running on runCtx and FinishAgentRun persists the result.
+		mu.Lock()
+		live = false
+		mu.Unlock()
+		return nil
+	}
+}
+
+// streamAnswer runs one answer continuation and streams it to the client as SSE.
+func streamAnswer(c echo.Context, svc *agentruntime.ChatService, opts agentruntime.AnswerOptions) error {
+	w := c.Response()
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	w.Flush()
+
+	var mu sync.Mutex
+	live := true
+	safeSSE := func(event string, data any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !live {
+			return
+		}
+		writeSSE(w, event, data)
+	}
+
+	sink := func(ev agentcore.StreamEvent) {
+		switch ev.Type {
+		case agentcore.StreamToken:
+			safeSSE("token", map[string]any{"token": ev.Token})
+		case agentcore.StreamProgress:
+			safeSSE("progress", map[string]any{"note": ev.Note})
+		case agentcore.StreamCard:
+			if ev.Card != nil {
+				safeSSE("card", ev.Card)
+			}
+		case agentcore.StreamQuestion:
+			safeSSE("question", map[string]any{"question": ev.Question, "turn": ev.Turn})
+		case agentcore.StreamTool:
+			if ev.Tool != nil {
+				safeSSE("tool", map[string]any{
+					"call_id": ev.Tool.CallID,
+					"tool":    ev.Tool.Tool, "allowed": ev.Tool.Allowed,
+					"reason": ev.Tool.Reason, "error": ev.Tool.Error,
+					"result_meta": ev.Tool.ResultMeta,
+					"latency_ms":  ev.Tool.LatencyMS,
+				})
+			}
+		case agentcore.StreamToolExecUpdate:
+			if ev.Tool != nil {
+				safeSSE("tool_update", map[string]any{"call_id": ev.Tool.CallID, "tool": ev.Tool.Tool, "note": ev.Note, "turn": ev.Turn})
+			}
+		case agentcore.StreamToolExecStart:
+			if ev.Tool != nil {
+				safeSSE("tool_start", map[string]any{"call_id": ev.Tool.CallID, "tool": ev.Tool.Tool, "target": agentruntime.ToolTarget(ev.Tool.Args), "turn": ev.Turn})
+			}
+		case agentcore.StreamAgentStart, agentcore.StreamAgentEnd,
+			agentcore.StreamTurnStart, agentcore.StreamTurnEnd,
+			agentcore.StreamMessageStart, agentcore.StreamMessageEnd,
+			agentcore.StreamToolExecEnd, agentcore.StreamSavePoint:
+			safeSSE("lifecycle", map[string]any{"phase": string(ev.Type), "turn": ev.Turn})
+		}
+	}
+
+	opts.OnPlan = func(items []agentruntime.PlanItem) {
+		safeSSE("plan", map[string]any{"items": items})
+	}
+	opts.OnGoal = func(goal string) {
+		safeSSE("goal", map[string]any{"goal": goal})
+	}
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request().Context()), detachedRunCeiling)
+	done := make(chan struct{})
+	var res agentruntime.ChatResult
+	var runErr error
+	go func() {
+		defer cancel()
+		defer close(done)
+		res, runErr = svc.AnswerQuestion(runCtx, opts, sink)
+	}()
+
+	select {
+	case <-done:
+		if runErr != nil {
+			safeSSE("error", map[string]any{"error": runErr.Error(), "run_id": res.RunID})
+		}
+		safeSSE("done", map[string]any{
+			"run_id": res.RunID, "final": res.Final, "tool_calls": res.Tools,
+			"usage": res.Usage, "turns": res.Turns, "card": res.Card, "route": res.Route,
+			"stopped":  res.Stopped,
+			"waiting":  res.Waiting,
+			"question": res.Question,
+		})
+		return nil
+	case <-c.Request().Context().Done():
 		mu.Lock()
 		live = false
 		mu.Unlock()

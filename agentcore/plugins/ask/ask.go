@@ -1,0 +1,155 @@
+// Package ask contributes the `ask` tool: the agent poses a structured
+// question to the human — a prompt plus labeled options, optionally
+// multi-select — and the run parks until the answer arrives.
+//
+// Parking is a loop mechanism, not a block: Run returns agentcore.ErrParked,
+// the loop records an EntryQuestion for the call and ends the run WITHOUT a
+// tool result, leaving the call dangling in the durable log. The answer
+// arrives out-of-band as an EntryAnswer keyed on the same call id; a resumed
+// run closes the dangling call with that answer as its tool result — the
+// model sees the human's reply exactly as if the tool had returned it. A
+// resume that finds the question still unanswered re-issues the call (the
+// tool is retry-safe), which parks the run again on the same question.
+//
+// The tool is advertised only where a human can answer — the host wires it on
+// chat-triggered runs and leaves it off scheduled/webhook/delegate/manual
+// runs. It is self-gated: it returns nothing but what the user typed, so it
+// cannot reach anything the run does not already have.
+package ask
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+
+	"github.com/lohi-ai/agentray/agentcore"
+)
+
+// ToolName is the model-visible identifier.
+const ToolName = "ask"
+
+// Bounds on what a question may carry. The clamps live in PrepareArguments so
+// the durable EntryQuestion — and the card the UI renders — holds the bounded
+// form, never the model's raw overshoot.
+const (
+	maxQuestionLen = 2000
+	maxOptionLen   = 200
+	maxOptions     = 8
+)
+
+// Option is one labeled choice the human can pick.
+type Option struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// args is the tool's input shape.
+type args struct {
+	Question string   `json:"question"`
+	Options  []Option `json:"options,omitempty"`
+	Multi    bool     `json:"multi,omitempty"`
+}
+
+// clamp bounds one args value in place: text lengths, option count, and the
+// one-question-per-call rule (a questions array is folded into the first).
+func clamp(in *args) {
+	in.Question = strings.TrimSpace(in.Question)
+	if len(in.Question) > maxQuestionLen {
+		in.Question = in.Question[:maxQuestionLen]
+	}
+	if len(in.Options) > maxOptions {
+		in.Options = in.Options[:maxOptions]
+	}
+	for i := range in.Options {
+		in.Options[i].Label = strings.TrimSpace(in.Options[i].Label)
+		if len(in.Options[i].Label) > maxOptionLen {
+			in.Options[i].Label = in.Options[i].Label[:maxOptionLen]
+		}
+		if len(in.Options[i].Description) > maxOptionLen {
+			in.Options[i].Description = in.Options[i].Description[:maxOptionLen]
+		}
+	}
+}
+
+// Tool is the ask capability. It carries no state: everything durable lives in
+// the session log the loop writes, so the same value serves every run.
+type Tool struct{}
+
+// Name identifies the tool.
+func (Tool) Name() string { return ToolName }
+
+// Schema advertises the tool to the model.
+func (Tool) Schema() agentcore.ToolSchema {
+	return agentcore.ToolSchema{
+		Name: ToolName,
+		Description: "Ask the user a structured question and wait for their answer. " +
+			"Use when you need a decision only the user can make — a choice between approaches, " +
+			"a missing detail, a confirmation. The run pauses until they answer; their reply " +
+			"comes back as this call's result. Ask ONE question per call. Prefer labeled options " +
+			"the user can pick with one click; set multi when several may apply.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"question": map[string]any{
+					"type":        "string",
+					"description": "The question to ask, phrased for the user.",
+				},
+				"options": map[string]any{
+					"type":        "array",
+					"description": "Labeled choices the user can pick from. Omit for a free-text answer.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"label":       map[string]any{"type": "string", "description": "Short choice label."},
+							"description": map[string]any{"type": "string", "description": "Optional detail shown under the label."},
+						},
+						"required": []string{"label"},
+					},
+				},
+				"multi": map[string]any{
+					"type":        "boolean",
+					"description": "Allow picking several options. Default false.",
+				},
+			},
+			"required": []string{"question"},
+		},
+	}
+}
+
+// PrepareArguments normalizes the raw call before validation: clamps bound the
+// question and options so the durable EntryQuestion records the form the human
+// actually sees.
+func (Tool) PrepareArguments(raw string) string {
+	var in args
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return raw // malformed JSON fails validation on the original text
+	}
+	clamp(&in)
+	out, err := json.Marshal(in)
+	if err != nil {
+		return raw
+	}
+	return string(out)
+}
+
+// Run never produces a result: a valid call parks the run. The answer reaches
+// the model through the durable log (EntryAnswer), not through this return.
+func (Tool) Run(_ context.Context, raw string) (string, error) {
+	var in args
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(in.Question) == "" {
+		return "", errors.New("question is required")
+	}
+	return "", agentcore.ErrParked
+}
+
+// SelfGated exempts the tool from the permission policy: it returns only what
+// the user typed, so it reaches nothing the run does not already have.
+func (Tool) SelfGated() bool { return true }
+
+// RetrySafe makes a dangling ask re-issue on resume: re-parking on the same
+// question is the correct recovery when the answer never arrived.
+func (Tool) RetrySafe() bool { return true }

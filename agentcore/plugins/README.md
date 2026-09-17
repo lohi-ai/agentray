@@ -113,6 +113,7 @@ listener", or "here is a decorator around every model call".
 | [`todo`](todo/) | `update_plan` + the pinned live plan | a long run drifts off task |
 | [`observe`](observe/) `Hooks` | telemetry at `PriorityLate` | the run is unobservable |
 | [`observe`](observe/) `Monitor` | per-call trace + cost, on every rung | spend is unattributable |
+| [`ask`](ask/) | `ask` tool for mid-run human decisions | the agent guesses instead of asking |
 
 ### Extensions — add something the loop does not do
 

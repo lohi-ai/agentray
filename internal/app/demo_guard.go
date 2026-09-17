@@ -126,6 +126,9 @@ var writeClasses = map[string]writeClass{
 	// rewriting a turn rewrites someone else's thread. Adding a message to it
 	// only appends. ---
 	"/api/agent/chat":                       writeAgentAsk,
+	// Answering a parked ask question resumes the run — same spend class as
+	// asking, so it is metered the same way.
+	"/api/agent/chat/answer":                writeAgentAsk,
 	"/api/agent/conversations/:id/messages": writeAgentAsk,
 
 	// --- controlling a run that is already going. Costs no quota because it
