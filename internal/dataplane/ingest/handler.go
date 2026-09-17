@@ -209,11 +209,14 @@ func (h Handler) toEvent(c echo.Context, payload capturePayload, inheritedAPIKey
 			ua,
 		),
 		// UTM tags arrive as $utm_* properties (browser autocapture) or bare
-		// utm_* keys (a server SDK that already names them). Both land in the
-		// dedicated columns; term/content stay in properties only.
+		// utm_* keys (a server SDK that already names them). All five land in
+		// dedicated columns so SQL and the acquisition board can read them
+		// without JSON extraction.
 		UTMSource:   firstNonEmpty(stringProp(props, "$utm_source"), stringProp(props, "utm_source")),
 		UTMMedium:   firstNonEmpty(stringProp(props, "$utm_medium"), stringProp(props, "utm_medium")),
 		UTMCampaign: firstNonEmpty(stringProp(props, "$utm_campaign"), stringProp(props, "utm_campaign")),
+		UTMTerm:     firstNonEmpty(stringProp(props, "$utm_term"), stringProp(props, "utm_term")),
+		UTMContent:  firstNonEmpty(stringProp(props, "$utm_content"), stringProp(props, "utm_content")),
 		InsertID:    stringProp(props, "$insert_id"),
 		IsUnplanned: h.catalog.isUnplanned(c.Request().Context(), project.ID, payload.Event),
 	}, nil

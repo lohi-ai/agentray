@@ -69,6 +69,7 @@ const (
 	MetricTopPages         = "top_pages"
 	MetricTopSources       = "top_sources"
 	MetricTopUTMSources    = "top_utm_sources"
+	MetricTopUTMMediums    = "top_utm_mediums"
 	MetricTopCampaigns     = "top_campaigns"
 	MetricTopReferrers     = "top_referrers"
 	// The reads the retired /traffic, /web-analytics and /product surfaces
@@ -158,8 +159,9 @@ const (
 	metricDefRevenue           = "Deduplicated net revenue per declared currency: rows de-duplicate by $insert_id (last write wins, event_id fallback), refunds and revenue_reversed rows net against bookings, and the headline is the currency with the largest deduplicated gross. No FX — currencies are never summed together."
 	metricDefRetention         = "Return rate for mature lifetime first-activity cohorts: those who came back on day N over those whose day N had fully elapsed. Cohorts too young to have reached day N are excluded, not counted as zero."
 	metricDefTopPages          = "Pageviews of human product activity grouped by path, ranked. Direct and unattributed traffic is not dropped — it is its own row."
-	metricDefTopSources        = "Pageviews of human product activity grouped by referrer channel, with a missing channel reported as unknown rather than inferred."
+	metricDefTopSources        = "Pageviews of human product activity grouped by acquisition source: the visit's utm_source tag when it carries one, else the classified referrer channel, with a missing source reported as unknown rather than inferred."
 	metricDefTopUTMSources     = "Pageviews of human product activity grouped by the visit's utm_source tag, with untagged traffic reported as unknown rather than dropped."
+	metricDefTopUTMMediums     = "Pageviews of human product activity grouped by the visit's utm_medium tag, with untagged traffic reported as unknown rather than dropped."
 	metricDefTopCampaigns      = "Pageviews of human product activity grouped by the visit's utm_campaign tag, with untagged traffic reported as unknown rather than dropped."
 	metricDefTopReferrers      = "Pageviews of human product activity grouped by external referrer host; direct, internal and unattributed visits are excluded rather than ranked."
 	metricDefPageviews         = "Every received user.pageview event in the range, all visitor classes — a crawler's pageview is still a pageview. The traffic_by_class breakdown is the human/non-human split."
@@ -335,6 +337,11 @@ var metricCatalogDecl = []MetricDefinition{
 	{
 		Key: MetricTopUTMSources, Label: "Top UTM sources", Unit: "pageviews", Kind: MetricKindBreakdown,
 		Group: MetricGroupAcquisition, Definition: metricDefTopUTMSources,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricTopUTMMediums, Label: "Top UTM mediums", Unit: "pageviews", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefTopUTMMediums,
 		Displays: []string{DisplayTable, DisplayBar},
 	},
 	{
@@ -657,7 +664,7 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			reading.Rate = &rate
 		}
 		return reading, nil
-	case MetricTopPages, MetricTopSources, MetricTopUTMSources, MetricTopCampaigns, MetricTopReferrers, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
+	case MetricTopPages, MetricTopSources, MetricTopUTMSources, MetricTopUTMMediums, MetricTopCampaigns, MetricTopReferrers, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
 		list := res.Content.TopPages
 		// The retired-surface breakdowns count every received event — their
 		// no-data gate is the range's event population, not qualifying
@@ -670,6 +677,8 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			list = res.Content.TopUTMSources
 		case MetricTopCampaigns:
 			list = res.Content.TopCampaigns
+		case MetricTopUTMMediums:
+			list = res.Content.TopUTMMediums
 		case MetricTopReferrers:
 			list = res.Content.TopReferrers
 		case MetricTrafficByClass:

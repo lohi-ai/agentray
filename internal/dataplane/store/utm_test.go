@@ -20,20 +20,20 @@ func TestAcquisitionBreakdownGroupsUTMTags(t *testing.T) {
 	s := &Store{duck: d}
 	projectID := "cccccccc-1111-2222-3333-444444444444"
 	at := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
-	pv := func(distinctID, source, campaign, refHost, refChannel string) Event {
+	pv := func(distinctID, source, medium, campaign, refHost, refChannel string) Event {
 		return Event{
 			ProjectID: projectID, EventID: uuid.NewString(), EventName: "user.pageview",
 			EventType: "user", DistinctID: distinctID, VisitorClass: "human",
-			Timestamp: at, UTMSource: source, UTMCampaign: campaign,
+			Timestamp: at, UTMSource: source, UTMMedium: medium, UTMCampaign: campaign,
 			ReferrerHost: refHost, ReferrerChannel: refChannel,
 		}
 	}
 	events := []Event{
-		pv("u1", "newsletter", "launch-week", "news.example.com", "referral"),
-		pv("u2", "newsletter", "launch-week", "news.example.com", "referral"),
-		pv("u3", "google", "brand", "google.com", "search"),
+		pv("u1", "newsletter", "email", "launch-week", "news.example.com", "referral"),
+		pv("u2", "newsletter", "email", "launch-week", "news.example.com", "referral"),
+		pv("u3", "google", "cpc", "brand", "google.com", "search"),
 		// Untagged: must surface as unknown, not disappear.
-		pv("u4", "", "", "", "direct"),
+		pv("u4", "", "", "", "", "direct"),
 		// A crawler's tagged pageview is not acquisition traffic.
 		{ProjectID: projectID, EventID: uuid.NewString(), EventName: "user.pageview",
 			EventType: "user", DistinctID: "bot-1", VisitorClass: "search-bot",
@@ -73,6 +73,14 @@ func TestAcquisitionBreakdownGroupsUTMTags(t *testing.T) {
 		t.Fatalf("utm_campaign rows = %+v, want launch-week(2) first of 3", campaigns)
 	}
 
+	mediums, err := s.acquisitionBreakdown(context.Background(), qualWhere, args, "utm_medium", "")
+	if err != nil {
+		t.Fatalf("utm_medium breakdown: %v", err)
+	}
+	if len(mediums) != 3 || mediums[0].Value != "email" || mediums[0].Count != 2 {
+		t.Fatalf("utm_medium rows = %+v, want email(2) first of 3", mediums)
+	}
+
 	referrers, err := s.acquisitionBreakdown(context.Background(), qualWhere, args, "referrer_host",
 		"referrer_channel NOT IN ('', 'direct', 'internal') AND referrer_host IS NOT NULL AND referrer_host <> ''")
 	if err != nil {
@@ -85,6 +93,41 @@ func TestAcquisitionBreakdownGroupsUTMTags(t *testing.T) {
 	}
 	if referrers[1].Value != "google.com" || referrers[1].Count != 1 {
 		t.Fatalf("referrer rows = %+v, want google.com(1) second", referrers)
+	}
+
+	// TopSources must prefer utm_source over referrer_channel when both exist:
+	// u1 and u2 have utm_source=newsletter and referrer_channel=referral ->
+	// attributed to "newsletter" (count 2). u3 has utm_source=google -> "google" (1).
+	// u4 is untagged with referrer_channel=direct -> "direct" (1).
+	topSources := []PathCount{}
+	err = s.duckQuery(context.Background(), `
+SELECT if(coalesce(nullif(utm_source, ''), referrer_channel, '') = '', 'unknown', coalesce(nullif(utm_source, ''), referrer_channel)) AS channel, count(*) AS count
+FROM events
+WHERE `+qualWhere+` AND event_name = 'user.pageview'
+GROUP BY channel
+ORDER BY count DESC
+LIMIT 20`, args, func(rows *sql.Rows) error {
+		var item PathCount
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
+			return err
+		}
+		topSources = append(topSources, item)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("top_sources query: %v", err)
+	}
+	if len(topSources) != 3 || topSources[0].Value != "newsletter" || topSources[0].Count != 2 {
+		t.Fatalf("top_sources rows = %+v, want newsletter(2) first", topSources)
+	}
+	var sawReferral bool
+	for _, row := range topSources {
+		if row.Value == "referral" {
+			sawReferral = true
+		}
+	}
+	if sawReferral {
+		t.Fatalf("top_sources contained 'referral', but UTM tag should have won")
 	}
 }
 
@@ -105,7 +148,7 @@ func TestDuckDBReopenAddsUTMColumns(t *testing.T) {
 	}
 	// Stand in for a pre-UTM file: the columns the ALTERs would add are gone.
 	if err := d.Write(ctx, func(tx *sql.Tx) error {
-		for _, col := range []string{"utm_source", "utm_medium", "utm_campaign"} {
+		for _, col := range []string{"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"} {
 			if _, err := tx.ExecContext(ctx, `ALTER TABLE events DROP COLUMN `+col); err != nil {
 				return err
 			}
@@ -123,7 +166,7 @@ func TestDuckDBReopenAddsUTMColumns(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer reopened.Close()
-	for _, col := range []string{"utm_source", "utm_medium", "utm_campaign"} {
+	for _, col := range []string{"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"} {
 		if got := duckCount(t, reopened, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'events' AND column_name = ?`, col); got != 1 {
 			t.Fatalf("reopened file is missing events.%s", col)
 		}

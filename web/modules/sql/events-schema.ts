@@ -45,6 +45,8 @@ export const EVENTS_COLUMNS: EventColumn[] = [
   { name: 'utm_source', type: 'VARCHAR', note: 'Campaign source tag ($utm_source)' },
   { name: 'utm_medium', type: 'VARCHAR', note: 'Campaign medium tag ($utm_medium)' },
   { name: 'utm_campaign', type: 'VARCHAR', note: 'Campaign name tag ($utm_campaign)' },
+  { name: 'utm_term', type: 'VARCHAR', note: 'Paid search keyword tag ($utm_term)' },
+  { name: 'utm_content', type: 'VARCHAR', note: 'Ad creative / variant tag ($utm_content)' },
 ];
 
 export const EVENTS_COLUMN_NAMES = EVENTS_COLUMNS.map((c) => c.name);

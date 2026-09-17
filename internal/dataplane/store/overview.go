@@ -41,7 +41,10 @@ import (
 // v7 adds acquisition detail: utm_source/utm_medium/utm_campaign columns on
 // events, plus top_utm_sources, top_campaigns and top_referrers breakdowns
 // over the same human pageview population as top_sources.
-const OverviewMetricVersion = "overview.v7"
+// v8 completes the UTM read: utm_term/utm_content columns, a top_utm_mediums
+// breakdown, and top_sources now attributes a tagged visit to its utm_source
+// before falling back to the classified referrer channel.
+const OverviewMetricVersion = "overview.v8"
 
 // overviewVerificationEvent is the canonical first-event check the onboarding
 // flow asks the SDK to send. It is excluded from every qualifying-activity
@@ -263,10 +266,8 @@ type OverviewRetention struct {
 type OverviewContent struct {
 	TopPages   OverviewList `json:"top_pages"`
 	TopSources OverviewList `json:"top_sources"`
-	// UTM-tagged acquisition detail and the external referrer hosts behind it —
-	// the same human pageview population as TopSources, grouped by the new
-	// columns instead of the classified channel.
 	TopUTMSources OverviewList `json:"top_utm_sources"`
+	TopUTMMediums OverviewList `json:"top_utm_mediums"`
 	TopCampaigns  OverviewList `json:"top_campaigns"`
 	TopReferrers  OverviewList `json:"top_referrers"`
 	// The retired Traffic page's remaining breakdowns. TrafficByClass counts
@@ -806,9 +807,13 @@ ORDER BY day`, append([]any{timezone}, args...), func(rows *sql.Rows) error {
 		}
 		res.Content.TopPages = OverviewList{Unit: "pageviews", Rows: pages}
 
+		// A UTM-tagged visit is attributed to its tag before the classified
+		// referrer channel: a ?utm_source=facebook click is "facebook", not
+		// "referral" — the tag is the marketer's own declaration of where the
+		// visit came from, and it always outranks a guessed channel.
 		sources := []PathCount{}
 		err = s.duckQuery(ctx, `
-SELECT if(coalesce(referrer_channel, '') = '', 'unknown', referrer_channel) AS channel, count(*) AS count
+SELECT if(coalesce(nullif(utm_source, ''), referrer_channel, '') = '', 'unknown', coalesce(nullif(utm_source, ''), referrer_channel)) AS channel, count(*) AS count
 FROM events
 WHERE `+qualWhere+` AND event_name = 'user.pageview'
 GROUP BY channel
@@ -831,6 +836,12 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 			return res, err
 		}
 		res.Content.TopUTMSources = OverviewList{Unit: "pageviews", Rows: utmSources}
+
+		mediums, err := s.acquisitionBreakdown(ctx, qualWhere, args, "utm_medium", "")
+		if err != nil {
+			return res, err
+		}
+		res.Content.TopUTMMediums = OverviewList{Unit: "pageviews", Rows: mediums}
 
 		campaigns, err := s.acquisitionBreakdown(ctx, qualWhere, args, "utm_campaign", "")
 		if err != nil {

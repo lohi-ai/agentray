@@ -269,6 +269,12 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"('web', 'ios', 'android', 'server'; '' when undetermined). Split by it before comparing " +
 			"platforms — do NOT read platform out of properties, and never state a product-wide rate as if " +
 			"it described one app when more than one platform is present. " +
+			"Campaign attribution lives in first-class columns — `utm_source`, `utm_medium`, " +
+			"`utm_campaign`, `utm_term`, `utm_content` — lifted from the URL's utm_* params at " +
+			"ingest ('' when the visit was untagged). A tagged visit's source is its `utm_source`, " +
+			"not `referrer_channel`: group by `utm_source` (or coalesce(nullif(utm_source,''), " +
+			"referrer_channel)) to answer 'which campaign/source drove this', and never read the " +
+			"tags back out of `properties` — the columns are the canonical copy. " +
 			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"json_extract_string(data, '$.column') (json_extract for numbers); row_key is the source row's " +

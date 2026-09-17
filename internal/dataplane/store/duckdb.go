@@ -287,6 +287,8 @@ var duckDBSchema = []string{
 		utm_source VARCHAR NOT NULL DEFAULT '',
 		utm_medium VARCHAR NOT NULL DEFAULT '',
 		utm_campaign VARCHAR NOT NULL DEFAULT '',
+		utm_term VARCHAR NOT NULL DEFAULT '',
+		utm_content VARCHAR NOT NULL DEFAULT '',
 		PRIMARY KEY (project_id, event_id)
 	)`,
 	// Column additions for files created before the UTM tags existed: CREATE
@@ -303,6 +305,10 @@ var duckDBSchema = []string{
 	`ALTER TABLE events ALTER COLUMN utm_medium SET NOT NULL`,
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR DEFAULT ''`,
 	`ALTER TABLE events ALTER COLUMN utm_campaign SET NOT NULL`,
+	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_term VARCHAR DEFAULT ''`,
+	`ALTER TABLE events ALTER COLUMN utm_term SET NOT NULL`,
+	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_content VARCHAR DEFAULT ''`,
+	`ALTER TABLE events ALTER COLUMN utm_content SET NOT NULL`,
 	// aliases mirrors the Postgres source of truth (reconciled at boot,
 	// upserted on write). resolved_events joins through it for canonical-id
 	// stitching.

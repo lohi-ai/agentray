@@ -210,13 +210,15 @@ type Event struct {
 	// two audiences added together. Empty means undetermined; it is rendered as
 	// "unknown" rather than folded into web.
 	Platform string `json:"platform,omitempty"`
-	// UTM campaign tags, lifted out of properties at ingest ($utm_source,
-	// $utm_medium, $utm_campaign — the browser SDK's autocapture names) so the
-	// acquisition board can group on a column instead of a JSON extract. Empty
-	// means the visit carried no tag; utm_term/utm_content stay in properties.
+	// UTM campaign tags, lifted out of properties at ingest ($utm_source …
+	// $utm_content — the browser SDK's autocapture names) so the acquisition
+	// board and SQL queries can group on a column instead of a JSON extract.
+	// Empty means the visit carried no tag.
 	UTMSource   string `json:"utm_source,omitempty"`
 	UTMMedium   string `json:"utm_medium,omitempty"`
 	UTMCampaign string `json:"utm_campaign,omitempty"`
+	UTMTerm     string `json:"utm_term,omitempty"`
+	UTMContent  string `json:"utm_content,omitempty"`
 	// InsertID is the caller-supplied idempotency key ($insert_id). Every money
 	// read de-duplicates on it — `coalesce(nullif(insert_id, ''), event_id)` in
 	// money.go's grid, keeping the greatest `(timestamp, event_id)` per key — so
@@ -2974,7 +2976,7 @@ SELECT
 	coalesce(tokens_input, 0), coalesce(tokens_output, 0),
 	coalesce(cost_usd, 0)::DOUBLE, coalesce(latency_ms, 0),
 	coalesce(model_name, ''), is_error, coalesce(error_message, ''), "timestamp", inserted_at, is_unplanned,
-	platform
+	platform, utm_source, utm_medium, utm_campaign, utm_term, utm_content
 FROM events
 WHERE `+where+`
 ORDER BY "timestamp" DESC
@@ -3010,7 +3012,7 @@ SELECT
 	coalesce(tokens_input, 0), coalesce(tokens_output, 0),
 	coalesce(cost_usd, 0)::DOUBLE, coalesce(latency_ms, 0),
 	coalesce(model_name, ''), is_error, coalesce(error_message, ''), "timestamp", inserted_at, is_unplanned,
-	platform
+	platform, utm_source, utm_medium, utm_campaign, utm_term, utm_content
 FROM events
 WHERE `+timelineWhere+`
 ORDER BY "timestamp" ASC
@@ -4544,6 +4546,11 @@ func scanEvent(rows eventScanner) (Event, error) {
 		&inserted,
 		&isUnplanned,
 		&event.Platform,
+		&event.UTMSource,
+		&event.UTMMedium,
+		&event.UTMCampaign,
+		&event.UTMTerm,
+		&event.UTMContent,
 	); err != nil {
 		return event, err
 	}
@@ -4581,6 +4588,11 @@ func eventToMap(event Event) map[string]any {
 		"tokens_input":  event.TokensInput,
 		"tokens_output": event.TokensOutput,
 		"cost_usd":      event.CostUSD,
+		"utm_source":    event.UTMSource,
+		"utm_medium":    event.UTMMedium,
+		"utm_campaign":  event.UTMCampaign,
+		"utm_term":      event.UTMTerm,
+		"utm_content":   event.UTMContent,
 	}
 }
 

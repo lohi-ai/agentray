@@ -159,6 +159,15 @@ export function analysisBars(res: OverviewResult, tile: BoardTile): AnalysisBars
       empty: 'No UTM-tagged visits in this range',
     };
   }
+  if (tile.metric === 'top_utm_mediums') {
+    return {
+      label: titleOf(tile, 'Top UTM mediums'),
+      unit: res.content.top_utm_mediums.unit,
+      rows: res.content.top_utm_mediums.rows,
+      provenance: tileProvenance(res, { kind: 'unserved' }),
+      empty: 'No medium-tagged visits in this range',
+    };
+  }
   if (tile.metric === 'top_campaigns') {
     return {
       label: titleOf(tile, 'Top campaigns'),

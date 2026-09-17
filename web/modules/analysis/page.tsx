@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, Info } from 'lucide-react';
 import { AgentRayAPI, APIError, type BoardContent, type OverviewResult } from '@/lib/api';
@@ -26,7 +26,7 @@ const PLATFORM_OPTIONS = ['web', 'ios', 'android', 'server', 'unknown'].map((val
 }));
 const TARGET_44 = '[&_button]:min-h-[44px] [&_[role=radio]]:min-h-[44px]';
 
-export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
+export function AnalysisPage({ boardKey, children }: { boardKey: AnalysisBoardKey; children?: ReactNode }) {
   const projectID = useAuthStore((s) => s.project?.id);
   const [period, setPeriod] = useState('7d');
   const [platform, setPlatform] = useState('');
@@ -99,6 +99,7 @@ export function AnalysisPage({ boardKey }: { boardKey: AnalysisBoardKey }) {
           same overview read the declared tiles use. Page-level, not a board
           declaration, so seeded and unseeded projects see them alike. */}
       {!loading && !error && res ? <AnalysisSystemSections boardKey={boardKey} board={board} res={res} platform={platform} /> : null}
+      {children}
     </AppShell>
   );
 }
