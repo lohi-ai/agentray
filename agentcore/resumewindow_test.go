@@ -316,6 +316,54 @@ func TestMemorySessionStoreServesAWindow(t *testing.T) {
 	}
 }
 
+// TestUnsettledInboxDefeatsTheWindow covers the third window-safety rule: an
+// EntryInbox queued before the newest checkpoint and never settled is invisible
+// to a suffix read — the fold scans the raw log for pending inbox items — so
+// the store must report no checkpoint and force the full read. Settling it
+// restores the window.
+func TestUnsettledInboxDefeatsTheWindow(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemorySessionStore()
+	b := longRun()
+	for _, e := range b.entries {
+		if err := m.Append(ctx, "s1", e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	full, _ := m.Log(ctx, "s1")
+
+	// A steer queued mid-run and never delivered sits before every checkpoint.
+	msg := Message{Role: RoleUser, Content: "also check shard 7"}
+	if err := m.Append(ctx, "s1", SessionEntry{Kind: EntryInbox, ID: "inbox-1", Lane: InboxSteer, Message: &msg}); err != nil {
+		t.Fatalf("append inbox: %v", err)
+	}
+	if seq, _, _ := m.CheckpointSeq(ctx, "s1"); seq != 0 {
+		t.Fatalf("an unsettled inbox must report no checkpoint, got seq %d", seq)
+	}
+	got, err := LoadResumeLog(ctx, m, "s1")
+	if err != nil {
+		t.Fatalf("LoadResumeLog: %v", err)
+	}
+	if len(got) != len(full)+1 {
+		t.Fatalf("an unsettled inbox must force the full read, got %d of %d entries", len(got), len(full)+1)
+	}
+	if rs := ReduceSession(got); len(rs.Inbox) != 1 || rs.Inbox[0].ID != "inbox-1" {
+		t.Fatalf("the pending steer must survive the fold, got %+v", rs.Inbox)
+	}
+
+	// Settling it makes the window safe again.
+	if err := m.Append(ctx, "s1", SessionEntry{Kind: EntryInboxDone, Target: "inbox-1"}); err != nil {
+		t.Fatalf("append done: %v", err)
+	}
+	got, err = LoadResumeLog(ctx, m, "s1")
+	if err != nil {
+		t.Fatalf("LoadResumeLog: %v", err)
+	}
+	if len(got) >= len(full)+2 {
+		t.Fatalf("a settled inbox must not defeat the window, got %d of %d entries", len(got), len(full)+2)
+	}
+}
+
 // TestARealRunWritesResumableCheckpoints closes the loop between the two halves
 // of this feature. Everything above proves a window folds correctly GIVEN a
 // checkpoint that carries state; this proves the loop actually writes one, on a

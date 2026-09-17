@@ -3,8 +3,10 @@ package agentcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Agent is a configured runtime instance: a provider + model, an injected
@@ -99,6 +101,12 @@ type Agent struct {
 	// instead of racing on the shared run state. A hook may still drive a *different*
 	// Agent instance reentrantly; only the same instance is single-flighted.
 	running int32
+	// inbox is the durable steering/follow-up queue (pi's durable inbox):
+	// Steer/FollowUp append an EntryInbox side record to the session log AND
+	// queue the item here, so the next drain point delivers it — and a crash
+	// before then loses nothing, because a resume re-reads the log.
+	inboxMu sync.Mutex
+	inbox   []InboxItem
 	// retry bounds the same-model backoff retry of a transient provider failure
 	// (429/5xx/network blip) before the loop escalates down the ladder, so a brief
 	// outage no longer jumps straight to a pricier rung or aborts the run.
@@ -297,9 +305,13 @@ type Config struct {
 	Escalation []ModelRung
 	// GetSteeringMessages is an optional callback drained at the top of each turn;
 	// returned messages are injected before the model reasons (mid-run steering).
+	// The consumer owns the source (channel, DB, SSE input) — and its durability:
+	// messages it has not yet returned are lost on a crash. Agent.Steer is the
+	// durable alternative: it writes the queue into the session log itself.
 	GetSteeringMessages func(ctx context.Context) []Message
 	// GetFollowUpMessages is an optional callback drained when the agent would
 	// stop; returned messages restart the loop instead of ending the run.
+	// Agent.FollowUp is the durable equivalent.
 	GetFollowUpMessages func(ctx context.Context) []Message
 	// Goal, when non-empty, declares the condition under which this run may
 	// stop (Claude Code /goal analog; see goal.go). The completion contract is
@@ -429,4 +441,66 @@ func (a *Agent) Continue(ctx context.Context, history []Message, task string) (R
 // streamed reply.
 func (a *Agent) ContinueStream(ctx context.Context, history []Message, task string, sink StreamSink) (RunResult, error) {
 	return a.runLoop(ctx, history, task, sink)
+}
+
+// Steer queues a mid-run correction (pi's steer()): the loop drains it at the
+// top of the next turn and threads it into the conversation before the model
+// reasons. On a durable run the message is also appended to the session log as
+// an EntryInbox side record the moment it is queued, so a crash between queue
+// and drain cannot lose it — a resume re-reads the log and delivers it then.
+// A nil error means queued; a non-nil error means the durable write failed and
+// the message is in-memory only.
+func (a *Agent) Steer(ctx context.Context, m Message) error {
+	return a.enqueueInbox(ctx, InboxSteer, m)
+}
+
+// FollowUp queues work for after the agent would stop (pi's followUp()): the
+// loop drains it when the model produces a final answer and restarts instead
+// of returning. Same durability contract as Steer.
+func (a *Agent) FollowUp(ctx context.Context, m Message) error {
+	return a.enqueueInbox(ctx, InboxFollow, m)
+}
+
+// enqueueInbox records one queued message: durably when the agent has a
+// session, always in memory. The durable entry is a side record — it does not
+// join the session tree — so it can be written mid-turn without touching the
+// loop's buffered chain.
+func (a *Agent) enqueueInbox(ctx context.Context, lane string, m Message) error {
+	item := InboxItem{Lane: lane, Message: m}
+	var err error
+	if a.session != nil && a.sessionID != "" {
+		e := SessionEntry{Kind: EntryInbox, Lane: lane, Message: &m, CreatedAt: time.Now()}
+		if e.ID = newEntryID(); e.ID == "" {
+			// crypto/rand failed: a "#<n>" fallback would mint IDs that collide
+			// with the fold's "#<seq>" convention for id-less entries, so an
+			// EntryInboxDone could settle the wrong intent. "inbox-<n>" keeps
+			// the ID non-empty (settlement works) and out of that namespace.
+			e.ID = fmt.Sprintf("inbox-%d", time.Now().UnixNano())
+		}
+		item.ID = e.ID
+		err = a.session.Append(ctx, a.sessionID, e)
+	}
+	a.inboxMu.Lock()
+	a.inbox = append(a.inbox, item)
+	a.inboxMu.Unlock()
+	return err
+}
+
+// drainInbox removes and returns the queued items for one lane. Called by the
+// loop at each lane's drain point; items carry their inbox entry ID so the
+// loop can settle them with EntryInboxDone.
+func (a *Agent) drainInbox(lane string) []InboxItem {
+	a.inboxMu.Lock()
+	defer a.inboxMu.Unlock()
+	var out []InboxItem
+	keep := a.inbox[:0]
+	for _, it := range a.inbox {
+		if it.Lane == lane {
+			out = append(out, it)
+		} else {
+			keep = append(keep, it)
+		}
+	}
+	a.inbox = keep
+	return out
 }

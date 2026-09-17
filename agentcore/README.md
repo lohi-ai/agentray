@@ -102,7 +102,7 @@ cannot give one belongs in a plugin, or belongs nowhere.
 
 | file | why core |
 |---|---|
-| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, and reduce/recover. The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. Also the windowed read (`SessionWindowStore`, `LoadResumeLog`): the fold restarts at a checkpoint, so a resume reads a suffix rather than a history — and the rule for when that is safe lives here, once, rather than in each backend. |
+| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, reduce/recover, and side records (`EntryInbox`/`EntryInboxDone`, `EntryAssistantFrame`, `EntryToolProgress`). The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. Chain entries form the session tree; side records capture intent and mid-turn in-flight granularity (streaming frames, tool progress) without forking the chain. Also the windowed read (`SessionWindowStore`, `LoadResumeLog`): the fold restarts at a checkpoint, so a resume reads a suffix rather than a history — and the rule for when that is safe lives here, once, rather than in each backend. |
 | [`session_tree.go`](session_tree.go) | **log** — the log is a tree: parent ids, branches, `EntryLeafMove`, `Rewind`. Reduce and recover walk only the active branch. |
 | [`memsession.go`](memsession.go) | **seam default** — in-process append-only `SessionStore`, so a run is resumable and the log invariant is checkable with nothing wired. |
 | [`goal.go`](goal.go) | **log** — the goal as a *fact about the run*: written once, recovered on resume. What to DO about an unmet goal is [`plugins/goal`](plugins/goal/). |

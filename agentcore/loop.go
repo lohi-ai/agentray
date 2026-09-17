@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // A ceiling stop is not a crash, and it must not read like one. Every bound a
@@ -19,6 +20,12 @@ import (
 // whatever assistant text happened to be lying around — empty, for any run whose
 // turns were all tool calls — and the caller was told the agent had failed after
 // paying for every token it spent getting there.
+
+// frameBytes is the side-record throttle: an assistant frame or tool-progress
+// snapshot is persisted on the first delta and again per this much new output,
+// so a long stream leaves a recent draft without a log write per token.
+const frameBytes = 4 << 10
+
 const (
 	budgetExhaustedSteer = "Your run budget for this period has been exhausted. Do not call any more tools. Summarize the progress you have made so far and any recommended next steps in a few sentences, then stop."
 	maxTurnsSteer        = "You have reached this run's step limit and cannot do any more work. Do not call any more tools. Answer the original question as well as the evidence you already have allows: state what you found, say how confident you are, and name what you would check next. If what you have is not enough to answer, say that plainly and say what is missing."
@@ -280,6 +287,35 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	}()
 	appendEntry := bufferEntry
 
+	// appendSide writes a side record (inbox settlement excluded — that one is
+	// a chain entry) directly to the store, outside the save-point buffer. The
+	// crash window these records cover is INSIDE a turn — mid-stream, mid-tool —
+	// so waiting for the turn boundary would lose exactly what they exist to
+	// keep. They carry no ParentID and buildChain skips them, so a direct write
+	// can never fork the chain or strand a buffered entry. Best-effort: a failed
+	// write degrades recovery detail, never the run, and is reported once.
+	// The store append runs under sideMu; the failure note is emitted AFTER the
+	// lock is released so a slow sink never stalls other side-record writers.
+	var sideMu sync.Mutex
+	sideWriteFailed := false
+	appendSide := func(e SessionEntry) {
+		if a.session == nil || a.sessionID == "" {
+			return
+		}
+		e.CreatedAt = time.Now()
+		sideMu.Lock()
+		exts.observeLogged(e)
+		aerr := a.session.Append(flushCtx, a.sessionID, e)
+		failed := aerr != nil && !sideWriteFailed
+		if failed {
+			sideWriteFailed = true
+		}
+		sideMu.Unlock()
+		if failed {
+			emit(StreamEvent{Type: StreamProgress, Note: "durable side-record write failed; crash recovery loses in-flight detail", Turn: res.Turns})
+		}
+	}
+
 	// recordTool appends a trace and, when streaming, forwards it to the sink as a
 	// tool_execution_end event (and the back-compat StreamTool) so the UI sees
 	// tool activity live (parity with the persisted tool_calls).
@@ -294,11 +330,43 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	}
 
 	// emitUpdate forwards a streaming tool's partial output as a
-	// tool_execution_update event (P8). It is guarded by a mutex because partials
-	// arrive from tool goroutines that may run concurrently (parallel-eligible
-	// tools), and the StreamSink is not assumed to be concurrency-safe.
+	// tool_execution_update event (P8) AND persists it as an EntryToolProgress
+	// side record — pi's tool progress checkpoint — so a crash mid-call leaves
+	// how far the tool reported getting, not just that it never finished.
+	// Snapshots are throttled to the first partial plus one per frameBytes of
+	// new output; the settled tool result supersedes them. The accumulated
+	// buffer is capped at frameBytes (tail kept, rune-aligned): only the newest
+	// snapshot is ever read, so a long stream costs bounded memory and bounded
+	// log writes instead of quadratic growth. Guarded by a mutex because
+	// partials arrive from tool goroutines that may run concurrently
+	// (parallel-eligible tools); the store append happens OUTSIDE the mutex so
+	// one tool's disk latency never stalls another's updates.
 	var sinkMu sync.Mutex
+	toolPartials := map[string]string{}
+	toolSince := map[string]int{}
 	emitUpdate := func(call ToolCall, partial string) {
+		var snapshot string
+		if partial != "" {
+			sinkMu.Lock()
+			acc := toolPartials[call.ID] + partial
+			if len(acc) > frameBytes {
+				// Keep the tail: the newest progress is the informative part.
+				acc = acc[len(acc)-frameBytes:]
+				for len(acc) > 0 && !utf8.RuneStart(acc[0]) {
+					acc = acc[1:]
+				}
+			}
+			toolPartials[call.ID] = acc
+			toolSince[call.ID] += len(partial)
+			if toolSince[call.ID] >= frameBytes || len(acc) == len(partial) {
+				snapshot = acc
+				toolSince[call.ID] = 0
+			}
+			sinkMu.Unlock()
+		}
+		if snapshot != "" {
+			appendSide(SessionEntry{Kind: EntryToolProgress, Turn: res.Turns, CallID: call.ID, Content: snapshot})
+		}
 		if sink == nil {
 			return
 		}
@@ -434,8 +502,53 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				Goal:          plan.Goal,
 				Completed:     plan.Completed,
 			}
+			// The durable inbox outlives the crash: anything queued but never
+			// delivered is re-queued on this agent so its lane's drain point
+			// picks it up like a live Steer/FollowUp. Items already in the
+			// in-memory queue (same agent resuming its own session) are not
+			// re-added — their IDs match. This runs before the Completed check:
+			// input queued after a run finished is new work, not a reattach.
+			if len(resumePlan.Inbox) > 0 {
+				a.inboxMu.Lock()
+				seen := make(map[string]bool, len(a.inbox))
+				for _, it := range a.inbox {
+					seen[it.ID] = true
+				}
+				for _, it := range resumePlan.Inbox {
+					if !seen[it.ID] {
+						a.inbox = append(a.inbox, it)
+					}
+				}
+				a.inboxMu.Unlock()
+			}
 			switch {
 			case plan.Completed:
+				// A completed log with queued input is not a reattach: the
+				// steer/follow-up arrived after the leaf and is the run's new
+				// task. Deliver every pending item as user input and continue.
+				if pending := append(a.drainInbox(InboxSteer), a.drainInbox(InboxFollow)...); len(pending) > 0 {
+					resumed = true
+					// The run is alive again: a checkpoint written from here on
+					// must not carry the old leaf's Completed, or a later resume
+					// would reattach to a stale answer instead of continuing.
+					checkpoint.Completed = false
+					messages = plan.Messages
+					res.Messages = plan.Messages
+					for _, it := range pending {
+						m := it.Message
+						if m.Role == RoleUser {
+							m.Directive = true
+						}
+						exts.observe(ctx, PhaseExternalInput, res.Turns, []Message{m})
+						messages = append(messages, m)
+						res.Messages = messages
+						appendEntry(SessionEntry{Kind: EntryMessage, Message: &m})
+						if it.ID != "" {
+							appendEntry(SessionEntry{Kind: EntryInboxDone, Target: it.ID})
+						}
+					}
+					break // continue into the run below
+				}
 				if final := strings.TrimSpace(lastAssistantText(plan.Messages)); final != "" {
 					res.Messages = plan.Messages
 					res.Final = final
@@ -512,7 +625,16 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						}
 						closing, ok := retried[c.ID]
 						if !ok {
-							closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: interruptedCallNote}
+							note := interruptedCallNote
+							// A streaming tool that reported progress before the
+							// crash leaves it in the note (pi's tool progress
+							// checkpoint): the model sees how far the call got,
+							// not just that it never finished.
+							if p := resumePlan.ToolProgress[c.ID]; p != "" {
+								p = truncateBytes(p, 500)
+								note += " Last reported progress: " + p
+							}
+							closing = Message{Role: RoleTool, ToolCallID: c.ID, Name: c.Name, Content: note}
 						}
 						stitched = append(stitched, closing)
 						appendEntry(SessionEntry{Kind: EntryMessage, Message: &closing})
@@ -536,6 +658,18 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// len(plan.Messages) == 0 falls through: nothing recoverable, run fresh.
 		}
 	}
+
+	// A turn that died mid-generation leaves its draft behind as context — not
+	// as a replayed assistant message, which would fabricate a turn boundary the
+	// log never recorded. Outside the resume switch so a crash before the first
+	// save-point flush (log holds only side records) still surfaces it.
+	if resumePlan.Draft != "" {
+		note := Message{Role: RoleSystem, Content: draftMarker + "\n" + resumePlan.Draft}
+		messages = append(messages, note)
+		res.Messages = messages
+		appendEntry(SessionEntry{Kind: EntryMessage, Message: &note})
+	}
+
 	// Restore the run state the log recorded beyond the transcript: the active
 	// tool set a PrepareNextTurn swap left behind (EntryActiveToolsChange) and
 	// the model the crashed run was actually answering with (EntryModelChange).
@@ -994,29 +1128,41 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 
 		// Steering: drain any user-injected corrections queued since the last turn
 		// and thread them in before the model reasons, so a mid-run correction is
-		// honored on the very next turn (pi's steering queue).
+		// honored on the very next turn (pi's steering queue). The durable inbox
+		// (Agent.Steer + whatever a crashed run left queued) drains first — it is
+		// the older input — then the consumer's callback queue.
+		//
+		// deliverInbox stamps, reports, persists, and settles one queued item: a
+		// steer is human input by definition, so the loop stamps it rather than
+		// trusting every consumer to remember (the stamp is what lets compaction
+		// keep the pinned requirement current instead of pinning the one being
+		// corrected). The EntryInboxDone settles the intent so a later resume
+		// never re-delivers it; an item with no ID was never durable and needs
+		// no settlement.
+		deliverInbox := func(it InboxItem) {
+			m := it.Message
+			if m.Role == RoleUser {
+				m.Directive = true
+			}
+			// New human input is reported to the extensions: one tracking the
+			// model's own behavior must treat this as a break, because the model
+			// now has information it did not have.
+			exts.observe(ctx, PhaseExternalInput, res.Turns, []Message{m})
+			res.Messages = append(res.Messages, m)
+			appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+			if it.ID != "" {
+				appendEntry(SessionEntry{Kind: EntryInboxDone, Turn: res.Turns, Target: it.ID})
+			}
+			if sink != nil {
+				sink(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
+			}
+		}
+		for _, it := range a.drainInbox(InboxSteer) {
+			deliverInbox(it)
+		}
 		if a.getSteering != nil {
 			for _, m := range a.getSteering(ctx) {
-				m := m
-				// A steer is human input by definition — that is what the queue is
-				// for — so the loop stamps it rather than trusting every consumer
-				// to remember. The stamp is what lets compaction keep the pinned
-				// requirement current instead of pinning the one being corrected.
-				if m.Role == RoleUser {
-					m.Directive = true
-				}
-				// New human input is reported to the extensions: one tracking the
-				// model's own behavior must treat this as a break, because the
-				// model now has information it did not have.
-				exts.observe(ctx, PhaseExternalInput, res.Turns, []Message{m})
-				res.Messages = append(res.Messages, m)
-				// Persist the drained steer: the model acts on it this turn, so a
-				// resume that rebuilt history without it would replay a different
-				// conversation than the one that ran.
-				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
-				if sink != nil {
-					sink(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
-				}
+				deliverInbox(InboxItem{Message: m})
 			}
 		}
 
@@ -1047,7 +1193,15 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			return failTurn(herr)
 		}
 		emit(StreamEvent{Type: StreamMessageStart, Turn: res.Turns})
-		resp, err := a.reason(ctx, req, sink, ladder, &rung)
+		// Durable partial frames (pi's assistant-durability): while the turn
+		// streams, streamTurn snapshots the accumulated text as an
+		// EntryAssistantFrame side record — first token, then per frameBytes —
+		// so a crash mid-generation leaves the draft the turn had produced. The
+		// turn's assistant EntryMessage settles them; the tail scan in
+		// ReduceSession only reads frames that outlived their turn.
+		resp, err := a.reason(ctx, req, sink, ladder, &rung, func(snapshot string) {
+			appendSide(SessionEntry{Kind: EntryAssistantFrame, Turn: res.Turns, Content: snapshot})
+		})
 		if err != nil {
 			return failTurn(fmt.Errorf("provider chat (turn %d): %w", res.Turns, err))
 		}
@@ -1130,31 +1284,21 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// Follow-up: after the agent would stop, drain any queued follow-up
 			// messages and restart the loop instead of returning, so a conversation
 			// continues inside the same bounded run (pi's follow-up queue). MaxTurns
-			// still bounds the extended loop.
+			// still bounds the extended loop. The durable inbox (Agent.FollowUp +
+			// a crashed run's leftovers) drains before the consumer callback.
+			follow := a.drainInbox(InboxFollow)
 			if a.getFollowUp != nil {
-				if follow := a.getFollowUp(ctx); len(follow) > 0 {
-					// A follow-up is new human input; report it for the same
-					// reason a steer is reported.
-					exts.observe(ctx, PhaseExternalInput, res.Turns, follow)
-					for _, m := range follow {
-						m := m
-						// Stamped for the same reason a steer is: a follow-up is
-						// the user asking for something, and a run that keeps
-						// pinning the FIRST thing they asked for is not following
-						// the conversation it is in.
-						if m.Role == RoleUser {
-							m.Directive = true
-						}
-						res.Messages = append(res.Messages, m)
-						// Persist the drained follow-up for the same reason as a
-						// steer: it is part of the conversation the model saw.
-						appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
-						emit(StreamEvent{Type: StreamProgress, Note: m.Content, Turn: res.Turns})
-					}
-					endTurn(true)
-					flush()
-					continue
+				for _, m := range a.getFollowUp(ctx) {
+					follow = append(follow, InboxItem{Message: m})
 				}
+			}
+			if len(follow) > 0 {
+				for _, it := range follow {
+					deliverInbox(it)
+				}
+				endTurn(true)
+				flush()
+				continue
 			}
 			endTurn(true)
 			appendEntry(SessionEntry{Kind: EntryLeaf, Turn: res.Turns})
@@ -1186,7 +1330,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			flush()
 			continue
 		}
-
 
 		// Budget guard (§7): once the run has spent its tool-call budget, block
 		// the whole batch and stop cleanly. (Checked per batch, not per call, so
@@ -1296,6 +1439,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		aborting := ctx.Err() != nil
 		for i := range outcomes {
 			msg := outcomes[i].message
+			// The call is done: drop its accumulated progress buffer so a long
+			// run doesn't pin every streaming call's partials until it ends.
+			sinkMu.Lock()
+			delete(toolPartials, outcomes[i].trace.CallID)
+			delete(toolSince, outcomes[i].trace.CallID)
+			sinkMu.Unlock()
 			applyBreaker(outcomes[i], &msg)
 			recordTool(outcomes[i].trace)
 			res.Messages = append(res.Messages, msg)

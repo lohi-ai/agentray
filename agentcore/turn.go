@@ -24,7 +24,7 @@ import (
 //     non-retryable error) does the loop fall down the ladder to the next rung and
 //     try the turn there, sticking with the first rung that works (*rung advances
 //     in place). Cancellation is never retried or escalated.
-func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, ladder []ModelRung, rung *int) (ChatResponse, error) {
+func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, ladder []ModelRung, rung *int, frame func(snapshot string)) (ChatResponse, error) {
 	for {
 		p := ladder[*rung]
 		req.Model = p.Model
@@ -39,7 +39,7 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, la
 			}
 		}
 
-		resp, err := a.callRung(ctx, p, req, sink)
+		resp, err := a.callRung(ctx, p, req, sink, frame)
 		if err == nil {
 			// after_provider_response observers see the raw response before its usage
 			// is folded into the run total. Under HookThrow a failure aborts the turn.
@@ -62,7 +62,7 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, la
 // (Retry-After when the server supplied one, else exponential with jitter) that
 // is cancellation-aware. A non-retryable error or a cancellation returns at once,
 // spending no further attempts.
-func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink StreamSink) (ChatResponse, error) {
+func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink StreamSink, frame func(snapshot string)) (ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt < a.retry.MaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -73,7 +73,7 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 		var resp ChatResponse
 		var err error
 		if sink != nil {
-			resp, err = a.streamTurn(ctx, p.Provider, req, sink)
+			resp, err = a.streamTurn(ctx, p.Provider, req, sink, frame)
 		} else {
 			resp, err = p.Provider.Chat(ctx, req)
 		}
@@ -93,14 +93,18 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 // streamTurn consumes the provider's delta channel for one turn, forwarding
 // content fragments to the sink as they arrive and accumulating the full
 // assistant message (text + tool calls + usage) so the Act path is identical to
-// the non-streaming turn.
-func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRequest, sink StreamSink) (ChatResponse, error) {
+// the non-streaming turn. frame, when non-nil, receives a throttled snapshot of
+// the text accumulated SO FAR — first delta, then per frameBytes — for the
+// durable partial-frame record; it is per-attempt, so a retried stream starts
+// its snapshots fresh rather than mixing two attempts' text.
+func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRequest, sink StreamSink, frame func(snapshot string)) (ChatResponse, error) {
 	ch, err := provider.Stream(ctx, req)
 	if err != nil {
 		return ChatResponse{}, err
 	}
 	msg := Message{Role: RoleAssistant}
 	var resp ChatResponse
+	sinceFrame := 0
 	for d := range ch {
 		if d.Err != nil {
 			return ChatResponse{}, d.Err
@@ -108,6 +112,13 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		if d.ContentDelta != "" {
 			msg.Content += d.ContentDelta
 			sink(StreamEvent{Type: StreamToken, Token: d.ContentDelta})
+			if frame != nil {
+				sinceFrame += len(d.ContentDelta)
+				if msg.Content == d.ContentDelta || sinceFrame >= frameBytes {
+					frame(msg.Content)
+					sinceFrame = 0
+				}
+			}
 		}
 		if d.ToolCall != nil {
 			msg.ToolCalls = append(msg.ToolCalls, *d.ToolCall)
