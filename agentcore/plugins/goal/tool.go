@@ -116,7 +116,7 @@ func (g *gateRun) Tools() []agentcore.Tool {
 // ReviseGoal hands a pending revision to the loop, which owns what follows: the
 // durable EntryGoal and the rebuilt system prompt. Draining here rather than in
 // the tool is what keeps the plugin out of the log — the same rule that puts the
-// goal's durable state in agentcore/goal.go and its policy here.
+// goal's durable state in agentcore/session.go and its policy here.
 func (g *gateRun) ReviseGoal() (string, bool) {
 	if g.store == nil {
 		return "", false

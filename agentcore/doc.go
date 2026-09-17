@@ -58,19 +58,20 @@
 //
 // The layers that map runs through, outermost first:
 //
-//   - Composition — doc.go, plugin.go, compose.go, agent.go, describe.go.
+//   - Composition — doc.go, plugin.go, compose.go, agent.go.
 //   - Contracts — provider.go, tool.go, permission.go, definition.go, hooks.go,
-//     extension.go, memory.go, embed.go, env.go, sandbox.go. The types a plugin
-//     outside this repo implements.
-//   - The loop — driver.go, loop.go, turn.go, tooldispatch.go, result.go,
-//     limits.go, prompt.go, cacheanchor.go, retry.go, schema.go, skill_tool.go.
-//   - Durable state — session.go, session_tree.go, memsession.go, goal.go,
-//     compaction.go, compactor.go, idempotency.go, delegation.go, fork.go,
-//     lab.go. The loop is the only writer; everything else reduces the log.
+//     extension.go, memory.go, env.go. The types a plugin outside this repo
+//     implements.
+//   - The loop — loop.go, turn.go, tooldispatch.go, result.go, prompt.go,
+//     skill_tool.go.
+//   - Durable state — session.go, session_tree.go, memsession.go,
+//     compaction.go, fork.go, lab.go. The loop is the only writer; everything
+//     else reduces the log.
 //
-// One file sits outside those layers on purpose: faux.go, a scripted
-// [LLMProvider] that makes the loop, the hooks and the gate exercisable with no
-// network and no key. It ships in the kernel rather than a test package because
-// the plugins are tested against it too, and a plugin proving its behavior
-// against the real loop is the point of the whole split.
+// One file sits outside those layers on purpose: faux.go, the providers that
+// make the loop, the hooks and the gate exercisable with no network and no key
+// — [FauxProvider] scripted, [ReplayProvider] over a recorded transcript. They
+// ship in the kernel rather than a test package because the plugins are tested
+// against them too, and a plugin proving its behavior against the real loop is
+// the point of the whole split.
 package agentcore

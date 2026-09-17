@@ -98,7 +98,7 @@ and work around.
 The recovery story only holds if the log tells the truth about what was
 finished, and two things in the loop used to record cancellation damage as fact.
 Both are fixed in the kernel, and both were found by cancelling a run mid-batch
-(`agentcore/fanoutfail_test.go`):
+(`agentcore/fanout_test.go`):
 
 - **A cancellation-caused tool result is no longer persisted.** A call answered
   with `stopped: run aborted` — or with a tool error that is really the

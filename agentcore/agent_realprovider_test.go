@@ -17,8 +17,7 @@ package agentcore_test
 // the steering queue draining before a turn, the todo pin surviving compaction,
 // progressive skill disclosure, the permission gate, trace records) are proven
 // separately and reproducibly by the faux unit tests in this package
-// (compaction_test, steering_test, todo_test, goalpin_test, skill_loading_test,
-// tracing_test, loop_test). These tests confirm a real model actually exercises
+// (compaction_test, prompt_test, todo_test, loop_test). These tests confirm a real model actually exercises
 // them.
 
 import (
