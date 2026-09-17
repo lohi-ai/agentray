@@ -78,7 +78,11 @@ export function ProjectSwitcher() {
         />
       ) : null}
       <SideNavHeading
-        heading={project?.name ?? 'No project'}
+        // Trailing space: SideNavHeading renders heading and subheading as
+        // sibling spans, so textContent/a11y read them concatenated
+        // ("AgentRay prdAgentRay workspace"). The space is invisible in the
+        // layout and separates the two in the accessible name.
+        heading={`${project?.name ?? 'No project'} `}
         subheading={project?.is_demo ? `${workspace?.name || 'workspace'} · read-only` : workspace?.name || 'workspace'}
         icon={<NavIcon icon={<Waypoints size={16} />} />}
         menu={<ProjectMenuList onCreate={() => setCreating(true)} />}

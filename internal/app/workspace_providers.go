@@ -111,7 +111,10 @@ func registerWorkspaceProviderRoutes(e *echo.Echo, store *storage.Store, mgr *oa
 		}
 		list, err := store.ListWorkspaceProviders(c.Request().Context(), ctx.User.ID, project.WorkspaceID)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			if errors.Is(err, storage.ErrAgentForbidden) {
+				return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "could not load providers")
 		}
 		if list == nil {
 			list = []storage.WorkspaceProvider{}
@@ -194,7 +197,10 @@ func registerWorkspaceProviderRoutes(e *echo.Echo, store *storage.Store, mgr *oa
 			return err
 		}
 		if _, err := store.GetWorkspaceModelTiers(c.Request().Context(), ctx.User.ID, project.WorkspaceID); err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			if errors.Is(err, storage.ErrAgentForbidden) {
+				return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "could not load model pool")
 		}
 		book, err := store.LoadWorkspaceBook(c.Request().Context(), project.WorkspaceID, true)
 		if err != nil {

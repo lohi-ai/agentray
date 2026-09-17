@@ -385,6 +385,11 @@ func formatAgentError(message string) string {
 		return "Growth Lead is paused. Open Team → Set up and turn the agent on."
 	case strings.Contains(lower, "no workspace model key"), strings.Contains(lower, "no api key"):
 		return "Add an AI key in Settings so I can answer. One key is enough."
+	case strings.Contains(raw, "SQLSTATE"), strings.Contains(lower, "syntax error at or near"):
+		// A store bug reaching the user verbatim reads as the agent's own
+		// confusion ("ERROR: syntax error at or near FILTER" on prod). The
+		// detail stays in the run record; the reader gets the honest shape.
+		return "Something broke on my side while I was setting up — the team has the detail. Try again in a moment."
 	case raw == "":
 		return "Something went wrong. Try again."
 	default:

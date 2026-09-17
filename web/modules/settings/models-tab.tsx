@@ -14,7 +14,7 @@ import type {
 } from '@/lib/api';
 import { useProviderAccounts, useWorkspaceModels } from '@/modules/agent/hooks';
 import { ConfirmDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
 import { formatRelative } from '@/lib/format';
 import { useStackSheet } from '@/modules/shared/components/stack-sheet';
 import {
@@ -218,9 +218,9 @@ type TierKey = (typeof TIERS)[number]['key'];
 
 export function ModelsTab() {
   const {
-    models, modelsLoading, providers, listedModels, listedErrors, listedLoading,
+    models, modelsLoading, modelsError, providers, providersError, listedModels, listedErrors, listedLoading,
     saveModels, testModels, createProvider, updateProvider, deleteProvider,
-    deleteAccount, setAccountStatus, probeUsage, refreshAccounts,
+    deleteAccount, setAccountStatus, probeUsage, refreshAccounts, retryLoad,
   } = useWorkspaceModels();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [seededFrom, setSeededFrom] = useState<WorkspaceModelTiers | null>(null);
@@ -264,6 +264,22 @@ export function ModelsTab() {
     for (const x of listed) m.set(x.provider_id, (m.get(x.provider_id) ?? 0) + 1);
     return m;
   }, [listed]);
+
+  if (modelsError || providersError) {
+    const err = modelsError ?? providersError;
+    return (
+      <Panel title="AI Provider">
+        <Callout
+          tone="warn"
+          icon={<AlertTriangle size={16} />}
+          label="AI Provider unavailable"
+          title="Could not load the model pool"
+          detail={err instanceof Error ? err.message : 'The workspace AI configuration could not be loaded.'}
+          action={<Button variant="outline" size="sm" className="min-h-[44px]" onClick={retryLoad}>Retry</Button>}
+        />
+      </Panel>
+    );
+  }
 
   if (!models || !draft) {
     return (

@@ -664,7 +664,7 @@ SELECT
 	count(*) FILTER (WHERE first_ts >= ? AND first_ts < ?)
 FROM (
 	SELECT `+canonicalID+` AS cid, min("timestamp") AS first_ts,
-		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+		arg_min(coalesce(platform, ''), ("timestamp", event_id)) AS first_platform
 	FROM resolved_events
 	WHERE project_id = ? AND `+overviewQualifying+`
 	GROUP BY cid
@@ -1130,7 +1130,7 @@ func (s *Store) overviewRetention(ctx context.Context, projectID, platform, time
 SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
 FROM (
 	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
-		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+		arg_min(coalesce(platform, ''), ("timestamp", event_id)) AS first_platform
 	FROM resolved_events
 	WHERE project_id = ? AND ` + overviewQualifying + `
 	GROUP BY cid
@@ -1201,7 +1201,7 @@ func (s *Store) overviewPaidConversion(ctx context.Context, projectID, platform,
 SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
 FROM (
 	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
-		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+		arg_min(coalesce(platform, ''), ("timestamp", event_id)) AS first_platform
 	FROM resolved_events
 	WHERE project_id = ? AND ` + overviewQualifying + `
 	GROUP BY cid
@@ -1289,7 +1289,7 @@ func (s *Store) overviewActivation(ctx context.Context, projectID, platform, tim
 SELECT cid, CAST(timezone(?, first_ts) AS DATE) AS cohort_day
 FROM (
 	SELECT ` + canonicalID + ` AS cid, min("timestamp") AS first_ts,
-		(array_agg(coalesce(platform, '') ORDER BY "timestamp" ASC, event_id ASC))[1] AS first_platform
+		arg_min(coalesce(platform, ''), ("timestamp", event_id)) AS first_platform
 	FROM resolved_events
 	WHERE project_id = ? AND ` + overviewQualifying + `
 	GROUP BY cid

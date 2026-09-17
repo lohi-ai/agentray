@@ -85,7 +85,10 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		cfg, err := store.GetWorkspaceModelTiers(c.Request().Context(), ctx.User.ID, project.WorkspaceID)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			if errors.Is(err, storage.ErrAgentForbidden) {
+				return echo.NewHTTPError(http.StatusForbidden, err.Error())
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "could not load model pool")
 		}
 		return c.JSON(http.StatusOK, map[string]any{"config": cfg})
 	})

@@ -15,6 +15,22 @@ import (
 
 var errDuckDBNotOpen = errors.New("storage: duckdb not open")
 
+// IsEngineResourceError reports whether err is the trusted DuckDB engine
+// refusing a query on its own budget — memory_limit or temp-directory size —
+// rather than on the SQL itself. Matched on message text because the driver
+// surfaces these as plain errors with no typed sentinel; the phrases are the
+// engine's stable prefixes ("Out of Memory Error", "failed to allocate").
+// Callers use this to answer retryable instead of leaking engine internals.
+func IsEngineResourceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Out of Memory") ||
+		strings.Contains(msg, "failed to allocate") ||
+		strings.Contains(msg, "max_temp_directory_size")
+}
+
 // duckQuery runs query on a snapshot reader and feeds each row to scan, which
 // fills caller-owned destinations. Scan errors abort the read.
 func (s *Store) duckQuery(ctx context.Context, query string, args []any, scan func(rows *sql.Rows) error) error {

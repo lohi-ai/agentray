@@ -37,7 +37,7 @@ function queryRefPart(ref: unknown): string | null {
   if (typeof kind === 'string' && kind) identity.push(kind.replace(/_/g, ' '));
   if (typeof definition === 'string' && definition) identity.push(definition);
   else if (typeof definition === 'number') identity.push(String(definition));
-  if (typeof version === 'string' && version) identity.push(`v${version}`);
+  if (typeof version === 'string' && version) identity.push(version.includes('.') || version.startsWith('v') ? version : `v${version}`);
   else if (typeof version === 'number') identity.push(`v${version}`);
   return identity.length ? identity.join(' ') : null;
 }

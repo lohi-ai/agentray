@@ -112,10 +112,17 @@ export function useWorkspaceModels() {
   return {
     models: modelsQuery.data?.config,
     modelsLoading: modelsQuery.isLoading,
+    modelsError: modelsQuery.error,
     providers: providersQuery.data?.providers ?? modelsQuery.data?.config?.providers ?? [],
+    providersError: providersQuery.error,
     listedModels: listedQuery.data?.models ?? [],
     listedErrors: listedQuery.data?.errors ?? [],
     listedLoading: listedQuery.isLoading,
+    retryLoad: () => {
+      void modelsQuery.refetch();
+      void providersQuery.refetch();
+      void listedQuery.refetch();
+    },
     saveModels: (input: WorkspaceModelTiersInput) => saveModels.mutateAsync(input),
     testModels: () => testModels.mutateAsync(),
     createProvider: (input: WorkspaceProviderInput) => createProvider.mutateAsync(input),

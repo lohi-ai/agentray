@@ -133,7 +133,7 @@ export function Callout({ tone, icon, label, title, detail, action }: { tone: 'g
     <Banner
       status={CALLOUT_STATUS[tone]}
       icon={icon}
-      title={<><Text type="supporting" className="me-2 uppercase tracking-[0.06em]">{label}</Text>{title}</>}
+      title={<><Text type="supporting" className="me-2 uppercase tracking-[0.06em]">{label}</Text>{' '}{title}</>}
       description={detail}
       endContent={action}
     />

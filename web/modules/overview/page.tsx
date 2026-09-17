@@ -950,7 +950,7 @@ export function OverviewPage() {
               icon={<AlertTriangle size={16} />}
               label="Overview unavailable"
               title="Could not load the overview"
-              detail={query.error instanceof Error ? query.error.message : 'The overview request failed.'}
+              detail="The overview request failed — retry in a moment. If it keeps failing, the analytics engine is at its limit."
               action={<Button variant="outline" size="sm" className="min-h-[44px]" icon={<RefreshCw size={14} />} onClick={() => void query.refetch()}>Retry</Button>}
             />
             {/* §States: the data status panel notes its own unavailability
@@ -1131,7 +1131,10 @@ export function OverviewPage() {
                     <p className="font-mono text-xs text-[var(--color-text-secondary)]">{nextStep.evidence}</p>
                     <div className={`flex flex-wrap items-center gap-3 ${TARGET_44}`}>
                       <Button variant="outline" size="sm" icon={<ArrowUpRight size={14} />} onClick={() => { window.location.href = '/plans'; }}>Open the finding</Button>
-                      <Button variant="outline" size="sm" onClick={() => { window.location.href = '/chat'; }}>Ask your agent to investigate</Button>
+                      <Button variant="outline" size="sm" onClick={() => {
+                        const prompt = `Investigate this finding: ${nextStep.title}. ${nextStep.observation}`;
+                        window.location.href = `/chat?q=${encodeURIComponent(prompt)}`;
+                      }}>Ask your agent to investigate</Button>
                     </div>
                   </div>
                 </Panel>

@@ -5,7 +5,6 @@ import { usePathname } from 'next/navigation';
 import {
   Bot,
   Gauge,
-  Languages,
   LayoutDashboard,
   List,
   LogOut,
@@ -52,13 +51,9 @@ function SidebarFooter() {
 
   return (
     <div className="flex flex-col gap-2 px-1 pb-1">
-      <div className="flex items-center gap-2 px-1 py-0.5 text-[var(--color-text-secondary)] text-xs">
-        <Languages size={15} />
-        <span>Language</span>
-        <span className="flex-1" />
-        <Button label="EN" size="sm" variant="secondary" />
-        <Button label="VI" size="sm" variant="ghost" />
-      </div>
+      {/* Language switcher removed: the EN/VI buttons were dead stubs — no
+          i18n machinery exists behind them, so they read as a broken control.
+          Restore when a real locale store lands. */}
       <div className="flex items-center gap-2 p-2 rounded-md bg-[var(--color-background-muted)]">
         <div className="flex-none">
           <Avatar name={accountName} size={24} />

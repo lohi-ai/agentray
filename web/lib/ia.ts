@@ -839,7 +839,8 @@ export function isRunError(text: string): boolean {
   if (needsKeyRecovery(raw)) return true;
   return /^error:/i.test(raw)
     || /^provider chat \(turn \d+\)/i.test(raw)
-    || /unexpected response \(status \d{3}\)/i.test(raw);
+    || /unexpected response \(status \d{3}\)/i.test(raw)
+    || /^something broke on my side/i.test(raw);
 }
 
 export function threadNeedsRecovery(
@@ -934,6 +935,11 @@ export function shouldStartDocksOpen(input: { threadCount: number; recommendatio
 // mentions an API key mid-sentence must survive untouched.
 const DISABLED_ERROR = /^(?:error:\s*)?agent is disabled\b/i;
 const NO_KEY_ERROR = /^(?:error:\s*)?(?:no workspace model key|no api key)\b/i;
+// A store/engine failure reaching the transcript verbatim ("ERROR: syntax
+// error at or near \"FILTER\" (SQLSTATE 42601)" on prod) reads as the agent's
+// own confusion. Same rule as the Go mirror: the detail stays in the run
+// record, the reader gets the honest shape.
+const ENGINE_ERROR = /sqlstate|syntax error at or near|out of memory error/i;
 
 export function formatAgentError(message: string): string {
   const raw = message.trim();
@@ -942,6 +948,9 @@ export function formatAgentError(message: string): string {
   }
   if (NO_KEY_ERROR.test(raw)) {
     return 'Add an AI key in Settings so I can answer. One key is enough.';
+  }
+  if (ENGINE_ERROR.test(raw)) {
+    return 'Something broke on my side while I was setting up — the team has the detail. Try again in a moment.';
   }
   return raw || 'Something went wrong. Try again.';
 }

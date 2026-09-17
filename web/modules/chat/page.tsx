@@ -108,12 +108,20 @@ export function ChatPage() {
   // print that part twice.
   const splitRef = useRef(false);
 
-  // Arriving via a deep-linked question (/chat?q=…, e.g. from the dashboard's
-  // "Ask the agent") prefills the composer once so the user can hit send.
+  // Arriving via a deep-linked question (/chat?q=…, e.g. from the overview's
+  // "Ask your agent to investigate") opens a FRESH thread and prefills the
+  // composer once — landing on the previous thread would bury the question in
+  // an unrelated conversation. Gated on projectID for the same reason as the
+  // agent deep-link below: useChatThreads re-points activeID when the project
+  // resolves, so the fresh chat must be started after.
   const prefilled = useRef(false);
   useEffect(() => {
-    if (initialQuery && !prefilled.current) { prefilled.current = true; setInput(initialQuery); }
-  }, [initialQuery]);
+    if (initialQuery && projectID && !prefilled.current) {
+      prefilled.current = true;
+      newChat();
+      setInput(initialQuery);
+    }
+  }, [initialQuery, projectID, newChat]);
 
   // Ensure there is always an active session so the first send has a thread id.
   useEffect(() => { if (!activeID) newChat(); }, [activeID, newChat]);

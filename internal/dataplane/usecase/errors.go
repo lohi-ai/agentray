@@ -41,6 +41,12 @@ func classifyOpError(err error) error {
 		// stay unclassified on purpose: those the author fixes.
 		errors.Is(err, storage.ErrSandboxUnavailable):
 		return &opcore.OpError{Kind: opcore.ErrRetryable, Message: err.Error(), Err: err}
+	case storage.IsEngineResourceError(err):
+		// The trusted engine ran out of its own budget (memory_limit, temp
+		// size). The raw message leaks engine internals — allocation sizes,
+		// tuning advice — that mean nothing to a reader, so the surface gets a
+		// clean retryable refusal while the detail stays in Err for logs.
+		return &opcore.OpError{Kind: opcore.ErrRetryable, Message: "the analytics engine hit its resource limit — retry in a moment", Err: err}
 	default:
 		return err
 	}

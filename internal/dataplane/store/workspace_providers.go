@@ -701,7 +701,7 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 			ids[i] = p.ID
 		}
 		countRows, err := s.pg.Query(ctx, `
-SELECT provider_id::text, count(*)::int FILTER (WHERE status = 'active')
+SELECT provider_id::text, count(*) FILTER (WHERE status = 'active')::int
 FROM workspace_provider_accounts WHERE provider_id = ANY($1::uuid[])
 GROUP BY provider_id`, ids)
 		if err != nil {

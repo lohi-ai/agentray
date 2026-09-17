@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -98,9 +99,14 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		// Each run gets a bounded context independent of the publish path.
 		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		_, _, _ = s.runner.Run(runCtx, RunOptions{
+		if _, _, err := s.runner.Run(runCtx, RunOptions{
 			ProjectID: m.ProjectID, AgentID: m.AgentID, Trigger: trigger, Prompt: prompt, Reflect: reflect,
-		})
+		}); err != nil {
+			// A run that fails before CreateAgentRun leaves no row anywhere —
+			// without this line the failure is invisible (the 2-month silent
+			// stall on prod was exactly this shape).
+			log.Printf("scheduler: run failed project=%s agent=%s trigger=%s: %v", m.ProjectID, m.AgentID, trigger, err)
+		}
 	})
 	if err != nil {
 		return err
@@ -192,14 +198,18 @@ func (s *Scheduler) sweepStaleRuns(ctx context.Context) {
 // scheduled projects keep firing unchanged while non-default agents gain their
 // own schedules.
 func (s *Scheduler) publishDue(ctx context.Context, now time.Time) {
-	if projects, err := s.store.ScheduledAgentProjects(ctx); err == nil {
+	if projects, err := s.store.ScheduledAgentProjects(ctx); err != nil {
+		log.Printf("scheduler: schedule scan failed: %v", err)
+	} else {
 		for projectID, cron := range projects {
 			if cronMatches(cron, now) {
 				_ = s.Publish(projectID, MonitorPrompt)
 			}
 		}
 	}
-	if triggers, err := s.store.ScheduledAgentTriggers(ctx); err == nil {
+	if triggers, err := s.store.ScheduledAgentTriggers(ctx); err != nil {
+		log.Printf("scheduler: trigger scan failed: %v", err)
+	} else {
 		for _, t := range triggers {
 			if !cronMatches(t.Cron, now) {
 				continue

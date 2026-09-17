@@ -60,6 +60,46 @@ func watermark(res storage.OverviewResult) string {
 	return ""
 }
 
+// wowDeltaText renders a week-over-week delta the way a reader can absorb it.
+// Past ±1000% the percent stops meaning anything ("+2571000%"), so the text
+// switches to a multiplier ("×25,711") — the same fact, readable.
+func wowDeltaText(delta float64, signed bool) string {
+	abs := delta
+	if abs < 0 {
+		abs = -abs
+	}
+	// delta ≥ -1 always (counts can't go negative), so the ×N branch only
+	// ever runs upward: a delta of N means the new value is N+1× the old.
+	if abs >= 10 {
+		return fmt.Sprintf("×%s", formatIntCommas(int64(abs+1.5)))
+	}
+	if signed {
+		return fmt.Sprintf("%+.0f%%", delta*100)
+	}
+	return fmt.Sprintf("%.0f%%", abs*100)
+}
+
+// formatIntCommas renders 25711 as "25,711" — the thousand-grouped form the
+// multiplier text needs. strconv has no grouped format, so this is the
+// three-digit walk.
+func formatIntCommas(n int64) string {
+	if n < 0 {
+		return "-" + formatIntCommas(-n)
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b = append(b, ',')
+		}
+		b = append(b, byte(c))
+	}
+	return string(b)
+}
+
 // wowMetrics are the catalog value metrics the WoW detector reads. Count
 // metrics only — rates and breakdowns don't carry a comparable Previous.
 var wowMetrics = []string{storage.MetricActiveUsers, storage.MetricNewUsers, storage.MetricSessions}
@@ -97,10 +137,10 @@ func detectWoWDeltas(cur storage.OverviewResult) []finding {
 		out = append(out, finding{
 			dedupeKey: "wow:" + key,
 			category:  "growth",
-			title:     fmt.Sprintf("%s %s %.0f%% week over week", reading.Label, dir, abs(delta)*100),
+			title:     fmt.Sprintf("%s %s %s week over week", reading.Label, dir, wowDeltaText(delta, false)),
 			rationale: fmt.Sprintf(
-				"%s moved from %d to %d %s (%+.0f%%) between the prior 7-day window and this one. Check the trend on the overview and the sources that drove the change.",
-				reading.Label, p, v, reading.Unit, delta*100),
+				"%s moved from %s to %s %s (%s) between the prior 7-day window and this one. Check the trend on the overview and the sources that drove the change.",
+				reading.Label, formatIntCommas(int64(p)), formatIntCommas(int64(v)), reading.Unit, wowDeltaText(delta, true)),
 			impact: impactFor(abs(delta) * 100),
 			evidence: evidenceEnvelope{
 				QueryRef:      map[string]any{"kind": "metric", "id_or_definition": key, "version": reading.MetricVersion},
