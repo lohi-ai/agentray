@@ -43,6 +43,11 @@ const (
 	// gated on. Human-only for the same reason — the gate itself is durable in the
 	// run's own session log (agentcore EntryGoal); this is how the thread shows it.
 	ConvKindGoal = "goal"
+	// ConvKindKeyword records the magic keywords a turn fired ("ultrathink").
+	// Human-only: the words are stripped from the message the model sees, so this
+	// entry is the durable record that they fired — and why the turn ran at a
+	// higher effort.
+	ConvKindKeyword = "keyword"
 )
 
 // Compaction policy defaults, named once (design §6). The trigger compares the
@@ -241,6 +246,28 @@ func AppendGoalEntry(ctx context.Context, store *storage.Store, convID, agentID,
 	return store.AppendConversationEntry(ctx, storage.AgentConversationEntry{
 		ConversationID: convID,
 		Kind:           ConvKindGoal,
+		AgentID:        agentID,
+		RunID:          runID,
+		PayloadJSON:    string(payload),
+	})
+}
+
+// convKeywordPayload is the body of a ConvKindKeyword entry: the magic keywords
+// a turn fired, in the order the catalog first matched them.
+type convKeywordPayload struct {
+	Keywords []string `json:"keywords"`
+}
+
+// AppendKeywordEntry records which magic keywords a turn fired. Same
+// zero-estimate reasoning as the goal entry: the words never enter the model's
+// context through this log — they are stripped from the message itself — so
+// counting them toward the compaction trigger would be weight it isn't
+// carrying.
+func AppendKeywordEntry(ctx context.Context, store *storage.Store, convID, agentID, runID string, keywords []string) (storage.AgentConversationEntry, error) {
+	payload, _ := json.Marshal(convKeywordPayload{Keywords: keywords})
+	return store.AppendConversationEntry(ctx, storage.AgentConversationEntry{
+		ConversationID: convID,
+		Kind:           ConvKindKeyword,
 		AgentID:        agentID,
 		RunID:          runID,
 		PayloadJSON:    string(payload),
