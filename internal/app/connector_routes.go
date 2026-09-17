@@ -11,8 +11,10 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -26,7 +28,7 @@ import (
 // the session principal is authorized against each operation's Access class,
 // which preserves the member-read / owner-admin-write boundary the store
 // enforced.
-func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter) {
+func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter, oauthMgr *oauth.Manager) {
 	// sessionOp resolves the session caller into an opcore principal for the
 	// project this request names — the legacy session-only admission plus the
 	// registry's access-class check.
@@ -298,7 +300,7 @@ func registerConnectorRoutes(e *echo.Echo, store *storage.Store, ops *opAdapter)
 		if len(tables) == 0 {
 			return echo.NewHTTPError(http.StatusBadRequest, "no tables discovered on the source")
 		}
-		provider, model, err := authoringProvider(c.Request().Context(), store, project.WorkspaceID)
+		provider, model, err := authoringProvider(c.Request().Context(), store, project.WorkspaceID, oauthMgr.Pool)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
@@ -348,12 +350,12 @@ func (e *authoringProviderInitError) Unwrap() error { return e.err }
 // It is the single owner of the tier/fallback rules both authoring endpoints
 // use: the pro tier's overrides, falling back to the flash default, then to the
 // workspace defaults and the flash key.
-func authoringProvider(ctx context.Context, tiers workspaceTierReader, workspaceID string) (agentcore.LLMProvider, string, error) {
+func authoringProvider(ctx context.Context, tiers workspaceTierReader, workspaceID string, poolFor func(providerID string) ai.TokenSource) (agentcore.LLMProvider, string, error) {
 	cfg, keys, err := tiers.WorkspaceTiersForRun(ctx, workspaceID)
 	if err != nil {
 		return nil, "", err
 	}
-	pro := agentruntime.TierSetFromWorkspace(cfg, keys).Resolve(agentruntime.DefaultAuthoringTier)
+	pro := agentruntime.TierSetFromWorkspace(cfg, keys, poolFor).Resolve(agentruntime.DefaultAuthoringTier)
 	if strings.TrimSpace(pro.Provider) == "" {
 		pro.Provider = cfg.Provider
 	}
@@ -369,7 +371,7 @@ func authoringProvider(ctx context.Context, tiers workspaceTierReader, workspace
 	if strings.TrimSpace(pro.Model) == "" || strings.TrimSpace(pro.APIKey) == "" {
 		return nil, "", fmt.Errorf("authoring model tier is not configured")
 	}
-	provider, err := agentruntime.NewTierProvider(pro.Provider, pro.BaseURL, pro.APIKey)
+	provider, err := agentruntime.NewTierProviderWithSource(pro.Provider, pro.BaseURL, pro.APIKey, pro.TokenSource)
 	if err != nil {
 		return nil, "", &authoringProviderInitError{err: err}
 	}

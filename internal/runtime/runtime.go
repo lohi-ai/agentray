@@ -32,11 +32,15 @@ type BuildParams struct {
 	// this empty preserves the original single-agent behavior byte-for-byte. A
 	// non-default agent passes its own id here while keeping ProjectID for the
 	// analytics tools (which read project-wide data through the usecase layer).
-	ScopeID     string
-	Provider    string // "openai" | "anthropic"
-	Model       string
-	BaseURL     string // optional per-config override
-	APIKey      string // decrypted, never persisted from here
+	ScopeID  string
+	Provider string // "openai" | "anthropic"
+	Model    string
+	BaseURL  string // optional per-config override
+	APIKey   string // decrypted, never persisted from here
+	// TokenSource is the OAuth account pool the primary provider draws a live
+	// access token from per request (subscription vendors only; nil for API-key
+	// providers).
+	TokenSource ai.TokenSource
 	Scopes      Scopes
 	Soul        string
 	Agents      string
@@ -263,11 +267,18 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 // NewTierProvider builds an LLMProvider for one tier's settings, applying the
 // same routing as a run (OpenAI wire / Anthropic / OpenAI-compatible vendor).
 // Exported for the config-test endpoint so a connectivity check uses the exact
-// provider a real run would.
+// provider a real run would. OAuth vendors need NewTierProviderWithSource —
+// without a TokenSource they cannot authenticate.
 func NewTierProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, error) {
+	return NewTierProviderWithSource(provider, baseURL, apiKey, nil)
+}
+
+// NewTierProviderWithSource is NewTierProvider plus the OAuth account pool a
+// subscription vendor draws its per-request access token from.
+func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSource) (agentcore.LLMProvider, error) {
 	// A connectivity check is not a run and has no trace to attribute; calls are
 	// still priced.
-	return buildTracedProvider(provider, baseURL, apiKey, nil)
+	return buildTracedProvider(provider, baseURL, apiKey, ts, nil)
 }
 
 // buildTracedProvider builds a provider for a call made OUTSIDE a composition —
@@ -277,8 +288,8 @@ func NewTierProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, e
 // Inside a composition, use buildProvider: the monitor plugin decorates every
 // rung once, and wrapping twice would double-price the call and emit two trace
 // rows per turn.
-func buildTracedProvider(provider, baseURL, apiKey string, tracer observe.Sink) (agentcore.LLMProvider, error) {
-	prov, err := buildProvider(provider, baseURL, apiKey)
+func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink) (agentcore.LLMProvider, error) {
+	prov, err := buildProvider(provider, baseURL, apiKey, ts)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +305,7 @@ func buildTracedProvider(provider, baseURL, apiKey string, tracer observe.Sink) 
 // monitor plugin in the composition, which decorates every rung the run can
 // reach — primary, escalation, and compaction alike. Wrapping here as well would
 // price each call twice and emit two trace rows per turn.
-func buildProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, error) {
+func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource) (agentcore.LLMProvider, error) {
 	var (
 		prov agentcore.LLMProvider
 		err  error
@@ -309,6 +320,14 @@ func buildProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, err
 			Name: "anthropic", APIKey: apiKey, BaseURL: strings.TrimSpace(baseURL),
 		})
 	default:
+		if ai.IsOAuthVendor(provider) {
+			// Subscription vendor: the account pool supplies a live access token
+			// per request; the static key is the OAuthPoolKey sentinel.
+			prov, err = ai.NewClient(ai.ClientSpec{
+				Name: provider, BaseURL: strings.TrimSpace(baseURL), TokenSource: ts,
+			})
+			break
+		}
 		// OpenAI-compatible vendor (e.g. a router): OpenAI wire at a custom
 		// base_url with default compat. base_url is required and validated by
 		// NewProvider.
@@ -329,7 +348,7 @@ func buildProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, err
 func buildRungs(tcs []TierConfig) ([]agentcore.ModelRung, error) {
 	rungs := make([]agentcore.ModelRung, 0, len(tcs))
 	for _, tc := range tcs {
-		prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey)
+		prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey, tc.TokenSource)
 		if err != nil {
 			return nil, err
 		}
@@ -432,7 +451,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	if p.Data == nil {
 		return nil, fmt.Errorf("agentruntime: missing data source")
 	}
-	llm, err := buildProvider(p.Provider, p.BaseURL, p.APIKey)
+	llm, err := buildProvider(p.Provider, p.BaseURL, p.APIKey, p.TokenSource)
 	if err != nil {
 		return nil, fmt.Errorf("agentruntime: %w", err)
 	}

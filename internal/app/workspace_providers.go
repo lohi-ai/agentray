@@ -11,24 +11,26 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 )
 
 // collectionFromBook builds the shipped provider collection from a workspace
 // book so list-models and connection tests share construction with a run.
-func collectionFromBook(book *storage.WorkspaceProviderBook) (*ai.Collection, error) {
+// OAuth vendors get their account pool attached as the TokenSource — a
+// list-models call then authenticates with a live account token, the same
+// credential a run would draw.
+func collectionFromBook(book *storage.WorkspaceProviderBook, mgr *oauth.Manager) (*ai.Collection, error) {
 	specs := make([]ai.Spec, 0, len(book.Providers))
 	for _, p := range book.Providers {
-		specs = append(specs, ai.Spec{
-			ID: p.ID, Vendor: p.Vendor, Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-		})
+		specs = append(specs, oauthProviderSpec(mgr, p))
 	}
 	return ai.CollectionFromSpecs(specs)
 }
 
 // testBookConnections pings each configured tier through the owning provider
 // (same credentials a run would use).
-func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBook) (bool, map[string]any) {
+func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBook, mgr *oauth.Manager) (bool, map[string]any) {
 	cfg, keys := book.Resolve()
 	results := make(map[string]any, 3)
 	allOK := true
@@ -39,7 +41,7 @@ func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBoo
 		key = firstNonEmpty(key, keys["flash"])
 		var res map[string]any
 		if providerID != "" {
-			res = testOwnedProvider(ctx, book, providerID, model)
+			res = testOwnedProvider(ctx, book, providerID, model, mgr)
 		} else {
 			res = testTierProviderCtx(ctx, provider, baseURL, model, key)
 		}
@@ -58,8 +60,8 @@ func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBoo
 	return allOK, results
 }
 
-func testOwnedProvider(ctx context.Context, book *storage.WorkspaceProviderBook, providerID, model string) map[string]any {
-	col, err := collectionFromBook(book)
+func testOwnedProvider(ctx context.Context, book *storage.WorkspaceProviderBook, providerID, model string, mgr *oauth.Manager) map[string]any {
+	col, err := collectionFromBook(book, mgr)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
@@ -90,7 +92,8 @@ func testTierProviderCtx(ctx context.Context, provider, baseURL, model, key stri
 	return map[string]any{"ok": true}
 }
 
-func registerWorkspaceProviderRoutes(e *echo.Echo, store *storage.Store) {
+func registerWorkspaceProviderRoutes(e *echo.Echo, store *storage.Store, mgr *oauth.Manager) {
+	registerWorkspaceOAuthRoutes(e, store, mgr)
 	e.GET("/api/workspace/providers", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
 		if err != nil {
@@ -187,7 +190,7 @@ func registerWorkspaceProviderRoutes(e *echo.Echo, store *storage.Store) {
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		col, err := collectionFromBook(book)
+		col, err := collectionFromBook(book, mgr)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}

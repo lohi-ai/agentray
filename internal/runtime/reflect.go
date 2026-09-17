@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -22,6 +23,9 @@ type reflectInput struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// TokenSource is the OAuth account pool for subscription vendors; nil for
+	// API-key providers.
+	TokenSource ai.TokenSource
 	// Memory is the store the pass writes through — the interface, not *PgMemory,
 	// because the pass only ever calls Remember, and the scope it writes under is
 	// the thing worth testing without a database behind it.
@@ -62,7 +66,7 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 	if in.Memory == nil {
 		return nil
 	}
-	provider, err := buildTracedProvider(in.Provider, in.BaseURL, in.APIKey, r.Tracer)
+	provider, err := buildTracedProvider(in.Provider, in.BaseURL, in.APIKey, in.TokenSource, r.Tracer)
 	if err != nil {
 		return err
 	}

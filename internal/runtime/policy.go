@@ -34,13 +34,13 @@ var readTools = map[string]bool{
 	// activation_candidates is a read: it ranks event names with evidence and
 	// never writes activation_event — the owner accepts a suggestion.
 	ToolActivationCandidates: true,
-	ToolExploreEvents:   true,
-	ToolPersons:         true,
-	ToolRunSQL:          true,
-	ToolRunInsight:      true,
-	ToolRunFunnel:       true,
-	ToolRunRetention:    true,
-	ToolListDashboards:  true,
+	ToolExploreEvents:        true,
+	ToolPersons:              true,
+	ToolRunSQL:               true,
+	ToolRunInsight:           true,
+	ToolRunFunnel:            true,
+	ToolRunRetention:         true,
+	ToolListDashboards:       true,
 	// test_status reads the live experiment out of the event store against a
 	// committed threshold. It is the pre-product agent's activity_summary, and
 	// leaving it unclassified would nudge the one agent that DID check.

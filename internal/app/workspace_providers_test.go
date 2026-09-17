@@ -45,7 +45,7 @@ func TestConnectionTestUsesOwnerCredentials(t *testing.T) {
 			LiteProviderID: "pb", LiteModel: "model-b",
 		},
 	}
-	ok, tiers := testBookConnections(context.Background(), book)
+	ok, tiers := testBookConnections(context.Background(), book, nil)
 	if !ok {
 		t.Fatalf("expected both tiers ok, got %+v", tiers)
 	}
@@ -67,7 +67,7 @@ func TestCollectionFromBookListsStubIDs(t *testing.T) {
 			{ID: "p1", Vendor: "openai", Name: "P", BaseURL: srv.URL, APIKey: "k"},
 		},
 	}
-	col, err := collectionFromBook(book)
+	col, err := collectionFromBook(book, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

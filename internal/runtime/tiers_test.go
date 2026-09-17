@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"testing"
 
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -35,7 +36,7 @@ func TestTierSetFromWorkspace(t *testing.T) {
 		ProProvider: "anthropic", ProModel: "claude-opus", ProBaseURL: "https://pro",
 	}
 	keys := map[string]string{"flash": "fk", "lite": "lk", "pro": "pk"}
-	ts := tierSetFromWorkspace(cfg, keys)
+	ts := tierSetFromWorkspace(cfg, keys, nil)
 
 	if got := ts.resolve(TierFlash); got.Model != "gpt-4o" || got.APIKey != "fk" || got.BaseURL != "https://flash" {
 		t.Errorf("flash = %+v, want gpt-4o/fk/https://flash", got)
@@ -53,9 +54,34 @@ func TestTierSetFromWorkspace(t *testing.T) {
 func TestTierSetFromWorkspaceUnconfiguredTierInheritsFlash(t *testing.T) {
 	cfg := storage.WorkspaceModelTiers{Provider: "openai", Model: "gpt-4o"}
 	keys := map[string]string{"flash": "fk"} // lite/pro have no key
-	ts := tierSetFromWorkspace(cfg, keys)
+	ts := tierSetFromWorkspace(cfg, keys, nil)
 	if got := ts.resolve(TierPro); got.Model != "gpt-4o" || got.APIKey != "fk" {
 		t.Errorf("unconfigured pro = %+v, want it to inherit flash", got)
+	}
+}
+
+// When a tier uses an OAuth provider, the token source pool is wired onto the
+// resolved TierConfig even when no APIKey is in the map.
+func TestTierSetFromWorkspaceOAuthTokenSource(t *testing.T) {
+	cfg := storage.WorkspaceModelTiers{
+		Provider: "openai", Model: "gpt-4o",
+		FlashProviderID: "p-oauth-1",
+		ProProvider:     "claude-code", ProModel: "claude-3-7-sonnet-20250219",
+		ProProviderID: "p-oauth-2",
+	}
+	keys := map[string]string{"flash": "fk"} // pro has no static key
+	poolCalled := map[string]bool{}
+	poolFor := func(pID string) ai.TokenSource {
+		poolCalled[pID] = true
+		return nil
+	}
+	ts := tierSetFromWorkspace(cfg, keys, poolFor)
+	pro := ts.resolve(TierPro)
+	if pro.Model != "claude-3-7-sonnet-20250219" {
+		t.Errorf("pro model = %q, want claude-3-7-sonnet-20250219", pro.Model)
+	}
+	if !poolCalled["p-oauth-2"] {
+		t.Errorf("expected poolFor to be called for p-oauth-2")
 	}
 }
 

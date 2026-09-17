@@ -43,7 +43,7 @@ func mountServerRoutes(t *testing.T, s *storage.Store) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	pass := func(next echo.HandlerFunc) echo.HandlerFunc { return next }
-	registerRoutes(e, s, ingestion.EventQueue{}, pass, pass, nil, nil, agentruntime.ToolBuildContext{}, nil, false, publicCollectSet{}, newOpAdapter(s, nil, nil), nil)
+	registerRoutes(e, s, ingestion.EventQueue{}, pass, pass, nil, nil, agentruntime.ToolBuildContext{}, nil, false, publicCollectSet{}, newOpAdapter(s, nil, nil), nil, nil)
 	return e
 }
 

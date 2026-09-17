@@ -15,6 +15,9 @@ const VENDOR_KINDS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'google', label: 'Google Gemini' },
+  { value: 'claude-code', label: 'Claude Code (subscription)' },
+  { value: 'openai-codex', label: 'ChatGPT / Codex (subscription)' },
+  { value: 'google-antigravity', label: 'Antigravity (subscription)' },
   { value: 'openai-compat', label: 'Something else (advanced)' },
 ] as const;
 
@@ -22,10 +25,17 @@ export function vendorLabel(vendor: string): string {
   return VENDOR_KINDS.find((v) => v.value === vendor)?.label ?? vendor;
 }
 
+// Subscription vendors authenticate with a pool of OAuth accounts, not a
+// pasted key — the form only creates the row; accounts are added by signing in.
+export function isOAuthVendor(vendor: string): boolean {
+  return vendor === 'claude-code' || vendor === 'openai-codex' || vendor === 'google-antigravity';
+}
+
 // Anything that is not one of the three first-party vendors is reached through
-// an OpenAI-compatible endpoint, and that endpoint has to be typed in.
+// an OpenAI-compatible endpoint, and that endpoint has to be typed in. OAuth
+// vendors have fixed endpoints, so they never ask for one either.
 function vendorNeedsBaseURL(vendor: string): boolean {
-  return vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google';
+  return !isOAuthVendor(vendor) && vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google';
 }
 
 type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
@@ -62,16 +72,14 @@ export function ProviderForm({
   const [saving, setSaving] = useState(false);
   const patch = (field: keyof ProviderDraft, value: string) => setDraft((d) => ({ ...d, [field]: value }));
 
+  const oauth = isOAuthVendor(draft.vendor);
   const advanced = vendorNeedsBaseURL(draft.vendor);
-  // Hidden for the three first-party vendors (criterion 4 — the advanced path
-  // must not read as an equal-weight first choice), but still shown for Google,
-  // which the previous UI let you point at a regional endpoint, and for any
-  // provider that already has one saved.
   const showBaseURL = advanced || draft.vendor === 'google' || !!draft.base_url;
-  const keyMissing = !editing && !draft.api_key.trim();
+  // OAuth vendors don't use API keys — accounts are added via sign-in after
+  // the provider row exists.
+  const keyMissing = !oauth && !editing && !draft.api_key.trim();
   const baseURLMissing = advanced && !draft.base_url.trim();
   const invalid = keyMissing || baseURLMissing;
-
   const submit = async () => {
     setTouched(true);
     if (invalid || saving) return;
@@ -103,17 +111,23 @@ export function ProviderForm({
         onChange={(v) => patch('vendor', v)}
         width="100%"
       />
-      <TextInput
-        label={editing ? 'New API key' : 'API key'}
-        type="password"
-        isRequired={!editing}
-        isOptional={editing}
-        status={touched && keyMissing ? { type: 'error', message: 'Paste the key from your provider.' } : undefined}
-        value={draft.api_key}
-        placeholder={editing ? 'Leave blank to keep the current key' : 'Paste the key from your provider'}
-        onChange={(v) => patch('api_key', v)}
-        width="100%"
-      />
+      {!oauth ? (
+        <TextInput
+          label={editing ? 'New API key' : 'API key'}
+          type="password"
+          isRequired={!editing}
+          isOptional={editing}
+          status={touched && keyMissing ? { type: 'error', message: 'Paste the key from your provider.' } : undefined}
+          value={draft.api_key}
+          placeholder={editing ? 'Leave blank to keep the current key' : 'Paste the key from your provider'}
+          onChange={(v) => patch('api_key', v)}
+          width="100%"
+        />
+      ) : (
+        <Text type="supporting">
+          This vendor authenticates with your subscription account, not an API key. Once added, you will sign in to connect one or more accounts.
+        </Text>
+      )}
       <TextInput
         label="Name"
         isOptional
@@ -139,9 +153,11 @@ export function ProviderForm({
         />
       ) : null}
       <Text type="supporting">
-        {advanced
-          ? 'Use this for a self-hosted or gateway endpoint that speaks the OpenAI API. Ask whoever runs it for the server address.'
-          : 'Your key is encrypted and never shown again. You can replace it any time.'}
+        {oauth
+          ? 'You can sign in with multiple accounts to pool rate limits.'
+          : advanced
+            ? 'Use this for a self-hosted or gateway endpoint that speaks the OpenAI API. Ask whoever runs it for the server address.'
+            : 'Your key is encrypted and never shown again. You can replace it any time.'}
       </Text>
       <div className="mt-1 flex gap-2">
         <Button variant="primary" size="sm" onClick={() => void submit()} disabled={saving}>

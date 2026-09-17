@@ -14,6 +14,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
@@ -68,14 +69,13 @@ func registerHealthRoutes(e *echo.Echo, ready readinessProbe) {
 
 // hosted marks the managed cloud (config.Hosted). It travels no further than the
 // auth payload: the web app hides every plan/pricing surface when it is false, so
-// a `docker compose up` operator is never shown a ceiling they cannot buy past.
-func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, ready readinessProbe, runnerOpts ...agentruntime.RunnerOption) {
+func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQueue, rateLimit echo.MiddlewareFunc, authRateLimit echo.MiddlewareFunc, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, collectPaths publicCollectSet, ops *opAdapter, ready readinessProbe, oauthMgr *oauth.Manager, runnerOpts ...agentruntime.RunnerOption) {
 	h := ingestion.NewHandler(store, events, store).WithCatalogGuard(store).WithWaitlist(store)
 	publicCollect := collectPaths.collect
 
 	registerHealthRoutes(e, ready)
 
-	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, runnerOpts...)
+	registerAgentRoutes(e, store, scheduler, sb, catalogCtx, liveReg, hosted, oauthMgr, runnerOpts...)
 	registerAgentMonitorRoutes(e, store)
 	registerAgentLabRoutes(e, store, sb != nil, runnerOpts...)
 	registerAlertRoutes(e, store)
@@ -884,7 +884,6 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 	mountDashboardLifecycle(e, store, ops)
 
-
 	e.GET("/api/events", func(c echo.Context) error {
 		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
@@ -1214,6 +1213,7 @@ func projectFromRequest(c echo.Context, store *storage.Store) (storage.Project, 
 	}
 	return projectForPrincipal(project, principal), nil
 }
+
 // wrapObject re-envelopes an operation's bare JSON result under the legacy
 // response key — {"id":…} becomes {"dashboard":{"id":…}} — so the adapter
 // keeps the envelope the web client already parses.
@@ -1299,7 +1299,6 @@ func accountResources(c echo.Context, store *storage.Store, ctx authContext, pre
 	}
 	return workspaces, projects, project, nil
 }
-
 
 func intParam(c echo.Context, name string, fallback int, minValue int, maxValue int) int {
 	value := fallback

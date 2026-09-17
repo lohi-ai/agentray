@@ -34,7 +34,7 @@ func newLifecycleEcho(t *testing.T, s *storage.Store) *echo.Echo {
 	t.Helper()
 	e := echo.New()
 	ops := newOpAdapter(s, nil, storeRunner{s})
-	registerConnectorRoutes(e, s, ops)
+	registerConnectorRoutes(e, s, ops, nil)
 	// The dashboard/chart block lives inside registerRoutes, which needs the
 	// full server wiring; mount just those routes here instead.
 	mountDashboardLifecycle(e, s, ops)

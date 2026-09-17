@@ -830,6 +830,48 @@ export type WorkspaceProvider = {
   name: string;
   base_url: string;
   has_key: boolean;
+  /** "key" for pasted API keys, "oauth" for subscription vendors whose
+   *  credential is a pool of signed-in accounts. */
+  auth_type?: 'key' | 'oauth';
+  /** Active accounts in the pool (oauth providers only). */
+  account_count?: number;
+};
+
+// One signed-in subscription account inside an OAuth provider's pool. Tokens
+// never leave the API — the row carries identity + pool state only.
+export type WorkspaceProviderAccount = {
+  id: string;
+  provider_id: string;
+  email: string;
+  account_id: string;
+  org_id?: string;
+  org_name?: string;
+  project_id?: string;
+  plan?: string;
+  status: 'active' | 'disabled';
+  disabled_cause?: string;
+  blocked_until?: string | null;
+  last_used_at?: string | null;
+  usage?: Record<string, unknown>;
+  created_at: string;
+};
+
+export type OAuthLoginStart = {
+  state: string;
+  auth_url: string;
+  instructions?: string;
+};
+
+export type OAuthDeviceStart = {
+  pending_id: string;
+  user_code: string;
+  verification_url: string;
+};
+
+export type OAuthDevicePoll = {
+  status: 'pending' | 'done' | 'error';
+  error?: string;
+  account?: WorkspaceProviderAccount;
 };
 
 export type WorkspaceProviderInput = {
@@ -2546,6 +2588,59 @@ export class AgentRayAPI {
 
   listedWorkspaceModels() {
     return this.get<ListedWorkspaceModels>('/api/workspace/models/listed');
+  }
+
+  // OAuth subscription pools: many signed-in accounts per provider row.
+  providerAccounts(providerID: string) {
+    return this.get<{ accounts: WorkspaceProviderAccount[] }>(`/api/workspace/providers/${providerID}/accounts`);
+  }
+
+  startProviderOAuth(providerID: string) {
+    return this.request<OAuthLoginStart>(this.withProject(`/api/workspace/providers/${providerID}/oauth/start`), {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  completeProviderOAuth(providerID: string, state: string, input: string) {
+    return this.request<{ account: WorkspaceProviderAccount }>(this.withProject(`/api/workspace/providers/${providerID}/oauth/complete`), {
+      method: 'POST',
+      body: JSON.stringify({ state, input }),
+    });
+  }
+
+  startProviderDeviceLogin(providerID: string) {
+    return this.request<OAuthDeviceStart>(this.withProject(`/api/workspace/providers/${providerID}/oauth/device/start`), {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  pollProviderDeviceLogin(providerID: string, pendingID: string) {
+    return this.request<OAuthDevicePoll>(this.withProject(`/api/workspace/providers/${providerID}/oauth/device/poll`), {
+      method: 'POST',
+      body: JSON.stringify({ pending_id: pendingID }),
+    });
+  }
+
+  deleteProviderAccount(providerID: string, accountID: string) {
+    return this.request<{ ok: boolean }>(this.withProject(`/api/workspace/providers/${providerID}/accounts/${accountID}`), {
+      method: 'DELETE',
+    });
+  }
+
+  setProviderAccountStatus(providerID: string, accountID: string, status: 'active' | 'disabled') {
+    return this.request<{ ok: boolean }>(this.withProject(`/api/workspace/providers/${providerID}/accounts/${accountID}/status`), {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  probeProviderAccountUsage(providerID: string, accountID: string) {
+    return this.request<{ usage: Record<string, unknown> }>(this.withProject(`/api/workspace/providers/${providerID}/accounts/${accountID}/usage`), {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   // Per-agent capabilities: which backend usecase/analytics tool groups this

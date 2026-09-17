@@ -16,7 +16,8 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/experiments"
 	"github.com/lohi-ai/agentray/internal/dataplane/findings"
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
-	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
@@ -282,12 +283,17 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	ops := newOpAdapter(store, alertDeliverer, connectorEngine)
 	demoAskLimit = cfg.DemoAgentRunsPerUserPerDay
 	e.Use(demoWriteGuard(store, ops.reg))
-	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, ready, runnerOpts...)
+	// One OAuth manager serves both the account routes and the run-time account
+	// pool — its pending-login state must be shared or a login started through
+	// one manager could never complete through another.
+	oauthMgr := oauth.NewManager(store)
+	runnerOpts = append(runnerOpts, agentruntime.WithAccountPool(oauthMgr.Pool))
+	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, ready, oauthMgr, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerOverviewRoutes(e, store, ops)
 	registerActivationRoutes(e, store, ops)
-	registerConnectorRoutes(e, store, ops)
+	registerConnectorRoutes(e, store, ops, oauthMgr)
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 

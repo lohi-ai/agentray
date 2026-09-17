@@ -83,6 +83,32 @@ export function useWorkspaceModels() {
     onError: (e: Error) => setError(e.message),
   });
 
+  const invalidateAccounts = (providerID: string) => {
+    queryClient.invalidateQueries({ queryKey: ['workspace-provider-accounts', projectID, providerID] });
+    invalidate();
+  };
+
+  const deleteAccount = useMutation({
+    mutationFn: ({ providerID, accountID }: { providerID: string; accountID: string }) =>
+      client().deleteProviderAccount(providerID, accountID),
+    onSuccess: (_d, v) => { setMessage('Account removed'); invalidateAccounts(v.providerID); },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const setAccountStatus = useMutation({
+    mutationFn: ({ providerID, accountID, status }: { providerID: string; accountID: string; status: 'active' | 'disabled' }) =>
+      client().setProviderAccountStatus(providerID, accountID, status),
+    onSuccess: (_d, v) => invalidateAccounts(v.providerID),
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const probeUsage = useMutation({
+    mutationFn: ({ providerID, accountID }: { providerID: string; accountID: string }) =>
+      client().probeProviderAccountUsage(providerID, accountID),
+    onSuccess: (_d, v) => invalidateAccounts(v.providerID),
+    onError: (e: Error) => setError(e.message),
+  });
+
   return {
     models: modelsQuery.data?.config,
     modelsLoading: modelsQuery.isLoading,
@@ -95,8 +121,26 @@ export function useWorkspaceModels() {
     createProvider: (input: WorkspaceProviderInput) => createProvider.mutateAsync(input),
     updateProvider: (id: string, input: WorkspaceProviderInput) => updateProvider.mutateAsync({ id, input }),
     deleteProvider: (id: string) => deleteProvider.mutateAsync(id),
+    deleteAccount: (providerID: string, accountID: string) => deleteAccount.mutateAsync({ providerID, accountID }),
+    setAccountStatus: (providerID: string, accountID: string, status: 'active' | 'disabled') =>
+      setAccountStatus.mutateAsync({ providerID, accountID, status }),
+    probeUsage: (providerID: string, accountID: string) => probeUsage.mutateAsync({ providerID, accountID }),
     refreshListed: () => queryClient.invalidateQueries({ queryKey: ['workspace-listed-models', projectID] }),
+    refreshAccounts: invalidateAccounts,
   };
+}
+
+// useProviderAccounts lists one OAuth provider's signed-in accounts. Only
+// fetched while the account section is on screen (the caller gates `enabled`).
+export function useProviderAccounts(providerID: string | null) {
+  const projectID = useAuthStore((s) => s.project?.id);
+  return useQuery({
+    queryKey: ['workspace-provider-accounts', projectID, providerID],
+    queryFn: () => new AgentRayAPI(projectID!).providerAccounts(providerID!),
+    enabled: !!projectID && !!providerID,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+  });
 }
 
 export function useAgentCapabilities(agentID = '') {

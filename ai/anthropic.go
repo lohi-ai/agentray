@@ -23,12 +23,35 @@ const (
 	// anthropicStructuredOutputBeta is the beta opt-in for output_format
 	// (grammar-constrained JSON answers).
 	anthropicStructuredOutputBeta = "structured-outputs-2025-11-13"
+
+	// claudeCodeUserAgent is the User-Agent the Claude Code CLI sends; the
+	// OAuth surface expects the subscription client's fingerprint, not a
+	// generic SDK one.
+	claudeCodeUserAgent = "claude-cli/2.1.257 (external, cli)"
+	// claudeCodeSystemInstruction is the identity block Claude Code prepends
+	// to every request's system prompt.
+	claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude."
 )
 
+// claudeCodeBetas are the anthropic-beta values the Claude Code OAuth client
+// always advertises, merged with whatever a request's own features need.
+var claudeCodeBetas = []string{
+	"claude-code-20250219",
+	"oauth-2025-04-20",
+	"interleaved-thinking-2025-05-14",
+	"context-management-2025-06-27",
+	"prompt-caching-scope-2026-01-05",
+}
+
 // antBetaHeader assembles the anthropic-beta header for a request: the
-// comma-joined set of betas it actually uses, or "" when none apply.
-func antBetaHeader(req agentcore.ChatRequest) string {
+// comma-joined set of betas it actually uses, or "" when none apply. In OAuth
+// (claude-code) mode the subscription client's fixed beta set always applies
+// and the per-request betas merge on top.
+func antBetaHeader(req agentcore.ChatRequest, oauth bool) string {
 	var betas []string
+	if oauth {
+		betas = append(betas, claudeCodeBetas...)
+	}
 	if usesExtendedCache(req) {
 		betas = append(betas, anthropicExtendedCacheBeta)
 	}
@@ -64,6 +87,11 @@ func usesExtendedCache(req agentcore.ChatRequest) bool {
 type AnthropicProvider struct {
 	APIKey  string
 	BaseURL string
+	// OAuth marks the claude-code subscription mode: the credential is an OAuth
+	// access token sent as Authorization: Bearer (never x-api-key), the request
+	// carries the Claude Code client fingerprint (User-Agent, x-app, the fixed
+	// beta set), and the system prompt gains the Claude Code identity block.
+	OAuth bool
 	// HTTP serves the non-streamed Chat path (absolute cap, no header deadline).
 	HTTP *http.Client
 	// StreamHTTP serves the SSE path, where a header deadline is meaningful. Nil
@@ -102,8 +130,44 @@ func (p *AnthropicProvider) UpdateAPIKey(key string) {
 	}
 }
 
-func (p *AnthropicProvider) Name() string        { return "anthropic" }
+// applyOAuthToken installs the account credential for the next request
+// (pooledProvider's oauthTokenApplier seam). The access token rides in APIKey;
+// the OAuth flag makes it a Bearer credential instead of an x-api-key.
+func (p *AnthropicProvider) applyOAuthToken(tok OAuthToken) {
+	p.APIKey = tok.AccessToken
+}
+
+func (p *AnthropicProvider) Name() string {
+	if p.OAuth {
+		return VendorClaudeCode
+	}
+	return "anthropic"
+}
 func (p *AnthropicProvider) SupportsTools() bool { return true }
+
+// setHeaders applies the request headers for the configured auth mode. OAuth
+// mode sends the Claude Code client fingerprint — Bearer auth, the CLI
+// User-Agent, x-app: cli, the fixed subscription beta set merged with the
+// request's own betas, and Accept: application/json even when streaming (the
+// OAuth surface answers SSE either way).
+func (p *AnthropicProvider) setHeaders(httpReq *http.Request, req agentcore.ChatRequest, stream bool) {
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	if p.OAuth {
+		httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+		httpReq.Header.Set("User-Agent", claudeCodeUserAgent)
+		httpReq.Header.Set("x-app", "cli")
+		httpReq.Header.Set("Accept", "application/json")
+	} else {
+		httpReq.Header.Set("x-api-key", p.APIKey)
+		if stream {
+			httpReq.Header.Set("Accept", "text/event-stream")
+		}
+	}
+	if betas := antBetaHeader(req, p.OAuth); betas != "" {
+		httpReq.Header.Set("anthropic-beta", betas)
+	}
+}
 
 // --- wire types (Anthropic Messages) ---
 
@@ -211,12 +275,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 	if err != nil {
 		return agentcore.ChatResponse{}, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.APIKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
-	if betas := antBetaHeader(req); betas != "" {
-		httpReq.Header.Set("anthropic-beta", betas)
-	}
+	p.setHeaders(httpReq, req, false)
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
@@ -306,13 +365,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("x-api-key", p.APIKey)
-	httpReq.Header.Set("anthropic-version", anthropicVersion)
-	if betas := antBetaHeader(req); betas != "" {
-		httpReq.Header.Set("anthropic-beta", betas)
-	}
+	p.setHeaders(httpReq, req, true)
 
 	resp, err := p.streamHTTP().Do(httpReq)
 	if err != nil {
@@ -482,7 +535,20 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 	// requested, send it as a structured block carrying cache_control so Anthropic
 	// reuses it across turns; otherwise keep the bare-string form the API has always
 	// received. An empty system stays omitted either way.
-	if systemText := strings.Join(systemParts, "\n\n"); systemText != "" {
+	//
+	// OAuth (claude-code) mode always uses the structured form: the Claude Code
+	// identity block leads, the caller's system text follows, and the cache
+	// breakpoint — when requested — lands on the last block.
+	if p.OAuth {
+		blocks := []antSystemBlock{{Type: "text", Text: claudeCodeSystemInstruction}}
+		if systemText := strings.Join(systemParts, "\n\n"); systemText != "" {
+			blocks = append(blocks, antSystemBlock{Type: "text", Text: systemText})
+		}
+		if req.CacheKey != "" {
+			blocks[len(blocks)-1].CacheControl = &antCacheControl{Type: "ephemeral", TTL: antCacheTTL(req.CacheRetention)}
+		}
+		out.System = blocks
+	} else if systemText := strings.Join(systemParts, "\n\n"); systemText != "" {
 		if req.CacheKey != "" {
 			out.System = []antSystemBlock{{
 				Type:         "text",
@@ -534,4 +600,46 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 		out.Tools = append(out.Tools, antTool{Name: s.Name, Description: s.Description, InputSchema: params})
 	}
 	return out
+}
+
+// listClaudeCodeModels calls GET {base}/v1/models with the OAuth account's
+// Bearer credential — the same endpoint as listAnthropicModels, but the
+// subscription surface authenticates with the token, not x-api-key.
+func listClaudeCodeModels(ctx context.Context, client HTTPDoer, baseURL string, tok OAuthToken) ([]Model, error) {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		base = defaultAnthropicBaseURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	req.Header.Set("anthropic-version", anthropicVersion)
+	req.Header.Set("User-Agent", claudeCodeUserAgent)
+	req.Header.Set("x-app", "cli")
+	req.Header.Set("Accept", "application/json")
+	data, status, err := doJSON(ctx, client, req)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("list models: status %d: %s", status, strings.TrimSpace(string(data)))
+	}
+	var decoded struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextWindow int    `json:"context_window"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("list models: decode: %w", err)
+	}
+	out := make([]Model, 0, len(decoded.Data))
+	for _, m := range decoded.Data {
+		if id := strings.TrimSpace(m.ID); id != "" {
+			out = append(out, Model{ID: id, ContextWindow: m.ContextWindow})
+		}
+	}
+	return out, nil
 }

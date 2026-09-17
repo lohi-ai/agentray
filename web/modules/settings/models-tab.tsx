@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertTriangle, Check, KeyRound, Plus, Search, X } from 'lucide-react';
+import { AlertTriangle, Check, KeyRound, LogIn, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
 import { Text } from '@astryxdesign/core/Text';
 import type {
@@ -9,11 +9,13 @@ import type {
   WorkspaceModelTiers,
   WorkspaceModelTiersInput,
   WorkspaceProvider,
+  WorkspaceProviderAccount,
   WorkspaceProviderInput,
 } from '@/lib/api';
-import { useWorkspaceModels } from '@/modules/agent/hooks';
+import { useProviderAccounts, useWorkspaceModels } from '@/modules/agent/hooks';
 import { ConfirmDialog } from '@/modules/shared/components/modal';
 import { Button, EmptyState, Loading, Panel, StatusPill } from '@/modules/shared/components/signal-primitives';
+import { formatRelative } from '@/lib/format';
 import { useStackSheet } from '@/modules/shared/components/stack-sheet';
 import {
   friendlyProviderError,
@@ -22,7 +24,8 @@ import {
   searchModelItems,
   type ListedModel,
 } from './model-picker';
-import { ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
+import { isOAuthVendor, ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
+import { OAuthSignIn } from './oauth-signin';
 
 // contextWindow is the operator's OVERRIDE only, in tokens; 0 means "use the
 // window we detected for this model". Storing the override rather than the
@@ -79,7 +82,129 @@ type TestState = {
   models: Record<string, string>;
 };
 
+function AccountsSection({
+  provider,
+  onAddAccount,
+  onDeleteAccount,
+  onSetStatus,
+  onProbeUsage,
+}: {
+  provider: WorkspaceProvider;
+  onAddAccount: () => void;
+  onDeleteAccount: (accountID: string) => Promise<unknown>;
+  onSetStatus: (accountID: string, status: 'active' | 'disabled') => Promise<unknown>;
+  onProbeUsage: (accountID: string) => Promise<unknown>;
+}) {
+  const { data, isLoading } = useProviderAccounts(provider.id);
+  const accounts = data?.accounts ?? [];
+  const [busy, setBusy] = useState<string | null>(null);
+
+  return (
+    <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-2)] p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-secondary)]">
+          Connected accounts ({accounts.length})
+        </span>
+        <Button variant="ghost" size="sm" icon={<Plus size={12} />} onClick={onAddAccount}>
+          Add account
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <Loading label="Loading accounts…" />
+      ) : !accounts.length ? (
+        <div className="flex items-center justify-between py-2 text-xs text-[var(--color-text-secondary)]">
+          <span>No accounts signed in yet.</span>
+          <Button variant="primary" size="sm" icon={<LogIn size={12} />} onClick={onAddAccount}>
+            Sign in now
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col divide-y divide-[var(--color-border)]">
+          {accounts.map((acc) => {
+            const isBlocked = acc.blocked_until && new Date(acc.blocked_until) > new Date();
+            const isWorking = busy === acc.id;
+            return (
+              <div key={acc.id} className="flex items-center justify-between gap-3 py-2 text-xs">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono font-medium text-[var(--color-text-primary)]">
+                      {acc.email || acc.account_id}
+                    </span>
+                    {acc.plan ? (
+                      <span className="rounded bg-[var(--color-surface-3)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--color-text-secondary)]">
+                        {acc.plan}
+                      </span>
+                    ) : null}
+                    {acc.org_name ? (
+                      <span className="truncate text-[var(--color-faint)]">({acc.org_name})</span>
+                    ) : null}
+                    <StatusPill
+                      grow={false}
+                      status={acc.status === 'disabled' ? 'paused' : isBlocked ? 'attention' : 'healthy'}
+                      label={acc.status === 'disabled' ? 'Disabled' : isBlocked ? 'Rate limited' : 'Active'}
+                    />
+                  </div>
+                  <span className="text-[11px] text-[var(--color-faint)]">
+                    {isBlocked ? `Cooling down until ${new Date(acc.blocked_until!).toLocaleTimeString()}` : null}
+                    {!isBlocked && acc.last_used_at ? `Last used ${formatRelative(acc.last_used_at)}` : null}
+                    {!isBlocked && !acc.last_used_at ? `Added ${formatRelative(acc.created_at)}` : null}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1 flex-none">
+                  <button
+                    title="Check usage"
+                    aria-label="Check usage"
+                    disabled={isWorking}
+                    onClick={async () => {
+                      setBusy(acc.id);
+                      try { await onProbeUsage(acc.id); } finally { setBusy(null); }
+                    }}
+                    className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text-primary)]"
+                  >
+                    <RefreshCw size={13} className={isWorking ? 'animate-spin' : ''} />
+                  </button>
+                  <button
+                    title={acc.status === 'active' ? 'Pause this account' : 'Resume this account'}
+                    aria-label={acc.status === 'active' ? 'Pause account' : 'Resume account'}
+                    disabled={isWorking}
+                    onClick={async () => {
+                      setBusy(acc.id);
+                      try {
+                        await onSetStatus(acc.id, acc.status === 'active' ? 'disabled' : 'active');
+                      } finally {
+                        setBusy(null);
+                      }
+                    }}
+                    className="rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-3)]"
+                  >
+                    {acc.status === 'active' ? 'Pause' : 'Resume'}
+                  </button>
+                  <button
+                    title="Remove account"
+                    aria-label="Remove account"
+                    disabled={isWorking}
+                    onClick={async () => {
+                      setBusy(acc.id);
+                      try { await onDeleteAccount(acc.id); } finally { setBusy(null); }
+                    }}
+                    className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-3)] hover:text-danger"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PROVIDER_SHEET = 'ai-provider-form';
+const OAUTH_SHEET = 'ai-oauth-form';
 
 const TIERS = [
   { key: 'flash', title: 'Default', does: 'The main analysis and answers.', required: true },
@@ -92,6 +217,7 @@ export function ModelsTab() {
   const {
     models, modelsLoading, providers, listedModels, listedErrors, listedLoading,
     saveModels, testModels, createProvider, updateProvider, deleteProvider,
+    deleteAccount, setAccountStatus, probeUsage, refreshAccounts,
   } = useWorkspaceModels();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [seededFrom, setSeededFrom] = useState<WorkspaceModelTiers | null>(null);
@@ -225,6 +351,22 @@ export function ModelsTab() {
       ),
     });
   };
+  const openOAuthSheet = (p: WorkspaceProvider) => {
+    push({
+      id: OAUTH_SHEET,
+      title: `Sign in to ${p.name || vendorLabel(p.vendor)}`,
+      content: (
+        <OAuthSignIn
+          provider={p}
+          onDone={() => {
+            closeById(OAUTH_SHEET);
+            refreshAccounts(p.id);
+          }}
+          onCancel={() => closeById(OAUTH_SHEET)}
+        />
+      ),
+    });
+  };
 
   const onDelete = async (id: string) => {
     setBusyProvider(id);
@@ -328,11 +470,16 @@ export function ModelsTab() {
                 const failure = errorByProvider.get(p.id);
                 const active = provider?.id === p.id;
                 const count = modelCount.get(p.id) ?? 0;
+                const isOAuth = isOAuthVendor(p.vendor);
                 const badge = failure
-                  ? { status: 'attention' as const, label: 'Key rejected' }
-                  : p.has_key
-                    ? { status: 'healthy' as const, label: 'Connected' }
-                    : { status: 'paused' as const, label: 'Needs a key' };
+                  ? { status: 'attention' as const, label: isOAuth ? 'Auth error' : 'Key rejected' }
+                  : isOAuth
+                    ? (p.account_count ?? 0) > 0
+                      ? { status: 'healthy' as const, label: `${p.account_count} account${p.account_count === 1 ? '' : 's'}` }
+                      : { status: 'paused' as const, label: 'Needs sign-in' }
+                    : p.has_key
+                      ? { status: 'healthy' as const, label: 'Connected' }
+                      : { status: 'paused' as const, label: 'Needs a key' };
                 return (
                   <button
                     key={p.id}
@@ -375,9 +522,15 @@ export function ModelsTab() {
           action={
             provider ? (
               <div className="flex gap-1">
-                <Button variant="ghost" size="sm" onClick={() => openProviderSheet(provider)} disabled={busyProvider === provider.id}>
-                  Replace key
-                </Button>
+                {isOAuthVendor(provider.vendor) ? (
+                  <Button variant="ghost" size="sm" icon={<LogIn size={13} />} onClick={() => openOAuthSheet(provider)}>
+                    Add account
+                  </Button>
+                ) : (
+                  <Button variant="ghost" size="sm" onClick={() => openProviderSheet(provider)} disabled={busyProvider === provider.id}>
+                    Replace key
+                  </Button>
+                )}
                 <Button variant="ghost" size="sm" onClick={() => setDeleting(provider)} disabled={busyProvider === provider.id}>
                   Remove
                 </Button>
@@ -399,7 +552,16 @@ export function ModelsTab() {
               }
             />
           ) : (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-3">
+              {isOAuthVendor(provider.vendor) ? (
+                <AccountsSection
+                  provider={provider}
+                  onAddAccount={() => openOAuthSheet(provider)}
+                  onDeleteAccount={(accID) => deleteAccount(provider.id, accID)}
+                  onSetStatus={(accID, status) => setAccountStatus(provider.id, accID, status)}
+                  onProbeUsage={(accID) => probeUsage(provider.id, accID)}
+                />
+              ) : null}
               <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3">
                 <Search size={14} className="flex-none text-[var(--color-text-secondary)]" />
                 <input

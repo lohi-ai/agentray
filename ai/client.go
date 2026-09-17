@@ -15,17 +15,25 @@ import (
 // needs. Spec adds the identity and live model list that a workspace-managed
 // provider needs, and builds on this.
 type ClientSpec struct {
-	Name    string // "openai" | "anthropic" | any OpenAI-compatible vendor
+	Name    string // "openai" | "anthropic" | an OAuth vendor | any OpenAI-compatible vendor
 	APIKey  string
 	BaseURL string
 	Compat  Compat // optional; zero value falls back to the vendor default
+	// TokenSource is the OAuth account pool a subscription vendor
+	// (claude-code | openai-codex | google-antigravity) draws per-request
+	// credentials from. Required for those vendors, ignored by the rest.
+	TokenSource TokenSource
 }
 
 // NewClient resolves a ClientSpec into an agentcore.LLMProvider. Adding a
 // vendor is additive here — a new case (or, for OpenAI-compatible vendors, just
 // a compat entry + base_url) — and never requires touching the agent loop.
 func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
-	switch strings.ToLower(strings.TrimSpace(spec.Name)) {
+	name := strings.ToLower(strings.TrimSpace(spec.Name))
+	if v := normalizeOAuthVendor(name); v != "" {
+		name = v
+	}
+	switch name {
 	case "", "openai":
 		compat := spec.Compat
 		if compat.MaxTokensField == "" {
@@ -34,6 +42,24 @@ func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
 		return NewOpenAIProvider(spec.APIKey, spec.BaseURL, compat), nil
 	case "anthropic":
 		return NewAnthropicProvider(spec.APIKey, spec.BaseURL), nil
+	case VendorClaudeCode:
+		// Claude Code speaks the Messages API but authenticates with a pooled
+		// OAuth grant: Bearer auth + the CLI fingerprint, token drawn per request.
+		inner := NewAnthropicProvider("", spec.BaseURL)
+		inner.OAuth = true
+		return newPooledProvider(VendorClaudeCode, inner, spec.TokenSource)
+	case VendorOpenAICodex:
+		inner := NewCodexProvider()
+		if b := strings.TrimSpace(spec.BaseURL); b != "" {
+			inner.BaseURL = strings.TrimRight(b, "/")
+		}
+		return newPooledProvider(VendorOpenAICodex, inner, spec.TokenSource)
+	case VendorGoogleAntigravity:
+		inner := NewAntigravityProvider()
+		if b := strings.TrimSpace(spec.BaseURL); b != "" {
+			inner.BaseURL = strings.TrimRight(b, "/")
+		}
+		return newPooledProvider(VendorGoogleAntigravity, inner, spec.TokenSource)
 	case "google", "gemini":
 		// Gemini on Google's OpenAI-compatible surface. An explicit BaseURL
 		// overrides the default endpoint (e.g. a regional proxy).

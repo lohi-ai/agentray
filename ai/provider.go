@@ -32,9 +32,11 @@ type Provider interface {
 	ListModels(ctx context.Context) ([]Model, error)
 }
 
-// Spec constructs a provider. Vendor is openai | anthropic | google | gemini
-// or any OpenAI-compatible name (which requires BaseURL). ID is the caller's
-// stable handle (a workspace provider row id); empty ID falls back to Vendor.
+// Spec constructs a provider. Vendor is openai | anthropic | google | gemini,
+// an OAuth subscription vendor (claude-code | openai-codex |
+// google-antigravity), or any OpenAI-compatible name (which requires BaseURL).
+// ID is the caller's stable handle (a workspace provider row id); empty ID
+// falls back to Vendor.
 type Spec struct {
 	ID      string
 	Vendor  string
@@ -42,6 +44,10 @@ type Spec struct {
 	APIKey  string
 	BaseURL string
 	HTTP    HTTPDoer
+	// TokenSource is the OAuth account pool a subscription vendor draws
+	// per-request credentials from. Required for OAuth vendors, ignored by
+	// the rest.
+	TokenSource TokenSource
 }
 
 // NormalizeVendor maps aliases onto the built-in vendor ids.

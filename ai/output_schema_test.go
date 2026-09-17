@@ -77,12 +77,12 @@ func TestAnthropicEncodesOutputSchema(t *testing.T) {
 			t.Fatalf("payload missing %s: %s", want, body)
 		}
 	}
-	if got := antBetaHeader(req); got != anthropicStructuredOutputBeta {
+	if got := antBetaHeader(req, false); got != anthropicStructuredOutputBeta {
 		t.Fatalf("beta header = %q", got)
 	}
 	// Betas compose: extended cache + structured outputs join with a comma.
 	req.CacheKey, req.CacheRetention = "k", "long"
-	if got := antBetaHeader(req); got != anthropicExtendedCacheBeta+","+anthropicStructuredOutputBeta {
+	if got := antBetaHeader(req, false); got != anthropicExtendedCacheBeta+","+anthropicStructuredOutputBeta {
 		t.Fatalf("combined beta header = %q", got)
 	}
 
@@ -90,7 +90,7 @@ func TestAnthropicEncodesOutputSchema(t *testing.T) {
 	if strings.Contains(string(raw), "output_format") {
 		t.Fatalf("unset schema must not emit output_format: %s", raw)
 	}
-	if got := antBetaHeader(agentcore.ChatRequest{Model: "m"}); got != "" {
+	if got := antBetaHeader(agentcore.ChatRequest{Model: "m"}, false); got != "" {
 		t.Fatalf("no betas must mean no header, got %q", got)
 	}
 }

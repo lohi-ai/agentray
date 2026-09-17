@@ -238,6 +238,15 @@ var mutatingRoutes = [][2]string{
 	{http.MethodPost, "/api/workspace/providers"},
 	{http.MethodPut, "/api/workspace/providers/:id"},
 	{http.MethodDelete, "/api/workspace/providers/:id"},
+	// OAuth account pools: signing in, removing, pausing, or probing an account
+	// mutates the workspace's credential set — all stay guarded.
+	{http.MethodPost, "/api/workspace/providers/:id/oauth/start"},
+	{http.MethodPost, "/api/workspace/providers/:id/oauth/complete"},
+	{http.MethodPost, "/api/workspace/providers/:id/oauth/device/start"},
+	{http.MethodPost, "/api/workspace/providers/:id/oauth/device/poll"},
+	{http.MethodDelete, "/api/workspace/providers/:id/accounts/:accountID"},
+	{http.MethodPost, "/api/workspace/providers/:id/accounts/:accountID/status"},
+	{http.MethodPost, "/api/workspace/providers/:id/accounts/:accountID/usage"},
 	{http.MethodPut, "/api/agent/capabilities"},
 	{http.MethodPut, "/api/agent/task-tiers"},
 	// Turning the advisor on or off changes what the agent is allowed to hand

@@ -478,3 +478,60 @@ func TestDeleteProviderClearsTierRefs(t *testing.T) {
 		t.Fatalf("delete did not clear: book=%+v", book)
 	}
 }
+
+// An OAuth provider with a live account pool resolves as configured: the tier
+// key is the pool sentinel (never a real key — the wire client pulls a token
+// from its TokenSource) and HasKey is true so the run gate treats it as ready.
+func TestResolveOAuthProviderWithAccounts(t *testing.T) {
+	book := &WorkspaceProviderBook{
+		Providers: []WorkspaceProviderRecord{
+			{ID: "p1", Vendor: ai.VendorClaudeCode, AuthType: "oauth", AccountCount: 2},
+		},
+		Sel: WorkspaceTierSelection{FlashProviderID: "p1", FlashModel: "claude-sonnet-4-5"},
+	}
+	cfg, keys := book.Resolve()
+	if !cfg.HasKey {
+		t.Fatalf("oauth provider with accounts must report HasKey, cfg=%+v", cfg)
+	}
+	if keys["flash"] != ai.OAuthPoolKey {
+		t.Fatalf("expected pool sentinel key, got %q", keys["flash"])
+	}
+	pub := book.Public()
+	if len(pub) != 1 || pub[0].AuthType != "oauth" || pub[0].AccountCount != 2 || !pub[0].HasKey {
+		t.Fatalf("public view must carry auth_type/account_count: %+v", pub)
+	}
+}
+
+// An OAuth provider with an empty pool resolves as unconfigured — no sentinel
+// key, HasKey false — so the run path surfaces "sign in an account" rather
+// than dispatching a request with no credential.
+func TestResolveOAuthProviderNoAccounts(t *testing.T) {
+	book := &WorkspaceProviderBook{
+		Providers: []WorkspaceProviderRecord{
+			{ID: "p1", Vendor: ai.VendorOpenAICodex, AuthType: "oauth"},
+		},
+		Sel: WorkspaceTierSelection{FlashProviderID: "p1", FlashModel: "gpt-5-codex"},
+	}
+	cfg, keys := book.Resolve()
+	if cfg.HasKey || keys["flash"] != "" {
+		t.Fatalf("empty pool must not resolve as configured: cfg=%+v keys=%v", cfg, keys)
+	}
+	pub := book.Public()
+	if pub[0].HasKey {
+		t.Fatalf("public view must not report has_key for an empty pool: %+v", pub[0])
+	}
+}
+
+// OAuth vendors need no base URL and never store a key — even if the caller
+// passes one, the record drops it so no stray credential lands at rest.
+func TestOAuthProviderRecordSkipsKeyAndBaseURL(t *testing.T) {
+	rec, err := NewWorkspaceProviderRecord("", "ws", WorkspaceProviderInput{
+		Vendor: "claude-code", APIKey: "sk-should-not-stick",
+	}, nil)
+	if err != nil {
+		t.Fatalf("oauth vendor must not require a base URL: %v", err)
+	}
+	if rec.AuthType != "oauth" || rec.APIKey != "" || rec.HasKey {
+		t.Fatalf("oauth record must carry no key: %+v", rec)
+	}
+}

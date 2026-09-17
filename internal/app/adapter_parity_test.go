@@ -848,7 +848,7 @@ func TestAuthoringProviderUsesFlashFallback(t *testing.T) {
 		cfg:  storage.WorkspaceModelTiers{Provider: "openai", Model: "gpt-5-mini"},
 		keys: map[string]string{"flash": "sk-flash"},
 	}
-	provider, model, err := authoringProvider(ctx, reader, "ws-1")
+	provider, model, err := authoringProvider(ctx, reader, "ws-1", nil)
 	if err != nil || provider == nil {
 		t.Fatalf("flash fallback = provider %v model %q err %v", provider, model, err)
 	}
@@ -856,7 +856,7 @@ func TestAuthoringProviderUsesFlashFallback(t *testing.T) {
 		t.Fatalf("resolved model = %q, want the flash default", model)
 	}
 
-	_, _, err = authoringProvider(ctx, fakeTierReader{}, "ws-1")
+	_, _, err = authoringProvider(ctx, fakeTierReader{}, "ws-1", nil)
 	if err == nil {
 		t.Fatal("an unconfigured workspace resolved a provider")
 	}
@@ -869,7 +869,7 @@ func TestAuthoringProviderUsesFlashFallback(t *testing.T) {
 		cfg:  storage.WorkspaceModelTiers{Provider: "mystery-router", Model: "m", BaseURL: ""},
 		keys: map[string]string{"flash": "sk-flash"},
 	}
-	_, _, err = authoringProvider(ctx, unbuildable, "ws-1")
+	_, _, err = authoringProvider(ctx, unbuildable, "ws-1", nil)
 	if err == nil {
 		t.Fatal("an unbuildable provider resolved without error")
 	}

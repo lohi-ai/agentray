@@ -17,6 +17,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/channels"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/runtime/authoring"
 	"github.com/lohi-ai/agentray/sandbox"
@@ -33,8 +34,8 @@ const detachedRunCeiling = 10 * time.Minute
 // recommendations, and a manual run trigger.
 // hosted marks the managed cloud (config.Hosted). Here it gates workspace
 // pinning, which hands its chooser a folder on the host.
-func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, runnerOpts ...agentruntime.RunnerOption) {
-	registerWorkspaceProviderRoutes(e, store)
+func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentruntime.Scheduler, sb agentcore.Sandbox, catalogCtx agentruntime.ToolBuildContext, liveReg *agentruntime.LiveRegistry, hosted bool, oauthMgr *oauth.Manager, runnerOpts ...agentruntime.RunnerOption) {
+	registerWorkspaceProviderRoutes(e, store, oauthMgr)
 	// --- config ---
 	e.GET("/api/agent/config", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)
@@ -165,7 +166,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		// Test each configured tier through the selected model's owning provider
 		// (same credentials a run would use).
-		allOK, results := testBookConnections(c.Request().Context(), book)
+		allOK, results := testBookConnections(c.Request().Context(), book, oauthMgr)
 		return c.JSON(http.StatusOK, map[string]any{"ok": allOK, "tiers": results})
 	})
 
@@ -332,7 +333,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if !canManage {
 			return echo.NewHTTPError(http.StatusForbidden, "agent config permission denied")
 		}
-		provider, model, err := authoringProvider(c.Request().Context(), store, project.WorkspaceID)
+		provider, model, err := authoringProvider(c.Request().Context(), store, project.WorkspaceID, oauthMgr.Pool)
 		if err != nil {
 			// A provider this process cannot build is a gateway failure; a
 			// workspace whose tier is unconfigured is the caller's 400.
@@ -1033,7 +1034,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProjectID: project.ID, AgentID: agentID,
 			Message: message, History: history,
 			SessionID: conv.ID, ConversationID: conv.ID,
-			ReadOnly:  !sessionAllowsWrite(project),
+			ReadOnly: !sessionAllowsWrite(project),
 		}
 		if wantsEventStream(c) {
 			return streamChat(c, svc, opts)

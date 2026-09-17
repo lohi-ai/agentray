@@ -14,24 +14,28 @@ import (
 // WorkspaceProvider is the redacted public view of one configured vendor
 // (key never returned — only HasKey).
 type WorkspaceProvider struct {
-	ID          string `json:"id"`
-	WorkspaceID string `json:"workspace_id"`
-	Vendor      string `json:"vendor"`
-	Name        string `json:"name"`
-	BaseURL     string `json:"base_url"`
-	HasKey      bool   `json:"has_key"`
+	ID           string `json:"id"`
+	WorkspaceID  string `json:"workspace_id"`
+	Vendor       string `json:"vendor"`
+	Name         string `json:"name"`
+	BaseURL      string `json:"base_url"`
+	HasKey       bool   `json:"has_key"`
+	AuthType     string `json:"auth_type"`
+	AccountCount int    `json:"account_count"`
 }
 
 // WorkspaceProviderRecord is the persist/run shape. APIKey is the decrypted
 // secret and is never serialized to JSON.
 type WorkspaceProviderRecord struct {
-	ID          string
-	WorkspaceID string
-	Vendor      string
-	Name        string
-	BaseURL     string
-	APIKey      string
-	HasKey      bool
+	ID           string
+	WorkspaceID  string
+	Vendor       string
+	Name         string
+	BaseURL      string
+	APIKey       string
+	HasKey       bool
+	AuthType     string
+	AccountCount int
 }
 
 // WorkspaceProviderInput is the mutable subset accepted from an owner/admin.
@@ -102,12 +106,32 @@ func publicProviders(recs []WorkspaceProviderRecord) []WorkspaceProvider {
 		if name == "" {
 			name = r.Vendor
 		}
+		authType := r.AuthType
+		if authType == "" {
+			authType = providerAuthType(r.Vendor)
+		}
+		hasKey := r.HasKey || r.APIKey != ""
+		if authType == "oauth" {
+			// Pooled providers hold no static key — a live account is what
+			// makes them usable, so the pool size is the "has key" signal.
+			hasKey = r.AccountCount > 0
+		}
 		out = append(out, WorkspaceProvider{
 			ID: r.ID, WorkspaceID: r.WorkspaceID, Vendor: r.Vendor,
-			Name: name, BaseURL: r.BaseURL, HasKey: r.HasKey || r.APIKey != "",
+			Name: name, BaseURL: r.BaseURL, HasKey: hasKey,
+			AuthType: authType, AccountCount: r.AccountCount,
 		})
 	}
 	return out
+}
+
+// providerAuthType maps a vendor onto its credential shape: "oauth" for the
+// subscription vendors backed by an account pool, "key" for API-key vendors.
+func providerAuthType(vendor string) string {
+	if ai.IsOAuthVendor(vendor) {
+		return "oauth"
+	}
+	return "key"
 }
 
 func (b *WorkspaceProviderBook) byID() map[string]WorkspaceProviderRecord {
@@ -181,7 +205,8 @@ func NewWorkspaceProviderRecord(id, workspaceID string, in WorkspaceProviderInpu
 		vendor = "openai"
 	}
 	base := strings.TrimSpace(in.BaseURL)
-	if vendor != "openai" && vendor != "anthropic" && vendor != "google" && base == "" {
+	oauth := ai.IsOAuthVendor(vendor)
+	if !oauth && vendor != "openai" && vendor != "anthropic" && vendor != "google" && base == "" {
 		return WorkspaceProviderRecord{}, fmt.Errorf("provider %q requires a base URL", vendor)
 	}
 	rec := WorkspaceProviderRecord{
@@ -190,6 +215,7 @@ func NewWorkspaceProviderRecord(id, workspaceID string, in WorkspaceProviderInpu
 		Vendor:      vendor,
 		Name:        strings.TrimSpace(in.Name),
 		BaseURL:     base,
+		AuthType:    providerAuthType(vendor),
 	}
 	if rec.ID == "" {
 		rec.ID = uuid.NewString()
@@ -197,18 +223,21 @@ func NewWorkspaceProviderRecord(id, workspaceID string, in WorkspaceProviderInpu
 	if rec.Name == "" {
 		rec.Name = vendor
 	}
-	switch strings.TrimSpace(in.APIKey) {
-	case "":
-		if existing != nil {
-			rec.APIKey = existing.APIKey
-			rec.HasKey = existing.HasKey || existing.APIKey != ""
+	// OAuth vendors hold no static key — their credential is the account pool.
+	if !oauth {
+		switch strings.TrimSpace(in.APIKey) {
+		case "":
+			if existing != nil {
+				rec.APIKey = existing.APIKey
+				rec.HasKey = existing.HasKey || existing.APIKey != ""
+			}
+		case "-":
+			rec.APIKey = ""
+			rec.HasKey = false
+		default:
+			rec.APIKey = strings.TrimSpace(in.APIKey)
+			rec.HasKey = true
 		}
-	case "-":
-		rec.APIKey = ""
-		rec.HasKey = false
-	default:
-		rec.APIKey = strings.TrimSpace(in.APIKey)
-		rec.HasKey = true
 	}
 	return rec, nil
 }
@@ -229,7 +258,7 @@ func ApplyLegacyProviders(workspaceID string, row LegacyWorkspaceTiers) (*Worksp
 		return WorkspaceProviderRecord{
 			ID: uuid.NewString(), WorkspaceID: workspaceID,
 			Vendor: vendor, Name: name, BaseURL: strings.TrimSpace(base),
-			APIKey: key, HasKey: key != "",
+			APIKey: key, HasKey: key != "", AuthType: providerAuthType(vendor),
 		}
 	}
 
@@ -283,6 +312,16 @@ func ResolveWorkspaceRun(providers []WorkspaceProviderRecord, sel WorkspaceTierS
 		p, ok := byID[providerID]
 		if !ok {
 			return "", "", "", model, false
+		}
+		// OAuth vendors hold no static key: a live account in the pool is what
+		// makes the provider usable, and the wire client pulls the real token
+		// from its TokenSource per request. The pool sentinel keeps the run
+		// path's "key configured" gate satisfied without a real key.
+		if ai.IsOAuthVendor(p.Vendor) {
+			if p.AccountCount > 0 {
+				return p.Vendor, p.BaseURL, ai.OAuthPoolKey, model, true
+			}
+			return p.Vendor, p.BaseURL, "", model, false
 		}
 		// HasKey is set from ciphertext presence when the book is loaded
 		// redacted (GET). APIKey is set only on the decrypt/run path. Either
@@ -467,9 +506,12 @@ func (s *Store) UpdateWorkspaceProvider(ctx context.Context, userID, workspaceID
 	if err != nil {
 		return WorkspaceProvider{}, err
 	}
-	cipherArg, err := resolveCipherArg(in.APIKey)
-	if err != nil {
-		return WorkspaceProvider{}, err
+	var cipherArg any
+	if !ai.IsOAuthVendor(rec.Vendor) {
+		cipherArg, err = resolveCipherArg(in.APIKey)
+		if err != nil {
+			return WorkspaceProvider{}, err
+		}
 	}
 	if _, err := s.pg.Exec(ctx, `
 UPDATE workspace_providers
@@ -525,6 +567,14 @@ FROM workspace_providers WHERE id = $1 AND workspace_id = $2`, providerID, works
 		return WorkspaceProviderRecord{}, err
 	}
 	rec.HasKey = cipher != ""
+	rec.AuthType = providerAuthType(rec.Vendor)
+	if rec.AuthType == "oauth" {
+		if err := s.pg.QueryRow(ctx, `
+SELECT count(*)::int FROM workspace_provider_accounts
+WHERE provider_id = $1 AND status = 'active'`, providerID).Scan(&rec.AccountCount); err != nil {
+			return WorkspaceProviderRecord{}, err
+		}
+	}
 	if decrypt && cipher != "" {
 		plain, decErr := decryptAgentKey(cipher)
 		if decErr != nil {
@@ -551,6 +601,7 @@ FROM workspace_providers WHERE workspace_id = $1 ORDER BY created_at ASC`, works
 			return nil, err
 		}
 		rec.HasKey = cipher != ""
+		rec.AuthType = providerAuthType(rec.Vendor)
 		if decrypt && cipher != "" {
 			plain, decErr := decryptAgentKey(cipher)
 			if decErr != nil {
@@ -604,6 +655,39 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		}
 		if legacy != nil {
 			return ApplyLegacyProviders(workspaceID, *legacy)
+		}
+	}
+	// Active-account counts per provider — one grouped scan rather than a
+	// per-row subquery. Only OAuth vendors consume it, but filling it for all
+	// keeps the public view honest.
+	if len(book.Providers) > 0 {
+		ids := make([]string, len(book.Providers))
+		for i, p := range book.Providers {
+			ids[i] = p.ID
+		}
+		countRows, err := s.pg.Query(ctx, `
+SELECT provider_id::text, count(*)::int FILTER (WHERE status = 'active')
+FROM workspace_provider_accounts WHERE provider_id = ANY($1::uuid[])
+GROUP BY provider_id`, ids)
+		if err != nil {
+			return nil, err
+		}
+		counts := make(map[string]int, len(ids))
+		for countRows.Next() {
+			var pid string
+			var n int
+			if err := countRows.Scan(&pid, &n); err != nil {
+				countRows.Close()
+				return nil, err
+			}
+			counts[pid] = n
+		}
+		countRows.Close()
+		if err := countRows.Err(); err != nil {
+			return nil, err
+		}
+		for i := range book.Providers {
+			book.Providers[i].AccountCount = counts[book.Providers[i].ID]
 		}
 	}
 	return book, nil

@@ -245,8 +245,6 @@ func registerCredentialRoutes(e *echo.Echo, store *storage.Store) {
 		return c.NoContent(http.StatusNoContent)
 	})
 
-
-
 	// source-connectors is the atomic session-only bridge used when a reader
 	// enters a DSN in the Connectors tab. It deliberately does not join
 	// /api/op/create_source: that operation accepts only credential_id for

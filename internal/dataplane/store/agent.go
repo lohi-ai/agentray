@@ -512,6 +512,34 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`,
 		`CREATE INDEX IF NOT EXISTS workspace_providers_ws_idx ON workspace_providers (workspace_id)`,
+		// OAuth/subscription provider pools: one row per signed-in account of a
+		// workspace_providers row whose vendor is an OAuth vendor (claude-code,
+		// openai-codex, google-antigravity). Tokens are AES-GCM ciphertext like
+		// workspace_providers.api_key_ciphertext. status 'disabled' is terminal
+		// until re-enabled; blocked_until is a temporary rate-limit skip.
+		`CREATE TABLE IF NOT EXISTS workspace_provider_accounts (
+	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	provider_id UUID NOT NULL REFERENCES workspace_providers(id) ON DELETE CASCADE,
+	workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	email VARCHAR(254) NOT NULL DEFAULT '',
+	account_id VARCHAR(128) NOT NULL DEFAULT '',
+	org_id VARCHAR(128) NOT NULL DEFAULT '',
+	org_name VARCHAR(256) NOT NULL DEFAULT '',
+	project_id VARCHAR(256) NOT NULL DEFAULT '',
+	plan VARCHAR(64) NOT NULL DEFAULT '',
+	access_token_ciphertext TEXT NOT NULL DEFAULT '',
+	refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
+	expires_at TIMESTAMPTZ,
+	status VARCHAR(16) NOT NULL DEFAULT 'active',
+	disabled_cause TEXT NOT NULL DEFAULT '',
+	blocked_until TIMESTAMPTZ,
+	last_used_at TIMESTAMPTZ,
+	usage JSONB NOT NULL DEFAULT '{}'::jsonb,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`,
+		`CREATE INDEX IF NOT EXISTS workspace_provider_accounts_provider_idx ON workspace_provider_accounts (provider_id)`,
+		`CREATE INDEX IF NOT EXISTS workspace_provider_accounts_ws_idx ON workspace_provider_accounts (workspace_id)`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS flash_provider_id UUID`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_provider_id UUID`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_provider_id UUID`,

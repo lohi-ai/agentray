@@ -14,6 +14,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
@@ -109,6 +110,10 @@ type Runner struct {
 	// picked up without killing a long run. false (the default) keeps the key fixed
 	// for the whole run.
 	KeyRefresh bool
+	// PoolFor resolves a workspace provider row id to its OAuth account pool
+	// (oauth.Manager.Pool). nil means no subscription vendors are configured —
+	// OAuth tiers then fail at call time with a clear error.
+	PoolFor func(providerID string) ai.TokenSource
 	// MaxContextTokens overrides the loop's soft compaction budget for every run
 	// this Runner drives. 0 (the default) keeps agentcore's 200k default. Mainly a
 	// deployment/test knob to tune or exercise compaction.
@@ -326,6 +331,14 @@ func WithKeyRefresh() RunnerOption {
 	return func(r *Runner) { r.KeyRefresh = true }
 }
 
+// WithAccountPool wires the OAuth account-pool resolver into every run this
+// Runner drives: tiers pointing at a subscription vendor (claude-code,
+// openai-codex, google-antigravity) pull a live access token from the pool per
+// request instead of a stored key.
+func WithAccountPool(poolFor func(providerID string) ai.TokenSource) RunnerOption {
+	return func(r *Runner) { r.PoolFor = poolFor }
+}
+
 // NewRunner builds a Runner over the storage layer.
 func NewRunner(store *storage.Store, opts ...RunnerOption) *Runner {
 	r := &Runner{Store: store}
@@ -467,7 +480,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
-	tierSet := tierSetFromWorkspace(wsTiers, tierKeys)
+	tierSet := tierSetFromWorkspace(wsTiers, tierKeys, r.PoolFor)
 	// flash is the always-present default every unconfigured tier resolves to, so
 	// its key is mandatory; lite/pro keys are optional.
 	if tierKeys["flash"] == "" {
@@ -712,7 +725,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// the loop so the in-run summary call doesn't borrow whichever rung the run has
 	// escalated to. Build a dedicated provider for it.
 	compactTC := tierSet.resolve(TierFromName(taskMap[storage.TaskCompaction]))
-	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey)
+	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey, compactTC.TokenSource)
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -758,6 +771,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		Model:              primary.Model,
 		BaseURL:            primary.BaseURL,
 		APIKey:             primary.APIKey,
+		TokenSource:        primary.TokenSource,
 		Trigger:            trigger,
 		Escalation:         esc,
 		ContextWindow:      EffectiveContextWindow(primary),
@@ -792,9 +806,9 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		StepGate:     opts.StepGate,
 		// Durable log: key the append-only log on the run id (the FK that the
 		// trace uses). nil store leaves runs in-memory.
-		Session:       r.SessionStore,
-		SessionID:     durableSession,
-		MaxTokens:     maxTokens,
+		Session:   r.SessionStore,
+		SessionID: durableSession,
+		MaxTokens: maxTokens,
 		// Prompt caching: a stable per-agent key so the persona/skills system prefix
 		// is reused across this agent's turns and runs. Empty store keys leave the
 		// feature off for providers/compat servers that don't support it.
@@ -965,7 +979,7 @@ func (r *Runner) keyRefresher(projectID string) func(context.Context, string) (s
 		if err != nil {
 			return "", err
 		}
-		ts := tierSetFromWorkspace(wsTiers, keys)
+		ts := tierSetFromWorkspace(wsTiers, keys, r.PoolFor)
 		want := normalizeProvider(provider)
 		// Resolve every tier and return the freshest key for the matching provider.
 		// A run uses one provider across its ladder rungs in practice; matching on
@@ -990,7 +1004,6 @@ func normalizeProvider(p string) string {
 	}
 	return p
 }
-
 
 // CheapProvider resolves the provider+model for the orchestrator's front-desk
 // "triage" task — cheap, no-analytics intent classification and small-talk. It
@@ -1024,9 +1037,9 @@ func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore
 	if err != nil {
 		return nil, "", err
 	}
-	tc := tierSetFromWorkspace(wsTiers, keys).resolve(TierFromName(taskMap[storage.TaskTriage]))
+	tc := tierSetFromWorkspace(wsTiers, keys, r.PoolFor).resolve(TierFromName(taskMap[storage.TaskTriage]))
 	// Trace the classifier's cheap calls too — they carry real (small) cost.
-	prov, err := buildTracedProvider(tc.Provider, tc.BaseURL, tc.APIKey, r.Tracer)
+	prov, err := buildTracedProvider(tc.Provider, tc.BaseURL, tc.APIKey, tc.TokenSource, r.Tracer)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1062,7 +1075,7 @@ func (r *Runner) RunTierWindow(ctx context.Context, projectID string) int {
 	if err != nil {
 		return 0
 	}
-	return EffectiveContextWindow(tierSetFromWorkspace(wsTiers, keys).resolve(TierFromName(taskMap[storage.TaskRun])))
+	return EffectiveContextWindow(tierSetFromWorkspace(wsTiers, keys, r.PoolFor).resolve(TierFromName(taskMap[storage.TaskRun])))
 }
 
 // loadSkills maps active stored skills into agentcore.Skill headers for the
@@ -1229,10 +1242,18 @@ func storageSkill(name, description, body string) storage.AgentSkill {
 // provider/model/base_url columns are the flash tier; lite/pro use their own
 // columns and key. A tier with no decrypted key is left unconfigured and
 // resolves back to flash at call time.
-func tierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string) TierSet {
+func tierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string, poolFor func(providerID string) ai.TokenSource) TierSet {
+	// Only OAuth vendors draw from an account pool; an API-key provider row id
+	// must not produce a TokenSource or the wire client would ignore its key.
+	src := func(vendor, providerID string) ai.TokenSource {
+		if poolFor == nil || providerID == "" || !ai.IsOAuthVendor(vendor) {
+			return nil
+		}
+		return poolFor(providerID)
+	}
 	return TierSet{
-		TierFlash: TierConfig{Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ContextWindow: cfg.ContextWindow},
-		TierLite:  TierConfig{Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ContextWindow: cfg.LiteContextWindow},
-		TierPro:   TierConfig{Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ContextWindow: cfg.ProContextWindow},
+		TierFlash: TierConfig{Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ProviderID: cfg.FlashProviderID, TokenSource: src(cfg.Provider, cfg.FlashProviderID), ContextWindow: cfg.ContextWindow},
+		TierLite:  TierConfig{Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ProviderID: cfg.LiteProviderID, TokenSource: src(cfg.LiteProvider, cfg.LiteProviderID), ContextWindow: cfg.LiteContextWindow},
+		TierPro:   TierConfig{Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ProviderID: cfg.ProProviderID, TokenSource: src(cfg.ProProvider, cfg.ProProviderID), ContextWindow: cfg.ProContextWindow},
 	}
 }

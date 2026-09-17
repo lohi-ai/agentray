@@ -67,7 +67,6 @@ func registerAlertRoutes(e *echo.Echo, store *storage.Store) {
 		return c.NoContent(http.StatusNoContent)
 	})
 
-
 	// --- channels (workspace-scoped) ---
 	e.GET("/api/alerts/channels", func(c echo.Context) error {
 		ctx, project, err := authProject(c, store)

@@ -41,7 +41,6 @@ func TestCloseDanglingCallsLeavesSatisfiedCalls(t *testing.T) {
 	}
 }
 
-
 // TestNormalizeProvider verifies the empty label folds to openai and matching is
 // case-insensitive, so a key refresh matches the provider an agentcore provider
 // reports.

@@ -62,6 +62,13 @@ type TierConfig struct {
 	Model    string
 	BaseURL  string
 	APIKey   string
+	// ProviderID is the workspace_providers row this tier draws from ("" for
+	// legacy provider-string tiers and the hosted default). OAuth vendors need
+	// it: their credential is the account pool hanging off that row.
+	ProviderID string
+	// TokenSource, when set, is the OAuth account pool the wire client pulls a
+	// live access token from per request. Nil for API-key vendors.
+	TokenSource ai.TokenSource
 	// ContextWindow is the operator's override for this model's input window in
 	// tokens, capping the compaction budget. 0 means "work it out", and
 	// EffectiveContextWindow does. An override exists because no catalog can
@@ -98,6 +105,15 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 	if strings.TrimSpace(c.Provider) != "" {
 		out.Provider = c.Provider
 	}
+	if strings.TrimSpace(c.ProviderID) != "" {
+		out.ProviderID = c.ProviderID
+		out.TokenSource = c.TokenSource
+	} else if strings.TrimSpace(c.Provider) != "" {
+		// A legacy tier that names a provider string but no provider row is a
+		// different credential than flash's — never inherit flash's pool.
+		out.ProviderID = ""
+		out.TokenSource = nil
+	}
 	if strings.TrimSpace(c.Model) != "" {
 		out.Model = c.Model
 	}
@@ -127,10 +143,12 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 func (ts TierSet) Resolve(tier Tier) TierConfig { return ts.resolve(tier) }
 
 // TierSetFromWorkspace assembles a TierSet from the workspace model tier pool and
-// decrypted per-tier keys. Exported for non-run paths that still need to resolve a
-// tier, such as authoring helpers.
-func TierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string) TierSet {
-	return tierSetFromWorkspace(cfg, keys)
+// decrypted per-tier keys. poolFor resolves a provider row id to its OAuth
+// account pool (oauth.Manager.Pool); pass nil where no pool exists — OAuth
+// vendors then build without a TokenSource and fail at call time with a clear
+// error rather than silently sending no credential.
+func TierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string, poolFor func(providerID string) ai.TokenSource) TierSet {
+	return tierSetFromWorkspace(cfg, keys, poolFor)
 }
 
 // DefaultAuthoringTier is the workspace tier used for authoring helpers that are
