@@ -137,6 +137,10 @@ type chatWork struct {
 	// Goal, when non-empty, activates the run-level goal gate for this turn
 	// (parsed from a leading "/goal <condition>" line; see parseDirective).
 	Goal string
+	// ReasoningEffort, when non-empty, is a magic keyword's per-turn override
+	// ("ultrathink" → "high"; see parseMagicKeywords). Threaded into the run's
+	// provider config; empty leaves the tier default.
+	ReasoningEffort string
 	// ReadOnly carries ChatOptions.ReadOnly into the run.
 	ReadOnly        bool
 	ResumeFromRunID string
@@ -191,10 +195,23 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		return s.runCommand(ctx, opts, d, sink)
 	}
 
+	// Magic keywords are the same mechanism one level down: standalone prose
+	// words that configure the run rather than address the model. They are
+	// stripped from the message the agent sees (and from what the classifier
+	// reads) and recorded in the durable log — the raw text the user typed is
+	// already on the transcript from the route's own append.
+	message, fired := parseMagicKeywords(message)
+	effort := ""
+	for _, kw := range fired {
+		if kw.ReasoningEffort != "" {
+			effort = kw.ReasoningEffort
+		}
+	}
+
 	dec := chatDecision{Route: routeData}
 	if goal == "" {
 		var err error
-		if dec, err = s.classify(ctx, opts.ProjectID, opts.History, opts.Message); err != nil {
+		if dec, err = s.classify(ctx, opts.ProjectID, opts.History, message); err != nil {
 			s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), "", 0)
 			return ChatResult{}, err
 		}
@@ -224,12 +241,24 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 			_, _ = AppendGoalEntry(context.WithoutCancel(ctx), s.runner.Store, opts.ConversationID, opts.AgentID, "", goal)
 		}
 	}
+	// Same durable-record reasoning as the goal entry: the keyword is stripped
+	// from what the model sees, so the log is the only place a reader (or a
+	// later audit of why a turn ran hot) can see it fired.
+	if len(fired) > 0 && opts.ConversationID != "" && s.runner != nil && s.runner.Store != nil {
+		words := make([]string, 0, len(fired))
+		for _, kw := range fired {
+			words = append(words, kw.Word)
+		}
+		_, _ = AppendKeywordEntry(context.WithoutCancel(ctx), s.runner.Store, opts.ConversationID, opts.AgentID, "", words)
+	}
 	res, err := s.handle(ctx, chatWork{
 		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
 		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
 		OnRunID: opts.OnRunID, OnPlan: opts.OnPlan, Goal: goal,
-		ReadOnly: opts.ReadOnly,
+		ReasoningEffort: effort,
+		ReadOnly:        opts.ReadOnly,
 	}, sink)
+
 	res.Route = dec.Route
 	// The gate's sentinel is a protocol between the loop and the plugin, not
 	// something to hand a reader. Left in, every gated answer in this product ends
@@ -546,7 +575,9 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
-		ReadOnly: req.ReadOnly, ResumeFromRunID: req.ResumeFromRunID,
+		ReasoningEffort:  req.ReasoningEffort,
+		ReadOnly:         req.ReadOnly,
+		ResumeFromRunID:  req.ResumeFromRunID,
 	}, wrapped)
 	if runErr != nil {
 		// Final is carried even on the error return: a stopped run's partial answer

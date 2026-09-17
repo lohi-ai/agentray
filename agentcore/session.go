@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 )
@@ -29,7 +30,9 @@ const (
 	// EntryModelChange records the active model switching (escalation or a
 	// save-point bump), so a resumed run reconstructs the right model.
 	EntryModelChange SessionEntryKind = "model_change"
-	// EntryActiveToolsChange records the active tool set changing mid-run.
+	// EntryActiveToolsChange records the active tool set changing mid-run (a
+	// PrepareNextTurn swap), so a resumed run rebuilds the tools the crashed
+	// run ended on rather than the registry it started with.
 	EntryActiveToolsChange SessionEntryKind = "active_tools_change"
 	// EntryTurnInterrupted is written by recovery to mark a turn that never
 	// completed (a crash between a tool result and the next assistant turn).
@@ -59,6 +62,40 @@ const (
 	// the same CallID. Recovery closes the dangling call with Answer as its tool
 	// result — the answer IS the tool result, not a new user turn.
 	EntryAnswer SessionEntryKind = "answer"
+
+	// --- Side records (pi's intent/progress granularity) ---
+	//
+	// The kinds below are written OUTSIDE the per-turn save-point buffer —
+	// directly to the store, mid-turn — because the crash window they cover is
+	// inside a turn. To keep the log a valid prefix of the conversation they
+	// are NOT tree nodes: buildChain skips them, so they never become the leaf
+	// and never break a pending entry's chain. The fold reads them by scanning
+	// the raw log, not the active path. Each is one half of an
+	// intent→effect→settlement triple (pi's op state machine): the intent or
+	// in-progress effect rides the side record, the settlement is an ordinary
+	// chain entry.
+	//
+	// EntryInbox is a queued steering or follow-up message (Lane selects the
+	// drain point). Written by Agent.Steer / Agent.FollowUp the moment the
+	// caller enqueues, so a crash between queue and drain cannot lose human
+	// input. Settled by EntryInboxDone when the loop delivers it into the
+	// transcript as an EntryMessage.
+	EntryInbox SessionEntryKind = "inbox"
+	// EntryInboxDone settles an EntryInbox (Target = the inbox entry's ID). It
+	// IS a chain entry: the fold's inbox scan reads it from the raw log, but
+	// writing it through the save-point buffer keeps the delivered message and
+	// its settlement in one atomic turn flush.
+	EntryInboxDone SessionEntryKind = "inbox_done"
+	// EntryAssistantFrame is a throttled snapshot of the assistant text
+	// streamed so far this turn (pi's durable partial frames). Settled by the
+	// turn's assistant EntryMessage; a trailing run of frames with no such
+	// message is the draft the crashed turn had produced.
+	EntryAssistantFrame SessionEntryKind = "assistant_frame"
+	// EntryToolProgress is a throttled snapshot of one streaming tool call's
+	// partial output (pi's tool progress checkpoint). Settled by the call's
+	// tool-result EntryMessage; a trailing one tells recovery how far the
+	// interrupted call reported getting.
+	EntryToolProgress SessionEntryKind = "tool_progress"
 )
 
 // SessionEntry is one immutable record in the append-only session log. The log
@@ -78,9 +115,20 @@ type SessionEntry struct {
 	Model    string           `json:"model,omitempty"`   // EntryModelChange
 	Tools    []string         `json:"tools,omitempty"`   // EntryActiveToolsChange
 	Tool     string           `json:"tool,omitempty"`    // EntryToolDisabled
-	Goal     string           `json:"goal,omitempty"`    // EntryGoal: the run's completion condition
-	Summary  string           `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
-	Final    bool             `json:"final,omitempty"`   // EntryCompaction completion marker
+	// Lane selects which queue an EntryInbox feeds: "steer" drains at the top
+	// of the next turn, "follow" drains when the run would stop.
+	Lane string `json:"lane,omitempty"`
+	// CallID links a side record to the tool call it concerns: an
+	// EntryToolProgress reports on it, an EntryQuestion parks it, an
+	// EntryAnswer resolves it (the provider's call id, stable across a resume).
+	CallID string `json:"call_id,omitempty"`
+	// Content carries a side record's payload: the accumulated text for an
+	// EntryAssistantFrame, the accumulated partial output for an
+	// EntryToolProgress. Snapshots, not deltas — the newest wins.
+	Content string `json:"content,omitempty"`
+	Goal    string `json:"goal,omitempty"`    // EntryGoal: the run's completion condition
+	Summary string `json:"summary,omitempty"` // EntryCompaction (completion) / EntryBranchSummary
+	Final   bool   `json:"final,omitempty"`   // EntryCompaction completion marker
 	// Retained is the transcript a completed EntryCompaction left behind: the
 	// summary (or elided fallback) plus the recent tail kept verbatim, MINUS the
 	// run's own leading system prompt, which every run re-derives and prepends
@@ -110,9 +158,6 @@ type SessionEntry struct {
 	// completion / EntryBranchSummary). Compaction and branch summaries are real
 	// billable provider calls; without this they are invisible spend (pi #6671).
 	Usage *Usage `json:"usage,omitempty"`
-	// CallID links an EntryQuestion/EntryAnswer to the tool call it parks or
-	// resolves (the provider's call id, stable across a resume).
-	CallID string `json:"call_id,omitempty"`
 	// Question is the parked call's validated arguments (EntryQuestion), kept
 	// verbatim so a consumer can re-render the prompt and options without
 	// knowing the tool's schema.
@@ -159,7 +204,13 @@ func (c CheckpointState) clone() *CheckpointState {
 // MemoryStore conceptually; kept separate so a consumer can adopt durability
 // incrementally). The store assigns Seq and never mutates a written entry.
 type SessionStore interface {
-	// Append records one entry; the store assigns its Seq.
+	// Append records one entry; the store assigns its Seq. It MUST be safe for
+	// concurrent use on the same sessionID: a run's loop appends serially, but
+	// Steer/FollowUp enqueue and side-record writes race it from other
+	// goroutines, and a sibling process resuming the same log appends too. A
+	// store that assigns Seq by read-max-then-insert must resolve collisions
+	// (retry on a unique violation, or serialize per session) — a lost or
+	// duplicated Seq silently corrupts the fold.
 	Append(ctx context.Context, sessionID string, entry SessionEntry) error
 	// Log returns the full ordered entry log for a session.
 	Log(ctx context.Context, sessionID string) ([]SessionEntry, error)
@@ -192,6 +243,12 @@ type SessionWindowStore interface {
 	// suffix loses the model, tools, and goal the fold had accumulated; with a
 	// leaf move the newest checkpoint by Seq may sit on an ABANDONED branch, and
 	// resuming from it would continue work the log says was rewound away.
+	//
+	// A third fact defeats it the same way: an EntryInbox queued BEFORE the
+	// checkpoint and still unsettled (no EntryInboxDone naming it). The fold
+	// reads pending inbox items from the raw log, so a window that starts past
+	// one silently drops queued human input. A store that sees such an item
+	// reports seq=0 — the full read is the only correct answer.
 	CheckpointSeq(ctx context.Context, sessionID string) (seq int, branched bool, err error)
 }
 
@@ -226,6 +283,20 @@ func LoadResumeLog(ctx context.Context, store SessionStore, sessionID string) ([
 	return window, nil
 }
 
+// InboxItem is one queued-but-undelivered steering or follow-up message: the
+// EntryInbox intent (ID) plus the message it carries.
+type InboxItem struct {
+	ID      string
+	Lane    string
+	Message Message
+}
+
+// Inbox lanes: which drain point an EntryInbox feeds.
+const (
+	InboxSteer  = "steer"
+	InboxFollow = "follow"
+)
+
 // ReducedState is the run state rebuilt by folding a session log: the message
 // history to resume from, the active model and tools, and flags for whether the
 // run completed and whether a compaction was left unfinished.
@@ -238,6 +309,19 @@ type ReducedState struct {
 	PendingCompaction bool     // a compaction start with no completion
 	Goal              string   // goal-gate condition of the unfinished tail run (EntryGoal)
 	LastTurn          int
+	// Inbox holds queued steering/follow-up messages never delivered before the
+	// crash (EntryInbox with no matching EntryInboxDone). Side records are read
+	// from the raw log — they are not tree nodes — so a pending inbox survives
+	// even when it was appended mid-turn between two buffered entries.
+	Inbox []InboxItem
+	// Draft is the partial assistant text the in-flight turn had produced when
+	// the run died (the newest trailing EntryAssistantFrame), "" when the last
+	// turn settled or produced no text.
+	Draft string
+	// ToolProgress maps a tool-call ID to the newest partial output it reported
+	// before the crash (trailing EntryToolProgress records), for calls whose
+	// result never landed.
+	ToolProgress map[string]string
 }
 
 // ReduceSession folds an append-only log into the current run state. It is a
@@ -248,7 +332,8 @@ type ReducedState struct {
 // whole log, so pre-tree logs reduce exactly as before.
 func ReduceSession(log []SessionEntry) ReducedState {
 	var rs ReducedState
-	for _, e := range ActivePath(log) {
+	path := ActivePath(log)
+	for _, e := range path {
 		if e.Turn > rs.LastTurn {
 			rs.LastTurn = e.Turn
 		}
@@ -319,6 +404,96 @@ func ReduceSession(log []SessionEntry) ReducedState {
 			rs.Goal = ""
 		}
 	}
+	// Side records are not tree nodes, so they are read from the raw log rather
+	// than the active path — one forward pass collects all three kinds.
+	//
+	// Pending inbox: every EntryInbox not settled by an EntryInboxDone. Both
+	// halves are attributed to a branch by position — each anchors to the chain
+	// node appended just before it — so a Rewind drops intents queued on the
+	// abandoned branch AND the settlements recorded there: a steer delivered on
+	// a rewound branch becomes pending again on the new one, which is the only
+	// consistent answer (its delivered message is gone from the transcript).
+	//
+	// In-flight work: side records newer than the last SETTLING chain entry —
+	// the last assistant or tool-result message — belong to the turn that never
+	// finished. Mid-turn chain entries (a delivered steer, an inbox settlement)
+	// can land after the last side record when a graceful interruption flushes
+	// the turn's buffer, so the boundary is the last settling entry, not the
+	// last chain entry. Newest wins: each record carries the accumulated
+	// snapshot, not a delta.
+	type queuedItem struct {
+		item   InboxItem
+		anchor int // Seq of the chain node this intent was appended after; -1 at log start
+	}
+	var queued []queuedItem
+	var doneEntries []SessionEntry // EntryInboxDone chain nodes; filtered by branch below
+	lastNodeSeq := -1
+	lastSettled := -1
+	var draft string
+	var progress map[string]string
+	for i, e := range log {
+		if !isSideRecord(e.Kind) && e.Kind != EntryLeafMove {
+			lastNodeSeq = e.Seq
+		}
+		switch e.Kind {
+		case EntryInbox:
+			if e.Message == nil {
+				continue
+			}
+			key := e.ID
+			if key == "" {
+				key = fmt.Sprintf("#%d", e.Seq)
+			}
+			queued = append(queued, queuedItem{
+				item:   InboxItem{ID: key, Lane: e.Lane, Message: *e.Message},
+				anchor: lastNodeSeq,
+			})
+		case EntryInboxDone:
+			doneEntries = append(doneEntries, e)
+		case EntryAssistantFrame:
+			if i > lastSettled {
+				draft = e.Content
+			}
+		case EntryToolProgress:
+			if i > lastSettled && e.CallID != "" {
+				if progress == nil {
+					progress = map[string]string{}
+				}
+				progress[e.CallID] = e.Content
+			}
+		case EntryMessage:
+			if e.Message != nil && (e.Message.Role == RoleAssistant || e.Message.Role == RoleTool) {
+				// A settling entry closes the in-flight window: everything
+				// collected so far belongs to turns that finished.
+				lastSettled = i
+				draft = ""
+				progress = nil
+			}
+		}
+	}
+	if len(queued) > 0 || len(doneEntries) > 0 {
+		activeSeq := make(map[int]bool, len(path))
+		for _, e := range path {
+			activeSeq[e.Seq] = true
+		}
+		var settled map[string]bool
+		for _, d := range doneEntries {
+			if activeSeq[d.Seq] {
+				if settled == nil {
+					settled = map[string]bool{}
+				}
+				settled[d.Target] = true
+			}
+		}
+		for _, q := range queued {
+			live := q.anchor == -1 || activeSeq[q.anchor]
+			if live && !settled[q.item.ID] {
+				rs.Inbox = append(rs.Inbox, q.item)
+			}
+		}
+	}
+	rs.Draft = draft
+	rs.ToolProgress = progress
 	return rs
 }
 
@@ -368,7 +543,9 @@ func isRetrySafe(tools *ToolSet, call ToolCall) bool {
 }
 
 // ResumePlan is the recovery output: the history to resume from, the active
-// model/tools, and the conservative decisions about an interrupted turn.
+// model/tools, the conservative decisions about an interrupted turn, and the
+// side-record state (queued inbox, partial draft, tool progress) the crashed
+// run had in flight.
 type ResumePlan struct {
 	Messages        []Message
 	Model           string
@@ -385,6 +562,16 @@ type ResumePlan struct {
 	// with an entry here is closed with the answer as its result — it is neither
 	// retried nor interrupted.
 	Answers map[string]string
+	// Inbox holds steering/follow-up messages queued but never delivered before
+	// the crash (pi's durable inbox). The resumed run drains them at their
+	// lane's point and settles each with EntryInboxDone.
+	Inbox []InboxItem
+	// Draft is the partial assistant text the in-flight turn had produced;
+	// surfaced to the resumed run as context, not replayed as a message.
+	Draft string
+	// ToolProgress maps a dangling call's ID to the last partial output it
+	// reported, so its interrupted note can say how far it got.
+	ToolProgress map[string]string
 }
 
 // RecoverSession turns a durable log into a conservative resume plan. It reduces
@@ -402,6 +589,9 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 		Completed:       rs.Completed,
 		Goal:            rs.Goal,
 		RerunCompaction: rs.PendingCompaction,
+		Inbox:           rs.Inbox,
+		Draft:           rs.Draft,
+		ToolProgress:    rs.ToolProgress,
 	}
 	if rs.Completed {
 		return plan // a leaf exists: the run finished, nothing to recover
@@ -459,6 +649,11 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 // call in a recovered transcript, shared by CloseDanglingCalls and the drive-
 // level resume path so the model always sees the same wording.
 const interruptedCallNote = "[interrupted: this tool call did not complete before the run was suspended and was not re-run automatically]"
+
+// draftMarker prefixes the system message a resumed run carries for a crashed
+// turn's partial assistant text (trailing EntryAssistantFrame records), so the
+// model reads it as its own interrupted work rather than user input.
+const draftMarker = "[interrupted draft: the previous run was cut off mid-reply; this is the text it had produced so far]"
 
 // CloseDanglingCalls returns a transcript in which every assistant tool call
 // that never received a result is satisfied by a synthesized interrupted-note
@@ -525,4 +720,38 @@ func PendingQuestion(log []SessionEntry) (callID string, question json.RawMessag
 		}
 	}
 	return "", nil, false
+}
+
+// The run's goal as durable STATE.
+//
+// The loop owns the goal only as a fact about the run: it writes the condition
+// to the durable log once, and recovers it when a crashed run resumes. What to
+// DO about an unmet goal — the completion protocol, the sentinel, the nudge, the
+// stall breaker — is policy, and policy lives in agentcore/plugins/goal as a
+// StopInterceptor. That split is deepseek-harness's: dsh-goal is an
+// event-sourced service, and continuation is a separate consumer package.
+//
+// The state stays here for one reason: only the loop may write the durable log.
+// A plugin that persisted its own gate condition would be a second writer to the
+// record resume depends on, and "model-visible means logged" would stop being a
+// property the core can guarantee.
+
+// goalFromLog recovers the goal-gate condition from a durable log, so a crashed
+// goal-gated run comes back gated even when the resuming caller cannot re-supply
+// the condition.
+//
+// The fold matches RecoverSession's: the last EntryGoal wins, and EntryLeaf
+// clears it — the goal belongs to the run that finished, so a later run chained
+// onto the same log (a chat continuation) must not inherit its gate.
+func goalFromLog(entries []SessionEntry) string {
+	goal := ""
+	for _, e := range entries {
+		switch e.Kind {
+		case EntryGoal:
+			goal = e.Goal
+		case EntryLeaf:
+			goal = ""
+		}
+	}
+	return goal
 }

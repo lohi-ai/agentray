@@ -46,10 +46,23 @@ type SessionNode struct {
 	ParentID string
 }
 
+// isSideRecord reports whether a kind is written outside the save-point buffer
+// and lives beside the tree rather than in it (see the side-record block in
+// session.go). Side records never become the leaf and never parent another
+// entry, so a mid-turn write cannot fork the chain or strand a pending entry.
+func isSideRecord(k SessionEntryKind) bool {
+	switch k {
+	case EntryInbox, EntryAssistantFrame, EntryToolProgress:
+		return true
+	}
+	return false
+}
+
 // buildChain resolves every entry's effective id + parent and the active leaf.
 // Replay rule: a node's parent is its explicit ParentID when set, else the
 // current leaf; every appended node becomes the new leaf (append-is-branch,
-// pi's model); an EntryLeafMove moves the leaf without adding a node.
+// pi's model); an EntryLeafMove moves the leaf without adding a node. Side
+// records (inbox, frames, progress) are skipped entirely — they are not nodes.
 func buildChain(log []SessionEntry) (nodes []SessionNode, byID map[string]int, leaf string) {
 	byID = make(map[string]int, len(log))
 	cur := ""
@@ -58,6 +71,9 @@ func buildChain(log []SessionEntry) (nodes []SessionNode, byID map[string]int, l
 			if e.Target != "" {
 				cur = e.Target
 			}
+			continue
+		}
+		if isSideRecord(e.Kind) {
 			continue
 		}
 		id := e.ID

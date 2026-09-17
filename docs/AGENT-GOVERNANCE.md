@@ -167,15 +167,15 @@ Already shipped: hardened sandbox image and credential vault.
 | Plugin composition (seams, priorities, unload) | `agentcore/plugin.go`, `agentcore/compose.go` |
 | Plugin packages (one folder + README per capability) | `agentcore/plugins/*` — see its README |
 | Default composition + parity + eject tests | `agentcore/plugins/preset/` |
-| Composition diagnostics | `Registry.Describe()`, `Agent.Describe()` (`agentcore/describe.go`) |
-| Loop seam (swappable control flow) | `agentcore/driver.go` |
+| Composition diagnostics | `Registry.Describe()`, `Agent.Describe()` (`agentcore/agent.go`) |
+| Loop seam (swappable control flow) | `agentcore/loop.go` |
 | Turn loop (reason → act, batches, durable writes) | `agentcore/loop.go` |
 | Tool trust boundary (gate, validation, credential resolution, bounding) | `agentcore/tooldispatch.go` |
 | Model call (same-rung retry, then ladder escalation) | `agentcore/turn.go` |
 | Child-agent construction (scope may only narrow) | `agentcore/fork.go` |
-| Delegation depth (survives crossing agents) | `agentcore/delegation.go` |
-| Compaction strategy contract (replaceable) | `agentcore/compactor.go` |
-| Goal as durable state (write + resume recovery) | `agentcore/goal.go` |
+| Delegation depth (survives crossing agents) | `agentcore/fork.go` |
+| Compaction strategy contract (replaceable) | `agentcore/compaction.go` |
+| Goal as durable state (write + resume recovery) | `agentcore/session.go` |
 | Goal gate policy (contract, sentinel, nudge, stall) | `agentcore/plugins/goal/` |
 | Policy contract (`Policy`, `Decision`, `DenyAll`, `AllowList`) | `agentcore/permission.go` |
 | Oversized tool output (spill + `read_spill`) | `agentcore/plugins/spill/` |
@@ -185,7 +185,7 @@ Already shipped: hardened sandbox image and credential vault.
 | Verify-on-stop (evidence guard) | `agentcore/plugins/finishguard/` |
 | Delegation (`spawn_subagent`) | `agentcore/plugins/subagent/` |
 | "Model-visible means logged" invariant | `agentcore/plugins/observe/` |
-| Sandbox contract | `agentcore/sandbox.go` |
+| Sandbox contract | `agentcore/env.go` |
 | Docker sandbox + injection guard | `sandbox/` |
 | Credential vault | `internal/shared/credential/` |
 | HTTP tool + SSRF guard | `sandbox/httpguard.go` + `sandbox/http_tool.go` |
