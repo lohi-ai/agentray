@@ -58,7 +58,7 @@
 //
 // The layers that map runs through, outermost first:
 //
-//   - Composition — doc.go, plugin.go, compose.go, agent.go.
+//   - Composition — doc.go, plugin.go, compose.go, agent.go, seams.go.
 //   - Contracts — provider.go, tool.go, permission.go, definition.go, hooks.go,
 //     extension.go, memory.go, env.go. The types a plugin outside this repo
 //     implements.

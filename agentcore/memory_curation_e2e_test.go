@@ -12,10 +12,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/definition"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
-	"github.com/lohi-ai/agentray/agentcore/plugins/model"
-	"github.com/lohi-ai/agentray/agentcore/plugins/policy"
 )
 
 // memStore is an in-memory MemoryStore + MemoryCurator with the shipped
@@ -89,9 +86,9 @@ var (
 func buildMemoryAgent(t *testing.T, store agentcore.MemoryStore, pol agentcore.Policy, provider *agentcore.FauxProvider) *agentcore.Agent {
 	t.Helper()
 	a, err := agentcore.Build(
-		model.Plugin{Provider: provider, Model: "faux"},
-		definition.Plugin{Definition: agentcore.AgentDefinition{ScopeID: "agent-1"}},
-		policy.Plugin{Policy: pol},
+		agentcore.ModelPlugin{Provider: provider, Model: "faux"},
+		agentcore.DefinitionPlugin{Definition: agentcore.AgentDefinition{ScopeID: "agent-1"}},
+		agentcore.PolicyPlugin{Policy: pol},
 		memory.Plugin{Store: store},
 	)
 	if err != nil {

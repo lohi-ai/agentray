@@ -43,57 +43,31 @@ is how a plugin system quietly becomes a monolith with folders. The kind is
 decided by which registry call the plugin makes, so you can read it off the
 `Register` body in one line.
 
-### Seams — configure something the loop always does
+### Seams — core loop configuration
 
-`r.SetX(...)`. Keyed.
+A seam has **exactly one provider**. Core seams (`model`, `definition`, `session`,
+`compaction`, `budget`, `steering`) and their adapters (`tools`, `hooks`, `policy`)
+live in `agentcore` itself (`agentcore/seams.go` and `agentcore.ConfigPlugin`),
+not in this directory — they are tightly coupled to the kernel's unexported setters
+and have no independent logic.
 
-A seam has **exactly one provider**. A second claim is a build error naming both
-plugins, never a silent overwrite. These are not ejectable in any meaningful
-sense: an agent with no provider cannot reason. What they buy is
-**replaceability**.
+The capabilities below are real, ejectable plugins:
 
-(The driver is a seam too, but has no folder: `Build` installs
-`agentcore.DefaultDriver` when nothing claims it, and a composition that wants
-different control flow registers a plugin whose `Register` calls
-`r.SetDriver` — keeping governance, durability, and observation unchanged.)
+| Folder | Kind | What it does | Ejecting it means |
+|---|---|---|---|
+| [`memory`](memory/) | Seam + tools | Cross-run recall + curation (`learn`, `memory_edit`) | Forgets between runs |
+| [`sandbox`](sandbox/) | Seam + guard | Isolation substrate + command injection guard | No untrusted code execution |
+| [`goal`](goal/) | Hybrid | Completion contract (`STATUS: DONE`) + `update_goal` tool | Runs stop when they like |
+The hybrids (`goal` and `sandbox`) install a recorded decision and its enforcement
+together so the composition cannot express the half-wired failure mode:
 
-| Folder | Seam | Ejecting it means |
-|---|---|---|
-| [`model`](model/) | provider, ladder, retry, caching | no reasoning |
-| [`definition`](definition/) | persona, skills, limits, env | no identity |
-| [`memory`](memory/) | cross-run recall + curation (`learn`, `memory_edit`) | forgets between runs |
-| [`session`](session/) | durable log, resume | a crash loses the run |
-| [`compaction`](compaction/) | context summarization | long runs hit the ceiling |
-| [`budget`](budget/) | spend ceiling, step gate | unbounded spend |
-| [`steering`](steering/) | steer / follow-up / save-point | no mid-run correction |
-| [`sandbox`](sandbox/) | isolation substrate + argument guard, secret vault | no untrusted code, no secrets |
-
-The permission gate is a seam too, and the most important one — but the folder
-that fills it holds no policy logic, so it is listed under
-[Adapters](#adapters) instead. Governance itself is the kernel's:
-`permission.go` owns `Policy`, `Decision`, `DenyAll` and `NewAllowList`, and
-`newRegistry` seeds `policy: DenyAll{}`.
-
-Two are hybrids, and both for the same reason — a recorded decision and its
-enforcement have to be installed together or the composition lies about itself:
-
-- [`goal`](goal/) claims the seam (the loop persists the condition to the durable
+- [`goal`](goal/) claims the goal seam (the loop persists the condition to the durable
   log and recovers it on resume) **and** adds the gate as an extension. The state
   is core's because only the loop may write the log; the policy — contract,
   sentinel, nudge, stall breaker — is entirely in the plugin.
 - [`sandbox`](sandbox/) claims the substrate seam **and** installs the guard that
   reads what is sent into it, at `PriorityGate`. A backend wired with nothing
-  inspecting its arguments is a shell with no one watching, and the forgetting
-  would be silent.
-
-`sandbox` and `credentials` are two seams inside one `Env`, folded in at build
-time rather than merged at registration — which is what lets `definition`
-install a whole `Env` and `sandbox` install one capability of it without either
-clobbering the other, whichever was listed first.
-
-`compaction` is a third shape: the seam is not ejectable, but its *strategy* is
-replaceable through `agentcore.Compactor`, so a pruner that makes no model call
-is a sibling package rather than an edit to the loop.
+  inspecting its arguments is a shell with no one watching.
 
 A contribution is not always a tool or a hook. `WrapProvider` contributes a
 decorator around every model call the run can make — the one shape that can
@@ -131,61 +105,14 @@ a new kind does not touch core.
 
 | Folder | Adds | Ejecting it means |
 |---|---|---|
-| [`spill`](spill/) | lossless bounding + `read_spill` | oversized results are truncated for good |
-| [`jobs`](jobs/) | async tools + `job_*` | every tool blocks the run |
-| [`sessionquery`](sessionquery/) | `session_query` over the log | compaction is lossy in practice |
-| [`repeatguard`](repeatguard/) | loop-detection reminder | a repeat loop burns the turn budget |
+| [`advisor`](advisor/) | pre-finish reviewer | the agent never gets a second opinion |
 | [`finishguard`](finishguard/) | verify-on-stop | the first answer is the answer |
-| [`goal`](goal/) | completion contract (`STATUS: DONE`) | runs stop when they like |
-| [`subagent`](subagent/) | `spawn_subagent` | the agent is solo |
+| [`jobs`](jobs/) | async tools + `job_*` | every tool blocks the run |
 | [`observe`](observe/) `LogInvariant` | proves model-visible ⊆ logged | resume corruption goes unnoticed |
-
-## Adapters
-
-Three folders are **not capabilities**. They hold no logic, own no state, and
-make no decision: each carries a value the caller already has to a setter the
-kernel already has.
-
-| Folder | Carries | `Register` body |
-|---|---|---|
-| [`tools`](tools/) | the caller's `agentcore.Tool`s | `r.AddTools(p.Tools...)` |
-| [`hooks`](hooks/) | the caller's `agentcore.Hooks` | `r.AddHooks(p.Priority, p.Hooks)` |
-| [`policy`](policy/) | the caller's `agentcore.Policy` | `r.UsePolicy(p.Policy)` |
-
-They exist because `agentcore.Build(plugins...)` is the only composition entry
-point, so every exported setter needs *some* `Plugin` to call it. Deleting one
-costs a caller a three-line inline plugin — which is what `agentcore`'s own
-`plugin_test.go` writes — never a capability.
-
-**Do not give them an "ejecting it means" row.** Every symbol they touch is the
-kernel's, so removing the *package* removes nothing; only passing an empty value
-does, and that is a configuration choice, not a composition one.
-[`extension.go`](../extension.go) names this distinction as the thing the whole
-mechanism rests on — *"that is the difference between a plugin and a
-configuration flag"* — so the line has to be drawn here or it is not drawn
-anywhere.
-
-Two consequences worth stating plainly, because the earlier version of this file
-got both wrong:
-
-- **Ejecting `policy` does not mean default-allow.** The kernel defaults to
-  `DenyAll` (`newRegistry`, `plugin.go`), proven by
-  `preset_test.go`'s `TestPolicyDefaultsToDenyAll`: an agent built with no policy
-  plugin still describes as `DenyAll`. A composition that forgets governance is
-  not ungoverned.
-- **The gate hook is installed by the kernel, not by the plugin.**
-  `Registry.UsePolicy` ([`compose.go`](../compose.go)) claims the seam *and*
-  contributes the `PriorityGate` hook in one call. `plugins/policy` forwards to
-  it. The "a policy nobody consults is not a gate" guarantee is real, but it is
-  enforced by the setter, which is why no plugin can register a policy without
-  it.
-
-`tools` and `hooks` carry a `Label` field precisely because a composition has
-**several** of each, naming themselves `tools:catalog`, `hooks:audit` — the
-other tell that they are not "one folder per capability". (`policy` has no
-`Label`: it forwards to a keyed seam, so a second one is a build error naming
-both plugins.)
-
+| [`repeatguard`](repeatguard/) | loop-detection reminder | a repeat loop burns the turn budget |
+| [`sessionquery`](sessionquery/) | `session_query` over the log | compaction is lossy in practice |
+| [`spill`](spill/) | lossless bounding + `read_spill` | oversized results are truncated for good |
+| [`subagent`](subagent/) | `spawn_subagent` | the agent is solo |
 ## preset
 
 [`preset`](preset/) is none of the above: it composes the rest back into

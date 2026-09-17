@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/definition"
-	"github.com/lohi-ai/agentray/agentcore/plugins/model"
 	"github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
 )
 
@@ -21,7 +19,7 @@ func (fakeSandbox) Exec(context.Context, agentcore.SandboxExec) (agentcore.Sandb
 
 func spine() []agentcore.Plugin {
 	return []agentcore.Plugin{
-		model.Plugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
+		agentcore.ModelPlugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
 	}
 }
 
@@ -65,12 +63,12 @@ func TestSandboxSurvivesAnEnvFromAnotherPlugin(t *testing.T) {
 
 	orders := map[string][]agentcore.Plugin{
 		"definition first": {
-			definition.Plugin{Env: &env},
+			agentcore.DefinitionPlugin{Env: &env},
 			sandbox.In(fakeSandbox{}),
 		},
 		"sandbox first": {
 			sandbox.In(fakeSandbox{}),
-			definition.Plugin{Env: &env},
+			agentcore.DefinitionPlugin{Env: &env},
 		},
 	}
 	for name, extra := range orders {

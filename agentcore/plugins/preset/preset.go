@@ -25,22 +25,13 @@ package preset
 
 import (
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/budget"
-	"github.com/lohi-ai/agentray/agentcore/plugins/compaction"
-	"github.com/lohi-ai/agentray/agentcore/plugins/definition"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
-	"github.com/lohi-ai/agentray/agentcore/plugins/hooks"
 	"github.com/lohi-ai/agentray/agentcore/plugins/jobs"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
-	"github.com/lohi-ai/agentray/agentcore/plugins/model"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
-	"github.com/lohi-ai/agentray/agentcore/plugins/policy"
 	"github.com/lohi-ai/agentray/agentcore/plugins/repeatguard"
-	"github.com/lohi-ai/agentray/agentcore/plugins/session"
 	"github.com/lohi-ai/agentray/agentcore/plugins/sessionquery"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
-	"github.com/lohi-ai/agentray/agentcore/plugins/steering"
-	"github.com/lohi-ai/agentray/agentcore/plugins/tools"
 )
 
 // Plugins returns the plugin set that reproduces agentcore.New(cfg).
@@ -51,7 +42,7 @@ func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 	list := []agentcore.Plugin{
 		// spine — the driver seam is left unclaimed; Build defaults it to the
 		// built-in reason→act loop, and a custom driver claims it via SetDriver.
-		model.Plugin{
+		agentcore.ModelPlugin{
 			Provider:        cfg.Provider,
 			Model:           cfg.Model,
 			ContextWindow:   cfg.ContextWindow,
@@ -64,27 +55,27 @@ func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 			PromptCacheKey:  cfg.PromptCacheKey,
 			CacheRetention:  cfg.PromptCacheRetention,
 		},
-		definition.Plugin{Definition: cfg.Definition, Limits: cfg.Limits, Env: cfg.Env},
+		agentcore.DefinitionPlugin{Definition: cfg.Definition, Limits: cfg.Limits, Env: cfg.Env},
 
 		// tools + governance
-		tools.FromSet(cfg.Tools),
-		policy.Plugin{Policy: cfg.Policy},
-		hooks.Of(cfg.Hooks),
+		agentcore.ToolsFromSet(cfg.Tools),
+		agentcore.PolicyPlugin{Policy: cfg.Policy},
+		agentcore.HooksOf(cfg.Hooks),
 		goal.Plugin{Goal: cfg.Goal},
-		budget.Plugin{Gate: cfg.BudgetGate, Step: cfg.StepGate},
+		agentcore.BudgetPlugin{Gate: cfg.BudgetGate, Step: cfg.StepGate},
 
 		// durability + context
-		session.Plugin{
+		agentcore.SessionPlugin{
 			Store:             cfg.Session,
 			ID:                cfg.SessionID,
 			Resume:            cfg.ResumeSession,
 			SeedDisabledTools: cfg.SeedDisabledTools,
 		},
 		memory.Plugin{Store: cfg.Memory},
-		compaction.Plugin{Settings: cfg.Compaction, Provider: cfg.CompactionProvider, Model: cfg.CompactionModel, Strategy: cfg.Compactor},
+		agentcore.CompactionPlugin{Settings: cfg.Compaction, Provider: cfg.CompactionProvider, Model: cfg.CompactionModel, Strategy: cfg.Compactor},
 
 		// steering
-		steering.Plugin{
+		agentcore.SteeringPlugin{
 			Steer:           cfg.GetSteeringMessages,
 			FollowUp:        cfg.GetFollowUpMessages,
 			PrepareNextTurn: cfg.PrepareNextTurn,
