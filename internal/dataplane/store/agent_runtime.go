@@ -484,10 +484,17 @@ RETURNING id::text`, id, scopeID, m.Content, tags, m.Confidence, srun, embedding
 		}
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 UPDATE agent_memory SET superseded_by = $3::uuid
-WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL`, id, scopeID, newID); err != nil {
+WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL`, id, scopeID, newID)
+	if err != nil {
 		return err
+	}
+	// A concurrent update that committed between our SELECT and this UPDATE
+	// leaves the row already superseded: roll back rather than commit an
+	// orphan successor with no retracted parent.
+	if tag.RowsAffected() == 0 {
+		return ErrAgentMemoryNotFound
 	}
 	return tx.Commit(ctx)
 }
@@ -640,7 +647,6 @@ ORDER BY (%s) DESC, last_seen_at DESC LIMIT $%d`, where, scoreExpr, limitParam)
 	defer rows.Close()
 	return scanMemoryRows(rows)
 }
-
 
 func scanMemoryRows(rows pgx.Rows) ([]AgentMemoryRow, error) {
 	out := []AgentMemoryRow{}
