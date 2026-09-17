@@ -170,6 +170,14 @@ var toolRegistry = map[string]ToolSpec{
 		Configurable: false,
 		build:        buildWebFetchTool,
 	},
+	sandbox.ToolWebSearch: {
+		Name:         sandbox.ToolWebSearch,
+		Title:        "Web search",
+		Description:  "Search the public web and return ranked results (title / URL / snippet). Config chooses the provider: {\"provider\":\"duckduckgo\"} uses the keyless DuckDuckGo HTML endpoint; providers that need a key take it as \"api_key\":\"{{cred:NAME}}\", resolved on the server and never seen by the model. Loopback / private / link-local addresses are refused by the egress guard.",
+		Configurable: true,
+		validate:     validateWebSearchConfig,
+		buildMany:    buildWebSearchTools,
+	},
 	sandbox.ToolRunShell: {
 		Name:         sandbox.ToolRunShell,
 		Title:        "Bash / shell",
@@ -601,4 +609,82 @@ func rejectConfig(toolName, configJSON string) error {
 		}
 	}
 	return nil
+}
+
+// webSearchToolConfig is the per-agent config for web_search. Provider names
+// the backend ("duckduckgo" is the keyless built-in); APIKey is for providers
+// that need one and may carry a {{cred:NAME}} placeholder resolved against the
+// agent's vault at build time, never in the tool loop.
+type webSearchToolConfig struct {
+	Provider   string `json:"provider"`
+	APIKey     string `json:"api_key"`
+	MaxResults int    `json:"max_results"`
+}
+
+// parseWebSearchConfig decodes the stored config. An empty or absent config is
+// NOT an error — it returns a zero config, and the caller decides what that
+// means (decline at run time, accept at write time).
+func parseWebSearchConfig(configJSON string) (webSearchToolConfig, error) {
+	cfg := webSearchToolConfig{}
+	if s := strings.TrimSpace(configJSON); s != "" {
+		if err := json.Unmarshal([]byte(s), &cfg); err != nil {
+			return cfg, fmt.Errorf("invalid web_search config: %w", err)
+		}
+	}
+	cfg.Provider = strings.TrimSpace(cfg.Provider)
+	return cfg, nil
+}
+
+// validateWebSearchConfig checks a stored selection without building or
+// touching the network. A config with no provider is savable — the tool simply
+// declines at run time — but a named provider must be one we can build, and an
+// api_key placeholder is left unresolved here (the vault belongs to the run).
+func validateWebSearchConfig(_ ToolBuildContext, configJSON string) error {
+	cfg, err := parseWebSearchConfig(configJSON)
+	if err != nil {
+		return err
+	}
+	if cfg.Provider == "" {
+		return nil
+	}
+	if _, ok := webSearchProviders[cfg.Provider]; !ok {
+		return fmt.Errorf("unknown web_search provider %q", cfg.Provider)
+	}
+	return nil
+}
+
+// webSearchProviders maps a config provider name to its constructor. The
+// resolved API key is passed through; providers that do not need one ignore it.
+var webSearchProviders = map[string]func(apiKey string) sandbox.SearchProvider{
+	"duckduckgo": func(string) sandbox.SearchProvider { return sandbox.NewDuckDuckGoSearch(nil) },
+}
+
+// buildWebSearchTools is a buildMany entry so an absent config can DECLINE —
+// return no tools and a note — instead of failing the run closed. A malformed
+// config or an unknown provider is still an error: that is a selection the
+// operator believes is on, and silently dropping it hides the mistake.
+func buildWebSearchTools(ctx context.Context, tctx ToolBuildContext, configJSON string) ([]agentcore.Tool, []string, error) {
+	cfg, err := parseWebSearchConfig(configJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.Provider == "" {
+		return nil, []string{"web_search skipped: no provider configured"}, nil
+	}
+	newProvider, ok := webSearchProviders[cfg.Provider]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown web_search provider %q", cfg.Provider)
+	}
+	apiKey := cfg.APIKey
+	if strings.Contains(apiKey, "{{cred:") {
+		if tctx.Credentials == nil {
+			return nil, nil, fmt.Errorf("web_search api_key uses a {{cred:…}} placeholder but this agent has no secrets configured")
+		}
+		resolved, err := tctx.Credentials.Resolve(ctx, apiKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("web_search api_key: %w", err)
+		}
+		apiKey = resolved
+	}
+	return []agentcore.Tool{sandbox.NewWebSearchTool(newProvider(apiKey), cfg.MaxResults)}, nil, nil
 }
