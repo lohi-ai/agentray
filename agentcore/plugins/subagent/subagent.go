@@ -413,6 +413,11 @@ func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res 
 	}
 	retryFinal, retryRes, retryErr := t.retryOnce(ctx, delegate, prompt, res, verr, sink)
 	t.parent.AddChildUsage(retryRes.Usage)
+	// Same guard as the main spawn path: an aborted retry must not hand the
+	// parent a killed child's partial answer — fall back to the first answer.
+	if retryErr == nil && retryRes.StopReason == "aborted" {
+		retryErr = fmt.Errorf("sub-agent retry was interrupted before it finished")
+	}
 	if retryErr == nil && strings.TrimSpace(retryFinal) != "" {
 		rerr := validateOutput(retryFinal, schema)
 		if rerr == nil {
