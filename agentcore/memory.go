@@ -58,6 +58,28 @@ type MemoryStore interface {
 	Fork(ctx context.Context, sessionID string) (Session, error)
 }
 
+// MemoryCurator is the OPTIONAL write-back half of the memory seam: a store
+// that implements it lets the model revise what it previously remembered —
+// update a stale fact, or retract one that turned out wrong. It is separate
+// from MemoryStore (rather than new methods on it) so a consumer's existing
+// store keeps satisfying the seam and simply does not offer the curation
+// tool; the memory plugin discovers the capability by type assertion.
+//
+// Both methods are soft: a retracted row stays in the store and is filtered
+// out of recall, so the history of having held the belief survives the
+// retraction. There is no hard delete on this seam.
+type MemoryCurator interface {
+	// Supersede retracts the entry id within scopeID, optionally naming the
+	// entry that replaces it ("" retracts without a successor). It must
+	// report not-found when no live entry with that id exists in the scope —
+	// a silent no-op would tell the model a memory is gone when it is not.
+	Supersede(ctx context.Context, scopeID, id, replacementID string) error
+	// Update replaces the content of the entry id within scopeID: the new
+	// entry is written and the old one retracted to it, atomically, so a
+	// failure never leaves a retracted memory with no successor.
+	Update(ctx context.Context, scopeID, id string, entry MemoryEntry) error
+}
+
 // Embedder turns text into dense vectors for semantic memory recall (§14.7).
 // It is the embedding analogue of LLMProvider: a narrow, product-agnostic seam
 // the consumer backs with a real vendor (OpenAIEmbedder) or a test fake. A nil

@@ -61,7 +61,7 @@ different control flow registers a plugin whose `Register` calls
 |---|---|---|
 | [`model`](model/) | provider, ladder, retry, caching | no reasoning |
 | [`definition`](definition/) | persona, skills, limits, env | no identity |
-| [`memory`](memory/) | cross-run recall | forgets between runs |
+| [`memory`](memory/) | cross-run recall + curation (`learn`, `memory_edit`) | forgets between runs |
 | [`session`](session/) | durable log, resume | a crash loses the run |
 | [`compaction`](compaction/) | context summarization | long runs hit the ceiling |
 | [`budget`](budget/) | spend ceiling, step gate | unbounded spend |

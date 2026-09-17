@@ -11,6 +11,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	sandboxplugin "github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
@@ -386,6 +387,14 @@ func permittedToolNames(p BuildParams) []string {
 	}
 	if revisableGoal(p) {
 		names = append(names, goal.ToolName)
+	}
+	// Memory curation is a plugin capability, not an opcore operation, so it
+	// is named here like todo/goal rather than in scopeTools. It rides the
+	// growth_suggest grant — the scope that already covers the remember write —
+	// and only when a memory store is installed, matching the plugin's own
+	// decline-without-a-store. Read-only runs never reach this line.
+	if p.Memory != nil && p.Scopes.GrowthSuggest {
+		names = append(names, memory.ToolMemoryEdit, memory.ToolLearn)
 	}
 	return names
 }

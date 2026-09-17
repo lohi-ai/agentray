@@ -166,7 +166,14 @@ func buildSystemPrompt(def AgentDefinition, recalled []MemoryEntry, skills []Ski
 				break
 			}
 			spent += len(entry)
-			fmt.Fprintf(&b, "- (%s) %s\n", m.Kind, entry)
+			// The id rides the bullet so memory_edit can name the entry — a
+			// memory the model cannot address is one it cannot curate. Entries
+			// without an id (synthetic/test) keep the bare form.
+			if m.ID != "" {
+				fmt.Fprintf(&b, "- (%s, id %s) %s\n", m.Kind, m.ID, entry)
+			} else {
+				fmt.Fprintf(&b, "- (%s) %s\n", m.Kind, entry)
+			}
 		}
 		b.WriteString("\n")
 	}
