@@ -39,7 +39,7 @@ func streamOnce(t *testing.T, deltas ...ChatDelta) ChatResponse {
 	t.Helper()
 	a := &Agent{}
 	resp, err := a.streamTurn(context.Background(), &pieceProvider{deltas: deltas},
-		ChatRequest{}, func(StreamEvent) {})
+		ChatRequest{}, func(StreamEvent) {}, nil)
 	if err != nil {
 		t.Fatalf("streamTurn: %v", err)
 	}

@@ -2,9 +2,32 @@ package agentcore
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 )
+
+// streamAbort is the sentinel a StreamInterceptor raises to cut a turn's
+// provider call mid-flight. It is NOT a provider failure: callRung must not
+// spend a retry on it and reason must not escalate it — the loop catches it,
+// appends the injection, and re-issues the same request itself.
+type streamAbort struct {
+	// inject is the correction the retried turn must see.
+	inject []Message
+	// usage is whatever the aborted attempt still spent: the tokens were
+	// generated and billed even though the message is discarded, so the run's
+	// accounting folds it in rather than letting a rule fire for free.
+	usage Usage
+}
+
+func (e *streamAbort) Error() string { return "stream aborted by interceptor" }
+
+// maxStreamAbortsPerTurn backstops a StreamInterceptor that never stops
+// matching: past it the turn's provider call is retried once with interception
+// disabled, so the stream completes unmodified. A guard that can spin the
+// provider forever is an availability bug wearing a policy costume — the
+// plugin's own per-turn cap is the real bound; this only covers a broken one.
+const maxStreamAbortsPerTurn = 8
 
 // One turn against the model: retry, escalation, streaming.
 //
@@ -24,7 +47,7 @@ import (
 //     non-retryable error) does the loop fall down the ladder to the next rung and
 //     try the turn there, sticking with the first rung that works (*rung advances
 //     in place). Cancellation is never retried or escalated.
-func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, ladder []ModelRung, rung *int) (ChatResponse, error) {
+func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, streams []StreamInterceptor, ladder []ModelRung, rung *int) (ChatResponse, error) {
 	for {
 		p := ladder[*rung]
 		req.Model = p.Model
@@ -39,7 +62,7 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, la
 			}
 		}
 
-		resp, err := a.callRung(ctx, p, req, sink)
+		resp, err := a.callRung(ctx, p, req, sink, streams)
 		if err == nil {
 			// after_provider_response observers see the raw response before its usage
 			// is folded into the run total. Under HookThrow a failure aborts the turn.
@@ -47,6 +70,14 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, la
 				return ChatResponse{}, herr
 			}
 			return resp, nil
+		}
+		// A stream abort is the loop's own retry signal, not a provider failure:
+		// it surfaces to the turn loop, which appends the injection and re-issues
+		// the request itself. Escalating it would retry on a different model
+		// against a conversation that never received the correction.
+		var abort *streamAbort
+		if errors.As(err, &abort) {
+			return ChatResponse{}, err
 		}
 		// Don't escalate on cancellation, and stop when the ladder is exhausted.
 		if ctx.Err() != nil || *rung+1 >= len(ladder) {
@@ -62,7 +93,12 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, la
 // (Retry-After when the server supplied one, else exponential with jitter) that
 // is cancellation-aware. A non-retryable error or a cancellation returns at once,
 // spending no further attempts.
-func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink StreamSink) (ChatResponse, error) {
+//
+// streams carries the run's stream interceptors. On the streaming path they are
+// consulted per content delta; on the non-streaming path they see the completed
+// response once, so a rule still fires when no viewer is attached. A match
+// returns the streamAbort sentinel — never retried here, never escalated.
+func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink StreamSink, streams []StreamInterceptor) (ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt < a.retry.MaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -73,12 +109,27 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 		var resp ChatResponse
 		var err error
 		if sink != nil {
-			resp, err = a.streamTurn(ctx, p.Provider, req, sink)
+			resp, err = a.streamTurn(ctx, p.Provider, req, sink, streams)
 		} else {
 			resp, err = p.Provider.Chat(ctx, req)
+			// Non-streaming fallback: the interceptor sees the completed answer
+			// once. It cannot cut the message mid-token — the tokens are already
+			// spent — but it can still discard it and retry with the injection,
+			// which is the half of the contract that changes what the model does.
+			if err == nil && len(streams) > 0 {
+				if d := interceptStreamDelta(ctx, streams, resp.Message.Content); d.Abort {
+					err = &streamAbort{inject: d.Inject, usage: resp.Usage}
+				}
+			}
 		}
 		if err == nil {
 			return resp, nil
+		}
+		// An interceptor abort is not a transient failure: spending a same-rung
+		// retry on it would re-issue the identical request with no injection.
+		var abort *streamAbort
+		if errors.As(err, &abort) {
+			return ChatResponse{}, err
 		}
 		lastErr = err
 		// A cancellation or a non-retryable error won't improve with another attempt:
@@ -94,8 +145,21 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 // content fragments to the sink as they arrive and accumulating the full
 // assistant message (text + tool calls + usage) so the Act path is identical to
 // the non-streaming turn.
-func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRequest, sink StreamSink) (ChatResponse, error) {
-	ch, err := provider.Stream(ctx, req)
+//
+// When stream interceptors are installed the provider call runs on a cancelable
+// child context: the first interceptor to abort cancels it — cutting the HTTP
+// stream mid-token — and the partial message is discarded into the streamAbort
+// sentinel. The channel is drained after cancel so a provider that does not
+// select on ctx.Done (the scripted test providers) still finishes its goroutine
+// instead of leaking it against a full buffer.
+func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRequest, sink StreamSink, streams []StreamInterceptor) (ChatResponse, error) {
+	streamCtx := ctx
+	cancel := context.CancelFunc(nil)
+	if len(streams) > 0 {
+		streamCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+	ch, err := provider.Stream(streamCtx, req)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -108,6 +172,14 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		if d.ContentDelta != "" {
 			msg.Content += d.ContentDelta
 			sink(StreamEvent{Type: StreamToken, Token: d.ContentDelta})
+			if len(streams) > 0 {
+				if dec := interceptStreamDelta(ctx, streams, msg.Content); dec.Abort {
+					cancel()
+					for range ch {
+					}
+					return ChatResponse{}, &streamAbort{inject: dec.Inject, usage: resp.Usage}
+				}
+			}
 		}
 		if d.ToolCall != nil {
 			msg.ToolCalls = append(msg.ToolCalls, *d.ToolCall)
@@ -126,6 +198,7 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 	resp.Message = msg
 	return resp, nil
 }
+
 
 // filterSchemas keeps only the schemas whose name is in permitted.
 func filterSchemas(all []ToolSchema, permitted []string) []ToolSchema {
