@@ -1,10 +1,8 @@
 # agentcore plugins
 
-One folder per capability — plus three [adapters](#adapters), which are not
-capabilities and are listed separately so they cannot be mistaken for one. Each
-folder has a `README.md` explaining what it does to the agent — what the model
-sees, what it costs in tokens, what it does to the provider's prefix cache, and
-what it cannot do.
+One folder per capability. Each folder has a `README.md` explaining what it
+does to the agent — what the model sees, what it costs in tokens, what it does
+to the provider's prefix cache, and what it cannot do.
 
 ## The rule
 

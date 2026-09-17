@@ -298,7 +298,7 @@ func validateObject(obj, schema map[string]any) error {
 // nullable field silently accepted every shape (pi #7243's nullable-schema
 // validation gap).
 func validateValue(name string, value any, propSchema map[string]any) error {
-	if enum, ok := propSchema["enum"].([]any); ok && len(enum) > 0 {
+	if enum := stringOrAnySlice(propSchema["enum"]); len(enum) > 0 {
 		if !enumContains(enum, value) {
 			return fmt.Errorf("field %q must be one of %s", name, formatEnum(enum))
 		}
@@ -330,8 +330,8 @@ func validateValue(name string, value any, propSchema map[string]any) error {
 // missingRequired returns the names listed in schema.required that are absent
 // from obj.
 func missingRequired(obj, schema map[string]any) []string {
-	req, ok := schema["required"].([]any)
-	if !ok {
+	req := stringOrAnySlice(schema["required"])
+	if req == nil {
 		return nil
 	}
 	var missing []string
@@ -345,6 +345,24 @@ func missingRequired(obj, schema map[string]any) []string {
 		}
 	}
 	return missing
+}
+
+// stringOrAnySlice normalizes a schema list that may be declared as []string
+// (hand-written Go schemas) or []any (JSON-decoded schemas) into []any, so
+// validation applies to both forms. Returns nil for anything else.
+func stringOrAnySlice(v any) []any {
+	switch s := v.(type) {
+	case []any:
+		return s
+	case []string:
+		out := make([]any, len(s))
+		for i, x := range s {
+			out[i] = x
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // isObjectSchema reports whether schema describes an object (so required/
@@ -397,8 +415,37 @@ func enumContains(enum []any, value any) bool {
 		if e == value {
 			return true
 		}
+		// JSON decodes every number as float64; a hand-written schema may
+		// declare integer enums as int/int64, which would never match.
+		if ef, ok := numericValue(e); ok {
+			if vf, ok := numericValue(value); ok && ef == vf {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// numericValue reads any Go numeric type as float64 for enum comparison.
+func numericValue(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }
 
 func formatEnum(enum []any) string {

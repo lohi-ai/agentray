@@ -87,6 +87,9 @@ func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 	// too, so the composition is one flat list. Nothing here inspects what an
 	// extension does — that is precisely the property the split bought.
 	for _, f := range cfg.Extensions {
+		if f == nil {
+			continue
+		}
 		if p, ok := f.(agentcore.Plugin); ok {
 			list = append(list, p)
 			continue

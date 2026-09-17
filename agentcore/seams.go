@@ -30,34 +30,46 @@ func (ModelPlugin) Name() string { return "model" }
 
 // Register claims the model seam and decoding knobs.
 func (p ModelPlugin) Register(r *Registry) error {
-	if p.Provider != nil && p.Model != "" {
-		if err := r.SetModel(p.Provider, p.Model); err != nil {
+	if err := r.SetModel(p.Provider, p.Model); err != nil {
+		return err
+	}
+	if p.Escalation != nil {
+		if err := r.SetEscalation(p.Escalation); err != nil {
 			return err
 		}
 	}
-	for _, set := range []func() error{
-		func() error { return setIf(p.Escalation != nil, func() error { return r.SetEscalation(p.Escalation) }) },
-		func() error {
-			return setIf(p.ContextWindow > 0, func() error { return r.SetContextWindow(p.ContextWindow) })
-		},
-		func() error {
-			return setIf(p.Retry != nil, func() error { return r.SetRetry(*p.Retry) })
-		},
-		func() error { return setIf(p.RefreshKey != nil, func() error { return r.SetRefreshKey(p.RefreshKey) }) },
-		func() error { return setIf(p.MaxTokens != 0, func() error { return r.SetMaxTokens(p.MaxTokens) }) },
-		func() error {
-			return setIf(p.ReasoningEffort != "", func() error { return r.SetReasoningEffort(p.ReasoningEffort) })
-		},
-		func() error {
-			return setIf(p.OutputSchema != nil, func() error { return r.SetOutputSchema(p.OutputSchema) })
-		},
-		func() error {
-			return setIf(p.PromptCacheKey != "", func() error { return r.SetPromptCache(p.PromptCacheKey, p.CacheRetention) })
-		},
-	} {
-		if err := set(); err != nil {
+	if p.ContextWindow > 0 {
+		if err := r.SetContextWindow(p.ContextWindow); err != nil {
 			return err
 		}
+	}
+	if p.Retry != nil {
+		if err := r.SetRetry(*p.Retry); err != nil {
+			return err
+		}
+	}
+	if p.RefreshKey != nil {
+		if err := r.SetRefreshKey(p.RefreshKey); err != nil {
+			return err
+		}
+	}
+	if p.MaxTokens != 0 {
+		if err := r.SetMaxTokens(p.MaxTokens); err != nil {
+			return err
+		}
+	}
+	if p.ReasoningEffort != "" {
+		if err := r.SetReasoningEffort(p.ReasoningEffort); err != nil {
+			return err
+		}
+	}
+	if p.OutputSchema != nil {
+		if err := r.SetOutputSchema(p.OutputSchema); err != nil {
+			return err
+		}
+	}
+	if p.PromptCacheKey != "" {
+		return r.SetPromptCache(p.PromptCacheKey, p.CacheRetention)
 	}
 	return nil
 }
@@ -141,14 +153,7 @@ func ToolsFromSet(ts *ToolSet) ToolsPlugin {
 	if ts == nil {
 		return ToolsPlugin{}
 	}
-	names := ts.Names()
-	out := make([]Tool, 0, len(names))
-	for _, n := range names {
-		if t, ok := ts.Get(n); ok {
-			out = append(out, t)
-		}
-	}
-	return ToolsPlugin{Tools: out}
+	return ToolsPlugin{Tools: toolsOf(ts)}
 }
 
 // HooksPlugin contributes consumer lifecycle hooks to a Registry.
@@ -228,6 +233,10 @@ type CompactionPlugin struct {
 	Model    string
 	Strategy Compactor
 }
+
+// CompactionUsing swaps the compaction strategy, keeping the default retention
+// policy.
+func CompactionUsing(c Compactor) CompactionPlugin { return CompactionPlugin{Strategy: c} }
 
 // Name identifies the plugin.
 func (CompactionPlugin) Name() string { return "compaction" }

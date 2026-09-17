@@ -415,7 +415,7 @@ type Config struct {
 // is still consulted before any consumer hook — now as a property of the hook
 // ordering rather than a side effect of prepending to a slice.
 func New(cfg Config) (*Agent, error) {
-	return Build(configPlugin{cfg: cfg})
+	return Build(ConfigPlugin(cfg))
 }
 
 // Prompt runs a single interactive turn-loop from a user message and returns

@@ -89,7 +89,7 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 	if err := setIf(cfg.ContextWindow > 0, func() error { return r.SetContextWindow(cfg.ContextWindow) }); err != nil {
 		return err
 	}
-	if err := setIf(cfg.Retry != nil, func() error { return r.SetRetry(*orZero(cfg.Retry)) }); err != nil {
+	if err := setIf(cfg.Retry != nil, func() error { return r.SetRetry(*cfg.Retry) }); err != nil {
 		return err
 	}
 	if err := setIf(cfg.RefreshKey != nil, func() error { return r.SetRefreshKey(cfg.RefreshKey) }); err != nil {
@@ -116,10 +116,10 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 	if err := setIf(!cfg.Definition.IsZero(), func() error { return r.SetDefinition(cfg.Definition) }); err != nil {
 		return err
 	}
-	if err := setIf(cfg.Limits != nil, func() error { return r.SetLimits(*orZero(cfg.Limits)) }); err != nil {
+	if err := setIf(cfg.Limits != nil, func() error { return r.SetLimits(*cfg.Limits) }); err != nil {
 		return err
 	}
-	if err := setIf(cfg.Env != nil, func() error { return r.SetEnv(*orZero(cfg.Env)) }); err != nil {
+	if err := setIf(cfg.Env != nil, func() error { return r.SetEnv(*cfg.Env) }); err != nil {
 		return err
 	}
 
@@ -153,7 +153,7 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 	if err := setIf(cfg.Memory != nil, func() error { return r.SetMemory(cfg.Memory) }); err != nil {
 		return err
 	}
-	if err := setIf(cfg.Compaction != nil, func() error { return r.SetCompaction(*orZero(cfg.Compaction)) }); err != nil {
+	if err := setIf(cfg.Compaction != nil, func() error { return r.SetCompaction(*cfg.Compaction) }); err != nil {
 		return err
 	}
 	if err := setIf(cfg.CompactionProvider != nil && cfg.CompactionModel != "", func() error {
@@ -214,15 +214,6 @@ func setIf(cond bool, fn func() error) error {
 		return nil
 	}
 	return fn()
-}
-
-// orZero dereferences an optional pointer field.
-func orZero[T any](p *T) *T {
-	if p == nil {
-		var zero T
-		return &zero
-	}
-	return p
 }
 
 // toolsOf flattens a ToolSet into a slice in registration order, so the model's

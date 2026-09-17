@@ -112,10 +112,10 @@ func TestAskToolParksRun(t *testing.T) {
 }
 
 // TestAskToolResumeWithAnswer verifies the full park -> answer -> resume round-trip:
-// 1. Run 1 parks on ask.
-// 2. An out-of-band EntryAnswer is appended to the session log.
-// 3. Run 2 resumes the session: RecoverSession closes the call with the answer,
-//    the model sees the answer as the tool result, and produces the final reply.
+//  1. Run 1 parks on ask.
+//  2. An out-of-band EntryAnswer is appended to the session log.
+//  3. Run 2 resumes the session: RecoverSession closes the call with the answer,
+//     the model sees the answer as the tool result, and produces the final reply.
 func TestAskToolResumeWithAnswer(t *testing.T) {
 	session := newMemSession()
 	sessionID := "sess-resume-1"

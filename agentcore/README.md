@@ -119,14 +119,17 @@ Root tests exercise **loop-owned** behaviour, not plugin policy. Two that look
 like plugin tests and are not, because the state is the kernel's:
 
 - `budget_test.go` — the graceful-stop protocol (one tool-free wrap-up turn,
-  then `budget_exhausted`) is the loop's; [`plugins/budget`](plugins/budget/)
+  then `budget_exhausted`) is the loop's; `BudgetPlugin` in `seams.go`
   only supplies the ceiling.
 - `session_test.go`, `compaction_test.go` — the goal's persistence and its
   survival through compaction are the log's;
   [`plugins/goal`](plugins/goal/) owns the completion protocol and is tested
   there.
 
-Only one root test imports a plugin: the env-gated live-model
-`agent_realprovider_test.go`, which is an end-to-end composition by design. Any
-other plugin import from a root test is a sign the test moved out from under its
-subject — put it next to the plugin instead.
+Root tests that import a plugin do so only for end-to-end composition
+(`agent_realprovider_test.go`, `e2e_test.go`, `fanout_test.go`,
+`longrun_e2e_test.go`, `memory_curation_e2e_test.go`, `ask_e2e_test.go`) —
+they prove a capability against the real loop, which is the point of the
+split. A root test that imports a plugin to test *the plugin's* policy is a
+sign the test moved out from under its subject — put it next to the plugin
+instead.

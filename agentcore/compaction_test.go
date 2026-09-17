@@ -1380,3 +1380,20 @@ func (*echoToolCompaction) Schema() ToolSchema {
 func (*echoToolCompaction) Run(context.Context, string) (string, error) {
 	return strings.Repeat("payload ", 64), nil
 }
+
+// TestDefaultCompactionStrategyStaysInstalled pins the other half: a
+// composition that says nothing about compaction still gets the built-in, so
+// extracting the seam did not quietly turn compaction off.
+func TestDefaultCompactionStrategyStaysInstalled(t *testing.T) {
+	agent, err := New(Config{
+		Provider: NewFauxProvider(AssistantText("ok")),
+		Model:    "test",
+		Policy:   DenyAll{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if desc := agent.Describe(); !strings.Contains(desc, "summary") {
+		t.Fatalf("default compactor missing:\n%s", desc)
+	}
+}

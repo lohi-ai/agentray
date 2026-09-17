@@ -27,10 +27,10 @@
 // any of it can be replaced by registering something else in its place.
 //
 //	agent, err := agentcore.Build(
-//		model.Plugin(...),      // seam: provider, ladder, retry
-//		definition.Plugin(...), // seam: persona, skills, limits
-//		policy.Plugin(...),     // seam: the permission gate
-//		todo.Plugin(...),       // extension: adds a tool and a step interceptor
+//		agentcore.ModelPlugin{...},      // seam: provider, ladder, retry
+//		agentcore.DefinitionPlugin{...}, // seam: persona, skills, limits
+//		agentcore.PolicyPlugin{...},     // seam: the permission gate
+//		todo.Plugin{...},                // extension: adds a tool and a step interceptor
 //	)
 //
 // [New] is the same composition reached through a flat [Config] instead of a
