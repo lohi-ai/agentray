@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // ToolSpawnSubagent is the stable name of the built-in delegation tool
@@ -204,12 +205,16 @@ func (t *subagentTool) Schema() agentcore.ToolSchema {
 			"type":        "string",
 			"description": "Optional background the sub-agent needs (identifiers, constraints, prior findings). It sees nothing else from this conversation.",
 		},
+		"output_schema": map[string]any{
+			"type":        "object",
+			"description": "Optional JSON Schema the sub-agent's final answer must satisfy. When set, the sub-agent is instructed to end with a bare JSON value, the answer is validated against the schema, and on a violation the sub-agent is re-opened once with the error. You receive the validated JSON — or the raw answer marked as validation-failed if the retry also fails.",
+		},
 	}
 	desc := "Delegate one self-contained task to an ephemeral sub-agent and get back only its final answer. " +
 		"The sub-agent has the same tools and permissions as you but a fresh, isolated context — its intermediate work never enters yours. " +
 		"Use it for exploration or noisy multi-step work whose details you don't need (research a question, scan data broadly, produce an artifact), " +
 		"NOT for quick single-tool lookups you can do yourself. State the task fully and self-contained: the sub-agent sees nothing of this conversation " +
-		"except what you put in task and context."
+		"except what you put in task and context. Pass output_schema when you need the answer as structured JSON rather than prose."
 	if roster := t.settings.Delegates; len(roster) > 0 {
 		var lines []string
 		for _, d := range roster {
@@ -240,9 +245,10 @@ func (t *subagentTool) Schema() agentcore.ToolSchema {
 
 // subagentArgs is the decoded argument shape.
 type subagentArgs struct {
-	Task    string `json:"task"`
-	Context string `json:"context"`
-	Agent   string `json:"agent"`
+	Task         string          `json:"task"`
+	Context      string          `json:"context"`
+	Agent        string          `json:"agent"`
+	OutputSchema json.RawMessage `json:"output_schema"`
 }
 
 func (t *subagentTool) Run(ctx context.Context, args string) (string, error) {
@@ -266,6 +272,13 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	if task == "" {
 		return "", fmt.Errorf("task is required")
 	}
+	// Compile the schema before any child runs: an invalid schema is a caller
+	// bug, and failing here costs nothing while failing after the child ran
+	// costs a whole delegation.
+	schema, err := compileOutputSchema(in.OutputSchema)
+	if err != nil {
+		return "", err
+	}
 	// Defense in depth: the loop already stops advertising the tool at MaxDepth,
 	// but the ctx check also protects consumers that seed a depth floor.
 	depth := agentcore.DelegationDepth(ctx)
@@ -280,6 +293,9 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	prompt := task
 	if c := strings.TrimSpace(in.Context); c != "" {
 		prompt = task + "\n\nContext:\n" + c
+	}
+	if schema != nil {
+		prompt += outputSchemaInstruction(in.OutputSchema)
 	}
 
 	// Resolve the target: self-fork by default, a granted teammate when named.
@@ -314,7 +330,7 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	}
 
 	var final string
-	var err error
+	var res agentcore.RunResult
 	if delegate != nil {
 		var usage agentcore.Usage
 		final, usage, err = delegate.Run(ctx, prompt, sink)
@@ -339,7 +355,6 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 		}
 		child := t.parent.Fork(childSession)
 		seed := []agentcore.Message{{Role: agentcore.RoleUser, Content: prompt}}
-		var res agentcore.RunResult
 		res, err = child.ContinueStream(ctx, seed, task, sink)
 		// Fold the child's spend before handling the error (a child's own
 		// children are already folded into res.Usage by its runLoop, recursively).
@@ -369,5 +384,76 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	if final == "" {
 		return "", fmt.Errorf("agent %s produced no answer", label)
 	}
+	// Validate BEFORE TruncateMiddle: a truncated answer must fail honestly
+	// rather than pass on a prefix.
+	if schema != nil {
+		final = t.validateWithRetry(ctx, final, res, delegate, prompt, schema, sink)
+	}
 	return agentcore.TruncateMiddle(final, t.settings.MaxOutputBytes), nil
+}
+
+// validateWithRetry enforces the output_schema contract after the child
+// produced an answer: validate, and on a violation re-open the child exactly
+// once with the error. A second failure returns the raw answer marked as
+// validation-failed rather than erroring the spawn — the parent's model can
+// still read the answer, and the note tells it the JSON is not trustworthy.
+//
+// The retry is a SECOND run, not a resume of the first: a durable child whose
+// log already reached its leaf reattaches and returns the recorded (invalid)
+// answer without re-running, so the retry forks a fresh child at the
+// deterministic "<childSession>/retry" session seeded with the prior
+// transcript plus the error. The deterministic id keeps the whole spawn
+// replay-safe: a re-issued spawn reattaches to whichever child log completed.
+// A delegate has no transcript to re-open — Run is an opaque closure — so its
+// retry is a single re-invocation carrying the error in the task.
+func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res agentcore.RunResult, delegate *Delegate, prompt string, schema *jsonschema.Schema, sink agentcore.StreamSink) string {
+	verr := validateOutput(final, schema)
+	if verr == nil {
+		return final
+	}
+	retryFinal, retryRes, retryErr := t.retryOnce(ctx, delegate, prompt, res, verr, sink)
+	t.parent.AddChildUsage(retryRes.Usage)
+	// Same guard as the main spawn path: an aborted retry must not hand the
+	// parent a killed child's partial answer — fall back to the first answer.
+	if retryErr == nil && retryRes.StopReason == "aborted" {
+		retryErr = fmt.Errorf("sub-agent retry was interrupted before it finished")
+	}
+	if retryErr == nil && strings.TrimSpace(retryFinal) != "" {
+		rerr := validateOutput(retryFinal, schema)
+		if rerr == nil {
+			return strings.TrimSpace(retryFinal)
+		}
+		return strings.TrimSpace(retryFinal) + "\n\n[validation failed: " + rerr.Error() + "]"
+	}
+	return final + "\n\n[validation failed: " + verr.Error() + "]"
+}
+
+// retryOnce runs the single corrective attempt. Self-forks re-open the child's
+// transcript in a fresh fork; delegates re-run the task with the error and the
+// rejected answer appended.
+func (t *subagentTool) retryOnce(ctx context.Context, delegate *Delegate, prompt string, res agentcore.RunResult, validationErr error, sink agentcore.StreamSink) (string, agentcore.RunResult, error) {
+	if delegate != nil {
+		retryTask := prompt + "\n\nYour previous answer failed output_schema validation: " + validationErr.Error() +
+			"\nRejected answer:\n" + lastAssistantText(res.Messages) +
+			"\nProduce ONLY a corrected JSON value matching the schema — no prose, no markdown fence."
+		final, usage, err := delegate.Run(ctx, retryTask, sink)
+		return final, agentcore.RunResult{Usage: usage}, err
+	}
+	retrySession := ""
+	if callID, ok := agentcore.ToolCallID(ctx); ok && t.durable {
+		retrySession = t.parent.SessionID() + "/" + callID + "/retry"
+	}
+	child := t.parent.Fork(retrySession)
+	r, err := child.ContinueStream(ctx, retrySeed(res.Messages, validationErr), "correct the invalid final answer", sink)
+	return r.Final, r, err
+}
+
+// lastAssistantText returns the final assistant text in a transcript.
+func lastAssistantText(msgs []agentcore.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == agentcore.RoleAssistant && msgs[i].Content != "" {
+			return msgs[i].Content
+		}
+	}
+	return ""
 }

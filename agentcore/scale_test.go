@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
-	"strings"
-	"sync"
-	"testing"
-
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
 )
 
 // Does the agent still know what it is doing after five thousand model calls?
@@ -972,5 +971,506 @@ func TestVeryLongRunFollowsTheRequirementTheUserChangedItTo(t *testing.T) {
 	if len(pin) > checkpointCeilingBytes {
 		t.Fatalf("the pin grew to %d B: it accumulates without a ceiling, which is the checkpoint "+
 			"ratchet again in a message compaction never even summarizes", len(pin))
+	}
+}
+
+// The run plan at scale.
+//
+// The plan is the one piece of run state that is immune to compaction *by
+// construction*: it lives in a Store, not the transcript, and a context hook
+// re-injects a fresh rendering into every request. That is the whole reason the
+// capability exists — after a thousand turns the original task has been
+// summarized away, but the checklist is still right there.
+//
+// It is also why the plan is dangerous. Anything that survives compaction and is
+// pinned into every request subtracts from the same window compaction is fighting
+// to protect, and it does so on every single turn for the rest of the run. So it
+// needs a ceiling for exactly the reason the compaction checkpoint needed one.
+//
+// The existing scale test writes a fixed five-item plan and only re-statuses it.
+// That is the friendly case. A real long run does not work that way: an agent
+// decomposes as it discovers, so the checklist GROWS — new subtasks appended,
+// finished ones left behind as a record of progress. These tests drive that
+// shape.
+
+// planScaleTask is a task whose shape invites decomposition, because that is the
+// shape that grows a checklist.
+const planScaleTask = "Audit every shard in the ledger corpus and file one report per region."
+
+const planScaleGoal = "Every shard audited and one report filed per region"
+
+// --- a model that discovers work as it goes -----------------------------------
+
+// growingPlanProvider plays an agent that decomposes. Every planEvery turns it
+// closes out the step it was on and appends the subtask it just discovered, then
+// starts on that. Nothing is ever deleted — a finished item is the record that
+// the work happened, which is exactly why a model keeps it.
+type growingPlanProvider struct {
+	mu sync.Mutex
+
+	workTurns int
+	planEvery int
+
+	parentTurns int
+	summaries   int
+	planUpdates int
+	finishes    int
+
+	// discovered is the checklist as the model has built it so far.
+	discovered []todo.Item
+
+	// lastRequest is what the model was shown on its most recent turn. Every
+	// assertion here is made against this, because the question is what the run
+	// COSTS to keep the plan in front of the model, not what the store holds.
+	lastRequest []agentcore.Message
+}
+
+func (*growingPlanProvider) Name() string        { return "growing-plan" }
+func (*growingPlanProvider) SupportsTools() bool { return true }
+
+func (p *growingPlanProvider) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(req.Messages) > 0 && strings.HasPrefix(req.Messages[0].Content, "You are a context summarization") {
+		p.summaries++
+		return usageFor(req, agentcore.AssistantText(fmt.Sprintf(
+			"## Goal\nContinue the audit\n## Progress\n### Done\n- [x] batch %d processed\n## Next Steps\n1. keep auditing",
+			p.summaries))), nil
+	}
+
+	p.parentTurns++
+	n := p.parentTurns
+	p.lastRequest = req.Messages
+
+	switch {
+	case n >= p.workTurns:
+		p.finishes++
+		if p.finishes == 1 {
+			return usageFor(req, agentcore.AssistantText("Audit looks complete.")), nil
+		}
+		return usageFor(req, agentcore.AssistantText("All shards audited, reports filed.\n"+goal.Done)), nil
+
+	case n == 1 || n%p.planEvery == 0:
+		p.planUpdates++
+		p.discover()
+		return usageFor(req, agentcore.AssistantToolCall(
+			fmt.Sprintf("plan%d", p.planUpdates), todo.ToolName, planItemArgs(p.discovered))), nil
+
+	default:
+		return usageFor(req, agentcore.AssistantToolCall(
+			fmt.Sprintf("w%d", n), "work", fmt.Sprintf(`{"n":%d}`, n))), nil
+	}
+}
+
+// discover closes the current step and appends the one it uncovered. Item text
+// is the length a real agent writes — a short imperative sentence, not a word.
+func (p *growingPlanProvider) discover() {
+	for i := range p.discovered {
+		if p.discovered[i].Status == todo.StatusInProgress {
+			p.discovered[i].Status = todo.StatusCompleted
+		}
+	}
+	p.discovered = append(p.discovered, todo.Item{
+		Content: fmt.Sprintf("Reconcile shard %d against the regional clearing file and note the discrepancy",
+			len(p.discovered)+1),
+		Status: todo.StatusInProgress,
+	})
+}
+
+func (p *growingPlanProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	resp, err := p.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentcore.ChatDelta, 4)
+	go func() {
+		defer close(ch)
+		if resp.Message.Content != "" {
+			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
+		}
+		for i := range resp.Message.ToolCalls {
+			tc := resp.Message.ToolCalls[i]
+			ch <- agentcore.ChatDelta{ToolCall: &tc}
+		}
+		ch <- agentcore.ChatDelta{Done: true}
+	}()
+	return ch, nil
+}
+
+func planItemArgs(items []todo.Item) string {
+	b, err := json.Marshal(struct {
+		Items []todo.Item `json:"items"`
+	}{items})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// injectedPlanBytes sizes the pinned checklist as the provider bills it: the
+// trailing system reminder the context hook adds to the request.
+func injectedPlanBytes(msgs []agentcore.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == agentcore.RoleSystem && strings.HasPrefix(msgs[i].Content, todo.ContextPrefix) {
+			return len(msgs[i].Content)
+		}
+	}
+	return 0
+}
+
+// --- the test -----------------------------------------------------------------
+
+// planCeilingBytes is the share of the window the pinned plan may hold.
+//
+// The run below is capped at 4000 context tokens, and the plan is charged
+// against that on every turn forever — it is not a cost the run pays once. A
+// checklist is a navigation aid, not a record, so it gets a smaller share than
+// the compaction checkpoint's budget/4: one eighth of the window, ~500 tokens at
+// the ~4-bytes-per-token the loop estimates with.
+const planCeilingBytes = (4000 / 8) * 4
+
+// TestVeryLongRunKeepsItsPlanInsideTheBudget is the round's headline. An agent
+// that decomposes for 900 turns builds a long checklist, and every item of it is
+// pinned into every request from then on. Unbounded, that is a slow-motion
+// context leak that compaction cannot touch and that gets worse the longer the
+// run goes — the exact opposite of what the plan is for.
+func TestVeryLongRunKeepsItsPlanInsideTheBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long run")
+	}
+
+	const workTurns = 900
+
+	prov := &growingPlanProvider{workTurns: workTurns, planEvery: 3}
+	store := newE2EStore()
+	plan := todo.NewStore()
+	work := &e2eWorkTool{size: 600}
+
+	limits := agentcore.DefaultLimits()
+	limits.MaxTurns = 4 * workTurns
+	limits.MaxToolCalls = 4 * workTurns
+	limits.MaxContextTokens = 4000
+
+	cs := agentcore.DefaultCompactionSettings()
+	cs.KeepRecentTokens = 1500
+
+	agent, err := agentcore.Build(
+		e2eConfig{cfg: agentcore.Config{
+			Provider:   prov,
+			Model:      "plan-scale",
+			Tools:      agentcore.NewToolSet(work),
+			Policy:     agentcore.NewAllowList("work", todo.ToolName),
+			Limits:     &limits,
+			Compaction: &cs,
+			Session:    store,
+			SessionID:  "plan-scale",
+		}},
+		goal.Until(planScaleGoal),
+		todo.With(plan),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if _, err := agent.Prompt(context.Background(), planScaleTask); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	prov.mu.Lock()
+	last := prov.lastRequest
+	updates := prov.planUpdates
+	items := len(prov.discovered)
+	prov.mu.Unlock()
+
+	pinned := injectedPlanBytes(last)
+	window := transcriptBytes(last)
+
+	t.Logf("plan updates=%d items=%d pinned=%dB window=%dB (plan is %d%% of the window)",
+		updates, items, pinned, window, pinned*100/max(window, 1))
+
+	if pinned == 0 {
+		t.Fatal("no plan was pinned into the final request — the checklist the whole capability exists to keep is not there")
+	}
+	if pinned > planCeilingBytes {
+		t.Fatalf("the pinned plan is %d bytes against a %d-byte share of the window: it grows with the run, "+
+			"is immune to compaction by construction, and is charged on every turn — so a long run pays it "+
+			"forever and it crowds out the work it was meant to keep on track", pinned, planCeilingBytes)
+	}
+
+	// Bounding the plan must not mean losing the model's place in it. What the
+	// agent is doing RIGHT NOW is the one line it cannot navigate without.
+	current := fmt.Sprintf("Reconcile shard %d against the regional clearing file", items)
+	if !strings.Contains(planText(last), current) {
+		t.Fatalf("the plan was bounded by dropping the in_progress step, which is the one item that "+
+			"decides the next action:\n%s", planText(last))
+	}
+
+	// And progress must still be legible: an agent that cannot tell how far it
+	// has come will redo work, which costs far more than the bytes saved.
+	if !strings.Contains(planText(last), "completed") {
+		t.Fatalf("the bounded plan does not account for the finished steps at all, so the run cannot "+
+			"tell what it has already done:\n%s", planText(last))
+	}
+}
+
+func planText(msgs []agentcore.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == agentcore.RoleSystem && strings.HasPrefix(msgs[i].Content, todo.ContextPrefix) {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// What does the harness cost when the model is not very good?
+//
+// The scale test next door proves the subsystems hold up over five thousand
+// calls, but its model is perfect: it follows the completion contract exactly,
+// and when it is told to keep going it goes and does something. Every rail in
+// that run is therefore measured against a model that never needed it. The rails
+// exist for the other case.
+//
+// The failure this file is about is specific, and it is the one that makes a
+// weak model expensive rather than merely wrong. The goal gate is UNCAPPED by
+// design — it re-opens a run that finishes without declaring itself done or
+// blocked, for as long as it takes — and what makes that affordable is the stall
+// breaker that gives up when the model has nothing left to give. That breaker
+// used to be a verbatim comparison of consecutive answers, which is a fine proxy
+// for a strong model and a broken one for a weak model: a weak model rephrases.
+// It says "I have finished the audit", then "The audit is complete", then "I
+// believe the work is done" — three ways of being stuck that no text comparison
+// catches, and the run pays a full model call for every one of them until
+// MaxTurns. On a long run that is a very large number.
+//
+// So these tests are about a boundary, not a feature. Below it, a model that is
+// genuinely working must never be cut off, however many times it needs to be
+// nudged — that is the whole point of an uncapped gate, and it is the property
+// this file's fix could most easily have broken. Above it, a model that has
+// stopped making progress must be stopped quickly and recorded honestly, as a
+// stalled goal rather than an exhausted turn budget.
+
+// weakModel is a model that cannot follow the completion contract, in the way
+// weak models actually fail: it is not confused about the task and it is not
+// looping on a tool. It believes it is finished and keeps saying so, in
+// different words each time, never emitting the sentinel that would let the run
+// close.
+type weakModel struct {
+	mu sync.Mutex
+
+	// workBeforeFinish is how many tool calls it makes each time it is nudged.
+	// Zero is the stalled model. Non-zero is the model that responds to a nudge
+	// by actually going back to work, which must never be cut off.
+	workBeforeFinish int
+	// compliesWhenTold makes it emit the sentinel once the nudge escalates from
+	// explaining the contract to dictating it. This is the model the escalation
+	// exists for: it was never unwilling, it just needed telling precisely.
+	compliesWhenTold bool
+
+	calls    int
+	finishes int
+	worked   int
+	// sawEscalated records whether the mechanically-worded nudge ever reached
+	// the model, so a test can assert the escalation is what unblocked it rather
+	// than assuming so.
+	sawEscalated bool
+}
+
+// escalatedMarker is a phrase unique to the second-and-later nudge. Matching on
+// it is how the model below can react to the escalation specifically, which is
+// what makes "the escalation is what fixed it" an assertion rather than a guess.
+const escalatedMarker = "make the LAST line of it exactly"
+
+func (*weakModel) Name() string        { return "weak" }
+func (*weakModel) SupportsTools() bool { return true }
+
+func (p *weakModel) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+
+	escalated := false
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, escalatedMarker) {
+			escalated = true
+		}
+	}
+	if escalated {
+		p.sawEscalated = true
+	}
+
+	if p.compliesWhenTold && escalated {
+		p.finishes++
+		return usageFor(req, agentcore.AssistantText("The audit is complete.\n"+goal.Done)), nil
+	}
+
+	// Do the configured amount of work before each finish. Counted against the
+	// finishes so far, so every nudge buys a fresh batch of tool calls.
+	if p.worked < (p.finishes+1)*p.workBeforeFinish {
+		p.worked++
+		return usageFor(req, agentcore.AssistantToolCall(
+			fmt.Sprintf("w%d", p.worked), "work", fmt.Sprintf(`{"n":%d}`, p.worked))), nil
+	}
+
+	// The finish that never satisfies the gate: no sentinel, and never the same
+	// wording twice, so the verbatim breaker has nothing to match on.
+	p.finishes++
+	return usageFor(req, agentcore.AssistantText(
+		fmt.Sprintf("I believe the audit is finished (%s).", ordinal(p.finishes)))), nil
+}
+
+func (p *weakModel) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	resp, err := p.Chat(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan agentcore.ChatDelta, 4)
+	go func() {
+		defer close(ch)
+		if resp.Message.Content != "" {
+			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
+		}
+		for i := range resp.Message.ToolCalls {
+			tc := resp.Message.ToolCalls[i]
+			ch <- agentcore.ChatDelta{ToolCall: &tc}
+		}
+		ch <- agentcore.ChatDelta{Done: true, Usage: resp.Usage}
+	}()
+	return ch, nil
+}
+
+// ordinal keeps every finish textually distinct. The point is not the wording;
+// it is that no two finishes are byte-identical, which is exactly the shape a
+// verbatim stall breaker cannot see.
+func ordinal(n int) string { return fmt.Sprintf("attempt %d", n) }
+
+// weakMaxTurns is the turn ceiling these runs are given. It stands in for a long
+// run's ceiling: large enough that reaching it is a real cost and an obviously
+// wrong outcome, so a test that ends there has caught something.
+const weakMaxTurns = 400
+
+// runWeak drives one gated run against the weak model.
+func runWeak(t *testing.T, id string, m *weakModel) (agentcore.RunResult, *e2eWorkTool) {
+	t.Helper()
+
+	limits := agentcore.DefaultLimits()
+	limits.MaxTurns = weakMaxTurns
+	limits.MaxToolCalls = weakMaxTurns
+	work := &e2eWorkTool{size: 100}
+
+	agent, err := agentcore.Build(
+		e2eConfig{cfg: agentcore.Config{
+			Provider:  m,
+			Model:     "weak-model",
+			Tools:     agentcore.NewToolSet(work),
+			Policy:    agentcore.NewAllowList("work"),
+			Limits:    &limits,
+			Session:   newE2EStore(),
+			SessionID: id,
+		}},
+		goal.Until(scaleGoal),
+	)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), scaleTask)
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	return res, work
+}
+
+// TestWeakModelStallsCheaplyInsteadOfBurningTheBudget is the regression lock on
+// the expensive failure. The model here is stuck and cannot say so in the
+// required words, and it never repeats itself, so the only thing that can stop
+// it is a breaker that looks at what it DID rather than what it wrote.
+func TestWeakModelStallsCheaplyInsteadOfBurningTheBudget(t *testing.T) {
+	m := &weakModel{} // no work between finishes: the stalled model
+	res, work := runWeak(t, "weak-stall", m)
+
+	t.Logf("model calls: %d, tool calls: %d, stop=%q", m.calls, work.Calls(), res.StopReason)
+
+	// The honest outcome. max_turns here would not merely be a worse number: it
+	// would be the wrong diagnosis recorded in the run, telling whoever reads it
+	// that the agent ran out of room to work rather than that it had stopped
+	// working a few hundred turns earlier.
+	if res.StopReason != goal.StopReasonStalled {
+		t.Fatalf("want the run recorded as a stalled goal, got %q — the gate kept nudging a model "+
+			"that had stopped making progress, and the run's own record of why it ended is wrong",
+			res.StopReason)
+	}
+
+	// The cost. The gate is uncapped, so nothing but the stall breaker stands
+	// between a paraphrasing model and the whole turn budget; this is the number
+	// that regressed from 4 to 400 the moment the breaker stopped matching.
+	if m.calls > 8 {
+		t.Fatalf("the stalled model cost %d model calls before the gate gave up (ceiling was %d); "+
+			"each one is a paid call spent re-reading the same nudge", m.calls, weakMaxTurns)
+	}
+	if m.calls >= weakMaxTurns {
+		t.Fatalf("the run burned its entire turn budget (%d calls) on a model that did nothing", m.calls)
+	}
+
+	// It really was the no-progress breaker and not luck: a stalled model makes
+	// no tool calls at all, which is precisely why the verbatim breaker had
+	// nothing to catch.
+	if work.Calls() != 0 {
+		t.Fatalf("this model is supposed to do no work between finishes, got %d tool calls", work.Calls())
+	}
+}
+
+// TestGoalGateStaysUncappedWhileTheModelWorks is the other side of the boundary,
+// and the property most at risk from any change that makes the gate give up
+// sooner. A model that answers a nudge by going back to work is not stalled, no
+// matter how many times it does it or how badly it phrases its finishes. If this
+// fails, the gate has become a turn cap wearing a stall breaker's name — and it
+// would fail silently in production as runs that quietly stopped early.
+func TestGoalGateStaysUncappedWhileTheModelWorks(t *testing.T) {
+	m := &weakModel{workBeforeFinish: 2} // works, finishes badly, works again
+	res, work := runWeak(t, "weak-working", m)
+
+	t.Logf("model calls: %d, tool calls: %d, finishes: %d, stop=%q",
+		m.calls, work.Calls(), m.finishes, res.StopReason)
+
+	if res.StopReason == goal.StopReasonStalled {
+		t.Fatalf("the gate called a working model stalled after %d finishes and %d tool calls: "+
+			"progress between nudges is the definition of not-stalled", m.finishes, work.Calls())
+	}
+
+	// And it was nudged many times, not once or twice — otherwise the run never
+	// got near the boundary and passing here proves nothing.
+	if m.finishes < 10 {
+		t.Fatalf("the model only finished %d times; the run never exercised repeated nudging", m.finishes)
+	}
+	if work.Calls() < 20 {
+		t.Fatalf("the model only worked %d times: this run is not the working case it claims to be", work.Calls())
+	}
+}
+
+// TestEscalatedNudgeRecoversAModelThatJustNeededTelling is why the fix is not
+// only a cheaper way to fail. The first nudge explains the contract in prose,
+// which is the version a model already ignored once; the second stops explaining
+// and dictates the literal line. This model complies the moment it is told that
+// way — so the escalation converts a run that would have been abandoned as
+// stalled into one that completes.
+func TestEscalatedNudgeRecoversAModelThatJustNeededTelling(t *testing.T) {
+	m := &weakModel{compliesWhenTold: true}
+	res, _ := runWeak(t, "weak-recovers", m)
+
+	t.Logf("model calls: %d, stop=%q, final=%q", m.calls, res.StopReason, res.Final)
+
+	if !m.sawEscalated {
+		t.Fatal("the escalated nudge never reached the model, so this test is not testing escalation")
+	}
+	if res.StopReason == goal.StopReasonStalled {
+		t.Fatal("the run was abandoned as stalled even though the model complied once told precisely")
+	}
+	if !strings.Contains(res.Final, goal.Done) {
+		t.Fatalf("the run did not close on the completion sentinel: %q", res.Final)
+	}
+	// Cheap, too: explaining then dictating is two nudges, not a long negotiation.
+	if m.calls > 5 {
+		t.Fatalf("recovery took %d model calls; the escalation is supposed to land on the second nudge", m.calls)
 	}
 }

@@ -96,7 +96,7 @@ into the persisted `ResultMeta` ("N bytes in Mms") — no DB schema change.
 
 ## Files
 
-- Core: `agentcore/sandbox.go` (Session + Image fields, `SessionSandbox`,
+- Core: `agentcore/env.go` (Session + Image fields, `SessionSandbox`,
   `WithSandboxSession`), `agentcore/loop.go` (latency).
 - Backend: `sandbox/docker.go` (session containers, per-exec image
   override), `shell_tool.go` (`NewComputerUseTool`, `ComputerUseLimits`),
@@ -145,11 +145,11 @@ a plain task. Real tests are gated on `AGENTRAY_TEST_OPENAI_BASE_URL` /
 | Fetch web | `sandbox::TestValidateURL`, `TestBlockedIP`, `TestParseAbsoluteURLRejectsRelative`, `agentcore::TestEndToEndBlocksNonAllowlistedHost` | `agentcore_test::TestReal_ToolCall_And_WebFetch` |
 | Browser use (real browser) | `sandbox/browser_tool_test.go::TestBrowserToolRunsThroughSandboxWithWorkspaceMount`, `TestBrowserToolThreadsBrowserScopedSession`, `sandbox/agent_browseruse_test.go::TestBrowserUseAgent_ControlsBrowser_Faux` (opens + snapshots a real page; asserts no zombie after `CloseSession`) | `sandbox/agent_browseruse_test.go::TestBrowserUseAgent_RealProvider_DrivesBrowser` |
 | Context auto-compaction | `compaction_test::TestCompactWithSummary_ReplacesOlderSpan`/`_FallsBackOnError`, `stress_test::TestLongRunStaysStableAcrossManyCompactions` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
-| Steer message mid-run | `steering_test::TestSteeringInjectedBeforeNextTurn`, `TestFollowUpRestartsLoop` | `agentcore_test::TestReal_SteeringMidRun` |
-| Todo/plan + keep across long session | `plugins/todo::TestTodoSurvivesCompaction`, `plugins/todo::TestPlanUpdatesDoNotStarveTurnBudget`, `goalpin_test::TestGoalSurvivesRepeatedCompaction` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
+| Steer message mid-run | `loop_test::TestSteeringInjectedBeforeNextTurn`, `TestFollowUpRestartsLoop` | `agentcore_test::TestReal_SteeringMidRun` |
+| Todo/plan + keep across long session | `plugins/todo::TestTodoSurvivesCompaction`, `plugins/todo::TestPlanUpdatesDoNotStarveTurnBudget`, `compaction_test::TestGoalSurvivesRepeatedCompaction` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
 | Permission (default-deny gate) | `loop_test::TestPermissionGateBlocks`, `sandbox::TestComputerUseAgent_BlockedWithoutGrant_Faux` | proven inside every real test (default-deny allow-lists) |
 | Trace & monitoring | `plugins/observe::TestTracingProviderChat`/`EndToEnd`/`Stream`, `TestPluginTracesEveryRung`, `TestPricingCost` | trace records emitted on every real run |
-| Skill use (progressive disclosure) | `skill_loading_test.go` (3 tests) | `agentcore_test::TestReal_SkillUse` |
+| Skill use (progressive disclosure) | `prompt_test.go` (skill-loading tests) | `agentcore_test::TestReal_SkillUse` |
 | Auto-improvement (reflection) | reflect parse/dispatch path (mechanical) | `agentruntime::TestReal_Reflection_ProposesImprovementFromRun` |
 
 Real tests verified green against an OpenAI-compatible `plus` (GPT-5.4-class)
