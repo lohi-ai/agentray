@@ -409,6 +409,10 @@ type RunOptions struct {
 	// sentinel re-opens the run. Still bounded by turn/tool/budget limits.
 	// Empty — the default — leaves the run ungated.
 	Goal string
+	// ReasoningEffort, when non-empty ("low" | "medium" | "high"), overrides the
+	// run tier's reasoning effort for this run — a chat magic keyword
+	// ("ultrathink") is the producer. Providers without the knob ignore it.
+	ReasoningEffort string
 }
 
 // Run executes one agent run and returns the persisted run row plus the loop
@@ -776,8 +780,9 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		// advisor is off, which makes the composition identical to before.
 		Advisor:      advisorReviewer,
 		AdvisorNotes: advisorNotes,
-		Goal:         opts.Goal,
-		Soul:         def.SoulMD,
+		Goal:            opts.Goal,
+		ReasoningEffort: opts.ReasoningEffort,
+		Soul:            def.SoulMD,
 		Agents:       def.AgentsMD,
 		Skills:       skills,
 		SkillLoader:  r.skillLoader(scopeID),
