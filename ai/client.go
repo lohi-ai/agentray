@@ -30,7 +30,7 @@ type ClientSpec struct {
 // a compat entry + base_url) — and never requires touching the agent loop.
 func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
 	name := strings.ToLower(strings.TrimSpace(spec.Name))
-	if v := normalizeOAuthVendor(name); v != "" {
+	if v := NormalizeOAuthVendor(name); v != "" {
 		name = v
 	}
 	switch name {

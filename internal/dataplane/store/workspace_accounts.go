@@ -83,15 +83,22 @@ type ProviderAccountInput struct {
 	ExpiresAt    time.Time
 }
 
-// accountColumns is the shared SELECT list for account rows; the vendor join
-// feeds WorkspaceProviderAccountRecord.Vendor.
-const accountColumns = `
+// accountSelect is the shared SELECT list for account rows; the vendor join
+// feeds WorkspaceProviderAccountRecord.Vendor. accountFrom is the FROM/JOIN
+// half; accountColumns is both for plain SELECTs, while AcquireProviderAccount
+// reuses the select list over an updating CTE.
+const accountSelect = `
 SELECT a.id::text, a.provider_id::text, a.workspace_id::text, p.vendor,
        a.email, a.account_id, a.org_id, a.org_name, a.project_id, a.plan,
        a.access_token_ciphertext, a.refresh_token_ciphertext, a.expires_at,
        a.status, a.disabled_cause, a.blocked_until, a.last_used_at, a.usage, a.created_at
+`
+
+const accountFrom = `
 FROM workspace_provider_accounts a
 JOIN workspace_providers p ON p.id = a.provider_id`
+
+const accountColumns = accountSelect + accountFrom
 
 // scanAccountRecord reads one account row. decrypt=true unwraps the token
 // ciphertexts (run path); false leaves them out (member-facing list).
@@ -134,7 +141,7 @@ func (s *Store) ListProviderAccounts(ctx context.Context, userID, workspaceID, p
 		return nil, err
 	}
 	if !member {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 	rows, err := s.pg.Query(ctx, accountColumns+`
 WHERE a.provider_id = $1 AND a.workspace_id = $2
@@ -160,7 +167,7 @@ func (s *Store) CreateProviderAccount(ctx context.Context, userID, workspaceID, 
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return WorkspaceProviderAccount{}, err
 	} else if !ok {
-		return WorkspaceProviderAccount{}, errAgentForbidden
+		return WorkspaceProviderAccount{}, ErrAgentForbidden
 	}
 	// The FK only proves the provider exists — pin it to this workspace so an
 	// admin of workspace A cannot attach accounts to a provider owned by B.
@@ -195,6 +202,37 @@ func (s *Store) CreateProviderAccount(ctx context.Context, userID, workspaceID, 
 		Email: in.Email, AccountID: in.AccountID, OrgID: in.OrgID, OrgName: in.OrgName,
 		ProjectID: in.ProjectID, Plan: in.Plan, Status: "active",
 	}
+	// Re-login is an upsert, not a second row: the same vendor account signing
+	// in again must refresh the existing row's tokens — a duplicate would keep
+	// the old (soon-rotated) refresh token, fail its next refresh, and sit in
+	// the pool as a permanently disabled zombie. Match on the vendor account
+	// id when the vendor supplies one, else on the email.
+	var existingID string
+	err = s.pg.QueryRow(ctx, `
+SELECT id::text FROM workspace_provider_accounts
+WHERE provider_id = $1 AND workspace_id = $2
+  AND (($3 <> '' AND account_id = $3) OR ($3 = '' AND email <> '' AND email = $4))
+LIMIT 1`, providerID, workspaceID, rec.AccountID, rec.Email).Scan(&existingID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return WorkspaceProviderAccount{}, err
+	}
+	if existingID != "" {
+		rec.ID = existingID
+		_, err = s.pg.Exec(ctx, `
+UPDATE workspace_provider_accounts SET
+	email = $3, account_id = $4, org_id = $5, org_name = $6, project_id = $7, plan = $8,
+	access_token_ciphertext = $9, refresh_token_ciphertext = $10, expires_at = $11,
+	status = 'active', disabled_cause = '', blocked_until = NULL, updated_at = now()
+WHERE id = $1 AND provider_id = $2`,
+			existingID, providerID, rec.Email, rec.AccountID, rec.OrgID, rec.OrgName,
+			rec.ProjectID, rec.Plan, accessCipher, refreshCipher, expiresAt)
+		if err != nil {
+			return WorkspaceProviderAccount{}, err
+		}
+		_ = s.recordWorkspaceAudit(ctx, workspaceID, userID, "agent.workspace_provider_account.relogin",
+			"workspace", workspaceID, firstNonEmpty(in.Email, in.AccountID, providerID), "{}")
+		return rec.Public(), nil
+	}
 	err = s.pg.QueryRow(ctx, `
 INSERT INTO workspace_provider_accounts (
 	id, provider_id, workspace_id, email, account_id, org_id, org_name,
@@ -216,7 +254,7 @@ func (s *Store) DeleteProviderAccount(ctx context.Context, userID, workspaceID, 
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return err
 	} else if !ok {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	tag, err := s.pg.Exec(ctx, `
 DELETE FROM workspace_provider_accounts
@@ -242,7 +280,7 @@ func (s *Store) SetProviderAccountStatus(ctx context.Context, userID, workspaceI
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return err
 	} else if !ok {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	tag, err := s.pg.Exec(ctx, `
 UPDATE workspace_provider_accounts
@@ -266,15 +304,29 @@ WHERE id = $1 AND provider_id = $2 AND workspace_id = $3`,
 }
 
 // AcquireProviderAccount picks the least-recently-used account that can serve
-// right now — active and not inside a blocked_until window — and returns it
-// with decrypted tokens. Run-path only; no membership gate (the caller already
-// resolved the workspace). ErrNoUsableAccount when the pool is dry.
+// right now — active and not inside a blocked_until window — stamps it used,
+// and returns it with decrypted tokens. The stamp rides the same statement
+// (FOR UPDATE SKIP LOCKED): without it every concurrent acquire lands on the
+// same LRU head, and an account that keeps failing is re-picked forever
+// because nothing ever advances its cursor. Run-path only; no membership
+// gate (the caller already resolved the workspace). ErrNoUsableAccount when
+// the pool is dry.
 func (s *Store) AcquireProviderAccount(ctx context.Context, providerID string) (WorkspaceProviderAccountRecord, error) {
-	rec, err := scanAccountRecord(s.pg.QueryRow(ctx, accountColumns+`
-WHERE a.provider_id = $1 AND a.status = 'active'
-  AND (a.blocked_until IS NULL OR a.blocked_until < now())
-ORDER BY a.last_used_at ASC NULLS FIRST
-LIMIT 1`, providerID).Scan, true)
+	rec, err := scanAccountRecord(s.pg.QueryRow(ctx, `
+WITH picked AS (
+	UPDATE workspace_provider_accounts SET last_used_at = now()
+	WHERE id = (
+		SELECT id FROM workspace_provider_accounts
+		WHERE provider_id = $1 AND status = 'active'
+		  AND (blocked_until IS NULL OR blocked_until < now())
+		ORDER BY last_used_at ASC NULLS FIRST
+		FOR UPDATE SKIP LOCKED
+		LIMIT 1
+	)
+	RETURNING *
+)`+accountSelect+`
+FROM picked a
+JOIN workspace_providers p ON p.id = a.provider_id`, providerID).Scan, true)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return WorkspaceProviderAccountRecord{}, ErrNoUsableAccount

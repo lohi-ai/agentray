@@ -8,7 +8,6 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
-	"github.com/lohi-ai/agentray/ai"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -45,13 +44,8 @@ const advisorTranscriptBudget = 60_000
 
 // advisorInput is everything one agent's reviewer needs.
 type advisorInput struct {
-	Provider string
-	Model    string
-	BaseURL  string
-	APIKey   string
-	// TokenSource is the OAuth account pool for subscription vendors; nil for
-	// API-key providers.
-	TokenSource ai.TokenSource
+	// Tier is the reviewer's resolved model tier — provider, model, credential.
+	Tier ModelTier
 	// Instructions are the operator's review priorities (storage.AgentAdvisor).
 	// They reach the REVIEWER only — never the agent under review.
 	Instructions string
@@ -75,12 +69,12 @@ type advisorNotes struct {
 // switched off.
 func (r *Runner) advisorReviewer(in advisorInput) advisor.Reviewer {
 	return func(ctx context.Context, rev advisor.Review) ([]advisor.Note, error) {
-		provider, err := buildTracedProvider(in.Provider, in.BaseURL, in.APIKey, in.TokenSource, r.Tracer)
+		provider, err := in.Tier.TracedProvider(r.Tracer)
 		if err != nil {
 			return nil, err
 		}
 		resp, err := provider.Chat(ctx, agentcore.ChatRequest{
-			Model:     in.Model,
+			Model:     in.Tier.Model,
 			MaxTokens: advisorMaxTokens,
 			Messages: []agentcore.Message{
 				{Role: agentcore.RoleSystem, Content: advisorSystemPrompt(in.Instructions)},

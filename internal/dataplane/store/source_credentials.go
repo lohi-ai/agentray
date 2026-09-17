@@ -67,7 +67,7 @@ func (s *Store) CreateSourceCredential(ctx context.Context, userID, projectID, n
 		return SourceCredential{}, err
 	}
 	if !canManage {
-		return SourceCredential{}, errAgentForbidden
+		return SourceCredential{}, ErrAgentForbidden
 	}
 	if len(dsn) < 8 {
 		return SourceCredential{}, fmt.Errorf("credential material looks too short to be a DSN")
@@ -107,7 +107,7 @@ func (s *Store) CreateSourceConnectorIdempotent(ctx context.Context, userID, pro
 		return DataConnector{}, err
 	}
 	if !canManage {
-		return DataConnector{}, errAgentForbidden
+		return DataConnector{}, ErrAgentForbidden
 	}
 	if len(dsn) < 8 {
 		return DataConnector{}, fmt.Errorf("credential material looks too short to be a DSN")
@@ -182,7 +182,7 @@ func (s *Store) RevokeSourceCredential(ctx context.Context, userID, projectID, c
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	tag, err := s.pg.Exec(ctx, `
 UPDATE source_credentials SET revoked_at = now()
@@ -258,7 +258,7 @@ func (s *Store) CreateDataConnectorForUser(ctx context.Context, userID, projectI
 		return DataConnector{}, err
 	}
 	if !canManage {
-		return DataConnector{}, errAgentForbidden
+		return DataConnector{}, ErrAgentForbidden
 	}
 	c, err := s.CreateDataConnectorForProject(ctx, projectID, name, kind, credentialID)
 	if err != nil {

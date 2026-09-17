@@ -43,7 +43,7 @@ func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBoo
 		if providerID != "" {
 			res = testOwnedProvider(ctx, book, providerID, model, mgr)
 		} else {
-			res = testTierProviderCtx(ctx, provider, baseURL, model, key)
+			res = testTierProviderCtx(ctx, provider, baseURL, model, key, tierTokenSource(mgr, provider, cfg.FlashProviderID))
 		}
 		results[name] = res
 		if ok, _ := res["ok"].(bool); !ok {
@@ -76,8 +76,18 @@ func testOwnedProvider(ctx context.Context, book *storage.WorkspaceProviderBook,
 	return map[string]any{"ok": true}
 }
 
-func testTierProviderCtx(ctx context.Context, provider, baseURL, model, key string) map[string]any {
-	p, err := agentruntime.NewTierProvider(provider, baseURL, key)
+// tierTokenSource resolves the account pool a legacy (provider-string-only)
+// OAuth tier draws from: the tier inherits flash's provider row, so flash's
+// providerID keys the pool. Nil for key vendors and when no pool exists.
+func tierTokenSource(mgr *oauth.Manager, provider, flashProviderID string) ai.TokenSource {
+	if mgr == nil || flashProviderID == "" || !ai.IsOAuthVendor(provider) {
+		return nil
+	}
+	return mgr.Pool(flashProviderID)
+}
+
+func testTierProviderCtx(ctx context.Context, provider, baseURL, model, key string, src ai.TokenSource) map[string]any {
+	p, err := agentruntime.NewTierProviderWithSource(provider, baseURL, key, src)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}

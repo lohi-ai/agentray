@@ -14,7 +14,7 @@ import (
 // rather than by two switches that have to agree.
 func New(spec Spec) (Provider, error) {
 	vendor := NormalizeVendor(spec.Vendor)
-	if v := normalizeOAuthVendor(vendor); v != "" {
+	if v := NormalizeOAuthVendor(vendor); v != "" {
 		vendor = v
 	}
 	id := strings.TrimSpace(spec.ID)

@@ -14,8 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -148,19 +147,11 @@ func (m *Manager) deletePending(key string) {
 // --- browser login ----------------------------------------------------------
 
 // providerVendor resolves the provider row's vendor for a workspace member.
-// ListWorkspaceProviders enforces membership; a missing row is pgx.ErrNoRows
-// so the HTTP layer maps it to 404.
+// One membership-scoped SELECT — the full provider book would run three extra
+// queries (providers scan, tiers row, account counts) to answer one column.
+// A missing row or non-member is pgx.ErrNoRows so the HTTP layer maps it to 404.
 func (m *Manager) providerVendor(ctx context.Context, userID, workspaceID, providerID string) (string, error) {
-	providers, err := m.store.ListWorkspaceProviders(ctx, userID, workspaceID)
-	if err != nil {
-		return "", err
-	}
-	for _, p := range providers {
-		if p.ID == providerID {
-			return p.Vendor, nil
-		}
-	}
-	return "", pgx.ErrNoRows
+	return m.store.WorkspaceProviderVendor(ctx, userID, workspaceID, providerID)
 }
 
 // StartLogin generates PKCE + state, records the pending attempt, and returns
@@ -212,7 +203,7 @@ func (m *Manager) startLogin(vendor, workspaceID, providerID string) (LoginStart
 	}
 
 	m.putPending(state, PendingLogin{
-		Vendor:      normalizeVendor(vendor),
+		Vendor:      ai.NormalizeOAuthVendor(vendor),
 		WorkspaceID: workspaceID,
 		ProviderID:  providerID,
 		Verifier:    verifier,
@@ -234,7 +225,14 @@ func parsePastedCode(pasted string) (code, state string, err error) {
 	if pasted == "" {
 		return "", "", &Error{Kind: "validation", Message: "missing authorization code"}
 	}
-	if u, parseErr := url.Parse(pasted); parseErr == nil && u.Scheme != "" && u.Host != "" {
+	// A pasted redirect may arrive without its scheme (browsers strip it when
+	// copying from the address bar): "localhost:54545/callback?code=…". Treat a
+	// scheme-less string that still looks like host/path?query as a URL.
+	candidate := pasted
+	if !strings.Contains(candidate, "://") && strings.Contains(candidate, "?") {
+		candidate = "http://" + candidate
+	}
+	if u, parseErr := url.Parse(candidate); parseErr == nil && u.Scheme != "" && u.Host != "" {
 		q := u.Query()
 		code = q.Get("code")
 		state = q.Get("state")
@@ -242,6 +240,12 @@ func parsePastedCode(pasted string) (code, state string, err error) {
 			return "", "", &Error{Kind: "validation", Message: "missing authorization code in redirect URL"}
 		}
 		return code, state, nil
+	}
+	// Bare `code#state` — the shape Anthropic's CLI flow prints when the
+	// localhost redirect cannot be reached. An empty state is fine: the pending
+	// attempt's state is implied.
+	if c, st, ok := strings.Cut(pasted, "#"); ok && c != "" {
+		return c, st, nil
 	}
 	return pasted, "", nil
 }
@@ -263,6 +267,15 @@ func (m *Manager) CompleteLogin(ctx context.Context, userID, workspaceID, provid
 	}
 	if pastedState != "" && pastedState != p.State {
 		return storage.WorkspaceProviderAccount{}, &Error{Kind: "validation", Message: "state mismatch in pasted redirect"}
+	}
+	// The manage check runs BEFORE the exchange: the authorization code is
+	// single-use, so a member who cannot add accounts must be rejected before
+	// the code is spent — otherwise the code is burned and an admin can never
+	// complete the same sign-in.
+	if ok, err := m.store.UserCanManageWorkspace(ctx, userID, workspaceID); err != nil {
+		return storage.WorkspaceProviderAccount{}, err
+	} else if !ok {
+		return storage.WorkspaceProviderAccount{}, storage.ErrAgentForbidden
 	}
 
 	res, err := m.exchangeLogin(ctx, p, code)
@@ -416,11 +429,7 @@ func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code,
 }
 
 func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
+	return agentcore.TruncateBytes(strings.TrimSpace(s), n)
 }
 
 // --- after-exchange enrichment ----------------------------------------------
@@ -615,7 +624,6 @@ const (
 	antigravityFreeTierID  = "free-tier"
 	antigravityOnboardCap  = 30 * time.Second
 	antigravityOnboardPoll = 1 * time.Second
-	antigravityUserAgent   = "antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)"
 )
 
 func (m *Manager) fetchGoogleUserEmail(ctx context.Context, d *providerDescriptor, accessToken string) (string, error) {
@@ -662,7 +670,7 @@ func (m *Manager) cloudCodeRequest(ctx context.Context, method, url, accessToken
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", antigravityUserAgent)
+	req.Header.Set("User-Agent", ai.AntigravityUserAgent)
 	resp, err := m.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -734,6 +742,10 @@ func (m *Manager) discoverAntigravityProject(ctx context.Context, d *providerDes
 		if err := m.onboardAntigravityUser(ctx, d, accessToken); err != nil {
 			return "", err
 		}
+	} else if project := extractAntigravityProject(initial); project != "" {
+		// Already onboarded with a project — the reload below would be a
+		// second round-trip for information we already hold.
+		return project, nil
 	}
 	refreshed, err := m.loadCodeAssist(ctx, d, accessToken)
 	if err != nil {

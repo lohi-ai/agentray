@@ -56,9 +56,14 @@ func NewCodexProvider() *CodexProvider {
 	}
 }
 
-// applyOAuthToken installs the account credential for the next request
-// (pooledProvider's oauthTokenApplier seam).
-func (p *CodexProvider) applyOAuthToken(tok OAuthToken) { p.tok = tok }
+// applyOAuthToken returns a per-call clone carrying the account credential
+// (pooledProvider's oauthTokenApplier seam) so concurrent calls never share
+// the token field.
+func (p *CodexProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+	c := *p
+	c.tok = tok
+	return &c
+}
 
 func (p *CodexProvider) Name() string        { return VendorOpenAICodex }
 func (p *CodexProvider) SupportsTools() bool { return true }
@@ -350,7 +355,10 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 }
 
 // eventError folds a response.failed / error SSE event into a provider error,
-// preferring the nested error object's message and code.
+// preferring the nested error object's message and code. The code is mapped
+// onto the HTTP status it implies so the retry ladder and the account pool
+// classify it structurally — a Status-0 error is a transport failure to them,
+// so a rate limit reported in-band would never block the account.
 func (p *CodexProvider) eventError(ev *codexStreamEvent) error {
 	msg, code := "", ""
 	if ev.Error != nil {
@@ -371,35 +379,23 @@ func (p *CodexProvider) eventError(ev *codexStreamEvent) error {
 	if code != "" {
 		msg = fmt.Sprintf("%s (code=%s)", msg, code)
 	}
-	return agentcore.NewProviderError(p.Name(), nil, msg)
+	status := http.StatusInternalServerError
+	switch code {
+	case "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached", "too_many_requests":
+		status = http.StatusTooManyRequests
+	case "unauthorized", "invalid_api_key", "authentication_error", "token_expired":
+		status = http.StatusUnauthorized
+	case "forbidden", "permission_denied":
+		status = http.StatusForbidden
+	}
+	return &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: msg}
 }
 
 // Chat consumes the SSE stream to completion and returns the assembled
 // response — the backend has no non-streaming mode, so this is the simplest
 // correct implementation rather than a second wire path.
 func (p *CodexProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	ch, err := p.Stream(ctx, req)
-	if err != nil {
-		return agentcore.ChatResponse{}, err
-	}
-	var resp agentcore.ChatResponse
-	resp.Message.Role = agentcore.RoleAssistant
-	for d := range ch {
-		if d.Err != nil {
-			return agentcore.ChatResponse{}, d.Err
-		}
-		resp.Message.Content += d.ContentDelta
-		if d.ToolCall != nil {
-			resp.Message.ToolCalls = append(resp.Message.ToolCalls, *d.ToolCall)
-		}
-		if d.Usage.InputTokens != 0 || d.Usage.OutputTokens != 0 || d.Usage.CacheReadTokens != 0 {
-			resp.Usage = d.Usage
-		}
-		if d.StopReason != "" {
-			resp.StopReason = d.StopReason
-		}
-	}
-	return resp, nil
+	return chatViaStream(ctx, p, req)
 }
 
 // listCodexModels calls GET {base}/codex/models?client_version=…, falling back
@@ -436,10 +432,10 @@ func (p *CodexProvider) listCodexModels(ctx context.Context, client HTTPDoer, to
 			continue
 		}
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return nil, fmt.Errorf("list codex models: status %d: %s", status, strings.TrimSpace(string(data)))
+			return nil, &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 		}
 		if status >= 400 {
-			lastErr = fmt.Errorf("list codex models: status %d: %s", status, strings.TrimSpace(string(data)))
+			lastErr = &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 			continue
 		}
 		models, err := parseCodexModels(data)

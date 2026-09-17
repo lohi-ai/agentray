@@ -32,15 +32,13 @@ type BuildParams struct {
 	// this empty preserves the original single-agent behavior byte-for-byte. A
 	// non-default agent passes its own id here while keeping ProjectID for the
 	// analytics tools (which read project-wide data through the usecase layer).
-	ScopeID  string
-	Provider string // "openai" | "anthropic"
-	Model    string
-	BaseURL  string // optional per-config override
-	APIKey   string // decrypted, never persisted from here
-	// TokenSource is the OAuth account pool the primary provider draws a live
-	// access token from per request (subscription vendors only; nil for API-key
-	// providers).
-	TokenSource ai.TokenSource
+	ScopeID string
+	// Rungs is the model ladder for the run: rungs[0] is the primary
+	// provider+model, the rest are the tier's in-provider fallback models tried
+	// when the rung above errors. Built by ModelTier.Rungs — the runner never
+	// assembles rungs itself. Empty is rejected: a run with no model cannot
+	// start.
+	Rungs       []agentcore.ModelRung
 	Scopes      Scopes
 	Soul        string
 	Agents      string
@@ -58,15 +56,6 @@ type BuildParams struct {
 	// submit_recommendation no longer ends the run, so the model still produces a
 	// textual reply for the user instead of terminating silently.
 	Trigger string
-	// Escalation is the ordered fallback ladder (higher tiers) tried when the
-	// primary provider/model errors. Built by the runner from the workspace's
-	// per-tier model pool; empty disables fallback.
-	Escalation []agentcore.ModelRung
-	// ContextWindow is the primary model's input window in tokens, which caps the
-	// compaction budget. Built by the runner from the primary tier (operator
-	// override, else the ai package's answer for the model id); 0 leaves
-	// MaxContextTokens to stand alone.
-	ContextWindow int
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
 	// to the agent's "compaction" task tier instead of borrowing the active rung.
 	// Both unset keeps agentcore's default (the active rung summarizes).
@@ -247,7 +236,10 @@ func resolveBaseURL(configBaseURL string) string {
 // Anthropic (and any vendor without a base_url) returns nil — memory then falls
 // back to keyword recall with zero config.
 func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
-	if apiKey == "" {
+	if apiKey == "" || apiKey == ai.OAuthPoolKey {
+		// The OAuth sentinel is not a credential — an OAuth vendor with a
+		// stored base_url would otherwise ship "Bearer oauth-pool" to
+		// {base}/embeddings and silently break vector recall.
 		return nil
 	}
 	switch provider {
@@ -264,17 +256,12 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 	}
 }
 
-// NewTierProvider builds an LLMProvider for one tier's settings, applying the
-// same routing as a run (OpenAI wire / Anthropic / OpenAI-compatible vendor).
-// Exported for the config-test endpoint so a connectivity check uses the exact
-// provider a real run would. OAuth vendors need NewTierProviderWithSource —
-// without a TokenSource they cannot authenticate.
-func NewTierProvider(provider, baseURL, apiKey string) (agentcore.LLMProvider, error) {
-	return NewTierProviderWithSource(provider, baseURL, apiKey, nil)
-}
-
-// NewTierProviderWithSource is NewTierProvider plus the OAuth account pool a
-// subscription vendor draws its per-request access token from.
+// NewTierProviderWithSource builds an LLMProvider for one tier's settings,
+// applying the same routing as a run (OpenAI wire / Anthropic /
+// OpenAI-compatible vendor). Exported for the config-test endpoint so a
+// connectivity check uses the exact provider a real run would. ts is the OAuth
+// account pool a subscription vendor draws its per-request access token from —
+// nil for API-key vendors; without it an OAuth vendor cannot authenticate.
 func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSource) (agentcore.LLMProvider, error) {
 	// A connectivity check is not a run and has no trace to attribute; calls are
 	// still priced.
@@ -339,29 +326,6 @@ func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource) (agentco
 		return nil, err
 	}
 	return prov, nil
-}
-
-// buildRungs turns resolved tier configs into agentcore escalation rungs (used
-// for the tiers above the primary). The rungs are raw; the composition's monitor
-// plugin decorates them, so a run that escalates does not silently stop being
-// priced or traced.
-func buildRungs(tcs []TierConfig) ([]agentcore.ModelRung, error) {
-	rungs := make([]agentcore.ModelRung, 0, len(tcs))
-	for _, tc := range tcs {
-		prov, err := buildProvider(tc.Provider, tc.BaseURL, tc.APIKey, tc.TokenSource)
-		if err != nil {
-			return nil, err
-		}
-		rungs = append(rungs, agentcore.ModelRung{
-			Provider: prov,
-			Model:    tc.Model,
-			// Each rung carries its own window, so escalating from a large-window
-			// model to a small one re-derives the compaction budget instead of
-			// carrying the first rung's headroom onto a model that cannot hold it.
-			ContextWindow: EffectiveContextWindow(tc),
-		})
-	}
-	return rungs, nil
 }
 
 // revisableGoal reports whether this run installs the AGENT-revisable goal gate.
@@ -445,16 +409,18 @@ func permittedToolNames(p BuildParams) []string {
 // mirrors — the migration moved where the capabilities come from, not how a
 // caller describes a run.
 func Build(p BuildParams) (*agentcore.Agent, error) {
-	if p.APIKey == "" {
-		return nil, fmt.Errorf("agentruntime: missing API key")
+	if len(p.Rungs) == 0 {
+		return nil, fmt.Errorf("agentruntime: missing model rungs")
+	}
+	for i, r := range p.Rungs {
+		if r.Provider == nil {
+			return nil, fmt.Errorf("agentruntime: rung %d (%q) has no provider", i, r.Model)
+		}
 	}
 	if p.Data == nil {
 		return nil, fmt.Errorf("agentruntime: missing data source")
 	}
-	llm, err := buildProvider(p.Provider, p.BaseURL, p.APIKey, p.TokenSource)
-	if err != nil {
-		return nil, fmt.Errorf("agentruntime: %w", err)
-	}
+	primary := p.Rungs[0]
 
 	// The persona/skills/memory scope defaults to the project (the default agent),
 	// so an unset ScopeID preserves the original single-agent behavior exactly.
@@ -467,10 +433,10 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 
 	names := permittedToolNames(p)
 	cfg := agentcore.Config{
-		Provider:           llm,
-		Model:              p.Model,
-		ContextWindow:      p.ContextWindow,
-		Escalation:         p.Escalation,
+		Provider:           primary.Provider,
+		Model:              primary.Model,
+		ContextWindow:      primary.ContextWindow,
+		Escalation:         p.Rungs[1:],
 		CompactionProvider: p.CompactionProvider,
 		CompactionModel:    p.CompactionModel,
 		Tools:              tools,

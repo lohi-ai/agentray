@@ -28,7 +28,7 @@ const OAuthPoolKey = "oauth-pool"
 // vendors. Such a provider row has no api_key; it owns a pool of accounts in
 // workspace_provider_accounts.
 func IsOAuthVendor(vendor string) bool {
-	return normalizeOAuthVendor(vendor) != ""
+	return NormalizeOAuthVendor(vendor) != ""
 }
 
 // OAuthToken is one acquired account credential, handed to a wire client for a
@@ -64,8 +64,10 @@ type TokenSource interface {
 	Report(ctx context.Context, tok OAuthToken, err error)
 }
 
-// normalizeOAuthVendor folds aliases onto the canonical vendor ids.
-func normalizeOAuthVendor(v string) string {
+// NormalizeOAuthVendor folds aliases onto the canonical vendor ids. Exported
+// because the oauth package's descriptor lookup must agree with this table —
+// a second copy has already drifted once (missing case-fold, wrong zero value).
+func NormalizeOAuthVendor(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "claude-code", "claude_code", "claudecode", "anthropic-oauth", "anthropic-claude-code":
 		return VendorClaudeCode

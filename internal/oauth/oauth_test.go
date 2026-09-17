@@ -330,8 +330,8 @@ func TestAntigravityExchangeForm(t *testing.T) {
 	if res.Email != "g@example.com" || res.ProjectID != "proj-1" {
 		t.Errorf("email/project = %q/%q", res.Email, res.ProjectID)
 	}
-	if loadAssistHits != 2 {
-		t.Errorf("loadCodeAssist hits = %d, want 2 (initial + reload; paidTier present → no re-post, no onboard)", loadAssistHits)
+	if loadAssistHits != 1 {
+		t.Errorf("loadCodeAssist hits = %d, want 1 (project+currentTier on the first response → no reload, no onboard)", loadAssistHits)
 	}
 }
 
@@ -655,12 +655,12 @@ func TestPoolAcquireDisablesOnRefreshFailure(t *testing.T) {
 func TestPoolReport(t *testing.T) {
 	ctx := context.Background()
 
-	// nil error → touch.
+	// nil error → no mark (the acquire already stamped last_used_at).
 	store := &fakePoolStore{}
 	pool := newPool(store, "p", testDescriptors("http://unused"), &http.Client{})
 	pool.Report(ctx, ai.OAuthToken{AccountID: "a1"}, nil)
-	if len(store.touched) != 1 || store.touched[0] != "a1" {
-		t.Errorf("touched = %v", store.touched)
+	if len(store.touched) != 0 {
+		t.Errorf("touched = %v, want none", store.touched)
 	}
 
 	// 429 with Retry-After → blocked until now+RetryAfter.

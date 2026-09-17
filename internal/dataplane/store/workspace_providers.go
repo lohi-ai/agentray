@@ -49,7 +49,10 @@ type WorkspaceProviderInput struct {
 }
 
 // WorkspaceTierSelection is the 3-tier pointer into configured providers.
-// A blank lite/pro provider+model inherits flash at resolve time.
+// A blank lite/pro provider+model inherits flash at resolve time. Each tier's
+// FallbackModel is an optional second model of the SAME provider the run
+// retries on when the primary model fails — in-tier fallback, not escalation
+// to another tier.
 type WorkspaceTierSelection struct {
 	FlashProviderID string
 	FlashModel      string
@@ -64,6 +67,10 @@ type WorkspaceTierSelection struct {
 	FlashContextWindow int
 	LiteContextWindow  int
 	ProContextWindow   int
+	// Per-tier fallback models — a model id on the tier's own provider.
+	FlashFallbackModel string
+	LiteFallbackModel  string
+	ProFallbackModel   string
 }
 
 // LegacyWorkspaceTiers is a pre-upgrade one-row-per-workspace tier record
@@ -224,6 +231,14 @@ func NewWorkspaceProviderRecord(id, workspaceID string, in WorkspaceProviderInpu
 		rec.Name = vendor
 	}
 	// OAuth vendors hold no static key — their credential is the account pool.
+	// An API key on an OAuth-vendor alias ("codex", "chatgpt", "antigravity")
+	// means the caller wanted a custom endpoint, not the subscription flow —
+	// silently dropping the key would strand them on a provider that can never
+	// authenticate. Say so instead.
+	if oauth && strings.TrimSpace(in.APIKey) != "" && in.APIKey != "-" {
+		return WorkspaceProviderRecord{}, fmt.Errorf(
+			"provider %q is a subscription sign-in vendor and takes no API key — for a custom OpenAI-compatible endpoint use vendor \"openai-compat\"", in.Vendor)
+	}
 	if !oauth {
 		switch strings.TrimSpace(in.APIKey) {
 		case "":
@@ -335,13 +350,16 @@ func ResolveWorkspaceRun(providers []WorkspaceProviderRecord, sel WorkspaceTierS
 
 	cfg := WorkspaceModelTiers{
 		Provider: fv, Model: fm, BaseURL: fb, HasKey: fh, ContextWindow: sel.FlashContextWindow,
-		LiteProvider: lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh, LiteContextWindow: sel.LiteContextWindow,
-		ProProvider: pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph, ProContextWindow: sel.ProContextWindow,
-		ModelFallback:   sel.ModelFallback,
-		FlashProviderID: sel.FlashProviderID,
-		LiteProviderID:  sel.LiteProviderID,
-		ProProviderID:   sel.ProProviderID,
-		Providers:       publicProviders(providers),
+		FallbackModel: sel.FlashFallbackModel,
+		LiteProvider:  lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh, LiteContextWindow: sel.LiteContextWindow,
+		LiteFallbackModel: sel.LiteFallbackModel,
+		ProProvider:       pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph, ProContextWindow: sel.ProContextWindow,
+		ProFallbackModel: sel.ProFallbackModel,
+		ModelFallback:    sel.ModelFallback,
+		FlashProviderID:  sel.FlashProviderID,
+		LiteProviderID:   sel.LiteProviderID,
+		ProProviderID:    sel.ProProviderID,
+		Providers:        publicProviders(providers),
 	}
 	if cfg.Provider == "" && len(providers) > 0 {
 		cfg.Provider = providers[0].Vendor
@@ -452,7 +470,7 @@ func (s *Store) ListWorkspaceProviders(ctx context.Context, userID, workspaceID 
 		return nil, err
 	}
 	if !member {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 	book, err := s.loadBook(ctx, workspaceID, false)
 	if err != nil {
@@ -466,7 +484,7 @@ func (s *Store) CreateWorkspaceProvider(ctx context.Context, userID, workspaceID
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return WorkspaceProvider{}, err
 	} else if !ok {
-		return WorkspaceProvider{}, errAgentForbidden
+		return WorkspaceProvider{}, ErrAgentForbidden
 	}
 	rec, err := NewWorkspaceProviderRecord("", workspaceID, in, nil)
 	if err != nil {
@@ -496,7 +514,7 @@ func (s *Store) UpdateWorkspaceProvider(ctx context.Context, userID, workspaceID
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return WorkspaceProvider{}, err
 	} else if !ok {
-		return WorkspaceProvider{}, errAgentForbidden
+		return WorkspaceProvider{}, ErrAgentForbidden
 	}
 	existing, err := s.loadProviderRecord(ctx, workspaceID, providerID, false)
 	if err != nil {
@@ -507,7 +525,13 @@ func (s *Store) UpdateWorkspaceProvider(ctx context.Context, userID, workspaceID
 		return WorkspaceProvider{}, err
 	}
 	var cipherArg any
-	if !ai.IsOAuthVendor(rec.Vendor) {
+	if ai.IsOAuthVendor(rec.Vendor) {
+		// An OAuth row never reads api_key_ciphertext — but COALESCE($6, …)
+		// keeps whatever a previous API-key vendor stored, and loadBook would
+		// then report HasKey for a provider that has no usable credential,
+		// suppressing the hosted-model fallback. Clear it instead.
+		cipherArg = ""
+	} else {
 		cipherArg, err = resolveCipherArg(in.APIKey)
 		if err != nil {
 			return WorkspaceProvider{}, err
@@ -535,7 +559,7 @@ func (s *Store) DeleteWorkspaceProvider(ctx context.Context, userID, workspaceID
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return err
 	} else if !ok {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if _, err := s.pg.Exec(ctx, `
 UPDATE workspace_model_tiers SET
@@ -600,9 +624,14 @@ FROM workspace_providers WHERE workspace_id = $1 ORDER BY created_at ASC`, works
 		if err := rows.Scan(&rec.ID, &rec.WorkspaceID, &rec.Vendor, &rec.Name, &rec.BaseURL, &cipher); err != nil {
 			return nil, err
 		}
-		rec.HasKey = cipher != ""
+		// An OAuth vendor's credential is its account pool, never the stored
+		// key — a leftover ciphertext (a row written before the vendor switch,
+		// or a legacy backfill) must not count as "has a key", or
+		// providerBookHasKey suppresses the hosted-model fallback for a
+		// provider that cannot actually authenticate.
+		rec.HasKey = cipher != "" && !ai.IsOAuthVendor(rec.Vendor)
 		rec.AuthType = providerAuthType(rec.Vendor)
-		if decrypt && cipher != "" {
+		if decrypt && cipher != "" && !ai.IsOAuthVendor(rec.Vendor) {
 			plain, decErr := decryptAgentKey(cipher)
 			if decErr != nil {
 				return nil, decErr
@@ -617,15 +646,18 @@ FROM workspace_providers WHERE workspace_id = $1 ORDER BY created_at ASC`, works
 
 	var flashID, liteID, proID *string
 	var flashModel, liteModel, proModel string
+	var flashFallback, liteFallback, proFallback string
 	var fallback bool
 	var flashWindow, liteWindow, proWindow int
 	err = s.pg.QueryRow(ctx, `
 SELECT flash_provider_id::text, model, lite_provider_id::text, lite_model,
        pro_provider_id::text, pro_model, model_fallback,
-       context_window, lite_context_window, pro_context_window
+       context_window, lite_context_window, pro_context_window,
+       fallback_model, lite_fallback_model, pro_fallback_model
 FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		&flashID, &flashModel, &liteID, &liteModel, &proID, &proModel, &fallback,
-		&flashWindow, &liteWindow, &proWindow)
+		&flashWindow, &liteWindow, &proWindow,
+		&flashFallback, &liteFallback, &proFallback)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -637,6 +669,9 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		book.Sel.FlashContextWindow = flashWindow
 		book.Sel.LiteContextWindow = liteWindow
 		book.Sel.ProContextWindow = proWindow
+		book.Sel.FlashFallbackModel = flashFallback
+		book.Sel.LiteFallbackModel = liteFallback
+		book.Sel.ProFallbackModel = proFallback
 		if flashID != nil {
 			book.Sel.FlashProviderID = *flashID
 		}
@@ -764,8 +799,9 @@ INSERT INTO workspace_model_tiers (
 	lite_provider, lite_model, lite_base_url,
 	pro_provider, pro_model, pro_base_url,
 	model_fallback, flash_provider_id, lite_provider_id, pro_provider_id,
-	context_window, lite_context_window, pro_context_window
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17)
+	context_window, lite_context_window, pro_context_window,
+	fallback_model, lite_fallback_model, pro_fallback_model
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17,$18,$19,$20)
 ON CONFLICT (workspace_id) DO UPDATE SET
 	provider = EXCLUDED.provider,
 	model = EXCLUDED.model,
@@ -783,10 +819,14 @@ ON CONFLICT (workspace_id) DO UPDATE SET
 	context_window = EXCLUDED.context_window,
 	lite_context_window = EXCLUDED.lite_context_window,
 	pro_context_window = EXCLUDED.pro_context_window,
+	fallback_model = EXCLUDED.fallback_model,
+	lite_fallback_model = EXCLUDED.lite_fallback_model,
+	pro_fallback_model = EXCLUDED.pro_fallback_model,
 	updated_at = now()`,
 		workspaceID, fv, fm, fb, lv, lm, lb, pv, pm, pb, sel.ModelFallback,
 		sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID,
-		sel.FlashContextWindow, sel.LiteContextWindow, sel.ProContextWindow)
+		sel.FlashContextWindow, sel.LiteContextWindow, sel.ProContextWindow,
+		sel.FlashFallbackModel, sel.LiteFallbackModel, sel.ProFallbackModel)
 	return err
 }
 
@@ -795,7 +835,7 @@ func (s *Store) SaveWorkspaceTierSelection(ctx context.Context, userID, workspac
 	if ok, err := s.userCanManageWorkspace(ctx, userID, workspaceID); err != nil {
 		return WorkspaceModelTiers{}, err
 	} else if !ok {
-		return WorkspaceModelTiers{}, errAgentForbidden
+		return WorkspaceModelTiers{}, ErrAgentForbidden
 	}
 	book, err := s.loadBook(ctx, workspaceID, false)
 	if err != nil {

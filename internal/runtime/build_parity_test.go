@@ -142,9 +142,9 @@ func TestBuildWithoutOptionalCapabilities(t *testing.T) {
 // would fail much later, inside a run.
 func TestBuildRejectsAnIncompleteRun(t *testing.T) {
 	p := representativeBuildParams()
-	p.APIKey = ""
+	p.Rungs = nil
 	if _, err := Build(p); err == nil {
-		t.Fatal("Build accepted a run with no API key")
+		t.Fatal("Build accepted a run with no model rungs")
 	}
 	p = representativeBuildParams()
 	p.Data = nil
@@ -162,11 +162,11 @@ func TestBuildRejectsAnIncompleteRun(t *testing.T) {
 // so a nil store satisfies the interface without standing up Postgres.
 func representativeBuildParams() BuildParams {
 	return BuildParams{
-		ProjectID:            "proj-1",
-		ScopeID:              "agent-1",
-		Provider:             "openai",
-		Model:                "gpt-5",
-		APIKey:               "sk-test",
+		ProjectID: "proj-1",
+		ScopeID:   "agent-1",
+		Rungs: []agentcore.ModelRung{
+			{Provider: stubProvider{name: "openai"}, Model: "gpt-5"},
+		},
 		Scopes:               Scopes{},
 		Soul:                 "soul",
 		Agents:               "agents",
@@ -202,6 +202,21 @@ func representativeBuildParams() BuildParams {
 		ReportLogInvariant: func(observe.LogInvariantViolation) {},
 	}
 }
+
+// stubProvider is a no-call LLMProvider for composition tests: Build only needs
+// the rung to exist; nothing here ever reaches the wire.
+type stubProvider struct{ name string }
+
+func (s stubProvider) Name() string { return s.name }
+func (s stubProvider) Chat(context.Context, agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	return agentcore.ChatResponse{}, nil
+}
+func (s stubProvider) Stream(context.Context, agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	ch := make(chan agentcore.ChatDelta)
+	close(ch)
+	return ch, nil
+}
+func (s stubProvider) SupportsTools() bool { return true }
 
 type paritySandbox struct{}
 

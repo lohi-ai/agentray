@@ -153,7 +153,7 @@ func (s *Store) CreateDataConnector(ctx context.Context, userID, projectID, name
 		return DataConnector{}, err
 	}
 	if !canManage {
-		return DataConnector{}, errAgentForbidden
+		return DataConnector{}, ErrAgentForbidden
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -218,7 +218,7 @@ func (s *Store) DeleteDataConnector(ctx context.Context, userID, projectID, conn
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID)
 	if err != nil {
@@ -266,7 +266,7 @@ func (s *Store) ConnectorDSNForUser(ctx context.Context, userID, projectID, conn
 		return "", "", err
 	}
 	if !canManage {
-		return "", "", errAgentForbidden
+		return "", "", ErrAgentForbidden
 	}
 	return s.ConnectorDSNForRun(ctx, projectID, connectorID)
 }
@@ -304,7 +304,7 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 		return ConnectorSync{}, err
 	}
 	if !canManage {
-		return ConnectorSync{}, errAgentForbidden
+		return ConnectorSync{}, ErrAgentForbidden
 	}
 	if err := validateSyncInput(in); err != nil {
 		return ConnectorSync{}, err
@@ -349,7 +349,7 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 		return ConnectorSync{}, err
 	}
 	if !canManage {
-		return ConnectorSync{}, errAgentForbidden
+		return ConnectorSync{}, ErrAgentForbidden
 	}
 	if err := validateSyncInput(in); err != nil {
 		return ConnectorSync{}, err
@@ -420,7 +420,7 @@ func (s *Store) DeleteConnectorSync(ctx context.Context, userID, projectID, sync
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID)
 	return err

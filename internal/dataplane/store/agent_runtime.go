@@ -879,7 +879,7 @@ func (s *Store) UpsertAgentSkill(ctx context.Context, userID, projectID, agentID
 		return AgentSkill{}, err
 	}
 	if !canManage {
-		return AgentSkill{}, errAgentForbidden
+		return AgentSkill{}, ErrAgentForbidden
 	}
 	var out AgentSkill
 	if sk.ID == "" {
@@ -915,7 +915,7 @@ func (s *Store) DeleteAgentSkill(ctx context.Context, userID, projectID, agentID
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM agent_skills WHERE id = $1 AND scope_id = $2`, id, scopeID)
 	return err
@@ -933,7 +933,7 @@ func (s *Store) ApproveAgentSkill(ctx context.Context, userID, projectID, agentI
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `
 UPDATE agent_skills SET status = 'active', enabled = true, updated_at = now()

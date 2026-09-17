@@ -347,31 +347,18 @@ func (e *authoringProviderInitError) Unwrap() error { return e.err }
 
 // authoringProvider resolves the workspace's authoring model tier (same
 // resolution as the agent-definition draft endpoint) into a callable provider.
-// It is the single owner of the tier/fallback rules both authoring endpoints
-// use: the pro tier's overrides, falling back to the flash default, then to the
-// workspace defaults and the flash key.
+// The tier owns its own fallback model; authoring is a single call, so only
+// the primary rung is used.
 func authoringProvider(ctx context.Context, tiers workspaceTierReader, workspaceID string, poolFor func(providerID string) ai.TokenSource) (agentcore.LLMProvider, string, error) {
 	cfg, keys, err := tiers.WorkspaceTiersForRun(ctx, workspaceID)
 	if err != nil {
 		return nil, "", err
 	}
-	pro := agentruntime.TierSetFromWorkspace(cfg, keys, poolFor).Resolve(agentruntime.DefaultAuthoringTier)
-	if strings.TrimSpace(pro.Provider) == "" {
-		pro.Provider = cfg.Provider
-	}
-	if strings.TrimSpace(pro.BaseURL) == "" {
-		pro.BaseURL = cfg.BaseURL
-	}
-	if pro.APIKey == "" {
-		pro.APIKey = keys["flash"]
-	}
-	if strings.TrimSpace(pro.Model) == "" {
-		pro.Model = cfg.Model
-	}
+	pro := agentruntime.TierSetFromWorkspace(cfg, keys, poolFor).For(agentruntime.DefaultAuthoringTier)
 	if strings.TrimSpace(pro.Model) == "" || strings.TrimSpace(pro.APIKey) == "" {
 		return nil, "", fmt.Errorf("authoring model tier is not configured")
 	}
-	provider, err := agentruntime.NewTierProviderWithSource(pro.Provider, pro.BaseURL, pro.APIKey, pro.TokenSource)
+	provider, err := pro.RawProvider()
 	if err != nil {
 		return nil, "", &authoringProviderInitError{err: err}
 	}

@@ -90,7 +90,7 @@ func (s *Store) SaveAgentLabCase(ctx context.Context, userID, projectID, agentID
 		return AgentLabCase{}, err
 	}
 	if !canManage {
-		return AgentLabCase{}, errAgentForbidden
+		return AgentLabCase{}, ErrAgentForbidden
 	}
 	var c AgentLabCase
 	err = s.pg.QueryRow(ctx, `
@@ -120,7 +120,7 @@ func (s *Store) UpdateAgentLabCaseVerdict(ctx context.Context, userID, projectID
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	var runArg any
 	if runID != "" {
@@ -143,7 +143,7 @@ func (s *Store) DeleteAgentLabCase(ctx context.Context, userID, projectID, agent
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM agent_lab_cases WHERE id = $1 AND scope_id = $2`, caseID, scopeID)
 	if err != nil {

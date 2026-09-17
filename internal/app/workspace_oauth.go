@@ -3,7 +3,6 @@ package app
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
@@ -165,25 +164,29 @@ func oauthStoreError(err error) error {
 	}
 }
 
-// oauthFlowError maps login-flow failures: bad paste input and unsupported
-// flows are 400s, vendor rejections surface as 502 with the vendor's message.
+// oauthFlowError maps login-flow failures. The typed oauth.Error carries the
+// classification in Kind — "validation" is a 400, everything else a 502 with
+// the vendor's message — so a reworded message can never flip the status.
+// Non-oauth errors fall through to the generic mapping.
 func oauthFlowError(err error) error {
 	var httpErr *echo.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr
 	}
-	msg := err.Error()
+	var oerr *oauth.Error
+	if errors.As(err, &oerr) {
+		if oerr.Kind == "validation" {
+			return echo.NewHTTPError(http.StatusBadRequest, oerr.Message)
+		}
+		return echo.NewHTTPError(http.StatusBadGateway, oerr.Message)
+	}
 	switch {
-	case strings.Contains(msg, "unknown or expired login"),
-		strings.Contains(msg, "state mismatch"),
-		strings.Contains(msg, "missing authorization code"),
-		strings.Contains(msg, "not an OAuth provider"),
-		strings.Contains(msg, "does not support device"):
-		return echo.NewHTTPError(http.StatusBadRequest, msg)
 	case errors.Is(err, pgx.ErrNoRows):
 		return echo.NewHTTPError(http.StatusNotFound, "not found")
+	case errors.Is(err, storage.ErrAgentForbidden):
+		return echo.NewHTTPError(http.StatusForbidden, "workspace admin required")
 	default:
-		return echo.NewHTTPError(http.StatusBadGateway, msg)
+		return echo.NewHTTPError(http.StatusBadGateway, err.Error())
 	}
 }
 

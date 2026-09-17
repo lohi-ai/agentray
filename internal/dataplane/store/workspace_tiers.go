@@ -25,19 +25,22 @@ type WorkspaceModelTiers struct {
 	// only sets it for an endpoint no catalog can know (a self-hosted model, or a
 	// gateway that serves a model truncated).
 	ContextWindow int `json:"context_window,omitempty"`
-
+	// FallbackModel is an optional second model on the SAME provider the run
+	// retries on when the primary model fails (in-tier fallback).
+	FallbackModel     string `json:"fallback_model,omitempty"`
 	LiteProvider      string `json:"lite_provider"`
 	LiteModel         string `json:"lite_model"`
 	LiteBaseURL       string `json:"lite_base_url"`
 	LiteHasKey        bool   `json:"lite_has_key"`
 	LiteContextWindow int    `json:"lite_context_window,omitempty"`
+	LiteFallbackModel string `json:"lite_fallback_model,omitempty"`
 	ProProvider       string `json:"pro_provider"`
 	ProModel          string `json:"pro_model"`
 	ProBaseURL        string `json:"pro_base_url"`
 	ProHasKey         bool   `json:"pro_has_key"`
 	ProContextWindow  int    `json:"pro_context_window,omitempty"`
-
-	ModelFallback bool `json:"model_fallback"`
+	ProFallbackModel  string `json:"pro_fallback_model,omitempty"`
+	ModelFallback     bool   `json:"model_fallback"`
 	// HostedDefault is true when the workspace is using the process-level
 	// default model (no BYOK key). Settings can say "using the hosted model"
 	// instead of pretending the tenant pasted a key.
@@ -161,8 +164,13 @@ type WorkspaceModelTiersInput struct {
 	ProBaseURL        string
 	ProAPIKey         string
 	ProContextWindow  int
+	ModelFallback     bool
 
-	ModelFallback bool
+	// Per-tier fallback models — a model id on the tier's own provider, tried
+	// when the tier's model call fails.
+	FallbackModel     string
+	LiteFallbackModel string
+	ProFallbackModel  string
 
 	// Provider-id form (preferred). When set, these win over the legacy
 	// per-tier vendor/key columns.
@@ -179,7 +187,7 @@ func (s *Store) GetWorkspaceModelTiers(ctx context.Context, userID, workspaceID 
 		return WorkspaceModelTiers{}, err
 	}
 	if !member {
-		return WorkspaceModelTiers{}, errAgentForbidden
+		return WorkspaceModelTiers{}, ErrAgentForbidden
 	}
 	return s.readWorkspaceModelTiers(ctx, workspaceID)
 }
@@ -208,14 +216,19 @@ func (s *Store) readWorkspaceModelTiers(ctx context.Context, workspaceID string)
 	return cfg, nil
 }
 
-// providerBookHasKey reports whether any configured provider already has a
-// key (ciphertext present, or a decrypted key on the run path).
+// providerBookHasKey reports whether any configured provider already has
+// credentials: a stored key (ciphertext present, or a decrypted key on the run
+// path) or, for OAuth vendors, at least one connected account. An OAuth
+// provider never carries a key — its tokens live in
+// workspace_provider_accounts — so without the account check a workspace keyed
+// purely by subscription accounts would look credential-less and get its tiers
+// overwritten by the host fallback.
 func providerBookHasKey(book *WorkspaceProviderBook) bool {
 	if book == nil {
 		return false
 	}
 	for _, p := range book.Providers {
-		if p.HasKey || p.APIKey != "" {
+		if p.HasKey || p.APIKey != "" || p.AccountCount > 0 {
 			return true
 		}
 	}
@@ -230,7 +243,7 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 		return WorkspaceModelTiers{}, err
 	}
 	if !canManage {
-		return WorkspaceModelTiers{}, errAgentForbidden
+		return WorkspaceModelTiers{}, ErrAgentForbidden
 	}
 
 	// Preferred path: tiers point at configured providers. An already-migrated
@@ -249,6 +262,10 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			FlashContextWindow: in.ContextWindow,
 			LiteContextWindow:  in.LiteContextWindow,
 			ProContextWindow:   in.ProContextWindow,
+
+			FlashFallbackModel: strings.TrimSpace(in.FallbackModel),
+			LiteFallbackModel:  strings.TrimSpace(in.LiteFallbackModel),
+			ProFallbackModel:   strings.TrimSpace(in.ProFallbackModel),
 		})
 	}
 	if existing, lerr := s.loadBook(ctx, workspaceID, false); lerr == nil && len(existing.Providers) > 0 {
@@ -264,6 +281,10 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			FlashContextWindow: in.ContextWindow,
 			LiteContextWindow:  in.LiteContextWindow,
 			ProContextWindow:   in.ProContextWindow,
+
+			FlashFallbackModel: strings.TrimSpace(in.FallbackModel),
+			LiteFallbackModel:  strings.TrimSpace(in.LiteFallbackModel),
+			ProFallbackModel:   strings.TrimSpace(in.ProFallbackModel),
 		})
 	}
 
@@ -374,4 +395,18 @@ func (s *Store) userInWorkspace(ctx context.Context, userID, workspaceID string)
 	var ok bool
 	err := s.pg.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspace_members WHERE user_id = $1 AND workspace_id = $2)`, userID, workspaceID).Scan(&ok)
 	return ok, err
+}
+
+// WorkspaceProviderVendor returns one provider row's vendor for a workspace
+// member — the cheap read the OAuth login flow needs, where loadBook's full
+// providers+tiers+account-count scan would be three extra queries for one
+// column. pgx.ErrNoRows when the row is missing or the user is not a member.
+func (s *Store) WorkspaceProviderVendor(ctx context.Context, userID, workspaceID, providerID string) (string, error) {
+	var vendor string
+	err := s.pg.QueryRow(ctx, `
+SELECT p.vendor FROM workspace_providers p
+WHERE p.id = $1 AND p.workspace_id = $2
+  AND EXISTS (SELECT 1 FROM workspace_members m WHERE m.user_id = $3 AND m.workspace_id = $2)`,
+		providerID, workspaceID, userID).Scan(&vendor)
+	return vendor, err
 }

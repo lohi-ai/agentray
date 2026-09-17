@@ -22,9 +22,11 @@ const (
 	// committed.
 	antigravityDailyEndpoint   = "https://daily-cloudcode-pa.googleapis.com"
 	antigravitySandboxEndpoint = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	// antigravityUserAgent mirrors the real antigravity/hub client; the backend
-	// gates model availability on the version it carries.
-	antigravityUserAgent = "antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)"
+	// AntigravityUserAgent mirrors the real antigravity/hub client; the backend
+	// gates model availability on the version it carries. Exported because the
+	// OAuth login path (internal/oauth) must present the same fingerprint — a
+	// version bump in one place only would desynchronize login from chat.
+	AntigravityUserAgent = "antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)"
 )
 
 // AntigravityProvider speaks Google's Cloud Code Assist internal API — the
@@ -56,9 +58,14 @@ func NewAntigravityProvider() *AntigravityProvider {
 	}
 }
 
-// applyOAuthToken installs the account credential for the next request
-// (pooledProvider's oauthTokenApplier seam).
-func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) { p.tok = tok }
+// applyOAuthToken returns a per-call clone carrying the account credential
+// (pooledProvider's oauthTokenApplier seam) so concurrent calls never share
+// the token field.
+func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+	c := *p
+	c.tok = tok
+	return &c
+}
 
 func (p *AntigravityProvider) Name() string        { return VendorGoogleAntigravity }
 func (p *AntigravityProvider) SupportsTools() bool { return true }
@@ -356,7 +363,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 		httpReq.Header.Set("Authorization", "Bearer "+p.tok.AccessToken)
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Accept", "text/event-stream")
-		httpReq.Header.Set("User-Agent", antigravityUserAgent)
+		httpReq.Header.Set("User-Agent", AntigravityUserAgent)
 
 		resp, err = p.streamHTTP().Do(httpReq)
 		if err != nil {
@@ -499,28 +506,7 @@ func mapAntigravityStopReason(reason string) string {
 // Chat consumes the SSE stream to completion and returns the assembled
 // response — the backend only streams, so there is no second wire path.
 func (p *AntigravityProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	ch, err := p.Stream(ctx, req)
-	if err != nil {
-		return agentcore.ChatResponse{}, err
-	}
-	var resp agentcore.ChatResponse
-	resp.Message.Role = agentcore.RoleAssistant
-	for d := range ch {
-		if d.Err != nil {
-			return agentcore.ChatResponse{}, d.Err
-		}
-		resp.Message.Content += d.ContentDelta
-		if d.ToolCall != nil {
-			resp.Message.ToolCalls = append(resp.Message.ToolCalls, *d.ToolCall)
-		}
-		if d.Usage.InputTokens != 0 || d.Usage.OutputTokens != 0 || d.Usage.CacheReadTokens != 0 {
-			resp.Usage = d.Usage
-		}
-		if d.StopReason != "" {
-			resp.StopReason = d.StopReason
-		}
-	}
-	return resp, nil
+	return chatViaStream(ctx, p, req)
 }
 
 // listAntigravityModels calls POST {endpoint}/v1internal:fetchAvailableModels
@@ -545,7 +531,7 @@ func (p *AntigravityProvider) listAntigravityModels(ctx context.Context, client 
 		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", antigravityUserAgent)
+		req.Header.Set("User-Agent", AntigravityUserAgent)
 
 		data, status, err := doJSON(ctx, client, req)
 		if err != nil {
@@ -553,7 +539,7 @@ func (p *AntigravityProvider) listAntigravityModels(ctx context.Context, client 
 			continue
 		}
 		if status >= 400 {
-			lastErr = fmt.Errorf("list antigravity models: status %d: %s", status, strings.TrimSpace(string(data)))
+			lastErr = &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 			continue
 		}
 		models, err := parseAntigravityModels(data)

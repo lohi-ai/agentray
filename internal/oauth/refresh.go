@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/lohi-ai/agentray/ai"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -38,7 +39,7 @@ func (r *refresher) refreshAccount(ctx context.Context, rec storage.WorkspacePro
 }
 
 func (r *refresher) doRefresh(ctx context.Context, rec storage.WorkspaceProviderAccountRecord) (TokenResult, error) {
-	d, ok := r.descriptors[normalizeVendor(rec.Vendor)]
+	d, ok := r.descriptors[ai.NormalizeOAuthVendor(rec.Vendor)]
 	if !ok {
 		return TokenResult{}, &Error{Kind: "validation", Message: "unsupported OAuth vendor: " + rec.Vendor}
 	}
@@ -124,12 +125,6 @@ func (r *refresher) doRefresh(ctx context.Context, rec storage.WorkspaceProvider
 		return TokenResult{}, err
 	}
 	return res, nil
-}
-
-// RefreshAccount refreshes one stored account's tokens and persists them.
-// Called by the pool on near-expiry and by Report on 401/403.
-func (m *Manager) RefreshAccount(ctx context.Context, rec storage.WorkspaceProviderAccountRecord) (TokenResult, error) {
-	return m.refresh.refreshAccount(ctx, rec)
 }
 
 // needsRefresh reports whether the account's access token is expired or within

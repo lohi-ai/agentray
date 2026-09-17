@@ -89,16 +89,16 @@ export function OAuthSignIn({
           }
           if (r.status === 'error') {
             setDeviceStatus('error');
-            setError(r.error || 'Sign-in failed');
+            setError(r.message || 'Sign-in failed');
             return;
           }
-          pollTimer.current = window.setTimeout(() => void poll(), 5000);
+          pollTimer.current = window.setTimeout(() => void poll(), (res.interval_seconds || 5) * 1000);
         } catch (e) {
           setDeviceStatus('error');
           setError(e instanceof Error ? e.message : 'Sign-in polling failed');
         }
       };
-      pollTimer.current = window.setTimeout(() => void poll(), 5000);
+      pollTimer.current = window.setTimeout(() => void poll(), (res.interval_seconds || 5) * 1000);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start sign-in');
     } finally {

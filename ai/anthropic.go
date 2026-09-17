@@ -130,11 +130,15 @@ func (p *AnthropicProvider) UpdateAPIKey(key string) {
 	}
 }
 
-// applyOAuthToken installs the account credential for the next request
+// applyOAuthToken returns a per-call clone carrying the account credential
 // (pooledProvider's oauthTokenApplier seam). The access token rides in APIKey;
-// the OAuth flag makes it a Bearer credential instead of an x-api-key.
-func (p *AnthropicProvider) applyOAuthToken(tok OAuthToken) {
-	p.APIKey = tok.AccessToken
+// the OAuth flag makes it a Bearer credential instead of an x-api-key. The
+// clone keeps concurrent calls from overwriting each other's token on the
+// shared client.
+func (p *AnthropicProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+	c := *p
+	c.APIKey = tok.AccessToken
+	return &c
 }
 
 func (p *AnthropicProvider) Name() string {
@@ -606,40 +610,17 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 // Bearer credential — the same endpoint as listAnthropicModels, but the
 // subscription surface authenticates with the token, not x-api-key.
 func listClaudeCodeModels(ctx context.Context, client HTTPDoer, baseURL string, tok OAuthToken) ([]Model, error) {
-	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if base == "" {
-		base = defaultAnthropicBaseURL
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
+	listed, err := listModelsV1(ctx, client, baseURL, func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		req.Header.Set("User-Agent", claudeCodeUserAgent)
+		req.Header.Set("x-app", "cli")
+	})
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("User-Agent", claudeCodeUserAgent)
-	req.Header.Set("x-app", "cli")
-	req.Header.Set("Accept", "application/json")
-	data, status, err := doJSON(ctx, client, req)
-	if err != nil {
-		return nil, err
-	}
-	if status >= 400 {
-		return nil, fmt.Errorf("list models: status %d: %s", status, strings.TrimSpace(string(data)))
-	}
-	var decoded struct {
-		Data []struct {
-			ID            string `json:"id"`
-			ContextWindow int    `json:"context_window"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, fmt.Errorf("list models: decode: %w", err)
-	}
-	out := make([]Model, 0, len(decoded.Data))
-	for _, m := range decoded.Data {
-		if id := strings.TrimSpace(m.ID); id != "" {
-			out = append(out, Model{ID: id, ContextWindow: m.ContextWindow})
-		}
+	out := make([]Model, 0, len(listed))
+	for _, m := range listed {
+		out = append(out, Model{ID: m.ID, ContextWindow: m.ContextWindow})
 	}
 	return out, nil
 }

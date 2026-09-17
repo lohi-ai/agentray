@@ -228,7 +228,7 @@ func (s *Store) CreateAlertRule(ctx context.Context, userID, projectID string, r
 		return AlertRule{}, err
 	}
 	if !canManage {
-		return AlertRule{}, errAgentForbidden
+		return AlertRule{}, ErrAgentForbidden
 	}
 	if err := validateAlertSource(r.SourceKind); err != nil {
 		return AlertRule{}, err
@@ -286,7 +286,7 @@ func (s *Store) UpdateAlertRule(ctx context.Context, userID, projectID, ruleID s
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if err := validateAlertSource(r.SourceKind); err != nil {
 		return err
@@ -324,7 +324,7 @@ func (s *Store) DeleteAlertRule(ctx context.Context, userID, projectID, ruleID s
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM alert_rules WHERE project_id=$1 AND id=$2`, projectID, ruleID)
 	return err
@@ -341,7 +341,7 @@ func (s *Store) ListAlertChannels(ctx context.Context, userID, workspaceID strin
 		return nil, err
 	}
 	if !member {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT id::text, workspace_id::text, kind, name, config, created_at
@@ -368,7 +368,7 @@ func (s *Store) CreateAlertChannel(ctx context.Context, userID, workspaceID stri
 		return AlertChannel{}, err
 	}
 	if !canManage {
-		return AlertChannel{}, errAgentForbidden
+		return AlertChannel{}, ErrAgentForbidden
 	}
 	switch ch.Kind {
 	case "slack", "email", "webhook":

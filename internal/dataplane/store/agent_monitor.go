@@ -99,7 +99,7 @@ func (s *Store) GetAgentMonitor(ctx context.Context, userID, projectID, agentID 
 WHERE a.project_id = $1 AND a.id = $2`+monitorGroupBy, project.ID, agentID)
 	m, err := scanMonitorRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return AgentMonitorRow{}, errAgentForbidden
+		return AgentMonitorRow{}, ErrAgentForbidden
 	}
 	if err != nil {
 		return AgentMonitorRow{}, err

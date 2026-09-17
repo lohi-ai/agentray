@@ -247,6 +247,14 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// /api/op expose — one engine, three adapters.
 	connectorEngine := connector.NewEngine(store, queue)
 	runnerOpts = append(runnerOpts, agentruntime.WithSourceRunner(connectorEngine))
+	// One OAuth manager serves both the account routes and the run-time account
+	// pool — its pending-login state must be shared or a login started through
+	// one manager could never complete through another. It must exist before
+	// the scheduler is built: the scheduler's runner captures runnerOpts, so
+	// appending WithAccountPool afterwards would leave scheduled runs without
+	// an account pool.
+	oauthMgr := oauth.NewManager(store)
+	runnerOpts = append(runnerOpts, agentruntime.WithAccountPool(oauthMgr.Pool))
 	scheduler := agentruntime.NewScheduler(nc, store, runnerOpts...)
 	// The evaluator and the connector sync engine ride the scheduler's minute
 	// tick, sharing one clock with scheduled runs instead of standing up more
@@ -283,11 +291,6 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	ops := newOpAdapter(store, alertDeliverer, connectorEngine)
 	demoAskLimit = cfg.DemoAgentRunsPerUserPerDay
 	e.Use(demoWriteGuard(store, ops.reg))
-	// One OAuth manager serves both the account routes and the run-time account
-	// pool — its pending-login state must be shared or a login started through
-	// one manager could never complete through another.
-	oauthMgr := oauth.NewManager(store)
-	runnerOpts = append(runnerOpts, agentruntime.WithAccountPool(oauthMgr.Pool))
 	registerRoutes(e, store, queue, rateLimit, authRateLimit, scheduler, sb, agentruntime.ToolBuildContext{Sandbox: sb, SandboxRequired: isolationRequired, WorkspaceBase: wsBase}, liveReg, cfg.Hosted, collectPaths, ops, ready, oauthMgr, runnerOpts...)
 	registerOpRoutes(e, store, alertDeliverer, connectorEngine)
 	registerMcpRoutes(e, store, alertDeliverer, connectorEngine)

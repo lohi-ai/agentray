@@ -68,7 +68,7 @@ func (s *Store) UpsertAgentDelegate(ctx context.Context, userID, projectID, agen
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if delegateAgentID == scopeID {
 		return errDelegateSelf
@@ -103,7 +103,7 @@ func (s *Store) DeleteAgentDelegate(ctx context.Context, userID, projectID, agen
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM agent_delegates WHERE scope_id = $1 AND delegate_agent_id = $2`, scopeID, delegateAgentID)
 	if err != nil {

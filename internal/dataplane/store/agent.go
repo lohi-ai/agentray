@@ -67,7 +67,11 @@ type AgentCapabilityConfig struct {
 	Scopes  map[string]bool `json:"scopes"`
 }
 
-var errAgentForbidden = errors.New("agent config permission denied")
+// ErrAgentForbidden is the sentinel every workspace-mutating store method
+// returns for a non-owner/admin; exported so callers outside the package (the
+// OAuth login flow checks it before spending a one-time code) can map it to
+// 403 instead of a generic 502.
+var ErrAgentForbidden = errors.New("agent config permission denied")
 var errInvalidSecretName = errors.New("invalid secret name (must match [A-Za-z0-9_.-]{1,128})")
 var errEmptySecretValue = errors.New("secret value must not be empty")
 
@@ -551,6 +555,13 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS context_window INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_context_window INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_context_window INTEGER NOT NULL DEFAULT 0`,
+		// Per-tier fallback model: when the tier's model call fails, the run
+		// retries on this model of the SAME provider — in-tier fallback replaced
+		// cross-tier escalation, so the column sits beside the tier's model.
+		// One row per workspace; '' means no fallback.
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
 		// Provenance: which marketplace preset (internal/workloads.Pack.Slug) an
 		// agent was hired from, if any — empty for a hand-created agent. This is
 		// what lets the marketplace tell "already hired" from "not hired yet"
@@ -668,7 +679,7 @@ func (s *Store) UpsertAgentConfig(ctx context.Context, userID, projectID string,
 		return AgentConfig{}, err
 	}
 	if !canManage {
-		return AgentConfig{}, errAgentForbidden
+		return AgentConfig{}, ErrAgentForbidden
 	}
 
 	scopes := normalizeScopes(in.Scopes)
@@ -779,7 +790,7 @@ func (s *Store) UpsertAgentCapabilities(ctx context.Context, userID, projectID, 
 		return AgentCapabilityConfig{}, err
 	}
 	if !canManage {
-		return AgentCapabilityConfig{}, errAgentForbidden
+		return AgentCapabilityConfig{}, ErrAgentForbidden
 	}
 	clean := normalizeScopes(scopes)
 	payload, err := json.Marshal(clean)
@@ -879,7 +890,7 @@ func (s *Store) UpsertAgentDefinition(ctx context.Context, userID, projectID, ag
 		return AgentDefinition{}, err
 	}
 	if !canManage {
-		return AgentDefinition{}, errAgentForbidden
+		return AgentDefinition{}, ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `
 INSERT INTO agent_definitions (scope_id, soul_md, agents_md) VALUES ($1, $2, $3)

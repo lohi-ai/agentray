@@ -33,10 +33,10 @@ func TestEffectiveContextWindowFallsBackToTheModelCatalog(t *testing.T) {
 // 1M-token window and never compact, which is the original bug reintroduced one
 // layer up.
 func TestATierThatChangesModelDoesNotInheritTheWindow(t *testing.T) {
-	ts := TierSet{
-		TierFlash: TierConfig{Provider: "google", Model: "gemini-1.5-pro", ContextWindow: 2_000_000},
-		TierPro:   TierConfig{Model: "gpt-4"},
-	}
+	ts := TierSet{tiers: map[Tier]TierConfig{
+		TierFlash: {Provider: "google", Model: "gemini-1.5-pro", ContextWindow: 2_000_000},
+		TierPro:   {Model: "gpt-4"},
+	}}
 	got := ts.resolve(TierPro)
 	if got.Model != "gpt-4" {
 		t.Fatalf("model = %q, want the pro override", got.Model)
@@ -54,10 +54,10 @@ func TestATierThatChangesModelDoesNotInheritTheWindow(t *testing.T) {
 // window. Dropping it here would make every unconfigured tier lose a number it
 // legitimately shares.
 func TestATierThatOverridesNothingKeepsTheWindow(t *testing.T) {
-	ts := TierSet{
-		TierFlash: TierConfig{Provider: "google", Model: "gemini-1.5-pro", ContextWindow: 2_000_000},
-		TierLite:  TierConfig{},
-	}
+	ts := TierSet{tiers: map[Tier]TierConfig{
+		TierFlash: {Provider: "google", Model: "gemini-1.5-pro", ContextWindow: 2_000_000},
+		TierLite:  {},
+	}}
 	if got := ts.resolve(TierLite); got.ContextWindow != 2_000_000 {
 		t.Fatalf("window = %d, want flash's 2000000 for a tier that changed nothing", got.ContextWindow)
 	}
@@ -66,10 +66,10 @@ func TestATierThatOverridesNothingKeepsTheWindow(t *testing.T) {
 // A tier may also override the window alone — same model, an operator who knows
 // their endpoint serves it truncated.
 func TestATierMayOverrideTheWindowAlone(t *testing.T) {
-	ts := TierSet{
-		TierFlash: TierConfig{Provider: "anthropic", Model: "claude-sonnet-4", ContextWindow: 200_000},
-		TierPro:   TierConfig{ContextWindow: 120_000},
-	}
+	ts := TierSet{tiers: map[Tier]TierConfig{
+		TierFlash: {Provider: "anthropic", Model: "claude-sonnet-4", ContextWindow: 200_000},
+		TierPro:   {ContextWindow: 120_000},
+	}}
 	got := ts.resolve(TierPro)
 	if got.Model != "claude-sonnet-4" {
 		t.Fatalf("model = %q, want the inherited flash model", got.Model)
@@ -79,26 +79,29 @@ func TestATierMayOverrideTheWindowAlone(t *testing.T) {
 	}
 }
 
-// The ladder is why the window lives per-rung. Escalation across models with
-// different windows must produce different budgets, or the run carries the
-// primary's headroom onto a model that cannot hold it.
-func TestBuildRungsCarriesEachTiersOwnWindow(t *testing.T) {
-	rungs, err := buildRungs([]TierConfig{
-		{Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "k"},
-		{Provider: "openai", Model: "gpt-4", APIKey: "k"},
-		{Provider: "openai-compat", Model: "mystery", BaseURL: "http://localhost:1", APIKey: "k"},
-	})
+// The fallback rung is why the window lives per-rung. Falling back across
+// models with different windows must produce different budgets, or the run
+// carries the primary's headroom onto a model that cannot hold it — and the
+// primary's operator override must NOT leak onto the fallback model.
+func TestRungsCarryEachModelsOwnWindow(t *testing.T) {
+	ts := TierSet{
+		fallback: true,
+		tiers: map[Tier]TierConfig{
+			TierFlash: {Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "k", ContextWindow: 150_000, FallbackModel: "claude-haiku-4-5"},
+		},
+	}
+	rungs, err := ts.For(TierFlash).Rungs()
 	if err != nil {
-		t.Fatalf("buildRungs: %v", err)
+		t.Fatalf("Rungs: %v", err)
 	}
-	want := []int{200_000, 8_192, 0}
-	if len(rungs) != len(want) {
-		t.Fatalf("got %d rungs, want %d", len(rungs), len(want))
+	if len(rungs) != 2 {
+		t.Fatalf("got %d rungs, want 2", len(rungs))
 	}
-	for i, w := range want {
-		if rungs[i].ContextWindow != w {
-			t.Errorf("rung %d (%s) window = %d, want %d", i, rungs[i].Model, rungs[i].ContextWindow, w)
-		}
+	if rungs[0].ContextWindow != 150_000 {
+		t.Errorf("primary window = %d, want the operator's 150000", rungs[0].ContextWindow)
+	}
+	if rungs[1].ContextWindow != 200_000 {
+		t.Errorf("fallback window = %d, want haiku's catalog 200000 — not the primary's override", rungs[1].ContextWindow)
 	}
 }
 
@@ -108,7 +111,7 @@ func TestBuildRungsCarriesEachTiersOwnWindow(t *testing.T) {
 // what happened here, and only a test that goes through Build catches it.
 func TestBuildCarriesTheContextWindowIntoTheComposition(t *testing.T) {
 	p := representativeBuildParams()
-	p.ContextWindow = 32_000
+	p.Rungs[0].ContextWindow = 32_000
 	agent, err := Build(p)
 	if err != nil {
 		t.Fatalf("Build: %v", err)

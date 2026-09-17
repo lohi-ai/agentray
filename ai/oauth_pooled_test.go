@@ -48,9 +48,12 @@ type fakeInner struct {
 	streamCh chan agentcore.ChatDelta
 }
 
-func (f *fakeInner) applyOAuthToken(tok OAuthToken) { f.applied = tok }
-func (f *fakeInner) Name() string                   { return "fake" }
-func (f *fakeInner) SupportsTools() bool            { return true }
+func (f *fakeInner) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+	f.applied = tok
+	return f
+}
+func (f *fakeInner) Name() string        { return "fake" }
+func (f *fakeInner) SupportsTools() bool { return true }
 func (f *fakeInner) Chat(context.Context, agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	return agentcore.ChatResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "ok"}}, f.chatErr
 }
@@ -146,7 +149,7 @@ func TestPooledProvider_StreamReportsFirstErrorDelta(t *testing.T) {
 	if sawErr == nil {
 		t.Fatal("stream error delta missing")
 	}
-	// One report for the synchronous result (nil), one for the error delta.
+	// A successful Stream start reports nothing; the error delta is the only report.
 	var errReports int
 	for _, r := range src.reports {
 		if r.err != nil {
@@ -407,7 +410,7 @@ func TestAntigravity_EnvelopeAndStreamDecode(t *testing.T) {
 	if gotPath != "/v1internal:streamGenerateContent" {
 		t.Fatalf("path = %q", gotPath)
 	}
-	if gotAuth != "Bearer ag-tok" || gotUA != antigravityUserAgent {
+	if gotAuth != "Bearer ag-tok" || gotUA != AntigravityUserAgent {
 		t.Fatalf("auth/UA wrong: %q / %q", gotAuth, gotUA)
 	}
 

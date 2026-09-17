@@ -52,7 +52,7 @@ func (s *Store) UpsertAgentSecret(ctx context.Context, userID, projectID, agentI
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if !credential.ValidName(name) {
 		return errInvalidSecretName
@@ -87,7 +87,7 @@ func (s *Store) DeleteAgentSecret(ctx context.Context, userID, projectID, agentI
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM agent_secrets WHERE scope_id = $1 AND name = $2`, scopeID, name)
 	if err != nil {

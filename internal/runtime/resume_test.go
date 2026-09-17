@@ -40,21 +40,3 @@ func TestCloseDanglingCallsLeavesSatisfiedCalls(t *testing.T) {
 		t.Fatalf("a satisfied call must not be re-closed, got %d messages: %+v", len(out), out)
 	}
 }
-
-// TestNormalizeProvider verifies the empty label folds to openai and matching is
-// case-insensitive, so a key refresh matches the provider an agentcore provider
-// reports.
-func TestNormalizeProvider(t *testing.T) {
-	cases := map[string]string{
-		"":          "openai",
-		"  ":        "openai",
-		"OpenAI":    "openai",
-		"Anthropic": "anthropic",
-		"myrouter":  "myrouter",
-	}
-	for in, want := range cases {
-		if got := normalizeProvider(in); got != want {
-			t.Fatalf("normalizeProvider(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

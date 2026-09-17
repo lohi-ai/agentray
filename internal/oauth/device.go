@@ -3,10 +3,10 @@ package oauth
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +18,7 @@ import (
 const codexDeviceTimeout = 15 * time.Second
 
 // errNoPending is returned by PollDeviceLogin for an unknown pending id.
-var errNoPending = errors.New("unknown or expired device login")
+var errNoPending = &Error{Kind: "validation", Message: "unknown or expired device login"}
 
 // DeviceStart is StartDeviceLogin's result.
 type DeviceStart struct {
@@ -45,7 +45,7 @@ func (m *Manager) StartDeviceLogin(ctx context.Context, userID, workspaceID, pro
 	if err != nil {
 		return DeviceStart{}, err
 	}
-	if normalizeVendor(vendor) != ai.VendorOpenAICodex {
+	if ai.NormalizeOAuthVendor(vendor) != ai.VendorOpenAICodex {
 		return DeviceStart{}, &Error{Kind: "validation",
 			Message: "provider " + vendor + " does not support device login"}
 	}
@@ -100,7 +100,7 @@ func (m *Manager) startDeviceLogin(ctx context.Context, d *providerDescriptor, w
 			interval = int(v)
 		}
 	case string:
-		if n, err := parseInt(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			interval = n
 		}
 	}
@@ -162,6 +162,10 @@ func (m *Manager) PollDeviceLogin(ctx context.Context, userID, workspaceID, prov
 		ExpiresAt:    res.ExpiresAt,
 	})
 	if err != nil {
+		// The authorization code is already spent — leaving the pending entry
+		// would let the next poll re-exchange a consumed code and surface a
+		// confusing vendor error. End the attempt; the user starts over.
+		m.deletePending(pendingID)
 		return DevicePoll{Status: "error", Message: err.Error()}, err
 	}
 	m.deletePending(pendingID)
@@ -217,10 +221,4 @@ func (m *Manager) pollDeviceOnce(ctx context.Context, d *providerDescriptor, p P
 		return TokenResult{}, false, err
 	}
 	return res, true, nil
-}
-
-func parseInt(s string) (int, error) {
-	var n int
-	_, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n)
-	return n, err
 }

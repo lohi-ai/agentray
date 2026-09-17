@@ -53,7 +53,7 @@ func (s *Store) GrantAgentToProject(ctx context.Context, userID, agentID, projec
 		return AgentGrant{}, err
 	}
 	if !canManage {
-		return AgentGrant{}, errAgentForbidden
+		return AgentGrant{}, ErrAgentForbidden
 	}
 	ws, err := s.agentWorkspace(ctx, agentID)
 	if err != nil {
@@ -95,7 +95,7 @@ func (s *Store) RevokeAgentFromProject(ctx context.Context, userID, agentID, pro
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if isDefaultAgent(project.ID, agentID) {
 		return errCannotRevokeHome
@@ -115,14 +115,14 @@ func (s *Store) ListAgentGrants(ctx context.Context, userID, agentID string) ([]
 		return nil, err
 	}
 	if ws == "" {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 	ok, err := s.userCanAccessWorkspace(ctx, userID, ws)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 	rows, err := s.pg.Query(ctx, `
 SELECT agent_id::text, project_id::text, scopes, created_at

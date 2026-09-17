@@ -866,11 +866,13 @@ export type OAuthDeviceStart = {
   pending_id: string;
   user_code: string;
   verification_url: string;
+  /** Vendor-requested poll cadence in seconds; the poll loop honors it. */
+  interval_seconds?: number;
 };
 
 export type OAuthDevicePoll = {
   status: 'pending' | 'done' | 'error';
-  error?: string;
+  message?: string;
   account?: WorkspaceProviderAccount;
 };
 
@@ -924,6 +926,11 @@ export type WorkspaceModelTiers = {
   context_window?: number;
   lite_context_window?: number;
   pro_context_window?: number;
+  /** Per-tier fallback model — a model id on the tier's own provider, retried
+   *  when the tier's model call fails. Empty means no fallback. */
+  fallback_model?: string;
+  lite_fallback_model?: string;
+  pro_fallback_model?: string;
 };
 
 export type WorkspaceModelTiersInput = {
@@ -946,6 +953,9 @@ export type WorkspaceModelTiersInput = {
   context_window?: number;
   lite_context_window?: number;
   pro_context_window?: number;
+  fallback_model?: string;
+  lite_fallback_model?: string;
+  pro_fallback_model?: string;
 };
 
 // --- Alerting (#1) ---

@@ -95,7 +95,7 @@ func (s *Store) agentScope(ctx context.Context, userID, projectID, agentID strin
 		return Project{}, "", err
 	}
 	if !ok {
-		return Project{}, "", errAgentForbidden
+		return Project{}, "", ErrAgentForbidden
 	}
 	return project, agentID, nil
 }
@@ -113,7 +113,7 @@ func (s *Store) AgentScopeForRun(ctx context.Context, projectID, agentID string)
 		return "", err
 	}
 	if !ok {
-		return "", errAgentForbidden
+		return "", ErrAgentForbidden
 	}
 	return agentID, nil
 }
@@ -206,7 +206,7 @@ func (s *Store) createAgent(ctx context.Context, userID, projectID, name, slug, 
 		return Agent{}, err
 	}
 	if !canManage {
-		return Agent{}, errAgentForbidden
+		return Agent{}, ErrAgentForbidden
 	}
 	name = strings.TrimSpace(name)
 	if slug = strings.TrimSpace(slug); slug == "" {
@@ -247,7 +247,7 @@ func (s *Store) UpdateAgent(ctx context.Context, userID, projectID, agentID, nam
 		return Agent{}, err
 	}
 	if !canManage {
-		return Agent{}, errAgentForbidden
+		return Agent{}, ErrAgentForbidden
 	}
 	var a Agent
 	err = s.pg.QueryRow(ctx, `
@@ -304,7 +304,7 @@ func (s *Store) DeleteAgent(ctx context.Context, userID, projectID, agentID stri
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if isDefaultAgent(project.ID, agentID) {
 		return errCannotDeleteDefault

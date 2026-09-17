@@ -108,7 +108,7 @@ func (s *Store) CreateProjectCredential(ctx context.Context, userID, projectID, 
 		return ProjectCredential{}, "", err
 	}
 	if !canManage {
-		return ProjectCredential{}, "", errAgentForbidden
+		return ProjectCredential{}, "", ErrAgentForbidden
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -180,7 +180,7 @@ func (s *Store) RevokeProjectCredential(ctx context.Context, userID, projectID, 
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	// Lock the project row so a concurrent MarkProjectCredentialSplit cannot
 	// count this credential as live while this revoke commits underneath it.
@@ -255,7 +255,7 @@ func (s *Store) MarkProjectCredentialSplit(ctx context.Context, userID, projectI
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	// The live-credential check and the split flag must be atomic with
 	// revocation: lock the project row (which RevokeProjectCredential also

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -17,15 +16,10 @@ type reflectInput struct {
 	// ScopeID is the agent's own scope — where recall reads from and where
 	// loadSkills reads from. Memories and skill proposals are filed here, not
 	// under ProjectID; see applyMemories and applySkills.
-	ScopeID  string
-	RunID    string
-	Provider string
-	Model    string
-	BaseURL  string
-	APIKey   string
-	// TokenSource is the OAuth account pool for subscription vendors; nil for
-	// API-key providers.
-	TokenSource ai.TokenSource
+	ScopeID string
+	RunID   string
+	// Tier is the pass's resolved model tier — provider, model, credential.
+	Tier ModelTier
 	// Memory is the store the pass writes through — the interface, not *PgMemory,
 	// because the pass only ever calls Remember, and the scope it writes under is
 	// the thing worth testing without a database behind it.
@@ -66,13 +60,13 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 	if in.Memory == nil {
 		return nil
 	}
-	provider, err := buildTracedProvider(in.Provider, in.BaseURL, in.APIKey, in.TokenSource, r.Tracer)
+	provider, err := in.Tier.TracedProvider(r.Tracer)
 	if err != nil {
 		return err
 	}
 
 	resp, err := provider.Chat(ctx, agentcore.ChatRequest{
-		Model:     in.Model,
+		Model:     in.Tier.Model,
 		MaxTokens: reflectMaxTokens,
 		Messages: []agentcore.Message{
 			{Role: agentcore.RoleSystem, Content: reflectSystemPrompt},

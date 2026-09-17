@@ -65,3 +65,32 @@ func NormalizeVendor(v string) string {
 		return strings.ToLower(strings.TrimSpace(v))
 	}
 }
+
+// chatViaStream drains a streaming-only provider's delta channel into a
+// ChatResponse. Codex and Antigravity have no non-streaming wire, so their
+// Chat is this loop — kept once here so drain semantics (mid-stream error,
+// usage capture, stop reason) can't drift between two copies.
+func chatViaStream(ctx context.Context, p agentcore.LLMProvider, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	ch, err := p.Stream(ctx, req)
+	if err != nil {
+		return agentcore.ChatResponse{}, err
+	}
+	var resp agentcore.ChatResponse
+	resp.Message.Role = agentcore.RoleAssistant
+	for d := range ch {
+		if d.Err != nil {
+			return agentcore.ChatResponse{}, d.Err
+		}
+		resp.Message.Content += d.ContentDelta
+		if d.ToolCall != nil {
+			resp.Message.ToolCalls = append(resp.Message.ToolCalls, *d.ToolCall)
+		}
+		if d.Usage.InputTokens != 0 || d.Usage.OutputTokens != 0 || d.Usage.CacheReadTokens != 0 {
+			resp.Usage = d.Usage
+		}
+		if d.StopReason != "" {
+			resp.StopReason = d.StopReason
+		}
+	}
+	return resp, nil
+}

@@ -121,7 +121,7 @@ func (s *Store) UpsertAgentBudget(ctx context.Context, userID, projectID, agentI
 		return AgentBudget{}, err
 	}
 	if !canManage {
-		return AgentBudget{}, errAgentForbidden
+		return AgentBudget{}, ErrAgentForbidden
 	}
 	period, err := normalizeBudgetPeriod(b.Period)
 	if err != nil {
@@ -159,7 +159,7 @@ func (s *Store) DeleteAgentBudget(ctx context.Context, userID, projectID, agentI
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	period, err = normalizeBudgetPeriod(period)
 	if err != nil {
@@ -177,7 +177,7 @@ func (s *Store) SetWorkspaceDefaultBudget(ctx context.Context, userID, workspace
 		return AgentBudget{}, err
 	}
 	if !canManage {
-		return AgentBudget{}, errAgentForbidden
+		return AgentBudget{}, ErrAgentForbidden
 	}
 	period, err := normalizeBudgetPeriod(b.Period)
 	if err != nil {

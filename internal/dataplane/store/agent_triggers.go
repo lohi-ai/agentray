@@ -141,7 +141,7 @@ func (s *Store) CreateAgentTrigger(ctx context.Context, userID, projectID, agent
 		return AgentTrigger{}, err
 	}
 	if !canManage {
-		return AgentTrigger{}, errAgentForbidden
+		return AgentTrigger{}, ErrAgentForbidden
 	}
 	switch in.Kind {
 	case TriggerSchedule:
@@ -192,7 +192,7 @@ func (s *Store) UpdateAgentTrigger(ctx context.Context, userID, projectID, agent
 		return AgentTrigger{}, err
 	}
 	if !canManage {
-		return AgentTrigger{}, errAgentForbidden
+		return AgentTrigger{}, ErrAgentForbidden
 	}
 	var trimmed *string
 	if name != nil {
@@ -225,7 +225,7 @@ func (s *Store) DeleteAgentTrigger(ctx context.Context, userID, projectID, agent
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if _, err := s.pg.Exec(ctx, `DELETE FROM agent_triggers WHERE scope_id = $1 AND id = $2`, scopeID, triggerID); err != nil {
 		return err

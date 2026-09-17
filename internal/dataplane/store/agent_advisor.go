@@ -74,7 +74,7 @@ func (s *Store) UpsertAgentAdvisor(ctx context.Context, userID, projectID, agent
 		return AgentAdvisor{}, err
 	}
 	if !canManage {
-		return AgentAdvisor{}, errAgentForbidden
+		return AgentAdvisor{}, ErrAgentForbidden
 	}
 
 	out := AgentAdvisor{

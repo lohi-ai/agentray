@@ -165,25 +165,11 @@ func defaultDescriptors() map[string]*providerDescriptor {
 
 // descriptorFor resolves a vendor (canonical or alias) to its descriptor.
 func (m *Manager) descriptorFor(vendor string) (*providerDescriptor, error) {
-	d, ok := m.descriptors[normalizeVendor(vendor)]
+	d, ok := m.descriptors[ai.NormalizeOAuthVendor(vendor)]
 	if !ok {
 		return nil, &Error{Kind: "validation", Message: "unsupported OAuth vendor: " + vendor}
 	}
 	return d, nil
-}
-
-// normalizeVendor folds aliases onto the canonical vendor ids. Kept local so
-// the oauth package does not depend on ai's unexported normalizer.
-func normalizeVendor(v string) string {
-	switch v {
-	case "claude-code", "claude_code", "claudecode", "anthropic-oauth", "anthropic-claude-code":
-		return ai.VendorClaudeCode
-	case "openai-codex", "codex", "chatgpt", "openai-oauth":
-		return ai.VendorOpenAICodex
-	case "google-antigravity", "antigravity":
-		return ai.VendorGoogleAntigravity
-	}
-	return v
 }
 
 // Error is the package's typed failure. Kind is a coarse category

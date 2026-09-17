@@ -522,16 +522,22 @@ func TestResolveOAuthProviderNoAccounts(t *testing.T) {
 	}
 }
 
-// OAuth vendors need no base URL and never store a key — even if the caller
-// passes one, the record drops it so no stray credential lands at rest.
+// OAuth vendors need no base URL and never store a key. A caller that passes
+// one is told so — silently dropping it would leave a custom-endpoint user
+// stranded on a provider that can never authenticate.
 func TestOAuthProviderRecordSkipsKeyAndBaseURL(t *testing.T) {
 	rec, err := NewWorkspaceProviderRecord("", "ws", WorkspaceProviderInput{
-		Vendor: "claude-code", APIKey: "sk-should-not-stick",
+		Vendor: "claude-code",
 	}, nil)
 	if err != nil {
 		t.Fatalf("oauth vendor must not require a base URL: %v", err)
 	}
 	if rec.AuthType != "oauth" || rec.APIKey != "" || rec.HasKey {
 		t.Fatalf("oauth record must carry no key: %+v", rec)
+	}
+	if _, err := NewWorkspaceProviderRecord("", "ws", WorkspaceProviderInput{
+		Vendor: "claude-code", APIKey: "sk-should-not-stick",
+	}, nil); err == nil {
+		t.Fatal("an API key on an OAuth vendor must be rejected, not dropped")
 	}
 }

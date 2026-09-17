@@ -57,7 +57,7 @@ func (s *Store) UpsertAgentTool(ctx context.Context, userID, projectID, agentID,
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	if strings.TrimSpace(configJSON) == "" {
 		configJSON = "{}"
@@ -86,7 +86,7 @@ func (s *Store) DeleteAgentTool(ctx context.Context, userID, projectID, agentID,
 		return err
 	}
 	if !canManage {
-		return errAgentForbidden
+		return ErrAgentForbidden
 	}
 	_, err = s.pg.Exec(ctx, `DELETE FROM agent_tools WHERE scope_id = $1 AND tool_name = $2`, scopeID, name)
 	if err != nil {

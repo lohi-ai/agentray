@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lohi-ai/agentray/agentcore"
 )
 
 const (
@@ -121,6 +123,15 @@ func firstPositive(vals ...int) int {
 // read anyway so that if Anthropic ever adds it, the live value wins over the
 // table without another change here.
 func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey string) ([]listedModel, error) {
+	return listModelsV1(ctx, client, baseURL, func(req *http.Request) {
+		req.Header.Set("x-api-key", apiKey)
+	})
+}
+
+// listModelsV1 is the shared GET {base}/v1/models fetch: the Anthropic wire
+// list endpoint, used by both the x-api-key provider and the claude-code
+// OAuth surface (which differs only in the headers it sets).
+func listModelsV1(ctx context.Context, client HTTPDoer, baseURL string, auth func(*http.Request)) ([]listedModel, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		base = defaultAnthropicBaseURL
@@ -129,7 +140,7 @@ func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey s
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-api-key", apiKey)
+	auth(req)
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("Accept", "application/json")
 	data, status, err := doJSON(ctx, client, req)
@@ -137,7 +148,7 @@ func listAnthropicModels(ctx context.Context, client HTTPDoer, baseURL, apiKey s
 		return nil, err
 	}
 	if status >= 400 {
-		return nil, fmt.Errorf("list models: status %d: %s", status, strings.TrimSpace(string(data)))
+		return nil, &agentcore.ProviderError{Provider: "anthropic", Status: status, Message: strings.TrimSpace(string(data))}
 	}
 	var decoded struct {
 		Data []struct {

@@ -120,6 +120,11 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ContextWindow     int `json:"context_window"`
 			LiteContextWindow int `json:"lite_context_window"`
 			ProContextWindow  int `json:"pro_context_window"`
+
+			// Per-tier fallback models — a model id on the tier's own provider.
+			FallbackModel     string `json:"fallback_model"`
+			LiteFallbackModel string `json:"lite_fallback_model"`
+			ProFallbackModel  string `json:"pro_fallback_model"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
@@ -137,10 +142,13 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			LiteBaseURL: payload.LiteBaseURL, LiteAPIKey: payload.LiteAPIKey,
 			ProProvider: payload.ProProvider, ProModel: payload.ProModel,
 			ProBaseURL: payload.ProBaseURL, ProAPIKey: payload.ProAPIKey,
-			ModelFallback:   payload.ModelFallback,
-			FlashProviderID: payload.FlashProviderID,
-			LiteProviderID:  payload.LiteProviderID,
-			ProProviderID:   payload.ProProviderID,
+			ModelFallback:     payload.ModelFallback,
+			FlashProviderID:   payload.FlashProviderID,
+			LiteProviderID:    payload.LiteProviderID,
+			ProProviderID:     payload.ProProviderID,
+			FallbackModel:     payload.FallbackModel,
+			LiteFallbackModel: payload.LiteFallbackModel,
+			ProFallbackModel:  payload.ProFallbackModel,
 
 			ContextWindow:     payload.ContextWindow,
 			LiteContextWindow: payload.LiteContextWindow,

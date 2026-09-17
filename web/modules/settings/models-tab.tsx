@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertTriangle, Check, KeyRound, LogIn, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
 import { Text } from '@astryxdesign/core/Text';
@@ -31,7 +31,7 @@ import { OAuthSignIn } from './oauth-signin';
 // window we detected for this model". Storing the override rather than the
 // effective number is what lets a later model change re-detect instead of
 // inheriting a stale figure.
-type TierDraft = { providerId: string; model: string; contextWindow: number };
+type TierDraft = { providerId: string; model: string; contextWindow: number; fallbackModel: string };
 type Draft = {
   flash: TierDraft;
   lite: TierDraft;
@@ -42,18 +42,18 @@ type Draft = {
 // Blank means "inherit from Default" everywhere in this file — that is exactly
 // what runtime.resolve() already does with an unset tier, and what
 // SaveWorkspaceTierSelection persists.
-const emptyTier = (): TierDraft => ({ providerId: '', model: '', contextWindow: 0 });
+const emptyTier = (): TierDraft => ({ providerId: '', model: '', contextWindow: 0, fallbackModel: '' });
 
 // A tier is only selectable when it names both a configured provider and a
 // model. A half-set tier is treated as unset, which is what the runtime does.
-const tierDraft = (providerId: string, model: string, contextWindow: number): TierDraft =>
-  providerId && model ? { providerId, model, contextWindow } : emptyTier();
+const tierDraft = (providerId: string, model: string, contextWindow: number, fallbackModel = ''): TierDraft =>
+  providerId && model ? { providerId, model, contextWindow, fallbackModel } : emptyTier();
 
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
-    flash: tierDraft(c.flash_provider_id || '', c.model || '', c.context_window || 0),
-    lite: tierDraft(c.lite_provider_id || '', c.lite_model || '', c.lite_context_window || 0),
-    pro: tierDraft(c.pro_provider_id || '', c.pro_model || '', c.pro_context_window || 0),
+    flash: tierDraft(c.flash_provider_id || '', c.model || '', c.context_window || 0, c.fallback_model || ''),
+    lite: tierDraft(c.lite_provider_id || '', c.lite_model || '', c.lite_context_window || 0, c.lite_fallback_model || ''),
+    pro: tierDraft(c.pro_provider_id || '', c.pro_model || '', c.pro_context_window || 0, c.pro_fallback_model || ''),
     model_fallback: c.model_fallback,
   };
 }
@@ -70,6 +70,9 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
     context_window: d.flash.contextWindow,
     lite_context_window: d.lite.contextWindow,
     pro_context_window: d.pro.contextWindow,
+    fallback_model: d.flash.fallbackModel,
+    lite_fallback_model: d.lite.fallbackModel,
+    pro_fallback_model: d.pro.fallbackModel,
   };
 }
 
@@ -249,11 +252,18 @@ export function ModelsTab() {
 
   // The search is the same tolerant matcher the old Typeahead used — model ids
   // are punctuation-heavy and nobody types the hyphens in the right places.
-  const providerItems = !provider ? [] : listedModelsToItems(listed.filter((m) => m.provider_id === provider.id));
-  const providerModels = searchModelItems(providerItems, query);
-
-  const modelCount = new Map<string, number>();
-  for (const x of listed) modelCount.set(x.provider_id, (modelCount.get(x.provider_id) ?? 0) + 1);
+  // Memoized: every keystroke and draft change would otherwise re-fold the
+  // whole catalog through the NFD/regex pipeline.
+  const providerItems = useMemo(
+    () => (!provider ? [] : listedModelsToItems(listed.filter((m) => m.provider_id === provider.id))),
+    [listed, provider],
+  );
+  const providerModels = useMemo(() => searchModelItems(providerItems, query), [providerItems, query]);
+  const modelCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const x of listed) m.set(x.provider_id, (m.get(x.provider_id) ?? 0) + 1);
+    return m;
+  }, [listed]);
 
   if (!models || !draft) {
     return (
@@ -291,13 +301,32 @@ export function ModelsTab() {
             [activeTier]: {
               providerId: provider.id,
               model: modelId,
-              // Changing the model drops any override: it was a statement about
-              // the model that was there.
+              // Changing the model drops the window override: it was a
+              // statement about the model that was there.
               contextWindow: d[activeTier].model === modelId ? d[activeTier].contextWindow : 0,
+              // The fallback belongs to the tier's provider — a provider switch
+              // drops it, and promoting the fallback to primary clears it.
+              fallbackModel:
+                d[activeTier].providerId === provider.id && d[activeTier].fallbackModel !== modelId
+                  ? d[activeTier].fallbackModel
+                  : '',
             },
           }
         : d,
     );
+  };
+
+  // The fallback is a second model of the tier's own provider, retried when the
+  // primary model's call fails. It only exists once the tier has a model on
+  // this provider, and it can never be the primary itself.
+  const toggleFallback = (modelId: string) => {
+    if (!provider) return;
+    setDraft((d) => {
+      if (!d) return d;
+      const t = d[activeTier];
+      if (t.providerId !== provider.id || !t.model || t.model === modelId) return d;
+      return { ...d, [activeTier]: { ...t, fallbackModel: t.fallbackModel === modelId ? '' : modelId } };
+    });
   };
 
   const clearTier = (key: TierKey) => {
@@ -424,6 +453,9 @@ export function ModelsTab() {
                 <span className={`mt-1 font-mono text-xs ${set ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-faint)]'}`}>
                   {tierLabel(t.key)}
                 </span>
+                {a.fallbackModel ? (
+                  <span className="font-mono text-xs text-[var(--color-text-secondary)]">fallback → {a.fallbackModel}</span>
+                ) : null}
                 {set && t.key !== 'flash' ? (
                   <button
                     onClick={(e) => {
@@ -584,6 +616,9 @@ export function ModelsTab() {
                 <div className="flex flex-col">
                   {providerModels.map((m) => {
                     const assigned = TIERS.filter((t) => draft[t.key].providerId === provider.id && draft[t.key].model === m.label);
+                    const isFallback = activeTierDraft.providerId === provider.id && activeTierDraft.fallbackModel === m.label;
+                    const canFallback =
+                      activeTierDraft.providerId === provider.id && activeTierDraft.model !== '' && activeTierDraft.model !== m.label;
                     return (
                       <button
                         key={m.id}
@@ -597,9 +632,29 @@ export function ModelsTab() {
                               {t.title}
                             </span>
                           ))}
+                          {isFallback ? (
+                            <span className="rounded-[var(--radius-sm)] bg-[var(--color-surface-3)] px-1.5 py-0.5 text-xs text-[var(--color-text-secondary)]">
+                              fallback
+                            </span>
+                          ) : null}
                         </span>
-                        <span className="text-xs text-[var(--color-text-secondary)]">
+                        <span className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                           {m.auxiliaryData.contextWindow ? `${formatTokens(m.auxiliaryData.contextWindow)} ctx` : 'ctx unknown'}
+                          {canFallback || isFallback ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFallback(m.label);
+                              }}
+                              title={isFallback ? 'Remove as fallback' : `Use as fallback for ${TIERS.find((t) => t.key === activeTier)?.title}`}
+                              aria-pressed={isFallback}
+                              className={`rounded-[var(--radius-sm)] p-1 transition-colors ${
+                                isFallback ? 'text-[var(--color-primary)]' : 'text-[var(--color-faint)] hover:text-[var(--color-text-secondary)]'
+                              }`}
+                            >
+                              <RefreshCw size={13} />
+                            </button>
+                          ) : null}
                         </span>
                       </button>
                     );
@@ -616,8 +671,11 @@ export function ModelsTab() {
                 Click a model to assign it to <strong>{TIERS.find((t) => t.key === activeTier)?.title}</strong>.
               </p>
 
-              {/* Context-window override for the active tier's chosen model */}
-              {activeModel || (activeTierDraft.providerId && activeTierDraft.model) ? (
+              {/* Context-window override for the active tier's chosen model —
+                  only when that model belongs to the provider in view, or the
+                  field would show a foreign model's window and write its
+                  override onto the wrong provider's draft. */}
+              {activeTierDraft.providerId === provider.id && activeTierDraft.model ? (
                 <ContextWindowField
                   detected={activeModel?.auxiliaryData.contextWindow ?? 0}
                   override={activeTierDraft.contextWindow}
@@ -633,8 +691,8 @@ export function ModelsTab() {
         <div className="flex flex-col gap-3">
           <div className="border-t border-[var(--color-border)] pt-4">
             <CheckboxInput
-              label="If a run fails, retry it on a stronger model"
-              description="Costs more on the runs that fail, but they finish instead of erroring out."
+              label="If a model call fails, retry it on the tier's fallback model"
+              description="Each tier can name a second model of the same provider (the refresh icon in the list). Off means a failed call ends the run."
               value={draft.model_fallback}
               onChange={(checked) => setDraft((d) => (d ? { ...d, model_fallback: checked } : d))}
             />

@@ -480,7 +480,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
-	tierSet := tierSetFromWorkspace(wsTiers, tierKeys, r.PoolFor)
+	tierSet := TierSetFromWorkspace(wsTiers, tierKeys, r.PoolFor)
 	// flash is the always-present default every unconfigured tier resolves to, so
 	// its key is mandatory; lite/pro keys are optional.
 	if tierKeys["flash"] == "" {
@@ -709,13 +709,11 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		defer func() { _ = ss.CloseSession(sandboxSession) }()
 	}
 
-	// Resolve the model ladder: the agent's "run" task tier is the start, plus the
-	// higher tiers as escalation rungs when model_fallback is on. The primary rung
-	// drives the run; the rest are tried on a retryable provider error.
-	start := TierFromName(taskMap[storage.TaskRun])
-	ladder := tierSet.ladder(start, wsTiers.ModelFallback)
-	primary := ladder[0]
-	esc, err := buildRungs(ladder[1:])
+	// Resolve the run's model tier: the agent's "run" task maps to a workspace
+	// tier, and the tier owns its own fallback — a second model of the same
+	// provider, tried when the primary model fails.
+	runTier := tierSet.For(TierFromName(taskMap[storage.TaskRun]))
+	rungs, err := runTier.Rungs()
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -723,9 +721,9 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 
 	// Compaction runs on its own tier (the agent's "compaction" task), pinned into
 	// the loop so the in-run summary call doesn't borrow whichever rung the run has
-	// escalated to. Build a dedicated provider for it.
-	compactTC := tierSet.resolve(TierFromName(taskMap[storage.TaskCompaction]))
-	compactProvider, err := buildProvider(compactTC.Provider, compactTC.BaseURL, compactTC.APIKey, compactTC.TokenSource)
+	// fallen back to. Build a dedicated provider for it.
+	compactTier := tierSet.For(TierFromName(taskMap[storage.TaskCompaction]))
+	compactProvider, err := compactTier.RawProvider()
 	if err != nil {
 		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
 		return storage.AgentRun{}, agentcore.RunResult{}, err
@@ -740,19 +738,15 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if adv, err := r.Store.AdvisorForRun(ctx, scopeID); err == nil && adv.Enabled {
 		// Its own tier, resolved like every other task kind. Defaults to pro:
 		// see storage.DefaultTaskTiers.
-		advTC := tierSet.resolve(TierFromName(taskMap[storage.TaskAdvisor]))
 		advisorReviewer = r.advisorReviewer(advisorInput{
-			Provider:     advTC.Provider,
-			Model:        advTC.Model,
-			BaseURL:      advTC.BaseURL,
-			APIKey:       advTC.APIKey,
+			Tier:         tierSet.For(TierFromName(taskMap[storage.TaskAdvisor])),
 			Instructions: adv.Instructions,
 		})
 		advisorNotes = r.advisorNoteRecorder(runID)
 	}
 
 	mem := NewPgMemory(r.Store, cfg.RedactPII)
-	if emb := newEmbedder(primary.Provider, primary.BaseURL, primary.APIKey); emb != nil {
+	if emb := newEmbedder(runTier.Provider, runTier.BaseURL, runTier.APIKey); emb != nil {
 		mem.Embedder = emb
 	}
 
@@ -767,16 +761,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	agent, err := Build(BuildParams{
 		ProjectID:          opts.ProjectID,
 		ScopeID:            scopeID,
-		Provider:           primary.Provider,
-		Model:              primary.Model,
-		BaseURL:            primary.BaseURL,
-		APIKey:             primary.APIKey,
-		TokenSource:        primary.TokenSource,
+		Rungs:              rungs,
 		Trigger:            trigger,
-		Escalation:         esc,
-		ContextWindow:      EffectiveContextWindow(primary),
 		CompactionProvider: compactProvider,
-		CompactionModel:    compactTC.Model,
+		CompactionModel:    compactTier.Model,
 		Scopes:             ScopesFromMap(cfg.Scopes),
 		// Verify-on-stop rail: a figure-shaped answer produced with zero evidence
 		// tool executions re-opens the run once (verify or disclaim). nil when the
@@ -902,10 +890,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if opts.Reflect && runErr == nil {
 		// Reflection resolves the agent's "reflection" task tier (defaults to pro,
 		// itself falling back to flash when pro is unconfigured). Best-effort.
-		rt := tierSet.resolve(TierFromName(taskMap[storage.TaskReflection]))
 		_ = r.reflect(ctx, reflectInput{
-			ProjectID: opts.ProjectID, ScopeID: scopeID, RunID: runID, Provider: rt.Provider,
-			Model: rt.Model, BaseURL: rt.BaseURL, APIKey: rt.APIKey, Memory: mem, Result: res,
+			ProjectID: opts.ProjectID, ScopeID: scopeID, RunID: runID,
+			Tier:   tierSet.For(TierFromName(taskMap[storage.TaskReflection])),
+			Memory: mem, Result: res,
 		})
 	}
 
@@ -970,7 +958,7 @@ func (r *Runner) keyRefresher(projectID string) func(context.Context, string) (s
 	}
 	return func(ctx context.Context, provider string) (string, error) {
 		// Re-resolve against the workspace tier pool — the same source a run's
-		// ladder resolves from — so a rotated workspace key is picked up mid-run.
+		// rungs resolve from — so a rotated workspace key is picked up mid-run.
 		wsID, err := r.Store.WorkspaceIDForProject(ctx, projectID)
 		if err != nil {
 			return "", err
@@ -979,30 +967,8 @@ func (r *Runner) keyRefresher(projectID string) func(context.Context, string) (s
 		if err != nil {
 			return "", err
 		}
-		ts := tierSetFromWorkspace(wsTiers, keys, r.PoolFor)
-		want := normalizeProvider(provider)
-		// Resolve every tier and return the freshest key for the matching provider.
-		// A run uses one provider across its ladder rungs in practice; matching on
-		// the normalized name keeps the OpenAI-compat vendor case working too.
-		for _, tier := range []Tier{TierLite, TierFlash, TierPro} {
-			tc := ts.resolve(tier)
-			if normalizeProvider(tc.Provider) == want && tc.APIKey != "" {
-				return tc.APIKey, nil
-			}
-		}
-		return "", fmt.Errorf("agentruntime: no key for provider %q on key refresh", provider)
+		return TierSetFromWorkspace(wsTiers, keys, r.PoolFor).KeyFor(provider)
 	}
-}
-
-// normalizeProvider folds the empty provider label to "openai" (the wire
-// default) and lower-cases it, so a tier's stored provider matches the name an
-// agentcore provider reports.
-func normalizeProvider(p string) string {
-	p = strings.ToLower(strings.TrimSpace(p))
-	if p == "" {
-		return "openai"
-	}
-	return p
 }
 
 // CheapProvider resolves the provider+model for the orchestrator's front-desk
@@ -1037,13 +1003,13 @@ func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore
 	if err != nil {
 		return nil, "", err
 	}
-	tc := tierSetFromWorkspace(wsTiers, keys, r.PoolFor).resolve(TierFromName(taskMap[storage.TaskTriage]))
+	tier := TierSetFromWorkspace(wsTiers, keys, r.PoolFor).For(TierFromName(taskMap[storage.TaskTriage]))
 	// Trace the classifier's cheap calls too — they carry real (small) cost.
-	prov, err := buildTracedProvider(tc.Provider, tc.BaseURL, tc.APIKey, tc.TokenSource, r.Tracer)
+	prov, err := tier.TracedProvider(r.Tracer)
 	if err != nil {
 		return nil, "", err
 	}
-	return prov, tc.Model, nil
+	return prov, tier.Model, nil
 }
 
 // RunTierWindow reports the input context window, in tokens, of the model that
@@ -1075,7 +1041,7 @@ func (r *Runner) RunTierWindow(ctx context.Context, projectID string) int {
 	if err != nil {
 		return 0
 	}
-	return EffectiveContextWindow(tierSetFromWorkspace(wsTiers, keys, r.PoolFor).resolve(TierFromName(taskMap[storage.TaskRun])))
+	return TierSetFromWorkspace(wsTiers, keys, r.PoolFor).For(TierFromName(taskMap[storage.TaskRun])).EffectiveWindow()
 }
 
 // loadSkills maps active stored skills into agentcore.Skill headers for the
@@ -1235,25 +1201,4 @@ func truncate(s string, n int) string {
 // storageSkill builds a reflect-proposed skill row.
 func storageSkill(name, description, body string) storage.AgentSkill {
 	return storage.AgentSkill{Name: name, Description: description, Body: body}
-}
-
-// tierSetFromWorkspace assembles the TierSet from the workspace model pool and
-// the decrypted per-tier keys (keyed "lite"/"flash"/"pro"). The base
-// provider/model/base_url columns are the flash tier; lite/pro use their own
-// columns and key. A tier with no decrypted key is left unconfigured and
-// resolves back to flash at call time.
-func tierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string, poolFor func(providerID string) ai.TokenSource) TierSet {
-	// Only OAuth vendors draw from an account pool; an API-key provider row id
-	// must not produce a TokenSource or the wire client would ignore its key.
-	src := func(vendor, providerID string) ai.TokenSource {
-		if poolFor == nil || providerID == "" || !ai.IsOAuthVendor(vendor) {
-			return nil
-		}
-		return poolFor(providerID)
-	}
-	return TierSet{
-		TierFlash: TierConfig{Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ProviderID: cfg.FlashProviderID, TokenSource: src(cfg.Provider, cfg.FlashProviderID), ContextWindow: cfg.ContextWindow},
-		TierLite:  TierConfig{Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ProviderID: cfg.LiteProviderID, TokenSource: src(cfg.LiteProvider, cfg.LiteProviderID), ContextWindow: cfg.LiteContextWindow},
-		TierPro:   TierConfig{Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ProviderID: cfg.ProProviderID, TokenSource: src(cfg.ProProvider, cfg.ProProviderID), ContextWindow: cfg.ProContextWindow},
-	}
 }

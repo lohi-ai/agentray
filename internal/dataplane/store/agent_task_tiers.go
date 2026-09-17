@@ -106,7 +106,7 @@ func (s *Store) UpsertAgentTaskTiers(ctx context.Context, userID, projectID, age
 		return nil, err
 	}
 	if !canManage {
-		return nil, errAgentForbidden
+		return nil, ErrAgentForbidden
 	}
 
 	clean := AgentTaskTiers{}
