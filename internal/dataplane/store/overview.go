@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -269,6 +270,11 @@ type OverviewContent struct {
 	TopUTMSources OverviewList `json:"top_utm_sources"`
 	TopCampaigns  OverviewList `json:"top_campaigns"`
 	TopReferrers  OverviewList `json:"top_referrers"`
+	// FirstReadDiscovery breaks down the discovery surface of readers completing
+	// their first activation event (e.g. chapter_view) in the period: classified
+	// from the human pageview immediately preceding that first activation into
+	// home, search, direct, or communication surfaces.
+	FirstReadDiscovery OverviewList `json:"first_read_discovery"`
 	// The retired Traffic page's remaining breakdowns. TrafficByClass counts
 	// pageviews per visitor class (human / search-bot / ai-platform) — the
 	// non-human rows are the point, so this list is not humans-filtered.
@@ -844,6 +850,12 @@ LIMIT 20`, args, func(rows *sql.Rows) error {
 			return res, err
 		}
 		res.Content.TopReferrers = OverviewList{Unit: "pageviews", Rows: referrers}
+
+		discoveryRows, err := s.overviewFirstReadDiscovery(ctx, projectID, platform, r.From, r.To, activationEvent)
+		if err != nil {
+			return res, err
+		}
+		res.Content.FirstReadDiscovery = OverviewList{Unit: "people", Rows: discoveryRows}
 	}
 
 	// --- content: the retired Traffic/Product breakdowns ---
@@ -1361,4 +1373,129 @@ WHERE f.cohort_day + INTERVAL '8 days' <= CAST(timezone(?, ?) AS DATE)
 		Definition: metricDefActivation,
 		Notes:      []string{note},
 	}, detail, nil
+}
+
+// overviewFirstReadDiscovery classifies the human pageview immediately preceding
+// each person's first activation event (e.g. chapter_view) into its discovery
+// surface: home, search, direct, or communication.
+//
+// The cohort is people whose lifetime first activation event occurred within the
+// selected analysis range [from, to). For each qualifying person, we find the
+// latest human user.pageview event that occurred before (or at) that first activation.
+// If no preceding pageview exists, the entry is classified as "direct". Otherwise,
+// the preceding pageview's path determines the discovery surface:
+//   - "/" -> "home"
+//   - contains "tim-kiem" or "search" -> "search"
+//   - starts with "/community", "/messages", "/messenger", or "/s/" -> "communication"
+//   - other paths -> "direct" (or "other" if distinct from direct)
+//
+// To ensure the 4 surfaces requested (home, search, direct, communication) are
+// always present and comparable, any surface with 0 users is populated with 0.
+func (s *Store) overviewFirstReadDiscovery(ctx context.Context, projectID, platform string, from, to time.Time, activationEvent string) ([]PathCount, error) {
+	activationEvent = strings.TrimSpace(activationEvent)
+	if activationEvent == "" {
+		return []PathCount{}, nil
+	}
+
+	platClause, platArg := overviewPlatform(platform)
+	args := []any{projectID, activationEvent, from, to}
+	if platArg != nil {
+		args = append(args, platArg)
+	}
+
+	// Find each person's first activation event in the project, restricted to
+	// those whose first activation falls within [from, to).
+	query := `
+WITH first_activations AS (
+	SELECT
+		canonical_distinct_id AS person_id,
+		min("timestamp") AS first_act_ts
+	FROM resolved_events
+	WHERE project_id = ?
+	  AND event_name = ?
+	  AND coalesce(visitor_class, 'human') = 'human'` + platClause + `
+	GROUP BY canonical_distinct_id
+	HAVING min("timestamp") >= ? AND min("timestamp") < ?
+),
+preceding_pvs AS (
+	SELECT
+		fa.person_id,
+		coalesce(json_extract_string(e.properties, '$.path'), '') AS pv_path,
+		e."timestamp" AS pv_ts,
+		row_number() OVER (PARTITION BY fa.person_id ORDER BY e."timestamp" DESC, e.event_id DESC) AS rn
+	FROM first_activations fa
+	INNER JOIN resolved_events e
+		ON e.project_id = ?
+	   AND e.canonical_distinct_id = fa.person_id
+	   AND e.event_name = 'user.pageview'
+	   AND coalesce(e.visitor_class, 'human') = 'human'
+	   AND e."timestamp" <= fa.first_act_ts
+),
+attributed AS (
+	SELECT
+		fa.person_id,
+		CASE
+			WHEN p.pv_path IS NULL OR p.pv_path = '' THEN 'direct'
+			WHEN p.pv_path = '/' THEN 'home'
+			WHEN p.pv_path LIKE '%tim-kiem%' OR p.pv_path LIKE '%search%' THEN 'search'
+			WHEN p.pv_path LIKE '/community%' OR p.pv_path LIKE '/messages%' OR p.pv_path LIKE '/messenger%' OR p.pv_path LIKE '/s/%' THEN 'communication'
+			ELSE 'direct'
+		END AS surface
+	FROM first_activations fa
+	LEFT JOIN preceding_pvs p
+		ON p.person_id = fa.person_id AND p.rn = 1
+)
+SELECT surface, count(*) AS count
+FROM attributed
+GROUP BY surface
+ORDER BY count DESC, surface ASC`
+
+	fullArgs := append(args, projectID)
+	surfaceCounts := map[string]uint64{
+		"home":          0,
+		"search":        0,
+		"direct":        0,
+		"communication": 0,
+	}
+
+	var hasRows bool
+	err := s.duckQuery(ctx, query, fullArgs, func(rows *sql.Rows) error {
+		hasRows = true
+		var surface string
+		var count uint64
+		if err := rows.Scan(&surface, &count); err != nil {
+			return err
+		}
+		surfaceCounts[surface] = count
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !hasRows {
+		return []PathCount{}, nil
+	}
+
+	// Return in fixed, canonical order: home, search, direct, communication
+	// or ordered by count DESC with fixed ties.
+	orderedSurfaces := []string{"home", "search", "direct", "communication"}
+	slices.SortFunc(orderedSurfaces, func(a, b string) int {
+		ca, cb := surfaceCounts[a], surfaceCounts[b]
+		if ca != cb {
+			if cb > ca {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(a, b)
+	})
+
+	result := make([]PathCount, 0, len(orderedSurfaces))
+	for _, s := range orderedSurfaces {
+		result = append(result, PathCount{
+			Value: s,
+			Count: surfaceCounts[s],
+		})
+	}
+	return result, nil
 }

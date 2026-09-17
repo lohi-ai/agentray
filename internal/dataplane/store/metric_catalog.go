@@ -71,6 +71,7 @@ const (
 	MetricTopUTMSources    = "top_utm_sources"
 	MetricTopCampaigns     = "top_campaigns"
 	MetricTopReferrers     = "top_referrers"
+	MetricFirstReadDiscovery = "first_read_discovery"
 	// The reads the retired /traffic, /web-analytics and /product surfaces
 	// served, absorbed into the overview contract (overview.v4).
 	MetricPageviews         = "pageviews"
@@ -177,6 +178,7 @@ const (
 	metricDefPayingUsers       = "Distinct people with at least one deduplicated positive revenue booking in the range, any declared currency. A refund does not un-pay a person."
 	metricDefProceedsPerPaying = "Net proceeds in the headline currency divided by the distinct people who paid in that currency in the range. No FX — the ratio never mixes currencies."
 	metricDefDownloadToPaid    = "Share of a lifetime first-activity cohort that made a deduplicated positive revenue booking within N local days of first activity. Cohorts too young to have reached day N are excluded, not counted as zero."
+	metricDefFirstReadDiscovery = "First-time readers reaching activation in the range, broken down by discovery surface (home, search, direct, communication) derived from the preceding pageview."
 )
 
 // Prerequisite texts — what must be instrumented before the metric can compute.
@@ -345,6 +347,11 @@ var metricCatalogDecl = []MetricDefinition{
 	{
 		Key: MetricTopReferrers, Label: "Top referrers", Unit: "pageviews", Kind: MetricKindBreakdown,
 		Group: MetricGroupAcquisition, Definition: metricDefTopReferrers,
+		Displays: []string{DisplayTable, DisplayBar},
+	},
+	{
+		Key: MetricFirstReadDiscovery, Label: "First-read discovery", Unit: "people", Kind: MetricKindBreakdown,
+		Group: MetricGroupAcquisition, Definition: metricDefFirstReadDiscovery, Prerequisite: metricPrereqActivation,
 		Displays: []string{DisplayTable, DisplayBar},
 	},
 }
@@ -656,6 +663,16 @@ func MetricReadingFor(def MetricDefinition, res OverviewResult) (MetricReading, 
 			rate := point.Rate * 100
 			reading.Rate = &rate
 		}
+		return reading, nil
+	case MetricFirstReadDiscovery:
+		if res.Metrics.Activation.State == OverviewStateUnconfigured {
+			reading.State = OverviewStateUnconfigured
+			reading.Notes = []string{metricPrereqActivation}
+			return reading, nil
+		}
+		reading.State = overviewMetricState(res.DataStatus.EverReceived, res.DataStatus.QualifyingInRange)
+		reading.Unit = res.Content.FirstReadDiscovery.Unit
+		reading.Rows = res.Content.FirstReadDiscovery.Rows
 		return reading, nil
 	case MetricTopPages, MetricTopSources, MetricTopUTMSources, MetricTopCampaigns, MetricTopReferrers, MetricTrafficByClass, MetricAITopPaths, MetricTrafficByPlatform, MetricTopEvents:
 		list := res.Content.TopPages
