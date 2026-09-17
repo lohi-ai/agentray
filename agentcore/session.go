@@ -28,7 +28,9 @@ const (
 	// EntryModelChange records the active model switching (escalation or a
 	// save-point bump), so a resumed run reconstructs the right model.
 	EntryModelChange SessionEntryKind = "model_change"
-	// EntryActiveToolsChange records the active tool set changing mid-run.
+	// EntryActiveToolsChange records the active tool set changing mid-run (a
+	// PrepareNextTurn swap), so a resumed run rebuilds the tools the crashed
+	// run ended on rather than the registry it started with.
 	EntryActiveToolsChange SessionEntryKind = "active_tools_change"
 	// EntryTurnInterrupted is written by recovery to mark a turn that never
 	// completed (a crash between a tool result and the next assistant turn).

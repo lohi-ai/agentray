@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -416,9 +417,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// needs no special step — the reduced history still carries the full span,
 	// so the in-loop compaction guard simply fires again.
 	resumed := false
+	var resumePlan ResumePlan
 	{
 		if len(resumeLog) > 0 {
-			plan := RecoverSession(resumeLog, tools, RecoveryMarkInterrupted)
+			resumePlan = RecoverSession(resumeLog, tools, RecoveryMarkInterrupted)
+			plan := resumePlan
 			// Seed the mirror from the log this run inherits, so a checkpoint
 			// written later carries the state accumulated ACROSS the crash and not
 			// just what this process happened to observe. A run that resumes,
@@ -531,6 +534,28 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				}
 			}
 			// len(plan.Messages) == 0 falls through: nothing recoverable, run fresh.
+		}
+	}
+	// Restore the run state the log recorded beyond the transcript: the active
+	// tool set a PrepareNextTurn swap left behind (EntryActiveToolsChange) and
+	// the model the crashed run was actually answering with (EntryModelChange).
+	// Without the first, a resumed run silently re-advertises the registry it
+	// STARTED with — the swap never happened; without the second, it re-pays the
+	// escalation that already failed once and reports the wrong model to the
+	// extensions until the next turn answers.
+	var resumeTools *ToolSet
+	if resumed && len(resumePlan.ActiveTools) > 0 {
+		restored := make([]Tool, 0, len(resumePlan.ActiveTools))
+		for _, n := range resumePlan.ActiveTools {
+			if t, ok := tools.Get(n); ok {
+				restored = append(restored, t)
+			}
+		}
+		// A tool the crashed run had that this composition no longer registers
+		// is dropped; if that empties the set, keep the full registry rather
+		// than resuming with nothing to call.
+		if len(restored) > 0 {
+			resumeTools = NewToolSet(restored...)
 		}
 	}
 
@@ -667,14 +692,36 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 
 	// Build the model ladder: the primary provider/model first, then the
 	// configured escalation rungs. rung points at the rung currently in use; once
-	// a higher rung succeeds the loop stays there for subsequent turns.
+	// a higher rung succeeds the loop stays there for subsequent turns. On a
+	// resume the log's recorded model wins: the crashed run already paid to
+	// discover its working rung, so the resumed run starts there rather than
+	// re-failing down the ladder. A recorded model that no longer names a rung
+	// (the composition changed) falls back to rung 0.
 	ladder := append([]ModelRung{{Provider: a.provider, Model: a.model, ContextWindow: a.contextWindow}}, a.escalation...)
 	rung := 0
+	if resumed && resumePlan.Model != "" {
+		for i, r := range ladder {
+			if r.Model == resumePlan.Model {
+				rung = i
+				break
+			}
+		}
+	}
 
 	// state is the per-turn save-point. It is applied at the top of each turn and
 	// refreshed by PrepareNextTurn after each turn (P7), so model / tools / system
-	// changes apply to the next request without touching the in-flight one.
-	state := TurnState{Model: a.model, Tools: tools, System: system}
+	// changes apply to the next request without touching the in-flight one. A
+	// resume seeds it from the log: the recorded model (or the configured one
+	// when the log predates EntryModelChange) and the recorded active tool set.
+	stateModel := a.model
+	if resumed && resumePlan.Model != "" {
+		stateModel = resumePlan.Model
+	}
+	stateTools := tools
+	if resumeTools != nil {
+		stateTools = resumeTools
+	}
+	state := TurnState{Model: stateModel, Tools: stateTools, System: system}
 
 	// finalizing latches once any ceiling trips: the loop spends one tool-free
 	// wrap-up turn and then stops with that ceiling as the StopReason.
@@ -1120,6 +1167,26 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// (read-only) tool, they run concurrently and results are applied in the
 		// model's original order so traces and tool messages stay deterministic.
 		calls := resp.Message.ToolCalls
+		// A response cut off by the output-token limit can carry tool calls whose
+		// arguments are silently incomplete: the stream ends mid-JSON, and the
+		// truncated tail may still parse (a cut landing on a boundary) while
+		// meaning something other than what the model intended. None of the
+		// calls in such a message are safe to execute — pi's
+		// failToolCallsFromTruncatedMessage — so each is answered with an error
+		// asking the model to re-issue it. The refusal is recorded and persisted
+		// like any other non-execution; it spends no tool-call budget.
+		if isTruncatedStop(resp.StopReason) {
+			for _, call := range calls {
+				recordTool(ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "response truncated by output limit"})
+				msg := toolResult(call, "not executed: the response hit the output token limit, so this call's arguments may be truncated. Re-issue the tool call with complete arguments.")
+				res.Messages = append(res.Messages, msg)
+				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
+			}
+			endTurn(true)
+			flush()
+			continue
+		}
+
 
 		// Budget guard (§7): once the run has spent its tool-call budget, block
 		// the whole batch and stop cleanly. (Checked per batch, not per call, so
@@ -1279,11 +1346,17 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 
 		// Per-turn save-point refresh (P7): hand the just-completed state to the
-		// hook so the next turn can use a new model / tools / system. Empty returned
-		// fields keep the current value, so a careless hook can't blank the run.
+		// hook so the next turn can use a new model / tools / system. Empty
+		// returned fields keep the current value, so a careless hook can't blank
+		// the run.
 		if a.prepareNextTurn != nil {
 			next := a.prepareNextTurn(ctx, TurnState{Model: state.Model, Tools: tools, System: system, Messages: res.Messages})
-			if next.Model != "" {
+			if next.Model != "" && next.Model != state.Model {
+				// A save-point model bump is durable for the same reason an
+				// escalation is: the log must record which model the run was
+				// actually answering with, or a resume rebuilds the wrong one.
+				appendEntry(SessionEntry{Kind: EntryModelChange, Turn: res.Turns, Model: next.Model})
+				checkpoint.Model = next.Model
 				state.Model = next.Model
 			}
 			if next.System != "" {
@@ -1291,6 +1364,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			}
 			if next.Tools != nil {
 				state.Tools = next.Tools
+				// The swap is durable: record the new set so a resume rebuilds
+				// the tools the run actually ended on, not the registry it
+				// started with. Compared against the CURRENT set so a hook that
+				// returns the same set every turn writes nothing.
+				if names := next.Tools.Names(); !slices.Equal(names, tools.Names()) {
+					appendEntry(SessionEntry{Kind: EntryActiveToolsChange, Turn: res.Turns, Tools: names})
+					checkpoint.ActiveTools = slices.Clone(names)
+				}
 			}
 		}
 

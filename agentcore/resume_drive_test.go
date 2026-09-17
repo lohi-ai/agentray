@@ -213,3 +213,111 @@ func TestResumeSessionEmptyLogRunsFresh(t *testing.T) {
 		t.Fatalf("seed persisted %d times, want 1", seeds)
 	}
 }
+
+// TestResumeRestoresActiveToolsAndModel verifies the durable run state beyond
+// the transcript is honored on resume: a crashed run that had swapped its tool
+// set (EntryActiveToolsChange) and escalated to another model
+// (EntryModelChange) comes back on THAT set and THAT rung — not the registry
+// and primary model it was configured with.
+func TestResumeRestoresActiveToolsAndModel(t *testing.T) {
+	ctx := context.Background()
+	store := newMemSessionStore()
+	// A crashed run: user task, a mid-run tool swap to just "b", an escalation
+	// to model "big", then an assistant turn that died mid-work.
+	for _, e := range []SessionEntry{
+		{Kind: EntryMessage, Message: &Message{Role: RoleUser, Content: "count the beans"}},
+		{Kind: EntryActiveToolsChange, Tools: []string{"b"}},
+		{Kind: EntryModelChange, Model: "big"},
+		{Kind: EntryMessage, Message: &Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "b", Arguments: "{}"}}}},
+	} {
+		if err := store.Append(ctx, "r5", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	primary := NewFauxProvider(AssistantText("primary must not be called"))
+	escalated := NewFauxProvider(AssistantText("resumed on the recorded rung"))
+	agent, err := New(Config{
+		Provider:      primary,
+		Model:         "small",
+		Escalation:    []ModelRung{{Provider: escalated, Model: "big"}},
+		Tools:         NewToolSet(&echoTool{name: "a"}, &echoTool{name: "b"}),
+		Policy:        NewAllowList("a", "b"),
+		Session:       store,
+		SessionID:     "r5",
+		ResumeSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := agent.Prompt(ctx, "resume")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if res.Final != "resumed on the recorded rung" {
+		t.Fatalf("final = %q", res.Final)
+	}
+	if len(primary.Recorded) != 0 {
+		t.Fatal("resume must start on the recorded rung, not re-pay the failed primary")
+	}
+	if len(escalated.Recorded) != 1 {
+		t.Fatalf("escalated provider calls = %d, want 1", len(escalated.Recorded))
+	}
+	// The recorded active set is advertised, not the full registry.
+	req := escalated.Recorded[0]
+	if len(req.Tools) != 1 || req.Tools[0].Name != "b" {
+		t.Fatalf("resumed run must advertise the recorded tool set [b], got %+v", req.Tools)
+	}
+}
+
+// TestPrepareNextTurnToolSwapIsDurable verifies a save-point tool swap writes
+// EntryActiveToolsChange — the entry a resume reads to rebuild the set — and
+// that a hook returning the same set every turn writes nothing.
+func TestPrepareNextTurnToolSwapIsDurable(t *testing.T) {
+	ctx := context.Background()
+	store := newMemSessionStore()
+	narrow := NewToolSet(&echoTool{name: "b"})
+	faux := NewFauxProvider(
+		AssistantToolCall("c1", "a", `{}`),
+		AssistantText("done"),
+	)
+	agent, err := New(Config{
+		Provider:  faux,
+		Model:     "test",
+		Tools:     NewToolSet(&echoTool{name: "a"}, &echoTool{name: "b"}),
+		Policy:    NewAllowList("a", "b"),
+		Session:   store,
+		SessionID: "r6",
+		PrepareNextTurn: func(_ context.Context, s TurnState) TurnState {
+			s.Tools = narrow
+			return s
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(ctx, "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	// Turn 2 advertised only the swapped-in set.
+	if len(faux.Recorded) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(faux.Recorded))
+	}
+	if got := faux.Recorded[1].Tools; len(got) != 1 || got[0].Name != "b" {
+		t.Fatalf("turn 2 must advertise only [b], got %+v", got)
+	}
+	// The swap is in the durable log exactly once.
+	log, _ := store.Log(ctx, "r6")
+	changes := 0
+	for _, e := range log {
+		if e.Kind == EntryActiveToolsChange {
+			changes++
+			if len(e.Tools) != 1 || e.Tools[0] != "b" {
+				t.Fatalf("recorded tool set = %v, want [b]", e.Tools)
+			}
+		}
+	}
+	if changes != 1 {
+		t.Fatalf("EntryActiveToolsChange written %d times, want 1", changes)
+	}
+}

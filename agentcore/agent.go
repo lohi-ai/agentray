@@ -313,7 +313,10 @@ type Config struct {
 	Goal string
 	// PrepareNextTurn is an optional save-point hook called after each turn; the
 	// returned TurnState (model / tools / system) drives the next turn. nil keeps
-	// the model, tools, and prompt fixed for the whole run.
+	// the model, tools, and prompt fixed for the whole run. Model and tool-set
+	// changes are durable (EntryModelChange / EntryActiveToolsChange), so a
+	// crash-resumed run rebuilds them; a system change is not — the prompt is
+	// re-derived on every run.
 	PrepareNextTurn func(ctx context.Context, state TurnState) TurnState
 	// BudgetGate is an optional per-turn ceiling check (#4). Consulted with the
 	// run's accumulated usage at the top of each turn; returning true triggers a

@@ -189,3 +189,16 @@ func lastAssistantText(messages []Message) string {
 	}
 	return ""
 }
+
+// isTruncatedStop reports whether the provider ended the response at its output
+// limit rather than by choice. Stop reasons pass through vendor-verbatim, so
+// this is a set: OpenAI-wire "length", Anthropic's "max_tokens", Codex's
+// "incomplete". A truncated message's tool calls may carry silently incomplete
+// arguments and are never executed (see the dispatch guard in loop.go).
+func isTruncatedStop(reason string) bool {
+	switch reason {
+	case "length", "max_tokens", "incomplete":
+		return true
+	}
+	return false
+}
