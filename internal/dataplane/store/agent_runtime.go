@@ -404,26 +404,92 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`, m.ScopeID, m.Kind, m.Content, tags, m.Conf
 	return err
 }
 
+// ErrAgentMemoryNotFound reports that no LIVE memory with the given id exists
+// in the scope — the id is wrong, the row belongs to another scope, or it was
+// already retracted. The model-facing edit tool surfaces this instead of
+// reporting success on a no-op.
+var ErrAgentMemoryNotFound = errors.New("agent memory not found in scope")
+
 // SupersedeAgentMemory soft-retracts one memory in favour of another: the row
 // stays, but every recall path filters it out. This is mnemopi's invalidate()
 // (core/beam/store.ts) — the minimum honest answer to "a memory written last
 // session is wrong this session", which a hard DELETE cannot give because it
 // loses the fact that the agent ever held the belief.
 //
-// Nothing calls it yet. It is the seam the soft-supersede column exists to
-// open: the model-facing edit/forget tool and a softer option for the existing
-// delete route are both owner decisions (docs/AGENT-GOVERNANCE.md), not
-// something this change assumes. replacementID may be empty, which retracts the
-// memory without naming a successor.
+// The memory_edit tool calls it for forget/invalidate. replacementID may be
+// empty, which retracts the memory without naming a successor. A call that
+// matches no live row in the scope returns ErrAgentMemoryNotFound — the tool
+// must be able to tell the model "that memory is not yours / not there"
+// rather than silently succeeding.
 func (s *Store) SupersedeAgentMemory(ctx context.Context, scopeID, id, replacementID string) error {
 	var replacement any
 	if replacementID != "" {
 		replacement = replacementID
 	}
-	_, err := s.pg.Exec(ctx, `
+	tag, err := s.pg.Exec(ctx, `
 UPDATE agent_memory SET superseded_by = COALESCE($3::uuid, id)
 WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL`, id, scopeID, replacement)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAgentMemoryNotFound
+	}
+	return nil
+}
+
+// UpdateAgentMemory rewrites one memory in place, keeping history: the new
+// content is inserted as a fresh row and the old row is soft-retracted to it,
+// in ONE transaction — a failure never leaves a retracted memory with no
+// successor, and never leaves both versions live.
+//
+// The successor inherits the old row's kind (an edit fixes what a memory
+// says, not what it is) and starts with seen_count 1: it is a new wording,
+// not a re-confirmation of the old one. The scope predicate on the UPDATE is
+// the cross-scope fence — an id outside the scope matches nothing and the
+// whole transaction rolls back with ErrAgentMemoryNotFound.
+func (s *Store) UpdateAgentMemory(ctx context.Context, scopeID, id string, m AgentMemoryRow) error {
+	tags := m.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	var embedding any // nil => SQL NULL => keyword-only recall
+	if len(m.Embedding) > 0 {
+		b, err := json.Marshal(m.Embedding)
+		if err != nil {
+			return err
+		}
+		embedding = string(b)
+	}
+	var srun any
+	if m.SourceRun != "" {
+		srun = m.SourceRun
+	}
+
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var newID string
+	if err := tx.QueryRow(ctx, `
+INSERT INTO agent_memory (scope_id, kind, content, tags, confidence, source_run_id, embedding)
+SELECT scope_id, kind, $3, $4, $5, $6, $7
+FROM agent_memory
+WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL
+RETURNING id::text`, id, scopeID, m.Content, tags, m.Confidence, srun, embedding).Scan(&newID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAgentMemoryNotFound
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE agent_memory SET superseded_by = $3::uuid
+WHERE id = $1::uuid AND scope_id = $2::uuid AND superseded_by IS NULL`, id, scopeID, newID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // RecallAgentMemoryCandidates returns recent entries that have an embedding, for

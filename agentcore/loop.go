@@ -179,6 +179,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	exts, xerr := beginExtensions(ctx, a.extensions, RunInfo{
 		SessionID: a.sessionID,
 		Owner:     owner,
+		ScopeID:   a.def.ScopeID,
 		Limits:    limits,
 		Depth:     DelegationDepth(ctx),
 		Durable:   a.session != nil && a.sessionID != "",

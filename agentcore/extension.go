@@ -36,6 +36,10 @@ type RunInfo struct {
 	// resources (a background job started here must not be visible to another
 	// run). It equals SessionID on a durable run and is otherwise unique.
 	Owner string
+	// ScopeID is the running agent's own memory/persona scope — the same value
+	// recall reads under (def.ScopeID). Extensions that write agent-private
+	// state pin to it so a model-supplied value can never widen the scope.
+	ScopeID string
 	// Limits are the run's effective bounds.
 	Limits Limits
 	// Depth is the delegation depth: 0 for a top-level run, higher inside a

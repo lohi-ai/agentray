@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -204,5 +205,116 @@ SELECT count(*) FROM agent_memory WHERE scope_id = $1::uuid AND kind = 'learning
 		if m.ID == learningID {
 			t.Fatalf("vector candidates returned the superseded memory %s", learningID)
 		}
+	}
+}
+
+// TestAgentMemoryUpdateLive exercises the model-facing edit path against live
+// Postgres: UpdateAgentMemory rewrites a memory as insert-successor +
+// soft-retract in one transaction, and both curation methods refuse an id
+// outside the scope (or one already retracted) with ErrAgentMemoryNotFound.
+// Same gate as TestAgentMemoryFoldInLive.
+func TestAgentMemoryUpdateLive(t *testing.T) {
+	dsn := os.Getenv("AGENTRAY_LIVE_PG")
+	if dsn == "" {
+		t.Skip("set AGENTRAY_LIVE_PG to run the live agent-memory update test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	s := &Store{pg: pool}
+
+	var scopeID, otherScope string
+	if err := pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&scopeID); err != nil {
+		t.Fatalf("seed scope: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&otherScope); err != nil {
+		t.Fatalf("seed other scope: %v", err)
+	}
+	defer func() {
+		if _, err := pool.Exec(ctx, `DELETE FROM agent_memory WHERE scope_id = ANY($1::uuid[])`,
+			[]string{scopeID, otherScope}); err != nil {
+			t.Logf("cleanup: %v", err)
+		}
+	}()
+
+	if err := s.RememberAgentMemory(ctx, AgentMemoryRow{
+		ScopeID: scopeID, Kind: "fact", Content: "deploys run on Friday", Confidence: 0.7,
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	var id string
+	if err := pool.QueryRow(ctx, `
+SELECT id::text FROM agent_memory WHERE scope_id = $1::uuid`, scopeID).Scan(&id); err != nil {
+		t.Fatalf("find memory: %v", err)
+	}
+
+	// Update: the successor carries the new wording under the SAME kind, the
+	// old row is kept but superseded to it, and recall sees only the new text.
+	if err := s.UpdateAgentMemory(ctx, scopeID, id, AgentMemoryRow{
+		Content: "deploys run on Thursday", Confidence: 0.7,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_memory WHERE scope_id = $1::uuid`, scopeID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 2 {
+		t.Fatalf("update left %d rows, want 2 (old kept as history)", rows)
+	}
+	var newID, succKind string
+	if err := pool.QueryRow(ctx, `
+SELECT id::text, kind FROM agent_memory WHERE scope_id = $1::uuid AND superseded_by IS NULL`,
+		scopeID).Scan(&newID, &succKind); err != nil {
+		t.Fatalf("find successor: %v", err)
+	}
+	if succKind != "fact" {
+		t.Errorf("successor kind = %q, want the old row's kind preserved", succKind)
+	}
+	var oldLink string
+	if err := pool.QueryRow(ctx, `
+SELECT superseded_by::text FROM agent_memory WHERE scope_id = $1::uuid AND id = $2::uuid`,
+		scopeID, id).Scan(&oldLink); err != nil {
+		t.Fatalf("old row link: %v", err)
+	}
+	if oldLink != newID {
+		t.Errorf("old row superseded_by = %s, want the successor %s", oldLink, newID)
+	}
+	got, err := s.RecallAgentMemory(ctx, scopeID, "deploys", 8)
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	if len(got) != 1 || got[0].Content != "deploys run on Thursday" {
+		t.Fatalf("recall after update: %+v", got)
+	}
+
+	// Cross-scope and already-retracted ids are refused, not silently no-oped.
+	if err := s.UpdateAgentMemory(ctx, otherScope, newID, AgentMemoryRow{Content: "x"}); !errors.Is(err, ErrAgentMemoryNotFound) {
+		t.Errorf("cross-scope update: got %v, want ErrAgentMemoryNotFound", err)
+	}
+	if err := s.SupersedeAgentMemory(ctx, otherScope, newID, ""); !errors.Is(err, ErrAgentMemoryNotFound) {
+		t.Errorf("cross-scope supersede: got %v, want ErrAgentMemoryNotFound", err)
+	}
+	if err := s.SupersedeAgentMemory(ctx, scopeID, id, ""); !errors.Is(err, ErrAgentMemoryNotFound) {
+		t.Errorf("re-superseding a retracted row: got %v, want ErrAgentMemoryNotFound", err)
+	}
+	if err := s.SupersedeAgentMemory(ctx, scopeID, newID, ""); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	recent, err := s.RecallAgentMemory(ctx, scopeID, "", 8)
+	if err != nil {
+		t.Fatalf("recency recall: %v", err)
+	}
+	if len(recent) != 0 {
+		t.Errorf("recall after forget returned %d rows, want 0", len(recent))
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_memory WHERE scope_id = $1::uuid`, scopeID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("forget deleted a row (%d left, want 2) — the retraction must be soft", rows)
 	}
 }

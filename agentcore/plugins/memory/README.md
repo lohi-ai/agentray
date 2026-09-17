@@ -65,12 +65,28 @@ either — both live in the store. What the shipped store does:
   every recall path, so the history of having held the belief survives the
   retraction.
 
+## Model-facing curation
+
+The plugin also contributes two gated tools when a store is installed
+(`BeginRun` declines without one, so they never appear on a memoryless run):
+
+- **`learn`** files a reusable lesson as a `learning` entry — the in-run half
+  of what the reflection pass does after the run. It needs only `Remember`,
+  so a store that cannot revise entries still gets it.
+- **`memory_edit`** revises one entry by id: `update` rewrites the content
+  (old row kept, superseded by the new one), `forget`/`invalidate` retract it.
+  It is offered only when the store implements `agentcore.MemoryCurator`.
+
+Both pin the run's own scope (`RunInfo.ScopeID`) — a model can never name
+another scope, and the store refuses an id outside it — and both stay behind
+the permission gate like any other tool (no `SelfGated`: they write durable
+state). Retraction is always soft; there is no hard delete on the seam.
+
 ## Known limitations and deferred work
 
 - **No contradiction resolution.** Nothing detects that two live memories
-  disagree; supersede is a seam the store exposes, not a judgement anything
-  makes. There is no model-facing edit/forget tool — that is an owner decision
-  (`docs/AGENT-GOVERNANCE.md`), not a plugin one.
+  disagree; supersede is a seam the store exposes and the model can invoke
+  through `memory_edit`, not a judgement anything makes on its own.
 - **No consolidation or decay of stored rows.** Old memory loses rank, never
   resolution: nothing summarizes, tiers, or evicts, and a scope's row count only
   grows (more slowly now that repeats fold).
