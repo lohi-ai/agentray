@@ -176,6 +176,7 @@ export function useAgent() {
         .sessionRun(sessionID)
         .then((r) => ({ run: r.run, toolCalls: r.tool_calls ?? [], pendingQuestion: r.pending_question }))
         .catch(() => null),
+    chatPending: chat.isPending,
     answerChatStream,
     ackRecommendation: (id: string, status: 'accepted' | 'dismissed', note?: string) =>
       ack.mutateAsync({ id, status, note }),

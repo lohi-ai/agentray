@@ -1104,14 +1104,14 @@ export function QuestionCard({
 
   if (answeredText) {
     return (
-      <Card variant="secondary" className="p-3 border rounded-md">
+      <Card variant="muted" padding={3}>
         <VStack gap={1} align="stretch">
           <Text type="supporting" weight="semibold" color="secondary">
             Question answered
           </Text>
           <Text>{question.question}</Text>
-          <HStack gap={2} align="center" className="mt-1">
-            <Badge variant="success" size="sm">Answered</Badge>
+          <HStack gap={2} align="center">
+            <Badge variant="success" label="Answered" />
             <Text type="supporting">{answeredText}</Text>
           </HStack>
         </VStack>
@@ -1120,11 +1120,11 @@ export function QuestionCard({
   }
 
   return (
-    <Card variant="outline" className="p-3 border border-border-strong rounded-md bg-surface-secondary/40">
+    <Card variant="default" padding={3}>
       <VStack gap={2} align="stretch">
         <HStack gap={2} align="center" justify="between">
           <Text weight="semibold">{question.question}</Text>
-          <Badge variant="warning" size="sm">Action required</Badge>
+          <Badge variant="warning" label="Action required" />
         </HStack>
         {hasOptions ? (
           <VStack gap={1.5} align="stretch">
@@ -1142,7 +1142,7 @@ export function QuestionCard({
                       : 'bg-surface hover:bg-surface-secondary border-border text-foreground/90'
                   } ${disabled || submitted ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
                 >
-                  <Text weight={active ? 'semibold' : 'regular'}>{opt.label}</Text>
+                  <Text weight={active ? 'semibold' : 'normal'}>{opt.label}</Text>
                   {opt.description ? (
                     <Text type="supporting" color="secondary">
                       {opt.description}

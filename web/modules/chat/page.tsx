@@ -1,3 +1,5 @@
+'use client';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useRouter } from 'next/navigation';
@@ -9,6 +11,7 @@ import { HStack } from '@astryxdesign/core/HStack';
 import { Badge } from '@astryxdesign/core/Badge';
 import { Text } from '@astryxdesign/core/Text';
 import { isSteered, type AgentPlanItem, type AgentQuestionPayload, type AgentResultCard, type AgentToolTrace } from '@/lib/api';
+import { useAuthStore } from '@/lib/app-state';
 import { useAgent } from '@/modules/agent/hooks';
 import { useAgents } from '@/modules/agent/hooks';
 import { useAgentSkills } from '@/modules/agent/hooks';
