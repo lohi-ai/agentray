@@ -27,10 +27,11 @@ const (
 	scanBudget = 5 * time.Minute
 
 	// WoWDeltaThreshold is the week-over-week move (fraction) that makes a
-	// headline metric a finding. WoWDeltaMinCount is the count floor: below
-	// it a percentage swing is noise, not news.
+	// headline metric a finding. WoWDeltaMinCount is the noise floor on the
+	// PRIOR window: a percentage swing computed off a tiny baseline is noise,
+	// not news (10 → 200 reads as "×20" and says nothing).
 	WoWDeltaThreshold = 0.25
-	WoWDeltaMinCount  = 25
+	WoWDeltaMinCount  = 50
 
 	// SourceShiftSharePP is the share move (percentage points) in one
 	// referrer channel that counts as a mix shift; a change in the top

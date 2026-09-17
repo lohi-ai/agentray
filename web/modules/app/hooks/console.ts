@@ -18,14 +18,27 @@ export function useConsoleQuery() {
       // Resilient fan-out: a single failing panel endpoint must degrade only
       // its own panel, not reject the whole aggregate and blank every
       // console-derived surface. Each call falls back to `null` on rejection;
-      // consumers already null-check their slice.
-      const settle = <T>(p: Promise<T>): Promise<T | null> => p.catch(() => null);
+      // consumers already null-check their slice. A transient refusal (cold
+      // start, engine-busy 503, a dropped connection) gets one retry after a
+      // short delay before it counts as failed — the first fan-out after
+      // navigation is exactly when those land, and without the retry the
+      // people page reads a blip as "unavailable" until a manual retry.
+      const settle = async <T>(p: () => Promise<T>): Promise<T | null> => {
+        try {
+          return await p();
+        } catch {
+          const { promise: waited, resolve: done } = Promise.withResolvers<void>();
+          setTimeout(done, 800);
+          await waited;
+          return p().catch(() => null);
+        }
+      };
       const [activity, templates, persons, explorer, dashboards] = await Promise.all([
-        settle(client.activity(appliedFilters)),
-        settle(client.templates()),
-        settle(client.persons(appliedFilters)),
-        settle(client.exploreEvents(appliedFilters)),
-        settle(client.dashboards()),
+        settle(() => client.activity(appliedFilters)),
+        settle(() => client.templates()),
+        settle(() => client.persons(appliedFilters)),
+        settle(() => client.exploreEvents(appliedFilters)),
+        settle(() => client.dashboards()),
       ]);
       return { activity, templates, persons, explorer, dashboards };
     },

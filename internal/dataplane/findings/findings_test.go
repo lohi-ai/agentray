@@ -81,8 +81,9 @@ func TestScanHealthyProjectWritesNothing(t *testing.T) {
 func TestWoWDeltaFiresOncePerMetric(t *testing.T) {
 	cur := okOverview(func(r *storage.OverviewResult) {
 		r.Metrics.ActiveUsers = storage.OverviewMetric{State: storage.OverviewStateOK, Value: u64(40), Previous: u64(200)}
-		// Below the count floor — must not fire.
-		r.Metrics.NewUsers = storage.OverviewMetric{State: storage.OverviewStateOK, Value: u64(2), Previous: u64(10)}
+		// Prior below the noise floor — a ×20 swing off a baseline of 10 is
+		// noise, must not fire.
+		r.Metrics.NewUsers = storage.OverviewMetric{State: storage.OverviewStateOK, Value: u64(200), Previous: u64(10)}
 		// Inside the threshold — must not fire.
 		r.Metrics.Sessions = storage.OverviewMetric{State: storage.OverviewStateOK, Value: u64(110), Previous: u64(100)}
 	})

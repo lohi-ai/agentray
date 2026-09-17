@@ -84,8 +84,8 @@ export function AgentsMonitorPage() {
                 align: 'start',
                 renderCell: (row) => {
                   const { status } = statusOf(row);
-                  const work = status === 'attention' ? `${row.error_count} failed` : status === 'working' ? `${row.running_count} running` : status === 'paused' ? '—' : 'idle';
-                  return <span className={status === 'attention' ? 'text-danger' : 'text-[var(--color-text-disabled)]'}>{work}{status !== 'paused' && row.last_run_at ? <span className="text-[var(--color-text-disabled)]"> · {formatRelative(row.last_run_at)}</span> : null}</span>;
+                  const work = status === 'attention' ? `${row.error_count} failed${row.last_error ? ` — ${row.last_error}` : ''}` : status === 'working' ? `${row.running_count} running` : status === 'paused' ? '—' : 'idle';
+                  return <span className={status === 'attention' ? 'text-danger' : 'text-[var(--color-text-disabled)]'} title={status === 'attention' ? row.last_error : undefined}>{work}{status !== 'paused' && row.last_run_at ? <span className="text-[var(--color-text-disabled)]"> · {formatRelative(row.last_run_at)}</span> : null}</span>;
                 },
               },
               { key: 'runs', header: 'Runs', align: 'end', renderCell: (row) => <span className="font-mono tabular-nums">{row.run_count}</span> },
