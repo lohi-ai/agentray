@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
 )
 
 // TestDataAnalystPresetGrantsSQLTools proves the config-only Data Analyst pack's
@@ -96,5 +97,51 @@ func TestPolicyForScopesUnion(t *testing.T) {
 	pNoSQL := PolicyForScopes(Scopes{Monitor: true})
 	if d := pNoSQL.Allow(context.Background(), agentcore.ToolCall{Name: ToolRunSQL}); d.Allow {
 		t.Error("run_sql must be denied when only monitor is enabled")
+	}
+}
+
+// TestMemoryCurationToolsGated pins the two conditions the memory_edit/learn
+// tools answer to: they are permitted only for an agent whose growth_suggest
+// scope is on (the scope that already covers the remember write) AND whose
+// run has a memory store installed. A scope-less or store-less run must not
+// see them — the plugin declines without a store, and the allow-list is what
+// keeps a permitted-looking name from reaching the model anyway.
+func TestMemoryCurationToolsGated(t *testing.T) {
+	has := func(names []string, want string) bool {
+		for _, n := range names {
+			if n == want {
+				return true
+			}
+		}
+		return false
+	}
+	mem := newScopedMemory()
+
+	full := permittedToolNames(BuildParams{Scopes: Scopes{GrowthSuggest: true}, Memory: mem})
+	for _, want := range []string{memory.ToolMemoryEdit, memory.ToolLearn} {
+		if !has(full, want) {
+			t.Errorf("%q not permitted for a growth_suggest run with a store", want)
+		}
+	}
+
+	noScope := permittedToolNames(BuildParams{Scopes: Scopes{Monitor: true}, Memory: mem})
+	for _, name := range []string{memory.ToolMemoryEdit, memory.ToolLearn} {
+		if has(noScope, name) {
+			t.Errorf("%q permitted without growth_suggest", name)
+		}
+	}
+
+	noStore := permittedToolNames(BuildParams{Scopes: Scopes{GrowthSuggest: true}})
+	for _, name := range []string{memory.ToolMemoryEdit, memory.ToolLearn} {
+		if has(noStore, name) {
+			t.Errorf("%q permitted without a memory store", name)
+		}
+	}
+
+	readOnly := permittedToolNames(BuildParams{Scopes: Scopes{GrowthSuggest: true}, Memory: mem, ReadOnly: true})
+	for _, name := range []string{memory.ToolMemoryEdit, memory.ToolLearn} {
+		if has(readOnly, name) {
+			t.Errorf("%q permitted on a read-only run", name)
+		}
 	}
 }

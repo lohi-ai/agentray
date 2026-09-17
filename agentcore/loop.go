@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -188,6 +189,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	exts, xerr := beginExtensions(ctx, a.extensions, RunInfo{
 		SessionID: a.sessionID,
 		Owner:     owner,
+		ScopeID:   a.def.ScopeID,
 		Limits:    limits,
 		Depth:     DelegationDepth(ctx),
 		Durable:   a.session != nil && a.sessionID != "",
@@ -1217,28 +1219,72 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// after them would flag every redaction as a violation.
 		exts.observe(ctx, PhaseRequest, res.Turns, res.Messages)
 
-		reqMessages, herr := a.hooks.runContext(ctx, res.Messages)
-		if herr != nil {
-			return failTurn(herr)
+		// buildRequest derives the outgoing request from the persisted history:
+		// context hooks shape the view, cache anchors mark the stable prefix, and
+		// before_provider_request hooks get the last word. It is a closure because
+		// a stream-abort retry re-derives it — the injection is new history, so the
+		// hooks that shape the outgoing view must see it too.
+		buildRequest := func() (ChatRequest, error) {
+			reqMessages, herr := a.hooks.runContext(ctx, res.Messages)
+			if herr != nil {
+				return ChatRequest{}, herr
+			}
+			// Cache-anchor placement is a loop decision, not a provider one: mark the
+			// stable prefix on the request view and let each provider translate the
+			// marks into its native caching (or ignore them).
+			reqMessages = markCacheAnchors(reqMessages, res.Messages, a.cacheKey)
+			req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
+			return a.hooks.runBeforeProviderRequest(ctx, req)
 		}
-		// Cache-anchor placement is a loop decision, not a provider one: mark the
-		// stable prefix on the request view and let each provider translate the
-		// marks into its native caching (or ignore them).
-		reqMessages = markCacheAnchors(reqMessages, res.Messages, a.cacheKey)
-		req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
-		if req, herr = a.hooks.runBeforeProviderRequest(ctx, req); herr != nil {
-			return failTurn(herr)
+
+		// A StreamInterceptor can cut the provider call mid-token: the partial
+		// answer is discarded, its injection joins the conversation (persisted like
+		// a steer, so a resume replays what the retry was actually shown), and the
+		// turn's provider call is re-issued in place — same turn, same rung. The
+		// plugin's own per-turn cap is the real bound; maxStreamAbortsPerTurn
+		// backstops a broken interceptor by retrying once with interception off so
+		// the stream completes unmodified rather than spinning the provider.
+		var resp ChatResponse
+		for streamAborts := 0; ; {
+			req, herr := buildRequest()
+			if herr != nil {
+				return failTurn(herr)
+			}
+			emit(StreamEvent{Type: StreamMessageStart, Turn: res.Turns})
+			streams := exts.streams
+			if streamAborts >= maxStreamAbortsPerTurn {
+				streams = nil
+			}
+			// Durable partial frames (pi's assistant-durability): while the turn
+			// streams, streamTurn snapshots the accumulated text as an
+			// EntryAssistantFrame side record — first token, then per frameBytes —
+			// so a crash mid-generation leaves the draft the turn had produced. The
+			// turn's assistant EntryMessage settles them; the tail scan in
+			// ReduceSession only reads frames that outlived their turn.
+			resp, err = a.reason(ctx, req, sink, streams, ladder, &rung, func(snapshot string) {
+				appendSide(SessionEntry{Kind: EntryAssistantFrame, Turn: res.Turns, Content: snapshot})
+			})
+			var abort *streamAbort
+			if err == nil || !errors.As(err, &abort) {
+				break
+			}
+			// The aborted attempt still generated tokens: fold its usage into the
+			// run total so a rule that keeps firing cannot spend for free.
+			res.Usage = addUsage(res.Usage, abort.usage)
+			streamAborts++
+			emit(StreamEvent{Type: StreamMessageEnd, Turn: res.Turns})
+			// The injection is new material the model did not have, so it is
+			// reported like a steer: an extension tracking the model's own behavior
+			// must treat the retried turn as a fresh decision, not a continuation.
+			exts.observe(ctx, PhaseExternalInput, res.Turns, abort.inject)
+			for _, m := range abort.inject {
+				m := m
+				res.Messages = append(res.Messages, m)
+				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &m})
+			}
+			emit(StreamEvent{Type: StreamProgress, Note: "stream rule matched — retrying the turn with its reminder", Turn: res.Turns})
 		}
-		emit(StreamEvent{Type: StreamMessageStart, Turn: res.Turns})
-		// Durable partial frames (pi's assistant-durability): while the turn
-		// streams, streamTurn snapshots the accumulated text as an
-		// EntryAssistantFrame side record — first token, then per frameBytes —
-		// so a crash mid-generation leaves the draft the turn had produced. The
-		// turn's assistant EntryMessage settles them; the tail scan in
-		// ReduceSession only reads frames that outlived their turn.
-		resp, err := a.reason(ctx, req, sink, ladder, &rung, func(snapshot string) {
-			appendSide(SessionEntry{Kind: EntryAssistantFrame, Turn: res.Turns, Content: snapshot})
-		})
+
 		if err != nil {
 			return failTurn(fmt.Errorf("provider chat (turn %d): %w", res.Turns, err))
 		}

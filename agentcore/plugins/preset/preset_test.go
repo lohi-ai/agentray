@@ -6,20 +6,16 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/compaction"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/jobs"
-	"github.com/lohi-ai/agentray/agentcore/plugins/model"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
-	"github.com/lohi-ai/agentray/agentcore/plugins/policy"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	"github.com/lohi-ai/agentray/agentcore/plugins/repeatguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/sessionquery"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
-	"github.com/lohi-ai/agentray/agentcore/plugins/tools"
 )
 
 // echoTool is a minimal host tool for composition tests.
@@ -428,11 +424,11 @@ func TestWithoutDropsAPlugin(t *testing.T) {
 // the plugins an agent actually needs.
 func TestHandBuiltComposition(t *testing.T) {
 	agent, err := agentcore.Build(
-		model.Plugin{Provider: &agentcore.FauxProvider{Responses: []agentcore.ChatResponse{
+		agentcore.ModelPlugin{Provider: &agentcore.FauxProvider{Responses: []agentcore.ChatResponse{
 			{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "hello"}},
 		}}, Model: "m"},
-		tools.Of(&echoTool{name: "echo"}),
-		policy.AllowList("echo"),
+		agentcore.ToolsOf(&echoTool{name: "echo"}),
+		agentcore.PolicyAllowList("echo"),
 		goal.Until("STATUS appears"),
 		repeatguard.Default(),
 	)
@@ -448,8 +444,8 @@ func TestHandBuiltComposition(t *testing.T) {
 // end up ungoverned.
 func TestPolicyDefaultsToDenyAll(t *testing.T) {
 	agent, err := agentcore.Build(
-		model.Plugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
-		tools.Of(&echoTool{name: "echo"}),
+		agentcore.ModelPlugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
+		agentcore.ToolsOf(&echoTool{name: "echo"}),
 	)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -579,7 +575,7 @@ func TestOptInPluginsShareTheSameInterface(t *testing.T) {
 		todo.With(todo.NewStore()),
 		observe.Hooks{Label: "audit", OnAgentEnd: []agentcore.AgentEndHook{func(context.Context, agentcore.RunResult) {}}},
 		observe.Monitor{Sink: observe.SinkFunc(func(observe.TraceRecord) {})},
-		policy.DenyAll(),
+		agentcore.PolicyDenyAll(),
 		sessionquery.Via(stubQuery{}),
 	}
 	for _, p := range optIn {
@@ -591,7 +587,7 @@ func TestOptInPluginsShareTheSameInterface(t *testing.T) {
 	// Composed together they must produce one working agent: same Registry, same
 	// Build call, no bespoke entry point anywhere.
 	base := []agentcore.Plugin{
-		model.Plugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
+		agentcore.ModelPlugin{Provider: &agentcore.FauxProvider{}, Model: "m"},
 	}
 	reg, err := agentcore.BuildRegistry(append(base, optIn...)...)
 	if err != nil {
@@ -620,7 +616,7 @@ func TestOptInPluginsShareTheSameInterface(t *testing.T) {
 		t.Fatalf("Agent from the opt-in composition: %v", err)
 	}
 	if dump := agent.Describe(); !describes(dump, "policy", "agentcore.DenyAll") {
-		t.Fatalf("policy.DenyAll did not claim the policy seam:\n%s", dump)
+		t.Fatalf("PolicyDenyAll did not claim the policy seam:\n%s", dump)
 	}
 }
 
@@ -640,9 +636,9 @@ func (stubQuery) Search(context.Context, sessionquery.SessionQueryRequest) (sess
 func TestSeamsAreNotExtensions(t *testing.T) {
 	seams := []agentcore.Plugin{
 		driverPlugin{agentcore.DefaultDriver()},
-		policy.AllowList("echo"),
-		compaction.Plugin{},
-		tools.Of(&echoTool{name: "echo"}),
+		agentcore.PolicyAllowList("echo"),
+		agentcore.CompactionPlugin{},
+		agentcore.ToolsOf(&echoTool{name: "echo"}),
 	}
 	for _, p := range seams {
 		if _, ok := p.(agentcore.ExtensionFactory); ok {

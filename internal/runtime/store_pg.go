@@ -207,6 +207,37 @@ func (m *PgMemory) Remember(ctx context.Context, e agentcore.MemoryEntry) error 
 	return m.Store.RememberAgentMemory(ctx, row)
 }
 
+var _ agentcore.MemoryCurator = (*PgMemory)(nil)
+
+// Supersede soft-retracts one memory in the scope (memory_edit forget /
+// invalidate). The row stays; every recall path filters it out.
+func (m *PgMemory) Supersede(ctx context.Context, scopeID, id, replacementID string) error {
+	return m.Store.SupersedeAgentMemory(ctx, scopeID, id, replacementID)
+}
+
+// Update rewrites one memory's content (memory_edit update): the successor
+// row gets the same PII redaction and re-embedding a fresh Remember would —
+// a vector that still described the old wording would rank the row against
+// queries it no longer answers.
+func (m *PgMemory) Update(ctx context.Context, scopeID, id string, e agentcore.MemoryEntry) error {
+	content := e.Content
+	if m.Redact {
+		content = redactPII(content, m.Denylist)
+	}
+	row := storage.AgentMemoryRow{
+		ScopeID: scopeID, Content: content, Tags: e.Tags,
+		Confidence: e.Confidence, SourceRun: e.SourceRun,
+	}
+	if m.Embedder != nil {
+		if vecs, err := m.Embedder.Embed(ctx, []string{content}); err == nil && len(vecs) > 0 {
+			row.Embedding = vecs[0]
+		}
+		// Embedding failure is non-fatal, same as Remember: the row persists
+		// without a vector and is still recalled by keyword.
+	}
+	return m.Store.UpdateAgentMemory(ctx, scopeID, id, row)
+}
+
 // CreateSession starts a working-memory thread.
 func (m *PgMemory) CreateSession(ctx context.Context, scopeID string) (agentcore.Session, error) {
 	s, err := m.Store.CreateAgentSession(ctx, scopeID)

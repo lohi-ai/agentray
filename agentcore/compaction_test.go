@@ -1299,3 +1299,84 @@ func names(msgs []Message) []string {
 	}
 	return out
 }
+
+type prunerCompactor struct{ compacted *int }
+
+func (prunerCompactor) Name() string { return "pruner" }
+
+func (prunerCompactor) ShouldCompact(messages []Message, _ int) bool {
+	return len(messages) > 4
+}
+
+func (p prunerCompactor) Compact(_ context.Context, req CompactionRequest) (CompactionResult, error) {
+	*p.compacted++
+	out := make([]Message, 0, len(req.Messages))
+	for i, m := range req.Messages {
+		if m.Role == RoleTool && i < len(req.Messages)-2 {
+			out = append(out, Message{Role: RoleTool, ToolCallID: m.ToolCallID, Content: "[pruned]"})
+			continue
+		}
+		out = append(out, m)
+	}
+	return CompactionResult{Messages: out}, nil
+}
+
+func TestCustomCompactionStrategyReplacesTheBuiltIn(t *testing.T) {
+	calls := 0
+	faux := NewFauxProvider(
+		AssistantToolCall("c1", "echo", `{"v":"1"}`),
+		AssistantToolCall("c2", "echo", `{"v":"2"}`),
+		AssistantText("done"),
+	)
+	agent, err := New(Config{
+		Provider:  faux,
+		Model:     "test",
+		Tools:     NewToolSet(&echoToolCompaction{}),
+		Policy:    NewAllowList("echo"),
+		Compactor: prunerCompactor{compacted: &calls},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("the custom compactor never ran — the loop is still calling its own strategy")
+	}
+	for _, req := range faux.Recorded {
+		for _, m := range req.Messages {
+			if strings.Contains(m.Content, "structured context checkpoint") {
+				t.Fatal("the built-in summarizer ran despite a replacement being installed")
+			}
+		}
+	}
+	if desc := agent.Describe(); !strings.Contains(desc, "compactor:") || !strings.Contains(desc, "pruner") {
+		t.Fatalf("Describe() does not report the installed strategy:\n%s", desc)
+	}
+}
+
+func TestTwoCompactionStrategiesIsABuildError(t *testing.T) {
+	calls := 0
+	_, err := Build(
+		ModelPlugin{Provider: NewFauxProvider(AssistantText("ok")), Model: "m"},
+		CompactionPlugin{Strategy: prunerCompactor{compacted: &calls}},
+		CompactionPlugin{Strategy: prunerCompactor{compacted: &calls}},
+	)
+	if err == nil {
+		t.Fatal("two compaction strategies composed without complaint")
+	}
+	if !strings.Contains(err.Error(), "compact") {
+		t.Fatalf("error should name the contested seam, got: %v", err)
+	}
+}
+
+type echoToolCompaction struct{}
+
+func (*echoToolCompaction) Name() string { return "echo" }
+func (*echoToolCompaction) Schema() ToolSchema {
+	return ToolSchema{Name: "echo", Description: "echo", Parameters: map[string]any{"type": "object"}}
+}
+func (*echoToolCompaction) Run(context.Context, string) (string, error) {
+	return strings.Repeat("payload ", 64), nil
+}

@@ -36,6 +36,10 @@ type RunInfo struct {
 	// resources (a background job started here must not be visible to another
 	// run). It equals SessionID on a durable run and is otherwise unique.
 	Owner string
+	// ScopeID is the running agent's own memory/persona scope — the same value
+	// recall reads under (def.ScopeID). Extensions that write agent-private
+	// state pin to it so a model-supplied value can never widen the scope.
+	ScopeID string
 	// Limits are the run's effective bounds.
 	Limits Limits
 	// Depth is the delegation depth: 0 for a top-level run, higher inside a
@@ -345,6 +349,47 @@ type StopInterceptor interface {
 	TurnStopping(ctx context.Context, info StopInfo) StopDecision
 }
 
+// StreamDecision is a StreamInterceptor's answer. The zero value lets the
+// stream continue untouched.
+type StreamDecision struct {
+	// Abort cuts the in-flight assistant message: the loop cancels the
+	// provider stream, discards the partial text, appends Inject to the
+	// conversation, and retries the turn's provider call from the same point.
+	// Abort with nothing to Inject would retry against an unchanged
+	// conversation — the model would emit the same tokens and abort again — so
+	// it is treated as "no opinion" and the stream completes.
+	Abort bool
+	// Inject is the correction the retried turn must see — the rule body the
+	// matched pattern violated. The LOOP appends it to the history and persists
+	// it like a steer, so a resumed run replays the conversation the retry was
+	// actually given.
+	Inject []Message
+}
+
+// StreamInterceptor observes the assistant's output WHILE it is being produced
+// and may cut it off mid-token. It is the only extension point that fires on
+// partial output: every other interceptor sees a finished artifact (a tool
+// result, a batch, a final answer), which is too late for a rule whose whole
+// purpose is that the model must never complete the pattern — a leaked secret,
+// a forbidden phrase, a banned construct. Aborting mid-stream is what keeps
+// the completed violation out of the transcript entirely.
+//
+// The interceptor is handed the assistant text accumulated SO FAR this turn —
+// the same buffer the loop is building — once per content delta, and again once
+// on the non-streaming path with the completed response. It is called
+// synchronously inside the delta loop, so a check must be cheap: a regex over
+// the buffer, not a network call. Interceptors are consulted in registration
+// order and the FIRST abort wins; the rest are not asked.
+//
+// The loop retries the turn after an abort, so an interceptor MUST bound
+// itself (a per-turn injection cap) or it spins the provider call forever.
+// The loop backstops a runaway interceptor at maxStreamAbortsPerTurn and then
+// lets the stream complete unmodified — pass-through, not failure, because a
+// guard that can take the run down is worse than the output it was policing.
+type StreamInterceptor interface {
+	InterceptStreamDelta(ctx context.Context, accumulated string) StreamDecision
+}
+
 // --- observation ---------------------------------------------------------
 
 // RunObserver watches a run without changing it. Implement it for metering,
@@ -389,6 +434,7 @@ type extensionSet struct {
 	toolIntcp []ToolInterceptor
 	batch     []BatchInterceptor
 	steps     []StepInterceptor
+	streams   []StreamInterceptor
 	stops     []StopInterceptor
 	revisers  []GoalReviser
 	observers []RunObserver
@@ -433,6 +479,9 @@ func (s *extensionSet) add(ext Extension) {
 	}
 	if v, ok := ext.(StepInterceptor); ok {
 		s.steps = append(s.steps, v)
+	}
+	if v, ok := ext.(StreamInterceptor); ok {
+		s.streams = append(s.streams, v)
 	}
 	if v, ok := ext.(StopInterceptor); ok {
 		s.stops = append(s.stops, v)
@@ -603,6 +652,24 @@ func (s *extensionSet) turnStopping(ctx context.Context, info StopInfo) (StopDec
 		}
 	}
 	return StopDecision{}, ""
+}
+
+// interceptStreamDelta consults the stream interceptors over the assistant text
+// accumulated so far. The first abort wins; the rest are not asked. A panicking
+// interceptor degrades to "no opinion" — same contract as every other dispatch
+// here — and an abort with nothing to inject is ignored, because retrying
+// against an unchanged conversation would just re-emit the same tokens.
+func interceptStreamDelta(ctx context.Context, interceptors []StreamInterceptor, accumulated string) StreamDecision {
+	for _, ic := range interceptors {
+		var d StreamDecision
+		if perr := safe(func() { d = ic.InterceptStreamDelta(ctx, accumulated) }); perr != nil {
+			continue
+		}
+		if d.Abort && len(d.Inject) > 0 {
+			return d
+		}
+	}
+	return StreamDecision{}
 }
 
 // observe dispatches to the read-only observers.
