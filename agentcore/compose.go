@@ -7,8 +7,8 @@ import (
 
 // Composition: turning a set of plugins into a runnable Agent.
 //
-// The plugins themselves do NOT live here — each is its own package under
-// agentcore/plugins/ (loop, model, policy, session, spill, jobs, observe, …).
+// Capabilities themselves do NOT live here — each is its own package under
+// agentcore/plugins/ (spill, jobs, observe, todo, subagent, …).
 // That split is deliberate and load-bearing:
 //
 //   - This package stays a leaf. It knows the Plugin interface and the Registry
@@ -79,107 +79,53 @@ func (p configPlugin) Register(r *Registry) error { return r.ApplyConfig(p.cfg) 
 // says nothing about — which is what lets ApplyConfig be combined with extra
 // plugins in one composition.
 func (r *Registry) ApplyConfig(cfg Config) error {
-	// --- spine ---
-	if err := r.SetModel(cfg.Provider, cfg.Model); err != nil {
-		return err
+	for _, p := range []Plugin{
+		ModelPlugin{
+			Provider:        cfg.Provider,
+			Model:           cfg.Model,
+			ContextWindow:   cfg.ContextWindow,
+			Escalation:      cfg.Escalation,
+			Retry:           cfg.Retry,
+			RefreshKey:      cfg.RefreshKey,
+			MaxTokens:       cfg.MaxTokens,
+			ReasoningEffort: cfg.ReasoningEffort,
+			OutputSchema:    cfg.OutputSchema,
+			PromptCacheKey:  cfg.PromptCacheKey,
+			CacheRetention:  cfg.PromptCacheRetention,
+		},
+		DefinitionPlugin{Definition: cfg.Definition, Limits: cfg.Limits, Env: cfg.Env},
+		ToolsFromSet(cfg.Tools),
+		PolicyPlugin{Policy: cfg.Policy},
+		HooksPlugin{Priority: PriorityDefault, Hooks: cfg.Hooks},
+		BudgetPlugin{Gate: cfg.BudgetGate, Step: cfg.StepGate},
+		SessionPlugin{
+			Store:             cfg.Session,
+			ID:                cfg.SessionID,
+			Resume:            cfg.ResumeSession,
+			SeedDisabledTools: cfg.SeedDisabledTools,
+		},
+		CompactionPlugin{
+			Settings: cfg.Compaction,
+			Provider: cfg.CompactionProvider,
+			Model:    cfg.CompactionModel,
+			Strategy: cfg.Compactor,
+		},
+		SteeringPlugin{
+			Steer:           cfg.GetSteeringMessages,
+			FollowUp:        cfg.GetFollowUpMessages,
+			PrepareNextTurn: cfg.PrepareNextTurn,
+		},
+	} {
+		if err := p.Register(r); err != nil {
+			return err
+		}
 	}
-	if err := setIf(cfg.Escalation != nil, func() error { return r.SetEscalation(cfg.Escalation) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.ContextWindow > 0, func() error { return r.SetContextWindow(cfg.ContextWindow) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.Retry != nil, func() error { return r.SetRetry(*cfg.Retry) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.RefreshKey != nil, func() error { return r.SetRefreshKey(cfg.RefreshKey) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.MaxTokens != 0, func() error { return r.SetMaxTokens(cfg.MaxTokens) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.ReasoningEffort != "", func() error { return r.SetReasoningEffort(cfg.ReasoningEffort) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.OutputSchema != nil, func() error { return r.SetOutputSchema(cfg.OutputSchema) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.PromptCacheKey != "", func() error {
-		return r.SetPromptCache(cfg.PromptCacheKey, cfg.PromptCacheRetention)
-	}); err != nil {
-		return err
-	}
-
-	// --- identity ---
-	// AgentDefinition holds slices, so it is not comparable; a definition-shaped
-	// seam is claimed only when the caller actually authored one.
-	if err := setIf(!cfg.Definition.IsZero(), func() error { return r.SetDefinition(cfg.Definition) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.Limits != nil, func() error { return r.SetLimits(*cfg.Limits) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.Env != nil, func() error { return r.SetEnv(*cfg.Env) }); err != nil {
-		return err
-	}
-
-	// --- tools + governance ---
-	if cfg.Tools != nil {
-		r.AddTools(toolsOf(cfg.Tools)...)
-	}
-	if err := r.UsePolicy(cfg.Policy); err != nil {
-		return err
-	}
-	r.AddHooks(PriorityDefault, cfg.Hooks)
 	if err := setIf(cfg.Goal != "", func() error { return r.SetGoal(cfg.Goal) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.BudgetGate != nil, func() error { return r.SetBudgetGate(cfg.BudgetGate) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.StepGate != nil, func() error { return r.SetStepGate(cfg.StepGate) }); err != nil {
-		return err
-	}
-
-	// --- durability + context ---
-	if err := setIf(cfg.Session != nil && cfg.SessionID != "", func() error {
-		return r.SetSession(cfg.Session, cfg.SessionID, cfg.ResumeSession)
-	}); err != nil {
-		return err
-	}
-	if err := setIf(len(cfg.SeedDisabledTools) > 0, func() error { return r.SetSeedDisabledTools(cfg.SeedDisabledTools) }); err != nil {
 		return err
 	}
 	if err := setIf(cfg.Memory != nil, func() error { return r.SetMemory(cfg.Memory) }); err != nil {
 		return err
 	}
-	if err := setIf(cfg.Compaction != nil, func() error { return r.SetCompaction(*cfg.Compaction) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.CompactionProvider != nil && cfg.CompactionModel != "", func() error {
-		return r.SetCompactionModel(cfg.CompactionProvider, cfg.CompactionModel)
-	}); err != nil {
-		return err
-	}
-	if err := setIf(cfg.Compactor != nil, func() error { return r.SetCompactor(cfg.Compactor) }); err != nil {
-		return err
-	}
-
-	// --- steering ---
-	if err := setIf(cfg.GetSteeringMessages != nil, func() error { return r.SetSteeringSource(cfg.GetSteeringMessages) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.GetFollowUpMessages != nil, func() error { return r.SetFollowUpSource(cfg.GetFollowUpMessages) }); err != nil {
-		return err
-	}
-	if err := setIf(cfg.PrepareNextTurn != nil, func() error { return r.SetPrepareNextTurn(cfg.PrepareNextTurn) }); err != nil {
-		return err
-	}
-
-	// --- extensions ---
-	// Every remaining capability arrives as an ExtensionFactory. Config does not
-	// know what any of them are, which is the point: adding one is a new package
-	// under agentcore/plugins/, never a new field here.
 	for _, f := range cfg.Extensions {
 		if f != nil {
 			r.AddExtension(f)

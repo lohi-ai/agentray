@@ -36,8 +36,8 @@ import (
 
 // Plugins returns the plugin set that reproduces agentcore.New(cfg).
 //
-// Every entry is a real plugin from its own package — there is no hidden core
-// doing the work behind them.
+// Core seams are provided by agentcore.*Plugin adapters in seams.go;
+// capabilities and extensions come from their respective plugin packages.
 func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 	list := []agentcore.Plugin{
 		// spine — the driver seam is left unclaimed; Build defaults it to the
