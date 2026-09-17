@@ -81,11 +81,15 @@ func (s *Store) migrateAgentSessionLog(ctx context.Context) error {
 	return nil
 }
 
-// AppendAgentSessionEntry records one entry, assigning the next per-run sequence
-// number atomically (COALESCE(MAX(seq))+1 in the INSERT). A run's loop appends
-// serially from one goroutine, so the read-max-then-insert is contention-free in
-// practice; the UNIQUE(run_id, seq) constraint is the backstop. No RBAC: called
-// by the runtime session adapter, not a user. Returns the assigned seq.
+// AppendAgentSessionEntry records one entry, assigning the next per-session
+// sequence number atomically (COALESCE(MAX(seq))+1 in the INSERT). A run's loop
+// appends serially from one goroutine, but the same session key can also be
+// written by a concurrent Steer/FollowUp enqueue or a sibling process resuming
+// the same log — the read-max-then-insert is then racy, and the UNIQUE
+// (session_key, seq) index is the backstop. On a collision the row is retried
+// with a fresh MAX: the loser of the race lands at the next seq, which is the
+// only correct answer for an append-only log. No RBAC: called by the runtime
+// session adapter, not a user. Returns the assigned seq.
 func (s *Store) AppendAgentSessionEntry(ctx context.Context, e AgentSessionEntry) (int, error) {
 	payload := e.PayloadJSON
 	if payload == "" {
@@ -96,7 +100,9 @@ func (s *Store) AppendAgentSessionEntry(ctx context.Context, e AgentSessionEntry
 		key = e.RunID
 	}
 	var seq int
-	err := s.pg.QueryRow(ctx, `
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		err = s.pg.QueryRow(ctx, `
 INSERT INTO agent_session_log (run_id, session_key, seq, kind, turn, payload_json)
 VALUES (
 	$1, $2,
@@ -104,6 +110,10 @@ VALUES (
 	$3, $4, $5::jsonb
 )
 RETURNING seq`, e.RunID, key, e.Kind, e.Turn, payload).Scan(&seq)
+		if !isUniqueViolation(err) {
+			return seq, err
+		}
+	}
 	return seq, err
 }
 
@@ -149,7 +159,9 @@ ORDER BY seq ASC`, sessionKey, sinceSeq)
 // AgentSessionCheckpoint reports the two facts that decide whether a session can
 // be resumed from a window: the seq of the newest SELF-CONTAINED checkpoint (a
 // completed compaction carrying both a retained transcript and the run state),
-// and whether the log has ever branched.
+// and whether the log has ever branched. A session with an unsettled inbox
+// intent reports seq=0 — the fold reads pending inbox from the raw log, so a
+// window starting past one would silently drop queued input.
 //
 // Both are mechanical — no judgement about whether a window is safe lives here;
 // the caller (agentcore.LoadResumeLog) owns that rule, so a second backend
@@ -170,7 +182,35 @@ SELECT
 	COALESCE(bool_or(kind = 'leaf_move'), false)
 FROM agent_session_log
 WHERE session_key = $1 AND kind IN ('compaction', 'leaf_move')`, sessionKey).Scan(&seq, &branched)
-	return seq, branched, err
+	if err != nil || seq == 0 {
+		return seq, branched, err
+	}
+	// An inbox intent queued before the checkpoint and never settled is
+	// invisible to a windowed read — the fold scans the RAW log for pending
+	// inbox items — so its presence downgrades the answer to "no window".
+	// An id-less intent cannot be matched to a settlement at all, so it is
+	// conservatively treated as unsettled.
+	var unsettled bool
+	err = s.pg.QueryRow(ctx, `
+SELECT EXISTS (
+	SELECT 1 FROM agent_session_log i
+	WHERE i.session_key = $1 AND i.kind = 'inbox'
+		AND (
+			COALESCE(i.payload_json->>'id', '') = ''
+			OR NOT EXISTS (
+				SELECT 1 FROM agent_session_log d
+				WHERE d.session_key = $1 AND d.kind = 'inbox_done'
+					AND d.payload_json->>'target' = i.payload_json->>'id'
+			)
+		)
+)`, sessionKey).Scan(&unsettled)
+	if err != nil {
+		return 0, branched, err
+	}
+	if unsettled {
+		return 0, branched, nil
+	}
+	return seq, branched, nil
 }
 
 func scanSessionEntries(rows pgx.Rows) ([]AgentSessionEntry, error) {

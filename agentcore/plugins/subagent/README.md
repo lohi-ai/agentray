@@ -14,7 +14,9 @@ dead ends, and large intermediate results never enter the parent's window.
 #### What the model sees
 
 One tool, `spawn_subagent`, with `task` and `context` parameters — plus an
-`agent` parameter listing named teammates when a roster is configured.
+`agent` parameter listing named teammates when a roster is configured, and an
+optional `output_schema` (JSON Schema object) that turns the final answer into
+validated JSON.
 
 ##### Verbatim text for this field
 
@@ -26,8 +28,27 @@ exploration or noisy multi-step work whose details you don't need (research a
 question, scan data broadly, produce an artifact), NOT for quick single-tool
 lookups you can do yourself. State the task fully and self-contained: the
 sub-agent sees nothing of this conversation except what you put in task and
-context.
+context. Pass output_schema when you need the answer as structured JSON rather
+than prose.
 ```
+
+### `output_schema` — typed final answers
+
+When `output_schema` is set, the child's task gains an instruction to end with
+a single bare JSON value matching the schema. The plugin validates the final
+answer itself — a forked child cannot carry the provider's structured-output
+seam — and on a violation re-opens the child exactly once with the error. The
+parent receives the validated JSON; if the retry also fails it receives the
+raw answer suffixed with `[validation failed: …]`, so a bad shape is visible
+rather than silent.
+
+The retry is a second run, not a resume: a durable child whose log completed
+would reattach to its recorded (invalid) answer, so the retry forks a fresh
+child at `<childSession>/retry` seeded with the prior transcript plus the
+error. The deterministic id keeps the spawn replay-safe — a re-issued spawn
+reattaches to whichever child log completed. A delegate has no transcript to
+re-open (`Delegate.Run` is an opaque closure), so its retry is a single
+re-invocation carrying the error and the rejected answer in the task.
 
 #### Token effect
 
@@ -98,7 +119,7 @@ and work around.
 The recovery story only holds if the log tells the truth about what was
 finished, and two things in the loop used to record cancellation damage as fact.
 Both are fixed in the kernel, and both were found by cancelling a run mid-batch
-(`agentcore/fanoutfail_test.go`):
+(`agentcore/fanout_test.go`):
 
 - **A cancellation-caused tool result is no longer persisted.** A call answered
   with `stopped: run aborted` — or with a tool error that is really the
@@ -126,9 +147,9 @@ answer.
 
 ## Known limitations and deferred work
 
-- **The parent sees only the final answer.** There is no structured return, no
-  partial results, and no way for a child to hand back an artifact reference
-  instead of prose.
+- **The parent sees only the final answer.** `output_schema` can make that
+  answer validated JSON, but there are no partial results and no way for a
+  child to hand back an artifact reference instead of prose.
 - **No per-child budget.** `MaxPerRun` counts spawns, not tokens or cost; one
   expensive child can consume the whole run's budget.
 - **A child cannot be steered.** No steering queue, no step gate — once started

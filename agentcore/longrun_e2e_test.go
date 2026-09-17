@@ -90,12 +90,30 @@ func (s *e2eStore) CheckpointSeq(_ context.Context, id string) (int, bool, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	seq, branched := 0, false
+	settled := map[string]bool{}
+	var queuedKeys []string
 	for _, e := range s.log[id] {
 		if e.Kind == agentcore.EntryLeafMove {
 			branched = true
 		}
 		if e.Kind == agentcore.EntryCompaction && e.Final && e.Retained != nil && e.State != nil {
 			seq = e.Seq
+		}
+		switch e.Kind {
+		case agentcore.EntryInboxDone:
+			settled[e.Target] = true
+		case agentcore.EntryInbox:
+			key := e.ID
+			if key == "" {
+				key = fmt.Sprintf("#%d", e.Seq)
+			}
+			queuedKeys = append(queuedKeys, key)
+		}
+	}
+	// Mirror the store contract: an unsettled inbox item defeats the window.
+	for _, k := range queuedKeys {
+		if !settled[k] {
+			return 0, branched, nil
 		}
 	}
 	return seq, branched, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -759,5 +760,457 @@ func TestDeniedAbortedMatchesWireLiteral(t *testing.T) {
 	}
 	if (ToolTrace{Reason: "tool-call budget exhausted"}).DeniedAborted() {
 		t.Fatal("other denials must not classify as abort")
+	}
+}
+
+// chunkBarrier is a barrierTool that additionally counts completions, so a
+// later sequential tool can prove the whole parallel group finished first.
+type chunkBarrier struct {
+	barrierTool
+	done *atomic.Int32
+}
+
+func (c *chunkBarrier) Run(ctx context.Context, args string) (string, error) {
+	out, err := c.barrierTool.Run(ctx, args)
+	c.done.Add(1)
+	return out, err
+}
+
+// TestMixedBatchChunksParallelRuns pins the chunked-dispatch contract: in a
+// batch [parallel, parallel, sequential], the two parallel calls still run
+// concurrently as a group (under the old all-or-nothing rule the sequential
+// neighbor forced the whole batch sequential and the barrier pair would time
+// out), and the sequential call runs only after the group completes. Trace
+// order stays the model's order.
+func TestMixedBatchChunksParallelRuns(t *testing.T) {
+	arrived := make(chan string, 2)
+	release := make(chan struct{})
+	var done atomic.Int32
+	qa := &chunkBarrier{barrierTool{name: "qa", arrived: arrived, release: release}, &done}
+	qb := &chunkBarrier{barrierTool{name: "qb", arrived: arrived, release: release}, &done}
+	go func() {
+		<-arrived
+		<-arrived
+		close(release)
+	}()
+
+	var wSawDone int32
+	w := funcTool{name: "w", run: func(context.Context, string) (string, error) {
+		wSawDone = done.Load()
+		return "wrote", nil
+	}}
+
+	batch := ChatResponse{
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "c1", Name: "qa", Arguments: "{}"},
+			{ID: "c2", Name: "qb", Arguments: "{}"},
+			{ID: "c3", Name: "w", Arguments: "{}"},
+		}},
+		StopReason: "tool_calls",
+	}
+	agent, err := New(Config{
+		Provider: NewFauxProvider(batch, AssistantText("all done")),
+		Model:    "test",
+		Tools:    NewToolSet(qa, qb, w),
+		Policy:   NewAllowList("qa", "qb", "w"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), "run all three")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(res.Tools) != 3 {
+		t.Fatalf("expected 3 tool traces, got %d", len(res.Tools))
+	}
+	for i, want := range []string{"qa", "qb", "w"} {
+		if res.Tools[i].Tool != want {
+			t.Fatalf("trace order not preserved: %+v", res.Tools)
+		}
+	}
+	for _, tr := range res.Tools {
+		if tr.Error != "" {
+			t.Fatalf("tool %q errored (group serialized?): %s", tr.Tool, tr.Error)
+		}
+	}
+	if wSawDone != 2 {
+		t.Fatalf("sequential tool ran before the parallel group finished (saw %d/2 done)", wSawDone)
+	}
+}
+
+// TestParallelGroupAfterSequentialBarrier pins that a parallel group forms
+// anywhere in the batch, not just at the front: [sequential, parallel,
+// parallel] runs the trailing pair concurrently after the barrier.
+func TestParallelGroupAfterSequentialBarrier(t *testing.T) {
+	arrived := make(chan string, 2)
+	release := make(chan struct{})
+	qa := &barrierTool{name: "qa", arrived: arrived, release: release}
+	qb := &barrierTool{name: "qb", arrived: arrived, release: release}
+	go func() {
+		<-arrived
+		<-arrived
+		close(release)
+	}()
+
+	w := funcTool{name: "w", run: func(context.Context, string) (string, error) {
+		return "wrote", nil
+	}}
+
+	batch := ChatResponse{
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "c1", Name: "w", Arguments: "{}"},
+			{ID: "c2", Name: "qa", Arguments: "{}"},
+			{ID: "c3", Name: "qb", Arguments: "{}"},
+		}},
+		StopReason: "tool_calls",
+	}
+	agent, err := New(Config{
+		Provider: NewFauxProvider(batch, AssistantText("all done")),
+		Model:    "test",
+		Tools:    NewToolSet(w, qa, qb),
+		Policy:   NewAllowList("qa", "qb", "w"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), "write then fan out")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if len(res.Tools) != 3 {
+		t.Fatalf("expected 3 tool traces, got %d", len(res.Tools))
+	}
+	for _, tr := range res.Tools {
+		if tr.Error != "" {
+			t.Fatalf("tool %q errored (trailing group serialized?): %s", tr.Tool, tr.Error)
+		}
+	}
+}
+
+// TestSteeringInjectedBeforeNextTurn verifies a steering message queued during
+// turn 1 appears in the turn-2 request, ahead of the model's reasoning.
+func TestSteeringInjectedBeforeNextTurn(t *testing.T) {
+	// Turn 1: model calls a (permitted) no-op tool so the loop continues; turn 2:
+	// final answer. Steering is queued once, drained on turn 2.
+	faux := NewFauxProvider(
+		AssistantToolCall("c1", "noop", `{}`),
+		AssistantText("ok"),
+	)
+	var delivered bool
+	agent, err := New(Config{
+		Provider: faux,
+		Model:    "test",
+		Tools:    NewToolSet(noopTool{}),
+		Policy:   NewAllowList("noop"),
+		GetSteeringMessages: func(context.Context) []Message {
+			if delivered {
+				return nil
+			}
+			delivered = true
+			return []Message{{Role: RoleUser, Content: "STEER: prefer option B"}}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := agent.Prompt(context.Background(), "start"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	// The second recorded request must contain the steering message.
+	if len(faux.Recorded) < 2 {
+		t.Fatalf("expected at least 2 turns, got %d", len(faux.Recorded))
+	}
+	var seen bool
+	for _, m := range faux.Recorded[1].Messages {
+		if strings.Contains(m.Content, "STEER: prefer option B") {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("steering message not present in turn-2 request: %+v", faux.Recorded[1].Messages)
+	}
+}
+
+// TestFollowUpRestartsLoop verifies a follow-up queued after the final answer
+// restarts the loop instead of ending the run.
+func TestFollowUpRestartsLoop(t *testing.T) {
+	faux := NewFauxProvider(
+		AssistantText("first answer"),
+		AssistantText("second answer"),
+	)
+	var sent bool
+	agent, err := New(Config{
+		Provider: faux,
+		Model:    "test",
+		GetFollowUpMessages: func(context.Context) []Message {
+			if sent {
+				return nil
+			}
+			sent = true
+			return []Message{{Role: RoleUser, Content: "now do the next thing"}}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if res.Final != "second answer" {
+		t.Fatalf("loop did not restart on follow-up: final=%q turns=%d", res.Final, res.Turns)
+	}
+	if res.Turns != 2 {
+		t.Fatalf("expected 2 turns after one follow-up, got %d", res.Turns)
+	}
+	// The follow-up must have entered the second request.
+	var seen bool
+	for _, m := range faux.Recorded[1].Messages {
+		if strings.Contains(m.Content, "now do the next thing") {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatalf("follow-up not present in restarted turn: %+v", faux.Recorded[1].Messages)
+	}
+}
+
+// TestFollowUpRespectsMaxTurns verifies an always-on follow-up queue cannot loop
+// past the turn budget.
+func TestFollowUpRespectsMaxTurns(t *testing.T) {
+	faux := NewFauxProvider() // always returns "(end)" / stop
+	limits := DefaultLimits()
+	limits.MaxTurns = 3
+	agent, err := New(Config{
+		Provider: faux,
+		Model:    "test",
+		Limits:   &limits,
+		GetFollowUpMessages: func(context.Context) []Message {
+			return []Message{{Role: RoleUser, Content: "again"}}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := agent.Prompt(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if res.Turns != 3 || res.StopReason != "max_turns" {
+		t.Fatalf("follow-up loop ignored budget: turns=%d stop=%q", res.Turns, res.StopReason)
+	}
+}
+
+// noopTool is a permitted do-nothing tool used to keep the loop alive for a turn.
+type noopTool struct{}
+
+func (noopTool) Name() string { return "noop" }
+func (noopTool) Schema() ToolSchema {
+	return ToolSchema{Name: "noop", Description: "does nothing", Parameters: map[string]any{"type": "object"}}
+}
+func (noopTool) Run(context.Context, string) (string, error) { return "ok", nil }
+
+// TestLifecycleEventOrder verifies a streamed run with one tool turn followed by
+// a final answer emits the granular lifecycle events in the documented order,
+// and that the back-compat token/tool events still appear.
+func TestLifecycleEventOrder(t *testing.T) {
+	faux := NewFauxProvider(
+		AssistantToolCall("c1", "noop", `{}`),
+		AssistantText("all done"),
+	)
+	agent, err := New(Config{
+		Provider: faux,
+		Model:    "test",
+		Tools:    NewToolSet(noopTool{}),
+		Policy:   NewAllowList("noop"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var events []StreamEventType
+	sink := func(ev StreamEvent) { events = append(events, ev.Type) }
+	if _, err := agent.PromptStream(context.Background(), "go", sink); err != nil {
+		t.Fatalf("PromptStream: %v", err)
+	}
+
+	// Reduce to the lifecycle skeleton (drop token/tool/message_update noise) and
+	// assert the boundary order.
+	want := []StreamEventType{
+		StreamAgentStart,
+		StreamTurnStart, StreamMessageStart, StreamMessageEnd,
+		StreamToolExecStart, StreamToolExecEnd, StreamTurnEnd,
+		StreamTurnStart, StreamMessageStart, StreamMessageEnd, StreamTurnEnd,
+		StreamAgentEnd,
+	}
+	var skeleton []StreamEventType
+	keep := map[StreamEventType]bool{
+		StreamAgentStart: true, StreamTurnStart: true, StreamMessageStart: true,
+		StreamMessageEnd: true, StreamToolExecStart: true, StreamToolExecEnd: true,
+		StreamTurnEnd: true, StreamAgentEnd: true,
+	}
+	for _, e := range events {
+		if keep[e] {
+			skeleton = append(skeleton, e)
+		}
+	}
+	if len(skeleton) != len(want) {
+		t.Fatalf("lifecycle skeleton = %v\nwant %v", skeleton, want)
+	}
+	for i := range want {
+		if skeleton[i] != want[i] {
+			t.Fatalf("event %d = %q, want %q\nfull: %v", i, skeleton[i], want[i], skeleton)
+		}
+	}
+
+	// Back-compat: the StreamTool event (completed trace) is still emitted.
+	var sawTool bool
+	for _, e := range events {
+		if e == StreamTool {
+			sawTool = true
+		}
+	}
+	if !sawTool {
+		t.Fatalf("back-compat StreamTool event missing: %v", events)
+	}
+}
+
+// errProvider always fails, to drive the failure-synthesis path.
+type errProvider struct{}
+
+func (errProvider) Name() string { return "err" }
+func (errProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
+	return ChatResponse{}, errors.New("provider exploded")
+}
+func (errProvider) Stream(context.Context, ChatRequest) (<-chan ChatDelta, error) {
+	return nil, errors.New("provider exploded")
+}
+func (errProvider) SupportsTools() bool { return true }
+
+// TestBusyGuardRejectsConcurrentRun verifies one Agent instance runs one run at
+// a time: a reentrant Prompt on the *same* agent fails fast with ErrBusy instead
+// of racing on the shared run state.
+func TestBusyGuardRejectsConcurrentRun(t *testing.T) {
+	var agent *Agent
+	var reentryErr error
+	reenter := func(ctx context.Context, _ Message) {
+		_, reentryErr = agent.Prompt(ctx, "again")
+	}
+	var err error
+	agent, err = New(Config{
+		Provider: NewFauxProvider(AssistantText("done")),
+		Model:    "test",
+		Hooks:    Hooks{MessageEnd: []MessageEndHook{reenter}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if !errors.Is(reentryErr, ErrBusy) {
+		t.Fatalf("a reentrant run on the same agent must return ErrBusy, got %v", reentryErr)
+	}
+}
+
+// TestFailureMessageSynthesizedOnProviderError verifies an aborting run still
+// produces a clean lifecycle: a synthesized assistant failure message plus
+// message_end / turn_end / agent_end events, while the error reaches the caller.
+func TestFailureMessageSynthesizedOnProviderError(t *testing.T) {
+	var seen []StreamEventType
+	sink := func(ev StreamEvent) { seen = append(seen, ev.Type) }
+
+	agent, err := New(Config{Provider: errProvider{}, Model: "test"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := agent.PromptStream(context.Background(), "go", sink)
+	if err == nil {
+		t.Fatalf("a provider error must surface to the caller")
+	}
+	last := res.Messages[len(res.Messages)-1]
+	if last.Role != RoleAssistant || last.Error == "" {
+		t.Fatalf("expected a synthesized assistant failure message, got %+v", last)
+	}
+	if res.StopReason != "error" {
+		t.Fatalf("stop reason = %q, want error", res.StopReason)
+	}
+	has := func(want StreamEventType) bool {
+		for _, e := range seen {
+			if e == want {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []StreamEventType{StreamMessageEnd, StreamTurnEnd, StreamAgentEnd} {
+		if !has(want) {
+			t.Fatalf("failure lifecycle missing %q in %v", want, seen)
+		}
+	}
+}
+
+// TestSavePointFlushesPerTurn verifies durable writes are buffered and committed
+// atomically at each turn boundary, emitting one save_point per turn, and the
+// committed log still reduces to a completed run.
+func TestSavePointFlushesPerTurn(t *testing.T) {
+	store := newMemSessionStore()
+	faux := NewFauxProvider(
+		AssistantToolCall("c1", "noop", `{}`),
+		AssistantText("done"),
+	)
+	var saves int
+	sink := func(ev StreamEvent) {
+		if ev.Type == StreamSavePoint {
+			saves++
+		}
+	}
+	agent, err := New(Config{
+		Provider:  faux,
+		Model:     "test",
+		Tools:     NewToolSet(noopTool{}),
+		Policy:    NewAllowList("noop"),
+		Session:   store,
+		SessionID: "s1",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.PromptStream(context.Background(), "go", sink); err != nil {
+		t.Fatalf("PromptStream: %v", err)
+	}
+	// One save-point per turn: the tool-call turn, then the final-answer turn.
+	if saves != 2 {
+		t.Fatalf("save-points = %d, want 2 (one per turn)", saves)
+	}
+	log, _ := store.Log(context.Background(), "s1")
+	if rs := ReduceSession(log); !rs.Completed {
+		t.Fatalf("committed log should reduce to a completed run: %+v", rs)
+	}
+}
+
+// TestAfterProviderResponseObserved verifies the raw-boundary observer fires
+// once per provider call, before usage accumulation.
+func TestAfterProviderResponseObserved(t *testing.T) {
+	var calls int
+	hook := func(context.Context, ChatResponse) { calls++ }
+	agent, err := New(Config{
+		Provider: NewFauxProvider(AssistantText("done")),
+		Model:    "test",
+		Hooks:    Hooks{AfterProviderResponse: []ProviderResponseHook{hook}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("after_provider_response observed %d times, want 1", calls)
 	}
 }

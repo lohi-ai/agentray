@@ -170,7 +170,7 @@ work between nudges is never capped. Mechanism:
 the gate is a plugin (`agentcore/plugins/goal`) reaching the loop through the
 generic `PromptContributor` + `StopInterceptor` extension points. Core keeps only
 the goal as durable STATE — it writes `EntryGoal`, recovers it on resume, and
-hands it back as `RunInfo.Goal` (`agentcore/goal.go`), because only the loop may
+hands it back as `RunInfo.Goal` (`agentcore/session.go`), because only the loop may
 write the durable log. `agentcore.Config.Goal` therefore RECORDS a goal;
 enforcing it needs the plugin, which `preset.Plugins` (and therefore
 `internal/runtime`) wires automatically. The chat directive parser is `parseDirective`

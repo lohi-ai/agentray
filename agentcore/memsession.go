@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -71,12 +72,31 @@ func (m *MemorySessionStore) CheckpointSeq(_ context.Context, id string) (int, b
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seq, branched := 0, false
+	settled := map[string]bool{}
+	var queuedKeys []string
 	for _, e := range m.log[id] {
 		if e.Kind == EntryLeafMove {
 			branched = true
 		}
 		if e.Kind == EntryCompaction && e.Final && e.Retained != nil && e.State != nil {
 			seq = e.Seq
+		}
+		switch e.Kind {
+		case EntryInboxDone:
+			settled[e.Target] = true
+		case EntryInbox:
+			key := e.ID
+			if key == "" {
+				key = fmt.Sprintf("#%d", e.Seq)
+			}
+			queuedKeys = append(queuedKeys, key)
+		}
+	}
+	// An unsettled inbox item may sit before the checkpoint; a window starting
+	// there would drop it, so report no checkpoint and force the full read.
+	for _, k := range queuedKeys {
+		if !settled[k] {
+			return 0, branched, nil
 		}
 	}
 	return seq, branched, nil
