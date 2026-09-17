@@ -199,7 +199,6 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 	return resp, nil
 }
 
-
 // filterSchemas keeps only the schemas whose name is in permitted.
 func filterSchemas(all []ToolSchema, permitted []string) []ToolSchema {
 	keep := make(map[string]bool, len(permitted))
