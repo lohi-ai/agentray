@@ -157,9 +157,8 @@ func TestLongRunStaysStableAcrossManyCompactions(t *testing.T) {
 
 // TestLongRunWithBulkyResultsStaysBounded is the token-pressure counterpart to
 // the compaction stress above: with bulky results from identical calls, a long
-// run must still terminate with its context bounded. Compaction is the only
-// mechanism doing that bounding — the deterministic in-place context editor was
-// removed, so this run pays for the bounding in summarization calls.
+// run must terminate with bounded context while deterministic pruning absorbs
+// most of the pressure without paying for repeated LLM summaries.
 func TestLongRunWithBulkyResultsStaysBounded(t *testing.T) {
 	prov := &stressProvider{target: 120}
 
@@ -192,6 +191,9 @@ func TestLongRunWithBulkyResultsStaysBounded(t *testing.T) {
 	// Compaction has to engage — a run this bulky cannot fit its own budget.
 	if prov.Summaries == 0 {
 		t.Fatal("compaction never engaged on a bulky long run")
+	}
+	if prov.Summaries > 3 {
+		t.Fatalf("deterministic pruning should avoid frequent summaries, got %d", prov.Summaries)
 	}
 	// And the estimated context must stay bounded, not grow with turn count.
 	if est := estimateContextTokens(res.Messages); est > 2*limits.MaxContextTokens {

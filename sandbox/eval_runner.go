@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import builtins
+import io
 import inspect
 import json
 import os
@@ -23,6 +25,8 @@ _loop = asyncio.new_event_loop()
 asyncio.set_event_loop(_loop)
 _execution_count = 0
 _result_name = "__agentray_cell_result__"
+_current_request_id = None
+_displayed_figure_ids = set()
 
 def _emit(value):
     line = json.dumps(value, ensure_ascii=False, default=repr)
@@ -55,12 +59,107 @@ def _capture_fd(kind, request_id, target_fd):
     threading.Thread(target=drain, daemon=True).start()
     return done
 
+_REPR_MIMES = [
+    ("_repr_html_", "text/html"),
+    ("_repr_markdown_", "text/markdown"),
+    ("_repr_svg_", "image/svg+xml"),
+    ("_repr_png_", "image/png"),
+    ("_repr_jpeg_", "image/jpeg"),
+    ("_repr_json_", "application/json"),
+    ("_repr_latex_", "text/latex"),
+]
+
+def _coerce_image(value):
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    return str(value)
+
+def _matplotlib_png(value):
+    value_type = type(value)
+    if value_type.__module__ != "matplotlib.figure" or value_type.__name__ != "Figure":
+        return None
+    savefig = getattr(value, "savefig", None)
+    if not callable(savefig):
+        return None
+    try:
+        buf = io.BytesIO()
+        savefig(buf, format="png", bbox_inches="tight")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+def _mime_bundle(value, json_value=False):
+    bundle = {}
+    if json_value and (value is None or isinstance(value, (dict, list, tuple, str, int, float, bool))):
+        try:
+            json.dumps(value, ensure_ascii=False)
+            bundle["application/json"] = value
+        except Exception:
+            pass
+    png = _matplotlib_png(value)
+    if png is not None:
+        bundle["image/png"] = png
+    mimebundle = getattr(value, "_repr_mimebundle_", None)
+    if callable(mimebundle):
+        try:
+            data = mimebundle()
+            if isinstance(data, tuple):
+                data = data[0]
+            if isinstance(data, dict):
+                bundle.update({str(k): v for k, v in data.items()})
+        except Exception:
+            pass
+    for attr, mime in _REPR_MIMES:
+        if mime in bundle:
+            continue
+        fn = getattr(value, attr, None)
+        if not callable(fn):
+            continue
+        try:
+            data = fn()
+        except Exception:
+            continue
+        if data is None:
+            continue
+        bundle[mime] = _coerce_image(data) if mime in ("image/png", "image/jpeg") else data
+    for mime in ("image/png", "image/jpeg"):
+        if mime in bundle:
+            bundle[mime] = _coerce_image(bundle[mime])
+    if "text/plain" not in bundle:
+        try:
+            bundle["text/plain"] = repr(value)
+        except Exception:
+            bundle["text/plain"] = "<unrepresentable value>"
+    return bundle
+
+def _emit_display(value, kind="display"):
+    if _current_request_id is None:
+        return
+    bundle = _mime_bundle(value, kind == "display")
+    if "image/png" in bundle and type(value).__module__ == "matplotlib.figure" and type(value).__name__ == "Figure":
+        _displayed_figure_ids.add(id(value))
+    _emit({"type": "display", "id": _current_request_id, "status": kind, "bundle": bundle})
+
 def display(*values):
     for value in values:
+        _emit_display(value)
+
+def _flush_matplotlib_figures():
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is None:
+        return
+    try:
+        numbers = list(plt.get_fignums())
+    except Exception:
+        return
+    for number in numbers:
         try:
-            print(json.dumps(value, ensure_ascii=False, indent=2, default=repr))
+            figure = plt.figure(number)
+            if id(figure) not in _displayed_figure_ids:
+                _emit_display(figure)
+            plt.close(figure)
         except Exception:
-            print(repr(value))
+            continue
 
 def _no_input(*_args, **_kwargs):
     raise RuntimeError("interactive input is not supported by AgentRay eval")
@@ -103,6 +202,8 @@ for _line in sys.stdin:
     if _request.get("type") == "exit":
         break
     _request_id = str(_request.get("id", ""))
+    _current_request_id = _request_id
+    _displayed_figure_ids.clear()
     _execution_count += 1
     _status = "ok"
     _result_text = ""
@@ -117,7 +218,8 @@ for _line in sys.stdin:
     try:
         _value, _has_result = _run_cell(str(_request.get("code", "")))
         if _has_result and _value is not None:
-            _result_text = repr(_value)
+            _emit_display(_value, "result")
+        _flush_matplotlib_figures()
     except BaseException:
         _status = "error"
         _error_text = traceback.format_exc()
@@ -142,6 +244,7 @@ for _line in sys.stdin:
         "status": _status,
         "execution_count": _execution_count,
     })
+    _current_request_id = None
 
 try:
     _pending = asyncio.all_tasks(_loop)

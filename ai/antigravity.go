@@ -262,9 +262,13 @@ func (p *AntigravityProvider) convertMessages(req agentcore.ChatRequest) []agCon
 			if name == "" {
 				name = callNames[m.ToolCallID]
 			}
+			text := messageText(m)
+			if images := messageImages(m); len(images) > 0 {
+				text = textWithImageNotice(text, len(images), false)
+			}
 			part := agPart{FunctionResponse: &agFunctionResponse{
 				Name:     name,
-				Response: map[string]any{"result": m.Content},
+				Response: map[string]any{"result": text},
 				ID:       m.ToolCallID,
 			}}
 			if n := len(contents); n > 0 && contents[n-1].Role == "user" && hasFunctionResponse(contents[n-1]) {
@@ -291,10 +295,14 @@ func (p *AntigravityProvider) convertMessages(req agentcore.ChatRequest) []agCon
 				contents = append(contents, agContent{Role: "model", Parts: parts})
 			}
 		default: // user
-			if strings.TrimSpace(m.Content) == "" {
+			text := messageText(m)
+			if images := messageImages(m); len(images) > 0 {
+				text = textWithImageNotice(text, len(images), false)
+			}
+			if strings.TrimSpace(text) == "" {
 				continue
 			}
-			contents = append(contents, agContent{Role: "user", Parts: []agPart{{Text: m.Content}}})
+			contents = append(contents, agContent{Role: "user", Parts: []agPart{{Text: text}}})
 		}
 	}
 	return contents

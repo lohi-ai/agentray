@@ -123,10 +123,21 @@ func (p *OpenAIProvider) UpdateAPIKey(key string) {
 
 type oaiMessage struct {
 	Role       string        `json:"role"`
-	Content    string        `json:"content,omitempty"`
+	Content    any           `json:"content,omitempty"`
 	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	Name       string        `json:"name,omitempty"`
+}
+
+type oaiContentPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *oaiImageURL `json:"image_url,omitempty"`
+}
+
+type oaiImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type oaiToolCall struct {
@@ -186,13 +197,19 @@ type oaiStreamOptions struct {
 
 type oaiResponse struct {
 	Choices []struct {
-		Message      oaiMessage `json:"message"`
-		FinishReason string     `json:"finish_reason"`
+		Message      oaiResponseMessage `json:"message"`
+		FinishReason string             `json:"finish_reason"`
 	} `json:"choices"`
 	Usage oaiUsage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+type oaiResponseMessage struct {
+	Role      string        `json:"role"`
+	Content   string        `json:"content"`
+	ToolCalls []oaiToolCall `json:"tool_calls,omitempty"`
 }
 
 // oaiUsage mirrors OpenAI's usage block, including the cached-token detail.
@@ -672,8 +689,57 @@ func (p *OpenAIProvider) encode(req agentcore.ChatRequest) oaiRequest {
 			JSONSchema: oaiJSONSchema{Name: name, Strict: req.OutputSchema.Strict, Schema: req.OutputSchema.Schema},
 		}
 	}
-	for _, m := range req.Messages {
-		om := oaiMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID, Name: m.Name}
+	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
+	for i := 0; i < len(req.Messages); i++ {
+		m := req.Messages[i]
+		// Chat Completions tool messages are text-only. Preserve tool-call/result
+		// adjacency by batching every consecutive result first, then hoist their
+		// images into one user message (the same shape OMP uses).
+		if m.Role == agentcore.RoleTool {
+			var attached []oaiContentPart
+			for ; i < len(req.Messages) && req.Messages[i].Role == agentcore.RoleTool; i++ {
+				tm := req.Messages[i]
+				images := messageImages(tm)
+				text := messageText(tm)
+				if allowImages {
+					text = textWithImageNotice(text, len(images), len(images) > 0)
+					for _, image := range images {
+						attached = append(attached, oaiContentPart{Type: "image_url", ImageURL: &oaiImageURL{
+							URL: imageDataURL(image), Detail: normalizedImageDetail(image.Detail, false),
+						}})
+					}
+				} else {
+					text = textWithImageNotice(text, len(images), false)
+				}
+				out.Messages = append(out.Messages, oaiMessage{
+					Role: string(tm.Role), Content: text, ToolCallID: tm.ToolCallID, Name: tm.Name,
+				})
+			}
+			i--
+			if len(attached) > 0 {
+				attached = append([]oaiContentPart{{Type: "text", Text: "Images from the preceding tool results."}}, attached...)
+				out.Messages = append(out.Messages, oaiMessage{Role: "user", Content: attached})
+			}
+			continue
+		}
+		content := any(messageText(m))
+		if images := messageImages(m); len(images) > 0 {
+			if allowImages && (m.Role == agentcore.RoleUser) {
+				parts := []oaiContentPart{}
+				if text := messageText(m); text != "" {
+					parts = append(parts, oaiContentPart{Type: "text", Text: text})
+				}
+				for _, image := range images {
+					parts = append(parts, oaiContentPart{Type: "image_url", ImageURL: &oaiImageURL{
+						URL: imageDataURL(image), Detail: normalizedImageDetail(image.Detail, false),
+					}})
+				}
+				content = parts
+			} else {
+				content = textWithImageNotice(messageText(m), len(images), false)
+			}
+		}
+		om := oaiMessage{Role: string(m.Role), Content: content, ToolCallID: m.ToolCallID, Name: m.Name}
 		for _, tc := range m.ToolCalls {
 			var otc oaiToolCall
 			otc.ID = tc.ID

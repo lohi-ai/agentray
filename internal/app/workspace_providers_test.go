@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -54,6 +55,36 @@ func TestConnectionTestUsesOwnerCredentials(t *testing.T) {
 	}
 	if len(bAuth) != 1 || bAuth[0] != "key-b" {
 		t.Fatalf("lite did not hit B with key-b: %v", bAuth)
+	}
+}
+
+func TestConnectionTestUsesPersistedResponsesWire(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w,
+			`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n"+
+				`data: {"type":"response.output_text.delta","delta":"ok"}`+"\n\n"+
+				`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	book := &storage.WorkspaceProviderBook{
+		Providers: []storage.WorkspaceProviderRecord{
+			{ID: "pa", Vendor: "openai", BaseURL: srv.URL, APIKey: "key-a", HasKey: true},
+		},
+		Sel: storage.WorkspaceTierSelection{
+			FlashProviderID: "pa", FlashModel: "gpt-responses",
+			FlashCapabilities: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported},
+		},
+	}
+	ok, tiers := testBookConnections(context.Background(), book, nil)
+	if !ok {
+		t.Fatalf("expected Responses connectivity test to pass: %+v", tiers)
+	}
+	if path != "/responses" {
+		t.Fatalf("connection test path = %q, want /responses", path)
 	}
 }
 

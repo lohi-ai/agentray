@@ -127,6 +127,18 @@ RETURNING bytes`, a.RunID, key, a.Locator, a.ToolName, a.CallID, a.Label, a.Cont
 //
 // No RBAC: the caller's fence is OwnsAgentSpill below.
 func (s *Store) AgentSpillWindowAt(ctx context.Context, locator string, offset, limit int) (AgentSpillWindow, error) {
+	return s.agentSpillWindow(ctx, locator, "", offset, limit)
+}
+
+// AgentSpillWindowForSession is the session-fenced form used when durable
+// session rows hydrate externalized binary content. It combines ownership and
+// bounded read in one query so restoring N unique images costs N lookups, not
+// a separate fence query plus read for each image.
+func (s *Store) AgentSpillWindowForSession(ctx context.Context, locator, sessionKey string, offset, limit int) (AgentSpillWindow, error) {
+	return s.agentSpillWindow(ctx, locator, sessionKey, offset, limit)
+}
+
+func (s *Store) agentSpillWindow(ctx context.Context, locator, sessionKey string, offset, limit int) (AgentSpillWindow, error) {
 	if offset < 0 {
 		offset = 0
 	}
@@ -135,10 +147,16 @@ func (s *Store) AgentSpillWindowAt(ctx context.Context, locator string, offset, 
 	}
 	var w AgentSpillWindow
 	// substring() is 1-indexed over the byte string.
-	err := s.pg.QueryRow(ctx, `
+	query := `
 SELECT substring(convert_to(content, 'UTF8') FROM $2 FOR $3), octet_length(content)
 FROM agent_spill
-WHERE locator = $1`, locator, offset+1, limit).Scan(&w.Content, &w.Total)
+WHERE locator = $1`
+	args := []any{locator, offset + 1, limit}
+	if sessionKey != "" {
+		query += " AND session_key = $4"
+		args = append(args, sessionKey)
+	}
+	err := s.pg.QueryRow(ctx, query, args...).Scan(&w.Content, &w.Total)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentSpillWindow{}, ErrAgentSpillNotFound
 	}

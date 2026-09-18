@@ -89,13 +89,16 @@ type TurnInfo struct {
 // Read-only: a return value is not threaded back.
 type TurnHook func(ctx context.Context, info TurnInfo)
 
-// CompactRequest describes an imminent compaction: the loop has decided the
-// transcript is over budget and is about to summarize its older span.
+// CompactRequest describes an imminent context reduction. The default strategy
+// may be at its half-budget deterministic-pruning threshold or at its full
+// summarization threshold.
 type CompactRequest struct {
 	Turn int
-	// Messages is the live history that would be compacted.
+	// Messages is the candidate history the active strategy would compact. For
+	// the default strategy it already contains deterministic pruning; Skip still
+	// leaves the original live transcript untouched.
 	Messages []Message
-	// Budget is the run's MaxContextTokens (the soft ceiling that tripped).
+	// Budget is the run's effective MaxContextTokens ceiling.
 	Budget int
 	// Settings are the effective compaction settings for this run (already
 	// clamped to the budget).
@@ -115,11 +118,11 @@ type CompactDecision struct {
 	Messages []Message
 }
 
-// BeforeCompactHook is consulted immediately before the loop compacts an
-// over-budget transcript (pi's session_before_compact). The first hook that
-// returns Skip, or a non-nil Messages, decides; later hooks are not consulted.
-// Use it to pin content the default cut point would drop, or to swap in a
-// domain-specific summarizer.
+// BeforeCompactHook is consulted immediately before the loop rewrites a
+// transcript for pruning or summary compaction (pi's session_before_compact).
+// The first hook that returns Skip, or a non-nil Messages, decides; later hooks
+// are not consulted. Use it to pin content the default policy would drop, or
+// to swap in a domain-specific reducer.
 type BeforeCompactHook func(ctx context.Context, req CompactRequest) CompactDecision
 
 // AgentEndHook observes a finished run (pi's agent_end), after sub-agent usage is
@@ -158,8 +161,8 @@ type Hooks struct {
 	// TurnEnd observers run in order once a turn is complete, on every path out
 	// of that turn (final answer, tool round, guard stop, abort).
 	TurnEnd []TurnHook
-	// BeforeCompact runs in order when the transcript trips its context budget;
-	// the first decisive answer (Skip, or replacement Messages) wins.
+	// BeforeCompact runs in order when the active strategy proposes pruning or
+	// compaction; the first decisive answer (Skip, or replacement Messages) wins.
 	BeforeCompact []BeforeCompactHook
 	// AgentEnd observers run in order as the run returns, on every exit path.
 	AgentEnd []AgentEndHook

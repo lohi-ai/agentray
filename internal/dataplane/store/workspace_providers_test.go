@@ -367,8 +367,8 @@ func TestStorePersistProvidersAndResolve(t *testing.T) {
 	got, err := s.SaveWorkspaceTierSelection(ctx, userID, wsID, WorkspaceTierSelection{
 		FlashProviderID: a.ID, FlashModel: modelA,
 		LiteProviderID: b.ID, LiteModel: modelB,
-		FlashCapabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported},
-		LiteCapabilities:  agentcore.ModelCapabilities{Tools: agentcore.CapabilitySupported},
+		FlashCapabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported, MaxInputImages: 7},
+		LiteCapabilities:  agentcore.ModelCapabilities{Tools: agentcore.CapabilitySupported, MaxInputImages: 11},
 		ModelFallback:     true,
 	})
 	if err != nil {
@@ -377,7 +377,8 @@ func TestStorePersistProvidersAndResolve(t *testing.T) {
 	if got.FlashProviderID != a.ID || got.Model != modelA || got.LiteProviderID != b.ID || got.LiteModel != modelB {
 		t.Fatalf("read-back selection = %+v", got)
 	}
-	if got.Capabilities.Tools != agentcore.CapabilityUnsupported || got.LiteCapabilities.Tools != agentcore.CapabilitySupported {
+	if got.Capabilities.Tools != agentcore.CapabilityUnsupported || got.Capabilities.MaxInputImages != 7 ||
+		got.LiteCapabilities.Tools != agentcore.CapabilitySupported || got.LiteCapabilities.MaxInputImages != 11 {
 		t.Fatalf("read-back capabilities = flash %+v lite %+v", got.Capabilities, got.LiteCapabilities)
 	}
 
@@ -391,7 +392,8 @@ func TestStorePersistProvidersAndResolve(t *testing.T) {
 	if keys["flash"] != "key-store-a" {
 		t.Fatalf("run resolve flash key = %q", keys["flash"])
 	}
-	if cfg.Capabilities.Tools != agentcore.CapabilityUnsupported || cfg.LiteCapabilities.Tools != agentcore.CapabilitySupported {
+	if cfg.Capabilities.Tools != agentcore.CapabilityUnsupported || cfg.Capabilities.MaxInputImages != 7 ||
+		cfg.LiteCapabilities.Tools != agentcore.CapabilitySupported || cfg.LiteCapabilities.MaxInputImages != 11 {
 		t.Fatalf("run resolve lost capability snapshots: flash %+v lite %+v", cfg.Capabilities, cfg.LiteCapabilities)
 	}
 }

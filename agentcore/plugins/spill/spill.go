@@ -129,7 +129,7 @@ func (r *spillRun) InterceptToolResult(ctx context.Context, call agentcore.ToolC
 	if locator == "" {
 		return agentcore.ToolResultDecision{}
 	}
-	return agentcore.ToolResultDecision{Result: text, Replace: true, Meta: locator}
+	return agentcore.ToolResultDecision{Result: text, Replace: true, ResultRef: locator}
 }
 
 // SpillStore persists a tool result too large to sit inline in the model's

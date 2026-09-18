@@ -341,6 +341,25 @@ func TestMarkCacheAnchorsStopsAtARewrittenMessage(t *testing.T) {
 	}
 }
 
+func TestMarkCacheAnchorsStopsAtChangedRichContent(t *testing.T) {
+	history := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleTool, ToolCallID: "c1", Content: "plot", ContentParts: []ContentPart{{Type: ContentPartImage, MIMEType: "image/png", Data: "old"}}},
+		{Role: RoleAssistant, Content: "done"},
+	}
+	req := cloneSessionMessages(history)
+	req[1].ContentParts[0].Data = "new"
+	out := markCacheAnchors(req, history, "k")
+	if !out[0].CacheAnchor {
+		t.Fatal("cache prefix must stop before a changed image payload")
+	}
+	for i := 1; i < len(out); i++ {
+		if out[i].CacheAnchor {
+			t.Fatalf("anchored at %d past changed rich content", i)
+		}
+	}
+}
+
 func TestMarkCacheAnchorsClearsStaleMarks(t *testing.T) {
 	// A hook (or a bug) leaving anchors on history must not accumulate into
 	// more breakpoints than a provider allows.

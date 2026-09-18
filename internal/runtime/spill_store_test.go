@@ -249,11 +249,11 @@ func TestSpillStoreDrivesTheTool(t *testing.T) {
 	if len(dec.Result) > 512 {
 		t.Fatalf("the replacement (%d bytes) overran the inline cap", len(dec.Result))
 	}
-	if !strings.Contains(dec.Result, dec.Meta) {
+	if !strings.Contains(dec.Result, dec.ResultRef) {
 		t.Fatalf("the notice does not carry the locator: %q", dec.Result)
 	}
 
-	slice, err := st.ReadText(context.Background(), dec.Meta, 0, 1024)
+	slice, err := st.ReadText(context.Background(), dec.ResultRef, 0, 1024)
 	if err != nil {
 		t.Fatalf("ReadText on the minted locator: %v", err)
 	}

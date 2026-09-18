@@ -12,6 +12,31 @@ func TestMemorySessionStoreConformance(t *testing.T) {
 	runSessionStoreConformance(t, func() SessionStore { return NewMemorySessionStore() })
 }
 
+func TestMemorySessionStoreSnapshotsRichContentParts(t *testing.T) {
+	store := NewMemorySessionStore()
+	ctx := context.Background()
+	msg := Message{Role: RoleTool, ContentParts: []ContentPart{{Type: ContentPartImage, Data: "original"}}}
+	if err := store.Append(ctx, "rich", SessionEntry{Kind: EntryMessage, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	msg.ContentParts[0].Data = "writer mutation"
+	first, err := store.Log(ctx, "rich")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first[0].Message.ContentParts[0].Data; got != "original" {
+		t.Fatalf("append did not snapshot content parts: %q", got)
+	}
+	first[0].Message.ContentParts[0].Data = "reader mutation"
+	second, err := store.Log(ctx, "rich")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second[0].Message.ContentParts[0].Data; got != "original" {
+		t.Fatalf("log did not clone content parts: %q", got)
+	}
+}
+
 // runSessionStoreConformance is the backend contract in executable form. A new
 // in-package backend gets the same ordering/concurrency checks by adding one
 // call with its factory; optional capabilities are tested when implemented.

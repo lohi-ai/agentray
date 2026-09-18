@@ -119,7 +119,7 @@ grow into one: it has no discovery, no loading, and no registration by name.
 | `MessageEnd` | when an assistant message is final | observe |
 | `Before` (tool call) | after args validate, before execution | **block** (`Decision`) |
 | `After` (tool call) | after execution | **rewrite** the result, **terminate** the run |
-| `BeforeCompact` | when the transcript trips its context budget | **skip** compaction, or **replace** the transcript |
+| `BeforeCompact` | when the active strategy proposes pruning or summary compaction | **skip** the rewrite, or **replace** the transcript |
 | `TurnEnd` | once per started turn, on every path out of it | observe |
 | `AgentEnd` | as the run returns, on every exit path | observe |
 

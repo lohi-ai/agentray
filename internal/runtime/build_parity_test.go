@@ -47,7 +47,7 @@ session_resume:        false
 seed_disabled:         broken
 memory:                -
 context_window:        0
-compaction:            keep_recent=5000 budget=50000
+compaction:            keep_recent=5000 budget=50000 prune_cache_suffix=8000 prune_min_savings=5000
 compactor:             summary
 compaction_model:      -
 steering:              set

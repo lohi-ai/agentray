@@ -268,7 +268,7 @@ func TestCompactCollapsesOldToolResults(t *testing.T) {
 	msgs := []Message{
 		{Role: RoleSystem, Content: "you are an analyst"},
 		{Role: RoleUser, Content: "find anomalies"},
-		{Role: RoleTool, Name: "run_sql", ToolCallID: "1", Content: string(big)},
+		{Role: RoleTool, Name: "run_sql", ToolCallID: "1", Content: string(big), ResultRef: "spill_compact_1"},
 		{Role: RoleTool, Name: "run_sql", ToolCallID: "2", Content: string(big)},
 		{Role: RoleAssistant, Content: "thinking"},
 		{Role: RoleTool, Name: "run_sql", ToolCallID: "3", Content: string(big)},
@@ -296,6 +296,15 @@ func TestCompactCollapsesOldToolResults(t *testing.T) {
 	}
 	if elided == 0 {
 		t.Error("expected at least one elided tool result")
+	}
+	var recovered bool
+	for _, m := range out {
+		if m.ToolCallID == "1" {
+			recovered = m.ResultRef == "spill_compact_1" && strings.Contains(m.Content, "spill_compact_1")
+		}
+	}
+	if !recovered {
+		t.Fatal("deterministic compaction lost recoverable result reference")
 	}
 }
 
@@ -659,6 +668,32 @@ func TestEffectiveCompactionClampsKeepRecentToHalfBudget(t *testing.T) {
 	}
 }
 
+func TestEffectiveCompactionDefaultsCacheAwarePruning(t *testing.T) {
+	got := effectiveCompaction(CompactionSettings{}, 6000)
+	if got.PruneCacheWarmSuffixTokens != defaultPruneCacheWarmSuffixTokens {
+		t.Fatalf("cache suffix = %d, want %d", got.PruneCacheWarmSuffixTokens, defaultPruneCacheWarmSuffixTokens)
+	}
+	if got.PruneMinimumSavingsTokens != 600 {
+		t.Fatalf("small-window savings floor = %d, want 600 (10%% of budget)", got.PruneMinimumSavingsTokens)
+	}
+
+	got = effectiveCompaction(CompactionSettings{
+		PruneCacheWarmSuffixTokens: -1,
+		PruneMinimumSavingsTokens:  500,
+	}, 6000)
+	if got.PruneCacheWarmSuffixTokens != -1 {
+		t.Fatal("negative cache suffix should explicitly disable the guard")
+	}
+	if got.PruneMinimumSavingsTokens != 500 {
+		t.Fatalf("explicit savings floor changed: %d", got.PruneMinimumSavingsTokens)
+	}
+
+	got = effectiveCompaction(CompactionSettings{}, 0)
+	if got.PruneMinimumSavingsTokens != defaultPruneMinimumSavingsTokens {
+		t.Fatalf("default-window savings floor = %d, want %d", got.PruneMinimumSavingsTokens, defaultPruneMinimumSavingsTokens)
+	}
+}
+
 // sinkTool accepts a large content argument and returns a tiny confirmation —
 // the bulk stays in the CALL, mirroring a full-file write tool.
 type sinkTool struct{ calls int }
@@ -784,7 +819,7 @@ func TestSerializeConversationBoundsToolPayloads(t *testing.T) {
 func TestElideOversizedTailShrinksBelowBudget(t *testing.T) {
 	tail := []Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "q"}}},
-		{Role: RoleTool, ToolCallID: "c1", Name: "q", Content: bigText(40_000)},
+		{Role: RoleTool, ToolCallID: "c1", Name: "q", Content: bigText(40_000), ResultRef: "spill_tail_1"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c2", Name: "q"}}},
 		{Role: RoleTool, ToolCallID: "c2", Name: "q", Content: bigText(40_000)},
 		{Role: RoleAssistant, Content: "working on it"},
@@ -806,12 +841,35 @@ func TestElideOversizedTailShrinksBelowBudget(t *testing.T) {
 		t.Fatalf("a cut-down result must say so, or the model reads a partial answer as a whole one: %q",
 			out[1].Content)
 	}
+	if out[1].ResultRef != "spill_tail_1" || !strings.Contains(out[1].Content, "spill_tail_1") {
+		t.Fatalf("tail elision lost recoverable reference: %+v", out[1])
+	}
 	if out[4].Content != "working on it" {
 		t.Fatal("final message must be untouched")
 	}
 	// Original slice unmodified (guard copies).
 	if !strings.HasPrefix(tail[1].Content, "xx") {
 		t.Fatal("guard mutated the caller's slice")
+	}
+}
+
+func TestElideOversizedTailDropsRichPartsWithNotice(t *testing.T) {
+	tail := []Message{
+		{Role: RoleTool, ToolCallID: "c1", Name: "eval", Content: "plot ready", ContentParts: []ContentPart{{Type: ContentPartImage, MIMEType: "image/png", Data: "aW1hZ2U="}}},
+		{Role: RoleAssistant, Content: "continue"},
+	}
+	out, shrunk := elideOversizedTail(tail, 500)
+	if !shrunk {
+		t.Fatal("rich result should be elided when it exceeds the tail budget")
+	}
+	if len(out[0].ContentParts) != 0 || !strings.Contains(out[0].Content, "1 rich image output(s) elided") {
+		t.Fatalf("rich result was not replaced with an explicit notice: %+v", out[0])
+	}
+	if len(tail[0].ContentParts) != 1 {
+		t.Fatal("tail elision mutated the input")
+	}
+	if got := serializeConversation(tail); !strings.Contains(got, "1 rich image output(s)") {
+		t.Fatalf("summary serialization hid rich content: %q", got)
 	}
 }
 

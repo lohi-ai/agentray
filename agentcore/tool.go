@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -19,6 +20,85 @@ type Tool interface {
 	// Run executes with validated JSON arguments and returns a result string
 	// (already truncated by the loop before reaching the model).
 	Run(ctx context.Context, args string) (string, error)
+}
+
+// ToolOutput is the optional structured result of a RichTool. Content remains
+// the model-visible text result and is processed by the same interceptors,
+// hooks, bounds, traces, and spill policy as Tool.Run. Parts are additive rich
+// content and are bounded independently at the dispatch boundary; providers
+// that cannot carry them degrade explicitly to text.
+type ToolOutput struct {
+	Content string
+	Parts   []ContentPart
+}
+
+// RichTool is an additive tool capability for outputs such as eval-generated
+// images. Implementations still provide Run for direct/legacy callers; the
+// agent loop prefers RunRich when it is available (unless a StreamingTool is
+// actively streaming). It does not bypass the permission gate or any other
+// execution policy.
+type RichTool interface {
+	RunRich(ctx context.Context, args string) (ToolOutput, error)
+}
+
+const (
+	maxRichToolParts      = 16
+	maxRichToolImages     = 8
+	maxRichToolImageBytes = 768 * 1024
+)
+
+// boundToolContentParts prevents a trusted-but-buggy tool from bypassing the
+// ordinary result bound through structured parts. Eval applies tighter MIME
+// validation before this point; the kernel enforces the generic count, decoded
+// image-byte, text-byte, and supported-shape limits for every RichTool.
+func boundToolContentParts(parts []ContentPart, maxTextBytes int) ([]ContentPart, int, []string) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = defaultMaxToolResultBytes
+	}
+	out := make([]ContentPart, 0, min(len(parts), maxRichToolParts))
+	textBytes, imageBytes, images, omitted := 0, 0, 0, 0
+	var notes []string
+	for _, part := range parts {
+		if len(out) >= maxRichToolParts {
+			omitted++
+			continue
+		}
+		switch part.Type {
+		case ContentPartText:
+			remaining := maxTextBytes - textBytes
+			if part.Text == "" || remaining <= 0 {
+				if part.Text != "" {
+					omitted++
+				}
+				continue
+			}
+			part.Text = truncateMiddle(part.Text, remaining)
+			part.Data, part.DataRef, part.MIMEType, part.Detail = "", "", "", ""
+			textBytes += len(part.Text)
+			out = append(out, part)
+		case ContentPartImage:
+			if images >= maxRichToolImages || part.Data == "" {
+				omitted++
+				continue
+			}
+			normalized, ok := normalizeRichImage(part, maxRichToolImageBytes-imageBytes)
+			if !ok {
+				omitted++
+				continue
+			}
+			part = normalized.part
+			decodedBytes := base64.StdEncoding.DecodedLen(len(part.Data))
+			imageBytes += decodedBytes
+			images++
+			out = append(out, part)
+			if note := normalized.dimensionNote(); note != "" {
+				notes = append(notes, note)
+			}
+		default:
+			omitted++
+		}
+	}
+	return out, omitted, notes
 }
 
 // ErrParked is the sentinel a tool returns to park the run on a human answer

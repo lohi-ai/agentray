@@ -207,9 +207,14 @@ type ToolResultDecision struct {
 	// otherwise.
 	Result  string
 	Replace bool
-	// Meta annotates the trace without entering the model's context (a spill
-	// locator, a cache verdict). Empty leaves the trace unchanged.
+	// Meta annotates the trace without entering the model's context (for example
+	// a cache verdict). Empty leaves the trace unchanged.
 	Meta string
+	// ResultRef is an opaque handle that recovers content omitted from Result
+	// (for example a spill locator). It is persisted on the tool message and
+	// context-reduction paths preserve and surface it in replacement text. Keep
+	// unrelated trace metadata in Meta: the model may be shown ResultRef later.
+	ResultRef string
 	// AdditionalContexts are messages to add to the conversation because of
 	// this call. The LOOP appends them after ALL tool results in the batch —
 	// never interleaved, which would break tool-call/result adjacency — and
@@ -560,7 +565,7 @@ func (s *extensionSet) systemPrompt() []string {
 
 // interceptToolResult folds the interceptors over one tool result. Each sees
 // the previous one's output, so a spill and a redactor compose.
-func (s *extensionSet) interceptToolResult(ctx context.Context, call ToolCall, result string, runErr error) (out string, meta string, extra []Message, replaced, terminate bool) {
+func (s *extensionSet) interceptToolResult(ctx context.Context, call ToolCall, result string, runErr error) (out, meta, resultRef string, extra []Message, replaced, terminate bool) {
 	out = result
 	for _, ic := range s.toolIntcp {
 		var d ToolResultDecision
@@ -576,10 +581,13 @@ func (s *extensionSet) interceptToolResult(ctx context.Context, call ToolCall, r
 		if d.Meta != "" {
 			meta = d.Meta
 		}
+		if d.ResultRef != "" {
+			resultRef = d.ResultRef
+		}
 		extra = append(extra, d.AdditionalContexts...)
 		terminate = terminate || d.Terminate
 	}
-	return out, meta, extra, replaced, terminate
+	return out, meta, resultRef, extra, replaced, terminate
 }
 
 // interceptBatch collects whole-batch injections.

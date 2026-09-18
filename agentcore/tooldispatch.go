@@ -29,16 +29,21 @@ const maxToolFailures = 3
 // otherwise plain Run — inside panic recovery. A panicking tool is converted to
 // an error so one broken tool degrades to a normal error result instead of
 // crashing the run (or, in the parallel dispatch path, the process).
-func callTool(ctx context.Context, tool Tool, args string, emit func(partial string)) (out string, err error) {
+func callTool(ctx context.Context, tool Tool, args string, emit func(partial string)) (out ToolOutput, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			out, err = "", fmt.Errorf("tool panicked: %v", r)
+			out, err = ToolOutput{}, fmt.Errorf("tool panicked: %v", r)
 		}
 	}()
 	if st, ok := tool.(StreamingTool); ok && emit != nil {
-		return st.RunStreaming(ctx, args, emit)
+		text, err := st.RunStreaming(ctx, args, emit)
+		return ToolOutput{Content: text}, err
 	}
-	return tool.Run(ctx, args)
+	if rt, ok := tool.(RichTool); ok {
+		return rt.RunRich(ctx, args)
+	}
+	text, err := tool.Run(ctx, args)
+	return ToolOutput{Content: text}, err
 }
 
 // ToolTrace is a persisted projection of one tool execution (§9
@@ -187,7 +192,8 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	ikey := toolIdempotencyKey(a.sessionID, call.ID)
 	trace.IdempotencyKey = ikey
 	execStart := time.Now()
-	out, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
+	richOut, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
+	out := richOut.Content
 	// A parked call ends the run here: no interceptors, no after hooks, no
 	// result message — the caller records the EntryQuestion and stops. The
 	// validated args ride the trace so the question lands in the log exactly as
@@ -198,6 +204,23 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 		return toolOutcome{trace: trace, parked: true, executed: true}
 	}
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
+	if runErr == nil {
+		var omitted int
+		var imageNotes []string
+		richOut.Parts, omitted, imageNotes = boundToolContentParts(richOut.Parts, limits.MaxToolResultLen)
+		if omitted > 0 {
+			note := fmt.Sprintf("[%d rich content part(s) omitted by tool-result limits]", omitted)
+			imageNotes = append(imageNotes, note)
+		}
+		for _, note := range imageNotes {
+			if richOut.Content == "" {
+				richOut.Content = note
+			} else {
+				richOut.Content += "\n" + note
+			}
+		}
+		out = richOut.Content
+	}
 	// Bound the result for the model. Interceptors see the RAW output first,
 	// because a lossless bounding strategy (persist the whole thing, hand back a
 	// preview plus a locator) cannot be built on top of an already-truncated
@@ -207,11 +230,11 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	// of build output, the final rows of a query, a stack trace's cause) — and
 	// the middle is gone for good. The loop does not know which extension, if
 	// any, took the job.
-	out, meta, extra, replaced, extTerm := exts.interceptToolResult(ctx, gated, out, runErr)
+	out, meta, resultRef, extra, replaced, extTerm := exts.interceptToolResult(ctx, gated, out, runErr)
 	if !replaced {
 		out = truncateMiddle(out, limits.MaxToolResultLen)
 	}
-	trace.SpillLocator = meta
+	trace.SpillLocator = resultRef
 	out, term := a.hooks.runAfter(ctx, gated, out, runErr)
 	term = term || extTerm
 
@@ -219,9 +242,19 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	if runErr != nil {
 		trace.Error = runErr.Error()
 		out = "error: " + runErr.Error()
+		richOut.Parts = nil
 	}
 	trace.ResultMeta = fmt.Sprintf("%d bytes in %dms", len(out), trace.LatencyMS)
-	return toolOutcome{trace: trace, message: toolResult(call, out), terminate: term, executed: true, extra: extra}
+	if len(richOut.Parts) > 0 {
+		trace.ResultMeta += fmt.Sprintf("; %d rich parts", len(richOut.Parts))
+	}
+	if meta != "" {
+		trace.ResultMeta += "; " + meta
+	}
+	message := toolResult(call, out)
+	message.ContentParts = append([]ContentPart(nil), richOut.Parts...)
+	message.ResultRef = resultRef
+	return toolOutcome{trace: trace, message: message, terminate: term, executed: true, extra: extra}
 }
 
 // isParallelTool reports whether one call targets a registered tool that opts

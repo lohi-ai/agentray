@@ -18,6 +18,7 @@ export type ListedModel = {
     tool_choice?: 'supported' | 'unsupported';
     reasoning_effort?: 'supported' | 'unsupported';
     image_input?: 'supported' | 'unsupported';
+    max_input_images?: number;
     structured_output?: 'supported' | 'unsupported';
     prompt_caching?: 'supported' | 'unsupported';
     stateful_responses?: 'supported' | 'unsupported';

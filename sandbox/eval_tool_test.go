@@ -91,6 +91,64 @@ func TestEvalToolWorkspaceAndEnvironmentBoundary(t *testing.T) {
 	}
 }
 
+func TestEvalToolReturnsRichMIMEDisplays(t *testing.T) {
+	tool, _, _ := testEvalTool(t, EvalConfig{})
+	ctx := evalContext("rich-display")
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	code := `import base64
+class Chart:
+    def _repr_markdown_(self): return "**chart ready**"
+    def _repr_png_(self): return base64.b64decode("` + png + `")
+display(Chart())`
+	payload, err := json.Marshal(map[string]any{"language": "python", "code": code})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.RunRich(ctx, string(payload))
+	if err != nil {
+		t.Fatalf("RunRich: %v", err)
+	}
+	if !strings.Contains(out.Content, "**chart ready**") || !strings.Contains(out.Content, "rich image display") {
+		t.Fatalf("rich display text = %q", out.Content)
+	}
+	if len(out.Parts) != 1 || out.Parts[0].Type != agentcore.ContentPartImage ||
+		out.Parts[0].MIMEType != "image/png" || out.Parts[0].Data != png {
+		t.Fatalf("rich display parts = %+v", out.Parts)
+	}
+}
+
+func TestEvalToolNormalizesBinaryMIMEBundleImages(t *testing.T) {
+	tool, _, _ := testEvalTool(t, EvalConfig{})
+	ctx := evalContext("mime-bundle")
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	code := `import base64
+class Bundle:
+    def _repr_mimebundle_(self):
+        return {"text/markdown": "bundle", "image/png": base64.b64decode("` + png + `")}
+display(Bundle())`
+	payload, err := json.Marshal(map[string]any{"language": "python", "code": code})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.RunRich(ctx, string(payload))
+	if err != nil {
+		t.Fatalf("RunRich: %v", err)
+	}
+	if len(out.Parts) != 1 || out.Parts[0].Data != png || !strings.Contains(out.Content, "bundle") {
+		t.Fatalf("binary MIME bundle = %+v", out)
+	}
+}
+
+func TestRenderEvalDisplayReportsImageLimitInsteadOfSilentlyDropping(t *testing.T) {
+	bundle := map[string]json.RawMessage{
+		"image/png": json.RawMessage(`"iVBORw0KGgo="`),
+	}
+	text, parts, used := renderEvalDisplay(bundle, 0, maxEvalImageBytes)
+	if len(parts) != 0 || used != 0 || !strings.Contains(text, "per-cell image limit reached") {
+		t.Fatalf("bounded display = text %q parts %+v used %d", text, parts, used)
+	}
+}
+
 func TestEvalToolTimeoutDiscardsKernelWithoutReplay(t *testing.T) {
 	tool, _, ws := testEvalTool(t, EvalConfig{TimeoutSeconds: 2})
 	ctx := evalContext("timeout")

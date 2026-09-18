@@ -20,14 +20,15 @@ import (
 // consumer, because it is the one place that may import both agentcore and
 // storage (storage never imports agentcore) — mirroring storeTraceSink.
 //
-// The agentcore SessionEntry is marshalled whole into the row's JSON payload, so
-// every typed field (the message, model, summary, compaction markers) round-trips
-// without storage needing to understand any of them; kind/turn are also lifted
-// into columns for cheap ordering and filtering. The sessionID the loop passes is
-// the run id (the same id the trace sink keys on), so the durable log and the
-// per-LLM-call trace attribute to the same run — or, for a spawned sub-agent, the
-// derived "<runID>/<toolCallID>" child key, which still attributes (and cascades)
-// to the root run via its UUID prefix.
+// The agentcore SessionEntry is marshalled into the row's JSON payload, so typed
+// fields round-trip without storage understanding them. Large inline images are
+// the one representation optimization: the adapter writes their base64 once to
+// the session-fenced spill table, stores a content-addressed reference in JSON,
+// and hydrates it before returning the log. Small images and the laptop-friendly
+// memory store stay inline. Kind/turn are also lifted into columns for ordering
+// and filtering. The sessionID the loop passes is the run id (the same id the
+// trace sink keys on), or a spawned sub-agent's derived
+// "<runID>/<toolCallID>" child key, which still cascades from the root UUID.
 type pgSessionStore struct {
 	store *storage.Store
 }
@@ -85,7 +86,13 @@ func (s *pgSessionStore) Append(ctx context.Context, sessionID string, entry age
 // records land entirely before or after this batch and cannot split it.
 func (s *pgSessionStore) AppendBatch(ctx context.Context, sessionID string, entries []agentcore.SessionEntry) error {
 	rows := make([]storage.AgentSessionEntry, 0, len(entries))
+	savedImages := make(map[string]bool)
 	for _, entry := range entries {
+		// Artifact writes precede the atomic/fenced log append because the
+		// existing spill API owns its own statement. If the append later loses
+		// its lease, the unreferenced content-addressed row is harmless and is
+		// removed with the root run; no canonical transcript points at it.
+		entry = externalizeSessionEntryImages(ctx, s.store, sessionID, entry, savedImages)
 		payload, err := json.Marshal(entry)
 		if err != nil {
 			return err
@@ -202,8 +209,11 @@ func (s *pgSessionStore) Log(ctx context.Context, sessionID string) ([]agentcore
 		return nil, err
 	}
 	out := make([]agentcore.SessionEntry, 0, len(rows))
+	images := make(map[string]hydratedSessionImage)
 	for _, r := range rows {
-		out = append(out, sessionEntryFromRow(r))
+		entry := sessionEntryFromRow(r)
+		hydrateSessionEntryImages(ctx, s.store, sessionID, &entry, images)
+		out = append(out, entry)
 	}
 	return out, nil
 }
@@ -216,8 +226,11 @@ func (s *pgSessionStore) LogFrom(ctx context.Context, sessionID string, sinceSeq
 		return nil, err
 	}
 	out := make([]agentcore.SessionEntry, 0, len(rows))
+	images := make(map[string]hydratedSessionImage)
 	for _, r := range rows {
-		out = append(out, sessionEntryFromRow(r))
+		entry := sessionEntryFromRow(r)
+		hydrateSessionEntryImages(ctx, s.store, sessionID, &entry, images)
+		out = append(out, entry)
 	}
 	return out, nil
 }

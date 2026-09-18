@@ -47,9 +47,9 @@ func newTestPolicy(t *testing.T, max int) *spillRun {
 func bound(p *spillRun, call agentcore.ToolCall, out string) (string, string) {
 	d := p.InterceptToolResult(context.Background(), call, out, nil)
 	if !d.Replace {
-		return agentcore.TruncateMiddle(out, p.maxInline), d.Meta
+		return agentcore.TruncateMiddle(out, p.maxInline), d.ResultRef
 	}
-	return d.Result, d.Meta
+	return d.Result, d.ResultRef
 }
 
 func TestSpill_UnderCapIsUntouched(t *testing.T) {
@@ -292,7 +292,7 @@ func TestSpill_DeclinesRunItCannotServe(t *testing.T) {
 func TestSpill_FailedCallIsNotSpilled(t *testing.T) {
 	p := newTestPolicy(t, 200)
 	d := p.InterceptToolResult(context.Background(), agentcore.ToolCall{ID: "c1", Name: "run_sql"}, strings.Repeat("H", 9000), errors.New("boom"))
-	if d.Replace || d.Meta != "" {
+	if d.Replace || d.ResultRef != "" {
 		t.Fatalf("a failed call must pass through untouched, got %+v", d)
 	}
 }

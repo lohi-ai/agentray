@@ -98,6 +98,7 @@ head+tail truncation. The plugin returns "no opinion" rather than an error.
 - **The preview split is fixed** at two-thirds head / one-third tail. A result
   whose signal sits in the middle is previewed badly, and there is no way for a
   tool to declare a better shape.
-- **`Meta` rides only the trace.** The locator reaches `ToolTrace.SpillLocator`,
-  not any structured field the model sees — the model must parse it out of the
-  notice text.
+- **The provider still sees a text notice.** The opaque locator also rides
+  `ToolTrace.SpillLocator` and durable `Message.ResultRef`, so context pruning
+  and fallback compaction can keep it reachable, but provider wire formats do
+  not gain a vendor-specific artifact block; the active model reads the notice.

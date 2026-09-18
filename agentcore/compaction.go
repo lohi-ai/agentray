@@ -92,6 +92,15 @@ const defaultKeepRecentTokens = 20_000
 const (
 	defaultMaxSummaryTokens = 2048
 	minSummaryTokens        = 256
+	// defaultPruneCacheWarmSuffixTokens is the largest already-sent suffix the
+	// built-in pruner will invalidate while prompt caching is active. Rewriting
+	// deeper history forces the provider to re-cache too much of a warm prefix;
+	// summary compaction can reclaim it when the window is actually full.
+	defaultPruneCacheWarmSuffixTokens = 8_000
+	// defaultPruneMinimumSavingsTokens prevents a generic age-only rewrite from
+	// churning the prompt cache for negligible savings. effectiveCompaction
+	// scales it down for small local-model windows.
+	defaultPruneMinimumSavingsTokens = 20_000
 )
 
 // summaryMarker prefixes a compaction summary message so later compactions can
@@ -125,13 +134,31 @@ const goalMarker = "[pinned goal — the run's requirement, kept verbatim across
 type CompactionSettings struct {
 	KeepRecentTokens int
 	MaxSummaryTokens int
+	// PruneProtectedTools exempts tool results from generic age-based pruning.
+	// Superseded identical results and stale file reads may still be pruned: a
+	// newer result already carries the truth. Nil selects the safe built-ins;
+	// an explicitly empty slice disables built-in protection. Add tools whose
+	// outputs are non-repeatable artifacts or durable instructions.
+	PruneProtectedTools []string
+	// PruneCacheWarmSuffixTokens protects deep results while prompt caching is
+	// active. A candidate is rewritten only when the estimated message suffix
+	// after it is no larger than this value. Zero selects the default; a negative
+	// value disables the guard.
+	PruneCacheWarmSuffixTokens int
+	// PruneMinimumSavingsTokens is the minimum aggregate saving required for
+	// generic age-only pruning. Superseded and stale results bypass this floor.
+	// <=0 selects the default; the effective value is capped to 10% of Budget.
+	PruneMinimumSavingsTokens int
 }
 
 // DefaultCompactionSettings returns conservative defaults.
 func DefaultCompactionSettings() CompactionSettings {
 	return CompactionSettings{
-		KeepRecentTokens: defaultKeepRecentTokens,
-		MaxSummaryTokens: defaultMaxSummaryTokens,
+		KeepRecentTokens:           defaultKeepRecentTokens,
+		MaxSummaryTokens:           defaultMaxSummaryTokens,
+		PruneProtectedTools:        []string{readSkillToolName},
+		PruneCacheWarmSuffixTokens: defaultPruneCacheWarmSuffixTokens,
+		PruneMinimumSavingsTokens:  defaultPruneMinimumSavingsTokens,
 	}
 }
 
@@ -155,7 +182,11 @@ func estimateContextTokens(messages []Message) int {
 		return estimateBytesTokens(messages)
 	}
 	u := messages[lastUsageIdx].Usage
-	return u.InputTokens + u.OutputTokens + estimateBytesTokens(messages[lastUsageIdx+1:])
+	measured := u.InputTokens + u.OutputTokens + messages[lastUsageIdx].ContextTokenAdjustment
+	if measured < 0 {
+		measured = 0
+	}
+	return measured + estimateBytesTokens(messages[lastUsageIdx+1:])
 }
 
 // estimateBytesTokens is the cheap ~4-bytes/token fallback over a message slice.
@@ -163,6 +194,16 @@ func estimateBytesTokens(messages []Message) int {
 	bytes := 0
 	for _, m := range messages {
 		bytes += len(m.Content)
+		// Base64 size is not prompt token size: vision adapters decode images and
+		// bill by dimensions/tiles. Use a conservative fixed estimate until the
+		// next provider Usage observation replaces this fallback.
+		for _, part := range m.ContentParts {
+			if part.Type == ContentPartImage {
+				bytes += 4 * 1024
+			} else {
+				bytes += len(part.Text)
+			}
+		}
 		for _, tc := range m.ToolCalls {
 			bytes += len(tc.Name) + len(tc.Arguments)
 		}
@@ -205,6 +246,18 @@ func effectiveCompaction(settings CompactionSettings, budget int) CompactionSett
 	}
 	if settings.MaxSummaryTokens < minSummaryTokens {
 		settings.MaxSummaryTokens = minSummaryTokens
+	}
+	if settings.PruneProtectedTools == nil {
+		settings.PruneProtectedTools = slices.Clone(DefaultCompactionSettings().PruneProtectedTools)
+	}
+	if settings.PruneCacheWarmSuffixTokens == 0 {
+		settings.PruneCacheWarmSuffixTokens = defaultPruneCacheWarmSuffixTokens
+	}
+	if settings.PruneMinimumSavingsTokens <= 0 {
+		settings.PruneMinimumSavingsTokens = defaultPruneMinimumSavingsTokens
+	}
+	if cap := budget / 10; cap > 0 && settings.PruneMinimumSavingsTokens > cap {
+		settings.PruneMinimumSavingsTokens = cap
 	}
 	return settings
 }
@@ -381,14 +434,19 @@ func elideOversizedTail(tail []Message, keepRecentTokens int) ([]Message, bool) 
 	shrunk := false
 	for i := 0; i < len(out)-1 && estimateBytesTokens(out) > keepRecentTokens; i++ {
 		m := out[i]
-		if m.Role != RoleTool || len(m.Content) <= elidedResultBytes {
+		if m.Role != RoleTool || (len(m.Content) <= elidedResultBytes && len(m.ContentParts) == 0) {
 			continue
+		}
+		content := truncateResultWithRef(m.Content, m.ResultRef, elidedResultBytes)
+		if images := imagePartCount(m); images > 0 {
+			content = strings.TrimSpace(content) + fmt.Sprintf("\n[%d rich image output(s) elided from the compacted tail]", images)
 		}
 		out[i] = Message{
 			Role:       RoleTool,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
-			Content:    truncateMiddle(m.Content, elidedResultBytes),
+			Content:    content,
+			ResultRef:  m.ResultRef,
 		}
 		shrunk = true
 	}
@@ -759,7 +817,11 @@ func serializeConversation(span []Message) string {
 				fmt.Fprintf(&b, "ASSISTANT called tool %s(%s)\n", tc.Name, serializeToolArgs(tc.Arguments))
 			}
 		case RoleTool:
-			fmt.Fprintf(&b, "TOOL %s -> %s\n", m.Name, truncateMiddle(strings.TrimSpace(m.Content), maxSerializedToolResult))
+			content := truncateMiddle(strings.TrimSpace(m.Content), maxSerializedToolResult)
+			if images := imagePartCount(m); images > 0 {
+				content = strings.TrimSpace(content) + fmt.Sprintf(" [%d rich image output(s)]", images)
+			}
+			fmt.Fprintf(&b, "TOOL %s -> %s\n", m.Name, content)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -870,13 +932,18 @@ func compact(messages []Message, keepRecent int) []Message {
 			continue
 		}
 		// Collapse bulky tool results in the older region; keep their linkage.
-		if m.Role == RoleTool && len(m.Content) > 256 {
+		if m.Role == RoleTool && (len(m.Content) > 256 || len(m.ContentParts) > 0) {
 			collapsed++
+			content := "[older tool result elided to fit context]"
+			if m.ResultRef != "" {
+				content = fmt.Sprintf("[older tool result elided to fit context; full output remains available at %s through the artifact retrieval tool]", m.ResultRef)
+			}
 			out = append(out, Message{
 				Role:       RoleTool,
 				ToolCallID: m.ToolCallID,
 				Name:       m.Name,
-				Content:    "[older tool result elided to fit context]",
+				Content:    content,
+				ResultRef:  m.ResultRef,
 			})
 			continue
 		}
@@ -894,6 +961,32 @@ func compact(messages []Message, keepRecent int) []Message {
 		out = append(out[:at:at], append([]Message{note}, out[at:]...)...)
 	}
 	return out
+}
+
+func imagePartCount(message Message) int {
+	count := 0
+	for _, part := range message.ContentParts {
+		if part.Type == ContentPartImage {
+			count++
+		}
+	}
+	return count
+}
+
+// truncateResultWithRef bounds a tool result while ensuring an opaque recovery
+// handle remains visible to the model. The field itself is durable metadata and
+// is not serialized by provider adapters, so preserving only ResultRef would
+// make the artifact recoverable to observers but unreachable to the agent.
+func truncateResultWithRef(content, ref string, maxBytes int) string {
+	truncated := truncateMiddle(content, maxBytes)
+	if ref == "" || strings.Contains(truncated, ref) {
+		return truncated
+	}
+	notice := fmt.Sprintf("\n[full output remains available at %s through the artifact retrieval tool]", ref)
+	if len(notice) >= maxBytes {
+		return truncateBytes(notice, maxBytes)
+	}
+	return truncateMiddle(content, maxBytes-len(notice)) + notice
 }
 
 // Compactor is transcript shrinking, as a seam.
@@ -970,6 +1063,10 @@ func (summaryCompactor) Name() string { return "summary" }
 
 func (summaryCompactor) ShouldCompact(messages []Message, budget int) bool {
 	return shouldCompact(messages, budget)
+}
+
+func (summaryCompactor) PruneContext(req ContextPruneRequest) ([]Message, bool) {
+	return pruneContextRequest(req)
 }
 
 func (summaryCompactor) Compact(ctx context.Context, req CompactionRequest) (CompactionResult, error) {

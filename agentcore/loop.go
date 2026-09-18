@@ -1160,18 +1160,41 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// MaxContextTokens cannot leave compaction with "nothing old enough".
 		compaction := effectiveCompaction(a.compaction, budget)
 
-		// Stop guard: compact old turns when the estimated context approaches
-		// the model window so long autonomous runs stay bounded (§5.2). The older
-		// span is summarized by the active rung's model into a structured
-		// checkpoint; on any failure it degrades to a deterministic elide.
-		if compactor.ShouldCompact(res.Messages, budget) {
+		// First remove obsolete old tool results at a soft threshold when the
+		// active compactor offers that capability. This frequently restores enough
+		// headroom to avoid an LLM summary altogether. A custom compactor that does
+		// not implement ContextPruner keeps its exact historical behavior.
+		compactInput := res.Messages
+		pruned := false
+		if pruner, ok := compactor.(ContextPruner); ok {
+			cacheCaps := CapabilitiesOf(ladder[rung].Provider, ladder[rung].Model).Overlay(ladder[rung].Capabilities)
+			compactInput, pruned = pruner.PruneContext(ContextPruneRequest{
+				Messages:          res.Messages,
+				Budget:            budget,
+				Settings:          compaction,
+				PromptCacheActive: a.cacheKey != "" && cacheCaps.PromptCaching != CapabilityUnsupported,
+			})
+			// Treat a buggy "changed" result with no usable transcript as a no-op;
+			// provider validity is more important than an optimization.
+			if pruned && len(compactInput) == 0 {
+				compactInput, pruned = res.Messages, false
+			}
+		}
+		needsFullCompaction := compactor.ShouldCompact(compactInput, budget)
+
+		// Stop guard: persist every transcript rewrite as a completed compaction
+		// checkpoint. Pruning-only turns therefore resume from the same reduced
+		// history, while transcripts still over budget continue into the normal
+		// summarization stage inside the SAME durable bracket.
+		if pruned || needsFullCompaction {
+			beforeCompaction := res.Messages
 			// before_compact (P10): the consumer may defer this compaction or supply
 			// its own — a domain summarizer, or a cut that pins content the default
 			// would drop. Asked before any durable bracket is written, so a skipped
 			// compaction leaves no trace to recover.
 			decision, herr := a.hooks.runBeforeCompact(ctx, CompactRequest{
 				Turn:     res.Turns,
-				Messages: res.Messages,
+				Messages: compactInput,
 				Budget:   budget,
 				Settings: compaction,
 			})
@@ -1206,20 +1229,32 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// truncated one.
 				appendEntry(SessionEntry{Kind: EntryCompaction, Turn: res.Turns})
 				var cu Usage
-				out, cerr := compactor.Compact(ctx, CompactionRequest{
-					Messages: res.Messages,
-					Budget:   budget,
-					Turn:     res.Turns,
-					Settings: compaction,
-					Provider: compactProvider,
-					Model:    compactModel,
-				})
-				// A compactor that fails leaves the transcript alone: an oversized
-				// context still answers, while a killed run loses the whole thing.
-				// The bracket still closes, so recovery sees a completed attempt
-				// rather than a dangling one it would re-run forever.
+				out := CompactionResult{Messages: compactInput}
+				var cerr error
+				if needsFullCompaction {
+					out, cerr = compactor.Compact(ctx, CompactionRequest{
+						Messages: compactInput,
+						Budget:   budget,
+						Turn:     res.Turns,
+						Settings: compaction,
+						Provider: compactProvider,
+						Model:    compactModel,
+					})
+					// Usage is billable even when the compactor could not produce a
+					// usable replacement (for example a provider failed after reporting
+					// input tokens). Transcript fallback and accounting are independent.
+					cu = out.Usage
+				}
+				// A failed summary keeps any safe deterministic pruning already done;
+				// without that, it leaves the transcript alone. The bracket still
+				// closes, so recovery sees a completed attempt rather than a dangling
+				// one it would re-run forever.
 				if cerr == nil && len(out.Messages) > 0 {
-					res.Messages, cu = out.Messages, out.Usage
+					res.Messages = out.Messages
+				} else if pruned {
+					// Deterministic pruning already bought safe headroom. Preserve it
+					// even if the optional summarization stage failed.
+					res.Messages = compactInput
 				}
 				// The summarization call is real billable spend: fold it into the
 				// run's accounting and stamp it on the completion entry so the audit
@@ -1239,10 +1274,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				}
 				appendEntry(fin)
 			}
-			// Compaction replaces the transcript wholesale, but the log carries
-			// the bracket that says so and recovery re-derives the same shape, so
-			// the rewritten history is the new baseline for the invariant.
-			exts.observe(ctx, PhaseRebase, res.Turns, res.Messages)
+			// Rebase observers only when provider-visible history actually changed.
+			// A skipped or failed no-op compaction has no new baseline.
+			if stablePrefixLen(beforeCompaction, res.Messages) != len(beforeCompaction) || len(beforeCompaction) != len(res.Messages) {
+				exts.observe(ctx, PhaseRebase, res.Turns, res.Messages)
+			}
 		}
 
 		// Per-turn extension injections: anything an extension needs the model to

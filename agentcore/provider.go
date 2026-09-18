@@ -29,10 +29,15 @@ const (
 // from their wire contract, live discovery, or both. Unknown fields preserve
 // the request exactly as authored.
 type ModelCapabilities struct {
-	Tools             CapabilitySupport `json:"tools,omitempty"`
-	ToolChoice        CapabilitySupport `json:"tool_choice,omitempty"`
-	ReasoningEffort   CapabilitySupport `json:"reasoning_effort,omitempty"`
-	ImageInput        CapabilitySupport `json:"image_input,omitempty"`
+	Tools           CapabilitySupport `json:"tools,omitempty"`
+	ToolChoice      CapabilitySupport `json:"tool_choice,omitempty"`
+	ReasoningEffort CapabilitySupport `json:"reasoning_effort,omitempty"`
+	ImageInput      CapabilitySupport `json:"image_input,omitempty"`
+	// MaxInputImages is the provider/model request-wide image count cap. Zero
+	// means unknown, in which case the loop uses a conservative portable floor.
+	// It is separate from ImageInput: a model may accept images but only a
+	// bounded number of them in one accumulated conversation.
+	MaxInputImages    int               `json:"max_input_images,omitempty"`
 	StructuredOutput  CapabilitySupport `json:"structured_output,omitempty"`
 	PromptCaching     CapabilitySupport `json:"prompt_caching,omitempty"`
 	StatefulResponses CapabilitySupport `json:"stateful_responses,omitempty"`
@@ -52,6 +57,9 @@ func (c ModelCapabilities) Overlay(newer ModelCapabilities) ModelCapabilities {
 	}
 	if newer.ImageInput != CapabilityUnknown {
 		c.ImageInput = newer.ImageInput
+	}
+	if newer.MaxInputImages > 0 {
+		c.MaxInputImages = newer.MaxInputImages
 	}
 	if newer.StructuredOutput != CapabilityUnknown {
 		c.StructuredOutput = newer.StructuredOutput
@@ -79,6 +87,9 @@ func (c ModelCapabilities) Validate() error {
 			return fmt.Errorf("%s capability must be supported, unsupported, or empty", name)
 		}
 	}
+	if c.MaxInputImages < 0 {
+		return fmt.Errorf("max_input_images must be zero (unknown) or positive")
+	}
 	return nil
 }
 
@@ -96,16 +107,33 @@ const (
 // messages that request tool execution; ToolCallID links a tool result back to
 // the call that produced it.
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"` // tool name for tool-result messages
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+	// ContentParts carries structured content that cannot be represented by the
+	// compatibility Content string, currently image outputs from tools. Text
+	// remains in Content so existing providers, hooks, traces, and durable logs
+	// keep their stable contract; capable adapters append these parts natively
+	// and explicitly degrade them for text-only models.
+	ContentParts []ContentPart `json:"content_parts,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	Name         string        `json:"name,omitempty"` // tool name for tool-result messages
 	// Usage is the provider-reported token usage for the turn that produced this
 	// message. Set only on assistant messages, and only when the provider
 	// reported it. Compaction prefers this over a byte heuristic to decide when
 	// the context window is filling (pi's usage-based estimateContextTokens).
 	Usage *Usage `json:"usage,omitempty"`
+	// ContextTokenAdjustment corrects a provider Usage observation after a
+	// deterministic, shape-preserving transcript rewrite. Usage remains the
+	// immutable billable fact the provider reported; this signed estimate is
+	// applied only by the future compaction-pressure heuristic. A fresh provider
+	// response starts at zero.
+	ContextTokenAdjustment int `json:"context_token_adjustment,omitempty"`
+	// ResultRef is an opaque handle for recovering content omitted from a tool
+	// result (for example a spill artifact). Providers do not serialize this
+	// field directly; pruning preserves it and includes it in any replacement
+	// notice so context reduction cannot make the underlying result unreachable.
+	ResultRef string `json:"result_ref,omitempty"`
 	// Error, when set, marks a synthesized failure turn: an empty-content
 	// assistant message the loop appends when a run aborts on a provider or hook
 	// error, so a subscriber always sees a clean message/turn lifecycle (pi's
@@ -139,6 +167,30 @@ type Message struct {
 	// scoped only — never persisted, so it is excluded from JSON.
 	CacheAnchor bool `json:"-"`
 }
+
+// ContentPart is one structured message attachment. Image Data is base64
+// without a data-URL prefix; MIMEType identifies the bytes. Detail is the
+// provider-neutral resolution hint understood by OpenAI-family adapters.
+// Keeping this type in agentcore lets tools return rich content without
+// importing a vendor package.
+type ContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	Data string `json:"data,omitempty"`
+	// DataRef is an internal durable-storage reference used to externalize large
+	// binary payloads from session rows. Session adapters hydrate it before a
+	// message reaches the loop or a provider; tools and provider adapters should
+	// produce/consume Data instead. Keeping the ref typed prevents persistence
+	// truncation from corrupting base64 image data.
+	DataRef  string `json:"data_ref,omitempty"`
+	MIMEType string `json:"mime_type,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+const (
+	ContentPartText  = "text"
+	ContentPartImage = "image"
+)
 
 // ToolCall is a model request to invoke a tool with JSON arguments.
 type ToolCall struct {

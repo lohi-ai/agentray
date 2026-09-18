@@ -47,18 +47,51 @@ are deliberately smaller:
 | Context durability | Append-only context; completed parallel results persist in completion order | Append-only session entries, atomic save points, assistant frames, pre-effect intent commits, completion journal with source-order recovery, renewable ownership/fencing | AgentRay combines earlier completion durability with deterministic transcript order and multi-replica safety |
 | Backend conformance | Targeted agent/session tests plus provider/catalog conformance checks | Memory and PostgreSQL session stores previously had separate tests | Added one reusable suite for ordering, isolation, snapshots, batches, recovery, branches, and checkpoint windows; this also carries forward the earlier pi-harness review's strongest testing practice |
 | Streaming recovery | Retries only before meaningful output commits | Previously retried after visible output | Adopted replay-safe commit boundary |
-| Compaction | Provider-aware pruning, tool protection, cache-aware strategies | Token/window-aware compaction with tool/result guards | Add cache-aware pruning and richer strategies later |
-| Providers | Very broad registry, dialects, auth broker, session state | Four native families, OpenAI-compatible routing, pooled OAuth, bounded conversation state, adaptive hint fallback | Keep generic wire; add dialect contracts and Responses chaining incrementally |
+| Compaction | Provider-aware pruning, tool protection, cache-aware strategies | Window-aware summary compaction plus durable, protected, cache-aware batched pruning | Adopted deterministic pruning, warm-prefix protection, and a savings floor; aggressive shake remains optional future work |
+| Providers | Very broad registry, model-scoped API dialects, auth broker, session state | Four native families, model-scoped OpenAI Chat/Responses routing, OpenAI-compatible gateways, pooled OAuth, bounded conversation state, adaptive hint fallback | Keep generic wires; add native families only where their behavior cannot be represented |
 | Model capabilities | Generated, resolved model/compat records | Previously one provider-wide tools boolean | Adopted tri-state per-model capabilities with live discovery and rung snapshots |
 | Local inference | Ollama and other local endpoints, optional credentials | Compatible wire existed but runtime required a key | Adopted explicit optional-auth local vendors |
 | Edit conflict safety | Hashline edits bind model-selected lines to a file snapshot | Exact/fuzzy replacement previously trusted only matching text | Adopted snapshot-bound edits; defer the full hashline grammar |
-| Tool surface | Coding-heavy suite: AST, LSP, DAP, eval, GitHub, browser/computer, memory | Portable filesystem/edit/LSP/eval/shell/browser/computer/web/MCP plus product tools | LSP read paths and persistent Python eval adopted; add DAP and richer eval incrementally |
+| Tool surface | Coding-heavy suite: AST, LSP, DAP, rich eval, GitHub, browser/computer, memory | Portable filesystem/edit/LSP/rich Python eval/shell/browser/computer/web/MCP plus product tools | LSP read paths, persistent eval, and provider-native image results adopted; add DAP and eval bridges incrementally |
+| Rich tool results | Typed text/image outputs, provider image budgets, content-addressed blob persistence, and MIME bundles flow to capable model wires | Tool contract was text-only | Added an optional rich-result seam, bounded eval MIME capture, per-wire image budgets, server-side content-addressed persistence, and explicit degradation for text-only paths |
 | Native acceleration | Rust edit/search/shell/VCS layer | Go implementation and external sandbox | Measure before adding native code; server simplicity wins today |
 | Pause/step | Process-level pause plus session controls | Per-run step gate | Keep per-run scope; a global pause is unsafe for multi-tenancy |
 | Speculative execution | Harness-native safe speculation | Parallel tool chunks and async jobs | Consider read-only turn speculation only with cancellation/cost evidence |
 | Catalog/policy | Generated catalog and KDL policy data | Live model lists plus small compatibility/window tables | Adopt generated capabilities when provider breadth makes it necessary |
 
 ## Improvements landed from this review
+
+### Durable deterministic context pruning
+
+The default compactor now runs a zero-LLM pruning stage after the transcript
+crosses half of its effective context budget. It replaces obsolete tool output
+only before the keep-recent window: superseded identical calls first, file
+reads invalidated by later writes second, then bulky old results. Tool-call IDs,
+names, order, and adjacency stay intact. Error results, loaded skill bodies, and
+consumer-declared non-repeatable/artifact tools are protected from generic
+age-based pruning. Spill-backed previews may be reduced, but their opaque
+recovery reference is preserved in both message metadata and the replacement
+notice, so archived output remains reachable.
+
+When prompt caching is actually active for the current model rung, candidates
+deeper than an 8k-token suffix are left in the warm prefix for full compaction
+to reclaim; cheap tail rewrites still proceed. Explicitly unsupported caching
+does not arm the guard. Generic age-only candidates are applied only when their
+aggregate saving reaches the configured floor (20k tokens on large windows,
+adaptively capped at 10% for smaller local models). Superseded and stale results
+remain the higher-confidence path and bypass that savings floor.
+
+Unlike the pre-plugin `contextedit.go`, this pass is an optional capability of
+the active `Compactor`; replacing the strategy replaces its pruning policy too.
+The loop applies `BeforeCompact`, one durable start/completion bracket, and one
+observer rebase around the combined prune/summary rewrite. A pruning-only pass
+therefore survives restart through `Retained`, while a transcript still over
+budget feeds the already-pruned form into one summary call. Provider usage
+observations remain immutable billable facts; a separate signed context-token
+adjustment subtracts only removed message bytes while retaining system and tool-
+schema overhead that the byte fallback cannot see. The implementation is pure
+Go and uses only transcript data, so laptop and multi-replica server runs have
+identical policy.
 
 ### Replay-safe streaming
 
@@ -209,13 +242,21 @@ require sticky sessions or shared mutable provider state.
 
 ### Public OpenAI Responses chaining
 
-`openai-responses` is now an explicit first-party provider alongside the
-existing `openai` Chat Completions wire. It maps the neutral transcript onto
+`openai-responses` is a first-party provider alongside the existing `openai`
+Chat Completions wire. The runtime also separates OpenAI provider identity from
+model wire, as OMP does with `model.api`: an ordinary `openai` row whose stored
+or discovered model metadata explicitly reports `stateful_responses:supported`
+uses Responses for that model while retaining the `openai` identity for key
+refresh, tracing, and policy. Unknown or unsupported metadata stays on Chat
+Completions, so existing gateways and privacy expectations do not change.
+
+The adapter maps the neutral transcript onto
 Responses input items, streams text and function calls, normalizes cached-token
 usage, supports reasoning effort and JSON-schema output, and advertises native
-stateful-response capability. The explicit provider identity avoids silently
-changing existing gateways or opting an existing workspace into OpenAI's
-server-side response retention.
+stateful-response capability. Primary and fallback models on the same OpenAI
+row may select different wires; they share credentials and base URL but not a
+stateful client. Live collection routing, runtime ladders, and connectivity
+tests all honor the same positive-only selection rule.
 
 When a logical provider session is available, the adapter retains the last
 successful canonical wire input, canonical assistant output, and response id.
@@ -358,15 +399,52 @@ failure discard the kernel without replaying the cell.
 
 The runner separates NDJSON control frames from fd 1/2, so Python and child
 process output cannot spoof the protocol or fill an unbounded host buffer. It
-supports final-expression display, `display(...)`, and top-level `await`.
+supports final-expression display, `display(...)`, top-level `await`, rich
+Python MIME representations, and automatic matplotlib PNG rendering. Markdown,
+JSON, HTML/SVG/LaTeX fallbacks remain visible as bounded text; validated
+PNG/JPEG data becomes typed message parts. Cells are capped at eight images and
+768 KiB of decoded image data, with explicit notices for invalid or omitted
+content.
+
+The optional `RichTool` contract is additive: existing `Tool` implementations
+and text-only consumers do not change. Rich parts are snapshotted by durable
+sessions, included in cache-prefix identity and context pressure, preserved for
+capable escalation rungs, and removed with an explicit breadcrumb during
+pruning/compaction. OpenAI Chat hoists tool images after the complete tool-result
+batch to preserve call/result adjacency; Responses and Codex emit native input
+image items; Anthropic nests images inside `tool_result`. Explicitly text-only
+model paths receive an omission notice, while unknown capability metadata stays
+optimistic for backward compatibility.
+
+The full outgoing request is also bounded at the provider seam, not merely each
+tool result. Known wire families advertise conservative limits (Anthropic and
+Claude Code 90, OpenAI/Responses/Codex and Google 200, OpenRouter 90); live model
+metadata may override them. Unknown image-capable endpoints use a portable floor
+of five. If a transcript exceeds the active rung's budget, the oldest images are
+removed copy-on-write with an explicit per-message breadcrumb. Escalation can
+therefore retry the untouched canonical transcript against a rung with a larger
+budget instead of inheriting the first provider's loss.
+
+Large images no longer multiply inside PostgreSQL JSON session rows. The server
+adapter externalizes base64 payloads of at least 1 KiB into the existing
+session-fenced spill table under a content-derived locator and stores only that
+reference in the log. Repeated content deduplicates, reads validate the fence,
+size, MIME signature, and completeness, and hydration restores the original
+provider-neutral message before agentcore sees it. Missing/corrupt artifacts
+remove only the affected image and leave a visible notice, so one bad artifact
+cannot make a run permanently unresumable. The in-memory laptop store remains
+dependency-free and inline. This is a PostgreSQL representation optimization,
+not yet raw-byte object storage: the artifact row currently holds base64 text.
+
 Host mode receives only allowlisted environment variables; Docker mode reuses
 the hardened no-network process envelope with a writable workspace and
 read-only root. Configuration and lifecycle details live in [`EVAL.md`](EVAL.md).
 
-JavaScript, MIME images, cell-to-tool/subagent bridges, auto-backgrounding, and
-speculative eval were not copied in this increment. Those features need native
-AgentRay cancellation, artifact, and delegation contracts rather than a direct
-desktop-runtime port.
+JavaScript, raw-byte/object-store backing, image resize/recompression,
+cell-to-tool/subagent bridges, auto-backgrounding, and speculative eval were
+not copied in this increment.
+Those features need native AgentRay cancellation, artifact, and delegation
+contracts rather than a direct desktop-runtime port.
 
 ### One session contract for laptop and server backends
 
@@ -427,14 +505,14 @@ portable CI threshold.
 
 1. Benchmark typed `edit_lines` against oh-my-pi's syntax-block hashline mode;
    add syntax-aware blocks only if they materially improve edit success.
-2. Add rich-display/artifact support to persistent eval, then evaluate
+2. Add bounded image resize/recompression and optionally move server artifacts
+   from base64 PostgreSQL text to raw-byte/object-store backing; then evaluate
    transactional rename/code actions over snapshot-checked multi-file writes.
-3. Make compaction prompt-cache-aware and add transcript shake/pruning policies.
-4. Add per-model wire selection so an OpenAI provider row can choose Chat or
-   Responses from discovered/catalog metadata without changing provider identity.
-5. Evaluate read-only speculative execution behind a budget and cancellation
+3. Measure an aggressive transcript-shake policy; keep it optional because
+   artifact durability and the acceptable loss profile vary by deployment.
+4. Evaluate read-only speculative execution behind a budget and cancellation
    gate; keep mutating tools strictly replay-safe.
-6. Expand native provider families only where the generic OpenAI-compatible
+5. Expand native provider families only where the generic OpenAI-compatible
    wire cannot represent required behavior.
 
 The target is behavioral parity where it improves correctness and agent quality,

@@ -69,15 +69,32 @@ func New(spec Spec) (Provider, error) {
 	if spec.HTTP != nil {
 		injectHTTP(inner, spec.HTTP)
 	}
+	var modelResponses agentcore.LLMProvider
+	if vendor == "openai" {
+		// Keep an identity-preserving Responses peer ready for models whose live
+		// metadata explicitly selects that API. Listing and chatting stay on the
+		// same provider row/key/base URL; only the model's wire changes.
+		modelResponses, err = NewClient(ClientSpec{
+			Name: "openai", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
+			OpenAIWire: OpenAIWireResponses,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if spec.HTTP != nil {
+			injectHTTP(modelResponses, spec.HTTP)
+		}
+	}
 
 	w := &wired{
-		id:      id,
-		vendor:  vendor,
-		name:    name,
-		baseURL: strings.TrimRight(strings.TrimSpace(spec.BaseURL), "/"),
-		apiKey:  spec.APIKey,
-		inner:   inner,
-		http:    spec.HTTP,
+		id:             id,
+		vendor:         vendor,
+		name:           name,
+		baseURL:        strings.TrimRight(strings.TrimSpace(spec.BaseURL), "/"),
+		apiKey:         spec.APIKey,
+		inner:          inner,
+		modelResponses: modelResponses,
+		http:           spec.HTTP,
 	}
 	if pooled, ok := inner.(*pooledProvider); ok {
 		// OAuth vendors list models through the same account pool they chat
@@ -143,7 +160,11 @@ func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
 type wired struct {
 	id, vendor, name, baseURL, apiKey string
 	inner                             agentcore.LLMProvider
-	http                              HTTPDoer
+	// modelResponses is the optional Responses peer for an ordinary OpenAI
+	// provider row. It keeps the same identity and is selected only by explicit
+	// per-model metadata learned from ListModels.
+	modelResponses agentcore.LLMProvider
+	http           HTTPDoer
 	// tokenSource and listModels are set only for OAuth vendors: the pool the
 	// list-models call draws its credential from, and the vendor's lister.
 	tokenSource TokenSource
@@ -172,11 +193,24 @@ func (w *wired) ModelCapabilities(model string) agentcore.ModelCapabilities {
 }
 
 func (w *wired) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	return w.inner.Chat(ctx, req)
+	return w.providerForModel(req.Model).Chat(ctx, req)
 }
 
 func (w *wired) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	return w.inner.Stream(ctx, req)
+	return w.providerForModel(req.Model).Stream(ctx, req)
+}
+
+func (w *wired) providerForModel(model string) agentcore.LLMProvider {
+	if w.modelResponses == nil {
+		return w.inner
+	}
+	w.modelsMu.RLock()
+	caps := w.discovered[model]
+	w.modelsMu.RUnlock()
+	if caps.StatefulResponses == agentcore.CapabilitySupported {
+		return w.modelResponses
+	}
+	return w.inner
 }
 
 func (w *wired) UpdateAPIKey(key string) {
@@ -185,6 +219,9 @@ func (w *wired) UpdateAPIKey(key string) {
 	}
 	w.apiKey = key
 	if u, ok := w.inner.(agentcore.KeyUpdater); ok {
+		u.UpdateAPIKey(key)
+	}
+	if u, ok := w.modelResponses.(agentcore.KeyUpdater); ok {
 		u.UpdateAPIKey(key)
 	}
 }

@@ -102,14 +102,14 @@ func (t ModelTier) EffectiveWindow() int { return EffectiveContextWindow(t.TierC
 // raw client because the composition's monitor plugin prices and traces every
 // rung itself — wrapping here would double-count.
 func (t ModelTier) RawProvider() (agentcore.LLMProvider, error) {
-	return buildProvider(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID)
+	return buildProviderForModel(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID, t.Capabilities)
 }
 
 // TracedProvider builds the tier's provider wrapped for pricing + tracing —
 // the shape one-shot callers (advisor, reflection, triage, authoring) want,
 // since they run outside the run composition's monitor plugin.
 func (t ModelTier) TracedProvider(tracer observe.Sink) (agentcore.LLMProvider, error) {
-	return buildTracedProvider(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, tracer)
+	return buildTracedProviderForModel(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, tracer, t.Capabilities)
 }
 
 // Rungs builds the model ladder for a run on this tier: the primary model
@@ -151,6 +151,24 @@ func (t ModelTier) Rungs() ([]agentcore.ModelRung, error) {
 		if fb.Model == t.Model {
 			return rungs, nil
 		}
+		// Provider identity and credentials may be shared while the selected
+		// models require different OpenAI wires. OMP stores API dialect on the
+		// model rather than the provider; retain that property here. Reuse the
+		// client only when both models resolve to the same wire.
+		if openAIWireFor(t.Provider, t.Capabilities) != openAIWireFor(t.Provider, fb.Capabilities) {
+			fbProv, err := buildProviderForModel(
+				t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID, fb.Capabilities,
+			)
+			if err != nil {
+				return nil, err
+			}
+			return append(rungs, agentcore.ModelRung{
+				Provider:      fbProv,
+				Model:         fb.Model,
+				Capabilities:  fb.Capabilities,
+				ContextWindow: ai.ContextWindowFor(t.Provider, fb.Model),
+			}), nil
+		}
 		return append(rungs, agentcore.ModelRung{
 			Provider:      prov,
 			Model:         fb.Model,
@@ -158,7 +176,7 @@ func (t ModelTier) Rungs() ([]agentcore.ModelRung, error) {
 			ContextWindow: ai.ContextWindowFor(t.Provider, fb.Model),
 		}), nil
 	}
-	fbProv, err := buildProvider(fb.Provider, fb.BaseURL, fb.APIKey, fb.TokenSource, fb.ProviderID)
+	fbProv, err := buildProviderForModel(fb.Provider, fb.BaseURL, fb.APIKey, fb.TokenSource, fb.ProviderID, fb.Capabilities)
 	if err != nil {
 		return nil, err
 	}

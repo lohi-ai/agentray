@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +16,7 @@ func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
 			"id":"text-only",
 			"supports_tools":false,
 			"supports_reasoning":true,
+			"max_input_images":7,
 			"capabilities":{"prompt_caching":"supported"},
 			"supported_parameters":["response_format"],
 			"architecture":{"input_modalities":["text"]}
@@ -38,7 +40,7 @@ func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
 		caps.ReasoningEffort != agentcore.CapabilitySupported ||
 		caps.StructuredOutput != agentcore.CapabilitySupported ||
 		caps.PromptCaching != agentcore.CapabilitySupported ||
-		caps.ImageInput != agentcore.CapabilityUnsupported {
+		caps.ImageInput != agentcore.CapabilityUnsupported || caps.MaxInputImages != 7 {
 		t.Fatalf("listed capabilities = %+v", caps)
 	}
 
@@ -72,12 +74,36 @@ func TestDedicatedCapabilityBooleanWinsOverGenericHints(t *testing.T) {
 
 func TestCapabilityOverlayUsesOnlyKnownNewValues(t *testing.T) {
 	base := agentcore.ModelCapabilities{
-		Tools:         agentcore.CapabilitySupported,
-		PromptCaching: agentcore.CapabilitySupported,
+		Tools:          agentcore.CapabilitySupported,
+		PromptCaching:  agentcore.CapabilitySupported,
+		MaxInputImages: 90,
 	}
 	got := base.Overlay(agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported})
-	if got.Tools != agentcore.CapabilityUnsupported || got.PromptCaching != agentcore.CapabilitySupported {
+	if got.Tools != agentcore.CapabilityUnsupported || got.PromptCaching != agentcore.CapabilitySupported || got.MaxInputImages != 90 {
 		t.Fatalf("overlay = %+v", got)
+	}
+	got = got.Overlay(agentcore.ModelCapabilities{MaxInputImages: 12})
+	if got.MaxInputImages != 12 {
+		t.Fatalf("numeric capability did not overlay: %+v", got)
+	}
+}
+
+func TestDiscoveredImageLimitAcceptsDedicatedAndCapabilityMapShapes(t *testing.T) {
+	twelve := 12
+	got := (discoveredCapabilities{
+		MaxImages: &twelve,
+		Capabilities: map[string]json.RawMessage{
+			"max_input_images": json.RawMessage(`9`),
+		},
+	}).modelCapabilities()
+	if got.MaxInputImages != 12 {
+		t.Fatalf("dedicated max_images should win over generic map: %+v", got)
+	}
+}
+
+func TestModelCapabilitiesRejectsNegativeImageLimit(t *testing.T) {
+	if err := (agentcore.ModelCapabilities{MaxInputImages: -1}).Validate(); err == nil {
+		t.Fatal("negative image limit must be rejected")
 	}
 }
 
@@ -85,10 +111,25 @@ func TestOpenAIResponsesAdvertisesStatefulWireWithoutChangingChatCompletions(t *
 	responses := CapabilitiesFor(VendorOpenAIResponses, "gpt-test")
 	if responses.StatefulResponses != agentcore.CapabilitySupported ||
 		responses.StructuredOutput != agentcore.CapabilitySupported ||
-		responses.Tools != agentcore.CapabilitySupported {
+		responses.Tools != agentcore.CapabilitySupported || responses.MaxInputImages != 200 {
 		t.Fatalf("responses capabilities = %+v", responses)
 	}
 	if chat := CapabilitiesFor("openai", "gpt-test"); chat.StatefulResponses != agentcore.CapabilityUnsupported {
 		t.Fatalf("chat-completions stateful capability = %q, want unsupported", chat.StatefulResponses)
+	}
+}
+
+func TestProviderImageBudgetsArePortableAndAntigravityIsExplicitlyTextOnly(t *testing.T) {
+	for vendor, want := range map[string]int{
+		"openai": 200, VendorOpenAIResponses: 200, "anthropic": 90,
+		VendorClaudeCode: 90, VendorOpenAICodex: 200, "google": 200, "openrouter": 90,
+	} {
+		caps := CapabilitiesFor(vendor, "m")
+		if caps.ImageInput != agentcore.CapabilitySupported || caps.MaxInputImages != want {
+			t.Errorf("%s image capabilities = %+v, want supported/%d", vendor, caps, want)
+		}
+	}
+	if got := CapabilitiesFor(VendorGoogleAntigravity, "m"); got.ImageInput != agentcore.CapabilityUnsupported {
+		t.Fatalf("antigravity image capability = %+v", got)
 	}
 }

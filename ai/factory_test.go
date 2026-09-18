@@ -105,6 +105,12 @@ func TestNew_InjectsHTTPClientIntoTheWireProvider(t *testing.T) {
 		if got != client {
 			t.Fatalf("%s: wire provider kept its own client, injection did not reach it", vendor)
 		}
+		if vendor == "openai" {
+			responses, ok := p.(*wired).modelResponses.(*OpenAIResponsesProvider)
+			if !ok || responses.HTTP != client || responses.StreamHTTP != client {
+				t.Fatalf("openai: Responses peer did not receive injected client: %T %+v", p.(*wired).modelResponses, responses)
+			}
+		}
 	}
 }
 
@@ -123,6 +129,9 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 	if inner := w.inner.(*OpenAIProvider); inner.APIKey != "new" {
 		t.Fatalf("wire key = %q, want new", inner.APIKey)
 	}
+	if peer := w.modelResponses.(*OpenAIResponsesProvider); peer.APIKey != "new" {
+		t.Fatalf("Responses peer key = %q, want new", peer.APIKey)
+	}
 	// An empty key is a no-op, not a way to erase the credential.
 	w.UpdateAPIKey("")
 	if w.APIKey() != "new" {
@@ -137,6 +146,35 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 	rw.UpdateAPIKey("new")
 	if inner := rw.inner.(*OpenAIResponsesProvider); inner.APIKey != "new" {
 		t.Fatalf("responses wire key = %q, want new", inner.APIKey)
+	}
+}
+
+func TestWiredSelectsResponsesByDiscoveredModelMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[
+			{"id":"gpt-responses","supports_stateful_responses":true},
+			{"id":"gpt-chat","supports_stateful_responses":false},
+			{"id":"gpt-unknown"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(Spec{Vendor: "openai", APIKey: "sk-test", BaseURL: srv.URL, HTTP: srv.Client()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := p.ListModels(context.Background()); err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	wired := p.(*wired)
+	responses, ok := wired.providerForModel("gpt-responses").(*OpenAIResponsesProvider)
+	if !ok || responses.Name() != "openai" {
+		t.Fatalf("responses model provider = %T name=%q", wired.providerForModel("gpt-responses"), wired.providerForModel("gpt-responses").Name())
+	}
+	for _, model := range []string{"gpt-chat", "gpt-unknown", "not-listed"} {
+		if _, ok := wired.providerForModel(model).(*OpenAIProvider); !ok {
+			t.Fatalf("%s provider = %T, want conservative chat wire", model, wired.providerForModel(model))
+		}
 	}
 }
 

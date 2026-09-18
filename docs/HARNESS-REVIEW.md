@@ -397,6 +397,19 @@ new processes, preventing teardown races from resurrecting them. Standalone
 laptop runners retain their self-contained defaults, and replica misses remain
 clean correctness-preserving starts.
 
+### Provider follow-up — model-scoped OpenAI wire selection
+
+oh-my-pi stores the wire API on the model rather than equating it with provider
+identity. AgentRay now preserves the same boundary for OpenAI: explicit positive
+`stateful_responses` model metadata selects the Responses adapter while the
+provider remains `openai` for credentials, refresh, tracing, and policy.
+Unknown or unsupported metadata remains on Chat Completions. Primary and
+fallback models on one provider row can therefore use different wires, and the
+live provider collection, runtime ladder, and connection-test path all make the
+same decision. Both adapters share only portable configuration (key and base
+URL); stateful response chains remain process-local optimizations and replay the
+full transcript after a laptop restart or server replica miss.
+
 ### Session-store conformance — one durability contract on laptop and server
 
 The memory and PostgreSQL session adapters now run the same reusable suite from
@@ -477,13 +490,21 @@ capacity, and idle expiry have deterministic tests.
 A token-cost audit of the loop found the harness paid for bulk it no longer
 needed. Two mechanisms landed in `agentcore/`:
 
-- **Deterministic context editing (`contextedit.go`):** at a soft threshold
+- **Deterministic context pruning (`contextprune.go`):** at a soft threshold
   (half the compaction budget) a zero-LLM pass clears tool-result bulk from
   the pre-keep-recent region, in confidence order: results superseded by a
   newer *identical* call (same tool + args), `read_file` results staled by a
   later `edit_file`/`write_file` to the same path, then any bulky (≥1KB)
   older result. Each cleared message keeps its `ToolCallID`/`Name` linkage and
-  gets an actionable placeholder ("re-run it if you need the detail").
+  gets a deterministic placeholder. Error results, skill bodies, and
+  consumer-declared non-repeatable/artifact tools are protected from generic
+  age-based pruning; spill-backed results keep their recovery locator in the
+  placeholder, so pruning cannot orphan the archived output.
+  With prompt caching active, an 8k-token suffix guard leaves deep candidates
+  in the warm prefix and only rewrites the cheap-to-recache tail. Generic
+  age-only candidates also need a meaningful aggregate saving (20k tokens on
+  large windows, capped to 10% of small local-model budgets); superseded/stale
+  results bypass that floor.
   Copy-on-write and idempotent, so it can never wedge the compaction that
   still bounds user/assistant text growth — both may fire in one turn for a
   single shared cache-prefix invalidation. The long-run stress suite now
@@ -492,15 +513,16 @@ needed. Two mechanisms landed in `agentcore/`:
   bulky redundant-call run stays bounded by clearing alone (≤3 summary calls
   where the same shape previously drove dozens).
 
-  **Superseded.** `contextedit.go` was removed during the plugin refactor.
-  Compaction is now the only mechanism that bounds a long transcript, so a
-  bulky redundant-call run pays for the bounding in summarization calls
-  instead of clearing them away — the guard is now
-  `TestLongRunWithBulkyResultsStaysBounded`, which asserts boundedness rather
-  than rarity. Removing it also exposed a latent hole: the per-turn rebase it
-  emitted was resetting `observe.LogInvariant` every turn, masking the fact
-  that the derived leading system prompt is not in the durable log. The
-  invariant now exempts that one message explicitly.
+  The original `contextedit.go` was temporarily removed during the plugin
+  refactor because it bypassed the replacement compactor seam and rewrote only
+  in-memory history. The restored design is an optional `ContextPruner`
+  capability on the active `Compactor`: a custom strategy keeps full ownership
+  of policy, while the loop applies the existing `BeforeCompact` hook and one
+  durable compaction bracket around either pruning alone or pruning followed by
+  summary compaction. `Retained` makes the reduced transcript resume exactly;
+  pruning no longer resets observers every turn, and a skipped/no-op rewrite
+  emits no false rebase. `TestLongRunWithBulkyResultsStaysBounded` again caps
+  summary calls at three for the redundant-output workload.
 - **Provider-neutral cache anchors (`cacheanchor.go`):** breakpoint *placement*
   moved out of the Anthropic provider (now `ai/anthropic.go`) into the loop. `markCacheAnchors` stamps
   `Message.CacheAnchor` (request-scoped, `json:"-"`, never persisted) on the
@@ -518,6 +540,34 @@ garden runner; and a "breakpoint after the compaction summary" idea is a no-op
 on Anthropic because `encode()` hoists all system-role messages into the
 top-level system block. After round-4: **456 tests green across 14 packages**;
 swatter re-verified (93 tests) against this tree.
+
+### OMP follow-up — rich tool results and eval MIME output
+
+The neutral message and tool contracts now carry bounded text/image parts
+without breaking existing `Tool.Run` implementations. Persistent Python eval
+recognizes standard rich representations and matplotlib figures, validates and
+bounds PNG/JPEG output, and records explicit notices when a value is invalid or
+over limit. OpenAI Chat, OpenAI Responses, Codex, Google's compatible wire, and
+Anthropic translate those parts to their native image shapes; explicitly
+text-only rungs receive a notice, and escalation retains the original parts for
+a later vision-capable rung.
+
+Rich parts are durable state rather than display-only callbacks: memory and
+PostgreSQL sessions retain them, prompt-cache equality includes them, and
+pruning/compaction estimates and removes them deliberately. Large server-side
+images are content-addressed into the session-fenced artifact table rather than
+repeated through JSON rows; reads hydrate them transparently and degrade one
+missing/corrupt attachment without poisoning the session. The in-memory laptop
+backend remains inline and dependency-free. The same
+`ProcessSandbox` and eval runner operate in trusted laptop host mode and the
+hardened server container.
+
+Provider-wide request budgets now bound historical images as well as each tool
+result. The loop drops the oldest attachments copy-on-write with a visible
+notice using per-wire limits (or a conservative unknown-provider floor), so a
+fallback rung starts from the untouched transcript. Remaining OMP deltas are
+raw-byte/object-store backing, image resize/recompression, JavaScript eval,
+cell-to-tool/subagent bridges, background cells, and speculative execution.
 
 ## Not done (deferred, low value now)
 

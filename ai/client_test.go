@@ -1,6 +1,11 @@
 package ai
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/lohi-ai/agentray/agentcore"
+)
 
 // TestNewClientResolvesVendors checks NewClient maps config→wire client with
 // zero loop edits: built-in vendors resolve, OpenAI-compatible vendors route
@@ -46,5 +51,35 @@ func TestNewClientResolvesVendors(t *testing.T) {
 				t.Errorf("provider name = %q, want %q", p.Name(), tc.wantName)
 			}
 		})
+	}
+}
+
+func TestNewClientSelectsResponsesWireWithoutChangingOpenAIIdentity(t *testing.T) {
+	p, err := NewClient(ClientSpec{
+		Name: "openai", APIKey: "sk-test", BaseURL: "https://gateway.example/v1",
+		OpenAIWire: OpenAIWireResponses,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	responses, ok := p.(*OpenAIResponsesProvider)
+	if !ok {
+		t.Fatalf("provider = %T, want *OpenAIResponsesProvider", p)
+	}
+	if responses.Name() != "openai" {
+		t.Fatalf("Name() = %q, want provider identity openai", responses.Name())
+	}
+	if responses.APIKey != "sk-test" || responses.BaseURL != "https://gateway.example/v1" {
+		t.Fatalf("responses provider = %+v", responses)
+	}
+	if got := responses.ModelCapabilities("gpt-test").StatefulResponses; got != agentcore.CapabilitySupported {
+		t.Fatalf("stateful responses capability = %q, want supported", got)
+	}
+}
+
+func TestNewClientRejectsUnknownOpenAIWire(t *testing.T) {
+	_, err := NewClient(ClientSpec{Name: "openai", OpenAIWire: OpenAIWire("mystery")})
+	if err == nil || !strings.Contains(err.Error(), "unknown OpenAI wire") {
+		t.Fatalf("err = %v, want unknown OpenAI wire", err)
 	}
 }

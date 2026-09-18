@@ -188,6 +188,7 @@ func cloneSessionMessages(messages []Message) []Message {
 func cloneSessionMessage(message Message) Message {
 	out := message
 	out.ToolCalls = slices.Clone(message.ToolCalls)
+	out.ContentParts = slices.Clone(message.ContentParts)
 	if message.Usage != nil {
 		usage := *message.Usage
 		out.Usage = &usage

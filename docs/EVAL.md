@@ -6,10 +6,11 @@ imports, functions, objects, and the event loop survive between cells. The
 agent can run incremental analysis without rebuilding state through repeated
 `python -c` shell commands.
 
-The first backend is Python 3. JavaScript, rich image displays, kernel-defined
-tools, subagent bridges, and background cells remain explicit follow-up work;
-the session and framed-protocol seams do not require the model-facing tool name
-to change when those arrive.
+The first backend is Python 3. It supports rich MIME display output, including
+Markdown/JSON and PNG/JPEG images. JavaScript, kernel-defined tools, subagent
+bridges, and background cells remain explicit follow-up work; the session and
+framed-protocol seams do not require the model-facing tool name to change when
+those arrive.
 
 ## Configuration
 
@@ -53,6 +54,31 @@ The model-facing call is one cell:
 Later calls in the conversation may reference `values`. Set `reset: true` to
 discard the retained kernel before executing that call. Top-level `await` and
 `display(value)` are supported; interactive `input()` is rejected.
+
+## Rich display contract
+
+`display(value)` and a cell's final expression inspect the usual Python rich
+representations: `_repr_mimebundle_`, Markdown, HTML, SVG, LaTeX, JSON, PNG,
+and JPEG. Matplotlib figures are rendered to PNG automatically. Textual forms
+stay in the ordinary tool result; PNG/JPEG bytes become typed image content
+parts so vision-capable OpenAI Chat/Responses, Codex, Google-compatible, and
+Anthropic paths can receive them natively. A model path that explicitly lacks
+image input receives an omission notice instead of silently losing the plot.
+The complete outgoing request is also capped for the active provider/model;
+when history exceeds that cap, the oldest images are omitted copy-on-write with
+a visible breadcrumb, leaving the canonical transcript intact for a more
+capable fallback rung.
+
+One cell may attach at most eight images and 768 KiB of decoded image data;
+individual protocol frames remain capped at 1 MiB. Invalid image signatures,
+over-budget images, and limit exhaustion are reported in text. Compaction and
+deterministic pruning count and explicitly elide image parts, while session
+stores snapshot them with the transcript. The PostgreSQL session adapter stores
+large base64 payloads once in its session-fenced, content-addressed artifact
+table and hydrates them transparently on resume; the in-memory laptop store
+keeps them inline. Raw-byte/object storage and resize/recompression are not
+implemented yet, so large durable plots should also be saved to the workspace
+when later retrieval matters.
 
 ## Lifecycle and failure semantics
 

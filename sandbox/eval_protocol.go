@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,12 +18,18 @@ import (
 
 const maxEvalFrameBytes = 1024 * 1024
 
+const (
+	maxEvalImagesPerCell = 8
+	maxEvalImageBytes    = 768 * 1024
+)
+
 type evalFrame struct {
-	Type           string `json:"type"`
-	ID             string `json:"id,omitempty"`
-	Data           string `json:"data,omitempty"`
-	Status         string `json:"status,omitempty"`
-	ExecutionCount int    `json:"execution_count,omitempty"`
+	Type           string                     `json:"type"`
+	ID             string                     `json:"id,omitempty"`
+	Data           string                     `json:"data,omitempty"`
+	Status         string                     `json:"status,omitempty"`
+	ExecutionCount int                        `json:"execution_count,omitempty"`
+	Bundle         map[string]json.RawMessage `json:"bundle,omitempty"`
 }
 
 type evalCellRequest struct {
@@ -31,6 +39,7 @@ type evalCellRequest struct {
 
 type evalCellResult struct {
 	Output         string
+	Parts          []agentcore.ContentPart
 	ExecutionCount int
 	RuntimeError   bool
 	Truncated      bool
@@ -122,6 +131,7 @@ func (p *evalProcess) execute(ctx context.Context, code string, limit int) (eval
 
 	output := newBoundedEvalOutput(limit)
 	result := evalCellResult{}
+	imageBytes := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,12 +154,109 @@ func (p *evalProcess) execute(ctx context.Context, code string, limit int) (eval
 			case "error":
 				result.RuntimeError = true
 				output.WriteSection("error", frame.Data)
+			case "display":
+				text, parts, bytes := renderEvalDisplay(frame.Bundle, maxEvalImagesPerCell-len(result.Parts), maxEvalImageBytes-imageBytes)
+				kind := "display"
+				if frame.Status == "result" {
+					kind = "result"
+				}
+				output.WriteSection(kind, text)
+				result.Parts = append(result.Parts, parts...)
+				imageBytes += bytes
 			case "done":
 				result.ExecutionCount = frame.ExecutionCount
 				result.Output, result.Truncated = output.String()
 				return result, nil
 			}
 		}
+	}
+}
+
+func renderEvalDisplay(bundle map[string]json.RawMessage, imageSlots, imageBudget int) (string, []agentcore.ContentPart, int) {
+	var text string
+	for _, mime := range []string{"text/markdown", "text/plain", "text/html", "image/svg+xml", "text/latex"} {
+		raw, ok := bundle[mime]
+		if !ok {
+			continue
+		}
+		if json.Unmarshal(raw, &text) == nil && text != "" {
+			if mime == "text/html" {
+				text = "[HTML display]\n" + text
+			} else if mime == "image/svg+xml" {
+				text = "[SVG display]\n" + text
+			} else if mime == "text/latex" {
+				text = "[LaTeX display]\n" + text
+			}
+			break
+		}
+	}
+	if raw, ok := bundle["application/json"]; ok {
+		var value any
+		if json.Unmarshal(raw, &value) == nil {
+			if pretty, err := json.MarshalIndent(value, "", "  "); err == nil {
+				text = string(pretty)
+			}
+		}
+	}
+
+	parts := make([]agentcore.ContentPart, 0, 2)
+	used := 0
+	appendNotice := func(notice string) {
+		if text != "" {
+			text += "\n"
+		}
+		text += notice
+	}
+	for _, mime := range []string{"image/png", "image/jpeg"} {
+		raw, ok := bundle[mime]
+		if !ok {
+			continue
+		}
+		if imageSlots <= len(parts) {
+			appendNotice(fmt.Sprintf("[%s display omitted: per-cell image limit reached]", mime))
+			continue
+		}
+		if imageBudget-used <= 0 {
+			appendNotice(fmt.Sprintf("[%s display omitted: cell image budget exhausted]", mime))
+			continue
+		}
+		var encoded string
+		if json.Unmarshal(raw, &encoded) != nil || encoded == "" {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || !validEvalImage(mime, decoded) {
+			appendNotice(fmt.Sprintf("[%s display omitted: invalid image data]", mime))
+			continue
+		}
+		if len(decoded) > imageBudget-used {
+			appendNotice(fmt.Sprintf("[%s display omitted: image exceeds remaining %d-byte cell budget]", mime, imageBudget-used))
+			continue
+		}
+		parts = append(parts, agentcore.ContentPart{
+			Type: agentcore.ContentPartImage, MIMEType: mime, Data: encoded,
+		})
+		used += len(decoded)
+	}
+	if len(parts) > 0 {
+		note := fmt.Sprintf("[%d rich image display(s) attached]", len(parts))
+		if text == "" {
+			text = note
+		} else {
+			text += "\n" + note
+		}
+	}
+	return text, parts, used
+}
+
+func validEvalImage(mime string, data []byte) bool {
+	switch mime {
+	case "image/png":
+		return bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n"))
+	case "image/jpeg":
+		return len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff
+	default:
+		return false
 	}
 }
 

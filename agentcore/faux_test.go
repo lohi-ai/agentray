@@ -56,6 +56,19 @@ func TestReplayProviderRejectsDrift(t *testing.T) {
 	}
 }
 
+func TestReplayProviderRejectsRichContentDrift(t *testing.T) {
+	recorded := Message{Role: RoleTool, ToolCallID: "c1", Content: "plot", ContentParts: []ContentPart{{
+		Type: ContentPartImage, MIMEType: "image/png", Data: "original",
+	}}}
+	p := NewReplayProvider(TurnRecord{Messages: []Message{recorded}, Response: "ok"})
+	changed := cloneSessionMessage(recorded)
+	changed.ContentParts[0].Data = "changed"
+	_, err := p.Chat(context.Background(), ChatRequest{Messages: []Message{changed}})
+	if err == nil || !strings.Contains(err.Error(), "drifted") {
+		t.Fatalf("rich content drift was not detected: %v", err)
+	}
+}
+
 // TestReplayProviderDrivesLoopAgainstTranscript is the intended use: capture a
 // real loop's requests via FauxProvider, persist the TurnRecords through JSON
 // (the same lossy round-trip agent_llm_calls applies), then drive the real

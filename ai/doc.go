@@ -1,7 +1,8 @@
 // Package ai is the LLM provider layer (the analogue of @earendil-works/pi-ai).
 //
 // It owns the wire: OpenAI Chat Completions (also used for Google Gemini and
-// arbitrary compatible base URLs), the public OpenAI Responses API, Anthropic
+// arbitrary compatible base URLs), model-selected or explicit public OpenAI
+// Responses API, Anthropic
 // Messages, and the subscription OAuth backends, plus the embeddings endpoint
 // behind agentcore.Embedder. agentcore holds only the agentcore.LLMProvider
 // interface and never imports this package, which keeps the runtime free of

@@ -123,13 +123,15 @@ type codexInputItem struct {
 	Name    string         `json:"name,omitempty"`
 	// Arguments is the function_call's raw JSON argument string.
 	Arguments string `json:"arguments,omitempty"`
-	// Output is the function_call_output's result text.
-	Output string `json:"output,omitempty"`
+	// Output is function_call_output text or a Responses content array.
+	Output any `json:"output,omitempty"`
 }
 
 type codexContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type codexTool struct {
@@ -160,6 +162,7 @@ type codexReasoning struct {
 // items); tool exchanges become function_call / function_call_output pairs.
 func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 	out := codexRequest{Model: req.Model, Stream: true, Store: false}
+	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
 
 	var systemParts []string
 	for _, m := range req.Messages {
@@ -169,10 +172,28 @@ func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 				systemParts = append(systemParts, m.Content)
 			}
 		case agentcore.RoleTool:
+			text := messageText(m)
+			images := messageImages(m)
+			var output any = text
+			if allowImages && len(images) > 0 {
+				parts := make([]codexContent, 0, len(images)+1)
+				if text != "" {
+					parts = append(parts, codexContent{Type: "input_text", Text: text})
+				}
+				for _, image := range images {
+					parts = append(parts, codexContent{
+						Type: "input_image", ImageURL: imageDataURL(image),
+						Detail: normalizedImageDetail(image.Detail, true),
+					})
+				}
+				output = parts
+			} else if len(images) > 0 {
+				output = textWithImageNotice(text, len(images), false)
+			}
 			out.Input = append(out.Input, codexInputItem{
 				Type:   "function_call_output",
 				CallID: m.ToolCallID,
-				Output: m.Content,
+				Output: output,
 			})
 		case agentcore.RoleAssistant:
 			if m.Content != "" {
@@ -195,10 +216,22 @@ func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 				})
 			}
 		default: // user
+			content := []codexContent{{Type: "input_text", Text: messageText(m)}}
+			images := messageImages(m)
+			if allowImages {
+				for _, image := range images {
+					content = append(content, codexContent{
+						Type: "input_image", ImageURL: imageDataURL(image),
+						Detail: normalizedImageDetail(image.Detail, true),
+					})
+				}
+			} else if len(images) > 0 {
+				content[0].Text = textWithImageNotice(content[0].Text, len(images), false)
+			}
 			out.Input = append(out.Input, codexInputItem{
 				Type:    "message",
 				Role:    "user",
-				Content: []codexContent{{Type: "input_text", Text: m.Content}},
+				Content: content,
 			})
 		}
 	}

@@ -903,6 +903,7 @@ export type ModelCapabilities = {
   tool_choice?: CapabilitySupport;
   reasoning_effort?: CapabilitySupport;
   image_input?: CapabilitySupport;
+  max_input_images?: number;
   structured_output?: CapabilitySupport;
   prompt_caching?: CapabilitySupport;
   stateful_responses?: CapabilitySupport;

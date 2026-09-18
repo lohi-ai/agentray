@@ -54,6 +54,12 @@ func (e *committedStreamError) Unwrap() error { return e.cause }
 // plugin's own per-turn cap is the real bound; this only covers a broken one.
 const maxStreamAbortsPerTurn = 8
 
+// unknownProviderImageLimit is the portable floor for an image-capable path
+// whose vendor metadata does not publish a request-wide image cap. It matches
+// the strictest mainstream compatible endpoints seen in OMP's provider budget;
+// known adapters advertise their larger limits through ModelCapabilities.
+const unknownProviderImageLimit = 5
+
 // ModelCapabilityError reports a request that a provider/model pair is known
 // not to accept. It is intentionally non-retryable: repeating the same rung
 // cannot add a missing capability, while reason may still advance to a capable
@@ -88,7 +94,113 @@ func requestForCapabilities(provider LLMProvider, model string, discovered Model
 		req.CacheKey = ""
 		req.CacheRetention = ""
 	}
+	if caps.ImageInput == CapabilityUnsupported {
+		req.Messages = withoutImageContent(req.Messages)
+	} else {
+		limit := caps.MaxInputImages
+		if limit <= 0 {
+			limit = unknownProviderImageLimit
+		}
+		req.Messages = clampImageContent(req.Messages, limit)
+	}
 	return req, nil
+}
+
+// clampImageContent drops the oldest image parts until the complete outgoing
+// request fits the active provider/model limit. It is copy-on-write: escalation
+// to a later rung starts from the unmodified canonical transcript and may apply
+// a different limit. Text parts and tool-call linkage stay intact, and every
+// affected message gets a visible breadcrumb instead of losing images silently.
+func clampImageContent(messages []Message, limit int) []Message {
+	if limit < 0 {
+		limit = 0
+	}
+	total := 0
+	for _, message := range messages {
+		for _, part := range message.ContentParts {
+			if part.Type == ContentPartImage {
+				total++
+			}
+		}
+	}
+	drop := total - limit
+	if drop <= 0 {
+		return messages
+	}
+
+	var out []Message
+	for i, message := range messages {
+		if drop == 0 {
+			break
+		}
+		omitted := 0
+		kept := make([]ContentPart, 0, len(message.ContentParts))
+		for _, part := range message.ContentParts {
+			if part.Type == ContentPartImage && drop > 0 {
+				drop--
+				omitted++
+				continue
+			}
+			kept = append(kept, part)
+		}
+		if omitted == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), messages...)
+		}
+		replacement := message
+		replacement.ContentParts = kept
+		note := fmt.Sprintf("[%d older image attachment(s) omitted: provider request limit is %d]", omitted, limit)
+		if replacement.Content == "" {
+			replacement.Content = note
+		} else {
+			replacement.Content += "\n" + note
+		}
+		out[i] = replacement
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
+// withoutImageContent makes an explicit negative image capability visible to
+// the model instead of silently dropping tool output. It is copy-on-write so a
+// failed rung cannot mutate the request later escalated to a vision-capable
+// fallback model.
+func withoutImageContent(messages []Message) []Message {
+	var out []Message
+	for i, message := range messages {
+		images := 0
+		kept := make([]ContentPart, 0, len(message.ContentParts))
+		for _, part := range message.ContentParts {
+			if part.Type == ContentPartImage {
+				images++
+				continue
+			}
+			kept = append(kept, part)
+		}
+		if images == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), messages...)
+		}
+		replacement := message
+		replacement.ContentParts = kept
+		note := fmt.Sprintf("[%d image output(s) omitted: provider/model path does not support image input]", images)
+		if replacement.Content == "" {
+			replacement.Content = note
+		} else {
+			replacement.Content += "\n" + note
+		}
+		out[i] = replacement
+	}
+	if out == nil {
+		return messages
+	}
+	return out
 }
 
 // One turn against the model: retry, escalation, streaming.

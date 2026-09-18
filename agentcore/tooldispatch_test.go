@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 )
 
+const testRichPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
 // namedTool is a minimal Tool used to assert the ToolSet registry contract
 // (ordering, lookup, overwrite) without standing up a provider/loop.
 type namedTool struct {
@@ -20,6 +22,122 @@ func (t namedTool) Schema() ToolSchema {
 	return ToolSchema{Name: t.name, Description: t.desc}
 }
 func (namedTool) Run(context.Context, string) (string, error) { return "", nil }
+
+type resultRefInterceptor struct{}
+
+func (resultRefInterceptor) InterceptToolResult(context.Context, ToolCall, string, error) ToolResultDecision {
+	return ToolResultDecision{
+		Result: "bounded preview", Replace: true,
+		Meta: "cache=miss", ResultRef: "spill_dispatch_1",
+	}
+}
+
+type richResultTool struct {
+	fail  bool
+	parts []ContentPart
+}
+
+func (richResultTool) Name() string { return "rich" }
+func (richResultTool) Schema() ToolSchema {
+	return ToolSchema{Name: "rich", Parameters: map[string]any{"type": "object"}}
+}
+func (richResultTool) Run(context.Context, string) (string, error) {
+	return "legacy path must not run", nil
+}
+func (t richResultTool) RunRich(context.Context, string) (ToolOutput, error) {
+	parts := t.parts
+	if parts == nil {
+		parts = []ContentPart{{
+			Type: ContentPartImage, MIMEType: "image/png", Data: testRichPNG,
+		}}
+	}
+	out := ToolOutput{Content: "plot ready", Parts: parts}
+	if t.fail {
+		return out, errors.New("render failed")
+	}
+	return out, nil
+}
+
+func TestRichToolResultIsBoundedAtDispatchBoundary(t *testing.T) {
+	parts := make([]ContentPart, 0, maxRichToolImages+2)
+	for i := 0; i < maxRichToolImages+1; i++ {
+		parts = append(parts, ContentPart{Type: ContentPartImage, MIMEType: "image/png", Data: testRichPNG})
+	}
+	parts = append(parts, ContentPart{Type: ContentPartImage, MIMEType: "text/plain", Data: testRichPNG})
+	out := (&Agent{}).runToolCall(
+		context.Background(), &extensionSet{}, map[string]bool{"rich": true},
+		NewToolSet(richResultTool{parts: parts}), ToolCall{ID: "c1", Name: "rich", Arguments: `{}`},
+		DefaultLimits(), nil,
+	)
+	if len(out.message.ContentParts) != maxRichToolImages {
+		t.Fatalf("rich part count = %d, want %d", len(out.message.ContentParts), maxRichToolImages)
+	}
+	if !strings.Contains(out.message.Content, "2 rich content part(s) omitted") {
+		t.Fatalf("omission was not visible to the model: %q", out.message.Content)
+	}
+	if !strings.Contains(out.trace.ResultMeta, "8 rich parts") {
+		t.Fatalf("rich result was not reflected in trace metadata: %q", out.trace.ResultMeta)
+	}
+}
+
+func TestRichToolRejectsMislabeledImageBytes(t *testing.T) {
+	out := (&Agent{}).runToolCall(
+		context.Background(), &extensionSet{}, map[string]bool{"rich": true},
+		NewToolSet(richResultTool{parts: []ContentPart{{
+			Type: ContentPartImage, MIMEType: "image/png", Data: "bm90IGEgcG5n",
+		}}}), ToolCall{ID: "c1", Name: "rich", Arguments: `{}`},
+		DefaultLimits(), nil,
+	)
+	if len(out.message.ContentParts) != 0 || !strings.Contains(out.message.Content, "1 rich content part(s) omitted") {
+		t.Fatalf("invalid image reached canonical history: %+v", out.message)
+	}
+}
+
+func TestRichToolResultReachesCanonicalToolMessage(t *testing.T) {
+	out := (&Agent{}).runToolCall(
+		context.Background(), &extensionSet{}, map[string]bool{"rich": true},
+		NewToolSet(richResultTool{}), ToolCall{ID: "c1", Name: "rich", Arguments: `{}`},
+		DefaultLimits(), nil,
+	)
+	if !strings.HasPrefix(out.message.Content, "plot ready\n[Image normalized from 1x1 to 200x200") || len(out.message.ContentParts) != 1 {
+		t.Fatalf("rich result = %+v", out.message)
+	}
+	if got := out.message.ContentParts[0]; got.Type != ContentPartImage || got.MIMEType != "image/png" || got.Data == testRichPNG {
+		t.Fatalf("image part = %+v", got)
+	}
+	if out.trace.ResultMeta == "" || !out.executed {
+		t.Fatalf("rich tool skipped ordinary accounting: %+v", out)
+	}
+}
+
+func TestRichToolDropsPartsOnError(t *testing.T) {
+	out := (&Agent{}).runToolCall(
+		context.Background(), &extensionSet{}, map[string]bool{"rich": true},
+		NewToolSet(richResultTool{fail: true}), ToolCall{ID: "c1", Name: "rich", Arguments: `{}`},
+		DefaultLimits(), nil,
+	)
+	if len(out.message.ContentParts) != 0 || !strings.Contains(out.message.Content, "render failed") {
+		t.Fatalf("failed rich result leaked parts: %+v", out.message)
+	}
+}
+
+func TestToolResultSeparatesTraceMetadataFromRecoverableReference(t *testing.T) {
+	out := (&Agent{}).runToolCall(
+		context.Background(),
+		&extensionSet{toolIntcp: []ToolInterceptor{resultRefInterceptor{}}},
+		map[string]bool{"query": true},
+		NewToolSet(namedTool{name: "query"}),
+		ToolCall{ID: "c1", Name: "query", Arguments: `{}`},
+		DefaultLimits(),
+		nil,
+	)
+	if out.message.ResultRef != "spill_dispatch_1" || out.trace.SpillLocator != "spill_dispatch_1" {
+		t.Fatalf("recoverable ref did not reach message and trace: message=%+v trace=%+v", out.message, out.trace)
+	}
+	if !strings.Contains(out.trace.ResultMeta, "cache=miss") || strings.Contains(out.message.Content, "cache=miss") {
+		t.Fatalf("trace-only metadata crossed the wrong boundary: message=%+v trace=%+v", out.message, out.trace)
+	}
+}
 
 // TestToolSetPreservesRegistrationOrder verifies Names/Schemas reflect insertion
 // order — the order the model is shown its tools in.

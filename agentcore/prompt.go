@@ -276,5 +276,13 @@ func sameForCache(a, b Message) bool {
 			return false
 		}
 	}
+	if len(a.ContentParts) != len(b.ContentParts) {
+		return false
+	}
+	for i := range a.ContentParts {
+		if a.ContentParts[i] != b.ContentParts[i] {
+			return false
+		}
+	}
 	return true
 }

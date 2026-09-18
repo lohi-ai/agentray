@@ -16,7 +16,7 @@ import (
 )
 
 // collectionFromBook builds the shipped provider collection from a workspace
-// book so list-models and connection tests share construction with a run.
+// book for live model discovery and provider-scoped calls.
 // OAuth vendors get their account pool attached as the TokenSource — a
 // list-models call then authenticates with a live account token, the same
 // credential a run would draw.
@@ -29,54 +29,55 @@ func collectionFromBook(book *storage.WorkspaceProviderBook, mgr *oauth.Manager)
 }
 
 // testBookConnections pings each configured tier — and each tier's fallback
-// rung — through the owning provider (same credentials a run would use).
+// rung — through the owning provider and model wire (same credentials and
+// persisted capabilities a run uses).
 // Fallback results land under "<tier>_fallback" keys so the settings page can
 // render the ladder it just verified.
 func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBook, mgr *oauth.Manager) (bool, map[string]any) {
 	cfg, keys := book.Resolve()
 	results := make(map[string]any, 3)
 	allOK := true
-	test := func(name, providerID, provider, model, baseURL, key string) {
+	test := func(name, providerID, provider, model, baseURL, key string, capabilities agentcore.ModelCapabilities) {
 		provider = firstNonEmpty(provider, cfg.Provider)
 		model = firstNonEmpty(model, cfg.Model)
 		baseURL = firstNonEmpty(baseURL, cfg.BaseURL)
 		key = firstNonEmpty(key, keys["flash"])
 		var res map[string]any
 		if providerID != "" {
-			res = testOwnedProvider(ctx, book, providerID, model, mgr)
+			res = testOwnedProvider(ctx, book, providerID, model, capabilities, mgr)
 		} else {
-			res = testTierProviderCtx(ctx, provider, baseURL, model, key, tierTokenSource(mgr, provider, cfg.FlashProviderID))
+			res = testTierProviderCtx(ctx, provider, baseURL, model, key, tierTokenSource(mgr, provider, cfg.FlashProviderID), capabilities)
 		}
 		results[name] = res
 		if ok, _ := res["ok"].(bool); !ok {
 			allOK = false
 		}
 	}
-	test("flash", cfg.FlashProviderID, cfg.Provider, cfg.Model, cfg.BaseURL, keys["flash"])
+	test("flash", cfg.FlashProviderID, cfg.Provider, cfg.Model, cfg.BaseURL, keys["flash"], cfg.Capabilities)
 	if cfg.LiteProviderID != "" || cfg.LiteProvider != "" || cfg.LiteModel != "" || keys["lite"] != "" {
-		test("lite", cfg.LiteProviderID, cfg.LiteProvider, cfg.LiteModel, cfg.LiteBaseURL, keys["lite"])
+		test("lite", cfg.LiteProviderID, cfg.LiteProvider, cfg.LiteModel, cfg.LiteBaseURL, keys["lite"], cfg.LiteCapabilities)
 	}
 	if cfg.ProProviderID != "" || cfg.ProProvider != "" || cfg.ProModel != "" || keys["pro"] != "" {
-		test("pro", cfg.ProProviderID, cfg.ProProvider, cfg.ProModel, cfg.ProBaseURL, keys["pro"])
+		test("pro", cfg.ProProviderID, cfg.ProProvider, cfg.ProModel, cfg.ProBaseURL, keys["pro"], cfg.ProCapabilities)
 	}
 
 	// Fallback rungs. A cross-provider fallback tests through its own provider
 	// row; a same-provider one tests the fallback model on the tier's provider.
-	testFallback := func(name, fbProviderID, fbProvider, fbModel, fbBaseURL, fbKey, tierProviderID, tierProvider, tierBaseURL, tierKey string) {
+	testFallback := func(name, fbProviderID, fbProvider, fbModel, fbBaseURL, fbKey, tierProviderID, tierProvider, tierBaseURL, tierKey string, capabilities agentcore.ModelCapabilities) {
 		if fbModel == "" {
 			return
 		}
 		var res map[string]any
 		switch {
 		case fbProviderID != "":
-			res = testOwnedProvider(ctx, book, fbProviderID, fbModel, mgr)
+			res = testOwnedProvider(ctx, book, fbProviderID, fbModel, capabilities, mgr)
 		case tierProviderID != "":
-			res = testOwnedProvider(ctx, book, tierProviderID, fbModel, mgr)
+			res = testOwnedProvider(ctx, book, tierProviderID, fbModel, capabilities, mgr)
 		default:
 			provider := firstNonEmpty(fbProvider, tierProvider, cfg.Provider)
 			baseURL := firstNonEmpty(fbBaseURL, tierBaseURL, cfg.BaseURL)
 			key := firstNonEmpty(fbKey, tierKey, keys["flash"])
-			res = testTierProviderCtx(ctx, provider, baseURL, fbModel, key, tierTokenSource(mgr, provider, cfg.FlashProviderID))
+			res = testTierProviderCtx(ctx, provider, baseURL, fbModel, key, tierTokenSource(mgr, provider, cfg.FlashProviderID), capabilities)
 		}
 		results[name] = res
 		if ok, _ := res["ok"].(bool); !ok {
@@ -84,20 +85,31 @@ func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBoo
 		}
 	}
 	testFallback("flash_fallback", cfg.FallbackProviderID, cfg.FallbackProvider, cfg.FallbackModel, cfg.FallbackBaseURL, keys["flash_fallback"],
-		cfg.FlashProviderID, cfg.Provider, cfg.BaseURL, keys["flash"])
+		cfg.FlashProviderID, cfg.Provider, cfg.BaseURL, keys["flash"], cfg.FallbackCapabilities)
 	testFallback("lite_fallback", cfg.LiteFallbackProviderID, cfg.LiteFallbackProvider, cfg.LiteFallbackModel, cfg.LiteFallbackBaseURL, keys["lite_fallback"],
-		cfg.LiteProviderID, cfg.LiteProvider, cfg.LiteBaseURL, keys["lite"])
+		cfg.LiteProviderID, cfg.LiteProvider, cfg.LiteBaseURL, keys["lite"], cfg.LiteFallbackCapabilities)
 	testFallback("pro_fallback", cfg.ProFallbackProviderID, cfg.ProFallbackProvider, cfg.ProFallbackModel, cfg.ProFallbackBaseURL, keys["pro_fallback"],
-		cfg.ProProviderID, cfg.ProProvider, cfg.ProBaseURL, keys["pro"])
+		cfg.ProProviderID, cfg.ProProvider, cfg.ProBaseURL, keys["pro"], cfg.ProFallbackCapabilities)
 	return allOK, results
 }
 
-func testOwnedProvider(ctx context.Context, book *storage.WorkspaceProviderBook, providerID, model string, mgr *oauth.Manager) map[string]any {
-	col, err := collectionFromBook(book, mgr)
+func testOwnedProvider(ctx context.Context, book *storage.WorkspaceProviderBook, providerID, model string, capabilities agentcore.ModelCapabilities, mgr *oauth.Manager) map[string]any {
+	var rec *storage.WorkspaceProviderRecord
+	for i := range book.Providers {
+		if book.Providers[i].ID == providerID {
+			rec = &book.Providers[i]
+			break
+		}
+	}
+	if rec == nil {
+		return map[string]any{"ok": false, "error": "unknown provider " + providerID}
+	}
+	spec := oauthProviderSpec(mgr, *rec)
+	p, err := agentruntime.NewTierProviderForModelWithSource(rec.Vendor, rec.BaseURL, rec.APIKey, spec.TokenSource, capabilities)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	_, err = col.ChatOn(ctx, providerID, agentcore.ChatRequest{
+	_, err = p.Chat(ctx, agentcore.ChatRequest{
 		Model:     model,
 		Messages:  []agentcore.Message{{Role: agentcore.RoleUser, Content: "ping"}},
 		MaxTokens: 1,
@@ -118,8 +130,8 @@ func tierTokenSource(mgr *oauth.Manager, provider, flashProviderID string) ai.To
 	return mgr.Pool(flashProviderID)
 }
 
-func testTierProviderCtx(ctx context.Context, provider, baseURL, model, key string, src ai.TokenSource) map[string]any {
-	p, err := agentruntime.NewTierProviderWithSource(provider, baseURL, key, src)
+func testTierProviderCtx(ctx context.Context, provider, baseURL, model, key string, src ai.TokenSource, capabilities agentcore.ModelCapabilities) map[string]any {
+	p, err := agentruntime.NewTierProviderForModelWithSource(provider, baseURL, key, src, capabilities)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}

@@ -42,6 +42,78 @@ func TestBuildProviderSelectsPublicOpenAIResponsesWire(t *testing.T) {
 	}
 }
 
+func TestModelTierSelectsOpenAIWireFromModelCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		caps          agentcore.ModelCapabilities
+		wantResponses bool
+	}{
+		{name: "explicit support selects responses", caps: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported}, wantResponses: true},
+		{name: "unknown stays chat compatible"},
+		{name: "explicit unsupported stays chat", caps: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilityUnsupported}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tier := ModelTier{TierConfig: TierConfig{
+				Provider: "openai", Model: "gpt-test", APIKey: "sk-test", Capabilities: tc.caps,
+			}}
+			provider, err := tier.RawProvider()
+			if err != nil {
+				t.Fatalf("RawProvider: %v", err)
+			}
+			_, responses := provider.(*ai.OpenAIResponsesProvider)
+			if responses != tc.wantResponses {
+				t.Fatalf("provider = %T, responses=%v want %v", provider, responses, tc.wantResponses)
+			}
+			if provider.Name() != "openai" {
+				t.Fatalf("provider identity = %q, want openai", provider.Name())
+			}
+		})
+	}
+}
+
+func TestModelTierUsesDifferentWiresForSameProviderFallback(t *testing.T) {
+	tier := ModelTier{TierConfig: TierConfig{
+		Provider: "openai", Model: "chat-model", APIKey: "sk-test", ProviderID: "row-1",
+		Capabilities: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilityUnsupported},
+		Fallback: &TierConfig{
+			Model:        "responses-model",
+			Capabilities: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported},
+		},
+	}}
+	rungs, err := tier.Rungs()
+	if err != nil {
+		t.Fatalf("Rungs: %v", err)
+	}
+	if len(rungs) != 2 {
+		t.Fatalf("rungs = %d, want 2", len(rungs))
+	}
+	if _, ok := rungs[0].Provider.(*ai.OpenAIProvider); !ok {
+		t.Fatalf("primary provider = %T, want chat wire", rungs[0].Provider)
+	}
+	responses, ok := rungs[1].Provider.(*ai.OpenAIResponsesProvider)
+	if !ok {
+		t.Fatalf("fallback provider = %T, want responses wire", rungs[1].Provider)
+	}
+	if responses.Name() != "openai" || responses.APIKey != "sk-test" {
+		t.Fatalf("fallback responses provider = %+v", responses)
+	}
+}
+
+func TestModelTierReusesProviderWhenFallbackWireMatches(t *testing.T) {
+	caps := agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported}
+	tier := ModelTier{TierConfig: TierConfig{
+		Provider: "openai", Model: "primary", APIKey: "sk-test", Capabilities: caps,
+		Fallback: &TierConfig{Model: "fallback", Capabilities: caps},
+	}}
+	rungs, err := tier.Rungs()
+	if err != nil {
+		t.Fatalf("Rungs: %v", err)
+	}
+	if len(rungs) != 2 || rungs[0].Provider != rungs[1].Provider {
+		t.Fatalf("matching wires should share provider instance: %+v", rungs)
+	}
+}
+
 // tierSetFromWorkspace maps the workspace tier columns + decrypted per-tier keys
 // onto a TierSet, and the result must behave like any other TierSet under resolve.
 func TestTierSetFromWorkspace(t *testing.T) {

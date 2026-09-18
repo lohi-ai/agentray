@@ -637,10 +637,12 @@ packages you can import on their own:
 
 - [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
   OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
-  budget gating, and context compaction.
+  budget gating, and context compaction. OpenAI model metadata can select Chat
+  Completions or Responses per model without changing provider-row identity.
 - [`sandbox`](sandbox/) — portable workspace tools (`read_file`, `write_file`,
-  `edit_file`, `edit_lines`, `grep`, `glob`, `lsp`, `eval`, `run_shell`, `web_fetch`) for
-  grounding and safely editing a repository on a laptop or server sandbox.
+  `edit_file`, `edit_lines`, `grep`, `glob`, `lsp`, rich persistent `eval`,
+  `run_shell`, `web_fetch`) for grounding and safely editing a repository on a
+  laptop or server sandbox.
 
 ```bash
 go get github.com/lohi-ai/agentray@latest

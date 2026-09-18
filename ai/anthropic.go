@@ -188,11 +188,19 @@ type antContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"`
 	// tool_result
 	ToolUseID string `json:"tool_use_id,omitempty"`
-	Content   string `json:"content,omitempty"`
+	Content   any    `json:"content,omitempty"`
+	// image
+	Source *antImageSource `json:"source,omitempty"`
 	// CacheControl marks this block as a prompt-cache breakpoint. encode stamps
 	// it on the final block of the final message (the "moving breakpoint"), so
 	// an agent loop's whole transcript-so-far is read from cache next turn.
 	CacheControl *antCacheControl `json:"cache_control,omitempty"`
+}
+
+type antImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 type antMessage struct {
@@ -495,6 +503,7 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 	// overrides a deliberate placement and re-anchors the final message — which
 	// is the very thing markCacheAnchors moved the breakpoint away from.
 	anchorRequested := false
+	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
 	for _, m := range req.Messages {
 		switch m.Role {
 		case agentcore.RoleSystem:
@@ -502,10 +511,27 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 				systemParts = append(systemParts, m.Content)
 			}
 		case agentcore.RoleTool:
+			text := messageText(m)
+			images := messageImages(m)
+			var content any = text
+			if allowImages && len(images) > 0 {
+				blocks := make([]antContentBlock, 0, len(images)+1)
+				if text != "" {
+					blocks = append(blocks, antContentBlock{Type: "text", Text: text})
+				}
+				for _, image := range images {
+					blocks = append(blocks, antContentBlock{Type: "image", Source: &antImageSource{
+						Type: "base64", MediaType: image.MIMEType, Data: image.Data,
+					}})
+				}
+				content = blocks
+			} else if len(images) > 0 {
+				content = textWithImageNotice(text, len(images), false)
+			}
 			out.Messages = append(out.Messages, antMessage{
 				Role: "user",
 				Content: []antContentBlock{{
-					Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Content,
+					Type: "tool_result", ToolUseID: m.ToolCallID, Content: content,
 				}},
 			})
 		case agentcore.RoleAssistant:
@@ -525,9 +551,24 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 			}
 			out.Messages = append(out.Messages, antMessage{Role: "assistant", Content: blocks})
 		default: // user
+			blocks := []antContentBlock{}
+			text := messageText(m)
+			images := messageImages(m)
+			if !allowImages && len(images) > 0 {
+				text = textWithImageNotice(text, len(images), false)
+			}
+			if text != "" || len(images) == 0 {
+				blocks = append(blocks, antContentBlock{Type: "text", Text: text})
+			}
+			if allowImages {
+				for _, image := range images {
+					blocks = append(blocks, antContentBlock{Type: "image", Source: &antImageSource{
+						Type: "base64", MediaType: image.MIMEType, Data: image.Data,
+					}})
+				}
+			}
 			out.Messages = append(out.Messages, antMessage{
-				Role:    "user",
-				Content: []antContentBlock{{Type: "text", Text: m.Content}},
+				Role: "user", Content: blocks,
 			})
 		}
 		// System messages don't reach out.Messages (hoisted into the system

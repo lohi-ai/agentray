@@ -7,10 +7,10 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 )
 
-// CapabilitiesFor returns adapter-level knowledge for a provider/model pair.
-// It intentionally stays sparse: this is not a model catalog, and unknown
-// preserves the current optimistic request path. Live discovery may overlay
-// these defaults with explicit model-level facts.
+// CapabilitiesFor returns adapter-level knowledge and conservative wire-policy
+// limits for a provider/model pair. It intentionally stays sparse: this is not
+// a model catalog, and unknown support preserves the optimistic request path.
+// Live discovery may overlay these defaults with explicit model-level facts.
 func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
 	supported := agentcore.CapabilitySupported
 	unsupported := agentcore.CapabilityUnsupported
@@ -18,6 +18,7 @@ func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
 	case "openai":
 		return agentcore.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
+			ImageInput: supported, MaxInputImages: 200,
 			StructuredOutput: supported, PromptCaching: supported,
 			// AgentRay currently speaks Chat Completions here, not the stateful
 			// Responses API.
@@ -26,25 +27,48 @@ func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
 	case VendorOpenAIResponses:
 		return agentcore.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
+			ImageInput: supported, MaxInputImages: 200,
 			StructuredOutput: supported, PromptCaching: supported,
 			StatefulResponses: supported,
 		}
 	case "anthropic":
 		return agentcore.ModelCapabilities{
-			Tools: supported, StructuredOutput: supported, PromptCaching: supported,
+			Tools: supported, ImageInput: supported, MaxInputImages: 90,
+			StructuredOutput: supported, PromptCaching: supported,
 			// The neutral request has no Anthropic thinking/tool-choice mapper yet.
 			ToolChoice: unsupported, ReasoningEffort: unsupported,
 			StatefulResponses: unsupported,
 		}
-	case VendorOpenAICodex, VendorGoogleAntigravity:
+	case VendorOpenAICodex:
 		return agentcore.ModelCapabilities{
 			Tools: supported, ReasoningEffort: supported,
+			ImageInput: supported, MaxInputImages: 200,
+		}
+	case VendorGoogleAntigravity:
+		return agentcore.ModelCapabilities{
+			Tools: supported, ReasoningEffort: supported,
+			// The current Cloud Code function-response adapter has no native
+			// inline-image carrier. Say so explicitly instead of accepting parts
+			// and degrading only after request-level policy has run.
+			ImageInput: unsupported,
 		}
 	case VendorClaudeCode:
 		return agentcore.ModelCapabilities{
-			Tools: supported, StructuredOutput: supported, PromptCaching: supported,
+			Tools: supported, ImageInput: supported, MaxInputImages: 90,
+			StructuredOutput: supported, PromptCaching: supported,
 			ToolChoice: unsupported, ReasoningEffort: unsupported,
 			StatefulResponses: unsupported,
+		}
+	case "google":
+		return agentcore.ModelCapabilities{
+			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
+			ImageInput: supported, MaxInputImages: 200,
+			StructuredOutput: supported, PromptCaching: supported,
+			StatefulResponses: unsupported,
+		}
+	case "openrouter":
+		return agentcore.ModelCapabilities{
+			ImageInput: supported, MaxInputImages: 90,
 		}
 	default:
 		return agentcore.ModelCapabilities{}
@@ -69,6 +93,8 @@ type discoveredCapabilities struct {
 	SupportsStructuredOutputs *bool                      `json:"supports_structured_outputs"`
 	SupportsPromptCaching     *bool                      `json:"supports_prompt_caching"`
 	SupportsStatefulResponses *bool                      `json:"supports_stateful_responses"`
+	MaxInputImages            *int                       `json:"max_input_images"`
+	MaxImages                 *int                       `json:"max_images"`
 	Capabilities              map[string]json.RawMessage `json:"capabilities"`
 	SupportedParameters       []string                   `json:"supported_parameters"`
 	InputModalities           []string                   `json:"input_modalities"`
@@ -82,11 +108,18 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 	// Some routers place booleans in a free-form capabilities object. Accept
 	// common spellings, but never infer false from a missing key.
 	for key, raw := range d.Capabilities {
+		name := normalizeCapabilityName(key)
+		if name == "maxinputimages" || name == "maximages" {
+			if value, ok := explicitPositiveInt(raw); ok {
+				out.MaxInputImages = value
+			}
+			continue
+		}
 		value, ok := explicitBool(raw)
 		if !ok {
 			continue
 		}
-		switch normalizeCapabilityName(key) {
+		switch name {
 		case "tools", "toolcalling", "functioncalling":
 			out.Tools = support(value)
 		case "toolchoice":
@@ -159,7 +192,21 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 	if d.SupportsStatefulResponses != nil {
 		out.StatefulResponses = support(*d.SupportsStatefulResponses)
 	}
+	if d.MaxImages != nil && *d.MaxImages > 0 {
+		out.MaxInputImages = *d.MaxImages
+	}
+	if d.MaxInputImages != nil && *d.MaxInputImages > 0 {
+		out.MaxInputImages = *d.MaxInputImages
+	}
 	return out
+}
+
+func explicitPositiveInt(raw json.RawMessage) (int, bool) {
+	var value int
+	if err := json.Unmarshal(raw, &value); err == nil && value > 0 {
+		return value, true
+	}
+	return 0, false
 }
 
 func explicitBool(raw json.RawMessage) (bool, bool) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -392,6 +393,7 @@ func (r *Registry) SetMemory(m MemoryStore) error { return setSeam(r, "memory", 
 // SetCompaction installs the transcript-shrinking retention policy (how much
 // recent context survives). WHAT replaces the older span is SetCompactor.
 func (r *Registry) SetCompaction(s CompactionSettings) error {
+	s.PruneProtectedTools = slices.Clone(s.PruneProtectedTools)
 	return setSeam(r, "compaction", &r.compaction, s)
 }
 

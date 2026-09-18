@@ -19,6 +19,12 @@ type ClientSpec struct {
 	APIKey  string
 	BaseURL string
 	Compat  Compat // optional; zero value falls back to the vendor default
+	// OpenAIWire chooses the transport for an OpenAI provider identity. Empty
+	// and OpenAIWireChat use Chat Completions; OpenAIWireResponses uses the
+	// public Responses API while Name() remains "openai". Keeping provider
+	// identity separate from wire format lets one workspace row serve models
+	// with different API contracts, matching the model.api split in OMP.
+	OpenAIWire OpenAIWire
 	// SessionScope distinguishes independently configured provider rows that use
 	// the same vendor/base URL. OAuth account-rotation state must never confuse
 	// two sibling pools just because both speak (for example) openai-codex.
@@ -28,6 +34,17 @@ type ClientSpec struct {
 	// credentials from. Required for those vendors, ignored by the rest.
 	TokenSource TokenSource
 }
+
+// OpenAIWire is the API dialect used behind an OpenAI provider identity.
+// Provider identity owns credentials and routing; the selected model owns the
+// wire. Explicit openai-responses vendors remain supported for operators who
+// want the wire fixed for the whole provider row.
+type OpenAIWire string
+
+const (
+	OpenAIWireChat      OpenAIWire = "chat-completions"
+	OpenAIWireResponses OpenAIWire = "responses"
+)
 
 // NewClient resolves a ClientSpec into an agentcore.LLMProvider. Adding a
 // vendor is additive here — a new case (or, for OpenAI-compatible vendors, just
@@ -39,6 +56,15 @@ func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
 	}
 	switch name {
 	case "", "openai":
+		switch spec.OpenAIWire {
+		case "", OpenAIWireChat:
+		case OpenAIWireResponses:
+			p := NewOpenAIResponsesProvider(spec.APIKey, spec.BaseURL)
+			p.Vendor = "openai"
+			return p, nil
+		default:
+			return nil, fmt.Errorf("ai: unknown OpenAI wire %q", spec.OpenAIWire)
+		}
 		compat := spec.Compat
 		if compat.MaxTokensField == "" {
 			compat = DefaultCompat()

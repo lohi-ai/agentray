@@ -598,8 +598,10 @@ func (a *Agent) Describe() string {
 	// the answering model's window caps it. Print what will actually be used,
 	// since a run that compacts unexpectedly early or late is diagnosed here.
 	line("context_window", a.contextWindow)
-	line("compaction", fmt.Sprintf("keep_recent=%d budget=%d",
-		a.compaction.KeepRecentTokens, effectiveBudget(a.limits.MaxContextTokens, a.contextWindow)))
+	budget := effectiveBudget(a.limits.MaxContextTokens, a.contextWindow)
+	compaction := effectiveCompaction(a.compaction, budget)
+	line("compaction", fmt.Sprintf("keep_recent=%d budget=%d prune_cache_suffix=%d prune_min_savings=%d",
+		compaction.KeepRecentTokens, budget, compaction.PruneCacheWarmSuffixTokens, compaction.PruneMinimumSavingsTokens))
 	line("compactor", compactorName(a.compactor))
 	line("compaction_model", orDash(a.compactionModel))
 

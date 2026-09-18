@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -54,6 +55,76 @@ func TestSessionStoreConformancePostgres(t *testing.T) {
 			return id
 		},
 	})
+}
+
+// TestPostgresSessionStoreExternalizesRichImages proves the representation
+// optimization at the real database boundary: JSON rows stay small, artifact
+// reads are session-fenced, and agentcore receives the original message shape.
+func TestPostgresSessionStoreExternalizesRichImages(t *testing.T) {
+	url := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set AGENTRAY_TEST_DATABASE_URL to run PostgreSQL rich-session integration")
+	}
+	ctx := context.Background()
+	st, err := storage.Open(ctx, config.Config{
+		PostgresURL: url,
+		DuckDBPath:  filepath.Join(t.TempDir(), "session-rich-images.duckdb"),
+	})
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(st.Close)
+	boot, err := st.CreateAccount(ctx,
+		fmt.Sprintf("session-rich-%d@example.com", time.Now().UnixNano()),
+		"Session rich image", "password1234", "rich workspace", "rich project",
+	)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	runID, err := st.CreateAgentRun(ctx, boot.Project.ID, "", "manual", "")
+	if err != nil {
+		t.Fatalf("CreateAgentRun: %v", err)
+	}
+
+	data := largeSessionPNG()
+	want := agentcore.Message{Role: agentcore.RoleTool, Name: "eval", ToolCallID: "call-1", Content: "plot", ContentParts: []agentcore.ContentPart{{
+		Type: agentcore.ContentPartImage, MIMEType: "image/png", Data: data,
+	}}}
+	adapter := &pgSessionStore{store: st}
+	if err := adapter.Append(ctx, runID, agentcore.SessionEntry{Kind: agentcore.EntryMessage, Message: &want}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	raw, err := st.AgentSessionLog(ctx, runID)
+	if err != nil || len(raw) != 1 {
+		t.Fatalf("raw log: rows=%d err=%v", len(raw), err)
+	}
+	var persisted agentcore.SessionEntry
+	if err := json.Unmarshal([]byte(raw[0].PayloadJSON), &persisted); err != nil {
+		t.Fatalf("decode raw payload: %v", err)
+	}
+	part := persisted.Message.ContentParts[0]
+	if part.Data != "" || part.DataRef == "" {
+		t.Fatalf("raw row retained inline image: %+v", part)
+	}
+	if len(raw[0].PayloadJSON) >= len(data)/2 {
+		t.Fatalf("raw row was not materially reduced: row=%d base64=%d", len(raw[0].PayloadJSON), len(data))
+	}
+	artifact, err := st.AgentSpillWindowForSession(ctx, part.DataRef, runID, 0, len(data)+1)
+	if err != nil || string(artifact.Content) != data {
+		t.Fatalf("artifact round trip: total=%d err=%v", artifact.Total, err)
+	}
+	if _, err := st.AgentSpillWindowForSession(ctx, part.DataRef, "another-session", 0, 1); !errors.Is(err, storage.ErrAgentSpillNotFound) {
+		t.Fatalf("cross-session artifact read error = %v, want not found", err)
+	}
+
+	log, err := adapter.Log(ctx, runID)
+	if err != nil || len(log) != 1 {
+		t.Fatalf("hydrated log: rows=%d err=%v", len(log), err)
+	}
+	if got := log[0].Message; got == nil || got.ContentParts[0].Data != data || got.ContentParts[0].DataRef != "" {
+		t.Fatalf("hydrated message = %+v", got)
+	}
 }
 
 func TestPostgresSessionLeaseFencesStaleOwner(t *testing.T) {

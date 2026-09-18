@@ -37,6 +37,10 @@ type OpenAIResponsesProvider struct {
 	BaseURL    string
 	HTTP       *http.Client
 	StreamHTTP *http.Client
+	// Vendor overrides Name() when this Responses wire is selected for a model
+	// belonging to an ordinary OpenAI provider row. Empty preserves the explicit
+	// openai-responses identity.
+	Vendor string
 }
 
 // NewOpenAIResponsesProvider builds the public Responses wire client. baseURL
@@ -54,10 +58,18 @@ func NewOpenAIResponsesProvider(apiKey, baseURL string) *OpenAIResponsesProvider
 	}
 }
 
-func (p *OpenAIResponsesProvider) Name() string        { return VendorOpenAIResponses }
+func (p *OpenAIResponsesProvider) Name() string {
+	if p.Vendor != "" {
+		return p.Vendor
+	}
+	return VendorOpenAIResponses
+}
 func (p *OpenAIResponsesProvider) SupportsTools() bool { return true }
 func (p *OpenAIResponsesProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
-	return CapabilitiesFor(p.Name(), model)
+	// Capabilities describe the selected wire, not the credential/provider
+	// identity returned by Name(). An identity-preserving OpenAI Responses
+	// client must still advertise stateful chaining.
+	return CapabilitiesFor(VendorOpenAIResponses, model)
 }
 func (p *OpenAIResponsesProvider) UpdateAPIKey(key string) {
 	if key != "" {
@@ -92,13 +104,15 @@ type responsesInputItem struct {
 	CallID    string             `json:"call_id,omitempty"`
 	Name      string             `json:"name,omitempty"`
 	Arguments string             `json:"arguments,omitempty"`
-	Output    string             `json:"output,omitempty"`
+	Output    any                `json:"output,omitempty"`
 }
 
 type responsesContent struct {
-	Type    string `json:"type"`
-	Text    string `json:"text,omitempty"`
-	Refusal string `json:"refusal,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Refusal  string `json:"refusal,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type responsesTool struct {
@@ -169,6 +183,7 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 		Temperature: req.Temperature, PromptCacheKey: req.CacheKey,
 	}
 	var instructions []string
+	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
 	for _, message := range req.Messages {
 		switch message.Role {
 		case agentcore.RoleSystem:
@@ -176,8 +191,26 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 				instructions = append(instructions, message.Content)
 			}
 		case agentcore.RoleTool:
+			text := messageText(message)
+			images := messageImages(message)
+			var output any = text
+			if allowImages && len(images) > 0 {
+				parts := make([]responsesContent, 0, len(images)+1)
+				if text != "" {
+					parts = append(parts, responsesContent{Type: "input_text", Text: text})
+				}
+				for _, image := range images {
+					parts = append(parts, responsesContent{
+						Type: "input_image", ImageURL: imageDataURL(image),
+						Detail: normalizedImageDetail(image.Detail, true),
+					})
+				}
+				output = parts
+			} else if len(images) > 0 {
+				output = textWithImageNotice(text, len(images), false)
+			}
 			out.Input = append(out.Input, responsesInputItem{
-				Type: "function_call_output", CallID: message.ToolCallID, Output: message.Content,
+				Type: "function_call_output", CallID: message.ToolCallID, Output: output,
 			})
 		case agentcore.RoleAssistant:
 			if message.Content != "" {
@@ -196,9 +229,21 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 				})
 			}
 		default:
+			content := []responsesContent{{Type: "input_text", Text: messageText(message)}}
+			images := messageImages(message)
+			if allowImages {
+				for _, image := range images {
+					content = append(content, responsesContent{
+						Type: "input_image", ImageURL: imageDataURL(image),
+						Detail: normalizedImageDetail(image.Detail, true),
+					})
+				}
+			} else if len(images) > 0 {
+				content[0].Text = textWithImageNotice(content[0].Text, len(images), false)
+			}
 			out.Input = append(out.Input, responsesInputItem{
 				Type: "message", Role: "user",
-				Content: []responsesContent{{Type: "input_text", Text: message.Content}},
+				Content: content,
 			})
 		}
 	}
@@ -377,14 +422,15 @@ func credentialFingerprint(key string) string {
 }
 
 func cloneResponsesRequest(in responsesRequest) responsesRequest {
-	raw, err := json.Marshal(in)
-	if err != nil {
-		return in
+	out := in
+	out.Input = append([]responsesInputItem(nil), in.Input...)
+	for i := range out.Input {
+		out.Input[i].Content = append([]responsesContent(nil), in.Input[i].Content...)
+		if parts, ok := in.Input[i].Output.([]responsesContent); ok {
+			out.Input[i].Output = append([]responsesContent(nil), parts...)
+		}
 	}
-	var out responsesRequest
-	if json.Unmarshal(raw, &out) != nil {
-		return in
-	}
+	out.Tools = append([]responsesTool(nil), in.Tools...)
 	return out
 }
 

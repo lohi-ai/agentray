@@ -69,6 +69,7 @@ func (t *EvalTool) Schema() agentcore.ToolSchema {
 		Name: ToolEval,
 		Description: "Execute one Python cell in a persistent conversation-scoped runtime. Variables, imports, functions, and objects survive later eval calls. " +
 			"Use reset=true to discard this conversation's Python state before the cell. Relative file access starts in the shared agent workspace. " +
+			"display(value), rich reprs, and final expressions preserve Markdown, JSON, PNG, and JPEG output; vision-capable models receive images natively. " +
 			"Output is bounded; interactive input is unsupported. A timeout discards the kernel and never replays the cell. " +
 			"The runtime is operator-provisioned and server deployments execute it inside the configured sandbox.",
 		Parameters: map[string]any{
@@ -85,6 +86,17 @@ func (t *EvalTool) Schema() agentcore.ToolSchema {
 }
 
 func (t *EvalTool) Run(ctx context.Context, args string) (string, error) {
+	out, err := t.run(ctx, args)
+	return out.Content, err
+}
+
+// RunRich preserves MIME displays for the agent loop. Run remains the
+// compatibility path for direct callers and returns the identical text.
+func (t *EvalTool) RunRich(ctx context.Context, args string) (agentcore.ToolOutput, error) {
+	return t.run(ctx, args)
+}
+
+func (t *EvalTool) run(ctx context.Context, args string) (agentcore.ToolOutput, error) {
 	var in struct {
 		Language       string  `json:"language"`
 		Code           *string `json:"code"`
@@ -94,32 +106,32 @@ func (t *EvalTool) Run(ctx context.Context, args string) (string, error) {
 	dec := json.NewDecoder(strings.NewReader(args))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
-		return "", fmt.Errorf("eval: invalid arguments: %w", err)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: invalid arguments: %w", err)
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return "", fmt.Errorf("eval: invalid arguments: expected one JSON object")
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: invalid arguments: expected one JSON object")
 	}
 	if strings.ToLower(strings.TrimSpace(in.Language)) != "python" {
-		return "", fmt.Errorf("eval: unsupported language %q", in.Language)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: unsupported language %q", in.Language)
 	}
 	if in.Code == nil {
-		return "", fmt.Errorf("eval: code is required")
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: code is required")
 	}
 	timeout := in.TimeoutSeconds
 	if timeout == 0 {
 		timeout = t.config.TimeoutSeconds
 	}
 	if timeout < 1 || timeout > t.config.TimeoutSeconds {
-		return "", fmt.Errorf("eval: timeout_seconds must be between 1 and %d", t.config.TimeoutSeconds)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: timeout_seconds must be between 1 and %d", t.config.TimeoutSeconds)
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return agentcore.ToolOutput{}, err
 	}
 
 	key := t.sessionKey(ctx)
 	kernel, err := t.registry.acquire(key, in.Reset, t.startProcess)
 	if err != nil {
-		return "", fmt.Errorf("eval: start Python kernel: %w", err)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: start Python kernel: %w", err)
 	}
 	released := false
 	release := func() {
@@ -139,18 +151,18 @@ func (t *EvalTool) Run(ctx context.Context, args string) (string, error) {
 		t.registry.invalidate(key, kernel)
 		released = true
 		if contextDeadline(cellCtx, err) {
-			return "", fmt.Errorf("eval: cell timed out after %ds; kernel discarded and cell not replayed", timeout)
+			return agentcore.ToolOutput{}, fmt.Errorf("eval: cell timed out after %ds; kernel discarded and cell not replayed", timeout)
 		}
-		return "", fmt.Errorf("eval: kernel discarded and cell not replayed: %w", err)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: kernel discarded and cell not replayed: %w", err)
 	}
 	output := strings.TrimSpace(result.Output)
 	if output == "" {
 		output = "(no output)"
 	}
 	if result.RuntimeError {
-		return "", fmt.Errorf("eval: Python cell %d failed; retained state before the error may remain:\n%s", result.ExecutionCount, output)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: Python cell %d failed; retained state before the error may remain:\n%s", result.ExecutionCount, output)
 	}
-	return output, nil
+	return agentcore.ToolOutput{Content: output, Parts: result.Parts}, nil
 }
 
 func contextDeadline(ctx context.Context, err error) bool {

@@ -92,8 +92,8 @@ func AssistantToolCall(id, name, args string) ChatResponse {
 // what turns a replay into a regression test. Comparison is the recorded
 // transcript, not the whole ChatRequest:
 //
-//   - Messages: Role, Content, Name, ToolCallID, Directive, Error, and each
-//     ToolCall's ID/Name/Arguments. That is the history the loop rebuilt.
+//   - Messages: Role, Content, ContentParts, Name, ToolCallID, Directive, Error,
+//     and each ToolCall's ID/Name/Arguments. That is the history the loop rebuilt.
 //   - Advertised tool names, in order (TurnRecord.Tools), against req.Tools.
 //
 // Ignored, because they are not the history and are legitimately
@@ -217,6 +217,14 @@ func replayMessageEqual(got, want Message) bool {
 	for i := range got.ToolCalls {
 		a, b := got.ToolCalls[i], want.ToolCalls[i]
 		if a.ID != b.ID || a.Name != b.Name || a.Arguments != b.Arguments {
+			return false
+		}
+	}
+	if len(got.ContentParts) != len(want.ContentParts) {
+		return false
+	}
+	for i := range got.ContentParts {
+		if got.ContentParts[i] != want.ContentParts[i] {
 			return false
 		}
 	}

@@ -272,9 +272,17 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 // account pool a subscription vendor draws its per-request access token from —
 // nil for API-key vendors; without it an OAuth vendor cannot authenticate.
 func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSource) (agentcore.LLMProvider, error) {
+	return NewTierProviderForModelWithSource(provider, baseURL, apiKey, ts, agentcore.ModelCapabilities{})
+}
+
+// NewTierProviderForModelWithSource is the model-aware connectivity path. It
+// uses the same explicit capability metadata as ModelTier, so testing an
+// OpenAI model selected for Responses exercises /responses rather than
+// accidentally proving only that /chat/completions works.
+func NewTierProviderForModelWithSource(provider, baseURL, apiKey string, ts ai.TokenSource, capabilities agentcore.ModelCapabilities) (agentcore.LLMProvider, error) {
 	// A connectivity check is not a run and has no trace to attribute; calls are
 	// still priced.
-	return buildTracedProvider(provider, baseURL, apiKey, ts, nil)
+	return buildTracedProviderForModel(provider, baseURL, apiKey, ts, nil, capabilities)
 }
 
 // buildTracedProvider builds a provider for a call made OUTSIDE a composition —
@@ -285,7 +293,11 @@ func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSour
 // rung once, and wrapping twice would double-price the call and emit two trace
 // rows per turn.
 func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink) (agentcore.LLMProvider, error) {
-	prov, err := buildProvider(provider, baseURL, apiKey, ts, "")
+	return buildTracedProviderForModel(provider, baseURL, apiKey, ts, tracer, agentcore.ModelCapabilities{})
+}
+
+func buildTracedProviderForModel(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink, capabilities agentcore.ModelCapabilities) (agentcore.LLMProvider, error) {
+	prov, err := buildProviderForModel(provider, baseURL, apiKey, ts, "", capabilities)
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +314,22 @@ func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tr
 // reach — primary, escalation, and compaction alike. Wrapping here as well would
 // price each call twice and emit two trace rows per turn.
 func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource, sessionScope string) (agentcore.LLMProvider, error) {
+	return buildProviderForModel(provider, baseURL, apiKey, ts, sessionScope, agentcore.ModelCapabilities{})
+}
+
+// openAIWireFor resolves the transport independently from provider identity.
+// Only explicit positive model metadata opts a normal OpenAI row into
+// Responses; unknown stays on Chat Completions, preserving compatibility and
+// the operator's privacy choice. An explicit openai-responses provider row is
+// already fixed to Responses and needs no model-level override.
+func openAIWireFor(provider string, capabilities agentcore.ModelCapabilities) ai.OpenAIWire {
+	if ai.NormalizeVendor(provider) == "openai" && capabilities.StatefulResponses == agentcore.CapabilitySupported {
+		return ai.OpenAIWireResponses
+	}
+	return ai.OpenAIWireChat
+}
+
+func buildProviderForModel(provider, baseURL, apiKey string, ts ai.TokenSource, sessionScope string, capabilities agentcore.ModelCapabilities) (agentcore.LLMProvider, error) {
 	var (
 		prov agentcore.LLMProvider
 		err  error
@@ -310,6 +338,7 @@ func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource, sessionS
 	case "", "openai":
 		prov, err = ai.NewClient(ai.ClientSpec{
 			Name: "openai", APIKey: apiKey, BaseURL: resolveBaseURL(baseURL),
+			OpenAIWire: openAIWireFor(provider, capabilities),
 		})
 	case ai.VendorOpenAIResponses:
 		prov, err = ai.NewClient(ai.ClientSpec{
