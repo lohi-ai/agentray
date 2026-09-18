@@ -305,6 +305,73 @@ func (s *evalBridgeSlowTool) Run(ctx context.Context, _ string) (string, error) 
 	return "", ctx.Err()
 }
 
+type evalBridgeConcurrencyTool struct {
+	name     string
+	parallel bool
+	active   atomic.Int32
+	maximum  atomic.Int32
+}
+
+func (t *evalBridgeConcurrencyTool) Name() string { return t.name }
+func (t *evalBridgeConcurrencyTool) Schema() agentcore.ToolSchema {
+	return agentcore.ToolSchema{Name: t.name, Parameters: map[string]any{"type": "object"}}
+}
+func (t *evalBridgeConcurrencyTool) Parallel() bool { return t.parallel }
+func (t *evalBridgeConcurrencyTool) Run(ctx context.Context, _ string) (string, error) {
+	active := t.active.Add(1)
+	defer t.active.Add(-1)
+	for {
+		maximum := t.maximum.Load()
+		if active <= maximum || t.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	select {
+	case <-time.After(75 * time.Millisecond):
+		return "ok", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func TestEvalHostToolBridgeHonorsParallelToolContract(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		name := "bridge_serial"
+		wantMax := int32(1)
+		if parallel {
+			name = "bridge_parallel"
+			wantMax = 2
+		}
+		t.Run(name, func(t *testing.T) {
+			eval, _, _ := testJavaScriptEvalTool(t, EvalConfig{})
+			probe := &evalBridgeConcurrencyTool{name: name, parallel: parallel}
+			code := fmt.Sprintf(`await Promise.all([tool.%s({}), tool.%s({})])`, name, name)
+			args, _ := json.Marshal(map[string]any{"language": "javascript", "code": code})
+			agent, err := agentcore.New(agentcore.Config{
+				Provider: agentcore.NewFauxProvider(
+					agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
+					agentcore.AssistantText("done"),
+				),
+				Model: "faux", Tools: agentcore.NewToolSet(eval, probe),
+				Policy: agentcore.NewAllowList(ToolEval, name),
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			result, err := agent.Prompt(evalContext("bridge-concurrency-"+name), "use eval")
+			if err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+			if probe.maximum.Load() != wantMax {
+				t.Fatalf("maximum concurrency = %d, want %d; traces=%+v", probe.maximum.Load(), wantMax, result.Tools)
+			}
+			if len(result.Tools) != 3 || result.Tools[0].Tool != name || result.Tools[1].Tool != name {
+				t.Fatalf("traces = %+v", result.Tools)
+			}
+		})
+	}
+}
+
 func TestEvalHostToolBridgeCancellationSettlesNestedTrace(t *testing.T) {
 	eval, _, _ := testJavaScriptEvalTool(t, EvalConfig{TimeoutSeconds: 2})
 	slow := &evalBridgeSlowTool{started: make(chan struct{})}
