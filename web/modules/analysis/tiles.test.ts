@@ -51,6 +51,7 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       top_pages: { unit: 'pageviews', rows: [{ value: '/pricing', count: 612 }] },
       top_sources: { unit: 'pageviews', rows: [{ value: 'Direct / unknown', count: 540 }] },
       top_utm_sources: { unit: 'pageviews', rows: [{ value: 'newsletter', count: 210 }] },
+      top_utm_mediums: { unit: 'pageviews', rows: [{ value: 'email', count: 210 }] },
       top_campaigns: { unit: 'pageviews', rows: [{ value: 'launch-week', count: 180 }] },
       top_referrers: { unit: 'pageviews', rows: [{ value: 'google.com', count: 300 }] },
       traffic_by_class: { unit: 'pageviews', rows: [{ value: 'human', count: 4800 }, { value: 'ai-platform', count: 328 }] },
@@ -105,6 +106,12 @@ describe('analysisBars', () => {
   it('keeps Direct / unknown in top sources', () => {
     const bars = analysisBars(res(), { key: 'top-sources', metric: 'top_sources', title: 'Top acquisition sources', kind: 'metric', display: 'bar' });
     expect(bars?.rows.map((r) => r.value)).toContain('Direct / unknown');
+  });
+
+  it('projects top UTM mediums', () => {
+    const bars = analysisBars(res(), { key: 'top-utm-mediums', metric: 'top_utm_mediums', title: 'Top UTM mediums', kind: 'metric', display: 'bar' });
+    expect(bars?.rows).toEqual([{ value: 'email', count: 210 }]);
+    expect(bars?.label).toBe('Top UTM mediums');
   });
 });
 

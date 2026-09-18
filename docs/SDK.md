@@ -124,6 +124,33 @@ ar.capture('user.pageview', { path: '/pricing' });
 ar.capture('button.click',  { label: 'Start free trial' });
 ```
 
+### Campaign tracking (UTM parameters)
+
+When `autocapture: true` is enabled, the browser client automatically parses
+standard UTM query parameters from `location.search` on every page load and SPA
+navigation (`pushState` / `replaceState` / `popstate`):
+
+| Query parameter | Emitted property | Column name | Example | Description |
+|---|---|---|---|---|
+| `utm_source` | `$utm_source` | `utm_source` | `newsletter`, `google`, `x` | Originating referrer / platform |
+| `utm_medium` | `$utm_medium` | `utm_medium` | `email`, `cpc`, `social` | Marketing or advertising medium |
+| `utm_campaign` | `$utm_campaign` | `utm_campaign` | `launch-week`, `promo` | Campaign or promotion name |
+| `utm_term` | `$utm_term` | `utm_term` | `novel-reader`, `analytics` | Search keyword / audience segment |
+| `utm_content` | `$utm_content` | `utm_content` | `hero-cta`, `sidebar-link` | Ad creative or link variant |
+
+**Attribution precedence:** Ingest lifts these tags into dedicated `events` columns.
+The **Top acquisition sources** read prioritizes `utm_source` over the classified
+`referrer_channel`: a click from `?utm_source=facebook&utm_campaign=launch` is
+attributed to `facebook`, not `referral`. Untagged visits fall back to the
+referrer channel (or `direct`).
+
+**Custom / server emitters:** A non-browser SDK or server script can send either
+`$utm_*` properties or bare `utm_*` keys in `properties` — ingest lands both in the
+dedicated columns. Untagged rows store empty strings (`''`).
+
+**Link builder:** A visual URL tagger is available directly on the **Acquisition**
+board in the web console.
+
 ### Track money
 
 Money created in the browser uses the same `capture()` — there is no privileged

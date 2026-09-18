@@ -769,7 +769,7 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 	}
 	if err := sb.copyRows(ctx, sandboxEventCopy,
 		[]any{sb.projectID, cursor.Watermark, cursor.Watermark, cursor.WatermarkID},
-		"events", 31, false); err != nil {
+		"events", 33, false); err != nil {
 		return err
 	}
 
@@ -797,7 +797,7 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 			return err
 		}
 		return sb.copyRows(ctx, sandboxEventCopy,
-			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 31, false)
+			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 33, false)
 	}
 	return nil
 }
@@ -1182,6 +1182,8 @@ var sandboxSchema = []string{
 		utm_source VARCHAR NOT NULL DEFAULT '',
 		utm_medium VARCHAR NOT NULL DEFAULT '',
 		utm_campaign VARCHAR NOT NULL DEFAULT '',
+		utm_term VARCHAR NOT NULL DEFAULT '',
+		utm_content VARCHAR NOT NULL DEFAULT '',
 		PRIMARY KEY (project_id, event_id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS aliases (
