@@ -437,8 +437,9 @@ constructing EvalTool has no authority to call host tools.
 Nested results stay inside the eval value and do not synthesize provider tool
 messages, preserving call/result adjacency. Their traces and control metadata
 are nevertheless carried in the outer bounded durable outcome and restored on
-resume. JavaScript supports concurrent calls and deterministic request-order
-accounting; Python is synchronous. Recursive active-tool calls are rejected,
+resume. JavaScript supports concurrent calls for tools that explicitly opt into
+parallel execution and deterministic request-order accounting; Python is
+synchronous. Recursive active-tool calls are rejected,
 parked human-input tools are direct-only, a per-cell cap complements the shared
 run cap, and `MaxToolCalls` now reserves atomically before every physical call—
 closing the pre-existing race where a parallel batch could exceed the limit.

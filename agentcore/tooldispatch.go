@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -293,6 +294,7 @@ type nestedToolInvoker struct {
 	emitUpdate func(ToolCall, string)
 	budget     *toolExecutionBudget
 	sequence   atomic.Uint64
+	nestedMu   sync.RWMutex
 }
 
 func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (ToolOutput, error) {
@@ -316,6 +318,19 @@ func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (
 		callID = fmt.Sprintf("bridge-%d", i.sequence.Load())
 	}
 	call := ToolCall{ID: callID, Name: name, Arguments: args}
+	parallel := isParallelTool(i.tools, call)
+	if parallel {
+		i.nestedMu.RLock()
+		defer i.nestedMu.RUnlock()
+	} else {
+		i.nestedMu.Lock()
+		defer i.nestedMu.Unlock()
+	}
+	if err := ctx.Err(); err != nil {
+		i.budget.release()
+		trace := ToolTrace{CallID: callID, Tool: name, Args: args, Allowed: false, Reason: string(ToolDenialAborted)}
+		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
+	}
 	outcome := i.agent.runToolCall(ctx, i.exts, i.exempt, i.tools, call, i.limits, i.emitUpdate)
 	if !outcome.executed {
 		i.budget.release()

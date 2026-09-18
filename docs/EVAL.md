@@ -122,8 +122,9 @@ wire and makes the same audit record durable across resume. A registered and
 permitted `spawn_subagent` can therefore be awaited like any other host tool,
 without giving the cell broader tools or policy than its parent.
 
-JavaScript host calls may run concurrently; their audit records are folded in
-request order. Python calls are synchronous. A JavaScript cell drains every
+JavaScript host calls targeting `ParallelTool`s may run concurrently; ordinary
+tools remain exclusive barriers, and audit records are folded in request order.
+Python calls are synchronous. A JavaScript cell drains every
 bridge request it started before completing, including an unawaited immediate
 call, and turns floating promise rejections into cell errors instead of letting
 them crash the retained Node kernel. The cell timeout includes time spent in

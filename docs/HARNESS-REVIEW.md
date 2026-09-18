@@ -582,7 +582,8 @@ identical without an image sidecar.
 
 Persistent JavaScript and Python cells can now call registered host tools.
 JavaScript exposes `await tool.name(args)` and `await tool(name, args)`, including
-parallel promises; Python exposes synchronous `tool(name, args)`. Unlike a raw
+parallel promises for tools that explicitly opt in; Python exposes synchronous
+`tool(name, args)`. Unlike a raw
 kernel registry lookup, the bridge is a capability installed only by a live
 Agent run. Nested calls re-enter the one dispatch trust boundary, retaining
 schema validation, permission hooks, credential resolution, interceptors,
