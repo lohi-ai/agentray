@@ -20,6 +20,10 @@ const DefaultRunSubject = "agentray.agent.run"
 // long run is never swept, only one whose process actually died.
 const staleRunDeadline = 15 * time.Minute
 
+// staleWaitingDeadline is how long a run parked in 'waiting' on an ask tool
+// call may sit before the sweeper marks it errored. A day is enough for an
+// asynchronous human answer; after that the run is stalled, not waiting.
+const staleWaitingDeadline = 24 * time.Hour
 // MonitorPrompt is the canned task for a scheduled watchdog run.
 const MonitorPrompt = `Perform your scheduled check. Inspect recent activity and data quality for anomalies:
 ingestion gaps, volume/error spikes, latency or cost drift, and malformed or missing event properties.
@@ -185,13 +189,13 @@ func (s *Scheduler) tickLoop(ctx context.Context) {
 	}
 }
 
-// sweepStaleRuns marks runs stuck in 'running' past the deadline as errored, so a
-// run whose process died never lingers in the UI. Best-effort: a sweep failure is
+// sweepStaleRuns marks runs stuck in 'running' or parked in 'waiting' past their
+// deadlines as errored, so a run whose process died or whose human never
+// answered never lingers forever in the UI. Best-effort: a sweep failure is
 // retried on the next tick.
 func (s *Scheduler) sweepStaleRuns(ctx context.Context) {
-	_, _ = s.store.SweepStaleRuns(ctx, staleRunDeadline)
+	_, _ = s.store.SweepStaleRuns(ctx, staleRunDeadline, staleWaitingDeadline)
 }
-
 // publishDue publishes a run for every due schedule. Two sources are scanned:
 // the legacy project-level schedule (agent_configs.schedule_cron → the default
 // agent) and the per-agent agent_triggers (AgentGarden §7), so existing

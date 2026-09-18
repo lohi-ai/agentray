@@ -129,20 +129,34 @@ FROM agent_runs WHERE project_id = $1 AND session_id = $2 AND status = 'waiting'
 	return r, nil
 }
 
-// SweepStaleRuns marks runs stuck in 'running' past olderThan as errored, so a
-// run whose process died (or whose detached context hit its ceiling without
-// persisting a terminal status) doesn't linger forever in the UI. Returns the
-// number of rows swept. System-level (no RBAC): the scheduler calls it.
-func (s *Store) SweepStaleRuns(ctx context.Context, olderThan time.Duration) (int64, error) {
+// SweepStaleRuns marks runs stuck past their deadline as errored, so a run
+// whose process died (or whose detached context hit its ceiling without
+// persisting a terminal status) doesn't linger forever in the UI. Two
+// deadlines: 'running' rows older than runningOlderThan, and 'waiting' rows
+// older than waitingOlderThan — a run parked on an unanswered ask is stalled,
+// not waiting, once the human had a day to answer. The waiting sweep names the
+// stall in the summary so the run list says why it died; the running sweep
+// keeps a non-empty summary it already has. Returns the rows swept.
+// System-level (no RBAC): the scheduler calls it.
+func (s *Store) SweepStaleRuns(ctx context.Context, runningOlderThan, waitingOlderThan time.Duration) (int64, error) {
 	tag, err := s.pg.Exec(ctx, `
 UPDATE agent_runs
 SET status = 'error', summary = CASE WHEN summary = '' THEN 'run timed out' ELSE summary END, finished_at = now()
 WHERE status = 'running' AND started_at < now() - $1::interval`,
-		fmt.Sprintf("%d seconds", int64(olderThan.Seconds())))
+		fmt.Sprintf("%d seconds", int64(runningOlderThan.Seconds())))
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	swept := tag.RowsAffected()
+	tag, err = s.pg.Exec(ctx, `
+UPDATE agent_runs
+SET status = 'error', summary = 'stalled waiting for an answer', finished_at = now()
+WHERE status = 'waiting' AND started_at < now() - $1::interval`,
+		fmt.Sprintf("%d seconds", int64(waitingOlderThan.Seconds())))
+	if err != nil {
+		return swept, err
+	}
+	return swept + tag.RowsAffected(), nil
 }
 
 // FinishAgentRun closes a run with status, summary, summed token usage, and the

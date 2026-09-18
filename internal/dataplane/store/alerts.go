@@ -392,9 +392,11 @@ RETURNING id::text, workspace_id::text, kind, name, config, created_at`,
 }
 
 // ensureDigestRule seeds the weekly decision digest onto a freshly created
-// project — one enabled rule, no channels yet, so it computes and watermarks
-// from day one and starts delivering the moment a channel exists (see
-// CreateAlertChannel, which attaches the workspace's first channel to it).
+// project — one enabled rule, auto-attached to the workspace's first channel
+// if one already exists. A project created after the first channel inherits it
+// from day one rather than delivering nowhere until another channel is added;
+// a project created when no channels exist seeds empty and waits for the first
+// channel creation (see attachChannelToDigestRules).
 // Idempotent: a project that already has a digest rule is left alone, so a
 // re-seed or a user-created digest never doubles up.
 func (s *Store) ensureDigestRule(ctx context.Context, projectID string) error {
@@ -403,15 +405,29 @@ func (s *Store) ensureDigestRule(ctx context.Context, projectID string) error {
 SELECT EXISTS(SELECT 1 FROM alert_rules WHERE project_id = $1 AND source_kind = 'digest')`, projectID).Scan(&exists); err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-	_, err := s.pg.Exec(ctx, `
+	if !exists {
+		if _, err := s.pg.Exec(ctx, `
 INSERT INTO alert_rules (project_id, name, source_kind, source_ref, condition, params, schedule_cron, channels, enabled)
-VALUES ($1, 'Weekly decision digest', 'digest', '', '{"op":"none"}'::jsonb, '{}'::jsonb, '0 9 * * 1', '[]'::jsonb, true)`, projectID)
+VALUES ($1, 'Weekly decision digest', 'digest', '', '{"op":"none"}'::jsonb, '{}'::jsonb, '0 9 * * 1', '[]'::jsonb, true)`, projectID); err != nil {
+			return err
+		}
+	}
+	// If the rule has no channels yet and the workspace already has at least
+	// one, wire the first one onto it so it delivers rather than staying dark.
+	// Only the empty set is filled: a rule the owner deliberately detached or
+	// redirected is left alone.
+	_, err := s.pg.Exec(ctx, `
+UPDATE alert_rules r
+SET channels = jsonb_build_array((
+    SELECT c.id::text FROM alert_channels c
+    JOIN projects p ON p.workspace_id = c.workspace_id
+    WHERE p.id = $1
+    ORDER BY c.created_at ASC LIMIT 1
+))
+WHERE r.project_id = $1 AND r.source_kind = 'digest' AND r.channels = '[]'::jsonb
+  AND EXISTS (SELECT 1 FROM alert_channels c JOIN projects p ON p.workspace_id = c.workspace_id WHERE p.id = $1)`, projectID)
 	return err
 }
-
 // attachChannelToDigestRules wires a newly created channel onto every digest
 // rule in the workspace that has no delivery target yet. A digest with no
 // channels computes silently forever; the first channel a workspace adds is

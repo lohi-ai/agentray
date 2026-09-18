@@ -59,7 +59,7 @@ export function AgentMonitorPage() {
             columns={[
               { key: 'run', header: 'Run', align: 'start', renderCell: (run) => run.summary || run.id.slice(0, 12) },
               { key: 'trigger', header: 'Trigger', align: 'start', renderCell: (run) => <span className="text-[var(--color-text-disabled)]">{run.trigger}</span> },
-              { key: 'status', header: 'Status', align: 'start', renderCell: (run) => <span style={run.status === 'failed' ? { color: 'var(--danger)' } : undefined}>{run.status}</span> },
+              { key: 'status', header: 'Status', align: 'start', renderCell: (run) => <span style={run.status === 'failed' || run.status === 'error' ? { color: 'var(--danger)' } : run.status === 'waiting' ? { color: 'var(--warning, #d97706)' } : undefined}>{run.status}</span> },
               { key: 'latency', header: 'Latency', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{runLatency(run)}</span> },
               { key: 'tokens', header: 'Tokens', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{formatCompact(run.token_input + run.token_output)}</span> },
               { key: 'cost', header: 'Cost', align: 'end', renderCell: (run) => <span className="font-mono tabular-nums">{formatCost(run.cost_usd, run.cost_unpriced)}</span> },

@@ -127,6 +127,28 @@ FROM agent_triggers WHERE scope_id = $1 ORDER BY kind ASC, created_at ASC`, scop
 	return out, rows.Err()
 }
 
+// ListAgentTriggersForScope returns an agent's triggers by scope id without
+// user authorization. Used by in-process tools (list_triggers) and internal
+// workers that have already established run-level permission.
+func (s *Store) ListAgentTriggersForScope(ctx context.Context, scopeID string) ([]AgentTrigger, error) {
+	rows, err := s.pg.Query(ctx, `
+SELECT id::text, name, kind, enabled, cron, webhook_token, prompt_template, hmac_secret_name, created_at, updated_at
+FROM agent_triggers WHERE scope_id = $1 ORDER BY kind ASC, created_at ASC`, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AgentTrigger, 0)
+	for rows.Next() {
+		var t AgentTrigger
+		if err := rows.Scan(&t.ID, &t.Name, &t.Kind, &t.Enabled, &t.Cron, &t.WebhookToken, &t.PromptTemplate, &t.HMACSecretName, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // CreateAgentTrigger adds a trigger to an agent (owner/admin only). A webhook
 // trigger is assigned a fresh unguessable token (its global ingress address); a
 // schedule trigger requires a cron. The returned row carries the token so the UI

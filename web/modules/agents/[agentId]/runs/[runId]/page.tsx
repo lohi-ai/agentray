@@ -185,7 +185,21 @@ export function AgentRunPage() {
       sub="What the agent did, chapter by chapter."
       actions={
           <>
-            {run ? <StatusPill status={run.status === 'failed' ? 'attention' : run.status === 'running' ? 'working' : 'healthy'} label={run.status} grow={false} /> : null}
+            {run ? (
+              <StatusPill
+                status={
+                  run.status === 'failed' || run.status === 'error'
+                    ? 'danger'
+                    : run.status === 'running'
+                    ? 'working'
+                    : run.status === 'waiting'
+                    ? 'attention'
+                    : 'healthy'
+                }
+                label={run.status}
+                grow={false}
+              />
+            ) : null}
             <Button variant="outline" icon={<BookOpen size={15} />} onClick={() => router.push(`/agents/${agentID}/lab`)}>Open lab</Button>
           </>
         }
@@ -201,6 +215,23 @@ export function AgentRunPage() {
           { label: 'Duration', value: run ? runDuration(run.started_at, run.finished_at) : '—' },
         ]}
       />
+
+      {/* When a run errored because it timed out or stalled waiting for a human
+          answer, call it out prominently so the owner knows why it halted. */}
+      {run && (run.status === 'error' || run.status === 'failed') && run.summary && (run.summary.includes('stalled') || run.summary.includes('timed out') || run.summary.includes('budget')) ? (
+        <Panel title="Run stopped">
+          <p className="m-0 text-sm leading-[1.5] text-danger">
+            {run.summary}
+          </p>
+        </Panel>
+      ) : null}
+      {run && run.status === 'waiting' ? (
+        <Panel title="Run waiting for answer">
+          <p className="m-0 text-sm leading-[1.5] text-[var(--color-text-secondary)]">
+            This run paused inside an ask tool call and is waiting for a response in chat. Runs unresponded past 24 hours are marked stalled.
+          </p>
+        </Panel>
+      ) : null}
 
       <Panel title={`Chapters${chapters.length ? ` (${chapters.length})` : ''}`}>
         {chapters.length === 0 ? (
