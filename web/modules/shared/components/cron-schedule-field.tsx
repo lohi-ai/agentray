@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { cronToWords } from '@/modules/operations/lib/cron-words';
-import { Text } from '@/modules/shared/components/signal-primitives';
+import { Text } from '@astryxdesign/core/Text';
 
 export interface CronPreset {
   label: string;
