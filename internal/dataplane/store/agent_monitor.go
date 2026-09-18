@@ -31,6 +31,10 @@ type AgentMonitorRow struct {
 	// entry. See AgentRun.CostUnpriced; this is the same fact, rolled up.
 	CostUnpriced bool       `json:"cost_unpriced"`
 	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
+	// LastError is the summary of the most recent failed run — the "what
+	// broke" a "Needs attention" badge owes the reader. Empty when no run
+	// has errored.
+	LastError string `json:"last_error,omitempty"`
 }
 
 // monitorSelect is the shared projection: every agent column the Agent struct
@@ -49,8 +53,8 @@ SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
        coalesce(sum(r.token_output), 0) AS token_output,
        coalesce(sum(r.cost_usd), 0) AS cost_usd,
        coalesce(bool_or(r.cost_unpriced), false) AS cost_unpriced,
-       max(r.started_at) AS last_run_at
-FROM agents a
+       max(r.started_at) AS last_run_at,
+       coalesce((array_agg(r.summary ORDER BY r.started_at DESC) FILTER (WHERE r.status = 'error'))[1], '') AS last_error
 LEFT JOIN agent_runs r ON coalesce(r.agent_id, r.project_id) = a.id`
 
 const monitorGroupBy = `
@@ -59,7 +63,7 @@ GROUP BY a.id, a.project_id, a.name, a.slug, a.is_default, a.enabled, a.workspac
 func scanMonitorRow(row pgx.Row) (AgentMonitorRow, error) {
 	var m AgentMonitorRow
 	err := row.Scan(&m.ID, &m.ProjectID, &m.Name, &m.Slug, &m.IsDefault, &m.Enabled, &m.Autonomy, &m.WorkspacePath, &m.PresetSlug, &m.CreatedAt, &m.UpdatedAt,
-		&m.RunCount, &m.RunningCount, &m.ErrorCount, &m.TokenInput, &m.TokenOutput, &m.CostUSD, &m.CostUnpriced, &m.LastRunAt)
+		&m.RunCount, &m.RunningCount, &m.ErrorCount, &m.TokenInput, &m.TokenOutput, &m.CostUSD, &m.CostUnpriced, &m.LastRunAt, &m.LastError)
 	return m, err
 }
 

@@ -91,6 +91,9 @@ export function AgentsPage() {
                   <StatusPill status={status} label={label} />
                 </div>
                 <div className="min-h-9 text-sm leading-[1.5] text-[var(--color-text-secondary)]">{row.is_default ? 'Default project analyst — routes and answers questions across your data.' : `Autonomy: ${row.autonomy || 'manual'}.`}</div>
+                {status === 'attention' && row.last_error ? (
+                  <div className="line-clamp-2 text-xs leading-[1.5] text-warning" title={row.last_error}>Last failure: {row.last_error}</div>
+                ) : null}
                 <div className="flex gap-4 pt-0.5 text-xs text-[var(--color-text-secondary)]">
                   <span>last run <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{formatRelative(row.last_run_at)}</b></span>
                   <span>runs <b className="font-mono font-medium text-[var(--color-text-primary)] tabular-nums">{row.run_count}</b></span>

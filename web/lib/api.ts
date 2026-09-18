@@ -1523,6 +1523,9 @@ export type AgentMonitorRow = Agent & {
   // see AgentRun.cost_unpriced (rolled up across its runs).
   cost_unpriced: boolean;
   last_run_at?: string;
+  // last_error is the most recent failed run's summary — the reason behind a
+  // "Needs attention" badge. Empty when no run has errored.
+  last_error?: string;
 };
 
 export type AgentRecommendation = {

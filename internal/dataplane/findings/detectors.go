@@ -118,7 +118,9 @@ func detectWoWDeltas(cur storage.OverviewResult) []finding {
 			continue
 		}
 		v, p := *reading.Value, *reading.Previous
-		if v < WoWDeltaMinCount && p < WoWDeltaMinCount {
+		// The floor gates on the prior window alone: a delta is a ratio of
+		// the baseline, so a small prior makes any move a huge percentage.
+		if p < WoWDeltaMinCount {
 			continue
 		}
 		var delta float64
