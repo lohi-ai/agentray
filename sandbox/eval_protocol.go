@@ -255,16 +255,27 @@ func (p *evalProcess) handleToolCall(
 		}
 		mu.Unlock()
 	}
+	recordBridgeBlock := func(reason string) {
+		if invoker == nil || strings.TrimSpace(frame.Name) == "" {
+			return
+		}
+		setResult(agentcore.ToolOutput{Invocations: []agentcore.ToolInvocation{{Trace: agentcore.ToolTrace{
+			CallID: frame.RequestID, Tool: frame.Name, Args: string(frame.Arguments), Allowed: false, Reason: reason,
+		}}})
+	}
 	if frame.RequestID == "" || len(frame.RequestID) > 160 {
 		response.Error = "invalid host tool request id"
 	} else if slot >= maxBridgeCalls {
 		response.Error = fmt.Sprintf("eval host-tool call limit reached (%d per cell)", maxBridgeCalls)
+		recordBridgeBlock(response.Error)
 	} else if strings.TrimSpace(frame.Name) == "" || len(frame.Name) > 128 {
 		response.Error = "invalid host tool name"
+		recordBridgeBlock(response.Error)
 	} else if invoker == nil {
 		response.Error = "host tool bridge is unavailable outside a live agent run"
 	} else if err := ctx.Err(); err != nil {
 		response.Error = err.Error()
+		recordBridgeBlock(response.Error)
 	} else {
 		arguments := frame.Arguments
 		if len(arguments) == 0 {
