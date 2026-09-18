@@ -186,6 +186,26 @@ export function analysisBars(res: OverviewResult, tile: BoardTile): AnalysisBars
       empty: 'No external referrers in this range',
     };
   }
+  if (tile.metric === 'first_read_discovery') {
+    const discovery = res.content.first_read_discovery;
+    const total = (discovery?.rows ?? []).reduce((sum, r) => sum + r.count, 0);
+    const rows = (discovery?.rows ?? []).map((r) => {
+      const pct = total > 0 ? Math.round((r.count / total) * 100) : 0;
+      return {
+        value: `${r.value} (${pct}%)`,
+        count: r.count,
+      };
+    });
+    return {
+      label: titleOf(tile, 'First-read discovery'),
+      unit: discovery?.unit || 'people',
+      rows,
+      provenance: tileProvenance(res, { kind: 'activation' }),
+      empty: res.metrics.activation.state === 'unconfigured'
+        ? 'No activation event configured'
+        : 'No first-time reader activations in this range',
+    };
+  }
   if (tile.metric === 'traffic_by_class') {
     return {
       label: titleOf(tile, 'Traffic by type'),

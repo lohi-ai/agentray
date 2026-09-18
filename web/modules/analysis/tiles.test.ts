@@ -58,6 +58,15 @@ function res(over: Partial<OverviewResult> = {}): OverviewResult {
       ai_top_paths: { unit: 'pageviews', rows: [{ value: '/pricing', count: 88 }] },
       traffic_by_platform: { unit: 'pageviews', rows: [{ value: 'web', count: 5128 }] },
       top_events: { unit: 'events', rows: [{ value: 'user.pageview', count: 5128 }] },
+      first_read_discovery: {
+        unit: 'people',
+        rows: [
+          { value: 'home', count: 120 },
+          { value: 'search', count: 60 },
+          { value: 'communication', count: 40 },
+          { value: 'direct', count: 20 },
+        ],
+      },
     },
     data_status: {
       last_received_at: '2026-09-12T00:02:00Z',
@@ -112,6 +121,51 @@ describe('analysisBars', () => {
     const bars = analysisBars(res(), { key: 'top-utm-mediums', metric: 'top_utm_mediums', title: 'Top UTM mediums', kind: 'metric', display: 'bar' });
     expect(bars?.rows).toEqual([{ value: 'email', count: 210 }]);
     expect(bars?.label).toBe('Top UTM mediums');
+  });
+
+  it('computes % per surface on first_read_discovery rows', () => {
+    const overview = res();
+    const bars = analysisBars(overview, {
+      key: 'first-read-discovery',
+      metric: 'first_read_discovery',
+      title: 'First-read discovery',
+      kind: 'metric',
+      display: 'bar',
+    });
+    expect(bars?.label).toBe('First-read discovery');
+    expect(bars?.unit).toBe('people');
+    // Total = 120 + 60 + 40 + 20 = 240
+    // home: 120/240 = 50%
+    // search: 60/240 = 25%
+    // communication: 40/240 = 17%
+    // direct: 20/240 = 8%
+    expect(bars?.rows).toEqual([
+      { value: 'home (50%)', count: 120 },
+      { value: 'search (25%)', count: 60 },
+      { value: 'communication (17%)', count: 40 },
+      { value: 'direct (8%)', count: 20 },
+    ]);
+  });
+
+  it('reports empty state when no activation event is configured', () => {
+    const overview = res({
+      metrics: {
+        ...res().metrics,
+        activation: metric('unconfigured'),
+      },
+      content: {
+        ...res().content,
+        first_read_discovery: { unit: 'people', rows: [] },
+      },
+    });
+    const bars = analysisBars(overview, {
+      key: 'first-read-discovery',
+      metric: 'first_read_discovery',
+      title: 'First-read discovery',
+      kind: 'metric',
+      display: 'bar',
+    });
+    expect(bars?.empty).toBe('No activation event configured');
   });
 });
 

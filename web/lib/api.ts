@@ -351,6 +351,7 @@ export type OverviewResult = {
     top_utm_mediums: { unit: string; rows: Array<{ value: string; count: number }> };
     top_campaigns: { unit: string; rows: Array<{ value: string; count: number }> };
     top_referrers: { unit: string; rows: Array<{ value: string; count: number }> };
+    first_read_discovery?: { unit: string; rows: Array<{ value: string; count: number }> };
     // The retired Traffic page's remaining breakdowns — all-classes pageview
     // populations, and the retired Product page's raw event ranking.
     traffic_by_class: { unit: string; rows: Array<{ value: string; count: number }> };

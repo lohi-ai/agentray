@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -312,5 +313,110 @@ func TestOverviewActivationNoMatureCohort(t *testing.T) {
 	}
 	if detail == nil || detail.Eligible != 0 {
 		t.Fatalf("detail = %+v, want eligible 0", detail)
+	}
+}
+
+// TestOverviewFirstReadDiscovery verifies that the human pageview immediately
+// preceding each person's first activation event (e.g. chapter_view) is accurately
+// classified into home, search, direct, and communication surfaces, with the
+// percentages and counts calculated per surface.
+func TestOverviewFirstReadDiscovery(t *testing.T) {
+	d := openTestDuckDB(t)
+	s := &Store{duck: d}
+	proj := "cccccccc-1111-2222-3333-444444444444"
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+
+	pv := func(person, path string, at time.Time) Event {
+		return Event{
+			ProjectID: proj, EventID: uuid.NewString(), EventName: "user.pageview",
+			EventType: "user", DistinctID: person, VisitorClass: "human",
+			Properties: fmt.Sprintf(`{"path":%q}`, path), Timestamp: at,
+		}
+	}
+	act := func(person, name string, at time.Time) Event {
+		return Event{
+			ProjectID: proj, EventID: uuid.NewString(), EventName: name,
+			EventType: "user", DistinctID: person, VisitorClass: "human",
+			Timestamp: at,
+		}
+	}
+
+	t1 := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	events := []Event{
+		// User 1: lands on home ("/") -> views chapter -> classified as home
+		pv("u1", "/", t1),
+		act("u1", "chapter_view", t1.Add(time.Minute)),
+
+		// User 2: searches ("/tim-kiem?q=kiem") -> views chapter -> search
+		pv("u2", "/tim-kiem?q=kiem", t1),
+		act("u2", "chapter_view", t1.Add(time.Minute)),
+
+		// User 3: shared novel link ("/s/novel/123") -> views chapter -> communication
+		pv("u3", "/s/novel/123", t1),
+		act("u3", "chapter_view", t1.Add(time.Minute)),
+
+		// User 4: lands directly on chapter without preceding pageview -> direct
+		act("u4", "chapter_view", t1),
+
+		// User 5: community post ("/community/post/456") -> views chapter -> communication
+		pv("u5", "/community/post/456", t1),
+		act("u5", "chapter_view", t1.Add(time.Minute)),
+
+		// User 6: novel detail page ("/truyen/truong-an-12-canh-gio") -> views chapter -> direct
+		pv("u6", "/truyen/truong-an-12-canh-gio", t1),
+		act("u6", "chapter_view", t1.Add(time.Minute)),
+
+		// User 7: first chapter_view was outside the window -> should NOT be included
+		act("u7", "chapter_view", from.Add(-24*time.Hour)),
+		pv("u7", "/", t1),
+		act("u7", "chapter_view", t1.Add(time.Minute)),
+	}
+
+	if err := d.SinkEvents(context.Background(), events, AppliedMark{}); err != nil {
+		t.Fatalf("SinkEvents: %v", err)
+	}
+
+	rows, err := s.overviewFirstReadDiscovery(context.Background(), proj, "", from, to, "chapter_view")
+	if err != nil {
+		t.Fatalf("overviewFirstReadDiscovery: %v", err)
+	}
+
+	// Total qualifying users in window = 6 (u1, u2, u3, u4, u5, u6).
+	// Distribution:
+	//   home: 1 (u1)
+	//   search: 1 (u2)
+	//   communication: 2 (u3, u5)
+	//   direct: 2 (u4, u6)
+	found := map[string]uint64{}
+	var total uint64
+	for _, r := range rows {
+		found[r.Value] = r.Count
+		total += r.Count
+	}
+
+	if total != 6 {
+		t.Fatalf("total = %d, want 6 (rows: %+v)", total, rows)
+	}
+	if found["communication"] != 2 {
+		t.Fatalf("communication = %d, want 2", found["communication"])
+	}
+	if found["direct"] != 2 {
+		t.Fatalf("direct = %d, want 2", found["direct"])
+	}
+	if found["home"] != 1 {
+		t.Fatalf("home = %d, want 1", found["home"])
+	}
+	if found["search"] != 1 {
+		t.Fatalf("search = %d, want 1", found["search"])
+	}
+
+	// Test empty activation event returns empty slice
+	emptyRows, err := s.overviewFirstReadDiscovery(context.Background(), proj, "", from, to, "")
+	if err != nil {
+		t.Fatalf("empty activationEvent error: %v", err)
+	}
+	if len(emptyRows) != 0 {
+		t.Fatalf("expected empty rows when activation_event is empty, got %v", emptyRows)
 	}
 }

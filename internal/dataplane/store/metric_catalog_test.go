@@ -40,8 +40,9 @@ func syntheticOverview() OverviewResult {
 			D30:          OverviewRetentionPoint{State: OverviewStateNotReady},
 		},
 		Content: OverviewContent{
-			TopPages:   OverviewList{Unit: "pageviews", Rows: []PathCount{{Value: "/", Count: 40}}},
-			TopSources: OverviewList{Unit: "referrers", Rows: []PathCount{{Value: "unknown", Count: 12}}},
+			TopPages:           OverviewList{Unit: "pageviews", Rows: []PathCount{{Value: "/", Count: 40}}},
+			TopSources:         OverviewList{Unit: "referrers", Rows: []PathCount{{Value: "unknown", Count: 12}}},
+			FirstReadDiscovery: OverviewList{Unit: "people", Rows: []PathCount{{Value: "home", Count: 10}, {Value: "search", Count: 5}}},
 		},
 		DataStatus: OverviewDataStatus{EverReceived: true, QualifyingInRange: 42, State: "fresh"},
 	}
@@ -176,6 +177,33 @@ func TestUnconfiguredMetricNamesItsPrerequisite(t *testing.T) {
 	}
 	if reading.Prerequisite == "" || len(reading.Notes) == 0 || reading.Notes[0] != reading.Prerequisite {
 		t.Fatalf("the prerequisite must be the note served beside the tile: prereq=%q notes=%v", reading.Prerequisite, reading.Notes)
+	}
+}
+
+func TestFirstReadDiscoveryReading(t *testing.T) {
+	res := syntheticOverview()
+	def, _ := MetricCatalogEntry(MetricFirstReadDiscovery)
+
+	// Case 1: unconfigured activation
+	reading, err := MetricReadingFor(def, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.State != OverviewStateUnconfigured {
+		t.Fatalf("state = %q, want unconfigured when activation is unconfigured", reading.State)
+	}
+
+	// Case 2: configured activation with rows
+	res.Metrics.Activation.State = OverviewStateOK
+	reading, err = MetricReadingFor(def, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.State != OverviewStateOK {
+		t.Fatalf("state = %q, want ok", reading.State)
+	}
+	if reading.Unit != "people" || len(reading.Rows) != 2 {
+		t.Fatalf("reading = %+v, want 2 rows with unit people", reading)
 	}
 }
 

@@ -65,6 +65,7 @@ func DefaultAnalysisBoards() []DefaultAnalysisBoard {
 						defaultTile("top-utm-mediums", MetricTopUTMMediums, DisplayBar, "Top UTM mediums", 2),
 						defaultTile("top-campaigns", MetricTopCampaigns, DisplayBar, "Top campaigns", 2),
 						defaultTile("top-referrers", MetricTopReferrers, DisplayBar, "Top referrers", 2),
+						defaultTile("first-read-discovery", MetricFirstReadDiscovery, DisplayBar, "First-read discovery", 2),
 					},
 				}},
 			},
