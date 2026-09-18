@@ -1,12 +1,13 @@
 # agentcore
 
-The kernel. One flat package, no subdirectories except [`plugins/`](plugins/),
-and a hard dependency rule in both directions:
+The kernel. The runtime is one flat package, with two explicit subdirectories:
+ejectable [`plugins/`](plugins/) and black-box [`integration/`](integration/)
+tests. The runtime has a hard dependency rule in both directions:
 
 > **The kernel names no plugin, and depends on nothing else in this module.**
-> `agentcore` imports only the standard library and `golang.org/x/text`. Delete
-> every package under `plugins/` and this package still compiles, still runs,
-> and still passes its tests — it just does less.
+> `agentcore` imports only the standard library plus focused Unicode and JSON
+> Schema libraries. Delete every package under `plugins/` and this package still
+> compiles, still runs, and still passes its tests — it just does less.
 
 Both halves are tests, not prose: [`boundary_test.go`](boundary_test.go) reads
 the package's own imports and fails on a `plugins/` import or on any other
@@ -20,7 +21,7 @@ only this file knows is a rule that drifts:
 |---|---|
 | `TestKernelNamesNoPlugin` | no `plugins/` import from the root package |
 | `TestKernelIsAModuleLeaf` | no in-module import at all |
-| `TestKernelTreeHoldsOnlyPlugins` | `plugins/` is the only subdirectory |
+| `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only `plugins/` and black-box `integration/` tests sit below the kernel |
 | `TestEveryKernelFileJustifiesItself` | every root `.go` file has a row below |
 | `TestPluginsDoNotNameEachOther` | no plugin imports a sibling (except `preset`) |
 | `TestEveryPluginDocumentsItself` | every plugin folder has a `README.md` |
@@ -93,14 +94,15 @@ cannot give one belongs in a plugin, or belongs nowhere.
 | [`permission.go`](permission.go) | **contract + seam default** — `Policy`, `Decision`, and `DenyAll`. Default-deny is the kernel's, so a composition that forgets governance is not ungoverned. |
 | [`prompt.go`](prompt.go) | **loop** — system-prompt assembly, recall dedup, and provider-neutral prompt-cache breakpoints placed at the end of the request's *append-only* prefix (the persisted history), not on its final message. A `ContextHook` trailer is re-rendered every turn, so a prefix ending in one can never be read back: measured on a 300-turn run, **7 of 299** cache entries were still a prefix of the next request; anchoring before the trailer makes it **277 of 299** (the rest are the 22 compactions, which legitimately rewrite the window). |
 | [`skill_tool.go`](skill_tool.go) | **loop** — the `read_skill` built-in, registered by the loop whenever a definition carries skills. Progressive disclosure is part of the prompt, not an add-on. |
+| [`schema.go`](schema.go) | **loop** — compiles `OutputSchema` at composition time and validates final text locally, so providers that ignore structured-output hints cannot silently violate the result contract. |
 
 ### Durable state — only the log's owner may touch these
 
 | file | why core |
 |---|---|
-| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, reduce/recover, side records (`EntryInbox`/`EntryInboxDone`, `EntryAssistantFrame`, `EntryToolProgress`), and the goal as a *fact about the run* (written once, recovered on resume; what to DO about an unmet goal is [`plugins/goal`](plugins/goal/)). The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. Chain entries form the session tree; side records capture intent and mid-turn in-flight granularity (streaming frames, tool progress) without forking the chain. Also the windowed read (`SessionWindowStore`, `LoadResumeLog`): the fold restarts at a checkpoint, so a resume reads a suffix rather than a history — and the rule for when that is safe lives here, once, rather than in each backend. |
+| [`session.go`](session.go) | **log** — `SessionEntry` kinds, `SessionStore`, reduce/recover, side records (`EntryInbox`/`EntryInboxDone`, `EntryAssistantFrame`, `EntryToolProgress`), and the goal as a *fact about the run* (written once, recovered on resume; what to DO about an unmet goal is [`plugins/goal`](plugins/goal/)). The log is the source of truth; run state is rebuilt by reducing it, never mutated in place. Chain entries form the session tree; side records capture intent and mid-turn in-flight granularity (streaming frames, tool progress) without forking the chain. `SessionBatchStore` upgrades a turn save point from ordered-prefix compatibility to an atomic commit. The windowed read (`SessionWindowStore`, `LoadResumeLog`) lets the fold restart at a checkpoint, so a resume reads a suffix rather than a history — and the rule for when that is safe lives here, once, rather than in each backend. |
 | [`session_tree.go`](session_tree.go) | **log** — the log is a tree: parent ids, branches, `EntryLeafMove`, `Rewind`. Reduce and recover walk only the active branch. |
-| [`memsession.go`](memsession.go) | **seam default** — in-process append-only `SessionStore`, so a run is resumable and the log invariant is checkable with nothing wired. |
+| [`memsession.go`](memsession.go) | **seam default** — in-process append-only `SessionStore` with atomic save-point batches, so a run is resumable and the log/concurrency invariants are checkable with nothing wired. |
 | [`compaction.go`](compaction.go) | **log + seam default** — WHEN to compact and the durable bracket around it, plus the goal pin that survives summarization, and `Compactor`/`DefaultCompactor`: WHAT replaces the old span, as a strategy with more than one right answer. The trigger is `min(model window − output headroom, configured ceiling)`, re-derived per turn from the answering rung: the ladder routinely mixes models whose windows differ by 30x, and a ceiling too high for the current one means the loop never compacts before the provider rejects the request. The kernel knows no model's window — the rung carries it. |
 | [`fork.go`](fork.go) | **loop** — everything that crosses an agent boundary: building a child from a parent's *unexported* fields (a delegation plugin cannot do this from outside without those fields becoming exported, which is exactly how a child ends up out-scoping its parent), delegation depth (a spawn plugin's recursion cap is only enforceable if the depth survives the hop), and the run's session id (a sub-agent shares its parent's provider and ctx, so without this tag the two are one undifferentiated stream to anything decorating the seam). All three ride ctx — the only thread that survives the hop. |
 | [`lab.go`](lab.go) | **log** — the read model: one pure fold from recorded facts to ordered steps, so a live-stepped run and a replayed run read identically — and the same fold one level up as chapters: a run's compaction summaries ARE its table of contents, and dividing the fold at them is what makes a several-thousand-step run navigable rather than merely paginated. |
@@ -126,10 +128,7 @@ like plugin tests and are not, because the state is the kernel's:
   [`plugins/goal`](plugins/goal/) owns the completion protocol and is tested
   there.
 
-Root tests that import a plugin do so only for end-to-end composition
-(`agent_realprovider_test.go`, `e2e_test.go`, `fanout_test.go`,
-`longrun_e2e_test.go`, `memory_curation_e2e_test.go`, `ask_e2e_test.go`) —
-they prove a capability against the real loop, which is the point of the
-split. A root test that imports a plugin to test *the plugin's* policy is a
-sign the test moved out from under its subject — put it next to the plugin
-instead.
+Black-box tests that import plugins now live in [`integration/`](integration/).
+They prove capabilities against the real public loop without mixing consumer
+composition into the kernel's package-private test suite. A plugin-policy test
+still belongs next to the plugin itself.

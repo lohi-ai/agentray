@@ -10,8 +10,9 @@
 // boundary_test.go):
 //
 //   - The kernel depends on nothing else in this module. agentcore imports only
-//     the standard library and golang.org/x/text. Everything product-specific
-//     enters through an interface declared here — including the model itself:
+//     the standard library plus focused Unicode and JSON Schema libraries.
+//     Everything product-specific enters through an interface declared here —
+//     including the model itself:
 //     agentcore declares [LLMProvider] and never speaks a wire protocol. The
 //     OpenAI and Anthropic implementations live in agentray/ai, which imports
 //     this package, so a vendor change cannot reach the loop.
@@ -48,9 +49,10 @@
 //
 // # Reading this package
 //
-// The root is deliberately flat: these files are not independent concerns that
-// happen to sit together, they are one machine reached through unexported
-// fields of one [Agent]. The real boundary is agentcore/plugins, so the
+// The runtime root is deliberately flat: these files are not independent
+// concerns that happen to sit together, they are one machine reached through
+// unexported fields of one [Agent]. Black-box composition tests live in
+// agentcore/integration; the real production boundary is agentcore/plugins, so the
 // organizing question here is not "which folder?" but "why is this file in the
 // kernel and not a plugin?". Every file answers with one of four words — loop,
 // contract, log, or seam default — and README.md holds the map, which

@@ -1,4 +1,4 @@
-package agentcore_test
+package integration
 
 // End-to-end proof of the memory-curation contract through the real loop:
 // the model calls learn / memory_edit, the calls pass the permission gate,

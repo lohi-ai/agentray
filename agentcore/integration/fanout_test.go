@@ -1,4 +1,4 @@
-package agentcore_test
+package integration
 
 import (
 	"context"

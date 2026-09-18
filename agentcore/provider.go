@@ -137,7 +137,8 @@ type ChatRequest struct {
 	// given JSON Schema (grammar-constrained decoding). OpenAI maps it to
 	// response_format json_schema with strict:true; Anthropic to the
 	// structured-outputs output_format (plus its beta header). Providers
-	// without the capability ignore it, so the loop still validates the answer.
+	// without the capability may ignore it; the loop validates every final text
+	// answer locally before accepting it.
 	// Intended for verdict-shaped agents (classification / moderation) — tool
 	// calls are unaffected, but any plain-text turn must fit the schema, so
 	// leave it nil for general chat agents.
@@ -155,9 +156,8 @@ type OutputSchema struct {
 	// object needs additionalProperties:false and all properties required, no
 	// unsupported keywords) — a non-conforming schema is rejected with a 400 on
 	// every turn. The default (false) sends the schema in best-effort mode,
-	// which accepts any valid JSON Schema and soft-degrades, matching the
-	// ChatRequest.OutputSchema contract that the loop still validates the
-	// answer itself.
+	// which accepts any valid JSON Schema and soft-degrades. Either way, the
+	// loop independently validates the final answer before accepting it.
 	Strict bool `json:"strict,omitempty"`
 }
 

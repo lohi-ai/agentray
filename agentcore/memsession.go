@@ -21,20 +21,35 @@ type MemorySessionStore struct {
 	log map[string][]SessionEntry
 }
 
+var (
+	_ SessionStore      = (*MemorySessionStore)(nil)
+	_ SessionBatchStore = (*MemorySessionStore)(nil)
+)
+
 // NewMemorySessionStore returns an empty in-process session store.
 func NewMemorySessionStore() *MemorySessionStore {
 	return &MemorySessionStore{log: map[string][]SessionEntry{}}
 }
 
 // Append records one entry, assigning its sequence number.
-func (m *MemorySessionStore) Append(_ context.Context, id string, e SessionEntry) error {
+func (m *MemorySessionStore) Append(ctx context.Context, id string, e SessionEntry) error {
+	return m.AppendBatch(ctx, id, []SessionEntry{e})
+}
+
+// AppendBatch records one save point atomically. Holding the store lock across
+// the whole slice guarantees that a concurrent side record cannot split the
+// batch and that readers observe either the state before it or the complete
+// state after it.
+func (m *MemorySessionStore) AppendBatch(_ context.Context, id string, entries []SessionEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.log == nil {
 		m.log = map[string][]SessionEntry{}
 	}
-	e.Seq = len(m.log[id])
-	m.log[id] = append(m.log[id], e)
+	for _, e := range entries {
+		e.Seq = len(m.log[id])
+		m.log[id] = append(m.log[id], e)
+	}
 	return nil
 }
 

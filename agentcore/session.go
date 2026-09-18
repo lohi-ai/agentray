@@ -216,6 +216,42 @@ type SessionStore interface {
 	Log(ctx context.Context, sessionID string) ([]SessionEntry, error)
 }
 
+// SessionBatchStore is an optional SessionStore capability for committing one
+// save point atomically. The loop buffers chain entries for a turn and hands
+// the whole ordered slice to AppendBatch; either every entry must become
+// visible, with consecutive sequence numbers in the supplied order, or none of
+// them may become visible.
+//
+// Side records (stream frames, tool progress, queued input) still use Append:
+// their purpose is to become durable while a turn is in flight. AppendBatch is
+// for the settled transcript boundary only. Backends that do not implement the
+// capability remain supported; the loop falls back to ordered Append calls and
+// retains the successfully written prefix on failure.
+type SessionBatchStore interface {
+	AppendBatch(ctx context.Context, sessionID string, entries []SessionEntry) error
+}
+
+// appendSessionBatch writes a buffered save point through the strongest
+// contract the store offers. The count is the durable prefix: all-or-none for
+// SessionBatchStore, and the successfully appended prefix for legacy stores.
+func appendSessionBatch(ctx context.Context, store SessionStore, sessionID string, entries []SessionEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	if batches, ok := store.(SessionBatchStore); ok {
+		if err := batches.AppendBatch(ctx, sessionID, entries); err != nil {
+			return 0, err
+		}
+		return len(entries), nil
+	}
+	for i, entry := range entries {
+		if err := store.Append(ctx, sessionID, entry); err != nil {
+			return i, err
+		}
+	}
+	return len(entries), nil
+}
+
 // SessionWindowStore is an optional SessionStore capability: read the tail of a
 // log instead of all of it.
 //

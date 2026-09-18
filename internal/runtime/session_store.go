@@ -27,6 +27,12 @@ type pgSessionStore struct {
 	store *storage.Store
 }
 
+var (
+	_ agentcore.SessionStore       = (*pgSessionStore)(nil)
+	_ agentcore.SessionBatchStore  = (*pgSessionStore)(nil)
+	_ agentcore.SessionWindowStore = (*pgSessionStore)(nil)
+)
+
 // NewSessionStore returns a SessionStore that writes durable run logs to Postgres.
 func NewSessionStore(store *storage.Store) agentcore.SessionStore {
 	return &pgSessionStore{store: store}
@@ -49,17 +55,28 @@ func rootRunID(sessionID string) string {
 // durability write must never break a run — but we surface the error so a failing
 // store is visible to the (best-effort) caller.
 func (s *pgSessionStore) Append(ctx context.Context, sessionID string, entry agentcore.SessionEntry) error {
-	payload, err := json.Marshal(entry)
-	if err != nil {
-		return err
+	return s.AppendBatch(ctx, sessionID, []agentcore.SessionEntry{entry})
+}
+
+// AppendBatch commits one agentcore save point in a database transaction. The
+// storage layer serializes sequence assignment per session, so concurrent side
+// records land entirely before or after this batch and cannot split it.
+func (s *pgSessionStore) AppendBatch(ctx context.Context, sessionID string, entries []agentcore.SessionEntry) error {
+	rows := make([]storage.AgentSessionEntry, 0, len(entries))
+	for _, entry := range entries {
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, storage.AgentSessionEntry{
+			RunID:       rootRunID(sessionID),
+			SessionKey:  sessionID,
+			Kind:        string(entry.Kind),
+			Turn:        entry.Turn,
+			PayloadJSON: string(payload),
+		})
 	}
-	_, err = s.store.AppendAgentSessionEntry(ctx, storage.AgentSessionEntry{
-		RunID:       rootRunID(sessionID),
-		SessionKey:  sessionID,
-		Kind:        string(entry.Kind),
-		Turn:        entry.Turn,
-		PayloadJSON: string(payload),
-	})
+	_, err := s.store.AppendAgentSessionEntries(ctx, rows)
 	return err
 }
 

@@ -221,11 +221,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		compactor = DefaultCompactor()
 	}
 
-	// Durable writes are buffered per turn and flushed atomically at the turn
-	// boundary (pi's pendingSessionWrites + save_point), so a crash mid-turn loses
-	// the whole in-flight turn rather than leaving a half-written one — which is
-	// exactly the shape RecoverSession treats as cleanly interrupted. A nil store
-	// makes both buffer and flush no-ops.
+	// Durable writes are buffered per turn and flushed at the turn boundary
+	// (pi's pendingSessionWrites + save_point). Stores implementing
+	// SessionBatchStore commit the boundary atomically, so a crash cannot expose
+	// a half-written turn. Legacy SessionStore implementations retain the old
+	// ordered-prefix fallback. A nil store makes both buffer and flush no-ops.
 	var pending []SessionEntry
 	// lastEntryID chains this run's entries into the session tree: each buffered
 	// entry gets a stable id and points at the one before it, so any entry is a
@@ -261,19 +261,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		if a.session == nil || a.sessionID == "" || len(pending) == 0 {
 			return
 		}
-		// Append in order and stop at the first failure, so the durable log is
-		// always a valid *prefix* of the run — a child entry never lands without
-		// its parent (holes would break tree chaining and recovery). The
-		// unflushed suffix stays pending and is retried at the next save point,
-		// so a transient store blip self-heals; entries still pending when the
-		// run returns are surfaced as res.UnpersistedEntries.
-		n := 0
-		for _, e := range pending {
-			if aerr := a.session.Append(flushCtx, a.sessionID, e); aerr != nil {
-				emit(StreamEvent{Type: StreamProgress, Note: "durable session write failed; retrying at next save point", Turn: res.Turns})
-				break
-			}
-			n++
+		// Use an atomic batch when the backend offers one. The compatibility path
+		// still stops at the first failure, so the durable log is always a valid
+		// prefix — a child never lands without its parent. Whatever was not
+		// committed stays pending for the next save point and is reported through
+		// UnpersistedEntries if the run returns first.
+		n, aerr := appendSessionBatch(flushCtx, a.session, a.sessionID, pending)
+		if aerr != nil {
+			emit(StreamEvent{Type: StreamProgress, Note: "durable session write failed; retrying at next save point", Turn: res.Turns})
 		}
 		if n == 0 {
 			return
@@ -1296,6 +1291,16 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		res.Usage.CostUSD += resp.Usage.CostUSD
 		res.Usage.CostUnpriced = res.Usage.CostUnpriced || resp.Usage.CostUnpriced
 		res.StopReason = resp.StopReason
+		// Structured output is a loop contract, not merely a provider hint. Some
+		// providers do not implement grammar-constrained decoding and explicitly
+		// ignore OutputSchema; validate a final text answer locally before it becomes
+		// part of the accepted transcript. Tool-call turns are exempt because their
+		// payload is governed by each tool's argument schema instead.
+		if len(resp.Message.ToolCalls) == 0 && a.outputValidator != nil {
+			if verr := a.outputValidator(resp.Message.Content); verr != nil {
+				return failTurn(verr)
+			}
+		}
 		// Stamp the turn's usage onto the assistant message so compaction can use
 		// the provider's real token count (not a byte heuristic) to find when the
 		// context window is filling.

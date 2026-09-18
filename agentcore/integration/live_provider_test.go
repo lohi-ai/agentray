@@ -1,4 +1,4 @@
-package agentcore_test
+package integration
 
 // Real-provider integration tests for the capabilities that genuinely require a
 // model to reason — the ones a scripted faux provider cannot prove. They are the

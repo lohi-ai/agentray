@@ -189,6 +189,10 @@ func (r *Registry) build() (*Agent, error) {
 	if r.model == "" {
 		return nil, errors.New("agentcore: model is required")
 	}
+	outputValidator, err := compileOutputValidator(r.outputSchema)
+	if err != nil {
+		return nil, err
+	}
 
 	// Provider decorators are applied once, here, over every rung the run can
 	// reach. Doing it at compose time rather than in the loop is what keeps the
@@ -228,6 +232,7 @@ func (r *Registry) build() (*Agent, error) {
 		maxTokens:          r.maxTokens,
 		reasoningEffort:    r.reasoningEffort,
 		outputSchema:       r.outputSchema,
+		outputValidator:    outputValidator,
 	}
 	return a, nil
 }

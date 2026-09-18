@@ -1,6 +1,6 @@
 # AgentRay developer tasks.
 #
-# Agent tests come in two layers (see agentcore/agent_realprovider_test.go):
+# Agent tests come in two layers (see agentcore/integration/live_provider_test.go):
 #   * deterministic faux-provider unit tests — always run, no credentials.
 #   * env-gated real-provider tests (TestReal_*) — exercise a live model; they
 #     SKIP (not fail) when AGENTRAY_TEST_OPENAI_* is unset, so `make test` stays
@@ -40,7 +40,7 @@ LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a;
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev web build cli install-cli vet test test-agents test-stress check agent-funcs \
+.PHONY: help dev web build cli install-cli vet test test-agents test-agentcore-race test-stress check agent-funcs \
         sdk-check sdk-check-npm sdk-check-python sdk-check-swift sdk-release sdk-resolve-tag \
         sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell \
         sandbox-check sandbox-setup test-sandbox
@@ -77,6 +77,9 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 	  echo "AGENTRAY_TEST_OPENAI_* not set — copy .env.example to .env and fill it."; exit 1; \
 	fi; \
 	$(GO) test ./... -run 'TestReal_|RealProvider' -v -count=1
+
+test-agentcore-race: ## Run agentcore's durability/concurrency suite with the race detector
+	$(GO) test -race ./agentcore/... -count=1
 
 test-stress: ## Run the long-run stability / compaction stress test
 	$(GO) test ./agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1

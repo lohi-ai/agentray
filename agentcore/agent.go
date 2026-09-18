@@ -141,8 +141,11 @@ type Agent struct {
 	// default — sends nothing, so strict compat servers are unaffected.
 	reasoningEffort string
 	// outputSchema, when set, constrains every text answer to a JSON Schema at
-	// the provider (structured outputs). Verdict-shaped agents only.
-	outputSchema *OutputSchema
+	// the provider (structured outputs). outputValidator is compiled at build
+	// time and enforces the same contract locally when a provider ignores it.
+	// Verdict-shaped agents only.
+	outputSchema    *OutputSchema
+	outputValidator outputValidator
 	// childUsage accumulates the usage of sub-agent runs spawned during the
 	// current run (written by spawn_subagent, possibly from parallel tool
 	// goroutines); runLoop folds and resets it into the RunResult so a parent

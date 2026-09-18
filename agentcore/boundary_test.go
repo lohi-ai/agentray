@@ -76,42 +76,40 @@ func TestKernelIsAModuleLeaf(t *testing.T) {
 	}
 }
 
-// TestKernelTreeHoldsOnlyPlugins enforces README.md's opening claim — "one flat
-// package, no subdirectories except plugins/" — which until now was the only
-// structural rule here stated as prose rather than as a test, and consequently
-// the only one that had drifted: an authoring/ package sat under agentcore for
-// some time, run-time-adjacent by filename and authoring-time by content, with
-// nothing to notice.
+// TestKernelTreeHoldsOnlyDeclaredBoundaries enforces README.md's opening claim:
+// the runtime is one flat package, plugins are ejectable capabilities, and
+// integration is a black-box test suite. Those are the only two subdirectories.
 //
 // The rule matters more than tidiness. "The kernel" has to name a tree a reader
 // can enumerate, or the boundary tests above are checking one package while the
 // directory quietly accumulates others that inherit the kernel's reputation
-// without its constraints. A package that imports agentcore belongs beside it
-// (authoring/, ai/, sandbox/); a package that extends a running agent belongs in
-// plugins/. There is no third position, which is why this list has one entry.
-func TestKernelTreeHoldsOnlyPlugins(t *testing.T) {
-	const allowed = "plugins"
+// without its constraints. A package that extends a running agent belongs in
+// plugins/; a test that composes several public packages belongs in
+// integration/. Production packages that merely import agentcore belong beside
+// it (authoring/, ai/, sandbox/).
+func TestKernelTreeHoldsOnlyDeclaredBoundaries(t *testing.T) {
+	allowed := map[string]bool{"plugins": true, "integration": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading the agentcore directory: %v", err)
 	}
-	var sawAllowed bool
+	seen := map[string]bool{}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasPrefix(e.Name(), "_") {
 			continue
 		}
-		if e.Name() == allowed {
-			sawAllowed = true
+		if allowed[e.Name()] {
+			seen[e.Name()] = true
 			continue
 		}
 		t.Errorf("agentcore/%s/ is a subdirectory of the kernel.\n"+
-			"Only plugins/ may live here. If it extends a running agent it is a plugin; "+
-			"otherwise it belongs beside agentcore, not under it.", e.Name())
+			"Only plugins/ and the black-box integration/ suite may live here. If it extends "+
+			"a running agent it is a plugin; otherwise it belongs beside agentcore.", e.Name())
 	}
-	// Guard against a vacuous pass: no plugins/ means the check is not reading
-	// the real tree, and every future stray would pass silently.
-	if !sawAllowed {
-		t.Fatal("found no plugins/ directory — the check is not looking at the real tree")
+	for name := range allowed {
+		if !seen[name] {
+			t.Errorf("found no %s/ directory — the check is not looking at the real tree", name)
+		}
 	}
 }
 

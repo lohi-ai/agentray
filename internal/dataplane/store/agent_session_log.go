@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -81,40 +82,69 @@ func (s *Store) migrateAgentSessionLog(ctx context.Context) error {
 	return nil
 }
 
-// AppendAgentSessionEntry records one entry, assigning the next per-session
-// sequence number atomically (COALESCE(MAX(seq))+1 in the INSERT). A run's loop
-// appends serially from one goroutine, but the same session key can also be
-// written by a concurrent Steer/FollowUp enqueue or a sibling process resuming
-// the same log — the read-max-then-insert is then racy, and the UNIQUE
-// (session_key, seq) index is the backstop. On a collision the row is retried
-// with a fresh MAX: the loser of the race lands at the next seq, which is the
-// only correct answer for an append-only log. No RBAC: called by the runtime
-// session adapter, not a user. Returns the assigned seq.
+// AppendAgentSessionEntry records one entry through the same serialized,
+// transactional path used for save-point batches. No RBAC: called by the
+// runtime session adapter, not a user. Returns the assigned sequence number.
 func (s *Store) AppendAgentSessionEntry(ctx context.Context, e AgentSessionEntry) (int, error) {
-	payload := e.PayloadJSON
-	if payload == "" {
-		payload = "{}"
+	seqs, err := s.AppendAgentSessionEntries(ctx, []AgentSessionEntry{e})
+	if err != nil || len(seqs) == 0 {
+		return 0, err
 	}
-	key := e.SessionKey
+	return seqs[0], nil
+}
+
+// AppendAgentSessionEntries atomically appends one ordered save point. A
+// transaction-scoped advisory lock serializes all writers for the session key,
+// including single-entry side records (which delegate here), so sequence
+// assignment is contiguous and no concurrent write can appear inside a batch.
+func (s *Store) AppendAgentSessionEntries(ctx context.Context, entries []AgentSessionEntry) ([]int, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	key := entries[0].SessionKey
 	if key == "" {
-		key = e.RunID
+		key = entries[0].RunID
 	}
-	var seq int
-	var err error
-	for attempt := 0; attempt < 4; attempt++ {
-		err = s.pg.QueryRow(ctx, `
-INSERT INTO agent_session_log (run_id, session_key, seq, kind, turn, payload_json)
-VALUES (
-	$1, $2,
-	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_session_log WHERE session_key = $2),
-	$3, $4, $5::jsonb
-)
-RETURNING seq`, e.RunID, key, e.Kind, e.Turn, payload).Scan(&seq)
-		if !isUniqueViolation(err) {
-			return seq, err
+	for i := range entries {
+		entryKey := entries[i].SessionKey
+		if entryKey == "" {
+			entryKey = entries[i].RunID
+		}
+		if entryKey != key {
+			return nil, fmt.Errorf("session batch mixes keys %q and %q", key, entryKey)
 		}
 	}
-	return seq, err
+
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
+		return nil, err
+	}
+	var last int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM agent_session_log WHERE session_key = $1`, key).Scan(&last); err != nil {
+		return nil, err
+	}
+	seqs := make([]int, len(entries))
+	for i, entry := range entries {
+		payload := entry.PayloadJSON
+		if payload == "" {
+			payload = "{}"
+		}
+		seq := last + i + 1
+		if _, err := tx.Exec(ctx, `
+INSERT INTO agent_session_log (run_id, session_key, seq, kind, turn, payload_json)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, entry.RunID, key, seq, entry.Kind, entry.Turn, payload); err != nil {
+			return nil, err
+		}
+		seqs[i] = seq
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return seqs, nil
 }
 
 // AgentSessionLog returns one session's full ordered entry log (oldest first),
