@@ -569,8 +569,7 @@ result. The loop drops the oldest attachments copy-on-write with a visible
 notice using per-wire limits (or a conservative unknown-provider floor), so a
 fallback rung starts from the untouched transcript. Remaining OMP deltas are
 raw-byte/object-store backing, parser-backed JSX/TSX and local-module reload
-semantics, cell-to-tool/subagent bridges, background cells, and speculative
-execution.
+semantics, background handles/work pools, and speculative execution.
 
 Rich images are now decoded and normalized centrally before persistence or
 provider translation: 16 MiB/16-megapixel input guards, a 1568 px maximum edge,
@@ -578,6 +577,33 @@ a 200 px minimum edge, PNG/JPEG selection with a 500 KiB target, and explicit
 coordinate mapping after resize. WebP input is converted for local inference
 compatibility. The pure-Go implementation keeps laptop and server behavior
 identical without an image sidecar.
+
+### OMP follow-up — governed eval-to-tool bridge
+
+Persistent JavaScript and Python cells can now call registered host tools.
+JavaScript exposes `await tool.name(args)` and `await tool(name, args)`, including
+parallel promises; Python exposes synchronous `tool(name, args)`. Unlike a raw
+kernel registry lookup, the bridge is a capability installed only by a live
+Agent run. Nested calls re-enter the one dispatch trust boundary, retaining
+schema validation, permission hooks, credential resolution, interceptors,
+result/image bounds, idempotency, cancellation, circuit breaking, and traces.
+Direct EvalTool construction has no bridge authority.
+
+Nested calls do not invent provider-authored tool messages. Their traces,
+extension context, and terminal decision ride the outer outcome, persist in the
+session log, and restore on resume. Stream consumers receive paired start/end
+events. Active-tool recursion and nested human-input parking are rejected.
+A configurable per-cell cap (default 16) composes with the run-wide budget; the
+latter now reserves atomically before every direct or nested execution, so a
+parallel batch can no longer race past `MaxToolCalls`. Cooperative calls settle
+briefly on cancellation so their audit records survive, while a tool that
+ignores context cannot defeat the eval timeout. Floating Node promise rejections
+become cell errors without killing the retained kernel.
+
+The same framed protocol and `ProcessSandbox` work in trusted laptop mode and
+the no-network server container. The bridge can await `spawn_subagent` when that
+tool is registered and permitted, but does not yet copy OMP's background
+handle/work-pool API, timeout pausing, or speculative shadow execution.
 
 ## Not done (deferred, low value now)
 
