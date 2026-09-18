@@ -190,6 +190,42 @@ catch (error) { second = error.message; }
 	}
 }
 
+func TestEvalHostToolBridgeEnforcesPerCellCap(t *testing.T) {
+	eval, _, _ := testJavaScriptEvalTool(t, EvalConfig{MaxBridgeCalls: 1})
+	probe := &evalBridgeProbeTool{}
+	code := `
+const first = await tool.bridge_probe({value: "first"});
+let second;
+try { second = await tool.bridge_probe({value: "second"}); }
+catch (error) { second = error.message; }
+({first, second})`
+	args, _ := json.Marshal(map[string]any{"language": "javascript", "code": code})
+	agent, err := agentcore.New(agentcore.Config{
+		Provider: agentcore.NewFauxProvider(
+			agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
+			agentcore.AssistantText("done"),
+		),
+		Model: "faux", Tools: agentcore.NewToolSet(eval, probe),
+		Policy: agentcore.NewAllowList(ToolEval, probeToolName),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := agent.Prompt(evalContext("bridge-cell-cap"), "use eval")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if probe.calls.Load() != 1 {
+		t.Fatalf("probe calls = %d", probe.calls.Load())
+	}
+	if message := toolMessageFor(t, result, ToolEval); !strings.Contains(message.Content, "per cell") {
+		t.Fatalf("eval result = %q", message.Content)
+	}
+	if len(result.Tools) != 3 || !result.Tools[0].Allowed || result.Tools[1].Allowed || result.Tools[1].Reason == "" {
+		t.Fatalf("cap traces = %+v", result.Tools)
+	}
+}
+
 func TestEvalHostToolBridgeRunsHooksAndPairsStreamEvents(t *testing.T) {
 	eval, _, _ := testJavaScriptEvalTool(t, EvalConfig{})
 	probe := &evalBridgeProbeTool{}
