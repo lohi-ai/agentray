@@ -15,7 +15,7 @@ import (
 )
 
 // workspaceFS is the I/O substrate the file and search tools (read_file,
-// write_file, edit_file, grep, glob) run on. It exists so those tools have one
+// write_file, edit_file, edit_lines, grep, glob) run on. It exists so those tools have one
 // implementation and two backends: hostFS does the os.ReadFile / WalkDir calls
 // they have always done, sandboxFS routes the same primitives through
 // agentcore.Sandbox.Exec. Every byte of windowing, line numbering, fuzzy

@@ -30,6 +30,12 @@ func TestNew_ResolvesIdentityFromSpec(t *testing.T) {
 			wantID: "row-7", wantVendor: "google", wantName: "My Gemini", wantBaseURL: "",
 		},
 		{
+			name:   "responses alias selects the public responses wire",
+			spec:   Spec{Vendor: "responses"},
+			wantID: VendorOpenAIResponses, wantVendor: VendorOpenAIResponses,
+			wantName: VendorOpenAIResponses, wantBaseURL: "",
+		},
+		{
 			name:   "base URL is trimmed of its trailing slash",
 			spec:   Spec{Vendor: "anthropic", BaseURL: "https://gw.example/  "},
 			wantID: "anthropic", wantVendor: "anthropic", wantName: "anthropic",
@@ -79,7 +85,7 @@ func TestNew_UnknownVendorWithoutBaseURLFails(t *testing.T) {
 func TestNew_InjectsHTTPClientIntoTheWireProvider(t *testing.T) {
 	client := &http.Client{Timeout: 3 * time.Second}
 
-	for _, vendor := range []string{"openai", "anthropic"} {
+	for _, vendor := range []string{"openai", VendorOpenAIResponses, "anthropic"} {
 		p, err := New(Spec{Vendor: vendor, BaseURL: "https://gw.example", HTTP: client})
 		if err != nil {
 			t.Fatalf("New(%s): %v", vendor, err)
@@ -88,6 +94,8 @@ func TestNew_InjectsHTTPClientIntoTheWireProvider(t *testing.T) {
 		var got *http.Client
 		switch w := inner.(type) {
 		case *OpenAIProvider:
+			got = w.HTTP
+		case *OpenAIResponsesProvider:
 			got = w.HTTP
 		case *AnthropicProvider:
 			got = w.HTTP
@@ -120,15 +128,26 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 	if w.APIKey() != "new" {
 		t.Fatalf("empty update erased the key: %q", w.APIKey())
 	}
+
+	responses, err := New(Spec{Vendor: VendorOpenAIResponses, APIKey: "old"})
+	if err != nil {
+		t.Fatalf("New responses: %v", err)
+	}
+	rw := responses.(*wired)
+	rw.UpdateAPIKey("new")
+	if inner := rw.inner.(*OpenAIResponsesProvider); inner.APIKey != "new" {
+		t.Fatalf("responses wire key = %q, want new", inner.APIKey)
+	}
 }
 
 // With no explicit base URL each vendor must fall back to its own default;
 // sharing one fallback would send Anthropic traffic to OpenAI's host.
 func TestWired_EffectiveBaseURLPerVendor(t *testing.T) {
 	want := map[string]string{
-		"openai":    defaultOpenAIBaseURL,
-		"anthropic": defaultAnthropicBaseURL,
-		"google":    defaultGoogleBaseURL,
+		"openai":              defaultOpenAIBaseURL,
+		VendorOpenAIResponses: defaultOpenAIBaseURL,
+		"anthropic":           defaultAnthropicBaseURL,
+		"google":              defaultGoogleBaseURL,
 	}
 	for vendor, url := range want {
 		p, err := New(Spec{Vendor: vendor})

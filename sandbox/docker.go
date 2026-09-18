@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strconv"
 	"strings"
@@ -173,6 +174,58 @@ func (s *DockerSandbox) Available(ctx context.Context) bool {
 	return exec.CommandContext(ctx, s.docker, "info").Run() == nil
 }
 
+// oneShotArgs renders the common hardened `docker run` envelope used by both
+// buffered Exec and interactive Start. Keeping one renderer is a security
+// invariant: adding streaming protocols must not silently lose a cap, mount,
+// user, network, or environment restriction.
+func (s *DockerSandbox) oneShotArgs(req agentcore.SandboxExec, lim agentcore.SandboxLimits, name string) ([]string, error) {
+	workdir := sandboxWorkdir
+	if strings.TrimSpace(req.Workdir) != "" {
+		workdir = req.Workdir
+	}
+	args := []string{
+		"run", "--rm", "-i",
+		"--name", name,
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--user", sandboxUser(lim),
+		"--workdir", workdir,
+		"--tmpfs", sandboxTmpfs(lim),
+		"--memory", fmt.Sprintf("%dm", lim.MemoryMB),
+		"--memory-swap", fmt.Sprintf("%dm", lim.MemoryMB),
+		"--cpus", strconv.FormatFloat(lim.CPUs, 'f', 2, 64),
+		"--pids-limit", strconv.Itoa(lim.PidsLimit),
+	}
+	egressArgs, egressEnv := s.egressNetworkArgs(lim)
+	args = append(args, egressArgs...)
+	if !lim.WritableFS {
+		args = append(args, "--read-only")
+	}
+	for _, m := range req.Mounts {
+		if strings.TrimSpace(m.Source) == "" || strings.TrimSpace(m.Target) == "" {
+			return nil, fmt.Errorf("sandbox: invalid mount")
+		}
+		spec := fmt.Sprintf("type=bind,src=%s,dst=%s", m.Source, m.Target)
+		if m.ReadOnly {
+			spec += ",readonly"
+		}
+		args = append(args, "--mount", spec)
+	}
+	for k, v := range req.Env {
+		args = append(args, "--env", k+"="+v)
+	}
+	for k, v := range egressEnv {
+		args = append(args, "--env", k+"="+v)
+	}
+	image := s.image
+	if strings.TrimSpace(req.Image) != "" {
+		image = req.Image
+	}
+	args = append(args, image)
+	args = append(args, req.Argv...)
+	return args, nil
+}
+
 // Exec runs req to completion in a fresh hardened container and returns the
 // captured output. A non-zero exit code is returned as a SandboxResult (not an
 // error); error is reserved for the backend itself failing.
@@ -193,64 +246,10 @@ func (s *DockerSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (ag
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// The command starts in the ephemeral scratch workdir unless the caller pins
-	// a Workdir (e.g. a mount target) so it runs against shared workspace files.
-	workdir := sandboxWorkdir
-	if strings.TrimSpace(req.Workdir) != "" {
-		workdir = req.Workdir
+	args, err := s.oneShotArgs(req, lim, name)
+	if err != nil {
+		return agentcore.SandboxResult{}, err
 	}
-
-	args := []string{
-		"run", "--rm", "-i",
-		"--name", name,
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges",
-		"--user", sandboxUser(lim),
-		"--workdir", workdir,
-		// Read-only root means the workdir must be an explicit writable tmpfs;
-		// it is wiped when the container exits, so nothing the agent writes
-		// survives the call.
-		"--tmpfs", fmt.Sprintf("%s:rw,size=%s,uid=65534,gid=65534", sandboxWorkdir, sandboxTmpfsSize),
-		"--memory", fmt.Sprintf("%dm", lim.MemoryMB),
-		// memory-swap == memory disables swap, so the cgroup limit can't be
-		// dodged by paging out.
-		"--memory-swap", fmt.Sprintf("%dm", lim.MemoryMB),
-		"--cpus", strconv.FormatFloat(lim.CPUs, 'f', 2, 64),
-		"--pids-limit", strconv.Itoa(lim.PidsLimit),
-	}
-	egressArgs, egressEnv := s.egressNetworkArgs(lim)
-	args = append(args, egressArgs...)
-	if !lim.WritableFS {
-		args = append(args, "--read-only")
-	}
-	for _, m := range req.Mounts {
-		if strings.TrimSpace(m.Source) == "" || strings.TrimSpace(m.Target) == "" {
-			return agentcore.SandboxResult{}, fmt.Errorf("sandbox: invalid mount")
-		}
-		spec := fmt.Sprintf("type=bind,src=%s,dst=%s", m.Source, m.Target)
-		if m.ReadOnly {
-			spec += ",readonly"
-		}
-		args = append(args, "--mount", spec)
-	}
-	// Only explicitly-passed env reaches the container. The host process
-	// environment is never forwarded — the core isolation guarantee.
-	for k, v := range req.Env {
-		args = append(args, "--env", k+"="+v)
-	}
-	// Egress-proxy env (when an allowlist is active) is injected last so it is
-	// present even when the caller passes no env of its own.
-	for k, v := range egressEnv {
-		args = append(args, "--env", k+"="+v)
-	}
-	// A per-exec Image override lets a tool pick a purpose-built image (e.g.
-	// browser_use's Chrome image); empty keeps the locked one-shot image.
-	image := s.image
-	if strings.TrimSpace(req.Image) != "" {
-		image = req.Image
-	}
-	args = append(args, image)
-	args = append(args, req.Argv...)
 
 	cmd := exec.CommandContext(runCtx, s.docker, args...)
 	if req.Stdin != "" {
@@ -284,6 +283,62 @@ func (s *DockerSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (ag
 	return res, nil
 }
 
+// Start launches an interactive command in the same fresh hardened container
+// Exec uses, exposing protocol pipes until Wait. The container is force-removed
+// after Wait or Kill because terminating the docker CLI alone is not sufficient
+// to reap a detached child on every daemon/platform combination.
+func (s *DockerSandbox) Start(ctx context.Context, req agentcore.SandboxExec) (agentcore.SandboxProcess, error) {
+	if len(req.Argv) == 0 {
+		return nil, fmt.Errorf("sandbox: empty argv")
+	}
+	if req.Stdin != "" {
+		return nil, fmt.Errorf("sandbox: interactive process cannot use preloaded stdin")
+	}
+	if strings.TrimSpace(req.Session) != "" {
+		return nil, fmt.Errorf("sandbox: interactive persistent sessions are not supported")
+	}
+	lim := withDefaults(req.Constraints)
+	name := "agentray-sbx-" + randHex(8)
+	args, err := s.oneShotArgs(req, lim, name)
+	if err != nil {
+		return nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(lim.TimeoutSeconds*float64(time.Second)))
+	cmd := exec.CommandContext(runCtx, s.docker, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox: docker stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox: docker stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox: docker stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox: docker start: %w", err)
+	}
+	remove := func() {
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = exec.CommandContext(rmCtx, s.docker, "rm", "-f", name).Run()
+		rmCancel()
+	}
+	return &commandProcess{
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
+		runCtx: runCtx, cancel: cancel, killFn: func() error {
+			remove()
+			return nil
+		},
+		cleanup: remove, errLabel: "docker run", timeout: fmt.Sprintf("exceeded %.0fs timeout", lim.TimeoutSeconds),
+	}, nil
+}
+
 // sandboxUser picks the in-container UID. The locked default (read-only root)
 // runs as unprivileged nobody. A writable-FS computer-use profile runs as
 // container-root so package managers can install system-wide — still with all
@@ -293,7 +348,24 @@ func sandboxUser(lim agentcore.SandboxLimits) string {
 	if lim.WritableFS {
 		return rootUser
 	}
+	if lim.RunAsHostUser {
+		if current, err := user.Current(); err == nil {
+			if _, uidErr := strconv.ParseUint(current.Uid, 10, 32); uidErr == nil {
+				if _, gidErr := strconv.ParseUint(current.Gid, 10, 32); gidErr == nil {
+					return current.Uid + ":" + current.Gid
+				}
+			}
+		}
+	}
 	return sandboxUID
+}
+
+func sandboxTmpfs(lim agentcore.SandboxLimits) string {
+	uid, gid := "65534", "65534"
+	if parsedUID, parsedGID, ok := strings.Cut(sandboxUser(lim), ":"); ok {
+		uid, gid = parsedUID, parsedGID
+	}
+	return fmt.Sprintf("%s:rw,size=%s,uid=%s,gid=%s", sandboxWorkdir, sandboxTmpfsSize, uid, gid)
 }
 
 // execSession runs req inside the persistent container for req.Session, creating
@@ -384,7 +456,7 @@ func (s *DockerSandbox) ensureSession(ctx context.Context, req agentcore.Sandbox
 	if !lim.WritableFS {
 		args = append(args,
 			"--read-only",
-			"--tmpfs", fmt.Sprintf("%s:rw,size=%s,uid=65534,gid=65534", sandboxWorkdir, sandboxTmpfsSize),
+			"--tmpfs", sandboxTmpfs(lim),
 			"--workdir", sandboxWorkdir,
 		)
 	}

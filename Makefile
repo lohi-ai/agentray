@@ -40,7 +40,7 @@ LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a;
 
 .DEFAULT_GOAL := help
 
-.PHONY: help dev web build cli install-cli vet test test-agents test-agentcore-race test-stress check agent-funcs \
+.PHONY: help dev web build cli install-cli vet test test-agents test-agentcore-race test-session-conformance test-stress bench-session check agent-funcs \
         sdk-check sdk-check-npm sdk-check-python sdk-check-swift sdk-release sdk-resolve-tag \
         sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell \
         sandbox-check sandbox-setup test-sandbox
@@ -78,11 +78,18 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 	fi; \
 	$(GO) test ./... -run 'TestReal_|RealProvider' -v -count=1
 
-test-agentcore-race: ## Run agentcore's durability/concurrency suite with the race detector
-	$(GO) test -race ./agentcore/... -count=1
+test-agentcore-race: ## Race-check the kernel plus its runtime and sandbox lifecycle backends
+	$(GO) test -race ./agentcore/... ./internal/runtime ./sandbox -count=1
+
+test-session-conformance: ## Run memory + opt-in PostgreSQL session contracts (loads .env)
+	@$(LOAD_ENV) \
+	$(GO) test ./agentcore ./internal/runtime -run 'SessionStoreConformance|SessionLease|RecordSessionAnswer|ChainedAskResume' -v -count=1
 
 test-stress: ## Run the long-run stability / compaction stress test
 	$(GO) test ./agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
+
+bench-session: ## Benchmark append snapshots and long-log reduction/window reads
+	$(GO) test ./agentcore -run '^$$' -bench 'Session(Store)?' -benchmem
 
 check: vet test ## Vet + unit tests — the pre-commit gate
 

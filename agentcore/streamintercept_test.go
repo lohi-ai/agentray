@@ -71,12 +71,20 @@ func TestStreamRuleAbortsInjectsAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	res, err := agent.PromptStream(context.Background(), "say something", func(StreamEvent) {})
+	var visible string
+	res, err := agent.PromptStream(context.Background(), "say something", func(ev StreamEvent) {
+		if ev.Type == StreamToken {
+			visible += ev.Token
+		}
+	})
 	if err != nil {
 		t.Fatalf("PromptStream: %v", err)
 	}
 	if res.Final != "a clean answer" {
 		t.Fatalf("final = %q, want the retried answer", res.Final)
+	}
+	if visible != "a clean answer" {
+		t.Fatalf("visible output = %q, want only the accepted retry", visible)
 	}
 	if res.Turns != 1 {
 		t.Fatalf("turns = %d, want 1 — a stream retry is the same turn, not a new one", res.Turns)

@@ -15,6 +15,7 @@ func TestNewClientResolvesVendors(t *testing.T) {
 	}{
 		{"default empty -> openai", ClientSpec{}, "openai", false},
 		{"explicit openai", ClientSpec{Name: "openai", APIKey: "k"}, "openai", false},
+		{"openai responses", ClientSpec{Name: "openai-responses", APIKey: "k"}, VendorOpenAIResponses, false},
 		{"case-insensitive", ClientSpec{Name: "OpenAI"}, "openai", false},
 		{"anthropic", ClientSpec{Name: "anthropic", APIKey: "k"}, "anthropic", false},
 		{"google", ClientSpec{Name: "google", APIKey: "k"}, "google", false},

@@ -61,9 +61,9 @@
 // The layers that map runs through, outermost first:
 //
 //   - Composition — doc.go, plugin.go, compose.go, agent.go, seams.go.
-//   - Contracts — provider.go, tool.go, permission.go, definition.go, hooks.go,
-//     extension.go, memory.go, env.go. The types a plugin outside this repo
-//     implements.
+//   - Contracts — provider.go, provider_session.go, tool.go, permission.go,
+//     definition.go, hooks.go, extension.go, memory.go, env.go. The types a
+//     plugin or provider outside this repo implements.
 //   - The loop — loop.go, turn.go, tooldispatch.go, result.go, prompt.go,
 //     skill_tool.go.
 //   - Durable state — session.go, session_tree.go, memsession.go,

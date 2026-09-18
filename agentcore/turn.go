@@ -30,12 +30,66 @@ type streamAbort struct {
 
 func (e *streamAbort) Error() string { return "stream aborted by interceptor" }
 
+// committedStreamError marks a provider stream that failed after content was
+// already delivered to the caller's sink. Retrying that request — on the same
+// model or an escalation rung — is no longer replay-safe: the replacement
+// answer would be appended to text the caller has already rendered. The cause
+// stays wrapped for errors.Is/errors.As, and usage preserves whatever the
+// failed attempt reported so a partial response is not free.
+type committedStreamError struct {
+	cause error
+	usage Usage
+}
+
+func (e *committedStreamError) Error() string {
+	return fmt.Sprintf("provider stream failed after emitting output: %v", e.cause)
+}
+
+func (e *committedStreamError) Unwrap() error { return e.cause }
+
 // maxStreamAbortsPerTurn backstops a StreamInterceptor that never stops
 // matching: past it the turn's provider call is retried once with interception
 // disabled, so the stream completes unmodified. A guard that can spin the
 // provider forever is an availability bug wearing a policy costume — the
 // plugin's own per-turn cap is the real bound; this only covers a broken one.
 const maxStreamAbortsPerTurn = 8
+
+// ModelCapabilityError reports a request that a provider/model pair is known
+// not to accept. It is intentionally non-retryable: repeating the same rung
+// cannot add a missing capability, while reason may still advance to a capable
+// fallback rung.
+type ModelCapabilityError struct {
+	Provider string
+	Model    string
+	Feature  string
+}
+
+func (e *ModelCapabilityError) Error() string {
+	return fmt.Sprintf("provider %s model %s does not support %s", e.Provider, e.Model, e.Feature)
+}
+
+// requestForCapabilities applies only explicit negative capability knowledge.
+// Unknown means preserve the request, which keeps arbitrary compatible/local
+// endpoints backward compatible. Provider hints may be removed here without
+// weakening loop-owned enforcement (for example OutputSchema is still checked
+// by Agent.outputValidator after the response).
+func requestForCapabilities(provider LLMProvider, model string, discovered ModelCapabilities, req ChatRequest) (ChatRequest, error) {
+	caps := CapabilitiesOf(provider, model).Overlay(discovered)
+	if len(req.Tools) > 0 && caps.Tools == CapabilityUnsupported {
+		return ChatRequest{}, &ModelCapabilityError{Provider: provider.Name(), Model: model, Feature: "native tool calls"}
+	}
+	if caps.ReasoningEffort == CapabilityUnsupported {
+		req.ReasoningEffort = ""
+	}
+	if caps.StructuredOutput == CapabilityUnsupported {
+		req.OutputSchema = nil
+	}
+	if caps.PromptCaching == CapabilityUnsupported {
+		req.CacheKey = ""
+		req.CacheRetention = ""
+	}
+	return req, nil
+}
 
 // One turn against the model: retry, escalation, streaming.
 //
@@ -58,11 +112,13 @@ const maxStreamAbortsPerTurn = 8
 func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, streams []StreamInterceptor, ladder []ModelRung, rung *int, frame func(snapshot string)) (ChatResponse, error) {
 	for {
 		p := ladder[*rung]
-		req.Model = p.Model
+		callReq := req
+		callReq.Model = p.Model
+		callReq, err := requestForCapabilities(p.Provider, p.Model, p.Capabilities, callReq)
 
 		// Re-resolve this rung's API key before the call so an expiring BYO token
 		// doesn't kill a long run; applied only when the provider is a KeyUpdater.
-		if a.refreshKey != nil {
+		if err == nil && a.refreshKey != nil {
 			if key, kerr := a.refreshKey(ctx, p.Provider.Name()); kerr == nil {
 				if u, ok := p.Provider.(KeyUpdater); ok {
 					u.UpdateAPIKey(key)
@@ -70,7 +126,10 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, st
 			}
 		}
 
-		resp, err := a.callRung(ctx, p, req, sink, streams, frame)
+		var resp ChatResponse
+		if err == nil {
+			resp, err = a.callRung(ctx, p, callReq, sink, streams, frame)
+		}
 		if err == nil {
 			// after_provider_response observers see the raw response before its usage
 			// is folded into the run total. Under HookThrow a failure aborts the turn.
@@ -84,7 +143,8 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, st
 		// the request itself. Escalating it would retry on a different model
 		// against a conversation that never received the correction.
 		var abort *streamAbort
-		if errors.As(err, &abort) {
+		var committed *committedStreamError
+		if errors.As(err, &abort) || errors.As(err, &committed) {
 			return ChatResponse{}, err
 		}
 		// Don't escalate on cancellation, and stop when the ladder is exhausted.
@@ -136,7 +196,8 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 		// An interceptor abort is not a transient failure: spending a same-rung
 		// retry on it would re-issue the identical request with no injection.
 		var abort *streamAbort
-		if errors.As(err, &abort) {
+		var committed *committedStreamError
+		if errors.As(err, &abort) || errors.As(err, &committed) {
 			return ChatResponse{}, err
 		}
 		lastErr = err
@@ -150,9 +211,10 @@ func (a *Agent) callRung(ctx context.Context, p ModelRung, req ChatRequest, sink
 }
 
 // streamTurn consumes the provider's delta channel for one turn, forwarding
-// content fragments to the sink as they arrive and accumulating the full
-// assistant message (text + tool calls + usage) so the Act path is identical to
-// the non-streaming turn. frame, when non-nil, receives a throttled snapshot of
+// content fragments to the sink as they arrive when no interceptor is installed
+// and holding an intercepted attempt until it is accepted. It accumulates the
+// full assistant message (text + tool calls + usage) so the Act path is identical
+// to the non-streaming turn. frame, when non-nil, receives a throttled snapshot of
 // the text accumulated SO FAR — first delta, then per frameBytes — for the
 // durable partial-frame record; it is per-attempt, so a retried stream starts
 // its snapshots fresh rather than mixing two attempts' text.
@@ -176,14 +238,21 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 	}
 	msg := Message{Role: RoleAssistant}
 	var resp ChatResponse
+	var heldTokens []string
+	committed := false
 	sinceFrame := 0
 	for d := range ch {
+		// Some providers attach their last known usage to the error delta. Merge
+		// it before inspecting Err so a failed partial stream is still accounted.
+		resp.Usage = mergeUsage(resp.Usage, d.Usage)
 		if d.Err != nil {
+			if committed {
+				return ChatResponse{}, &committedStreamError{cause: d.Err, usage: resp.Usage}
+			}
 			return ChatResponse{}, d.Err
 		}
 		if d.ContentDelta != "" {
 			msg.Content += d.ContentDelta
-			sink(StreamEvent{Type: StreamToken, Token: d.ContentDelta})
 			if len(streams) > 0 {
 				if dec := interceptStreamDelta(ctx, streams, msg.Content); dec.Abort {
 					cancel()
@@ -191,6 +260,16 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 					}
 					return ChatResponse{}, &streamAbort{inject: dec.Inject, usage: resp.Usage}
 				}
+			}
+			if len(streams) > 0 {
+				// A rule can match a later chunk, after earlier chunks already looked
+				// harmless. Hold the attempt until it completes so an aborted draft
+				// never leaks a prefix into the visible stream. Streams without rules
+				// retain true token-by-token delivery.
+				heldTokens = append(heldTokens, d.ContentDelta)
+			} else {
+				sink(StreamEvent{Type: StreamToken, Token: d.ContentDelta})
+				committed = true
 			}
 			if frame != nil {
 				sinceFrame += len(d.ContentDelta)
@@ -209,10 +288,12 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		// last-write-wins assignment on Done alone zeroes the whole turn's spend
 		// for any provider that reports early — and the run's budget gate meters
 		// on that number, so the loss is invisible until a run overshoots.
-		resp.Usage = mergeUsage(resp.Usage, d.Usage)
 		if d.Done {
 			resp.StopReason = d.StopReason
 		}
+	}
+	for _, token := range heldTokens {
+		sink(StreamEvent{Type: StreamToken, Token: token})
 	}
 	resp.Message = msg
 	return resp, nil

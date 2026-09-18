@@ -10,8 +10,8 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
+	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	sandboxplugin "github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
@@ -48,9 +48,9 @@ type BuildParams struct {
 	// ResumeSession, when true, continues the existing durable log at SessionID
 	// rather than writing a fresh run from seeds.
 	ResumeSession bool
-	Data        DataSource
-	Memory      agentcore.MemoryStore // optional
-	Notifier    usecase.Notifier      // optional; backs send_notification
+	Data          DataSource
+	Memory        agentcore.MemoryStore // optional
+	Notifier      usecase.Notifier      // optional; backs send_notification
 	// SourceRunner backs run_source/cancel_source_run for in-process agents —
 	// the same engine MCP and /api/op share. nil leaves those tools reporting
 	// unavailable.
@@ -111,6 +111,11 @@ type BuildParams struct {
 	// and resumed. nil store — the default — keeps the run in-memory only.
 	Session   agentcore.SessionStore
 	SessionID string
+	// ProviderSession is retained across short-lived Agent instances for one
+	// logical conversation. ProviderSessionID is the stable routing identity
+	// placed on provider requests; neither changes durable run-log semantics.
+	ProviderSession   *agentcore.ProviderSession
+	ProviderSessionID string
 	// SeedDisabledTools pre-disables tools in the run's circuit breaker. Empty —
 	// the default — starts every tool enabled.
 	SeedDisabledTools []string
@@ -240,14 +245,14 @@ func resolveBaseURL(configBaseURL string) string {
 // Anthropic (and any vendor without a base_url) returns nil — memory then falls
 // back to keyword recall with zero config.
 func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
-	if apiKey == "" || apiKey == ai.OAuthPoolKey {
+	if (apiKey == "" && !ai.APIKeyOptional(provider)) || apiKey == ai.OAuthPoolKey {
 		// The OAuth sentinel is not a credential — an OAuth vendor with a
 		// stored base_url would otherwise ship "Bearer oauth-pool" to
 		// {base}/embeddings and silently break vector recall.
 		return nil
 	}
-	switch provider {
-	case "", "openai":
+	switch ai.NormalizeVendor(provider) {
+	case "", "openai", ai.VendorOpenAIResponses:
 		return ai.NewOpenAIEmbedder(apiKey, resolveBaseURL(baseURL), "")
 	case "anthropic":
 		return nil
@@ -261,7 +266,7 @@ func newEmbedder(provider, baseURL, apiKey string) agentcore.Embedder {
 }
 
 // NewTierProviderWithSource builds an LLMProvider for one tier's settings,
-// applying the same routing as a run (OpenAI wire / Anthropic /
+// applying the same routing as a run (OpenAI Chat/Responses / Anthropic /
 // OpenAI-compatible vendor). Exported for the config-test endpoint so a
 // connectivity check uses the exact provider a real run would. ts is the OAuth
 // account pool a subscription vendor draws its per-request access token from —
@@ -280,7 +285,7 @@ func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSour
 // rung once, and wrapping twice would double-price the call and emit two trace
 // rows per turn.
 func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink) (agentcore.LLMProvider, error) {
-	prov, err := buildProvider(provider, baseURL, apiKey, ts)
+	prov, err := buildProvider(provider, baseURL, apiKey, ts, "")
 	if err != nil {
 		return nil, err
 	}
@@ -288,23 +293,27 @@ func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tr
 }
 
 // buildProvider constructs an LLMProvider for one tier's settings, applying the
-// §13.1 base_url precedence for the OpenAI wire and routing any non-anthropic,
-// non-openai label as an OpenAI-compatible vendor (base_url + default compat).
+// §13.1 base_url precedence for the OpenAI wires and routing any non-anthropic,
+// non-OpenAI label as an OpenAI-compatible vendor (base_url + default compat).
 // Shared by the primary rung and every escalation rung.
 //
 // It returns the RAW provider. Pricing and tracing are contributed once, by the
 // monitor plugin in the composition, which decorates every rung the run can
 // reach — primary, escalation, and compaction alike. Wrapping here as well would
 // price each call twice and emit two trace rows per turn.
-func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource) (agentcore.LLMProvider, error) {
+func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource, sessionScope string) (agentcore.LLMProvider, error) {
 	var (
 		prov agentcore.LLMProvider
 		err  error
 	)
-	switch strings.ToLower(strings.TrimSpace(provider)) {
+	switch ai.NormalizeVendor(provider) {
 	case "", "openai":
 		prov, err = ai.NewClient(ai.ClientSpec{
 			Name: "openai", APIKey: apiKey, BaseURL: resolveBaseURL(baseURL),
+		})
+	case ai.VendorOpenAIResponses:
+		prov, err = ai.NewClient(ai.ClientSpec{
+			Name: ai.VendorOpenAIResponses, APIKey: apiKey, BaseURL: resolveBaseURL(baseURL),
 		})
 	case "anthropic":
 		prov, err = ai.NewClient(ai.ClientSpec{
@@ -316,6 +325,7 @@ func buildProvider(provider, baseURL, apiKey string, ts ai.TokenSource) (agentco
 			// per request; the static key is the OAuthPoolKey sentinel.
 			prov, err = ai.NewClient(ai.ClientSpec{
 				Name: provider, BaseURL: strings.TrimSpace(baseURL), TokenSource: ts,
+				SessionScope: sessionScope,
 			})
 			break
 		}
@@ -447,6 +457,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	cfg := agentcore.Config{
 		Provider:           primary.Provider,
 		Model:              primary.Model,
+		ModelCapabilities:  primary.Capabilities,
 		ContextWindow:      primary.ContextWindow,
 		Escalation:         p.Rungs[1:],
 		CompactionProvider: p.CompactionProvider,
@@ -467,6 +478,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		// the analytics-only run is unchanged unless the runner wires these.
 		Session:              p.Session,
 		SessionID:            p.SessionID,
+		ProviderSession:      p.ProviderSession,
+		ProviderSessionID:    p.ProviderSessionID,
 		ResumeSession:        p.ResumeSession,
 		SeedDisabledTools:    p.SeedDisabledTools,
 		MaxTokens:            p.MaxTokens,

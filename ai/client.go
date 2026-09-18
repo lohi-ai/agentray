@@ -19,6 +19,10 @@ type ClientSpec struct {
 	APIKey  string
 	BaseURL string
 	Compat  Compat // optional; zero value falls back to the vendor default
+	// SessionScope distinguishes independently configured provider rows that use
+	// the same vendor/base URL. OAuth account-rotation state must never confuse
+	// two sibling pools just because both speak (for example) openai-codex.
+	SessionScope string
 	// TokenSource is the OAuth account pool a subscription vendor
 	// (claude-code | openai-codex | google-antigravity) draws per-request
 	// credentials from. Required for those vendors, ignored by the rest.
@@ -40,6 +44,8 @@ func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
 			compat = DefaultCompat()
 		}
 		return NewOpenAIProvider(spec.APIKey, spec.BaseURL, compat), nil
+	case VendorOpenAIResponses:
+		return NewOpenAIResponsesProvider(spec.APIKey, spec.BaseURL), nil
 	case "anthropic":
 		return NewAnthropicProvider(spec.APIKey, spec.BaseURL), nil
 	case VendorClaudeCode:
@@ -47,19 +53,19 @@ func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
 		// OAuth grant: Bearer auth + the CLI fingerprint, token drawn per request.
 		inner := NewAnthropicProvider("", spec.BaseURL)
 		inner.OAuth = true
-		return newPooledProvider(VendorClaudeCode, inner, spec.TokenSource)
+		return newPooledProvider(VendorClaudeCode, inner, spec.TokenSource, spec.SessionScope)
 	case VendorOpenAICodex:
 		inner := NewCodexProvider()
 		if b := strings.TrimSpace(spec.BaseURL); b != "" {
 			inner.BaseURL = strings.TrimRight(b, "/")
 		}
-		return newPooledProvider(VendorOpenAICodex, inner, spec.TokenSource)
+		return newPooledProvider(VendorOpenAICodex, inner, spec.TokenSource, spec.SessionScope)
 	case VendorGoogleAntigravity:
 		inner := NewAntigravityProvider()
 		if b := strings.TrimSpace(spec.BaseURL); b != "" {
 			inner.BaseURL = strings.TrimRight(b, "/")
 		}
-		return newPooledProvider(VendorGoogleAntigravity, inner, spec.TokenSource)
+		return newPooledProvider(VendorGoogleAntigravity, inner, spec.TokenSource, spec.SessionScope)
 	case "google", "gemini":
 		// Gemini on Google's OpenAI-compatible surface. An explicit BaseURL
 		// overrides the default endpoint (e.g. a regional proxy).

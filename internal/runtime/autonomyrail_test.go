@@ -82,7 +82,7 @@ func TestToolExternalWriteMarks(t *testing.T) {
 	if !ToolExternalWrite(sandbox.ToolHTTPRequest) {
 		t.Error("http_request must be marked external-write")
 	}
-	for _, name := range []string{sandbox.ToolWebFetch, sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolRunShell, "run_sql", "team_board", "not_a_tool"} {
+	for _, name := range []string{sandbox.ToolWebFetch, sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolLSP, sandbox.ToolEval, sandbox.ToolRunShell, "run_sql", "team_board", "not_a_tool"} {
 		if ToolExternalWrite(name) {
 			t.Errorf("%s must not be marked external-write", name)
 		}

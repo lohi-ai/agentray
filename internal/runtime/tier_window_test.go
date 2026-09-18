@@ -87,7 +87,7 @@ func TestRungsCarryEachModelsOwnWindow(t *testing.T) {
 	ts := TierSet{
 		fallback: true,
 		tiers: map[Tier]TierConfig{
-			TierFlash: {Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "k", ContextWindow: 150_000, FallbackModel: "claude-haiku-4-5"},
+			TierFlash: {Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "k", ContextWindow: 150_000, Fallback: &TierConfig{Model: "claude-haiku-4-5"}},
 		},
 	}
 	rungs, err := ts.For(TierFlash).Rungs()

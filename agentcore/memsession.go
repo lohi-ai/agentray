@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -19,16 +20,68 @@ import (
 type MemorySessionStore struct {
 	mu  sync.Mutex
 	log map[string][]SessionEntry
+
+	leaseMu sync.Mutex
+	leases  map[string]*memorySessionLease
+}
+
+type memorySessionLease struct {
+	sem  chan struct{}
+	refs int
 }
 
 var (
 	_ SessionStore      = (*MemorySessionStore)(nil)
 	_ SessionBatchStore = (*MemorySessionStore)(nil)
+	_ SessionLeaseStore = (*MemorySessionStore)(nil)
 )
 
 // NewMemorySessionStore returns an empty in-process session store.
 func NewMemorySessionStore() *MemorySessionStore {
-	return &MemorySessionStore{log: map[string][]SessionEntry{}}
+	return &MemorySessionStore{log: map[string][]SessionEntry{}, leases: map[string]*memorySessionLease{}}
+}
+
+// AcquireSessionLease serializes resumes of one session inside this process.
+// It intentionally has no cross-process claim; server deployments use the
+// PostgreSQL implementation, while laptops keep a dependency-free fast path.
+func (m *MemorySessionStore) AcquireSessionLease(ctx context.Context, id string) (context.Context, func() error, error) {
+	m.leaseMu.Lock()
+	if m.leases == nil {
+		m.leases = map[string]*memorySessionLease{}
+	}
+	lease := m.leases[id]
+	if lease == nil {
+		lease = &memorySessionLease{sem: make(chan struct{}, 1)}
+		m.leases[id] = lease
+	}
+	lease.refs++
+	m.leaseMu.Unlock()
+
+	select {
+	case lease.sem <- struct{}{}:
+	case <-ctx.Done():
+		m.dropLeaseRef(id, lease)
+		return ctx, nil, ctx.Err()
+	}
+
+	var once sync.Once
+	release := func() error {
+		once.Do(func() {
+			<-lease.sem
+			m.dropLeaseRef(id, lease)
+		})
+		return nil
+	}
+	return ctx, release, nil
+}
+
+func (m *MemorySessionStore) dropLeaseRef(id string, lease *memorySessionLease) {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	lease.refs--
+	if lease.refs == 0 && m.leases[id] == lease {
+		delete(m.leases, id)
+	}
 }
 
 // Append records one entry, assigning its sequence number.
@@ -47,6 +100,7 @@ func (m *MemorySessionStore) AppendBatch(_ context.Context, id string, entries [
 		m.log = map[string][]SessionEntry{}
 	}
 	for _, e := range entries {
+		e = cloneSessionEntry(e)
 		e.Seq = len(m.log[id])
 		m.log[id] = append(m.log[id], e)
 	}
@@ -58,8 +112,7 @@ func (m *MemorySessionStore) AppendBatch(_ context.Context, id string, entries [
 func (m *MemorySessionStore) Log(_ context.Context, id string) ([]SessionEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]SessionEntry, len(m.log[id]))
-	copy(out, m.log[id])
+	out := cloneSessionEntries(m.log[id])
 	return out, nil
 }
 
@@ -74,10 +127,72 @@ func (m *MemorySessionStore) LogFrom(_ context.Context, id string, sinceSeq int)
 	var out []SessionEntry
 	for _, e := range m.log[id] {
 		if e.Seq >= sinceSeq {
-			out = append(out, e)
+			out = append(out, cloneSessionEntry(e))
 		}
 	}
 	return out, nil
+}
+
+// cloneSessionEntry takes a complete value snapshot of an entry. SessionEntry
+// is logically immutable once appended, but several of its fields are pointers
+// or slices; copying only the outer struct lets the writer (or a Log caller)
+// mutate the store behind its lock. Durable stores get this isolation from
+// serialization, so the in-memory backend must provide the same contract.
+func cloneSessionEntry(e SessionEntry) SessionEntry {
+	out := e
+	out.Tools = slices.Clone(e.Tools)
+	out.Retained = cloneSessionMessages(e.Retained)
+	out.Question = slices.Clone(e.Question)
+	if e.Message != nil {
+		message := cloneSessionMessage(*e.Message)
+		out.Message = &message
+	}
+	if e.State != nil {
+		out.State = e.State.clone()
+	}
+	if e.Usage != nil {
+		usage := *e.Usage
+		out.Usage = &usage
+	}
+	if e.Outcome != nil {
+		outcome := *e.Outcome
+		outcome.Message = cloneSessionMessage(e.Outcome.Message)
+		outcome.Extra = cloneSessionMessages(e.Outcome.Extra)
+		out.Outcome = &outcome
+	}
+	return out
+}
+
+func cloneSessionEntries(entries []SessionEntry) []SessionEntry {
+	if entries == nil {
+		return nil
+	}
+	out := make([]SessionEntry, len(entries))
+	for i, entry := range entries {
+		out[i] = cloneSessionEntry(entry)
+	}
+	return out
+}
+
+func cloneSessionMessages(messages []Message) []Message {
+	if messages == nil {
+		return nil
+	}
+	out := make([]Message, len(messages))
+	for i, message := range messages {
+		out[i] = cloneSessionMessage(message)
+	}
+	return out
+}
+
+func cloneSessionMessage(message Message) Message {
+	out := message
+	out.ToolCalls = slices.Clone(message.ToolCalls)
+	if message.Usage != nil {
+		usage := *message.Usage
+		out.Usage = &usage
+	}
+	return out
 }
 
 // CheckpointSeq reports the newest self-contained checkpoint and whether the log

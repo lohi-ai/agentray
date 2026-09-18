@@ -25,13 +25,16 @@ type AgentRun struct {
 	ProjectID string `json:"project_id"`
 	AgentID   string `json:"agent_id"`
 	Trigger   string `json:"trigger"` // chat | scheduled | manual | webhook
-	Status    string `json:"status"`  // running | done | error
+	Status    string `json:"status"`  // running | waiting | stopped | done | error
 	// SessionID is the session this run belongs to: the client conversation id
 	// for a chat run.
-	SessionID   string  `json:"session_id,omitempty"`
-	TokenInput  int     `json:"token_input"`
-	TokenOutput int     `json:"token_output"`
-	CostUSD     float64 `json:"cost_usd"` // summed model cost for the run (§ tracing)
+	SessionID string `json:"session_id,omitempty"`
+	// DurableSessionID is the append-only AgentCore log this run resumed. Empty
+	// means the run owns a fresh log keyed by ID.
+	DurableSessionID string  `json:"durable_session_id,omitempty"`
+	TokenInput       int     `json:"token_input"`
+	TokenOutput      int     `json:"token_output"`
+	CostUSD          float64 `json:"cost_usd"` // summed model cost for the run (§ tracing)
 	// CostUnpriced is true when CostUSD understates the run's real spend — at
 	// least one of its LLM calls billed against a model with no price-table
 	// entry, so that call's contribution is 0 rather than a real number. A
@@ -81,13 +84,21 @@ type AgentToolCall struct {
 // sessionID is the client conversation id a chat run belongs to (empty for
 // scheduled/webhook runs), so the client can reattach to the run after leaving.
 func (s *Store) CreateAgentRun(ctx context.Context, projectID, agentID, trigger, sessionID string) (string, error) {
+	return s.CreateAgentRunWithDurableSession(ctx, projectID, agentID, trigger, sessionID, "")
+}
+
+// CreateAgentRunWithDurableSession records the durable log identity inherited
+// by a continuation. The compatibility wrapper above keeps ordinary callers
+// and fresh runs unchanged.
+func (s *Store) CreateAgentRunWithDurableSession(ctx context.Context, projectID, agentID, trigger, sessionID, durableSessionID string) (string, error) {
 	if agentID == "" {
 		agentID = projectID
 	}
 	var id string
 	err := s.pg.QueryRow(ctx, `
-INSERT INTO agent_runs (project_id, agent_id, trigger, status, session_id) VALUES ($1, $2, $3, 'running', $4)
-RETURNING id::text`, projectID, agentID, trigger, sessionID).Scan(&id)
+INSERT INTO agent_runs (project_id, agent_id, trigger, status, session_id, durable_session_id)
+VALUES ($1, $2, $3, 'running', $4, $5)
+RETURNING id::text`, projectID, agentID, trigger, sessionID, durableSessionID).Scan(&id)
 	return id, err
 }
 
@@ -101,9 +112,10 @@ func (s *Store) LatestRunForSession(ctx context.Context, userID, projectID, sess
 	}
 	var r AgentRun
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status,
+       coalesce(session_id, ''), coalesce(durable_session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs WHERE project_id = $1 AND session_id = $2 ORDER BY started_at DESC LIMIT 1`, project.ID, sessionID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.DurableSessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
 	if err != nil {
 		return AgentRun{}, err
 	}
@@ -120,13 +132,23 @@ func (s *Store) LatestWaitingRunForSession(ctx context.Context, userID, projectI
 	}
 	var r AgentRun
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status,
+       coalesce(session_id, ''), coalesce(durable_session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at
 FROM agent_runs WHERE project_id = $1 AND session_id = $2 AND status = 'waiting' ORDER BY started_at DESC LIMIT 1`, project.ID, sessionID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.DurableSessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt)
 	if err != nil {
 		return AgentRun{}, err
 	}
 	return r, nil
+}
+
+// AgentRunStatus returns the current status for an internal run id. Runtime
+// answer handling calls it after acquiring durable-session ownership to
+// revalidate a row selected before it may have waited on another replica.
+func (s *Store) AgentRunStatus(ctx context.Context, runID string) (string, error) {
+	var status string
+	err := s.pg.QueryRow(ctx, `SELECT status FROM agent_runs WHERE id = $1`, runID).Scan(&status)
+	return status, err
 }
 
 // SweepStaleRuns marks runs stuck past their deadline as errored, so a run
@@ -264,9 +286,9 @@ func (s *Store) GetAgentRun(ctx context.Context, userID, projectID, runID string
 	var r AgentRun
 	var advisorRaw string
 	err = s.pg.QueryRow(ctx, `
-SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at, advisor_notes_json::text
+SELECT id::text, project_id::text, coalesce(agent_id, project_id)::text, trigger, status, coalesce(session_id, ''), coalesce(durable_session_id, ''), token_input, token_output, cost_usd, cost_unpriced, summary, started_at, finished_at, advisor_notes_json::text
 FROM agent_runs WHERE id = $1 AND project_id = $2`, runID, project.ID).
-		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt, &advisorRaw)
+		Scan(&r.ID, &r.ProjectID, &r.AgentID, &r.Trigger, &r.Status, &r.SessionID, &r.DurableSessionID, &r.TokenInput, &r.TokenOutput, &r.CostUSD, &r.CostUnpriced, &r.Summary, &r.StartedAt, &r.FinishedAt, &advisorRaw)
 	if err != nil {
 		return AgentRun{}, nil, err
 	}

@@ -833,8 +833,9 @@ export type WorkspaceProvider = {
   base_url: string;
   has_key: boolean;
   /** "key" for pasted API keys, "oauth" for subscription vendors whose
-   *  credential is a pool of signed-in accounts. */
-  auth_type?: 'key' | 'oauth';
+   * credential is a pool of signed-in accounts, or "optional" for local
+   * engines that can run without a key. */
+  auth_type?: 'key' | 'oauth' | 'optional';
   /** Active accounts in the pool (oauth providers only). */
   account_count?: number;
 };
@@ -892,6 +893,19 @@ export type ListedWorkspaceModel = {
   id: string;
   /** Input window in tokens as the provider reported it, or 0 when unknown. */
   context_window?: number;
+  capabilities?: ModelCapabilities;
+};
+
+export type CapabilitySupport = 'supported' | 'unsupported';
+
+export type ModelCapabilities = {
+  tools?: CapabilitySupport;
+  tool_choice?: CapabilitySupport;
+  reasoning_effort?: CapabilitySupport;
+  image_input?: CapabilitySupport;
+  structured_output?: CapabilitySupport;
+  prompt_caching?: CapabilitySupport;
+  stateful_responses?: CapabilitySupport;
 };
 
 export type ListedWorkspaceModels = {
@@ -928,11 +942,32 @@ export type WorkspaceModelTiers = {
   context_window?: number;
   lite_context_window?: number;
   pro_context_window?: number;
-  /** Per-tier fallback model — a model id on the tier's own provider, retried
-   *  when the tier's model call fails. Empty means no fallback. */
+  capabilities?: ModelCapabilities;
+  lite_capabilities?: ModelCapabilities;
+  pro_capabilities?: ModelCapabilities;
+  /** Per-tier fallback — a (provider, model) pair retried when the tier's
+   *  model call fails. A blank provider id keeps the fallback on the tier's
+   *  own provider; a set one crosses providers. Empty model means no
+   *  fallback. The resolved provider's vendor/base/has_key ride along so a
+   *  client can label the rung without a second lookup. */
   fallback_model?: string;
+  fallback_provider_id?: string;
+  fallback_provider?: string;
+  fallback_base_url?: string;
+  fallback_has_key?: boolean;
+  fallback_capabilities?: ModelCapabilities;
   lite_fallback_model?: string;
+  lite_fallback_provider_id?: string;
+  lite_fallback_provider?: string;
+  lite_fallback_base_url?: string;
+  lite_fallback_has_key?: boolean;
+  lite_fallback_capabilities?: ModelCapabilities;
   pro_fallback_model?: string;
+  pro_fallback_provider_id?: string;
+  pro_fallback_provider?: string;
+  pro_fallback_base_url?: string;
+  pro_fallback_has_key?: boolean;
+  pro_fallback_capabilities?: ModelCapabilities;
 };
 
 export type WorkspaceModelTiersInput = {
@@ -955,9 +990,18 @@ export type WorkspaceModelTiersInput = {
   context_window?: number;
   lite_context_window?: number;
   pro_context_window?: number;
+  capabilities?: ModelCapabilities;
+  lite_capabilities?: ModelCapabilities;
+  pro_capabilities?: ModelCapabilities;
   fallback_model?: string;
+  fallback_provider_id?: string;
+  fallback_capabilities?: ModelCapabilities;
   lite_fallback_model?: string;
+  lite_fallback_provider_id?: string;
+  lite_fallback_capabilities?: ModelCapabilities;
   pro_fallback_model?: string;
+  pro_fallback_provider_id?: string;
+  pro_fallback_capabilities?: ModelCapabilities;
 };
 
 // --- Alerting (#1) ---

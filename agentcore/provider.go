@@ -7,7 +7,80 @@
 // package doc, including the boundary rules this file rests on, is in doc.go.
 package agentcore
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// CapabilitySupport is a tri-state answer about one model feature. Unknown is
+// deliberately distinct from unsupported: third-party and local providers
+// frequently omit capability metadata, and treating absence as false would
+// silently remove working features after an upgrade.
+type CapabilitySupport string
+
+const (
+	CapabilityUnknown     CapabilitySupport = ""
+	CapabilitySupported   CapabilitySupport = "supported"
+	CapabilityUnsupported CapabilitySupport = "unsupported"
+)
+
+// ModelCapabilities describes request features a provider/model pair accepts.
+// It is provider-neutral policy data, not a catalog: adapters may derive it
+// from their wire contract, live discovery, or both. Unknown fields preserve
+// the request exactly as authored.
+type ModelCapabilities struct {
+	Tools             CapabilitySupport `json:"tools,omitempty"`
+	ToolChoice        CapabilitySupport `json:"tool_choice,omitempty"`
+	ReasoningEffort   CapabilitySupport `json:"reasoning_effort,omitempty"`
+	ImageInput        CapabilitySupport `json:"image_input,omitempty"`
+	StructuredOutput  CapabilitySupport `json:"structured_output,omitempty"`
+	PromptCaching     CapabilitySupport `json:"prompt_caching,omitempty"`
+	StatefulResponses CapabilitySupport `json:"stateful_responses,omitempty"`
+}
+
+// Overlay returns c with every known field from newer replacing it. This is
+// used when live model metadata refines conservative adapter defaults.
+func (c ModelCapabilities) Overlay(newer ModelCapabilities) ModelCapabilities {
+	if newer.Tools != CapabilityUnknown {
+		c.Tools = newer.Tools
+	}
+	if newer.ToolChoice != CapabilityUnknown {
+		c.ToolChoice = newer.ToolChoice
+	}
+	if newer.ReasoningEffort != CapabilityUnknown {
+		c.ReasoningEffort = newer.ReasoningEffort
+	}
+	if newer.ImageInput != CapabilityUnknown {
+		c.ImageInput = newer.ImageInput
+	}
+	if newer.StructuredOutput != CapabilityUnknown {
+		c.StructuredOutput = newer.StructuredOutput
+	}
+	if newer.PromptCaching != CapabilityUnknown {
+		c.PromptCaching = newer.PromptCaching
+	}
+	if newer.StatefulResponses != CapabilityUnknown {
+		c.StatefulResponses = newer.StatefulResponses
+	}
+	return c
+}
+
+// Validate rejects capability values outside the wire contract. It is used at
+// configuration boundaries so an arbitrary string cannot become a silently
+// ignored fourth state.
+func (c ModelCapabilities) Validate() error {
+	for name, value := range map[string]CapabilitySupport{
+		"tools": c.Tools, "tool_choice": c.ToolChoice,
+		"reasoning_effort": c.ReasoningEffort, "image_input": c.ImageInput,
+		"structured_output": c.StructuredOutput, "prompt_caching": c.PromptCaching,
+		"stateful_responses": c.StatefulResponses,
+	} {
+		if value != CapabilityUnknown && value != CapabilitySupported && value != CapabilityUnsupported {
+			return fmt.Errorf("%s capability must be supported, unsupported, or empty", name)
+		}
+	}
+	return nil
+}
 
 // Role identifies the author of a Message.
 type Role string
@@ -118,6 +191,15 @@ type ChatRequest struct {
 	Tools       []ToolSchema `json:"tools,omitempty"`
 	Temperature float64      `json:"temperature,omitempty"`
 	MaxTokens   int          `json:"max_tokens,omitempty"`
+	// SessionID is the stable logical-conversation identity providers may use
+	// for request affinity or server-side turn chaining. It is deliberately
+	// distinct from the durable run-log id: one user conversation spans several
+	// short-lived Agent instances and run logs.
+	SessionID string `json:"session_id,omitempty"`
+	// ProviderSession carries provider-private mutable state across those Agent
+	// instances. It is never serialized onto a provider wire; adapters opt into
+	// concrete records through ProviderSession.State.
+	ProviderSession *ProviderSession `json:"-"`
 	// CacheKey, when set, opts this call into provider prompt caching: a provider
 	// that supports it reuses a cached prefix across calls sharing the key (OpenAI's
 	// prompt_cache_key; Anthropic marks the stable prefix with cache_control). It is
@@ -200,6 +282,32 @@ type LLMProvider interface {
 	Chat(ctx context.Context, req ChatRequest) (ChatResponse, error)
 	Stream(ctx context.Context, req ChatRequest) (<-chan ChatDelta, error)
 	SupportsTools() bool
+}
+
+// ModelCapabilityProvider is an optional LLMProvider capability. The model is
+// explicit because one provider endpoint may serve heterogeneous local or
+// routed models. Providers should return CapabilityUnknown for facts they do
+// not know rather than guessing unsupported.
+type ModelCapabilityProvider interface {
+	ModelCapabilities(model string) ModelCapabilities
+}
+
+// CapabilitiesOf resolves the optional model-level contract and fills only the
+// legacy provider-wide tools fact when the model answer is unknown. It is the
+// single compatibility bridge for providers that predate ModelCapabilityProvider.
+func CapabilitiesOf(provider LLMProvider, model string) ModelCapabilities {
+	var caps ModelCapabilities
+	if p, ok := provider.(ModelCapabilityProvider); ok {
+		caps = p.ModelCapabilities(model)
+	}
+	if caps.Tools == CapabilityUnknown {
+		if provider.SupportsTools() {
+			caps.Tools = CapabilitySupported
+		} else {
+			caps.Tools = CapabilityUnsupported
+		}
+	}
+	return caps
 }
 
 // KeyUpdater is an optional LLMProvider capability: a provider that holds a

@@ -44,10 +44,11 @@ func TierFromName(name string) Tier {
 // inherits the flash default at resolution time, so the common "one provider +
 // key, different model per tier" setup needs the key entered only once.
 type TierConfig struct {
-	Provider string
-	Model    string
-	BaseURL  string
-	APIKey   string
+	Provider     string
+	Model        string
+	Capabilities agentcore.ModelCapabilities
+	BaseURL      string
+	APIKey       string
 	// ProviderID is the workspace_providers row this tier draws from ("" for
 	// legacy provider-string tiers and the hosted default). OAuth vendors need
 	// it: their credential is the account pool hanging off that row.
@@ -61,9 +62,16 @@ type TierConfig struct {
 	// know a self-hosted endpoint's window, and being wrong high there means the
 	// run dies at the provider rather than compacting.
 	ContextWindow int
-	// FallbackModel is an optional second model on the SAME provider the run
-	// retries on when the primary model fails. It is the tier's whole fallback
-	// mechanism — there is no cross-tier escalation.
+	// Fallback is the rung the run retries on when the primary model fails —
+	// a full provider+model spec, so it may cross providers (its own vendor,
+	// credentials, OAuth pool, derived window). Nil means no fallback; a
+	// Fallback with a blank Provider means "same provider, different model"
+	// and reuses the primary provider instance. There is no cross-tier
+	// escalation — this is the tier's whole fallback mechanism.
+	Fallback *TierConfig
+	// FallbackModel is the backward-compatible same-provider shorthand. New
+	// resolution code populates both it and Fallback; callers constructing a
+	// TierConfig directly may continue setting only this field.
 	FallbackModel string
 }
 
@@ -94,7 +102,7 @@ func (t ModelTier) EffectiveWindow() int { return EffectiveContextWindow(t.TierC
 // raw client because the composition's monitor plugin prices and traces every
 // rung itself — wrapping here would double-count.
 func (t ModelTier) RawProvider() (agentcore.LLMProvider, error) {
-	return buildProvider(t.Provider, t.BaseURL, t.APIKey, t.TokenSource)
+	return buildProvider(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID)
 }
 
 // TracedProvider builds the tier's provider wrapped for pricing + tracing —
@@ -105,10 +113,10 @@ func (t ModelTier) TracedProvider(tracer observe.Sink) (agentcore.LLMProvider, e
 }
 
 // Rungs builds the model ladder for a run on this tier: the primary model
-// first, then the fallback model as a second rung of the same provider when
-// one is configured. The fallback rung's window is derived from its own model
-// id — the operator's ContextWindow override describes the primary model and
-// must not leak onto a different one.
+// first, then the fallback rung when one is configured. A fallback on the
+// tier's own provider reuses the primary provider instance; a fallback that
+// names a different provider gets its own client — its credentials, OAuth
+// pool, and derived context window are its own, never the primary's.
 func (t ModelTier) Rungs() ([]agentcore.ModelRung, error) {
 	prov, err := t.RawProvider()
 	if err != nil {
@@ -117,16 +125,49 @@ func (t ModelTier) Rungs() ([]agentcore.ModelRung, error) {
 	rungs := []agentcore.ModelRung{{
 		Provider:      prov,
 		Model:         t.Model,
+		Capabilities:  t.Capabilities,
 		ContextWindow: t.EffectiveWindow(),
 	}}
-	if fb := strings.TrimSpace(t.FallbackModel); fb != "" && fb != t.Model {
-		rungs = append(rungs, agentcore.ModelRung{
-			Provider:      prov,
-			Model:         fb,
-			ContextWindow: ai.ContextWindowFor(t.Provider, fb),
-		})
+	fb := t.Fallback
+	if fb == nil && strings.TrimSpace(t.FallbackModel) != "" {
+		// Same-provider shorthand: a directly-built tier may set only the
+		// model id — resolve() normalizes it into Fallback, but a caller that
+		// skips resolve still gets its second rung.
+		fb = &TierConfig{Model: t.FallbackModel}
 	}
-	return rungs, nil
+	if fb == nil || strings.TrimSpace(fb.Model) == "" {
+		return rungs, nil
+	}
+	// Cross-provider means a different provider ROW, not just a different
+	// vendor: two rows can share vendor and base URL yet hold different keys,
+	// and the fallback must authenticate with its own. A row-less fallback
+	// (legacy same-provider) falls through to the shared-instance path.
+	crossProvider := fb.ProviderID != "" && fb.ProviderID != t.ProviderID
+	if !crossProvider && strings.TrimSpace(fb.Provider) != "" {
+		crossProvider = ai.NormalizeVendor(fb.Provider) != ai.NormalizeVendor(t.Provider) ||
+			strings.TrimSpace(fb.BaseURL) != strings.TrimSpace(t.BaseURL)
+	}
+	if !crossProvider {
+		if fb.Model == t.Model {
+			return rungs, nil
+		}
+		return append(rungs, agentcore.ModelRung{
+			Provider:      prov,
+			Model:         fb.Model,
+			Capabilities:  fb.Capabilities,
+			ContextWindow: ai.ContextWindowFor(t.Provider, fb.Model),
+		}), nil
+	}
+	fbProv, err := buildProvider(fb.Provider, fb.BaseURL, fb.APIKey, fb.TokenSource, fb.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	return append(rungs, agentcore.ModelRung{
+		Provider:      fbProv,
+		Model:         fb.Model,
+		Capabilities:  fb.Capabilities,
+		ContextWindow: ai.ContextWindowFor(fb.Provider, fb.Model),
+	}), nil
 }
 
 // TierSet is the workspace's tier pool resolved for one run: the per-tier
@@ -139,10 +180,11 @@ type TierSet struct {
 }
 
 // For resolves a task's tier into a ready-to-use ModelTier: flash inheritance
-// applied, fallback model attached when the workspace switch allows it.
+// applied, fallback attached when the workspace switch allows it.
 func (ts TierSet) For(tier Tier) ModelTier {
 	tc := ts.resolve(tier)
 	if !ts.fallback {
+		tc.Fallback = nil
 		tc.FallbackModel = ""
 	}
 	return ModelTier{TierConfig: tc}
@@ -161,6 +203,12 @@ func (ts TierSet) KeyFor(provider string) (string, error) {
 		tc := ts.resolve(tier)
 		if ai.NormalizeVendor(tc.Provider) == want && tc.APIKey != "" {
 			return tc.APIKey, nil
+		}
+		// A provider used only as a fallback rung still needs its key
+		// refreshed mid-run — scan fallback configs too.
+		if fb := tc.Fallback; fb != nil &&
+			ai.NormalizeVendor(fb.Provider) == want && fb.APIKey != "" {
+			return fb.APIKey, nil
 		}
 	}
 	return "", fmt.Errorf("agentruntime: no key for provider %q on key refresh", provider)
@@ -194,6 +242,7 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 	}
 	if strings.TrimSpace(c.Model) != "" {
 		out.Model = c.Model
+		out.Capabilities = c.Capabilities
 	}
 	if strings.TrimSpace(c.BaseURL) != "" {
 		out.BaseURL = c.BaseURL
@@ -201,12 +250,18 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 	if c.APIKey != "" {
 		out.APIKey = c.APIKey
 	}
-	// The fallback model belongs to the tier's provider. A tier that points at
-	// a different provider cannot keep flash's fallback — that model may not
-	// exist there — but a model-only override on the same provider inherits it.
-	if strings.TrimSpace(c.FallbackModel) != "" {
+	// The fallback belongs to the tier's provider unless it names its own. A
+	// tier that points at a different provider cannot keep flash's fallback —
+	// that pair may not exist there — but a model-only override on the same
+	// provider inherits it, and a tier's own fallback always wins.
+	if c.Fallback != nil && strings.TrimSpace(c.Fallback.Model) != "" {
+		out.Fallback = c.Fallback
+		out.FallbackModel = c.Fallback.Model
+	} else if strings.TrimSpace(c.FallbackModel) != "" {
 		out.FallbackModel = c.FallbackModel
+		out.Fallback = &TierConfig{Model: c.FallbackModel}
 	} else if strings.TrimSpace(c.ProviderID) != "" || strings.TrimSpace(c.Provider) != "" {
+		out.Fallback = nil
 		out.FallbackModel = ""
 	}
 	// The window is the one field that must NOT simply inherit flash's value: it
@@ -241,11 +296,32 @@ func TierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]strin
 		}
 		return poolFor(providerID)
 	}
+	// fb assembles one tier's fallback rung spec. A blank provider id keeps
+	// the fallback on the tier's own provider (model-only spec — Rungs reuses
+	// the primary client); a set one carries the resolved provider's vendor,
+	// base URL, key slot, and OAuth pool.
+	fb := func(model, providerID, provider, baseURL, key string, capabilities agentcore.ModelCapabilities) *TierConfig {
+		if strings.TrimSpace(model) == "" {
+			return nil
+		}
+		return &TierConfig{
+			Provider:     provider,
+			Model:        model,
+			BaseURL:      baseURL,
+			APIKey:       key,
+			ProviderID:   providerID,
+			TokenSource:  src(provider, providerID),
+			Capabilities: capabilities,
+		}
+	}
 	return TierSet{
 		tiers: map[Tier]TierConfig{
-			TierFlash: {Provider: cfg.Provider, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ProviderID: cfg.FlashProviderID, TokenSource: src(cfg.Provider, cfg.FlashProviderID), ContextWindow: cfg.ContextWindow, FallbackModel: cfg.FallbackModel},
-			TierLite:  {Provider: cfg.LiteProvider, Model: cfg.LiteModel, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ProviderID: cfg.LiteProviderID, TokenSource: src(cfg.LiteProvider, cfg.LiteProviderID), ContextWindow: cfg.LiteContextWindow, FallbackModel: cfg.LiteFallbackModel},
-			TierPro:   {Provider: cfg.ProProvider, Model: cfg.ProModel, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ProviderID: cfg.ProProviderID, TokenSource: src(cfg.ProProvider, cfg.ProProviderID), ContextWindow: cfg.ProContextWindow, FallbackModel: cfg.ProFallbackModel},
+			TierFlash: {Provider: cfg.Provider, Model: cfg.Model, Capabilities: cfg.Capabilities, BaseURL: cfg.BaseURL, APIKey: keys["flash"], ProviderID: cfg.FlashProviderID, TokenSource: src(cfg.Provider, cfg.FlashProviderID), ContextWindow: cfg.ContextWindow,
+				Fallback: fb(cfg.FallbackModel, cfg.FallbackProviderID, cfg.FallbackProvider, cfg.FallbackBaseURL, keys["flash_fallback"], cfg.FallbackCapabilities), FallbackModel: cfg.FallbackModel},
+			TierLite: {Provider: cfg.LiteProvider, Model: cfg.LiteModel, Capabilities: cfg.LiteCapabilities, BaseURL: cfg.LiteBaseURL, APIKey: keys["lite"], ProviderID: cfg.LiteProviderID, TokenSource: src(cfg.LiteProvider, cfg.LiteProviderID), ContextWindow: cfg.LiteContextWindow,
+				Fallback: fb(cfg.LiteFallbackModel, cfg.LiteFallbackProviderID, cfg.LiteFallbackProvider, cfg.LiteFallbackBaseURL, keys["lite_fallback"], cfg.LiteFallbackCapabilities), FallbackModel: cfg.LiteFallbackModel},
+			TierPro: {Provider: cfg.ProProvider, Model: cfg.ProModel, Capabilities: cfg.ProCapabilities, BaseURL: cfg.ProBaseURL, APIKey: keys["pro"], ProviderID: cfg.ProProviderID, TokenSource: src(cfg.ProProvider, cfg.ProProviderID), ContextWindow: cfg.ProContextWindow,
+				Fallback: fb(cfg.ProFallbackModel, cfg.ProFallbackProviderID, cfg.ProFallbackProvider, cfg.ProFallbackBaseURL, keys["pro_fallback"], cfg.ProFallbackCapabilities), FallbackModel: cfg.ProFallbackModel},
 		},
 		fallback: cfg.ModelFallback,
 	}

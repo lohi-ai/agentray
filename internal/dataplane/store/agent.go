@@ -467,6 +467,10 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		// finishes on a detached context independent of the SSE connection. Additive
 		// + defaulted, so scheduled/webhook runs (no session) read back ''.
 		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS session_id VARCHAR(64) NOT NULL DEFAULT ''`,
+		// The durable log may belong to an earlier parked run. Continuation rows
+		// retain that identity so a second ask resumes the same event stream rather
+		// than looking for entries under the continuation's fresh run id.
+		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS durable_session_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS agent_runs_session_idx ON agent_runs (project_id, session_id, started_at DESC) WHERE session_id <> ''`,
 		// Cross-agent delegation grants (ARCHITECT-AGENT-TEAM delegate, pulled
 		// forward): which OTHER agents this agent may hand a task to through
@@ -562,6 +566,22 @@ ON CONFLICT (workspace_id) DO NOTHING`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
 		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_fallback_model VARCHAR(128) NOT NULL DEFAULT ''`,
+		// Per-tier fallback provider: when set, the fallback model runs on THIS
+		// provider row instead of the tier's own — the cross-provider rung of the
+		// escalation ladder. Nullable like the primary pointers (no FK: a deleted
+		// provider clears the pointer in DeleteProvider, not the database).
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS fallback_provider_id UUID`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_fallback_provider_id UUID`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_fallback_provider_id UUID`,
+		// Sparse capability snapshots captured from live model discovery when a
+		// tier is selected. JSONB keeps the contract additive as providers expose
+		// new facts; '{}' means unknown and preserves optimistic legacy behavior.
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS fallback_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS lite_fallback_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE workspace_model_tiers ADD COLUMN IF NOT EXISTS pro_fallback_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb`,
 		// Provenance: which marketplace preset (internal/workloads.Pack.Slug) an
 		// agent was hired from, if any — empty for a hand-created agent. This is
 		// what lets the marketplace tell "already hired" from "not hired yet"

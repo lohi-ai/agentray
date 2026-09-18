@@ -83,6 +83,7 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 		ModelPlugin{
 			Provider:        cfg.Provider,
 			Model:           cfg.Model,
+			Capabilities:    cfg.ModelCapabilities,
 			ContextWindow:   cfg.ContextWindow,
 			Escalation:      cfg.Escalation,
 			Retry:           cfg.Retry,
@@ -103,6 +104,8 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 			ID:                cfg.SessionID,
 			Resume:            cfg.ResumeSession,
 			SeedDisabledTools: cfg.SeedDisabledTools,
+			ProviderState:     cfg.ProviderSession,
+			ProviderSessionID: cfg.ProviderSessionID,
 		},
 		CompactionPlugin{
 			Settings: cfg.Compaction,
@@ -216,6 +219,7 @@ func (r *Registry) build() (*Agent, error) {
 		refreshKey:         r.refreshKey,
 		escalation:         wrapRungs(r.providerWrappers, r.escalation),
 		contextWindow:      r.contextWindow,
+		modelCapabilities:  r.modelCapabilities,
 		getSteering:        r.getSteering,
 		getFollowUp:        r.getFollowUp,
 		goal:               r.goal,
@@ -223,6 +227,8 @@ func (r *Registry) build() (*Agent, error) {
 		budgetGate:         r.budgetGate,
 		session:            r.session,
 		sessionID:          r.sessionID,
+		providerSession:    r.providerSession,
+		providerSessionID:  r.providerSessionID,
 		resumeSession:      r.promptResume,
 		stepGate:           r.stepGate,
 		retry:              r.retry,

@@ -229,6 +229,36 @@ func (d *DuckDB) migrate(ctx context.Context) error {
 				return fmt.Errorf("duckdb schema: %w", err)
 			}
 		}
+		// utm_* columns are NOT NULL in the schema but arrive via ADD COLUMN,
+		// which DuckDB cannot do with the constraint attached. Tighten only the
+		// ones still nullable: ALTER ... SET NOT NULL writes a WAL entry that
+		// crashes duckdb-go 2.10505's replay on the next open, so running it
+		// unconditionally would brick every restart.
+		rows, err := tx.QueryContext(ctx,
+			`SELECT column_name FROM information_schema.columns
+			 WHERE table_name = 'events' AND is_nullable = 'YES'
+			   AND column_name IN ('utm_source','utm_medium','utm_campaign','utm_term','utm_content')`)
+		if err != nil {
+			return fmt.Errorf("duckdb schema: %w", err)
+		}
+		var nullable []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("duckdb schema: %w", err)
+			}
+			nullable = append(nullable, name)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("duckdb schema: %w", err)
+		}
+		for _, col := range nullable {
+			if _, err := tx.ExecContext(ctx,
+				`ALTER TABLE events ALTER COLUMN `+col+` SET NOT NULL`); err != nil {
+				return fmt.Errorf("duckdb schema: %w", err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_meta (name, version) VALUES ('schema', ?)`,
 			DuckDBSchemaVersion); err != nil {
@@ -299,16 +329,22 @@ var duckDBSchema = []string{
 	// both statements are safe on a file that already has the column.
 	// The sandbox schema (duckdb_sandbox.go) mirrors this column order
 	// exactly — its refresh copies SELECT *, so the two lists must never drift.
+	// Column additions for files created before the UTM tags existed: CREATE
+	// TABLE IF NOT EXISTS leaves an existing events table alone, so the same
+	// columns are added here idempotently. DuckDB cannot ADD COLUMN with
+	// NOT NULL in one statement, so each column lands nullable-with-default
+	// (existing rows backfill to '') and the constraint is applied after.
+	// The SET NOT NULL itself is gated on the column still being nullable:
+	// replaying an ALTER ... SET NOT NULL WAL entry crashes duckdb-go
+	// 2.10505 on open, so the statement must only run when it changes
+	// something — an unconditional one poisons every restart.
+	// The sandbox schema (duckdb_sandbox.go) mirrors this column order
+	// exactly — its refresh copies SELECT *, so the two lists must never drift.
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_source VARCHAR DEFAULT ''`,
-	`ALTER TABLE events ALTER COLUMN utm_source SET NOT NULL`,
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_medium VARCHAR DEFAULT ''`,
-	`ALTER TABLE events ALTER COLUMN utm_medium SET NOT NULL`,
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR DEFAULT ''`,
-	`ALTER TABLE events ALTER COLUMN utm_campaign SET NOT NULL`,
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_term VARCHAR DEFAULT ''`,
-	`ALTER TABLE events ALTER COLUMN utm_term SET NOT NULL`,
 	`ALTER TABLE events ADD COLUMN IF NOT EXISTS utm_content VARCHAR DEFAULT ''`,
-	`ALTER TABLE events ALTER COLUMN utm_content SET NOT NULL`,
 	// aliases mirrors the Postgres source of truth (reconciled at boot,
 	// upserted on write). resolved_events joins through it for canonical-id
 	// stitching.

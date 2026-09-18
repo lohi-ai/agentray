@@ -34,6 +34,45 @@ func TestFlatLogActivePathIsWholeLog(t *testing.T) {
 	}
 }
 
+func TestLinearActivePathRecognizesOnlyAnUnbranchedLog(t *testing.T) {
+	linear := []SessionEntry{
+		msgEntry("one", "", RoleUser, "one"),
+		{Kind: EntryToolProgress, CallID: "call", Content: "half"},
+		msgEntry("two", "one", RoleAssistant, "two"),
+		{Kind: EntryLeafMove}, // an empty legacy control record changes nothing
+		msgEntry("three", "two", RoleUser, "three"),
+	}
+	path, ok := linearActivePath(linear)
+	if !ok {
+		t.Fatal("linear production-shaped log was sent through tree fallback")
+	}
+	if len(path) != 3 || path[0].ID != "one" || path[1].ID != "two" || path[2].ID != "three" {
+		t.Fatalf("linear path = %+v", path)
+	}
+
+	for name, log := range map[string][]SessionEntry{
+		"explicit branch": {
+			msgEntry("one", "", RoleUser, "one"),
+			msgEntry("two", "one", RoleAssistant, "two"),
+			msgEntry("fork", "one", RoleAssistant, "fork"),
+		},
+		"leaf move": {
+			msgEntry("one", "", RoleUser, "one"),
+			{Kind: EntryLeafMove, Target: "one"},
+		},
+		"duplicate id": {
+			msgEntry("same", "", RoleUser, "one"),
+			msgEntry("same", "same", RoleAssistant, "two"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := linearActivePath(log); ok {
+				t.Fatal("non-linear log bypassed the tree algorithm")
+			}
+		})
+	}
+}
+
 // TestBranchByParentIDForksThePath verifies pi's append-is-branch model: an
 // entry whose ParentID names an earlier entry forks the tree, and the active
 // path follows the new branch while the abandoned one stays in the log.

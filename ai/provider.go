@@ -19,6 +19,9 @@ type Model struct {
 	// fallback, otherwise 0 for "unknown". It is what the compaction budget is
 	// capped against, so 0 must stay distinguishable from a real number.
 	ContextWindow int `json:"context_window,omitempty"`
+	// Capabilities is sparse tri-state metadata. Missing fields mean unknown,
+	// not unsupported; explicit live discovery values refine adapter defaults.
+	Capabilities agentcore.ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 // Provider is the runtime unit: identity, auth, live model list, Chat/Stream.
@@ -32,8 +35,8 @@ type Provider interface {
 	ListModels(ctx context.Context) ([]Model, error)
 }
 
-// Spec constructs a provider. Vendor is openai | anthropic | google | gemini,
-// an OAuth subscription vendor (claude-code | openai-codex |
+// Spec constructs a provider. Vendor is openai | openai-responses | anthropic |
+// google | gemini, an OAuth subscription vendor (claude-code | openai-codex |
 // google-antigravity), or any OpenAI-compatible name (which requires BaseURL).
 // ID is the caller's stable handle (a workspace provider row id); empty ID
 // falls back to Vendor.
@@ -55,6 +58,8 @@ func NormalizeVendor(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "openai":
 		return "openai"
+	case "openai-responses", "openai-response", "responses":
+		return VendorOpenAIResponses
 	case "anthropic":
 		return "anthropic"
 	case "google", "gemini":
@@ -63,6 +68,21 @@ func NormalizeVendor(v string) string {
 		return "openai-compat"
 	default:
 		return strings.ToLower(strings.TrimSpace(v))
+	}
+}
+
+// APIKeyOptional reports OpenAI-compatible engines whose normal local/self-
+// hosted deployment accepts unauthenticated requests. These are explicit
+// vendor identities rather than a hostname heuristic so the same configuration
+// works on a laptop (localhost) and a server (a private service/DNS name). A
+// supplied key is still sent, which supports secured deployments of the same
+// engines.
+func APIKeyOptional(vendor string) bool {
+	switch strings.ToLower(strings.TrimSpace(vendor)) {
+	case "ollama", "lm-studio", "lmstudio", "llama.cpp", "llama-cpp", "vllm", "localai", "local-ai", "litellm":
+		return true
+	default:
+		return false
 	}
 }
 

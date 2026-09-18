@@ -58,6 +58,9 @@ type Agent struct {
 	// The loop treats the primary as rung zero of the ladder, so this is the same
 	// fact ModelRung.ContextWindow carries for the rest.
 	contextWindow int
+	// modelCapabilities is a discovery snapshot for the primary rung. Known
+	// values override adapter defaults; unknown fields leave them intact.
+	modelCapabilities ModelCapabilities
 	// getSteering, when set, is drained at the top of every turn: any messages it
 	// returns are threaded into the conversation before the model reasons, so a
 	// user can inject a mid-run correction honored on the next turn (pi's steering
@@ -89,6 +92,11 @@ type Agent struct {
 	// durability — the run is purely in-memory.
 	session   SessionStore
 	sessionID string
+	// providerSession is mutable provider-private state for the logical user
+	// conversation. providerSessionID is the routing identity exposed on each
+	// request; unlike sessionID it remains stable across per-turn run logs.
+	providerSession   *ProviderSession
+	providerSessionID string
 	// stepGate, when set, is called at the top of every turn before any work
 	// (compaction, steering, reason) happens. It blocks until the consumer permits
 	// the turn to proceed, returning a non-nil error to halt the run. This is how
@@ -243,6 +251,9 @@ func (a *Agent) release() { atomic.StoreInt32(&a.running, 0) }
 type ModelRung struct {
 	Provider LLMProvider
 	Model    string
+	// Capabilities is an optional discovery/config snapshot for this exact
+	// provider/model rung. It overlays the provider adapter's defaults.
+	Capabilities ModelCapabilities
 	// ContextWindow is this model's input window in tokens, which caps the
 	// compaction budget while this rung is answering. 0 means unknown and the
 	// configured MaxContextTokens stands alone.
@@ -274,8 +285,9 @@ type TurnState struct {
 // Config wires an Agent. Provider, Model, Tools, and Policy are required; the
 // rest have safe defaults (DenyAll policy, no memory, DefaultLimits, DefaultEnv).
 type Config struct {
-	Provider LLMProvider
-	Model    string
+	Provider          LLMProvider
+	Model             string
+	ModelCapabilities ModelCapabilities
 	// ContextWindow is the primary model's input window in tokens — the same
 	// fact ModelRung.ContextWindow carries for the escalation rungs. 0 means
 	// unknown.
@@ -345,6 +357,11 @@ type Config struct {
 	// either unset keeps the run in-memory only.
 	Session   SessionStore
 	SessionID string
+	// ProviderSession and ProviderSessionID are independent of durable run
+	// logging. They retain provider transport/compatibility state for a logical
+	// conversation even when each user turn gets a fresh Agent and run id.
+	ProviderSession   *ProviderSession
+	ProviderSessionID string
 	// ResumeSession, when true (with Session + SessionID set), continues the
 	// existing durable log at SessionID instead of starting a fresh run: the
 	// loop rebuilds history from the log (the seed messages are used only if

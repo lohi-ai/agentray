@@ -49,6 +49,7 @@ func (t *ReadFileTool) Schema() agentcore.ToolSchema {
 		Description: "Read a UTF-8 text file from the agent workspace. Content is returned with " +
 			"cat -n style line numbers so you can cite exact lines. Use offset and limit to read a " +
 			"window of a large file; a truncated read ends with the exact offset to continue from. " +
+			"The result includes a content_hash required by edit_file and edit_lines to reject stale edits. " +
 			"The path must be relative and cannot escape the workspace.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -141,7 +142,7 @@ func (t *ReadFileTool) Run(ctx context.Context, args string) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "path: %s\nbytes: %d\nlines: %d", rel, info.Size, total)
+	fmt.Fprintf(&b, "path: %s\ncontent_hash: %s\nbytes: %d\nlines: %d", rel, fileContentHash(data), info.Size, total)
 	if last < total {
 		b.WriteString("\ntruncated: true")
 	}
@@ -183,7 +184,7 @@ func (t *WriteFileTool) Name() string { return ToolWriteFile }
 func (t *WriteFileTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:        ToolWriteFile,
-		Description: "Write a UTF-8 text file inside the agent workspace. Parent directories are created; paths must be relative and cannot escape the workspace.",
+		Description: "Write a UTF-8 text file inside the agent workspace. The result includes a content_hash for a subsequent edit_file or edit_lines call. Parent directories are created; paths must be relative and cannot escape the workspace.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -210,5 +211,5 @@ func (t *WriteFileTool) Run(ctx context.Context, args string) (string, error) {
 	if err := t.fs.WriteFile(ctx, rel, []byte(in.Content)); err != nil {
 		return "", fmt.Errorf("write_file: %w", err)
 	}
-	return fmt.Sprintf("path: %s\nbytes_written: %d", rel, len(in.Content)), nil
+	return fmt.Sprintf("path: %s\ncontent_hash: %s\nbytes_written: %d", rel, fileContentHash([]byte(in.Content)), len(in.Content)), nil
 }

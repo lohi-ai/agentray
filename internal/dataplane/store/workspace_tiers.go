@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
@@ -11,7 +13,8 @@ import (
 // config): the 3 tiers every project and agent in the workspace draws from. The
 // bare Provider/Model/BaseURL/HasKey are the flash (default) tier; lite/pro are
 // additive and fall back to flash when unconfigured. Keys are never returned —
-// only the *HasKey presence flags.
+// the *HasKey flags mean the tier is credential-ready (including OAuth account
+// pools and explicit local engines that need no key).
 type WorkspaceModelTiers struct {
 	WorkspaceID string `json:"workspace_id"`
 
@@ -24,23 +27,45 @@ type WorkspaceModelTiers struct {
 	// case — means the window is worked out from the model id, and an operator
 	// only sets it for an endpoint no catalog can know (a self-hosted model, or a
 	// gateway that serves a model truncated).
-	ContextWindow int `json:"context_window,omitempty"`
-	// FallbackModel is an optional second model on the SAME provider the run
-	// retries on when the primary model fails (in-tier fallback).
-	FallbackModel     string `json:"fallback_model,omitempty"`
-	LiteProvider      string `json:"lite_provider"`
-	LiteModel         string `json:"lite_model"`
-	LiteBaseURL       string `json:"lite_base_url"`
-	LiteHasKey        bool   `json:"lite_has_key"`
-	LiteContextWindow int    `json:"lite_context_window,omitempty"`
-	LiteFallbackModel string `json:"lite_fallback_model,omitempty"`
-	ProProvider       string `json:"pro_provider"`
-	ProModel          string `json:"pro_model"`
-	ProBaseURL        string `json:"pro_base_url"`
-	ProHasKey         bool   `json:"pro_has_key"`
-	ProContextWindow  int    `json:"pro_context_window,omitempty"`
-	ProFallbackModel  string `json:"pro_fallback_model,omitempty"`
-	ModelFallback     bool   `json:"model_fallback"`
+	ContextWindow int                         `json:"context_window,omitempty"`
+	Capabilities  agentcore.ModelCapabilities `json:"capabilities,omitempty"`
+	// FallbackModel is an optional second model the run retries on when the
+	// primary model fails. FallbackProviderID blank means the model lives on
+	// the tier's own provider (in-tier fallback); set means the rung runs on
+	// that provider row — the cross-provider leg of the escalation ladder.
+	// FallbackProvider/BaseURL/HasKey are the resolved provider's redacted
+	// fields, filled by ResolveWorkspaceRun (empty for same-provider).
+	FallbackModel            string                      `json:"fallback_model,omitempty"`
+	FallbackProviderID       string                      `json:"fallback_provider_id,omitempty"`
+	FallbackProvider         string                      `json:"fallback_provider,omitempty"`
+	FallbackBaseURL          string                      `json:"fallback_base_url,omitempty"`
+	FallbackHasKey           bool                        `json:"fallback_has_key,omitempty"`
+	FallbackCapabilities     agentcore.ModelCapabilities `json:"fallback_capabilities,omitempty"`
+	LiteProvider             string                      `json:"lite_provider"`
+	LiteModel                string                      `json:"lite_model"`
+	LiteBaseURL              string                      `json:"lite_base_url"`
+	LiteHasKey               bool                        `json:"lite_has_key"`
+	LiteContextWindow        int                         `json:"lite_context_window,omitempty"`
+	LiteCapabilities         agentcore.ModelCapabilities `json:"lite_capabilities,omitempty"`
+	LiteFallbackModel        string                      `json:"lite_fallback_model,omitempty"`
+	LiteFallbackProviderID   string                      `json:"lite_fallback_provider_id,omitempty"`
+	LiteFallbackProvider     string                      `json:"lite_fallback_provider,omitempty"`
+	LiteFallbackBaseURL      string                      `json:"lite_fallback_base_url,omitempty"`
+	LiteFallbackHasKey       bool                        `json:"lite_fallback_has_key,omitempty"`
+	LiteFallbackCapabilities agentcore.ModelCapabilities `json:"lite_fallback_capabilities,omitempty"`
+	ProProvider              string                      `json:"pro_provider"`
+	ProModel                 string                      `json:"pro_model"`
+	ProBaseURL               string                      `json:"pro_base_url"`
+	ProHasKey                bool                        `json:"pro_has_key"`
+	ProContextWindow         int                         `json:"pro_context_window,omitempty"`
+	ProCapabilities          agentcore.ModelCapabilities `json:"pro_capabilities,omitempty"`
+	ProFallbackModel         string                      `json:"pro_fallback_model,omitempty"`
+	ProFallbackProviderID    string                      `json:"pro_fallback_provider_id,omitempty"`
+	ProFallbackProvider      string                      `json:"pro_fallback_provider,omitempty"`
+	ProFallbackBaseURL       string                      `json:"pro_fallback_base_url,omitempty"`
+	ProFallbackHasKey        bool                        `json:"pro_fallback_has_key,omitempty"`
+	ProFallbackCapabilities  agentcore.ModelCapabilities `json:"pro_fallback_capabilities,omitempty"`
+	ModelFallback            bool                        `json:"model_fallback"`
 	// HostedDefault is true when the workspace is using the process-level
 	// default model (no BYOK key). Settings can say "using the hosted model"
 	// instead of pretending the tenant pasted a key.
@@ -153,6 +178,7 @@ type WorkspaceModelTiersInput struct {
 	// APIKey there is no separate clear sentinel, because 0 already means
 	// "no override".
 	ContextWindow int
+	Capabilities  agentcore.ModelCapabilities
 
 	LiteProvider      string
 	LiteModel         string
@@ -164,13 +190,21 @@ type WorkspaceModelTiersInput struct {
 	ProBaseURL        string
 	ProAPIKey         string
 	ProContextWindow  int
+	LiteCapabilities  agentcore.ModelCapabilities
+	ProCapabilities   agentcore.ModelCapabilities
 	ModelFallback     bool
-
-	// Per-tier fallback models — a model id on the tier's own provider, tried
-	// when the tier's model call fails.
-	FallbackModel     string
-	LiteFallbackModel string
-	ProFallbackModel  string
+	// Per-tier fallbacks — a (provider, model) pair tried when the tier's
+	// model call fails. A blank provider id keeps the fallback on the tier's
+	// own provider; a set one crosses providers.
+	FallbackModel            string
+	FallbackProviderID       string
+	FallbackCapabilities     agentcore.ModelCapabilities
+	LiteFallbackModel        string
+	LiteFallbackProviderID   string
+	LiteFallbackCapabilities agentcore.ModelCapabilities
+	ProFallbackModel         string
+	ProFallbackProviderID    string
+	ProFallbackCapabilities  agentcore.ModelCapabilities
 
 	// Provider-id form (preferred). When set, these win over the legacy
 	// per-tier vendor/key columns.
@@ -228,7 +262,7 @@ func providerBookHasKey(book *WorkspaceProviderBook) bool {
 		return false
 	}
 	for _, p := range book.Providers {
-		if p.HasKey || p.APIKey != "" || p.AccountCount > 0 {
+		if p.HasKey || p.APIKey != "" || p.AccountCount > 0 || ai.APIKeyOptional(p.Vendor) {
 			return true
 		}
 	}
@@ -260,12 +294,21 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			ModelFallback:   in.ModelFallback,
 
 			FlashContextWindow: in.ContextWindow,
+			FlashCapabilities:  in.Capabilities,
 			LiteContextWindow:  in.LiteContextWindow,
+			LiteCapabilities:   in.LiteCapabilities,
 			ProContextWindow:   in.ProContextWindow,
+			ProCapabilities:    in.ProCapabilities,
 
-			FlashFallbackModel: strings.TrimSpace(in.FallbackModel),
-			LiteFallbackModel:  strings.TrimSpace(in.LiteFallbackModel),
-			ProFallbackModel:   strings.TrimSpace(in.ProFallbackModel),
+			FlashFallbackModel:        strings.TrimSpace(in.FallbackModel),
+			FlashFallbackProviderID:   strings.TrimSpace(in.FallbackProviderID),
+			FlashFallbackCapabilities: in.FallbackCapabilities,
+			LiteFallbackModel:         strings.TrimSpace(in.LiteFallbackModel),
+			LiteFallbackProviderID:    strings.TrimSpace(in.LiteFallbackProviderID),
+			LiteFallbackCapabilities:  in.LiteFallbackCapabilities,
+			ProFallbackModel:          strings.TrimSpace(in.ProFallbackModel),
+			ProFallbackProviderID:     strings.TrimSpace(in.ProFallbackProviderID),
+			ProFallbackCapabilities:   in.ProFallbackCapabilities,
 		})
 	}
 	if existing, lerr := s.loadBook(ctx, workspaceID, false); lerr == nil && len(existing.Providers) > 0 {
@@ -279,12 +322,21 @@ func (s *Store) UpsertWorkspaceModelTiers(ctx context.Context, userID, workspace
 			ModelFallback:   in.ModelFallback,
 
 			FlashContextWindow: in.ContextWindow,
+			FlashCapabilities:  in.Capabilities,
 			LiteContextWindow:  in.LiteContextWindow,
+			LiteCapabilities:   in.LiteCapabilities,
 			ProContextWindow:   in.ProContextWindow,
+			ProCapabilities:    in.ProCapabilities,
 
-			FlashFallbackModel: strings.TrimSpace(in.FallbackModel),
-			LiteFallbackModel:  strings.TrimSpace(in.LiteFallbackModel),
-			ProFallbackModel:   strings.TrimSpace(in.ProFallbackModel),
+			FlashFallbackModel:        strings.TrimSpace(in.FallbackModel),
+			FlashFallbackProviderID:   strings.TrimSpace(in.FallbackProviderID),
+			FlashFallbackCapabilities: in.FallbackCapabilities,
+			LiteFallbackModel:         strings.TrimSpace(in.LiteFallbackModel),
+			LiteFallbackProviderID:    strings.TrimSpace(in.LiteFallbackProviderID),
+			LiteFallbackCapabilities:  in.LiteFallbackCapabilities,
+			ProFallbackModel:          strings.TrimSpace(in.ProFallbackModel),
+			ProFallbackProviderID:     strings.TrimSpace(in.ProFallbackProviderID),
+			ProFallbackCapabilities:   in.ProFallbackCapabilities,
 		})
 	}
 

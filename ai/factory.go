@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -35,6 +36,10 @@ func New(spec Spec) (Provider, error) {
 		inner, err = NewClient(ClientSpec{
 			Name: "openai", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
+	case VendorOpenAIResponses:
+		inner, err = NewClient(ClientSpec{
+			Name: VendorOpenAIResponses, APIKey: spec.APIKey, BaseURL: spec.BaseURL,
+		})
 	case "anthropic":
 		inner, err = NewClient(ClientSpec{
 			Name: "anthropic", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
@@ -48,6 +53,7 @@ func New(spec Spec) (Provider, error) {
 		// token from the account pool per request.
 		inner, err = NewClient(ClientSpec{
 			Name: vendor, BaseURL: spec.BaseURL, TokenSource: spec.TokenSource,
+			SessionScope: id,
 		})
 	default:
 		if strings.TrimSpace(spec.BaseURL) == "" {
@@ -118,6 +124,9 @@ func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
 	switch p := inner.(type) {
 	case *OpenAIProvider:
 		p.HTTP = std
+	case *OpenAIResponsesProvider:
+		p.HTTP = std
+		p.StreamHTTP = std
 	case *AnthropicProvider:
 		p.HTTP = std
 	case *CodexProvider:
@@ -139,6 +148,11 @@ type wired struct {
 	// list-models call draws its credential from, and the vendor's lister.
 	tokenSource TokenSource
 	listModels  func(ctx context.Context, tok OAuthToken) ([]Model, error)
+	modelsMu    sync.RWMutex
+	// discovered keeps explicit live model facts by id. It is an optimization
+	// and refinement only: a fresh process still has adapter defaults, and a
+	// failed list call never erases the last successful knowledge.
+	discovered map[string]agentcore.ModelCapabilities
 }
 
 func (w *wired) ID() string          { return w.id }
@@ -148,6 +162,14 @@ func (w *wired) BaseURL() string     { return w.baseURL }
 func (w *wired) APIKey() string      { return w.apiKey }
 func (w *wired) Name() string        { return w.inner.Name() }
 func (w *wired) SupportsTools() bool { return w.inner.SupportsTools() }
+
+func (w *wired) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	caps := agentcore.CapabilitiesOf(w.inner, model)
+	w.modelsMu.RLock()
+	live := w.discovered[model]
+	w.modelsMu.RUnlock()
+	return caps.Overlay(live)
+}
 
 func (w *wired) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	return w.inner.Chat(ctx, req)
@@ -189,10 +211,11 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 		}
 		listed = make([]Model, 0, len(raw))
 		for _, m := range raw {
-			listed = append(listed, Model{ID: m.ID, ContextWindow: m.ContextWindow})
+			listed = append(listed, Model{ID: m.ID, ContextWindow: m.ContextWindow, Capabilities: m.Capabilities})
 		}
 	}
 	out := make([]Model, 0, len(listed))
+	discovered := make(map[string]agentcore.ModelCapabilities, len(listed))
 	for _, m := range listed {
 		// The vendor's own figure wins; the table only fills a gap. A vendor that
 		// starts reporting the window therefore takes over automatically, and a
@@ -201,14 +224,20 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 		if window <= 0 {
 			window = ContextWindowFor(w.vendor, m.ID)
 		}
+		caps := agentcore.CapabilitiesOf(w.inner, m.ID).Overlay(m.Capabilities)
+		discovered[m.ID] = m.Capabilities
 		out = append(out, Model{
 			ProviderID:     w.id,
 			ProviderVendor: w.vendor,
 			ProviderName:   w.name,
 			ID:             m.ID,
 			ContextWindow:  window,
+			Capabilities:   caps,
 		})
 	}
+	w.modelsMu.Lock()
+	w.discovered = discovered
+	w.modelsMu.Unlock()
 	return out, nil
 }
 

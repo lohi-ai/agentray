@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -211,9 +212,79 @@ func TestSetTiersRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+// A fallback that names a provider row resolves to that row's vendor, base
+// URL, and key — the cross-provider rung carries its own credentials, never
+// the tier's. A model-only fallback keeps the same-provider meaning.
+func TestResolveCrossProviderFallback(t *testing.T) {
+	book := &WorkspaceProviderBook{WorkspaceID: "ws"}
+	a := WorkspaceProviderRecord{ID: "pa", WorkspaceID: "ws", Vendor: "openai", BaseURL: "https://a.example/v1", APIKey: "key-a", HasKey: true}
+	b := WorkspaceProviderRecord{ID: "pb", WorkspaceID: "ws", Vendor: "anthropic", BaseURL: "https://b.example", APIKey: "key-b", HasKey: true}
+	book.UpsertProvider(a)
+	book.UpsertProvider(b)
+	if err := book.SetTiers(WorkspaceTierSelection{
+		FlashProviderID: a.ID, FlashModel: "gpt-5",
+		FlashFallbackProviderID: b.ID, FlashFallbackModel: "claude-sonnet-4-5",
+		FlashFallbackCapabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported},
+		LiteProviderID:            a.ID, LiteModel: "gpt-5-mini",
+		LiteFallbackModel: "gpt-5-nano", // same-provider fallback: no provider id
+		ModelFallback:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, keys := book.Resolve()
+	if cfg.FallbackProvider != "anthropic" || cfg.FallbackBaseURL != "https://b.example" || !cfg.FallbackHasKey {
+		t.Fatalf("cross-provider fallback did not resolve to row b: %+v", cfg)
+	}
+	if cfg.FallbackCapabilities.Tools != agentcore.CapabilityUnsupported {
+		t.Fatalf("fallback capability snapshot was lost: %+v", cfg.FallbackCapabilities)
+	}
+	if keys["flash_fallback"] != "key-b" {
+		t.Fatalf("fallback key slot = %q, want key-b", keys["flash_fallback"])
+	}
+	if cfg.LiteFallbackProvider != "" || cfg.LiteFallbackProviderID != "" {
+		t.Fatalf("same-provider fallback must not resolve a provider: %+v", cfg)
+	}
+	if _, ok := keys["lite_fallback"]; ok {
+		t.Fatal("same-provider fallback must not get its own key slot")
+	}
+}
+
+// A fallback provider id without its model is half a rung — rejected, and an
+// unknown fallback provider id is rejected like an unknown primary.
+func TestSetTiersRejectsBadFallback(t *testing.T) {
+	book := &WorkspaceProviderBook{WorkspaceID: "ws"}
+	book.UpsertProvider(WorkspaceProviderRecord{ID: "pa", WorkspaceID: "ws", Vendor: "openai", APIKey: "k", HasKey: true})
+	if err := book.SetTiers(WorkspaceTierSelection{FlashFallbackProviderID: "missing", FlashFallbackModel: "m"}); err == nil {
+		t.Fatal("expected error for unknown fallback provider")
+	}
+	if err := book.SetTiers(WorkspaceTierSelection{FlashFallbackProviderID: "pa"}); err == nil {
+		t.Fatal("expected error for fallback provider without a model")
+	}
+	// Deleting the provider clears the fallback pointer too.
+	if err := book.SetTiers(WorkspaceTierSelection{FlashProviderID: "pa", FlashModel: "m", FlashFallbackProviderID: "pa", FlashFallbackModel: "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	book.DeleteProvider("pa")
+	if book.Sel.FlashFallbackProviderID != "" {
+		t.Fatal("DeleteProvider left a dangling fallback provider pointer")
+	}
+}
+
 func TestCompatVendorRequiresBaseURL(t *testing.T) {
 	if _, err := NewWorkspaceProviderRecord("", "ws", WorkspaceProviderInput{Vendor: "groq", APIKey: "k"}, nil); err == nil {
 		t.Fatal("expected error for compat vendor without base URL")
+	}
+}
+
+func TestOpenAIResponsesProviderUsesOfficialEndpointWithoutBaseURL(t *testing.T) {
+	rec, err := NewWorkspaceProviderRecord("", "ws", WorkspaceProviderInput{
+		Vendor: ai.VendorOpenAIResponses, APIKey: "sk-test",
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewWorkspaceProviderRecord: %v", err)
+	}
+	if rec.Vendor != ai.VendorOpenAIResponses || rec.BaseURL != "" || !rec.HasKey {
+		t.Fatalf("record = %+v", rec)
 	}
 }
 
@@ -296,13 +367,18 @@ func TestStorePersistProvidersAndResolve(t *testing.T) {
 	got, err := s.SaveWorkspaceTierSelection(ctx, userID, wsID, WorkspaceTierSelection{
 		FlashProviderID: a.ID, FlashModel: modelA,
 		LiteProviderID: b.ID, LiteModel: modelB,
-		ModelFallback: true,
+		FlashCapabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported},
+		LiteCapabilities:  agentcore.ModelCapabilities{Tools: agentcore.CapabilitySupported},
+		ModelFallback:     true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.FlashProviderID != a.ID || got.Model != modelA || got.LiteProviderID != b.ID || got.LiteModel != modelB {
 		t.Fatalf("read-back selection = %+v", got)
+	}
+	if got.Capabilities.Tools != agentcore.CapabilityUnsupported || got.LiteCapabilities.Tools != agentcore.CapabilitySupported {
+		t.Fatalf("read-back capabilities = flash %+v lite %+v", got.Capabilities, got.LiteCapabilities)
 	}
 
 	cfg, keys, err := s.WorkspaceTiersForRun(ctx, wsID)
@@ -314,6 +390,19 @@ func TestStorePersistProvidersAndResolve(t *testing.T) {
 	}
 	if keys["flash"] != "key-store-a" {
 		t.Fatalf("run resolve flash key = %q", keys["flash"])
+	}
+	if cfg.Capabilities.Tools != agentcore.CapabilityUnsupported || cfg.LiteCapabilities.Tools != agentcore.CapabilitySupported {
+		t.Fatalf("run resolve lost capability snapshots: flash %+v lite %+v", cfg.Capabilities, cfg.LiteCapabilities)
+	}
+}
+
+func TestSetTiersRejectsInvalidCapabilityState(t *testing.T) {
+	book := &WorkspaceProviderBook{}
+	err := book.SetTiers(WorkspaceTierSelection{
+		FlashCapabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilitySupport("maybe")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid model capabilities") {
+		t.Fatalf("invalid capability error = %v", err)
 	}
 }
 
@@ -469,10 +558,52 @@ func TestResolveHonorsRedactedHasKey(t *testing.T) {
 	}
 }
 
+func TestResolveTreatsExplicitLocalEngineAsReadyWithoutKey(t *testing.T) {
+	book := &WorkspaceProviderBook{
+		Providers: []WorkspaceProviderRecord{{
+			ID: "local", Vendor: "ollama", Name: "Laptop Ollama",
+			BaseURL: "http://127.0.0.1:11434/v1",
+		}},
+		Sel: WorkspaceTierSelection{FlashProviderID: "local", FlashModel: "qwen3-coder"},
+	}
+	cfg, keys := book.Resolve()
+	if !cfg.HasKey {
+		t.Fatalf("keyless local engine must be run-ready: %+v", cfg)
+	}
+	if keys["flash"] != "" {
+		t.Fatalf("keyless local engine invented a credential: %q", keys["flash"])
+	}
+	pub := book.Public()
+	if len(pub) != 1 || pub[0].AuthType != "optional" || pub[0].HasKey {
+		t.Fatalf("public provider = %+v, want optional auth with no stored key", pub)
+	}
+	if !providerBookHasKey(book) {
+		t.Fatal("host fallback would overwrite an explicitly configured local engine")
+	}
+
+	cloud := &WorkspaceProviderBook{
+		Providers: []WorkspaceProviderRecord{{ID: "cloud", Vendor: "openai"}},
+		Sel:       WorkspaceTierSelection{FlashProviderID: "cloud", FlashModel: "gpt"},
+	}
+	cloudCfg, _ := cloud.Resolve()
+	if cloudCfg.HasKey || providerBookHasKey(cloud) {
+		t.Fatal("keyless OpenAI must remain unready")
+	}
+}
+
 func TestDeleteProviderClearsTierRefs(t *testing.T) {
 	book := &WorkspaceProviderBook{}
 	book.UpsertProvider(WorkspaceProviderRecord{ID: "p1", Vendor: "openai", APIKey: "k"})
-	_ = book.SetTiers(WorkspaceTierSelection{FlashProviderID: "p1", FlashModel: "m"})
+	book.UpsertProvider(WorkspaceProviderRecord{ID: "p2", Vendor: "anthropic", APIKey: "k2"})
+	_ = book.SetTiers(WorkspaceTierSelection{
+		FlashProviderID: "p1", FlashModel: "m",
+		FlashFallbackProviderID: "p2", FlashFallbackModel: "fb",
+		LiteFallbackProviderID: "p2", LiteFallbackModel: "fb2",
+	})
+	book.DeleteProvider("p2")
+	if book.Sel.FlashFallbackProviderID != "" || book.Sel.LiteFallbackProviderID != "" {
+		t.Fatalf("delete left a dangling fallback pointer: %+v", book.Sel)
+	}
 	book.DeleteProvider("p1")
 	if book.Sel.FlashProviderID != "" || len(book.Providers) != 0 {
 		t.Fatalf("delete did not clear: book=%+v", book)

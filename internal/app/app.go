@@ -33,6 +33,7 @@ type Server struct {
 	nats            *nats.Conn
 	worker          *ingestion.EventWorker
 	scheduler       *agentruntime.Scheduler
+	agentResources  *agentruntime.RuntimeResources
 	connectorEngine *connector.Engine
 	retention       *storage.Retention
 }
@@ -145,6 +146,12 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// into both run paths — the NATS scheduler and the HTTP chat handler. Nil when
 	// disabled or Docker is unreachable, leaving agents analytics-only.
 	var runnerOpts []agentruntime.RunnerOption
+	// One process-owned warm-state bundle crosses the deliberately short-lived
+	// Runner instances created by HTTP handlers, the persistent scheduler, and
+	// the Lab. Its keys retain tenant/project/agent/conversation isolation; a
+	// replica miss still starts cleanly, so this is never correctness-critical.
+	agentResources := agentruntime.NewRuntimeResources()
+	runnerOpts = append(runnerOpts, agentruntime.WithRuntimeResources(agentResources))
 	sb := buildSandbox(ctx, cfg)
 	if sb != nil {
 		runnerOpts = append(runnerOpts, agentruntime.WithSandbox(sb))
@@ -281,6 +288,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		experimentReview.Tick(tickCtx, now)
 	})
 	if err := scheduler.Start(ctx); err != nil {
+		agentResources.Close()
 		store.Close()
 		_ = redisClient.Close()
 		_ = worker.Stop()
@@ -300,7 +308,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, connectorEngine: connectorEngine, retention: retention}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, agentResources: agentResources, connectorEngine: connectorEngine, retention: retention}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -459,6 +467,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// cancels it and waits rather than closing the DuckDB handle underneath it.
 	if s.retention != nil {
 		s.retention.Stop()
+	}
+	// Requests and scheduler admission are stopped before warm provider/language
+	// resources. Closing here prevents retained subprocesses and transports from
+	// outliving the server dependencies they were built against.
+	if s.agentResources != nil {
+		s.agentResources.Close()
 	}
 	// Drain the consumer first: Stop() blocks until the batcher's final flush
 	// commits, so every acked batch is durable in DuckDB before the engine

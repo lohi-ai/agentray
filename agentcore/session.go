@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -96,7 +97,26 @@ const (
 	// tool-result EntryMessage; a trailing one tells recovery how far the
 	// interrupted call reported getting.
 	EntryToolProgress SessionEntryKind = "tool_progress"
+	// EntryToolOutcome records one completed physical tool execution before the
+	// turn can place its results in assistant source order. It is a side record:
+	// a fast parallel sibling becomes durable without waiting for an earlier slow
+	// call, while the eventual tool-result EntryMessage remains the canonical
+	// transcript settlement. Recovery uses the outcome only when that settlement
+	// is absent, so a normal run never duplicates a result.
+	EntryToolOutcome SessionEntryKind = "tool_outcome"
 )
+
+// ToolOutcomeRecord is the bounded, model-visible result of one completed tool
+// call plus the run semantics that must survive a crash before source-order
+// placement. It deliberately stores no raw/unbounded tool output: Message is
+// the same truncated or spill-backed value the live model receives.
+type ToolOutcomeRecord struct {
+	Message   Message   `json:"message"`
+	Trace     ToolTrace `json:"trace"`
+	Extra     []Message `json:"extra,omitempty"`
+	Terminate bool      `json:"terminate,omitempty"`
+	Executed  bool      `json:"executed,omitempty"`
+}
 
 // SessionEntry is one immutable record in the append-only session log. The log
 // is a tree, not just a line: ID/ParentID give each entry a stable address and
@@ -108,7 +128,7 @@ type SessionEntry struct {
 	Seq      int              `json:"seq"` // append order, assigned by the store
 	Kind     SessionEntryKind `json:"kind"`
 	ID       string           `json:"id,omitempty"`        // stable entry id (writer-assigned)
-	ParentID string           `json:"parent_id,omitempty"` // tree parent; "" chains to the previous entry
+	ParentID string           `json:"parent_id,omitempty"` // tree parent; for outcome side records, the intent anchor
 	Target   string           `json:"target,omitempty"`    // EntryLeafMove: the new active leaf
 	Turn     int              `json:"turn,omitempty"`
 	Message  *Message         `json:"message,omitempty"` // EntryMessage
@@ -164,8 +184,12 @@ type SessionEntry struct {
 	Question json.RawMessage `json:"question,omitempty"`
 	// Answer is the human's reply to a parked question (EntryAnswer): the text
 	// recovery feeds back as the call's tool result.
-	Answer    string    `json:"answer,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Answer string `json:"answer,omitempty"`
+	// Outcome is populated only for EntryToolOutcome. CallID is kept on the
+	// envelope so stores and recovery can identify it without decoding a nested
+	// message first.
+	Outcome   *ToolOutcomeRecord `json:"outcome,omitempty"`
+	CreatedAt time.Time          `json:"created_at"`
 }
 
 // CheckpointState is the non-transcript half of a checkpoint: the run state a
@@ -203,6 +227,9 @@ func (c CheckpointState) clone() *CheckpointState {
 // SessionStore is the append-only durability seam (extends the working-memory
 // MemoryStore conceptually; kept separate so a consumer can adopt durability
 // incrementally). The store assigns Seq and never mutates a written entry.
+// Append takes an immutable value snapshot: later changes through the caller's
+// pointers or slices must not alter the stored record. Log likewise returns a
+// snapshot whose mutation cannot rewrite the store.
 type SessionStore interface {
 	// Append records one entry; the store assigns its Seq. It MUST be safe for
 	// concurrent use on the same sessionID: a run's loop appends serially, but
@@ -216,13 +243,93 @@ type SessionStore interface {
 	Log(ctx context.Context, sessionID string) ([]SessionEntry, error)
 }
 
+// ErrSessionLeaseLost reports that a durable-session owner no longer holds the
+// fencing token that authorized its resume. Callers must stop provider/tool
+// work and may retry by acquiring a fresh lease.
+var ErrSessionLeaseLost = errors.New("agentcore: durable session lease lost")
+
+// ErrNoPendingQuestion reports that an answer does not match an open ask call.
+var ErrNoPendingQuestion = errors.New("agentcore: no pending question")
+
+// ErrAnswerConflict reports a second, different answer for an already-answered
+// call. Retrying the same answer is idempotent; changing it is not.
+var ErrAnswerConflict = errors.New("agentcore: answer conflicts with recorded answer")
+
+// SessionLeaseStore is an optional SessionStore capability for exclusive,
+// renewable ownership of a resumed durable session. The returned context must
+// be used for all resumed work and appends: distributed backends attach a
+// fencing token to it and cancel it if renewal fails. Local stores may implement
+// the same contract with an in-process lock.
+type SessionLeaseStore interface {
+	AcquireSessionLease(ctx context.Context, sessionID string) (leaseCtx context.Context, release func() error, err error)
+}
+
+type sessionLeaseMarkerKey struct{}
+
+// AcquireSessionLease uses the strongest ownership contract a store exposes.
+// Legacy stores remain source-compatible and receive a no-op lease; they retain
+// their previous single-owner semantics.
+func AcquireSessionLease(ctx context.Context, store SessionStore, sessionID string) (context.Context, func() error, error) {
+	if held, _ := ctx.Value(sessionLeaseMarkerKey{}).(string); held == sessionID {
+		return ctx, func() error { return nil }, nil
+	}
+	if leases, ok := store.(SessionLeaseStore); ok {
+		leaseCtx, release, err := leases.AcquireSessionLease(ctx, sessionID)
+		if err != nil {
+			return ctx, nil, err
+		}
+		if leaseCtx == nil {
+			leaseCtx = ctx
+		}
+		if release == nil {
+			release = func() error { return nil }
+		}
+		return context.WithValue(leaseCtx, sessionLeaseMarkerKey{}, sessionID), release, nil
+	}
+	return ctx, func() error { return nil }, nil
+}
+
+// RecordSessionAnswer appends one answer to the currently pending question.
+// It is idempotent for an exact retry and rejects a different answer for the
+// same call. Hosts should call it while holding the session lease so the read
+// and append form one logical ownership interval.
+func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, callID, answer string) (bool, error) {
+	log, err := store.Log(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range log {
+		if entry.Kind != EntryAnswer || entry.CallID != callID {
+			continue
+		}
+		if entry.Answer == answer {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w for call %q", ErrAnswerConflict, callID)
+	}
+	pendingID, _, found := PendingQuestion(log)
+	if !found {
+		return false, ErrNoPendingQuestion
+	}
+	if callID == "" {
+		callID = pendingID
+	}
+	if callID != pendingID {
+		return false, fmt.Errorf("%w: expected call %q, got %q", ErrNoPendingQuestion, pendingID, callID)
+	}
+	if err := store.Append(ctx, sessionID, SessionEntry{Kind: EntryAnswer, CallID: callID, Answer: answer}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SessionBatchStore is an optional SessionStore capability for committing one
 // save point atomically. The loop buffers chain entries for a turn and hands
 // the whole ordered slice to AppendBatch; either every entry must become
 // visible, with consecutive sequence numbers in the supplied order, or none of
 // them may become visible.
 //
-// Side records (stream frames, tool progress, queued input) still use Append:
+// Side records (stream frames, tool progress/outcomes, queued input) still use Append:
 // their purpose is to become durable while a turn is in flight. AppendBatch is
 // for the settled transcript boundary only. Backends that do not implement the
 // capability remain supported; the loop falls back to ordered Append calls and
@@ -358,6 +465,10 @@ type ReducedState struct {
 	// before the crash (trailing EntryToolProgress records), for calls whose
 	// result never landed.
 	ToolProgress map[string]string
+	// ToolOutcomes holds completed physical executions whose canonical result
+	// message may not have reached the transcript before a crash. Recovery
+	// chooses them by the assistant's original call order.
+	ToolOutcomes map[string]ToolOutcomeRecord
 }
 
 // ReduceSession folds an append-only log into the current run state. It is a
@@ -441,7 +552,7 @@ func ReduceSession(log []SessionEntry) ReducedState {
 		}
 	}
 	// Side records are not tree nodes, so they are read from the raw log rather
-	// than the active path — one forward pass collects all three kinds.
+	// than the active path — one forward pass collects every side kind.
 	//
 	// Pending inbox: every EntryInbox not settled by an EntryInboxDone. Both
 	// halves are attributed to a branch by position — each anchors to the chain
@@ -467,6 +578,13 @@ func ReduceSession(log []SessionEntry) ReducedState {
 	lastSettled := -1
 	var draft string
 	var progress map[string]string
+	type anchoredOutcome struct {
+		callID   string
+		outcome  ToolOutcomeRecord
+		anchor   int
+		anchorID string
+	}
+	var outcomes []anchoredOutcome
 	for i, e := range log {
 		if !isSideRecord(e.Kind) && e.Kind != EntryLeafMove {
 			lastNodeSeq = e.Seq
@@ -497,6 +615,10 @@ func ReduceSession(log []SessionEntry) ReducedState {
 				}
 				progress[e.CallID] = e.Content
 			}
+		case EntryToolOutcome:
+			if e.CallID != "" && e.Outcome != nil {
+				outcomes = append(outcomes, anchoredOutcome{callID: e.CallID, outcome: *e.Outcome, anchor: lastNodeSeq, anchorID: e.ParentID})
+			}
 		case EntryMessage:
 			if e.Message != nil && (e.Message.Role == RoleAssistant || e.Message.Role == RoleTool) {
 				// A settling entry closes the in-flight window: everything
@@ -507,10 +629,14 @@ func ReduceSession(log []SessionEntry) ReducedState {
 			}
 		}
 	}
-	if len(queued) > 0 || len(doneEntries) > 0 {
+	if len(queued) > 0 || len(doneEntries) > 0 || len(outcomes) > 0 {
 		activeSeq := make(map[int]bool, len(path))
+		activeID := make(map[string]bool, len(path))
 		for _, e := range path {
 			activeSeq[e.Seq] = true
+			if e.ID != "" {
+				activeID[e.ID] = true
+			}
 		}
 		var settled map[string]bool
 		for _, d := range doneEntries {
@@ -527,9 +653,37 @@ func ReduceSession(log []SessionEntry) ReducedState {
 				rs.Inbox = append(rs.Inbox, q.item)
 			}
 		}
+		for _, outcome := range outcomes {
+			live := outcome.anchor == -1 || activeSeq[outcome.anchor]
+			if outcome.anchorID != "" {
+				live = activeID[outcome.anchorID]
+			}
+			if !live {
+				continue
+			}
+			if rs.ToolOutcomes == nil {
+				rs.ToolOutcomes = make(map[string]ToolOutcomeRecord)
+			}
+			// Completion records are immutable snapshots, but a later record for
+			// the same call may include source-order accounting such as a breaker
+			// note. Raw-log order makes the newest record authoritative.
+			rs.ToolOutcomes[outcome.callID] = outcome.outcome
+		}
 	}
 	rs.Draft = draft
 	rs.ToolProgress = progress
+	// A canonical result settles and supersedes its completion side record. This
+	// keeps a whole-log fold equivalent to a checkpoint window that legitimately
+	// starts after old side records, and prevents normal resumes from retaining
+	// already-materialized outcomes as live state.
+	for _, entry := range path {
+		if entry.Kind == EntryMessage && entry.Message != nil && entry.Message.Role == RoleTool && entry.Message.ToolCallID != "" {
+			delete(rs.ToolOutcomes, entry.Message.ToolCallID)
+		}
+	}
+	if len(rs.ToolOutcomes) == 0 {
+		rs.ToolOutcomes = nil
+	}
 	return rs
 }
 
@@ -608,6 +762,10 @@ type ResumePlan struct {
 	// ToolProgress maps a dangling call's ID to the last partial output it
 	// reported, so its interrupted note can say how far it got.
 	ToolProgress map[string]string
+	// ToolOutcomes are completed calls recovered from side records. They are
+	// neither retried nor marked interrupted; the resume path materializes their
+	// messages beside unresolved siblings in original source order.
+	ToolOutcomes map[string]ToolOutcomeRecord
 }
 
 // RecoverSession turns a durable log into a conservative resume plan. It reduces
@@ -628,6 +786,7 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 		Inbox:           rs.Inbox,
 		Draft:           rs.Draft,
 		ToolProgress:    rs.ToolProgress,
+		ToolOutcomes:    rs.ToolOutcomes,
 	}
 	if rs.Completed {
 		return plan // a leaf exists: the run finished, nothing to recover
@@ -665,6 +824,9 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 			plan.Interrupted = true
 			if _, answered := answers[c.ID]; answered {
 				continue // closed by its EntryAnswer at stitch time
+			}
+			if _, completed := rs.ToolOutcomes[c.ID]; completed {
+				continue // physical effect completed; resume materializes its journaled result
 			}
 			if isRetrySafe(tools, c) {
 				plan.RetryCalls = append(plan.RetryCalls, c)

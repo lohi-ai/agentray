@@ -1,6 +1,9 @@
 package agentcore
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Env carries injected capabilities the core depends on rather than reaching
 // for concrete infrastructure. Extend with FileSystem/Shell as consumers need.
@@ -104,6 +107,29 @@ type SessionSandbox interface {
 	CloseSession(id string) error
 }
 
+// ProcessSandbox is the optional interactive-process capability implemented by
+// backends that can keep stdin/stdout open while a command runs. Protocol tools
+// such as LSP and DAP need this; ordinary shell/file tools intentionally stay on
+// the smaller run-to-completion Sandbox contract.
+type ProcessSandbox interface {
+	Sandbox
+	// Start must enforce SandboxExec.Constraints.TimeoutSeconds for the whole
+	// process lifetime and hard-kill the process group/container when it expires.
+	// Retained protocol tools rely on that backend-independent lifetime bound.
+	Start(ctx context.Context, req SandboxExec) (SandboxProcess, error)
+}
+
+// SandboxProcess is one started interactive command. Callers own all three
+// pipes and must call Wait. Kill is idempotent and terminates the command's
+// process group or container, not merely its direct child.
+type SandboxProcess interface {
+	Stdin() io.WriteCloser
+	Stdout() io.ReadCloser
+	Stderr() io.ReadCloser
+	Wait() (SandboxResult, error)
+	Kill() error
+}
+
 // SandboxExec is one sandboxed command request.
 type SandboxExec struct {
 	// Argv is the command and its arguments; Argv[0] is resolved against the
@@ -152,13 +178,19 @@ type SandboxMount struct {
 // The zero value is fail-closed: no network, read-only root filesystem, and the
 // default resource caps applied by the backend.
 type SandboxLimits struct {
-	Network        bool     // false (default) = no network egress at all
-	NetworkAllow   []string // when Network is true and non-empty, egress is confined to these hosts (+subdomains) via the sandbox filtering proxy; empty = open network
-	WritableFS     bool     // false (default) = read-only root + small writable workdir
-	MemoryMB       int      // 0 = backend default
-	CPUs           float64  // 0 = backend default
-	PidsLimit      int      // 0 = backend default
-	TimeoutSeconds float64  // 0 = backend default; hard-kill after this elapses
+	Network      bool     // false (default) = no network egress at all
+	NetworkAllow []string // when Network is true and non-empty, egress is confined to these hosts (+subdomains) via the sandbox filtering proxy; empty = open network
+	WritableFS   bool     // false (default) = read-only root + small writable workdir
+	// RunAsHostUser requests the host process UID/GID inside a container while
+	// preserving a read-only root. It is for writable bind-mounted workspaces:
+	// nobody often cannot modify a 0755 host directory, while container-root
+	// would leave root-owned files behind. Backends that cannot map numeric host
+	// identities may ignore it and retain their unprivileged default.
+	RunAsHostUser  bool
+	MemoryMB       int     // 0 = backend default
+	CPUs           float64 // 0 = backend default
+	PidsLimit      int     // 0 = backend default
+	TimeoutSeconds float64 // 0 = backend default; hard-kill after this elapses
 }
 
 // SandboxResult is the captured outcome of a sandboxed execution.

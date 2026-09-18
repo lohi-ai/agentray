@@ -1,12 +1,11 @@
 // Package ai is the LLM provider layer (the analogue of @earendil-works/pi-ai).
 //
-// It owns the wire: the OpenAI chat-completions protocol (also used for Google
-// Gemini and any OpenAI-compatible base URL) and the Anthropic Messages
-// protocol, plus the embeddings endpoint behind agentcore.Embedder. A vendor is
-// config — vendor id + key + optional base URL + a Compat entry — not a new
-// codec. agentcore holds only the agentcore.LLMProvider interface and never
-// imports this package, which is what keeps the runtime free of vendor
-// specifics.
+// It owns the wire: OpenAI Chat Completions (also used for Google Gemini and
+// arbitrary compatible base URLs), the public OpenAI Responses API, Anthropic
+// Messages, and the subscription OAuth backends, plus the embeddings endpoint
+// behind agentcore.Embedder. agentcore holds only the agentcore.LLMProvider
+// interface and never imports this package, which keeps the runtime free of
+// vendor specifics.
 //
 // Two constructors, at two levels:
 //
@@ -26,4 +25,13 @@
 // Retry-After) rather than by string-matching a message. A provider that
 // returns a plain error is silently un-retryable — the run will escalate to a
 // pricier rung instead of retrying a 429.
+//
+// Providers may keep private, conversation-scoped records in
+// agentcore.ProviderSession. The OpenAI-compatible adapter uses it to remember
+// explicit optional-parameter rejections across rebuilt clients. The public
+// Responses adapter additionally retains prefix-checked previous_response_id
+// chains; pooled OAuth providers use the account-reset contract so account-bound
+// handles are invalidated without discarding endpoint-wide compatibility
+// lessons. State is an optimization: a missing registry causes a full transcript
+// replay but cannot change request correctness.
 package ai

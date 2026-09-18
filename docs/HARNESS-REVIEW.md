@@ -352,6 +352,126 @@ After the follow-up: **445 tests green across 14 packages**, and swatter
 (the downstream bug-catch agent consuming these tools) builds and passes its
 full suite (93 tests) against this tree.
 
+### Hashline follow-up — atomic typed multi-hunk editing
+
+The later oh-my-pi comparison separated hashline's useful execution contract
+from its Rust parser. AgentRay's new `edit_lines` tool applies up to 100 typed,
+non-overlapping operations against the original numbered `read_file` snapshot:
+range replacement/deletion, insertion before/after a line, and append. One
+64-bit content tag guards the whole call, coordinates never shift between
+hunks, conflicts fail before mutation, and the tag is revalidated immediately
+before writing. BOM and line-ending behavior are preserved across both
+the laptop host filesystem and server sandbox substrate. `edit_file` remains the
+fuzzy single-replacement path; the two tools solve different model failure
+modes without importing a native patch grammar.
+
+### LSP follow-up — semantic reads on both execution substrates
+
+The sandbox contract now has an optional interactive `ProcessSandbox` seam for
+framed protocols. Both HostSandbox and DockerSandbox implement it with open
+stdin/stdout/stderr, timeout and whole-process cleanup; Docker renders the same
+hardened one-shot envelope as buffered `Exec`, avoiding a weaker side door for
+protocol tools. The new configurable, read-only `lsp` tool performs initialize,
+document synchronization, diagnostics/symbol/navigation requests, and graceful
+shutdown against operator-provisioned servers. It resolves model-friendly
+line-plus-symbol inputs to UTF-16 positions, bounds results, drains stderr, and
+never reports an absent diagnostic publication as clean. A protocol fixture
+tests the complete lifecycle without requiring a particular language server.
+
+The follow-up replaces per-action cold starts with a bounded, process-local
+client registry. Identity includes runtime namespace, conversation, workspace,
+execution mode, and a canonical hash of every server setting. Calls serialize
+per client; each action clears cached diagnostics and reopens freshly read bytes
+at a new version. Idle/capacity eviction never kills in-flight work, and a
+cancelled or broken protocol stream is discarded without replay. This borrows
+oh-my-pi's durable client/freshness behavior without requiring its optional
+cross-process mux, so clean replica misses work on both laptops and servers.
+
+The process host—not an individual `Runner`—now owns the provider, eval, and
+LSP registries. This closes a server-only lifecycle bug: ordinary HTTP routes
+construct a fresh ChatService/Runner for each request, so Runner-local defaults
+discarded every supposedly retained resource after one turn. One explicit
+`RuntimeResources` bundle is injected into HTTP, scheduler, and Lab paths and
+closed during server shutdown. Closed eval/LSP registries permanently reject
+new processes, preventing teardown races from resurrecting them. Standalone
+laptop runners retain their self-contained defaults, and replica misses remain
+clean correctness-preserving starts.
+
+### Session-store conformance — one durability contract on laptop and server
+
+The memory and PostgreSQL session adapters now run the same reusable suite from
+`internal/agentcoretest`. It covers immutable write/read snapshots, typed entry
+round-trips, session isolation, concurrent sequence ordering, batch contiguity
+under competing writers, branch-aware side records, reverse-order parallel
+completion recovered once in canonical call order, completed-tool recovery,
+checkpoint-window/full-fold equivalence, and the branch/pending-inbox conditions
+that force a full resume read. Optional lease conformance also checks same-key
+exclusion, independent-key concurrency, cancellation, release, and reacquire.
+The memory suite is dependency-free and always
+runs; the PostgreSQL suite uses `AGENTRAY_TEST_DATABASE_URL` so CI or a server
+environment can validate the actual durable adapter without making laptop
+development depend on a database.
+
+This contract exposed and closed an actual backend divergence. The memory store
+previously made a shallow `SessionEntry` copy, so nested pointers and slices
+could mutate an appended record outside its mutex; PostgreSQL's JSON boundary
+naturally prevented that. Both `AppendBatch` and the memory read paths now make
+complete snapshots, giving local runs the same append-only semantics as the
+server.
+
+The developer gate now exposes `make test-session-conformance`; the PostgreSQL
+half activates from `.env` when `AGENTRAY_TEST_DATABASE_URL` is available.
+`make bench-session` records immutable batch-append cost, long-log fold scaling,
+and checkpoint-window read cost, and the race target now covers the kernel,
+runtime registries, and sandbox process lifecycle together.
+
+### Durable parallel outcomes — completion speed without transcript disorder
+
+oh-my-pi persists parallel tool results as each finishes, which protects a fast
+side effect from a crash while another call is still running. AgentCore kept
+tool messages in model order, but that meant the fast completion lived only in
+RAM until the complete group joined. The loop now commits assistant tool-call
+intent before effects, journals each bounded settled outcome immediately as a
+non-tree side record, and still commits canonical result messages atomically in
+source order. Recovery never replays a journaled completion; it stitches those
+results into provider-valid order and then settles the side records with normal
+messages. Cancellation placeholders and parked calls remain dangling, branch
+rewinds filter abandoned outcomes through an explicit intent anchor, transient
+outcome writes retry immediately, and a canonical result supersedes its side
+record. The in-memory and PostgreSQL adapters need no divergent code because
+the protocol extends the existing append-only entry envelope.
+
+The remaining server-specific race is now closed by an optional renewable
+session lease. Memory stores use a process-local per-session lock; PostgreSQL
+stores owner UUID + epoch + database-clock expiry and validates that fence in
+the same transaction as each resumed append. Lease loss cancels the run, stale
+epochs cannot write after takeover, and deterministic tool idempotency keys
+remain the final guard for external effects that complete at the ownership
+boundary. Continuation rows also persist the original durable-session id, so a
+run that parks twice keeps reopening one event stream instead of stranding its
+second question under a fresh run row.
+
+### Eval follow-up — retained Python without a desktop-only runtime
+
+The same `ProcessSandbox` seam now backs configurable persistent Python eval.
+One typed `eval` call is one cell; imports, variables, functions, objects, and
+the event loop survive later calls in the same logical conversation. A bounded
+registry keys kernels by tenant/project/agent/conversation/workspace/runtime,
+serializes cells, expires idle state, and permits clean replica misses. Reset is
+explicit. Ordinary Python exceptions retain mutations completed before the
+error, while timeout/cancellation/transport failure discards the process and
+never replays a possibly side-effecting cell.
+
+The self-contained runner keeps NDJSON protocol output on a duplicated file
+descriptor and drains user fd 1/2 through pipes, so child-process output cannot
+spoof frames or fill an unbounded capture file. Model-visible output retains a
+bounded head and tail. Host mode uses an allowlisted environment and is
+documented as trusted local execution; Docker mode keeps no network, resource
+caps, a read-only root, writable tmpfs home, and only the agent workspace
+mounted writable. Persistence, reset, isolation, environment filtering,
+timeouts/no-replay, output bounding, top-level await, serialization, registry
+capacity, and idle expiry have deterministic tests.
+
 ### Round-4 — token-usage pass (context editing + cache-anchor abstraction)
 
 A token-cost audit of the loop found the harness paid for bulk it no longer

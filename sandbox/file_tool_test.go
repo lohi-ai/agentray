@@ -21,12 +21,17 @@ func TestFileToolsReadWriteWithinWorkspace(t *testing.T) {
 	if !strings.Contains(out, "bytes_written: 5") {
 		t.Fatalf("write output = %q", out)
 	}
+	if !strings.Contains(out, "content_hash: "+fileContentHash([]byte("hello"))) {
+		t.Fatalf("write output missing content hash: %q", out)
+	}
 	read := NewReadFileTool(nil, ws)
 	out, err = read.Run(context.Background(), `{"path":"notes/a.txt"}`)
 	if err != nil {
 		t.Fatalf("read Run: %v", err)
 	}
-	if !strings.Contains(out, "path: notes/a.txt") || !strings.Contains(out, "hello") {
+	if !strings.Contains(out, "path: notes/a.txt") ||
+		!strings.Contains(out, "content_hash: "+fileContentHash([]byte("hello"))) ||
+		!strings.Contains(out, "hello") {
 		t.Fatalf("read output = %q", out)
 	}
 }

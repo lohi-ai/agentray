@@ -303,7 +303,7 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 // AnswerQuestion records the user's answer to a parked ask tool call, resumes
 // the run from its durable session log, and streams the continuation.
 func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, sink agentcore.StreamSink) (ChatResult, error) {
-	if s.runner == nil || s.runner.Store == nil {
+	if s.runner == nil || s.runner.Store == nil || s.runner.SessionStore == nil {
 		return ChatResult{}, fmt.Errorf("runner store required for answer")
 	}
 	waitingRun, err := s.runner.Store.LatestWaitingRunForSession(ctx, opts.UserID, opts.ProjectID, opts.SessionID)
@@ -311,38 +311,56 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 		return ChatResult{}, fmt.Errorf("no parked question awaiting answer for session %q: %w", opts.SessionID, err)
 	}
 
-	logEntries, err := s.runner.Store.AgentSessionLog(ctx, waitingRun.ID)
+	durableSession := waitingRun.DurableSessionID
+	if durableSession == "" {
+		durableSession = waitingRun.ID
+	}
+	leaseCtx, release, err := agentcore.AcquireSessionLease(ctx, s.runner.SessionStore, durableSession)
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("claiming parked session: %w", err)
+	}
+	defer func() { _ = release() }()
+	ctx = leaseCtx
+
+	// The row was selected before ownership acquisition and may have completed
+	// while this request waited on another replica. Revalidate under the lease so
+	// only the request that still owns a waiting predecessor can continue it.
+	status, err := s.runner.Store.AgentRunStatus(ctx, waitingRun.ID)
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("revalidating parked run: %w", err)
+	}
+	if status != "waiting" {
+		return ChatResult{}, fmt.Errorf("parked run %s is already %s", waitingRun.ID, status)
+	}
+
+	sessionLog, err := s.runner.SessionStore.Log(ctx, durableSession)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("reading durable session log: %w", err)
 	}
-	sessionLog := make([]agentcore.SessionEntry, len(logEntries))
-	for i, le := range logEntries {
-		_ = json.Unmarshal([]byte(le.PayloadJSON), &sessionLog[i])
-		sessionLog[i].Seq = le.Seq
-	}
 	pendingCallID, _, found := agentcore.PendingQuestion(sessionLog)
 	if !found {
-		return ChatResult{}, fmt.Errorf("no unanswered question in session log for run %s", waitingRun.ID)
+		// A crash after recording the answer but before starting the continuation
+		// leaves the predecessor waiting. A supplied call id makes that retry
+		// unambiguous; RecordSessionAnswer below recognizes the exact answer.
+		if opts.CallID == "" {
+			return ChatResult{}, fmt.Errorf("no unanswered question in durable session %s", durableSession)
+		}
+		pendingCallID = opts.CallID
 	}
 	if opts.CallID != "" && opts.CallID != pendingCallID {
 		return ChatResult{}, fmt.Errorf("call id mismatch: expected %q, got %q", pendingCallID, opts.CallID)
 	}
 
-	if s.runner.SessionStore != nil {
-		if err := s.runner.SessionStore.Append(ctx, waitingRun.ID, agentcore.SessionEntry{
-			Kind:   agentcore.EntryAnswer,
-			CallID: pendingCallID,
-			Answer: opts.Answer,
-		}); err != nil {
-			return ChatResult{}, fmt.Errorf("recording answer entry: %w", err)
-		}
+	appended, err := agentcore.RecordSessionAnswer(ctx, s.runner.SessionStore, durableSession, pendingCallID, opts.Answer)
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("recording answer entry: %w", err)
 	}
 
 	convID := opts.ConversationID
 	if convID == "" {
 		convID = waitingRun.SessionID
 	}
-	if convID != "" {
+	if convID != "" && appended {
 		_, _ = AppendMessageEntry(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0)
 	}
 
@@ -354,13 +372,15 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 		ConversationID:  convID,
 		OnPlan:          opts.OnPlan,
 		ReadOnly:        opts.ReadOnly,
-		ResumeFromRunID: waitingRun.ID,
+		ResumeFromRunID: durableSession,
 	}
 	res, err := s.handle(ctx, work, sink)
 	res.Route = routeData
 
-	if err == nil && !res.Waiting {
+	if err == nil {
 		_ = s.runner.Store.SetAgentRunStatus(ctx, waitingRun.ID, "done")
+	}
+	if err == nil && !res.Waiting {
 		chatOpts := ChatOptions{
 			ProjectID:      opts.ProjectID,
 			AgentID:        waitingRun.AgentID,
@@ -580,9 +600,9 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
-		ReasoningEffort:  req.ReasoningEffort,
-		ReadOnly:         req.ReadOnly,
-		ResumeFromRunID:  req.ResumeFromRunID,
+		ReasoningEffort: req.ReasoningEffort,
+		ReadOnly:        req.ReadOnly,
+		ResumeFromRunID: req.ResumeFromRunID,
 	}, wrapped)
 	if runErr != nil {
 		// Final is carried even on the error return: a stopped run's partial answer

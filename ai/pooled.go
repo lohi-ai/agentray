@@ -34,23 +34,28 @@ type oauthTokenApplier interface {
 // per-turn key refresh would overwrite the freshly acquired token with the
 // provider row's sentinel key (OAuthPoolKey), which is never a real credential.
 type pooledProvider struct {
-	vendor string
-	inner  agentcore.LLMProvider
-	src    TokenSource
+	vendor       string
+	sessionScope string
+	inner        agentcore.LLMProvider
+	src          TokenSource
 }
 
 // newPooledProvider wraps inner so each Chat/Stream call acquires an account
 // token from src. Both arguments are required: a nil source has nothing to
 // draw from, and an inner client that cannot apply a token would send the
 // request unauthenticated.
-func newPooledProvider(vendor string, inner agentcore.LLMProvider, src TokenSource) (*pooledProvider, error) {
+func newPooledProvider(vendor string, inner agentcore.LLMProvider, src TokenSource, sessionScope ...string) (*pooledProvider, error) {
 	if src == nil {
 		return nil, fmt.Errorf("ai: provider %q requires a TokenSource (OAuth account pool)", vendor)
 	}
 	if _, ok := inner.(oauthTokenApplier); !ok {
 		return nil, fmt.Errorf("ai: provider %q wire client cannot apply OAuth tokens", vendor)
 	}
-	return &pooledProvider{vendor: vendor, inner: inner, src: src}, nil
+	scope := vendor
+	if len(sessionScope) > 0 && sessionScope[0] != "" {
+		scope = sessionScope[0]
+	}
+	return &pooledProvider{vendor: vendor, sessionScope: scope, inner: inner, src: src}, nil
 }
 
 // acquire pulls the next usable account token and returns a per-call clone of
@@ -67,12 +72,16 @@ func (p *pooledProvider) acquire(ctx context.Context) (agentcore.LLMProvider, OA
 
 func (p *pooledProvider) Name() string        { return p.vendor }
 func (p *pooledProvider) SupportsTools() bool { return p.inner.SupportsTools() }
+func (p *pooledProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	return agentcore.CapabilitiesOf(p.inner, model)
+}
 
 func (p *pooledProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	inner, tok, err := p.acquire(ctx)
 	if err != nil {
 		return agentcore.ChatResponse{}, err
 	}
+	bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
 	resp, callErr := inner.Chat(ctx, req)
 	p.src.Report(ctx, tok, callErr)
 	return resp, callErr
@@ -83,6 +92,7 @@ func (p *pooledProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 	if err != nil {
 		return nil, err
 	}
+	bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
 	ch, callErr := inner.Stream(ctx, req)
 	if callErr != nil {
 		// The call failed synchronously — report it here. A successful start is

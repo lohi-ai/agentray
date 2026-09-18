@@ -29,6 +29,13 @@ const ToolMCP = "mcp"
 // are built only when the host injected the required isolation substrate.
 type ToolBuildContext struct {
 	Sandbox agentcore.Sandbox
+	// EvalSessions and LSPSessions own retained language processes across the
+	// per-run tool instances.
+	// RuntimeNamespace is the tenant/project/agent prefix used before the
+	// conversation id, preventing client-chosen ids from crossing boundaries.
+	EvalSessions     *sandbox.EvalSessionRegistry
+	LSPSessions      *sandbox.LSPSessionRegistry
+	RuntimeNamespace string
 	// SandboxRequired withholds the shell/computer/browser tools when no Sandbox
 	// is wired, instead of building them against the host workspace.
 	//
@@ -101,6 +108,24 @@ func workspaceToolAvailable(c ToolBuildContext) bool { return c.workspaceAvailab
 func sandboxToolAvailable(c ToolBuildContext) bool {
 	return c.isolationSatisfied() && c.workspaceAvailable()
 }
+
+// lspToolAvailable adds the protocol requirement to ordinary executable-tool
+// availability. Local host mode supplies HostSandbox automatically; an injected
+// server backend must explicitly support interactive process pipes.
+func lspToolAvailable(c ToolBuildContext) bool {
+	if !sandboxToolAvailable(c) {
+		return false
+	}
+	if c.Sandbox == nil {
+		return true
+	}
+	_, ok := c.Sandbox.(agentcore.ProcessSandbox)
+	return ok
+}
+
+// eval uses the same interactive-process substrate and workspace requirements
+// as LSP; its process is retained by a bounded registry rather than one call.
+func evalToolAvailable(c ToolBuildContext) bool { return lspToolAvailable(c) }
 
 // ToolSpec describes one selectable tool: its stable name, human-facing catalog
 // copy, whether it carries per-agent config, and how to build a live tool from
@@ -186,6 +211,24 @@ var toolRegistry = map[string]ToolSpec{
 		available:    sandboxToolAvailable,
 		build:        buildRunShellTool,
 	},
+	sandbox.ToolLSP: {
+		Name:         sandbox.ToolLSP,
+		Title:        "Language intelligence (LSP)",
+		Description:  "Query operator-provisioned language servers for diagnostics, symbols, hover, definitions, and references. Runs read-only in the agent workspace on the local host or configured server sandbox.",
+		Configurable: true,
+		available:    lspToolAvailable,
+		validate:     validateLSPConfig,
+		build:        buildLSPTool,
+	},
+	sandbox.ToolEval: {
+		Name:         sandbox.ToolEval,
+		Title:        "Persistent Python eval",
+		Description:  "Execute one Python cell at a time with conversation-scoped state. Variables and imports survive later calls; reset discards the kernel. Uses a trusted local Python on laptops or a no-network sandbox image on servers.",
+		Configurable: true,
+		available:    evalToolAvailable,
+		validate:     validateEvalConfig,
+		build:        buildEvalTool,
+	},
 	sandbox.ToolComputerUse: {
 		Name:         sandbox.ToolComputerUse,
 		Title:        "Computer use",
@@ -217,6 +260,14 @@ var toolRegistry = map[string]ToolSpec{
 		Configurable: false,
 		available:    workspaceToolAvailable,
 		build:        buildEditFileTool,
+	},
+	sandbox.ToolEditLines: {
+		Name:         sandbox.ToolEditLines,
+		Title:        "Edit lines",
+		Description:  "Apply several snapshot-bound line replacements, insertions, or deletions to one workspace file atomically. Every line number addresses the original file revision.",
+		Configurable: false,
+		available:    workspaceToolAvailable,
+		build:        buildEditLinesTool,
 	},
 	sandbox.ToolGrep: {
 		Name:         sandbox.ToolGrep,
@@ -361,19 +412,24 @@ func ValidateToolConfig(tctx ToolBuildContext, name, configJSON string) error {
 	if !ok {
 		return fmt.Errorf("unknown tool %q", name)
 	}
+	// The control plane has no concrete per-run workspace, but it does carry
+	// WorkspaceBase and deployment isolation capabilities. Check availability
+	// before a custom offline validator: otherwise configurable workspace tools
+	// such as LSP/eval could be enabled by a direct API call even though the
+	// catalog correctly withheld them from a hosted deployment.
+	if tctx.Workspace == nil && spec.available != nil && !spec.available(tctx) {
+		return fmt.Errorf("%s is not available on this deployment", name)
+	}
 	if spec.validate != nil {
 		return spec.validate(tctx, configJSON)
 	}
 	// The workspace is created per RUN, so the control plane's context never
 	// carries one — validating by building would reject read_file, write_file,
-	// edit_file, grep, glob, run_shell, computer_use and browser_use on every
+	// edit_file, edit_lines, grep, glob, run_shell, computer_use and browser_use on every
 	// deployment, with the catalog offering exactly the tools the writer refuses.
 	// What the write path can honestly check is the same predicate the catalog
 	// advertised them by, plus the config itself.
 	if tctx.Workspace == nil && spec.available != nil {
-		if !spec.available(tctx) {
-			return fmt.Errorf("%s is not available on this deployment", name)
-		}
 		if !spec.Configurable {
 			return rejectConfig(name, configJSON)
 		}
@@ -488,7 +544,7 @@ func buildRunShellTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 	if !ctx.isolationSatisfied() {
 		return nil, fmt.Errorf("run_shell requires the sandbox to be enabled")
 	}
-	// The shell shares one directory with read_file/write_file/edit_file because
+	// The shell shares one directory with read_file/write_file/edit_file/edit_lines because
 	// that sharing is the point: an agent writes a script with write_file and
 	// runs it with run_shell. A shell in its own ephemeral scratch dir could not
 	// see the file it had just been asked to execute.
@@ -499,6 +555,42 @@ func buildRunShellTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 		return nil, err
 	}
 	return sandbox.NewShellTool(ctx.Sandbox, agentcore.SandboxLimits{}, ctx.Workspace), nil
+}
+
+func validateLSPConfig(_ ToolBuildContext, configJSON string) error {
+	return sandbox.ValidateLSPConfig(configJSON)
+}
+
+func buildLSPTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
+	if !ctx.isolationSatisfied() {
+		return nil, fmt.Errorf("lsp requires the sandbox to be enabled")
+	}
+	if ctx.Workspace == nil {
+		return nil, fmt.Errorf("lsp requires the agent workspace to be enabled")
+	}
+	config, err := sandbox.ParseLSPConfig(configJSON)
+	if err != nil {
+		return nil, err
+	}
+	return sandbox.NewLSPToolWithRegistry(ctx.Sandbox, ctx.Workspace, ctx.LSPSessions, ctx.RuntimeNamespace, config)
+}
+
+func validateEvalConfig(_ ToolBuildContext, configJSON string) error {
+	return sandbox.ValidateEvalConfig(configJSON)
+}
+
+func buildEvalTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
+	if !ctx.isolationSatisfied() {
+		return nil, fmt.Errorf("eval requires the sandbox to be enabled")
+	}
+	if ctx.Workspace == nil {
+		return nil, fmt.Errorf("eval requires the agent workspace to be enabled")
+	}
+	config, err := sandbox.ParseEvalConfig(configJSON)
+	if err != nil {
+		return nil, err
+	}
+	return sandbox.NewEvalTool(ctx.Sandbox, ctx.Workspace, ctx.EvalSessions, ctx.RuntimeNamespace, config)
 }
 
 // buildComputerUseTool constructs the persistent computer_use shell. It needs
@@ -541,6 +633,16 @@ func buildEditFileTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool,
 		return nil, err
 	}
 	return sandbox.NewEditFileTool(ctx.Sandbox, ctx.Workspace), nil
+}
+
+func buildEditLinesTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {
+	if ctx.Workspace == nil {
+		return nil, fmt.Errorf("edit_lines requires the agent workspace to be enabled")
+	}
+	if err := rejectConfig(sandbox.ToolEditLines, configJSON); err != nil {
+		return nil, err
+	}
+	return sandbox.NewEditLinesTool(ctx.Sandbox, ctx.Workspace), nil
 }
 
 func buildGrepTool(ctx ToolBuildContext, configJSON string) (agentcore.Tool, error) {

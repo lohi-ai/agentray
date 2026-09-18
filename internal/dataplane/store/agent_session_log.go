@@ -2,11 +2,16 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// ErrAgentSessionLeaseLost is returned when a fenced writer no longer owns the
+// lease epoch it presents. The runtime maps it to agentcore's public sentinel.
+var ErrAgentSessionLeaseLost = errors.New("storage: agent session lease lost")
 
 // This file holds the durable session log — the append-only harness that makes a
 // run resumable (agentcore's SessionStore seam). One row per loop event (a
@@ -73,6 +78,19 @@ func (s *Store) migrateAgentSessionLog(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS agent_session_log_resume_idx
 	ON agent_session_log (session_key, seq DESC)
 	WHERE kind IN ('compaction', 'leaf_move')`,
+		`CREATE TABLE IF NOT EXISTS agent_session_leases (
+	session_key TEXT PRIMARY KEY,
+	run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+	owner_id UUID NOT NULL,
+	epoch BIGINT NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`,
+		// Idempotent upgrade for a database that created the lease table during a
+		// partial rollout before run ownership/cascade was added.
+		`ALTER TABLE agent_session_leases ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES agent_runs(id) ON DELETE CASCADE`,
+		`UPDATE agent_session_leases SET run_id = split_part(session_key, '/', 1)::uuid WHERE run_id IS NULL`,
+		`ALTER TABLE agent_session_leases ALTER COLUMN run_id SET NOT NULL`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -98,6 +116,17 @@ func (s *Store) AppendAgentSessionEntry(ctx context.Context, e AgentSessionEntry
 // including single-entry side records (which delegate here), so sequence
 // assignment is contiguous and no concurrent write can appear inside a batch.
 func (s *Store) AppendAgentSessionEntries(ctx context.Context, entries []AgentSessionEntry) ([]int, error) {
+	return s.appendAgentSessionEntries(ctx, entries, "", 0, false)
+}
+
+// AppendAgentSessionEntriesFenced appends only while ownerID still holds the
+// supplied lease epoch. The lease row is locked through commit, so an expired
+// owner cannot race a replacement owner between validation and insertion.
+func (s *Store) AppendAgentSessionEntriesFenced(ctx context.Context, entries []AgentSessionEntry, ownerID string, epoch int64) ([]int, error) {
+	return s.appendAgentSessionEntries(ctx, entries, ownerID, epoch, true)
+}
+
+func (s *Store) appendAgentSessionEntries(ctx context.Context, entries []AgentSessionEntry, ownerID string, epoch int64, fenced bool) ([]int, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -123,6 +152,20 @@ func (s *Store) AppendAgentSessionEntries(ctx context.Context, entries []AgentSe
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
 		return nil, err
 	}
+	if fenced {
+		var valid bool
+		err := tx.QueryRow(ctx, `
+SELECT owner_id::text = $2 AND epoch = $3 AND expires_at > now()
+FROM agent_session_leases
+WHERE session_key = $1
+FOR UPDATE`, key, ownerID, epoch).Scan(&valid)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !valid) {
+			return nil, ErrAgentSessionLeaseLost
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 	var last int
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM agent_session_log WHERE session_key = $1`, key).Scan(&last); err != nil {
 		return nil, err
@@ -145,6 +188,53 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, entry.RunID, key, seq, entry.Kind, entr
 		return nil, err
 	}
 	return seqs, nil
+}
+
+// AcquireAgentSessionLease claims an absent or expired lease and increments its
+// fencing epoch on takeover. A live owner is never overwritten.
+func (s *Store) AcquireAgentSessionLease(ctx context.Context, sessionKey, runID, ownerID string, ttl time.Duration) (int64, bool, error) {
+	if ttl <= 0 {
+		return 0, false, fmt.Errorf("session lease ttl must be positive")
+	}
+	var epoch int64
+	err := s.pg.QueryRow(ctx, `
+INSERT INTO agent_session_leases (session_key, run_id, owner_id, epoch, expires_at, updated_at)
+VALUES ($1, $2, $3, 1, now() + $4::interval, now())
+ON CONFLICT (session_key) DO UPDATE
+SET owner_id = EXCLUDED.owner_id,
+    epoch = agent_session_leases.epoch + 1,
+    expires_at = EXCLUDED.expires_at,
+    updated_at = now()
+WHERE agent_session_leases.expires_at <= now()
+RETURNING epoch`, sessionKey, runID, ownerID, durationInterval(ttl)).Scan(&epoch)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return epoch, err == nil, err
+}
+
+// RenewAgentSessionLease extends only the currently live matching epoch.
+func (s *Store) RenewAgentSessionLease(ctx context.Context, sessionKey, ownerID string, epoch int64, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("session lease ttl must be positive")
+	}
+	tag, err := s.pg.Exec(ctx, `
+UPDATE agent_session_leases
+SET expires_at = now() + $4::interval, updated_at = now()
+WHERE session_key = $1 AND owner_id = $2 AND epoch = $3 AND expires_at > now()`,
+		sessionKey, ownerID, epoch, durationInterval(ttl))
+	return err == nil && tag.RowsAffected() == 1, err
+}
+
+// ReleaseAgentSessionLease deletes only the caller's epoch; a stale owner's
+// deferred release cannot remove a newer owner's claim.
+func (s *Store) ReleaseAgentSessionLease(ctx context.Context, sessionKey, ownerID string, epoch int64) error {
+	_, err := s.pg.Exec(ctx, `DELETE FROM agent_session_leases WHERE session_key = $1 AND owner_id = $2 AND epoch = $3`, sessionKey, ownerID, epoch)
+	return err
+}
+
+func durationInterval(d time.Duration) string {
+	return fmt.Sprintf("%d milliseconds", d.Milliseconds())
 }
 
 // AgentSessionLog returns one session's full ordered entry log (oldest first),

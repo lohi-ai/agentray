@@ -83,14 +83,16 @@ type Registry struct {
 	// --- capability seams: exactly one provider each -----------------------
 	seams map[string]string // seam name -> plugin that claimed it
 
-	driver    Driver
-	provider  LLMProvider
-	model     string
-	tools     *ToolSet
-	policy    Policy
-	memory    MemoryStore
-	session   SessionStore
-	sessionID string
+	driver            Driver
+	provider          LLMProvider
+	model             string
+	tools             *ToolSet
+	policy            Policy
+	memory            MemoryStore
+	session           SessionStore
+	sessionID         string
+	providerSession   *ProviderSession
+	providerSessionID string
 
 	// --- configuration contributed by plugins ------------------------------
 	limits Limits
@@ -100,24 +102,25 @@ type Registry struct {
 	// merging them into the struct at registration time would make the result
 	// depend on whether SetEnv ran before or after SetSandbox — the one thing a
 	// plugin system must never do.
-	env             Env
-	sandbox         Sandbox
-	credentials     CredentialResolver
-	definition      AgentDefinition
-	compaction      CompactionSettings
-	compactionRung  ModelRung
-	compactor       Compactor
-	escalation      []ModelRung
-	contextWindow   int
-	retry           RetryPolicy
-	goal            string
-	maxTokens       int
-	reasoningEffort string
-	outputSchema    *OutputSchema
-	cacheKey        string
-	cacheRetention  string
-	promptResume    bool
-	seedDisabled    []string
+	env               Env
+	sandbox           Sandbox
+	credentials       CredentialResolver
+	definition        AgentDefinition
+	compaction        CompactionSettings
+	compactionRung    ModelRung
+	compactor         Compactor
+	escalation        []ModelRung
+	contextWindow     int
+	modelCapabilities ModelCapabilities
+	retry             RetryPolicy
+	goal              string
+	maxTokens         int
+	reasoningEffort   string
+	outputSchema      *OutputSchema
+	cacheKey          string
+	cacheRetention    string
+	promptResume      bool
+	seedDisabled      []string
 
 	budgetGate      func(ctx context.Context, u Usage) bool
 	stepGate        func(ctx context.Context, turn int) error
@@ -237,6 +240,11 @@ func (r *Registry) SetContextWindow(tokens int) error {
 	return setSeam(r, "context_window", &r.contextWindow, tokens)
 }
 
+// SetModelCapabilities installs live/configured facts for the primary model.
+func (r *Registry) SetModelCapabilities(c ModelCapabilities) error {
+	return setSeam(r, "model_capabilities", &r.modelCapabilities, c)
+}
+
 // SetRetry overrides the same-model backoff policy applied before escalation.
 // Zero fields are filled from DefaultRetryPolicy().
 func (r *Registry) SetRetry(p RetryPolicy) error {
@@ -349,6 +357,25 @@ func (r *Registry) SetSession(s SessionStore, id string, resume bool) error {
 	r.onUnload(func() {
 		r.session, r.sessionID, r.promptResume = prevS, prevID, prevR
 		delete(r.seams, "session")
+	})
+	return nil
+}
+
+// SetProviderSession installs provider-private state for a logical
+// conversation. It is separate from SetSession because provider affinity spans
+// run logs and remains useful when durable logging is disabled.
+func (r *Registry) SetProviderSession(s *ProviderSession, id string) error {
+	if s == nil {
+		return fmt.Errorf("agentcore: plugin %q cannot install a nil provider session", r.current)
+	}
+	if err := r.claim("provider_session"); err != nil {
+		return err
+	}
+	prevS, prevID := r.providerSession, r.providerSessionID
+	r.providerSession, r.providerSessionID = s, id
+	r.onUnload(func() {
+		r.providerSession, r.providerSessionID = prevS, prevID
+		delete(r.seams, "provider_session")
 	})
 	return nil
 }

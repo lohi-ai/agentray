@@ -177,7 +177,7 @@ func TestWriteAndEditRoundTripOnSandboxSubstrate(t *testing.T) {
 
 	// edit_file reads and rewrites through the same substrate.
 	out, err := NewEditFileTool(sb, ws).Run(context.Background(),
-		`{"path":"out/new.txt","old_string":"line two","new_string":"line 2"}`)
+		editArgs(t, ws, "out/new.txt", "line two", "line 2", false))
 	if err != nil {
 		t.Fatalf("edit_file: %v", err)
 	}

@@ -134,6 +134,9 @@ func newTracingProvider(inner agentcore.LLMProvider, pricing Pricing, sink Sink)
 
 func (t *tracingProvider) Name() string        { return t.inner.Name() }
 func (t *tracingProvider) SupportsTools() bool { return t.inner.SupportsTools() }
+func (t *tracingProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	return agentcore.CapabilitiesOf(t.inner, model)
+}
 
 // UpdateAPIKey forwards key rotation to the inner provider when it supports it,
 // so wrapping doesn't break long-run BYO-key refresh (the loop type-asserts the

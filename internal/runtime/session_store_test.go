@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -25,6 +26,27 @@ func TestSessionEntryFromRowRoundTrip(t *testing.T) {
 	}
 	if e.Message == nil || e.Message.Content != "done" {
 		t.Fatalf("message not restored: %+v", e.Message)
+	}
+}
+
+func TestSessionEntryFromRowRestoresToolOutcome(t *testing.T) {
+	want := agentcore.SessionEntry{
+		Kind: agentcore.EntryToolOutcome, Turn: 4, CallID: "call-7",
+		Outcome: &agentcore.ToolOutcomeRecord{
+			Message:  agentcore.Message{Role: agentcore.RoleTool, ToolCallID: "call-7", Name: "read", Content: "result"},
+			Trace:    agentcore.ToolTrace{CallID: "call-7", Tool: "read", Args: `{}`, Allowed: true},
+			Executed: true,
+		},
+	}
+	payload, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sessionEntryFromRow(storage.AgentSessionEntry{
+		Seq: 11, Kind: string(agentcore.EntryToolOutcome), Turn: 4, PayloadJSON: string(payload),
+	})
+	if got.Seq != 11 || got.Outcome == nil || got.Outcome.Message.Content != "result" || got.Outcome.Trace.CallID != "call-7" || !got.Outcome.Executed {
+		t.Fatalf("tool outcome did not round-trip: %+v", got)
 	}
 }
 

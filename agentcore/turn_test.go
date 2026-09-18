@@ -272,6 +272,104 @@ func TestRetryThenEscalate(t *testing.T) {
 	}
 }
 
+// retryStreamProvider returns one scripted stream per call. It lets the tests
+// put a transport error on either side of the first visible token — the exact
+// boundary that decides whether replay is safe.
+type retryStreamProvider struct {
+	name    string
+	scripts [][]ChatDelta
+	calls   int32
+}
+
+func (p *retryStreamProvider) Name() string        { return p.name }
+func (p *retryStreamProvider) SupportsTools() bool { return true }
+func (p *retryStreamProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
+	return ChatResponse{}, errors.New("unused")
+}
+func (p *retryStreamProvider) Stream(context.Context, ChatRequest) (<-chan ChatDelta, error) {
+	i := int(atomic.AddInt32(&p.calls, 1)) - 1
+	if i >= len(p.scripts) {
+		return nil, errors.New("unexpected stream attempt")
+	}
+	ch := make(chan ChatDelta, len(p.scripts[i]))
+	for _, d := range p.scripts[i] {
+		ch <- d
+	}
+	close(ch)
+	return ch, nil
+}
+
+// Once a token reaches the sink, retrying would concatenate a second answer to
+// the first. The failed attempt also remains billable, so its partial usage must
+// survive on the errored RunResult.
+func TestStreamFailureAfterVisibleOutputIsNotRetriedOrEscalated(t *testing.T) {
+	cause := &ProviderError{Provider: "primary", Status: http.StatusServiceUnavailable}
+	primary := &retryStreamProvider{name: "primary", scripts: [][]ChatDelta{{
+		{ContentDelta: "partial", Usage: Usage{InputTokens: 11}},
+		{Err: cause, Usage: Usage{OutputTokens: 1}},
+	}}}
+	fallback := &retryStreamProvider{name: "fallback", scripts: [][]ChatDelta{{
+		{ContentDelta: "fallback should not run"}, {Done: true},
+	}}}
+	agent, err := New(Config{
+		Provider: primary, Model: "primary-model", Retry: fastRetry(),
+		Escalation: []ModelRung{{Provider: fallback, Model: "fallback-model"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var visible string
+	res, err := agent.PromptStream(context.Background(), "go", func(ev StreamEvent) {
+		if ev.Type == StreamToken {
+			visible += ev.Token
+		}
+	})
+	if err == nil || !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want wrapped original provider error", err)
+	}
+	if visible != "partial" {
+		t.Fatalf("visible output = %q, want one copy of the committed prefix", visible)
+	}
+	if got := atomic.LoadInt32(&primary.calls); got != 1 {
+		t.Fatalf("primary attempts = %d, want 1 after output committed", got)
+	}
+	if got := atomic.LoadInt32(&fallback.calls); got != 0 {
+		t.Fatalf("fallback attempts = %d, want 0 after output committed", got)
+	}
+	if res.Usage.InputTokens != 11 || res.Usage.OutputTokens != 1 {
+		t.Fatalf("partial usage = %+v, want input=11 output=1", res.Usage)
+	}
+}
+
+// A failure before the first token is still replay-safe and should retain the
+// existing same-rung retry behavior.
+func TestStreamFailureBeforeVisibleOutputStillRetries(t *testing.T) {
+	primary := &retryStreamProvider{name: "primary", scripts: [][]ChatDelta{
+		{{Err: &ProviderError{Provider: "primary", Status: http.StatusServiceUnavailable}}},
+		{{ContentDelta: "recovered"}, {Done: true, StopReason: "stop"}},
+	}}
+	agent, err := New(Config{Provider: primary, Model: "test", Retry: fastRetry()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var visible string
+	res, err := agent.PromptStream(context.Background(), "go", func(ev StreamEvent) {
+		if ev.Type == StreamToken {
+			visible += ev.Token
+		}
+	})
+	if err != nil {
+		t.Fatalf("PromptStream should recover before output commits: %v", err)
+	}
+	if res.Final != "recovered" || visible != "recovered" {
+		t.Fatalf("final=%q visible=%q, want recovered", res.Final, visible)
+	}
+	if got := atomic.LoadInt32(&primary.calls); got != 2 {
+		t.Fatalf("primary attempts = %d, want 2", got)
+	}
+}
+
 // TestRetryClassification spot-checks the retryable/non-retryable split that
 // gates same-rung retry.
 func TestRetryClassification(t *testing.T) {

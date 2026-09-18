@@ -23,8 +23,8 @@ func TestEnablingAWorkspaceToolAgreesWithTheCatalog(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolEditFile,
-		sandbox.ToolGrep, sandbox.ToolGlob, sandbox.ToolRunShell,
+		sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolEditFile, sandbox.ToolEditLines,
+		sandbox.ToolGrep, sandbox.ToolGlob, sandbox.ToolRunShell, sandbox.ToolEval,
 	} {
 		if !catalog[name] {
 			t.Fatalf("%s: catalog reports it unavailable with a workspace base configured", name)
@@ -42,12 +42,19 @@ func TestEnablingAWorkspaceToolAgreesWithTheCatalog(t *testing.T) {
 func TestEnablingAWithheldToolIsRefused(t *testing.T) {
 	ctx := ToolBuildContext{WorkspaceBase: t.TempDir(), SandboxRequired: true}
 
-	err := ValidateToolConfig(ctx, sandbox.ToolRunShell, "{}")
-	if err == nil {
-		t.Fatal("run_shell was accepted with isolation required and no sandbox wired")
-	}
-	if !strings.Contains(err.Error(), "not available") && !strings.Contains(err.Error(), "sandbox") {
-		t.Fatalf("refusal does not say why: %v", err)
+	for name, config := range map[string]string{
+		sandbox.ToolRunShell: "{}",
+		sandbox.ToolEval:     "{}",
+		sandbox.ToolLSP:      `{"servers":[{"name":"go","command":"gopls","extensions":[".go"]}]}`,
+	} {
+		err := ValidateToolConfig(ctx, name, config)
+		if err == nil {
+			t.Errorf("%s was accepted with isolation required and no sandbox wired", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not available") && !strings.Contains(err.Error(), "sandbox") {
+			t.Errorf("%s refusal does not say why: %v", name, err)
+		}
 	}
 
 	// read_file is not an isolation tool and stays enablable — withholding the

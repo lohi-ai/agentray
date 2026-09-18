@@ -118,6 +118,63 @@ func (h *HostSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (agen
 	return res, nil
 }
 
+// Start launches an interactive host process under the same environment,
+// workspace, timeout, and process-group rules as Exec. It is intentionally an
+// optional capability on agentcore.Sandbox; tools that do not need a live
+// protocol keep using the smaller buffered contract.
+func (h *HostSandbox) Start(ctx context.Context, req agentcore.SandboxExec) (agentcore.SandboxProcess, error) {
+	if len(req.Argv) == 0 {
+		return nil, fmt.Errorf("sandbox: empty argv")
+	}
+	if req.Stdin != "" {
+		return nil, fmt.Errorf("sandbox: interactive process cannot use preloaded stdin")
+	}
+	timeoutS := req.Constraints.TimeoutSeconds
+	if timeoutS <= 0 {
+		timeoutS = hostDefaultTimeoutS
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutS*float64(time.Second)))
+	dir, cleanup, err := hostWorkdir(req)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(runCtx, req.Argv[0], req.Argv[1:]...)
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.Dir = dir
+	cmd.Env = hostEnv(req.Env)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		cleanup()
+		return nil, fmt.Errorf("sandbox: host stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		cleanup()
+		return nil, fmt.Errorf("sandbox: host stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		cleanup()
+		return nil, fmt.Errorf("sandbox: host stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		cleanup()
+		return nil, fmt.Errorf("sandbox: host start: %w", err)
+	}
+	return &commandProcess{
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
+		runCtx: runCtx, cancel: cancel, killFn: func() error { return killProcessGroup(cmd) },
+		cleanup: cleanup, errLabel: "host wait", timeout: fmt.Sprintf("exceeded %.0fs timeout", timeoutS),
+	}, nil
+}
+
 // hostEnv renders req.Env as a KEY=VALUE slice. It returns a non-nil slice even
 // when env is empty, because os/exec treats a nil Env as "inherit the parent's"
 // — the exact leak this substrate exists to avoid.

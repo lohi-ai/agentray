@@ -14,6 +14,7 @@ func ConfigPlugin(cfg Config) Plugin {
 type ModelPlugin struct {
 	Provider        LLMProvider
 	Model           string
+	Capabilities    ModelCapabilities
 	ContextWindow   int
 	Escalation      []ModelRung
 	Retry           *RetryPolicy
@@ -40,6 +41,11 @@ func (p ModelPlugin) Register(r *Registry) error {
 	}
 	if p.ContextWindow > 0 {
 		if err := r.SetContextWindow(p.ContextWindow); err != nil {
+			return err
+		}
+	}
+	if p.Capabilities != (ModelCapabilities{}) {
+		if err := r.SetModelCapabilities(p.Capabilities); err != nil {
 			return err
 		}
 	}
@@ -208,6 +214,8 @@ type SessionPlugin struct {
 	ID                string
 	Resume            bool
 	SeedDisabledTools []string
+	ProviderState     *ProviderSession
+	ProviderSessionID string
 }
 
 // Name identifies the plugin.
@@ -215,6 +223,11 @@ func (SessionPlugin) Name() string { return "session" }
 
 // Register claims the session seam.
 func (p SessionPlugin) Register(r *Registry) error {
+	if p.ProviderState != nil {
+		if err := r.SetProviderSession(p.ProviderState, p.ProviderSessionID); err != nil {
+			return err
+		}
+	}
 	if len(p.SeedDisabledTools) > 0 {
 		if err := r.SetSeedDisabledTools(p.SeedDisabledTools); err != nil {
 			return err

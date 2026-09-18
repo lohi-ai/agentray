@@ -50,6 +50,21 @@ func TestShellToolRunsThroughSandbox(t *testing.T) {
 	}
 }
 
+func TestShellToolMapsHostUserForWritableWorkspace(t *testing.T) {
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubSandbox{result: agentcore.SandboxResult{ExitCode: 0}}
+	tool := NewShellTool(stub, agentcore.SandboxLimits{}, ws)
+	if _, err := tool.Run(context.Background(), `{"command":"touch output.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	if !stub.last.Constraints.RunAsHostUser || stub.last.Constraints.WritableFS {
+		t.Fatalf("workspace identity/root policy = %+v", stub.last.Constraints)
+	}
+}
+
 // computer_use is the persistent, network-enabled, writable profile and must
 // thread the conversation session id from the context onto the exec so the
 // backend reuses one container across calls.

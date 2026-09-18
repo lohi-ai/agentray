@@ -35,8 +35,11 @@ import "context"
 // cap holds across an A -> B -> A cycle the same as a straight chain.
 func (a *Agent) Fork(childSessionID string) *Agent {
 	child := &Agent{
+		driver:             a.driver,
 		provider:           a.provider,
 		model:              a.model,
+		modelCapabilities:  a.modelCapabilities,
+		contextWindow:      a.contextWindow,
 		tools:              a.tools,
 		policy:             a.policy,
 		hooks:              a.hooks,
@@ -55,6 +58,10 @@ func (a *Agent) Fork(childSessionID string) *Agent {
 		cacheRetention:     a.cacheRetention,
 		maxTokens:          a.maxTokens,
 		reasoningEffort:    a.reasoningEffort,
+		outputSchema:       a.outputSchema,
+		outputValidator:    a.outputValidator,
+		providerSession:    a.providerSession,
+		providerSessionID:  childSessionID,
 		extensions:         a.extensions,
 	}
 	if childSessionID != "" && a.session != nil && a.sessionID != "" {

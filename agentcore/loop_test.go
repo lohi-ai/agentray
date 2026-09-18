@@ -1184,9 +1184,10 @@ func TestSavePointFlushesPerTurn(t *testing.T) {
 	if _, err := agent.PromptStream(context.Background(), "go", sink); err != nil {
 		t.Fatalf("PromptStream: %v", err)
 	}
-	// One save-point per turn: the tool-call turn, then the final-answer turn.
-	if saves != 2 {
-		t.Fatalf("save-points = %d, want 2 (one per turn)", saves)
+	// The tool intent is committed before execution, its settlement closes that
+	// turn, then the final-answer turn commits.
+	if saves != 3 {
+		t.Fatalf("save-points = %d, want 3 (tool intent, settlement, final turn)", saves)
 	}
 	log, _ := store.Log(context.Background(), "s1")
 	if rs := ReduceSession(log); !rs.Completed {

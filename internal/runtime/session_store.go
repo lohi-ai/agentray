@@ -3,8 +3,13 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -31,7 +36,24 @@ var (
 	_ agentcore.SessionStore       = (*pgSessionStore)(nil)
 	_ agentcore.SessionBatchStore  = (*pgSessionStore)(nil)
 	_ agentcore.SessionWindowStore = (*pgSessionStore)(nil)
+	_ agentcore.SessionLeaseStore  = (*pgSessionStore)(nil)
 )
+
+const (
+	sessionLeaseTTL       = 30 * time.Second
+	sessionLeaseRenew     = 10 * time.Second
+	sessionLeasePoll      = 100 * time.Millisecond
+	sessionLeaseDBTimeout = 5 * time.Second
+)
+
+type sessionLeaseContextKey struct{}
+
+type sessionLeaseToken struct {
+	sessionID string
+	ownerID   string
+	epoch     int64
+	cancel    context.CancelCauseFunc
+}
 
 // NewSessionStore returns a SessionStore that writes durable run logs to Postgres.
 func NewSessionStore(store *storage.Store) agentcore.SessionStore {
@@ -76,8 +98,97 @@ func (s *pgSessionStore) AppendBatch(ctx context.Context, sessionID string, entr
 			PayloadJSON: string(payload),
 		})
 	}
-	_, err := s.store.AppendAgentSessionEntries(ctx, rows)
+	var err error
+	if token, ok := ctx.Value(sessionLeaseContextKey{}).(sessionLeaseToken); ok && token.sessionID == sessionID {
+		_, err = s.store.AppendAgentSessionEntriesFenced(ctx, rows, token.ownerID, token.epoch)
+		if errors.Is(err, storage.ErrAgentSessionLeaseLost) {
+			lost := fmt.Errorf("%w: %v", agentcore.ErrSessionLeaseLost, err)
+			if token.cancel != nil {
+				token.cancel(lost)
+			}
+			return lost
+		}
+	} else {
+		_, err = s.store.AppendAgentSessionEntries(ctx, rows)
+	}
 	return err
+}
+
+// AcquireSessionLease waits for exclusive ownership of a durable session and
+// renews it until release. The lease token rides on the returned context so all
+// agentcore appends are fenced at the database boundary. PostgreSQL's clock is
+// authoritative, avoiding skew between server replicas.
+func (s *pgSessionStore) AcquireSessionLease(ctx context.Context, sessionID string) (context.Context, func() error, error) {
+	ownerID := uuid.NewString()
+	var epoch int64
+	for {
+		claimed, ok, err := s.store.AcquireAgentSessionLease(ctx, sessionID, rootRunID(sessionID), ownerID, sessionLeaseTTL)
+		if err != nil {
+			return ctx, nil, err
+		}
+		if ok {
+			epoch = claimed
+			break
+		}
+		timer := time.NewTimer(sessionLeasePoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx, nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	leaseBaseCtx, cancel := context.WithCancelCause(ctx)
+	token := sessionLeaseToken{sessionID: sessionID, ownerID: ownerID, epoch: epoch, cancel: cancel}
+	leaseCtx := context.WithValue(leaseBaseCtx, sessionLeaseContextKey{}, token)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(sessionLeaseRenew)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(context.WithoutCancel(ctx), sessionLeaseDBTimeout)
+				ok, err := s.store.RenewAgentSessionLease(renewCtx, sessionID, ownerID, epoch, sessionLeaseTTL)
+				renewCancel()
+				if err != nil || !ok {
+					cancel(sessionLeaseRenewalError(err))
+					return
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	var releaseErr error
+	release := func() error {
+		once.Do(func() {
+			close(stop)
+			<-done
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), sessionLeaseDBTimeout)
+			releaseErr = s.store.ReleaseAgentSessionLease(releaseCtx, sessionID, ownerID, epoch)
+			releaseCancel()
+			cancel(nil)
+		})
+		return releaseErr
+	}
+	return leaseCtx, release, nil
+}
+
+// sessionLeaseRenewalError preserves the public ownership sentinel while retaining the
+// backend failure for diagnostics.
+func sessionLeaseRenewalError(err error) error {
+	if err == nil {
+		return agentcore.ErrSessionLeaseLost
+	}
+	return fmt.Errorf("%w: renewing PostgreSQL lease: %v", agentcore.ErrSessionLeaseLost, err)
 }
 
 // Log returns the full ordered entry log for a run, mapping each stored row back

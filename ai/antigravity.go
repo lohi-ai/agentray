@@ -70,6 +70,10 @@ func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvi
 func (p *AntigravityProvider) Name() string        { return VendorGoogleAntigravity }
 func (p *AntigravityProvider) SupportsTools() bool { return true }
 
+func (p *AntigravityProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	return CapabilitiesFor(p.Name(), model)
+}
+
 // streamHTTP is the client the SSE path uses: StreamHTTP when set, otherwise
 // whatever the caller put on HTTP.
 func (p *AntigravityProvider) streamHTTP() *http.Client {

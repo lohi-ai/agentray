@@ -28,8 +28,10 @@ func collectionFromBook(book *storage.WorkspaceProviderBook, mgr *oauth.Manager)
 	return ai.CollectionFromSpecs(specs)
 }
 
-// testBookConnections pings each configured tier through the owning provider
-// (same credentials a run would use).
+// testBookConnections pings each configured tier — and each tier's fallback
+// rung — through the owning provider (same credentials a run would use).
+// Fallback results land under "<tier>_fallback" keys so the settings page can
+// render the ladder it just verified.
 func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBook, mgr *oauth.Manager) (bool, map[string]any) {
 	cfg, keys := book.Resolve()
 	results := make(map[string]any, 3)
@@ -57,6 +59,36 @@ func testBookConnections(ctx context.Context, book *storage.WorkspaceProviderBoo
 	if cfg.ProProviderID != "" || cfg.ProProvider != "" || cfg.ProModel != "" || keys["pro"] != "" {
 		test("pro", cfg.ProProviderID, cfg.ProProvider, cfg.ProModel, cfg.ProBaseURL, keys["pro"])
 	}
+
+	// Fallback rungs. A cross-provider fallback tests through its own provider
+	// row; a same-provider one tests the fallback model on the tier's provider.
+	testFallback := func(name, fbProviderID, fbProvider, fbModel, fbBaseURL, fbKey, tierProviderID, tierProvider, tierBaseURL, tierKey string) {
+		if fbModel == "" {
+			return
+		}
+		var res map[string]any
+		switch {
+		case fbProviderID != "":
+			res = testOwnedProvider(ctx, book, fbProviderID, fbModel, mgr)
+		case tierProviderID != "":
+			res = testOwnedProvider(ctx, book, tierProviderID, fbModel, mgr)
+		default:
+			provider := firstNonEmpty(fbProvider, tierProvider, cfg.Provider)
+			baseURL := firstNonEmpty(fbBaseURL, tierBaseURL, cfg.BaseURL)
+			key := firstNonEmpty(fbKey, tierKey, keys["flash"])
+			res = testTierProviderCtx(ctx, provider, baseURL, fbModel, key, tierTokenSource(mgr, provider, cfg.FlashProviderID))
+		}
+		results[name] = res
+		if ok, _ := res["ok"].(bool); !ok {
+			allOK = false
+		}
+	}
+	testFallback("flash_fallback", cfg.FallbackProviderID, cfg.FallbackProvider, cfg.FallbackModel, cfg.FallbackBaseURL, keys["flash_fallback"],
+		cfg.FlashProviderID, cfg.Provider, cfg.BaseURL, keys["flash"])
+	testFallback("lite_fallback", cfg.LiteFallbackProviderID, cfg.LiteFallbackProvider, cfg.LiteFallbackModel, cfg.LiteFallbackBaseURL, keys["lite_fallback"],
+		cfg.LiteProviderID, cfg.LiteProvider, cfg.LiteBaseURL, keys["lite"])
+	testFallback("pro_fallback", cfg.ProFallbackProviderID, cfg.ProFallbackProvider, cfg.ProFallbackModel, cfg.ProFallbackBaseURL, keys["pro_fallback"],
+		cfg.ProProviderID, cfg.ProProvider, cfg.ProBaseURL, keys["pro"])
 	return allOK, results
 }
 

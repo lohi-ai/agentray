@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"testing"
 
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -27,11 +28,26 @@ func TestTierFromName(t *testing.T) {
 	}
 }
 
+func TestBuildProviderSelectsPublicOpenAIResponsesWire(t *testing.T) {
+	provider, err := buildProvider(ai.VendorOpenAIResponses, "", "sk-test", nil, "row-1")
+	if err != nil {
+		t.Fatalf("buildProvider: %v", err)
+	}
+	responses, ok := provider.(*ai.OpenAIResponsesProvider)
+	if !ok {
+		t.Fatalf("provider = %T, want *ai.OpenAIResponsesProvider", provider)
+	}
+	if responses.Name() != ai.VendorOpenAIResponses || responses.APIKey != "sk-test" {
+		t.Fatalf("responses provider = %+v", responses)
+	}
+}
+
 // tierSetFromWorkspace maps the workspace tier columns + decrypted per-tier keys
 // onto a TierSet, and the result must behave like any other TierSet under resolve.
 func TestTierSetFromWorkspace(t *testing.T) {
 	cfg := storage.WorkspaceModelTiers{
 		Provider: "openai", Model: "gpt-4o", BaseURL: "https://flash",
+		Capabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported},
 		LiteProvider: "openai", LiteModel: "gpt-4o-mini",
 		ProProvider: "anthropic", ProModel: "claude-opus", ProBaseURL: "https://pro",
 	}
@@ -40,6 +56,16 @@ func TestTierSetFromWorkspace(t *testing.T) {
 
 	if got := ts.resolve(TierFlash); got.Model != "gpt-4o" || got.APIKey != "fk" || got.BaseURL != "https://flash" {
 		t.Errorf("flash = %+v, want gpt-4o/fk/https://flash", got)
+	}
+	if got := ts.resolve(TierFlash).Capabilities.Tools; got != agentcore.CapabilityUnsupported {
+		t.Fatalf("flash tools capability = %q", got)
+	}
+	rungs, err := ts.For(TierFlash).Rungs()
+	if err != nil {
+		t.Fatalf("Rungs: %v", err)
+	}
+	if got := rungs[0].Capabilities.Tools; got != agentcore.CapabilityUnsupported {
+		t.Fatalf("runtime rung tools capability = %q", got)
 	}
 	if got := ts.resolve(TierLite); got.Model != "gpt-4o-mini" || got.APIKey != "lk" {
 		t.Errorf("lite = %+v, want gpt-4o-mini/lk", got)
@@ -116,7 +142,7 @@ func TestResolveClearsKeyAcrossProviders(t *testing.T) {
 // Fallback off → the tier's rungs are just the primary model.
 func TestForNoFallback(t *testing.T) {
 	ts := TierSet{tiers: map[Tier]TierConfig{
-		TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", FallbackModel: "gpt-4o-mini"},
+		TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", Fallback: &TierConfig{Model: "gpt-4o-mini"}},
 	}}
 	rungs, err := ts.For(TierFlash).Rungs()
 	if err != nil {
@@ -133,7 +159,7 @@ func TestForAddsInTierFallbackRung(t *testing.T) {
 	ts := TierSet{
 		fallback: true,
 		tiers: map[Tier]TierConfig{
-			TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", FallbackModel: "gpt-4o-mini"},
+			TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", Fallback: &TierConfig{Model: "gpt-4o-mini"}},
 			TierPro:   tc("anthropic", "claude-opus", "pro-key"),
 		},
 	}
@@ -164,7 +190,7 @@ func TestForFallbackEdgeCases(t *testing.T) {
 	ts := TierSet{
 		fallback: true,
 		tiers: map[Tier]TierConfig{
-			TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", FallbackModel: "gpt-4o"},
+			TierFlash: {Provider: "openai", Model: "gpt-4o", APIKey: "k", Fallback: &TierConfig{Model: "gpt-4o"}},
 			TierPro:   {Provider: "anthropic", Model: "claude-opus", APIKey: "k2"},
 		},
 	}
@@ -175,8 +201,70 @@ func TestForFallbackEdgeCases(t *testing.T) {
 	if len(rungs) != 1 {
 		t.Fatalf("fallback == primary should dedup to one rung, got %+v", rungs)
 	}
-	if got := ts.For(TierPro).FallbackModel; got != "" {
+	if got := ts.For(TierPro).Fallback; got != nil {
 		t.Errorf("pro inherited flash's fallback %q across providers", got)
+	}
+}
+
+// A fallback that names a different provider row gets its own client — its
+// credentials and derived window are its own, never the primary's. Two rows
+// sharing vendor+baseURL but holding different keys still count as
+// cross-provider (identity is the row, not the vendor string).
+func TestForAddsCrossProviderFallbackRung(t *testing.T) {
+	ts := TierSet{
+		fallback: true,
+		tiers: map[Tier]TierConfig{
+			TierFlash: {
+				Provider: "openai", Model: "gpt-5", APIKey: "k1", ProviderID: "row-a",
+				Fallback: &TierConfig{Provider: "anthropic", Model: "claude-sonnet-4-5", APIKey: "k2", ProviderID: "row-b", Capabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported}},
+			},
+		},
+	}
+	rungs, err := ts.For(TierFlash).Rungs()
+	if err != nil {
+		t.Fatalf("Rungs: %v", err)
+	}
+	if len(rungs) != 2 || rungs[0].Model != "gpt-5" || rungs[1].Model != "claude-sonnet-4-5" {
+		t.Fatalf("rungs = %+v, want [gpt-5, claude-sonnet-4-5]", rungs)
+	}
+	if rungs[0].Provider == rungs[1].Provider {
+		t.Error("a cross-provider fallback must not reuse the primary's client")
+	}
+	if rungs[1].Capabilities.Tools != agentcore.CapabilityUnsupported {
+		t.Fatalf("fallback rung lost capability snapshot: %+v", rungs[1].Capabilities)
+	}
+
+	// Same vendor+baseURL, different row → still a distinct client (own key).
+	ts2 := TierSet{
+		fallback: true,
+		tiers: map[Tier]TierConfig{
+			TierFlash: {
+				Provider: "openai", Model: "gpt-5", APIKey: "k1", ProviderID: "row-a",
+				Fallback: &TierConfig{Provider: "openai", Model: "gpt-5-mini", APIKey: "k-other", ProviderID: "row-c"},
+			},
+		},
+	}
+	rungs2, err := ts2.For(TierFlash).Rungs()
+	if err != nil {
+		t.Fatalf("Rungs: %v", err)
+	}
+	if len(rungs2) != 2 || rungs2[0].Provider == rungs2[1].Provider {
+		t.Fatalf("same-vendor different-row fallback must build its own client: %+v", rungs2)
+	}
+}
+
+// KeyFor must reach a provider used only as a fallback rung — a mid-run key
+// refresh that can't find it would kill the rung it exists to save.
+func TestKeyForReachesFallbackOnlyProvider(t *testing.T) {
+	ts := TierSet{tiers: map[Tier]TierConfig{
+		TierFlash: {
+			Provider: "openai", Model: "gpt-5", APIKey: "k1",
+			Fallback: &TierConfig{Provider: "anthropic", Model: "claude-sonnet-4-5", APIKey: "fb-key"},
+		},
+	}}
+	got, err := ts.KeyFor("anthropic")
+	if err != nil || got != "fb-key" {
+		t.Fatalf("KeyFor(anthropic) = %q, %v — want the fallback row's key", got, err)
 	}
 }
 

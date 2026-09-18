@@ -172,4 +172,22 @@ func (c *Collection) StreamOn(ctx context.Context, providerID string, req agentc
 func (c *Collection) Name() string        { return "collection" }
 func (c *Collection) SupportsTools() bool { return true }
 
+func (c *Collection) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	c.mu.RLock()
+	var listed Model
+	var provider Provider
+	for _, candidate := range c.last {
+		if candidate.ID == model {
+			listed = candidate
+			provider = c.providers[candidate.ProviderID]
+			break
+		}
+	}
+	c.mu.RUnlock()
+	if provider == nil {
+		return agentcore.ModelCapabilities{}
+	}
+	return agentcore.CapabilitiesOf(provider, model).Overlay(listed.Capabilities)
+}
+
 var _ agentcore.LLMProvider = (*Collection)(nil)

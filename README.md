@@ -638,8 +638,9 @@ packages you can import on their own:
 - [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
   OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
   budget gating, and context compaction.
-- [`sandbox`](sandbox/) — workspace tools (`read_file`, `grep`, `glob`,
-  `web_fetch`) for grounding an agent in a repository.
+- [`sandbox`](sandbox/) — portable workspace tools (`read_file`, `write_file`,
+  `edit_file`, `edit_lines`, `grep`, `glob`, `lsp`, `eval`, `run_shell`, `web_fetch`) for
+  grounding and safely editing a repository on a laptop or server sandbox.
 
 ```bash
 go get github.com/lohi-ai/agentray@latest

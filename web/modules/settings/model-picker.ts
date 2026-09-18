@@ -13,6 +13,15 @@ export type ListedModel = {
    * 0 is a real answer and must stay distinguishable from a small window.
    */
   context_window?: number;
+  capabilities?: {
+    tools?: 'supported' | 'unsupported';
+    tool_choice?: 'supported' | 'unsupported';
+    reasoning_effort?: 'supported' | 'unsupported';
+    image_input?: 'supported' | 'unsupported';
+    structured_output?: 'supported' | 'unsupported';
+    prompt_caching?: 'supported' | 'unsupported';
+    stateful_responses?: 'supported' | 'unsupported';
+  };
 };
 
 export type ModelPickerItem = {
@@ -20,7 +29,7 @@ export type ModelPickerItem = {
   id: string;
   /** The bare model id, what the row renders. */
   label: string;
-  auxiliaryData: { provider: string; contextWindow: number };
+  auxiliaryData: { provider: string; contextWindow: number; capabilities: NonNullable<ListedModel['capabilities']> };
 };
 
 export function listedModelsToItems(models: ListedModel[]): ModelPickerItem[] {
@@ -32,6 +41,7 @@ export function listedModelsToItems(models: ListedModel[]): ModelPickerItem[] {
       auxiliaryData: {
         provider: m.provider_name || m.provider_vendor || m.provider_id,
         contextWindow: m.context_window || 0,
+        capabilities: m.capabilities || {},
       },
     }));
 }

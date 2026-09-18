@@ -88,6 +88,14 @@ func (p *OpenAIProvider) Name() string {
 }
 func (p *OpenAIProvider) SupportsTools() bool { return p.Compat.SupportsTools }
 
+func (p *OpenAIProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	caps := CapabilitiesFor(p.Name(), model)
+	// Compat is the authoritative wire-level tool flag for arbitrary
+	// OpenAI-compatible endpoints, including an explicit false.
+	caps.Tools = support(p.Compat.SupportsTools)
+	return caps
+}
+
 // defaultGeminiBaseURL is Google's OpenAI-compatible surface for the Gemini
 // API (chat completions + tools + streaming on the OpenAI wire).
 const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -213,8 +221,31 @@ func (u oaiUsage) usage() agentcore.Usage {
 	}
 }
 
-// Chat performs one non-streaming completion.
+// Chat performs one non-streaming completion. OpenAI-compatible endpoints are
+// inconsistent about optional request hints; when one explicitly rejects a
+// hint, the adapter removes only that hint and retains the endpoint lesson in
+// the logical provider session.
 func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	state, active := p.adaptiveRequest(req)
+	var learned agentcore.ModelCapabilities
+	for {
+		resp, err := p.chatOnce(ctx, active)
+		if err == nil {
+			if state != nil {
+				state.remember(active.Model, learned)
+			}
+			return resp, nil
+		}
+		next, demotion, ok := withoutRejectedOpenAIHint(active, err)
+		if !ok {
+			return agentcore.ChatResponse{}, err
+		}
+		active = next
+		learned = learned.Overlay(demotion)
+	}
+}
+
+func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
 	body := p.encode(req)
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -225,7 +256,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (a
 		return agentcore.ChatResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+	setOptionalBearerAuth(httpReq, p.APIKey)
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
@@ -412,6 +443,26 @@ type oaiStreamChunk struct {
 // flushed before the terminal Done delta. The loop forwards content deltas to a
 // live SSE sink; tool execution is unchanged.
 func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	state, active := p.adaptiveRequest(req)
+	var learned agentcore.ModelCapabilities
+	for {
+		ch, err := p.streamOnce(ctx, active)
+		if err == nil {
+			if state != nil {
+				state.remember(active.Model, learned)
+			}
+			return ch, nil
+		}
+		next, demotion, ok := withoutRejectedOpenAIHint(active, err)
+		if !ok {
+			return nil, err
+		}
+		active = next
+		learned = learned.Overlay(demotion)
+	}
+}
+
+func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
 	body := p.encode(req)
 	body.Stream = true
 	body.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
@@ -425,7 +476,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+	setOptionalBearerAuth(httpReq, p.APIKey)
 
 	resp, err := p.streamHTTP().Do(httpReq)
 	if err != nil {
@@ -568,7 +619,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+e.APIKey)
+	setOptionalBearerAuth(httpReq, e.APIKey)
 
 	resp, err := e.HTTP.Do(httpReq)
 	if err != nil {

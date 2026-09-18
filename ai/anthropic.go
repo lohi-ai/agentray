@@ -149,6 +149,10 @@ func (p *AnthropicProvider) Name() string {
 }
 func (p *AnthropicProvider) SupportsTools() bool { return true }
 
+func (p *AnthropicProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	return CapabilitiesFor(p.Name(), model)
+}
+
 // setHeaders applies the request headers for the configured auth mode. OAuth
 // mode sends the Claude Code client fingerprint — Bearer auth, the CLI
 // User-Agent, x-app: cli, the fixed subscription beta set merged with the

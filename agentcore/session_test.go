@@ -533,6 +533,31 @@ func TestFlushReportsPermanentStoreFailure(t *testing.T) {
 	}
 }
 
+// TestToolEffectsRequireDurableIntent verifies the pre-effect save point fails
+// closed: if the assistant call cannot be recorded, the tool must not run and
+// leave an external effect that recovery cannot attach to any durable intent.
+func TestToolEffectsRequireDurableIntent(t *testing.T) {
+	tool := &echoTool{name: "write"}
+	store := &flakySessionStore{memSessionStore: newMemSessionStore(), broken: true}
+	agent, err := New(Config{
+		Provider:  NewFauxProvider(AssistantToolCall("c1", "write", `{}`)),
+		Model:     "test",
+		Tools:     NewToolSet(tool),
+		Policy:    NewAllowList("write"),
+		Session:   store,
+		SessionID: "s-no-intent",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), "write it"); err == nil {
+		t.Fatal("run should fail when tool intent cannot be made durable")
+	}
+	if tool.called != 0 {
+		t.Fatalf("tool ran %d times without durable intent", tool.called)
+	}
+}
+
 // bigResultTool returns an oversized result so the context estimate crosses the
 // compaction threshold within one turn.
 type bigResultTool struct{}

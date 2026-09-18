@@ -6,6 +6,7 @@ import { CheckboxInput } from '@astryxdesign/core/CheckboxInput';
 import { Text } from '@astryxdesign/core/Text';
 import type {
   AgentConfigTestResult,
+  ModelCapabilities,
   WorkspaceModelTiers,
   WorkspaceModelTiersInput,
   WorkspaceProvider,
@@ -24,14 +25,22 @@ import {
   searchModelItems,
   type ListedModel,
 } from './model-picker';
-import { isOAuthVendor, ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
+import { isAPIKeyOptionalVendor, isOAuthVendor, ProviderForm, providerFormTitle, vendorLabel } from './provider-form';
 import { OAuthSignIn } from './oauth-signin';
 
 // contextWindow is the operator's OVERRIDE only, in tokens; 0 means "use the
 // window we detected for this model". Storing the override rather than the
 // effective number is what lets a later model change re-detect instead of
 // inheriting a stale figure.
-type TierDraft = { providerId: string; model: string; contextWindow: number; fallbackModel: string };
+type TierDraft = {
+  providerId: string;
+  model: string;
+  capabilities: ModelCapabilities;
+  contextWindow: number;
+  fallbackModel: string;
+  fallbackProviderId: string;
+  fallbackCapabilities: ModelCapabilities;
+};
 type Draft = {
   flash: TierDraft;
   lite: TierDraft;
@@ -42,18 +51,26 @@ type Draft = {
 // Blank means "inherit from Default" everywhere in this file — that is exactly
 // what runtime.resolve() already does with an unset tier, and what
 // SaveWorkspaceTierSelection persists.
-const emptyTier = (): TierDraft => ({ providerId: '', model: '', contextWindow: 0, fallbackModel: '' });
+const emptyTier = (): TierDraft => ({ providerId: '', model: '', capabilities: {}, contextWindow: 0, fallbackModel: '', fallbackProviderId: '', fallbackCapabilities: {} });
 
 // A tier is only selectable when it names both a configured provider and a
 // model. A half-set tier is treated as unset, which is what the runtime does.
-const tierDraft = (providerId: string, model: string, contextWindow: number, fallbackModel = ''): TierDraft =>
-  providerId && model ? { providerId, model, contextWindow, fallbackModel } : emptyTier();
+const tierDraft = (
+  providerId: string,
+  model: string,
+  capabilities: ModelCapabilities,
+  contextWindow: number,
+  fallbackModel = '',
+  fallbackProviderId = '',
+  fallbackCapabilities: ModelCapabilities = {},
+): TierDraft =>
+  providerId && model ? { providerId, model, capabilities, contextWindow, fallbackModel, fallbackProviderId, fallbackCapabilities } : emptyTier();
 
 function draftFromConfig(c: WorkspaceModelTiers): Draft {
   return {
-    flash: tierDraft(c.flash_provider_id || '', c.model || '', c.context_window || 0, c.fallback_model || ''),
-    lite: tierDraft(c.lite_provider_id || '', c.lite_model || '', c.lite_context_window || 0, c.lite_fallback_model || ''),
-    pro: tierDraft(c.pro_provider_id || '', c.pro_model || '', c.pro_context_window || 0, c.pro_fallback_model || ''),
+    flash: tierDraft(c.flash_provider_id || '', c.model || '', c.capabilities || {}, c.context_window || 0, c.fallback_model || '', c.fallback_provider_id || '', c.fallback_capabilities || {}),
+    lite: tierDraft(c.lite_provider_id || '', c.lite_model || '', c.lite_capabilities || {}, c.lite_context_window || 0, c.lite_fallback_model || '', c.lite_fallback_provider_id || '', c.lite_fallback_capabilities || {}),
+    pro: tierDraft(c.pro_provider_id || '', c.pro_model || '', c.pro_capabilities || {}, c.pro_context_window || 0, c.pro_fallback_model || '', c.pro_fallback_provider_id || '', c.pro_fallback_capabilities || {}),
     model_fallback: c.model_fallback,
   };
 }
@@ -68,11 +85,20 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
     pro_model: d.pro.model,
     model_fallback: d.model_fallback,
     context_window: d.flash.contextWindow,
+    capabilities: d.flash.capabilities,
     lite_context_window: d.lite.contextWindow,
+    lite_capabilities: d.lite.capabilities,
     pro_context_window: d.pro.contextWindow,
+    pro_capabilities: d.pro.capabilities,
     fallback_model: d.flash.fallbackModel,
+    fallback_provider_id: d.flash.fallbackProviderId,
+    fallback_capabilities: d.flash.fallbackCapabilities,
     lite_fallback_model: d.lite.fallbackModel,
+    lite_fallback_provider_id: d.lite.fallbackProviderId,
+    lite_fallback_capabilities: d.lite.fallbackCapabilities,
     pro_fallback_model: d.pro.fallbackModel,
+    pro_fallback_provider_id: d.pro.fallbackProviderId,
+    pro_fallback_capabilities: d.pro.fallbackCapabilities,
   };
 }
 
@@ -82,7 +108,9 @@ function draftToInput(d: Draft): WorkspaceModelTiersInput {
 type TestState = {
   ok: boolean;
   tiers: Record<string, { ok: boolean; error?: string }>;
-  models: Record<string, string>;
+  // Snapshot of what each tier (and its fallback) pointed at when the check
+  // ran — {model, providerId} per key, '' when unset.
+  models: Record<string, { model: string; providerId: string }>;
 };
 
 function AccountsSection({
@@ -307,9 +335,9 @@ export function ModelsTab() {
     if (!t.providerId || !t.model) return key === 'flash' ? 'Not set — pick a model' : 'Same as Default';
     return `${t.model} · ${providerName(t.providerId)}`;
   };
-
-  const assignModel = (modelId: string) => {
+  const assignModel = (item: (typeof providerItems)[number]) => {
     if (!provider) return;
+    const modelId = item.label;
     setDraft((d) =>
       d
         ? {
@@ -317,33 +345,53 @@ export function ModelsTab() {
             [activeTier]: {
               providerId: provider.id,
               model: modelId,
+              capabilities: item.auxiliaryData.capabilities,
               // Changing the model drops the window override: it was a
               // statement about the model that was there.
               contextWindow: d[activeTier].model === modelId ? d[activeTier].contextWindow : 0,
-              // The fallback belongs to the tier's provider — a provider switch
-              // drops it, and promoting the fallback to primary clears it.
+              // The fallback survives a provider switch — it is a
+              // (provider, model) pair of its own now. It only clears when
+              // the new primary IS the fallback (a rung can't retry itself).
               fallbackModel:
-                d[activeTier].providerId === provider.id && d[activeTier].fallbackModel !== modelId
-                  ? d[activeTier].fallbackModel
-                  : '',
+                (d[activeTier].fallbackProviderId || d[activeTier].providerId) === provider.id && d[activeTier].fallbackModel === modelId
+                  ? ''
+                  : d[activeTier].fallbackModel,
+              fallbackProviderId:
+                (d[activeTier].fallbackProviderId || d[activeTier].providerId) === provider.id && d[activeTier].fallbackModel === modelId
+                  ? ''
+                  : d[activeTier].fallbackProviderId,
+              fallbackCapabilities:
+                (d[activeTier].fallbackProviderId || d[activeTier].providerId) === provider.id && d[activeTier].fallbackModel === modelId
+                  ? {}
+                  : d[activeTier].fallbackCapabilities,
             },
           }
         : d,
     );
   };
 
-  // The fallback is a second model of the tier's own provider, retried when the
-  // primary model's call fails. It only exists once the tier has a model on
-  // this provider, and it can never be the primary itself.
-  const toggleFallback = (modelId: string) => {
+  // The fallback is a second (provider, model) pair retried when the primary
+  // call fails — any configured provider, not just the tier's own. It only
+  // exists once the tier has a primary, and it can never be the primary.
+  const toggleFallback = (item: (typeof providerItems)[number]) => {
     if (!provider) return;
+    const modelId = item.label;
     setDraft((d) => {
       if (!d) return d;
       const t = d[activeTier];
-      if (t.providerId !== provider.id || !t.model || t.model === modelId) return d;
-      return { ...d, [activeTier]: { ...t, fallbackModel: t.fallbackModel === modelId ? '' : modelId } };
+      const isCurrent = t.fallbackModel === modelId && (t.fallbackProviderId || t.providerId) === provider.id;
+      return {
+        ...d,
+        [activeTier]: {
+          ...t,
+          fallbackModel: isCurrent ? '' : modelId,
+          fallbackProviderId: isCurrent ? '' : provider.id,
+          fallbackCapabilities: isCurrent ? {} : item.auxiliaryData.capabilities,
+        },
+      };
     });
   };
+
 
   const clearTier = (key: TierKey) => {
     setDraft((d) => (d ? { ...d, [key]: emptyTier() } : d));
@@ -356,7 +404,18 @@ export function ModelsTab() {
   const onSave = async () => {
     setSaving(true);
     try {
-      await saveModels(draftToInput(draft));
+      const input = draftToInput(draft);
+      const latest = (providerId: string, model: string, persisted: ModelCapabilities): ModelCapabilities => ({
+        ...persisted,
+        ...(listed.find((m) => m.provider_id === providerId && m.id === model)?.capabilities || {}),
+      });
+      input.capabilities = latest(draft.flash.providerId, draft.flash.model, draft.flash.capabilities);
+      input.lite_capabilities = latest(draft.lite.providerId, draft.lite.model, draft.lite.capabilities);
+      input.pro_capabilities = latest(draft.pro.providerId, draft.pro.model, draft.pro.capabilities);
+      input.fallback_capabilities = latest(draft.flash.fallbackProviderId || draft.flash.providerId, draft.flash.fallbackModel, draft.flash.fallbackCapabilities);
+      input.lite_fallback_capabilities = latest(draft.lite.fallbackProviderId || draft.lite.providerId, draft.lite.fallbackModel, draft.lite.fallbackCapabilities);
+      input.pro_fallback_capabilities = latest(draft.pro.fallbackProviderId || draft.pro.providerId, draft.pro.fallbackModel, draft.pro.fallbackCapabilities);
+      await saveModels(input);
     } finally {
       setSaving(false);
     }
@@ -370,7 +429,14 @@ export function ModelsTab() {
       setTestState({
         ok: res.ok,
         tiers: res.tiers ?? {},
-        models: { flash: models.model, lite: models.lite_model, pro: models.pro_model },
+        models: {
+          flash: { model: models.model, providerId: models.flash_provider_id ?? '' },
+          flash_fallback: { model: models.fallback_model ?? '', providerId: models.fallback_provider_id ?? '' },
+          lite: { model: models.lite_model, providerId: models.lite_provider_id ?? '' },
+          lite_fallback: { model: models.lite_fallback_model ?? '', providerId: models.lite_fallback_provider_id ?? '' },
+          pro: { model: models.pro_model, providerId: models.pro_provider_id ?? '' },
+          pro_fallback: { model: models.pro_fallback_model ?? '', providerId: models.pro_fallback_provider_id ?? '' },
+        },
       });
     } catch {
       // useWorkspaceModels already surfaced the failure as a toast.
@@ -470,7 +536,10 @@ export function ModelsTab() {
                   {tierLabel(t.key)}
                 </span>
                 {a.fallbackModel ? (
-                  <span className="font-mono text-xs text-[var(--color-text-secondary)]">fallback → {a.fallbackModel}</span>
+                  <span className="font-mono text-xs text-[var(--color-text-secondary)]">
+                    fallback → {a.fallbackModel}
+                    {a.fallbackProviderId && a.fallbackProviderId !== a.providerId ? ` · ${providerName(a.fallbackProviderId)}` : ''}
+                  </span>
                 ) : null}
                 {set && t.key !== 'flash' ? (
                   <button
@@ -519,12 +588,15 @@ export function ModelsTab() {
                 const active = provider?.id === p.id;
                 const count = modelCount.get(p.id) ?? 0;
                 const isOAuth = isOAuthVendor(p.vendor);
+                const keyOptional = p.auth_type === 'optional' || isAPIKeyOptionalVendor(p.vendor);
                 const badge = failure
-                  ? { status: 'attention' as const, label: isOAuth ? 'Auth error' : 'Key rejected' }
+                  ? { status: 'attention' as const, label: isOAuth ? 'Auth error' : keyOptional ? 'Connection error' : 'Key rejected' }
                   : isOAuth
                     ? (p.account_count ?? 0) > 0
                       ? { status: 'healthy' as const, label: `${p.account_count} account${p.account_count === 1 ? '' : 's'}` }
                       : { status: 'paused' as const, label: 'Needs sign-in' }
+                    : keyOptional
+                      ? { status: 'healthy' as const, label: p.has_key ? 'Connected · keyed' : 'Connected · no key' }
                     : p.has_key
                       ? { status: 'healthy' as const, label: 'Connected' }
                       : { status: 'paused' as const, label: 'Needs a key' };
@@ -632,13 +704,18 @@ export function ModelsTab() {
                 <div className="flex flex-col">
                   {providerModels.map((m) => {
                     const assigned = TIERS.filter((t) => draft[t.key].providerId === provider.id && draft[t.key].model === m.label);
-                    const isFallback = activeTierDraft.providerId === provider.id && activeTierDraft.fallbackModel === m.label;
+                    const isFallback =
+                      activeTierDraft.fallbackModel === m.label &&
+                      (activeTierDraft.fallbackProviderId || activeTierDraft.providerId) === provider.id;
+                    // Any provider's model may be the fallback — the pair is
+                    // recorded, so a foreign provider's row offers the toggle
+                    // too. Only the tier's own primary is excluded.
                     const canFallback =
-                      activeTierDraft.providerId === provider.id && activeTierDraft.model !== '' && activeTierDraft.model !== m.label;
+                      activeTierDraft.model !== '' && !(activeTierDraft.providerId === provider.id && activeTierDraft.model === m.label);
                     return (
                       <button
                         key={m.id}
-                        onClick={() => assignModel(m.label)}
+                        onClick={() => assignModel(m)}
                         className="flex min-h-[40px] w-full items-center justify-between gap-3 rounded-[var(--radius-md)] px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-2)]"
                       >
                         <span className="flex items-center gap-2">
@@ -660,7 +737,7 @@ export function ModelsTab() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                toggleFallback(m.label);
+                                toggleFallback(m);
                               }}
                               title={isFallback ? 'Remove as fallback' : `Use as fallback for ${TIERS.find((t) => t.key === activeTier)?.title}`}
                               aria-pressed={isFallback}
@@ -708,7 +785,7 @@ export function ModelsTab() {
           <div className="border-t border-[var(--color-border)] pt-4">
             <CheckboxInput
               label="If a model call fails, retry it on the tier's fallback model"
-              description="Each tier can name a second model of the same provider (the refresh icon in the list). Off means a failed call ends the run."
+              description="Each tier can name a second model, including one from another provider (the refresh icon in the list). Off means a failed call ends the run."
               value={draft.model_fallback}
               onChange={(checked) => setDraft((d) => (d ? { ...d, model_fallback: checked } : d))}
             />
@@ -736,21 +813,43 @@ export function ModelsTab() {
                 {TIERS.map((tier) => {
                   const result = testState.tiers[tier.key];
                   const model = testState.models[tier.key];
+                  const fbResult = testState.tiers[`${tier.key}_fallback`];
+                  const fb = testState.models[`${tier.key}_fallback`];
+                  const fbProviderDiffers = fb?.providerId && fb.providerId !== model?.providerId;
                   return (
-                    <div key={tier.key} className="flex flex-wrap items-baseline gap-2 text-sm">
-                      {!result ? (
-                        <Check size={14} className="flex-none text-[var(--color-text-disabled)]" />
-                      ) : result.ok ? (
-                        <Check size={14} className="flex-none text-success" />
-                      ) : (
-                        <X size={14} className="flex-none text-danger" />
-                      )}
-                      <span className="text-[var(--color-text-primary)]">{tier.title}</span>
-                      <span className="text-[var(--color-text-secondary)]">
-                        {result ? model || 'default model' : 'same as Default'}
-                      </span>
-                      {result?.error ? (
-                        <span className="text-danger">— {friendlyProviderError(result.error)}</span>
+                    <div key={tier.key} className="flex flex-col gap-1">
+                      <div className="flex flex-wrap items-baseline gap-2 text-sm">
+                        {!result ? (
+                          <Check size={14} className="flex-none text-[var(--color-text-disabled)]" />
+                        ) : result.ok ? (
+                          <Check size={14} className="flex-none text-success" />
+                        ) : (
+                          <X size={14} className="flex-none text-danger" />
+                        )}
+                        <span className="text-[var(--color-text-primary)]">{tier.title}</span>
+                        <span className="text-[var(--color-text-secondary)]">
+                          {result ? model?.model || 'default model' : 'same as Default'}
+                        </span>
+                        {result?.error ? (
+                          <span className="text-danger">— {friendlyProviderError(result.error)}</span>
+                        ) : null}
+                      </div>
+                      {fbResult ? (
+                        <div className="flex flex-wrap items-baseline gap-2 pl-6 text-sm">
+                          {fbResult.ok ? (
+                            <Check size={13} className="flex-none text-success" />
+                          ) : (
+                            <X size={13} className="flex-none text-danger" />
+                          )}
+                          <span className="text-xs text-[var(--color-text-secondary)]">fallback</span>
+                          <span className="text-[var(--color-text-secondary)]">
+                            {fb?.model}
+                            {fbProviderDiffers ? ` · ${providerName(fb.providerId)}` : ''}
+                          </span>
+                          {fbResult.error ? (
+                            <span className="text-danger">— {friendlyProviderError(fbResult.error)}</span>
+                          ) : null}
+                        </div>
                       ) : null}
                     </div>
                   );

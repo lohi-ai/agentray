@@ -68,6 +68,10 @@ func (p *CodexProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
 func (p *CodexProvider) Name() string        { return VendorOpenAICodex }
 func (p *CodexProvider) SupportsTools() bool { return true }
 
+func (p *CodexProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+	return CapabilitiesFor(p.Name(), model)
+}
+
 // streamHTTP is the client the SSE path uses: StreamHTTP when set, otherwise
 // whatever the caller put on HTTP.
 func (p *CodexProvider) streamHTTP() *http.Client {

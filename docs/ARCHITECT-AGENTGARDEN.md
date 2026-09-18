@@ -261,7 +261,7 @@ the agent or merely recorded.
 ## The workspace: one folder, every tool
 
 Every tool that touches a filesystem — `read_file`, `write_file`, `edit_file`,
-`grep`, `glob`, `run_shell`, `computer_use`, `browser_use`, and the `save_as`
+`edit_lines`, `grep`, `glob`, `lsp`, `eval`, `run_shell`, `computer_use`, `browser_use`, and the `save_as`
 parameter on `http_request` / `web_fetch` — works in **one** directory per run.
 
 That sharing is the capability. An agent that can write a script but not run it,

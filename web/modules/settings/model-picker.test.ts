@@ -135,3 +135,18 @@ describe('listed models carry their context window', () => {
     expect(items[1].auxiliaryData.contextWindow).toBe(0);
   });
 });
+
+describe('listed models carry capability snapshots', () => {
+  it('preserves explicit negatives so saving a tier can enforce them at runtime', () => {
+    const [item] = listedModelsToItems([
+      {
+        provider_id: 'local',
+        provider_name: 'Laptop model',
+        provider_vendor: 'ollama',
+        id: 'text-only',
+        capabilities: { tools: 'unsupported', reasoning_effort: 'supported' },
+      },
+    ]);
+    expect(item.auxiliaryData.capabilities).toEqual({ tools: 'unsupported', reasoning_effort: 'supported' });
+  });
+});

@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
+	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
@@ -115,6 +116,23 @@ type Runner struct {
 	// (oauth.Manager.Pool). nil means no subscription vendors are configured —
 	// OAuth tiers then fail at call time with a clear error.
 	PoolFor func(providerID string) ai.TokenSource
+	// ProviderSessions retains provider-private transport and compatibility
+	// state across the short-lived Agent instances serving one conversation.
+	// Nil is lazily replaced with a bounded in-process registry, so direct Runner
+	// literals and local deployments get the same behavior as NewRunner.
+	ProviderSessions   *agentcore.ProviderSessionRegistry
+	providerSessionsMu sync.Mutex
+	// EvalSessions retains bounded language kernels across consecutive runs in
+	// one logical conversation. A host normally injects its shared
+	// RuntimeResources bundle; a standalone Runner keeps a local default. It is
+	// process-local by design: a replica miss starts a clean kernel.
+	EvalSessions   *sandbox.EvalSessionRegistry
+	evalSessionsMu sync.Mutex
+	// LSPSessions retains initialized language servers across consecutive runs
+	// in one logical conversation, from the same host bundle or a local default.
+	// Like eval state, it is replica-local and a clean miss is always correct.
+	LSPSessions   *sandbox.LSPSessionRegistry
+	lspSessionsMu sync.Mutex
 	// MaxContextTokens overrides the loop's soft compaction budget for every run
 	// this Runner drives. 0 (the default) keeps agentcore's 200k default. Mainly a
 	// deployment/test knob to tune or exercise compaction.
@@ -340,13 +358,76 @@ func WithAccountPool(poolFor func(providerID string) ai.TokenSource) RunnerOptio
 	return func(r *Runner) { r.PoolFor = poolFor }
 }
 
+// WithProviderSessionRegistry supplies the bounded logical-conversation state
+// registry. A nil registry is a no-op; NewRunner's default remains in force.
+func WithProviderSessionRegistry(registry *agentcore.ProviderSessionRegistry) RunnerOption {
+	return func(r *Runner) {
+		if registry != nil {
+			r.ProviderSessions = registry
+		}
+	}
+}
+
+// WithEvalSessionRegistry supplies the retained eval-kernel registry. A nil
+// registry is a no-op; NewRunner's bounded default remains in force.
+func WithEvalSessionRegistry(registry *sandbox.EvalSessionRegistry) RunnerOption {
+	return func(r *Runner) {
+		if registry != nil {
+			r.EvalSessions = registry
+		}
+	}
+}
+
+// WithLSPSessionRegistry supplies the retained language-server registry. A nil
+// registry is a no-op; NewRunner's bounded default remains in force.
+func WithLSPSessionRegistry(registry *sandbox.LSPSessionRegistry) RunnerOption {
+	return func(r *Runner) {
+		if registry != nil {
+			r.LSPSessions = registry
+		}
+	}
+}
+
 // NewRunner builds a Runner over the storage layer.
 func NewRunner(store *storage.Store, opts ...RunnerOption) *Runner {
-	r := &Runner{Store: store}
+	r := &Runner{
+		Store:            store,
+		ProviderSessions: agentcore.NewProviderSessionRegistry(0, 0),
+		EvalSessions:     sandbox.NewEvalSessionRegistry(0, 0),
+		LSPSessions:      sandbox.NewLSPSessionRegistry(0, 0),
+	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+func (r *Runner) lspSessionRegistry() *sandbox.LSPSessionRegistry {
+	r.lspSessionsMu.Lock()
+	defer r.lspSessionsMu.Unlock()
+	if r.LSPSessions == nil {
+		r.LSPSessions = sandbox.NewLSPSessionRegistry(0, 0)
+	}
+	return r.LSPSessions
+}
+
+func (r *Runner) evalSessionRegistry() *sandbox.EvalSessionRegistry {
+	r.evalSessionsMu.Lock()
+	defer r.evalSessionsMu.Unlock()
+	if r.EvalSessions == nil {
+		r.EvalSessions = sandbox.NewEvalSessionRegistry(0, 0)
+	}
+	return r.EvalSessions
+}
+
+func (r *Runner) acquireProviderSession(key string) (*agentcore.ProviderSession, func()) {
+	r.providerSessionsMu.Lock()
+	if r.ProviderSessions == nil {
+		r.ProviderSessions = agentcore.NewProviderSessionRegistry(0, 0)
+	}
+	registry := r.ProviderSessions
+	r.providerSessionsMu.Unlock()
+	return registry.Acquire(key)
 }
 
 // RunOptions parameterize a single run.
@@ -437,6 +518,14 @@ func (r *Runner) RunStream(ctx context.Context, opts RunOptions, sink agentcore.
 
 // execute is the shared run path; a non-nil sink streams the interactive turn.
 func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.StreamSink) (storage.AgentRun, agentcore.RunResult, error) {
+	if opts.ResumeFromRunID != "" && r.SessionStore != nil {
+		leaseCtx, release, err := agentcore.AcquireSessionLease(ctx, r.SessionStore, opts.ResumeFromRunID)
+		if err != nil {
+			return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("acquiring resume ownership: %w", err)
+		}
+		ctx = leaseCtx
+		defer func() { _ = release() }()
+	}
 	// Live control, registered FIRST — before any I/O, and in particular before the
 	// run row opens and OnRunID fires. Stop is offered by the UI the moment a turn
 	// is sent, so registering late would leave a window where the user has pressed
@@ -491,9 +580,10 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
 	tierSet := TierSetFromWorkspace(wsTiers, tierKeys, r.PoolFor)
-	// flash is the always-present default every unconfigured tier resolves to, so
-	// its key is mandatory; lite/pro keys are optional.
-	if tierKeys["flash"] == "" {
+	// flash is the always-present default every unconfigured tier resolves to.
+	// HasKey is the readiness bit: it also covers OAuth account pools and local
+	// engines (Ollama, LM Studio, vLLM, ...) whose key is intentionally empty.
+	if !wsTiers.HasKey {
 		return storage.AgentRun{}, agentcore.RunResult{}, fmt.Errorf("no workspace model key configured")
 	}
 	taskMap, err := r.Store.TaskTiersForRun(ctx, scopeID)
@@ -571,11 +661,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		log.Printf("agentruntime: scope=%s workspace unavailable, file tools will fail closed: %v", scopeID, wserr)
 	}
 	runTools, toolNotes, err := resolveRunTools(ctx, ToolBuildContext{
-		Sandbox:         r.Sandbox,
-		SandboxRequired: r.SandboxRequired,
-		Workspace:       runWorkspace,
-		BrowserImage:    r.BrowserImage,
-		NetworkAllow:    r.NetworkAllow,
+		Sandbox:          r.Sandbox,
+		SandboxRequired:  r.SandboxRequired,
+		Workspace:        runWorkspace,
+		EvalSessions:     r.evalSessionRegistry(),
+		LSPSessions:      r.lspSessionRegistry(),
+		RuntimeNamespace: strings.Join([]string{wsID, opts.ProjectID, scopeID}, "\x00"),
+		BrowserImage:     r.BrowserImage,
+		NetworkAllow:     r.NetworkAllow,
 		// The vault backs {{cred:NAME}} in a tool's *config* (an MCP server's
 		// Authorization header), resolved here rather than in the tool loop.
 		Credentials: creds,
@@ -691,7 +784,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// A chat run records its conversation id on the run row (the session_id
 	// column) so a later turn can follow the chain back to the log.
 	rowSession := opts.SessionID
-	runID, err := r.Store.CreateAgentRun(ctx, opts.ProjectID, scopeID, trigger, rowSession)
+	runID, err := r.Store.CreateAgentRunWithDurableSession(ctx, opts.ProjectID, scopeID, trigger, rowSession, opts.ResumeFromRunID)
 	if err != nil {
 		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
@@ -713,6 +806,18 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if opts.ResumeFromRunID != "" {
 		durableSession = opts.ResumeFromRunID
 	}
+	// Provider state follows the logical conversation rather than the durable
+	// per-run log. Namespace the in-process lookup by tenant/project/agent so a
+	// client-generated conversation id cannot collide across accounts. Providers
+	// see only the opaque routing id, not this internal compound key.
+	providerRoutingID := strings.TrimSpace(opts.SessionID)
+	if providerRoutingID == "" {
+		providerRoutingID = durableSession
+	}
+	providerSession, releaseProviderSession := r.acquireProviderSession(
+		strings.Join([]string{wsID, opts.ProjectID, scopeID, providerRoutingID}, "\x00"),
+	)
+	defer releaseProviderSession()
 	sandboxSession := opts.SessionID
 	if strings.TrimSpace(sandboxSession) == "" {
 		sandboxSession = runID
@@ -788,31 +893,33 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes), runToolNames(runTools)),
 		// Consulted after the two rule-based gates above; nil when this agent's
 		// advisor is off, which makes the composition identical to before.
-		Advisor:      advisorReviewer,
-		AdvisorNotes: advisorNotes,
+		Advisor:         advisorReviewer,
+		AdvisorNotes:    advisorNotes,
 		Goal:            opts.Goal,
 		ReasoningEffort: opts.ReasoningEffort,
 		Soul:            def.SoulMD,
-		Agents:       def.AgentsMD,
-		Skills:       skills,
-		SkillLoader:  r.skillLoader(scopeID),
-		Data:         r.Store,
-		Memory:       mem,
-		Notifier:     r.Notifier,
-		SourceRunner: r.SourceRunner,
-		RunID:        runID,
-		Sandbox:      r.Sandbox,
-		Credentials:  creds,
-		Tools:        runTools,
-		ReadOnly:     opts.ReadOnly,
-		Tracer:       r.Tracer,
-		StepGate:     opts.StepGate,
+		Agents:          def.AgentsMD,
+		Skills:          skills,
+		SkillLoader:     r.skillLoader(scopeID),
+		Data:            r.Store,
+		Memory:          mem,
+		Notifier:        r.Notifier,
+		SourceRunner:    r.SourceRunner,
+		RunID:           runID,
+		Sandbox:         r.Sandbox,
+		Credentials:     creds,
+		Tools:           runTools,
+		ReadOnly:        opts.ReadOnly,
+		Tracer:          r.Tracer,
+		StepGate:        opts.StepGate,
 		// Durable log: key the append-only log on the run id (the FK that the
 		// trace uses). nil store leaves runs in-memory.
-		Session:       r.SessionStore,
-		SessionID:     durableSession,
-		ResumeSession: opts.ResumeFromRunID != "",
-		MaxTokens:     maxTokens,
+		Session:           r.SessionStore,
+		SessionID:         durableSession,
+		ProviderSession:   providerSession,
+		ProviderSessionID: providerRoutingID,
+		ResumeSession:     opts.ResumeFromRunID != "",
+		MaxTokens:         maxTokens,
 		// Prompt caching: a stable per-agent key so the persona/skills system prefix
 		// is reused across this agent's turns and runs. Empty store keys leave the
 		// feature off for providers/compat servers that don't support it.
@@ -922,7 +1029,8 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	}
 
 	run := storage.AgentRun{
-		ID: runID, ProjectID: opts.ProjectID, Trigger: trigger, Status: status,
+		ID: runID, ProjectID: opts.ProjectID, AgentID: scopeID, Trigger: trigger, Status: status,
+		SessionID: rowSession, DurableSessionID: opts.ResumeFromRunID,
 		Summary: summary, TokenInput: res.Usage.InputTokens, TokenOutput: res.Usage.OutputTokens,
 		CostUSD: res.Usage.CostUSD, CostUnpriced: res.Usage.CostUnpriced,
 	}
@@ -1019,7 +1127,7 @@ func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore
 	if err != nil {
 		return nil, "", err
 	}
-	if keys["flash"] == "" {
+	if !wsTiers.HasKey {
 		return nil, "", fmt.Errorf("no workspace model key configured")
 	}
 	// The default agent's id is the project id (scope == project for triage).

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,16 @@ const (
 	// mistakenly doing. It is meaningless on a buffered completion.
 	DefaultResponseHeaderTimeout = 60 * time.Second
 )
+
+// setOptionalBearerAuth adds a Bearer credential only when one exists. Several
+// OpenAI-compatible local engines accept unauthenticated requests; sending an
+// empty `Authorization: Bearer ` header can make an otherwise valid local call
+// fail at a proxy or middleware layer.
+func setOptionalBearerAuth(req *http.Request, apiKey string) {
+	if key := strings.TrimSpace(apiKey); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+}
 
 // NewChatHTTPClient builds the HTTP client for NON-streamed chat completions: a
 // generous absolute deadline and no header deadline, because the headers of a

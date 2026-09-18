@@ -97,6 +97,12 @@ const (
 // tools; when nil the shell runs in an ephemeral, empty scratch dir.
 func NewShellTool(sb agentcore.Sandbox, limits agentcore.SandboxLimits, ws *Workspace) *ShellTool {
 	hosted := sb == nil
+	// A locked container keeps its root read-only, but a workspace bind mount is
+	// intentionally writable. Map the host UID/GID so ordinary 0755 workspaces
+	// are actually writable and generated files are not owned by container-root.
+	if ws != nil && !limits.WritableFS {
+		limits.RunAsHostUser = true
+	}
 	desc := "Run a shell command inside an isolated sandbox (no host " +
 		"filesystem, no host environment, no network unless granted). " +
 		"Returns the combined exit code, stdout, and stderr."

@@ -13,11 +13,17 @@ import { Button } from '@/modules/shared/components/signal-primitives';
 // reads it as the advanced choice it is, not a fourth equal vendor.
 const VENDOR_KINDS = [
   { value: 'openai', label: 'OpenAI' },
+  { value: 'openai-responses', label: 'OpenAI Responses (stored context)' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'google', label: 'Google Gemini' },
   { value: 'claude-code', label: 'Claude Code (subscription)' },
   { value: 'openai-codex', label: 'ChatGPT / Codex (subscription)' },
   { value: 'google-antigravity', label: 'Antigravity (subscription)' },
+  { value: 'ollama', label: 'Ollama (local)' },
+  { value: 'lm-studio', label: 'LM Studio (local)' },
+  { value: 'llama.cpp', label: 'llama.cpp (local)' },
+  { value: 'vllm', label: 'vLLM (self-hosted)' },
+  { value: 'litellm', label: 'LiteLLM (self-hosted)' },
   { value: 'openai-compat', label: 'Something else (advanced)' },
 ] as const;
 
@@ -31,11 +37,17 @@ export function isOAuthVendor(vendor: string): boolean {
   return vendor === 'claude-code' || vendor === 'openai-codex' || vendor === 'google-antigravity';
 }
 
+// These OpenAI-compatible engines commonly run without authentication. A key
+// remains optional so secured laptop/server deployments work too.
+export function isAPIKeyOptionalVendor(vendor: string): boolean {
+  return ['ollama', 'lm-studio', 'lmstudio', 'llama.cpp', 'llama-cpp', 'vllm', 'localai', 'local-ai', 'litellm'].includes(vendor);
+}
+
 // Anything that is not one of the three first-party vendors is reached through
 // an OpenAI-compatible endpoint, and that endpoint has to be typed in. OAuth
 // vendors have fixed endpoints, so they never ask for one either.
 function vendorNeedsBaseURL(vendor: string): boolean {
-  return !isOAuthVendor(vendor) && vendor !== 'openai' && vendor !== 'anthropic' && vendor !== 'google';
+  return !isOAuthVendor(vendor) && vendor !== 'openai' && vendor !== 'openai-responses' && vendor !== 'anthropic' && vendor !== 'google';
 }
 
 type ProviderDraft = { vendor: string; name: string; base_url: string; api_key: string };
@@ -46,12 +58,13 @@ const draftFrom = (p: WorkspaceProvider | null): ProviderDraft =>
   p ? { vendor: p.vendor, name: p.name, base_url: p.base_url, api_key: '' } : emptyDraft();
 
 export function providerFormTitle(provider: WorkspaceProvider | null): string {
-  return provider ? `Replace key — ${provider.name || vendorLabel(provider.vendor)}` : 'Add AI provider';
+  if (!provider) return 'Add AI provider';
+  return `${provider.auth_type === 'optional' ? 'Edit provider' : 'Replace key'} — ${provider.name || vendorLabel(provider.vendor)}`;
 }
 
-// One form for both "Add provider" and "Replace key" — the only difference is
-// whether a key is required (adding) or optional (editing: blank keeps the
-// stored one, which is what the API already means by an empty api_key).
+// One form for both adding and editing providers. Keys are required for new
+// cloud providers, optional for local engines, and blank-on-edit preserves the
+// stored one (the API's existing empty api_key behavior).
 //
 // It lives inside a StackSheet panel, which owns the title and the close
 // affordance, so this renders body + footer only. The panel content is a
@@ -73,11 +86,12 @@ export function ProviderForm({
   const patch = (field: keyof ProviderDraft, value: string) => setDraft((d) => ({ ...d, [field]: value }));
 
   const oauth = isOAuthVendor(draft.vendor);
+  const keyOptional = isAPIKeyOptionalVendor(draft.vendor);
   const advanced = vendorNeedsBaseURL(draft.vendor);
   const showBaseURL = advanced || draft.vendor === 'google' || !!draft.base_url;
   // OAuth vendors don't use API keys — accounts are added via sign-in after
   // the provider row exists.
-  const keyMissing = !oauth && !editing && !draft.api_key.trim();
+  const keyMissing = !oauth && !keyOptional && !editing && !draft.api_key.trim();
   const baseURLMissing = advanced && !draft.base_url.trim();
   const invalid = keyMissing || baseURLMissing;
   const submit = async () => {
@@ -115,11 +129,11 @@ export function ProviderForm({
         <TextInput
           label={editing ? 'New API key' : 'API key'}
           type="password"
-          isRequired={!editing}
-          isOptional={editing}
+          isRequired={!editing && !keyOptional}
+          isOptional={editing || keyOptional}
           status={touched && keyMissing ? { type: 'error', message: 'Paste the key from your provider.' } : undefined}
           value={draft.api_key}
-          placeholder={editing ? 'Leave blank to keep the current key' : 'Paste the key from your provider'}
+          placeholder={editing ? 'Leave blank to keep the current key' : keyOptional ? 'Optional — only if your server requires one' : 'Paste the key from your provider'}
           onChange={(v) => patch('api_key', v)}
           width="100%"
         />
@@ -155,6 +169,10 @@ export function ProviderForm({
       <Text type="supporting">
         {oauth
           ? 'You can sign in with multiple accounts to pool rate limits.'
+          : draft.vendor === 'openai-responses'
+            ? 'Uses OpenAI’s Responses API. Conversation chaining stores response state at OpenAI; AgentRay safely replays full context when local session state is unavailable.'
+          : keyOptional
+            ? 'This engine can run without a key. AgentRay uses the same OpenAI-compatible connection on a laptop or a server.'
           : advanced
             ? 'Use this for a self-hosted or gateway endpoint that speaks the OpenAI API. Ask whoever runs it for the server address.'
             : 'Your key is encrypted and never shown again. You can replace it any time.'}

@@ -120,14 +120,24 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 
 			// Per-tier context-window overrides in tokens; 0 (or absent) means
 			// "derive it from the model id".
-			ContextWindow     int `json:"context_window"`
-			LiteContextWindow int `json:"lite_context_window"`
-			ProContextWindow  int `json:"pro_context_window"`
+			ContextWindow     int                         `json:"context_window"`
+			LiteContextWindow int                         `json:"lite_context_window"`
+			ProContextWindow  int                         `json:"pro_context_window"`
+			Capabilities      agentcore.ModelCapabilities `json:"capabilities"`
+			LiteCapabilities  agentcore.ModelCapabilities `json:"lite_capabilities"`
+			ProCapabilities   agentcore.ModelCapabilities `json:"pro_capabilities"`
 
-			// Per-tier fallback models — a model id on the tier's own provider.
-			FallbackModel     string `json:"fallback_model"`
-			LiteFallbackModel string `json:"lite_fallback_model"`
-			ProFallbackModel  string `json:"pro_fallback_model"`
+			// Per-tier fallbacks — a (provider, model) pair. A blank provider
+			// id keeps the fallback on the tier's own provider.
+			FallbackModel            string                      `json:"fallback_model"`
+			FallbackProviderID       string                      `json:"fallback_provider_id"`
+			FallbackCapabilities     agentcore.ModelCapabilities `json:"fallback_capabilities"`
+			LiteFallbackModel        string                      `json:"lite_fallback_model"`
+			LiteFallbackProviderID   string                      `json:"lite_fallback_provider_id"`
+			LiteFallbackCapabilities agentcore.ModelCapabilities `json:"lite_fallback_capabilities"`
+			ProFallbackModel         string                      `json:"pro_fallback_model"`
+			ProFallbackProviderID    string                      `json:"pro_fallback_provider_id"`
+			ProFallbackCapabilities  agentcore.ModelCapabilities `json:"pro_fallback_capabilities"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
@@ -145,17 +155,26 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			LiteBaseURL: payload.LiteBaseURL, LiteAPIKey: payload.LiteAPIKey,
 			ProProvider: payload.ProProvider, ProModel: payload.ProModel,
 			ProBaseURL: payload.ProBaseURL, ProAPIKey: payload.ProAPIKey,
-			ModelFallback:     payload.ModelFallback,
-			FlashProviderID:   payload.FlashProviderID,
-			LiteProviderID:    payload.LiteProviderID,
-			ProProviderID:     payload.ProProviderID,
-			FallbackModel:     payload.FallbackModel,
-			LiteFallbackModel: payload.LiteFallbackModel,
-			ProFallbackModel:  payload.ProFallbackModel,
+			ModelFallback:          payload.ModelFallback,
+			FlashProviderID:        payload.FlashProviderID,
+			LiteProviderID:         payload.LiteProviderID,
+			ProProviderID:          payload.ProProviderID,
+			FallbackModel:          payload.FallbackModel,
+			FallbackProviderID:     payload.FallbackProviderID,
+			LiteFallbackModel:      payload.LiteFallbackModel,
+			LiteFallbackProviderID: payload.LiteFallbackProviderID,
+			ProFallbackModel:       payload.ProFallbackModel,
+			ProFallbackProviderID:  payload.ProFallbackProviderID,
 
-			ContextWindow:     payload.ContextWindow,
-			LiteContextWindow: payload.LiteContextWindow,
-			ProContextWindow:  payload.ProContextWindow,
+			ContextWindow:            payload.ContextWindow,
+			Capabilities:             payload.Capabilities,
+			LiteContextWindow:        payload.LiteContextWindow,
+			LiteCapabilities:         payload.LiteCapabilities,
+			ProContextWindow:         payload.ProContextWindow,
+			ProCapabilities:          payload.ProCapabilities,
+			FallbackCapabilities:     payload.FallbackCapabilities,
+			LiteFallbackCapabilities: payload.LiteFallbackCapabilities,
+			ProFallbackCapabilities:  payload.ProFallbackCapabilities,
 		})
 		if err != nil {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())

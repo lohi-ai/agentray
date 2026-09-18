@@ -73,6 +73,14 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 		return RunResult{}, ErrBusy
 	}
 	defer a.release()
+	if a.resumeSession && a.session != nil && a.sessionID != "" {
+		leaseCtx, release, err := AcquireSessionLease(ctx, a.session, a.sessionID)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("resume: acquiring durable session lease: %w", err)
+		}
+		ctx = leaseCtx
+		defer func() { _ = release() }()
+	}
 
 	emit := func(ev StreamEvent) {
 		if sink != nil {
@@ -102,6 +110,12 @@ func (a *Agent) runLoop(ctx context.Context, messages []Message, task string, si
 		driver = DefaultDriver()
 	}
 	res, err := driver.Drive(ctx, a, messages, task, sink, emit)
+	// A fenced append can discover lease loss on the driver's final save point.
+	// Promote that cancellation even when a compatibility driver treated the
+	// durability write as best-effort and otherwise returned success.
+	if err == nil && errors.Is(context.Cause(ctx), ErrSessionLeaseLost) {
+		err = context.Cause(ctx)
+	}
 	// Fold in what spawned sub-agents spent (spawn_subagent accumulates child
 	// usage out-of-band), so a parent run's accounting includes its children on
 	// every exit path.
@@ -257,9 +271,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// buffered entries, or the durable log loses exactly the turns recovery
 	// needs to see. WithoutCancel keeps the ctx values (tracing) minus the kill.
 	flushCtx := context.WithoutCancel(ctx)
-	flush := func() {
+	flush := func() bool {
 		if a.session == nil || a.sessionID == "" || len(pending) == 0 {
-			return
+			return true
 		}
 		// Use an atomic batch when the backend offers one. The compatibility path
 		// still stops at the first failure, so the durable log is always a valid
@@ -271,10 +285,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			emit(StreamEvent{Type: StreamProgress, Note: "durable session write failed; retrying at next save point", Turn: res.Turns})
 		}
 		if n == 0 {
-			return
+			return false
 		}
 		pending = pending[n:]
 		emit(StreamEvent{Type: StreamSavePoint, Turn: res.Turns})
+		return len(pending) == 0
 	}
 	// A trailing flush guarantees the last turn's buffered entries (leaf included)
 	// are committed on every return path; whatever still couldn't be written is
@@ -296,9 +311,9 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// lock is released so a slow sink never stalls other side-record writers.
 	var sideMu sync.Mutex
 	sideWriteFailed := false
-	appendSide := func(e SessionEntry) {
+	appendSide := func(e SessionEntry) bool {
 		if a.session == nil || a.sessionID == "" {
-			return
+			return true
 		}
 		e.CreatedAt = time.Now()
 		sideMu.Lock()
@@ -311,6 +326,44 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		sideMu.Unlock()
 		if failed {
 			emit(StreamEvent{Type: StreamProgress, Note: "durable side-record write failed; crash recovery loses in-flight detail", Turn: res.Turns})
+		}
+		return aerr == nil
+	}
+	// persistToolOutcome journals a physically completed call immediately, before
+	// a parallel group waits for slower siblings and before the transcript can
+	// place results in source order. Cancellation placeholders and parked calls
+	// are deliberately not facts: leaving them dangling lets recovery apply the
+	// tool's retry-safety policy instead of permanently recording work as done.
+	persistToolOutcome := func(out toolOutcome, intentID string) {
+		if out.parked || out.trace.CallID == "" {
+			return
+		}
+		settled := ctx.Err() == nil ||
+			(out.trace.Error == "" && !out.trace.DeniedAborted())
+		if !settled {
+			return
+		}
+		entry := SessionEntry{
+			Kind:   EntryToolOutcome,
+			Turn:   res.Turns,
+			CallID: out.trace.CallID,
+			// Side records do not join the tree, but ParentID explicitly anchors
+			// this outcome to the intent that launched it. Recovery therefore does
+			// not infer ownership from a different replica's latest chain node.
+			ParentID: intentID,
+			Outcome: &ToolOutcomeRecord{
+				Message:   out.message,
+				Trace:     out.trace,
+				Extra:     slices.Clone(out.extra),
+				Terminate: out.terminate,
+				Executed:  out.executed,
+			},
+		}
+		// Outcome durability is stronger than best-effort progress telemetry. An
+		// immediate retry closes ordinary transient failures and unknown-commit
+		// errors are harmless: reduction makes the newest record per call win.
+		if !appendSide(entry) {
+			appendSide(entry)
 		}
 	}
 
@@ -624,12 +677,14 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						satisfied[m.ToolCallID] = true
 					}
 				}
-				stitched := make([]Message, 0, len(plan.Messages)+len(plan.RetryCalls)+len(plan.DroppedCalls))
+				stitched := make([]Message, 0, len(plan.Messages)+len(plan.RetryCalls)+len(plan.DroppedCalls)+len(plan.ToolOutcomes))
 				for _, m := range plan.Messages {
 					stitched = append(stitched, m)
 					if m.Role != RoleAssistant {
 						continue
 					}
+					var outcomeExtra []Message
+					batchTerminate := false
 					for _, c := range m.ToolCalls {
 						if satisfied[c.ID] || c.ID == reparkedCall {
 							// A re-parked call stays dangling: its question is
@@ -637,6 +692,38 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 							continue
 						}
 						closing, ok := retried[c.ID]
+						if durable, found := plan.ToolOutcomes[c.ID]; found {
+							closing = durable.Message
+							if closing.Role == "" {
+								closing.Role = RoleTool
+							}
+							if closing.ToolCallID == "" {
+								closing.ToolCallID = c.ID
+							}
+							if closing.Name == "" {
+								closing.Name = c.Name
+							}
+							trace := durable.Trace
+							if trace.CallID == "" {
+								trace.CallID = c.ID
+							}
+							if trace.Tool == "" {
+								trace.Tool = c.Name
+							}
+							if trace.Args == "" {
+								trace.Args = c.Arguments
+							}
+							recovered := toolOutcome{message: closing, trace: trace, terminate: durable.Terminate, executed: durable.Executed}
+							applyBreaker(recovered, &closing)
+							recordTool(trace)
+							if durable.Executed {
+								toolCallCount++
+							}
+							terminated = terminated || durable.Terminate
+							batchTerminate = batchTerminate || durable.Terminate
+							outcomeExtra = append(outcomeExtra, durable.Extra...)
+							ok = true
+						}
 						if !ok {
 							if answer, answered := plan.Answers[c.ID]; answered {
 								// A parked call resolved out-of-band: the EntryAnswer
@@ -659,6 +746,15 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						stitched = append(stitched, closing)
 						appendEntry(SessionEntry{Kind: EntryMessage, Message: &closing})
 						satisfied[c.ID] = true
+					}
+					// Live execution appends extension context after every result in
+					// the batch. Preserve that provider-valid ordering on recovery.
+					if !batchTerminate {
+						for _, extra := range outcomeExtra {
+							extra := extra
+							stitched = append(stitched, extra)
+							appendEntry(SessionEntry{Kind: EntryMessage, Message: &extra})
+						}
 					}
 				}
 				messages = stitched
@@ -865,7 +961,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// discover its working rung, so the resumed run starts there rather than
 	// re-failing down the ladder. A recorded model that no longer names a rung
 	// (the composition changed) falls back to rung 0.
-	ladder := append([]ModelRung{{Provider: a.provider, Model: a.model, ContextWindow: a.contextWindow}}, a.escalation...)
+	ladder := append([]ModelRung{{Provider: a.provider, Model: a.model, ContextWindow: a.contextWindow, Capabilities: a.modelCapabilities}}, a.escalation...)
 	rung := 0
 	if resumed && resumePlan.Model != "" {
 		for i, r := range ladder {
@@ -1228,7 +1324,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// stable prefix on the request view and let each provider translate the
 			// marks into its native caching (or ignore them).
 			reqMessages = markCacheAnchors(reqMessages, res.Messages, a.cacheKey)
-			req := ChatRequest{Messages: reqMessages, Tools: schemas, CacheKey: a.cacheKey, CacheRetention: a.cacheRetention, MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort, OutputSchema: a.outputSchema}
+			req := ChatRequest{
+				Messages: reqMessages, Tools: schemas,
+				SessionID: a.providerSessionID, ProviderSession: a.providerSession,
+				CacheKey: a.cacheKey, CacheRetention: a.cacheRetention,
+				MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort,
+				OutputSchema: a.outputSchema,
+			}
 			return a.hooks.runBeforeProviderRequest(ctx, req)
 		}
 
@@ -1281,6 +1383,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		}
 
 		if err != nil {
+			// A partial streamed answer was already visible, so it cannot be
+			// replayed safely. The attempt still consumed provider tokens; retain
+			// the usage carried by the committed-stream sentinel before failing.
+			var committed *committedStreamError
+			if errors.As(err, &committed) {
+				res.Usage = addUsage(res.Usage, committed.usage)
+			}
 			return failTurn(fmt.Errorf("provider chat (turn %d): %w", res.Turns, err))
 		}
 		emit(StreamEvent{Type: StreamMessageEnd, Turn: res.Turns})
@@ -1436,6 +1545,19 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			continue
 		}
 
+		// Effect-intent save point: the assistant message containing these calls
+		// must be durable before any tool can produce an external side effect.
+		// The completed outcomes below are side records anchored to this node.
+		if !flush() {
+			// A transient failure gets one immediate retry. Running an effect while
+			// its assistant call exists only in memory defeats the outcome journal:
+			// after a crash there would be no durable intent to attach it to.
+			if !flush() {
+				return failTurn(errors.New("persist tool-call intent before execution"))
+			}
+		}
+		toolIntentID := lastEntryID
+
 		// tool_execution_start for each requested call, in the model's order, before
 		// dispatch (parallel or sequential).
 		for i := range calls {
@@ -1476,6 +1598,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				} else {
 					outcomes[lo] = a.runToolCall(ctx, exts, extExempt, tools, calls[lo], limits, emitUpdate)
 				}
+				persistToolOutcome(outcomes[lo], toolIntentID)
 			} else {
 				var wg sync.WaitGroup
 				for i := lo; i < hi; i++ {
@@ -1487,9 +1610,11 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						// here during dispatch is safe.
 						if disabledTools[calls[i].Name] {
 							outcomes[i] = disabledOutcome(calls[i])
+							persistToolOutcome(outcomes[i], toolIntentID)
 							return
 						}
 						outcomes[i] = a.runToolCall(ctx, exts, extExempt, tools, calls[i], limits, emitUpdate)
+						persistToolOutcome(outcomes[i], toolIntentID)
 					}(i)
 				}
 				wg.Wait()

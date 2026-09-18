@@ -52,7 +52,7 @@ type SessionNode struct {
 // entry, so a mid-turn write cannot fork the chain or strand a pending entry.
 func isSideRecord(k SessionEntryKind) bool {
 	switch k {
-	case EntryInbox, EntryAssistantFrame, EntryToolProgress:
+	case EntryInbox, EntryAssistantFrame, EntryToolProgress, EntryToolOutcome:
 		return true
 	}
 	return false
@@ -62,7 +62,8 @@ func isSideRecord(k SessionEntryKind) bool {
 // Replay rule: a node's parent is its explicit ParentID when set, else the
 // current leaf; every appended node becomes the new leaf (append-is-branch,
 // pi's model); an EntryLeafMove moves the leaf without adding a node. Side
-// records (inbox, frames, progress) are skipped entirely — they are not nodes.
+// records (inbox, frames, progress, outcomes) are skipped entirely — they are
+// not nodes.
 func buildChain(log []SessionEntry) (nodes []SessionNode, byID map[string]int, leaf string) {
 	byID = make(map[string]int, len(log))
 	cur := ""
@@ -133,6 +134,9 @@ func pathIndices(nodes []SessionNode, byID map[string]int, from string) []int {
 // from the root to the active leaf. A flat (id-less, never-rewound) log returns
 // every entry in order — the pre-tree behavior.
 func ActivePath(log []SessionEntry) []SessionEntry {
+	if path, ok := linearActivePath(log); ok {
+		return path
+	}
 	nodes, byID, leaf := buildChain(log)
 	idxs := pathIndices(nodes, byID, leaf)
 	out := make([]SessionEntry, 0, len(idxs))
@@ -140,6 +144,50 @@ func ActivePath(log []SessionEntry) []SessionEntry {
 		out = append(out, nodes[i].Entry)
 	}
 	return out
+}
+
+// linearActivePath avoids materializing the full tree for the overwhelmingly
+// common case: an append-only session that has never forked or rewound. The
+// general buildChain path needs a SessionNode copy, an id->node index, a
+// leaf-to-root walk, and a second SessionEntry copy. On a long server session
+// that is substantial resume-time allocation for data already in log order.
+//
+// We still validate parent continuity and effective-id uniqueness here. Any
+// malformed or genuinely branched shape falls back to the authoritative tree
+// algorithm, preserving its degradation behavior instead of guessing.
+func linearActivePath(log []SessionEntry) ([]SessionEntry, bool) {
+	out := make([]SessionEntry, 0, len(log))
+	seen := make(map[string]struct{}, len(log))
+	leaf := ""
+	for i, entry := range log {
+		if entry.Kind == EntryLeafMove {
+			if entry.Target != "" {
+				return nil, false
+			}
+			continue
+		}
+		if isSideRecord(entry.Kind) {
+			continue
+		}
+		id := entry.ID
+		if id == "" {
+			id = fmt.Sprintf("#%d", i)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, false
+		}
+		seen[id] = struct{}{}
+		parent := entry.ParentID
+		if parent == "" {
+			parent = leaf
+		}
+		if parent != leaf {
+			return nil, false
+		}
+		out = append(out, entry)
+		leaf = id
+	}
+	return out, true
 }
 
 // commonAncestor returns the effective id of the deepest node shared by the

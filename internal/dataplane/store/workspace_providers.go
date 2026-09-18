@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -50,9 +52,11 @@ type WorkspaceProviderInput struct {
 
 // WorkspaceTierSelection is the 3-tier pointer into configured providers.
 // A blank lite/pro provider+model inherits flash at resolve time. Each tier's
-// FallbackModel is an optional second model of the SAME provider the run
-// retries on when the primary model fails — in-tier fallback, not escalation
-// to another tier.
+// fallback is a (provider, model) pair the run retries on when the primary
+// model fails: FallbackProviderID blank means "the tier's own provider"
+// (in-tier fallback); set means the rung runs on that provider row — the
+// cross-provider leg of the escalation ladder. Still in-tier in the other
+// direction: a failed call never climbs to another tier.
 type WorkspaceTierSelection struct {
 	FlashProviderID string
 	FlashModel      string
@@ -65,12 +69,22 @@ type WorkspaceTierSelection struct {
 	// model id". They sit beside the model rather than on the provider because
 	// the window is a property of the model, and one provider serves several.
 	FlashContextWindow int
+	FlashCapabilities  agentcore.ModelCapabilities
 	LiteContextWindow  int
+	LiteCapabilities   agentcore.ModelCapabilities
 	ProContextWindow   int
-	// Per-tier fallback models — a model id on the tier's own provider.
-	FlashFallbackModel string
-	LiteFallbackModel  string
-	ProFallbackModel   string
+	ProCapabilities    agentcore.ModelCapabilities
+	// Per-tier fallbacks — a (provider, model) pair. A blank provider id keeps
+	// the fallback on the tier's own provider; a set one crosses providers.
+	FlashFallbackModel        string
+	LiteFallbackModel         string
+	ProFallbackModel          string
+	FlashFallbackProviderID   string
+	FlashFallbackCapabilities agentcore.ModelCapabilities
+	LiteFallbackProviderID    string
+	LiteFallbackCapabilities  agentcore.ModelCapabilities
+	ProFallbackProviderID     string
+	ProFallbackCapabilities   agentcore.ModelCapabilities
 }
 
 // LegacyWorkspaceTiers is a pre-upgrade one-row-per-workspace tier record
@@ -133,10 +147,14 @@ func publicProviders(recs []WorkspaceProviderRecord) []WorkspaceProvider {
 }
 
 // providerAuthType maps a vendor onto its credential shape: "oauth" for the
-// subscription vendors backed by an account pool, "key" for API-key vendors.
+// subscription vendors backed by an account pool, "optional" for local engines
+// that may run without auth, and "key" for API-key vendors.
 func providerAuthType(vendor string) string {
 	if ai.IsOAuthVendor(vendor) {
 		return "oauth"
+	}
+	if ai.APIKeyOptional(vendor) {
+		return "optional"
 	}
 	return "key"
 }
@@ -175,6 +193,15 @@ func (b *WorkspaceProviderBook) DeleteProvider(id string) {
 	if b.Sel.FlashProviderID == id {
 		b.Sel.FlashProviderID = ""
 	}
+	if b.Sel.FlashFallbackProviderID == id {
+		b.Sel.FlashFallbackProviderID = ""
+	}
+	if b.Sel.LiteFallbackProviderID == id {
+		b.Sel.LiteFallbackProviderID = ""
+	}
+	if b.Sel.ProFallbackProviderID == id {
+		b.Sel.ProFallbackProviderID = ""
+	}
 	if b.Sel.LiteProviderID == id {
 		b.Sel.LiteProviderID = ""
 	}
@@ -184,15 +211,34 @@ func (b *WorkspaceProviderBook) DeleteProvider(id string) {
 }
 
 // SetTiers records the 3-tier selection. Unknown provider ids are rejected
-// (blank is allowed — inherit).
+// (blank is allowed — inherit), and a fallback provider id without its model
+// is rejected: the pair is the rung, half of it is meaningless.
 func (b *WorkspaceProviderBook) SetTiers(sel WorkspaceTierSelection) error {
 	known := b.byID()
-	for _, id := range []string{sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID} {
+	for _, id := range []string{sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID,
+		sel.FlashFallbackProviderID, sel.LiteFallbackProviderID, sel.ProFallbackProviderID} {
 		if id == "" {
 			continue
 		}
 		if _, ok := known[id]; !ok {
 			return fmt.Errorf("unknown provider %q", id)
+		}
+	}
+	for _, fb := range []struct{ id, model string }{
+		{sel.FlashFallbackProviderID, sel.FlashFallbackModel},
+		{sel.LiteFallbackProviderID, sel.LiteFallbackModel},
+		{sel.ProFallbackProviderID, sel.ProFallbackModel},
+	} {
+		if fb.id != "" && fb.model == "" {
+			return fmt.Errorf("fallback provider %q without a fallback model", fb.id)
+		}
+	}
+	for _, caps := range []agentcore.ModelCapabilities{
+		sel.FlashCapabilities, sel.LiteCapabilities, sel.ProCapabilities,
+		sel.FlashFallbackCapabilities, sel.LiteFallbackCapabilities, sel.ProFallbackCapabilities,
+	} {
+		if err := caps.Validate(); err != nil {
+			return fmt.Errorf("invalid model capabilities: %w", err)
 		}
 	}
 	b.Sel = sel
@@ -213,7 +259,7 @@ func NewWorkspaceProviderRecord(id, workspaceID string, in WorkspaceProviderInpu
 	}
 	base := strings.TrimSpace(in.BaseURL)
 	oauth := ai.IsOAuthVendor(vendor)
-	if !oauth && vendor != "openai" && vendor != "anthropic" && vendor != "google" && base == "" {
+	if !oauth && vendor != "openai" && vendor != ai.VendorOpenAIResponses && vendor != "anthropic" && vendor != "google" && base == "" {
 		return WorkspaceProviderRecord{}, fmt.Errorf("provider %q requires a base URL", vendor)
 	}
 	rec := WorkspaceProviderRecord{
@@ -340,26 +386,39 @@ func ResolveWorkspaceRun(providers []WorkspaceProviderRecord, sel WorkspaceTierS
 		}
 		// HasKey is set from ciphertext presence when the book is loaded
 		// redacted (GET). APIKey is set only on the decrypt/run path. Either
-		// counts so a BYOK workspace is not treated as empty.
-		return p.Vendor, p.BaseURL, p.APIKey, model, p.HasKey || p.APIKey != ""
+		// counts so a BYOK workspace is not treated as empty. Explicit local
+		// engines are also ready without a credential.
+		return p.Vendor, p.BaseURL, p.APIKey, model,
+			p.HasKey || p.APIKey != "" || ai.APIKeyOptional(p.Vendor)
 	}
 
 	fv, fb, fk, fm, fh := pick(sel.FlashProviderID, sel.FlashModel)
 	lv, lb, lk, lm, lh := pick(sel.LiteProviderID, sel.LiteModel)
 	pv, pb, pk, pm, ph := pick(sel.ProProviderID, sel.ProModel)
 
+	// Fallback rungs: a fallback that names a provider row resolves to that
+	// row's vendor/base/key — the cross-provider leg. A blank provider id
+	// keeps the fallback on the tier's own provider and resolves to nothing
+	// extra here (the runtime reuses the tier's provider).
+	ffv, ffb, ffk, _, ffh := pick(sel.FlashFallbackProviderID, sel.FlashFallbackModel)
+	lfv, lfb, lfk, _, lfh := pick(sel.LiteFallbackProviderID, sel.LiteFallbackModel)
+	pfv, pfb, pfk, _, pfh := pick(sel.ProFallbackProviderID, sel.ProFallbackModel)
+
 	cfg := WorkspaceModelTiers{
-		Provider: fv, Model: fm, BaseURL: fb, HasKey: fh, ContextWindow: sel.FlashContextWindow,
-		FallbackModel: sel.FlashFallbackModel,
-		LiteProvider:  lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh, LiteContextWindow: sel.LiteContextWindow,
-		LiteFallbackModel: sel.LiteFallbackModel,
-		ProProvider:       pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph, ProContextWindow: sel.ProContextWindow,
-		ProFallbackModel: sel.ProFallbackModel,
-		ModelFallback:    sel.ModelFallback,
-		FlashProviderID:  sel.FlashProviderID,
-		LiteProviderID:   sel.LiteProviderID,
-		ProProviderID:    sel.ProProviderID,
-		Providers:        publicProviders(providers),
+		Provider: fv, Model: fm, BaseURL: fb, HasKey: fh, ContextWindow: sel.FlashContextWindow, Capabilities: sel.FlashCapabilities,
+		FallbackModel: sel.FlashFallbackModel, FallbackProviderID: sel.FlashFallbackProviderID,
+		FallbackProvider: ffv, FallbackBaseURL: ffb, FallbackHasKey: ffh, FallbackCapabilities: sel.FlashFallbackCapabilities,
+		LiteProvider: lv, LiteModel: lm, LiteBaseURL: lb, LiteHasKey: lh, LiteContextWindow: sel.LiteContextWindow, LiteCapabilities: sel.LiteCapabilities,
+		LiteFallbackModel: sel.LiteFallbackModel, LiteFallbackProviderID: sel.LiteFallbackProviderID,
+		LiteFallbackProvider: lfv, LiteFallbackBaseURL: lfb, LiteFallbackHasKey: lfh, LiteFallbackCapabilities: sel.LiteFallbackCapabilities,
+		ProProvider: pv, ProModel: pm, ProBaseURL: pb, ProHasKey: ph, ProContextWindow: sel.ProContextWindow, ProCapabilities: sel.ProCapabilities,
+		ProFallbackModel: sel.ProFallbackModel, ProFallbackProviderID: sel.ProFallbackProviderID,
+		ProFallbackProvider: pfv, ProFallbackBaseURL: pfb, ProFallbackHasKey: pfh, ProFallbackCapabilities: sel.ProFallbackCapabilities,
+		ModelFallback:   sel.ModelFallback,
+		FlashProviderID: sel.FlashProviderID,
+		LiteProviderID:  sel.LiteProviderID,
+		ProProviderID:   sel.ProProviderID,
+		Providers:       publicProviders(providers),
 	}
 	if cfg.Provider == "" && len(providers) > 0 {
 		cfg.Provider = providers[0].Vendor
@@ -373,6 +432,17 @@ func ResolveWorkspaceRun(providers []WorkspaceProviderRecord, sel WorkspaceTierS
 	}
 	if pk != "" {
 		keys["pro"] = pk
+	}
+	// Fallback providers get their own key slots — a cross-provider rung
+	// authenticates with its own row's credential, never the tier's.
+	if ffk != "" {
+		keys["flash_fallback"] = ffk
+	}
+	if lfk != "" {
+		keys["lite_fallback"] = lfk
+	}
+	if pfk != "" {
+		keys["pro_fallback"] = pfk
 	}
 	return cfg, keys
 }
@@ -565,7 +635,10 @@ func (s *Store) DeleteWorkspaceProvider(ctx context.Context, userID, workspaceID
 UPDATE workspace_model_tiers SET
 	flash_provider_id = CASE WHEN flash_provider_id::text = $2 THEN NULL ELSE flash_provider_id END,
 	lite_provider_id  = CASE WHEN lite_provider_id::text  = $2 THEN NULL ELSE lite_provider_id END,
-	pro_provider_id   = CASE WHEN pro_provider_id::text   = $2 THEN NULL ELSE pro_provider_id END
+	pro_provider_id   = CASE WHEN pro_provider_id::text   = $2 THEN NULL ELSE pro_provider_id END,
+	fallback_provider_id      = CASE WHEN fallback_provider_id::text      = $2 THEN NULL ELSE fallback_provider_id END,
+	lite_fallback_provider_id = CASE WHEN lite_fallback_provider_id::text = $2 THEN NULL ELSE lite_fallback_provider_id END,
+	pro_fallback_provider_id  = CASE WHEN pro_fallback_provider_id::text  = $2 THEN NULL ELSE pro_fallback_provider_id END
 WHERE workspace_id = $1`, workspaceID, providerID); err != nil {
 		return err
 	}
@@ -647,17 +720,25 @@ FROM workspace_providers WHERE workspace_id = $1 ORDER BY created_at ASC`, works
 	var flashID, liteID, proID *string
 	var flashModel, liteModel, proModel string
 	var flashFallback, liteFallback, proFallback string
+	var flashFbID, liteFbID, proFbID *string
+	var flashCaps, liteCaps, proCaps []byte
+	var flashFbCaps, liteFbCaps, proFbCaps []byte
 	var fallback bool
 	var flashWindow, liteWindow, proWindow int
 	err = s.pg.QueryRow(ctx, `
 SELECT flash_provider_id::text, model, lite_provider_id::text, lite_model,
        pro_provider_id::text, pro_model, model_fallback,
        context_window, lite_context_window, pro_context_window,
-       fallback_model, lite_fallback_model, pro_fallback_model
+	       fallback_model, lite_fallback_model, pro_fallback_model,
+	       fallback_provider_id::text, lite_fallback_provider_id::text, pro_fallback_provider_id::text,
+	       capabilities, lite_capabilities, pro_capabilities,
+	       fallback_capabilities, lite_fallback_capabilities, pro_fallback_capabilities
 FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		&flashID, &flashModel, &liteID, &liteModel, &proID, &proModel, &fallback,
 		&flashWindow, &liteWindow, &proWindow,
-		&flashFallback, &liteFallback, &proFallback)
+		&flashFallback, &liteFallback, &proFallback,
+		&flashFbID, &liteFbID, &proFbID,
+		&flashCaps, &liteCaps, &proCaps, &flashFbCaps, &liteFbCaps, &proFbCaps)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -672,6 +753,12 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		book.Sel.FlashFallbackModel = flashFallback
 		book.Sel.LiteFallbackModel = liteFallback
 		book.Sel.ProFallbackModel = proFallback
+		book.Sel.FlashCapabilities = decodeModelCapabilities(flashCaps)
+		book.Sel.LiteCapabilities = decodeModelCapabilities(liteCaps)
+		book.Sel.ProCapabilities = decodeModelCapabilities(proCaps)
+		book.Sel.FlashFallbackCapabilities = decodeModelCapabilities(flashFbCaps)
+		book.Sel.LiteFallbackCapabilities = decodeModelCapabilities(liteFbCaps)
+		book.Sel.ProFallbackCapabilities = decodeModelCapabilities(proFbCaps)
 		if flashID != nil {
 			book.Sel.FlashProviderID = *flashID
 		}
@@ -680,6 +767,15 @@ FROM workspace_model_tiers WHERE workspace_id = $1`, workspaceID).Scan(
 		}
 		if proID != nil {
 			book.Sel.ProProviderID = *proID
+		}
+		if flashFbID != nil {
+			book.Sel.FlashFallbackProviderID = *flashFbID
+		}
+		if liteFbID != nil {
+			book.Sel.LiteFallbackProviderID = *liteFbID
+		}
+		if proFbID != nil {
+			book.Sel.ProFallbackProviderID = *proFbID
 		}
 	}
 
@@ -800,8 +896,11 @@ INSERT INTO workspace_model_tiers (
 	pro_provider, pro_model, pro_base_url,
 	model_fallback, flash_provider_id, lite_provider_id, pro_provider_id,
 	context_window, lite_context_window, pro_context_window,
-	fallback_model, lite_fallback_model, pro_fallback_model
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17,$18,$19,$20)
+		fallback_model, lite_fallback_model, pro_fallback_model,
+		fallback_provider_id, lite_fallback_provider_id, pro_fallback_provider_id,
+		capabilities, lite_capabilities, pro_capabilities,
+		fallback_capabilities, lite_fallback_capabilities, pro_fallback_capabilities
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17,$18,$19,$20,NULLIF($21,'')::uuid,NULLIF($22,'')::uuid,NULLIF($23,'')::uuid,$24::jsonb,$25::jsonb,$26::jsonb,$27::jsonb,$28::jsonb,$29::jsonb)
 ON CONFLICT (workspace_id) DO UPDATE SET
 	provider = EXCLUDED.provider,
 	model = EXCLUDED.model,
@@ -822,12 +921,35 @@ ON CONFLICT (workspace_id) DO UPDATE SET
 	fallback_model = EXCLUDED.fallback_model,
 	lite_fallback_model = EXCLUDED.lite_fallback_model,
 	pro_fallback_model = EXCLUDED.pro_fallback_model,
+	fallback_provider_id = EXCLUDED.fallback_provider_id,
+	lite_fallback_provider_id = EXCLUDED.lite_fallback_provider_id,
+	pro_fallback_provider_id = EXCLUDED.pro_fallback_provider_id,
+	capabilities = EXCLUDED.capabilities,
+	lite_capabilities = EXCLUDED.lite_capabilities,
+	pro_capabilities = EXCLUDED.pro_capabilities,
+	fallback_capabilities = EXCLUDED.fallback_capabilities,
+	lite_fallback_capabilities = EXCLUDED.lite_fallback_capabilities,
+	pro_fallback_capabilities = EXCLUDED.pro_fallback_capabilities,
 	updated_at = now()`,
 		workspaceID, fv, fm, fb, lv, lm, lb, pv, pm, pb, sel.ModelFallback,
 		sel.FlashProviderID, sel.LiteProviderID, sel.ProProviderID,
 		sel.FlashContextWindow, sel.LiteContextWindow, sel.ProContextWindow,
-		sel.FlashFallbackModel, sel.LiteFallbackModel, sel.ProFallbackModel)
+		sel.FlashFallbackModel, sel.LiteFallbackModel, sel.ProFallbackModel,
+		sel.FlashFallbackProviderID, sel.LiteFallbackProviderID, sel.ProFallbackProviderID,
+		encodeModelCapabilities(sel.FlashCapabilities), encodeModelCapabilities(sel.LiteCapabilities), encodeModelCapabilities(sel.ProCapabilities),
+		encodeModelCapabilities(sel.FlashFallbackCapabilities), encodeModelCapabilities(sel.LiteFallbackCapabilities), encodeModelCapabilities(sel.ProFallbackCapabilities))
 	return err
+}
+
+func encodeModelCapabilities(c agentcore.ModelCapabilities) []byte {
+	raw, _ := json.Marshal(c)
+	return raw
+}
+
+func decodeModelCapabilities(raw []byte) agentcore.ModelCapabilities {
+	var c agentcore.ModelCapabilities
+	_ = json.Unmarshal(raw, &c)
+	return c
 }
 
 // SaveWorkspaceTierSelection writes lite/flash/pro → provider+model (owner/admin).

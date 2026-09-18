@@ -48,6 +48,7 @@ func doJSON(ctx context.Context, client HTTPDoer, req *http.Request) ([]byte, in
 type listedModel struct {
 	ID            string
 	ContextWindow int
+	Capabilities  agentcore.ModelCapabilities
 }
 
 // listOpenAIModels calls GET {base}/models (OpenAI and OpenAI-compatible).
@@ -67,7 +68,7 @@ func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	setOptionalBearerAuth(req, apiKey)
 	req.Header.Set("Accept", "application/json")
 	data, status, err := doJSON(ctx, client, req)
 	if err != nil {
@@ -86,6 +87,7 @@ func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 			TopProvider      struct {
 				ContextLength int `json:"context_length"`
 			} `json:"top_provider"`
+			discoveredCapabilities
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -97,9 +99,12 @@ func listOpenAIModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 		if id == "" {
 			continue
 		}
-		out = append(out, listedModel{ID: id, ContextWindow: firstPositive(
-			m.ContextLength, m.ContextWindow, m.MaxModelLen, m.MaxContextLength, m.TopProvider.ContextLength,
-		)})
+		out = append(out, listedModel{
+			ID: id, ContextWindow: firstPositive(
+				m.ContextLength, m.ContextWindow, m.MaxModelLen, m.MaxContextLength, m.TopProvider.ContextLength,
+			),
+			Capabilities: m.discoveredCapabilities.modelCapabilities(),
+		})
 	}
 	return out, nil
 }

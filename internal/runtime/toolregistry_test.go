@@ -1,9 +1,12 @@
 package agentruntime
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/sandbox"
 )
 
@@ -162,16 +165,75 @@ func TestBuildToolRunShellNeedsAWorkspaceNotASandbox(t *testing.T) {
 
 func TestToolCatalogIncludesWorkspaceToolsOnlyWhenWorkspaceReady(t *testing.T) {
 	names := catalogNames(ToolBuildContext{Workspace: testWorkspace(t)})
-	if !names[sandbox.ToolReadFile] || !names[sandbox.ToolWriteFile] {
+	if !names[sandbox.ToolReadFile] || !names[sandbox.ToolWriteFile] || !names[sandbox.ToolEditLines] || !names[sandbox.ToolLSP] || !names[sandbox.ToolEval] {
 		t.Fatalf("workspace tools missing from catalog: %v", names)
 	}
 
 	bare := catalogNames()
-	for _, name := range []string{sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolGrep, sandbox.ToolGlob} {
+	for _, name := range []string{sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolEditFile, sandbox.ToolEditLines, sandbox.ToolGrep, sandbox.ToolGlob} {
 		if bare[name] {
 			t.Errorf("%s offered by a deployment with no workspace at all", name)
 		}
 	}
+}
+
+func TestLSPCatalogAndBuilderRespectInteractiveSandboxCapability(t *testing.T) {
+	workspaceBase := t.TempDir()
+	if !catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase})[sandbox.ToolLSP] {
+		t.Fatal("host-mode deployment should offer lsp")
+	}
+	if catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase, Sandbox: stubSandbox{}})[sandbox.ToolLSP] {
+		t.Fatal("backend without interactive process support should not offer lsp")
+	}
+	if !catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase, Sandbox: processCapableSandbox{}})[sandbox.ToolLSP] {
+		t.Fatal("interactive sandbox backend should offer lsp")
+	}
+
+	config := `{"servers":[{"name":"go","command":"gopls","extensions":[".go"]}]}`
+	tool, err := BuildToolWithContext(ToolBuildContext{Workspace: testWorkspace(t)}, sandbox.ToolLSP, config)
+	if err != nil {
+		t.Fatalf("host-mode lsp build: %v", err)
+	}
+	if tool.Name() != sandbox.ToolLSP {
+		t.Fatalf("tool name = %q", tool.Name())
+	}
+	if err := ValidateToolConfig(ToolBuildContext{WorkspaceBase: workspaceBase}, sandbox.ToolLSP, `{}`); err == nil {
+		t.Fatal("empty lsp config should be rejected")
+	}
+}
+
+func TestEvalCatalogAndBuilderRespectInteractiveSandboxCapability(t *testing.T) {
+	workspaceBase := t.TempDir()
+	if !catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase})[sandbox.ToolEval] {
+		t.Fatal("host-mode deployment should offer eval")
+	}
+	if catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase, Sandbox: stubSandbox{}})[sandbox.ToolEval] {
+		t.Fatal("backend without interactive process support should not offer eval")
+	}
+	if !catalogNames(ToolBuildContext{WorkspaceBase: workspaceBase, Sandbox: processCapableSandbox{}})[sandbox.ToolEval] {
+		t.Fatal("interactive sandbox backend should offer eval")
+	}
+
+	registry := sandbox.NewEvalSessionRegistry(2, time.Minute)
+	defer registry.Close()
+	tool, err := BuildToolWithContext(ToolBuildContext{
+		Workspace: testWorkspace(t), EvalSessions: registry, RuntimeNamespace: "tenant-project-agent",
+	}, sandbox.ToolEval, `{}`)
+	if err != nil {
+		t.Fatalf("host-mode eval build: %v", err)
+	}
+	if tool.Name() != sandbox.ToolEval {
+		t.Fatalf("tool name = %q", tool.Name())
+	}
+	if err := ValidateToolConfig(ToolBuildContext{WorkspaceBase: workspaceBase}, sandbox.ToolEval, `{"timeout_seconds":999}`); err == nil {
+		t.Fatal("invalid eval config should be rejected")
+	}
+}
+
+type processCapableSandbox struct{ stubSandbox }
+
+func (processCapableSandbox) Start(context.Context, agentcore.SandboxExec) (agentcore.SandboxProcess, error) {
+	return nil, nil
 }
 
 func TestBuildWorkspaceToolsRequireWorkspace(t *testing.T) {
@@ -182,7 +244,7 @@ func TestBuildWorkspaceToolsRequireWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
-	for _, name := range []string{sandbox.ToolReadFile, sandbox.ToolWriteFile} {
+	for _, name := range []string{sandbox.ToolReadFile, sandbox.ToolWriteFile, sandbox.ToolEditFile, sandbox.ToolEditLines} {
 		tool, err := BuildToolWithContext(ToolBuildContext{Workspace: ws}, name, `{}`)
 		if err != nil {
 			t.Fatalf("BuildToolWithContext(%s): %v", name, err)
