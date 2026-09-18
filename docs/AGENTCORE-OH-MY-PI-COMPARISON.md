@@ -436,13 +436,24 @@ cannot make a run permanently unresumable. The in-memory laptop store remains
 dependency-free and inline. This is a PostgreSQL representation optimization,
 not yet raw-byte object storage: the artifact row currently holds base64 text.
 
+Before any rich image becomes canonical history, the loop now decodes it rather
+than trusting a file signature, corrects mislabeled MIME metadata, rejects more
+than 16 megapixels or 16 MiB of compressed input, and normalizes it with a
+portable pure-Go pipeline. The longest edge is capped at 1568 px, degenerate
+short edges are raised to 200 px, PNG and white-composited JPEG encodings compete
+for the smallest result, and quality/dimension ladders target at most 500 KiB
+while respecting the 768 KiB aggregate tool-result budget. A resize adds an
+explicit coordinate-mapping note for screenshot-style tools. WebP is decoded
+but converted, avoiding a common llama.cpp/local-backend incompatibility. This
+rebuilds OMP's `Bun.Image` policy without adding a platform-specific runtime or
+external image process to either laptop or server deployments.
+
 Host mode receives only allowlisted environment variables; Docker mode reuses
 the hardened no-network process envelope with a writable workspace and
 read-only root. Configuration and lifecycle details live in [`EVAL.md`](EVAL.md).
 
-JavaScript, raw-byte/object-store backing, image resize/recompression,
-cell-to-tool/subagent bridges, auto-backgrounding, and speculative eval were
-not copied in this increment.
+JavaScript, raw-byte/object-store backing, cell-to-tool/subagent bridges,
+auto-backgrounding, and speculative eval were not copied in this increment.
 Those features need native AgentRay cancellation, artifact, and delegation
 contracts rather than a direct desktop-runtime port.
 
@@ -505,8 +516,7 @@ portable CI threshold.
 
 1. Benchmark typed `edit_lines` against oh-my-pi's syntax-block hashline mode;
    add syntax-aware blocks only if they materially improve edit success.
-2. Add bounded image resize/recompression and optionally move server artifacts
-   from base64 PostgreSQL text to raw-byte/object-store backing; then evaluate
+2. Evaluate raw-byte/object-store backing for server artifacts, then evaluate
    transactional rename/code actions over snapshot-checked multi-file writes.
 3. Measure an aggressive transcript-shake policy; keep it optional because
    artifact durability and the acceptable loss profile vary by deployment.

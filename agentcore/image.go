@@ -27,6 +27,7 @@ type normalizedRichImage struct {
 	part                          ContentPart
 	originalWidth, originalHeight int
 	width, height                 int
+	bytes                         int
 }
 
 // normalizeRichImage validates decoded image data, corrects caller MIME
@@ -76,7 +77,7 @@ func normalizeRichImage(part ContentPart, maxBytes int) (normalizedRichImage, bo
 	if withinDimensions && len(decoded) <= comfortable && mime != "image/webp" {
 		return normalizedRichImage{
 			part: part, originalWidth: config.Width, originalHeight: config.Height,
-			width: config.Width, height: config.Height,
+			width: config.Width, height: config.Height, bytes: len(decoded),
 		}, true
 	}
 
@@ -89,7 +90,7 @@ func normalizeRichImage(part ContentPart, maxBytes int) (normalizedRichImage, bo
 	part.MIMEType = result.mime
 	return normalizedRichImage{
 		part: part, originalWidth: config.Width, originalHeight: config.Height,
-		width: width, height: height,
+		width: width, height: height, bytes: len(result.data),
 	}, true
 }
 

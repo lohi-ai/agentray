@@ -76,9 +76,17 @@ deterministic pruning count and explicitly elide image parts, while session
 stores snapshot them with the transcript. The PostgreSQL session adapter stores
 large base64 payloads once in its session-fenced, content-addressed artifact
 table and hydrates them transparently on resume; the in-memory laptop store
-keeps them inline. Raw-byte/object storage and resize/recompression are not
-implemented yet, so large durable plots should also be saved to the workspace
-when later retrieval matters.
+keeps them inline.
+
+At the shared rich-tool boundary, decoded images are validated and normalized
+before they enter canonical history. Inputs are bounded to 16 MiB and 16
+megapixels; the longest edge is capped at 1568 px, short edges below 200 px are
+raised, and PNG/JPEG recompression targets 500 KiB while preserving the 768 KiB
+aggregate cap. Dimension changes add a coordinate-mapping note. WebP input is
+decoded but converted for local-model portability. The pipeline is pure Go and
+therefore identical in trusted laptop mode and the hardened server runtime.
+Raw-byte/object storage is not implemented yet, so large durable plots should
+also be saved to the workspace when later retrieval matters.
 
 ## Lifecycle and failure semantics
 

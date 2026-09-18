@@ -566,8 +566,15 @@ Provider-wide request budgets now bound historical images as well as each tool
 result. The loop drops the oldest attachments copy-on-write with a visible
 notice using per-wire limits (or a conservative unknown-provider floor), so a
 fallback rung starts from the untouched transcript. Remaining OMP deltas are
-raw-byte/object-store backing, image resize/recompression, JavaScript eval,
-cell-to-tool/subagent bridges, background cells, and speculative execution.
+raw-byte/object-store backing, JavaScript eval, cell-to-tool/subagent bridges,
+background cells, and speculative execution.
+
+Rich images are now decoded and normalized centrally before persistence or
+provider translation: 16 MiB/16-megapixel input guards, a 1568 px maximum edge,
+a 200 px minimum edge, PNG/JPEG selection with a 500 KiB target, and explicit
+coordinate mapping after resize. WebP input is converted for local inference
+compatibility. The pure-Go implementation keeps laptop and server behavior
+identical without an image sidecar.
 
 ## Not done (deferred, low value now)
 

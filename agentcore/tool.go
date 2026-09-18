@@ -2,7 +2,6 @@ package agentcore
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -87,8 +86,7 @@ func boundToolContentParts(parts []ContentPart, maxTextBytes int) ([]ContentPart
 				continue
 			}
 			part = normalized.part
-			decodedBytes := base64.StdEncoding.DecodedLen(len(part.Data))
-			imageBytes += decodedBytes
+			imageBytes += normalized.bytes
 			images++
 			out = append(out, part)
 			if note := normalized.dimensionNote(); note != "" {
