@@ -157,6 +157,7 @@ func cloneSessionEntry(e SessionEntry) SessionEntry {
 	if e.Outcome != nil {
 		outcome := *e.Outcome
 		outcome.Message = cloneSessionMessage(e.Outcome.Message)
+		outcome.Invocations = slices.Clone(e.Outcome.Invocations)
 		outcome.Extra = cloneSessionMessages(e.Outcome.Extra)
 		out.Outcome = &outcome
 	}

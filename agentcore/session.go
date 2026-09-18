@@ -111,11 +111,12 @@ const (
 // placement. It deliberately stores no raw/unbounded tool output: Message is
 // the same truncated or spill-backed value the live model receives.
 type ToolOutcomeRecord struct {
-	Message   Message   `json:"message"`
-	Trace     ToolTrace `json:"trace"`
-	Extra     []Message `json:"extra,omitempty"`
-	Terminate bool      `json:"terminate,omitempty"`
-	Executed  bool      `json:"executed,omitempty"`
+	Message     Message          `json:"message"`
+	Trace       ToolTrace        `json:"trace"`
+	Invocations []ToolInvocation `json:"invocations,omitempty"`
+	Extra       []Message        `json:"extra,omitempty"`
+	Terminate   bool             `json:"terminate,omitempty"`
+	Executed    bool             `json:"executed,omitempty"`
 }
 
 // SessionEntry is one immutable record in the append-only session log. The log

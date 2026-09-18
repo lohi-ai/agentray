@@ -15,6 +15,7 @@ import io
 import inspect
 import json
 import os
+import re
 import sys
 import threading
 import traceback
@@ -27,6 +28,7 @@ _execution_count = 0
 _result_name = "__agentray_cell_result__"
 _current_request_id = None
 _displayed_figure_ids = set()
+_tool_sequence = 0
 
 def _emit(value):
     line = json.dumps(value, ensure_ascii=False, default=repr)
@@ -144,6 +146,48 @@ def display(*values):
     for value in values:
         _emit_display(value)
 
+def tool(name, args=None):
+    global _tool_sequence
+    if _current_request_id is None:
+        raise RuntimeError("host tools are only available while an eval cell is running")
+    name = str(name or "").strip()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", name) is None:
+        raise ValueError("invalid host tool name")
+    if args is None:
+        args = {}
+    try:
+        # Round-trip to reject cycles and values the Go host cannot validate as
+        # tool arguments. Do not use _emit's repr fallback on this boundary.
+        clean_args = json.loads(json.dumps(args, ensure_ascii=False))
+    except Exception as error:
+        raise TypeError("host tool arguments must be JSON serializable: " + str(error)) from error
+    _tool_sequence += 1
+    request_id = _current_request_id + "/tool-" + str(_tool_sequence)
+    _emit({
+        "type": "tool_call",
+        "id": _current_request_id,
+        "request_id": request_id,
+        "name": name,
+        "arguments": clean_args,
+    })
+    while True:
+        response_line = sys.stdin.readline()
+        if response_line == "":
+            raise RuntimeError("eval kernel closed while waiting for host tool " + name)
+        try:
+            response = json.loads(response_line)
+        except Exception:
+            continue
+        if response.get("type") == "exit":
+            raise RuntimeError("eval kernel closed while waiting for host tool " + name)
+        if response.get("type") != "tool_result" or str(response.get("request_id", "")) != request_id:
+            continue
+        if str(response.get("id", "")) != _current_request_id:
+            raise RuntimeError("host tool response belongs to a different eval cell")
+        if not response.get("ok"):
+            raise RuntimeError(str(response.get("error") or "host tool call failed"))
+        return response.get("value")
+
 def _flush_matplotlib_figures():
     plt = sys.modules.get("matplotlib.pyplot")
     if plt is None:
@@ -170,6 +214,7 @@ _user_ns = {
     "__doc__": None,
     "__builtins__": builtins,
     "display": display,
+    "tool": tool,
 }
 
 def _compile_cell(source):

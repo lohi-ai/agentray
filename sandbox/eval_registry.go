@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/lohi-ai/agentray/agentcore"
 )
 
 const (
@@ -241,13 +243,13 @@ func (r *EvalSessionRegistry) Close() {
 	}
 }
 
-func (k *evalKernel) execute(ctx context.Context, code string, limit int) (evalCellResult, error) {
+func (k *evalKernel) execute(ctx context.Context, code string, limit, maxBridgeCalls int, invoker agentcore.ToolInvoker) (evalCellResult, error) {
 	k.executionMu.Lock()
 	defer k.executionMu.Unlock()
 	if k.closed || k.process == nil {
 		return evalCellResult{}, errEvalKernelClosed
 	}
-	return k.process.execute(ctx, code, limit)
+	return k.process.execute(ctx, code, limit, maxBridgeCalls, invoker)
 }
 
 func (k *evalKernel) close() {

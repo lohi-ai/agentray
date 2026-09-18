@@ -52,7 +52,7 @@ are deliberately smaller:
 | Model capabilities | Generated, resolved model/compat records | Previously one provider-wide tools boolean | Adopted tri-state per-model capabilities with live discovery and rung snapshots |
 | Local inference | Ollama and other local endpoints, optional credentials | Compatible wire existed but runtime required a key | Adopted explicit optional-auth local vendors |
 | Edit conflict safety | Hashline edits bind model-selected lines to a file snapshot | Exact/fuzzy replacement previously trusted only matching text | Adopted snapshot-bound edits; defer the full hashline grammar |
-| Tool surface | Coding-heavy suite: AST, LSP, DAP, rich eval, GitHub, browser/computer, memory | Portable filesystem/edit/LSP/rich Python eval/shell/browser/computer/web/MCP plus product tools | LSP read paths, persistent eval, and provider-native image results adopted; add DAP and eval bridges incrementally |
+| Tool surface | Coding-heavy suite: AST, LSP, DAP, rich eval, GitHub, browser/computer, memory | Portable filesystem/edit/LSP/rich Python/JavaScript eval with governed host-tool/subagent calls, shell/browser/computer/web/MCP, plus product tools | LSP read paths, persistent dual-language eval, provider-native image results, and the eval bridge adopted; DAP remains a measured follow-up |
 | Rich tool results | Typed text/image outputs, provider image budgets, content-addressed blob persistence, and MIME bundles flow to capable model wires | Tool contract was text-only | Added an optional rich-result seam, bounded eval MIME capture, per-wire image budgets, server-side content-addressed persistence, and explicit degradation for text-only paths |
 | Native acceleration | Rust edit/search/shell/VCS layer | Go implementation and external sandbox | Measure before adding native code; server simplicity wins today |
 | Pause/step | Process-level pause plus session controls | Per-run step gate | Keep per-run scope; a global pause is unsafe for multi-tenancy |
@@ -379,7 +379,7 @@ formatting, and code actions should land only with a snapshot-checked cross-file
 transaction, so an LSP workspace edit cannot partially overwrite concurrent
 changes.
 
-### Persistent Python eval
+### Persistent Python and JavaScript eval
 
 oh-my-pi's eval stack retains Python and JavaScript runtimes, streams rich
 display output, bridges tools and subagents into cells, backgrounds long work,
@@ -388,9 +388,10 @@ cell per call, retained state keyed to a logical session and working directory,
 exclusive execution, explicit reset, bounded output, and no replay after an
 ambiguous kernel failure.
 
-AgentRay now implements that foundation as a configurable `eval` tool with a
-self-contained Python 3 runner. A bounded host-owned registry carries the
-kernel across the short-lived tool instances built for consecutive chat turns.
+AgentRay now implements that foundation as a configurable `eval` tool with
+self-contained Python 3 and Node.js runners. A bounded host-owned registry
+carries language-separated kernels across the short-lived tool instances built
+for consecutive chat turns.
 Keys include tenant/workspace, project, agent, conversation, workspace path,
 runtime, and config fingerprint; idle/capacity eviction is explicit, and a
 replica miss simply starts clean. Python exceptions preserve mutations made
@@ -405,6 +406,46 @@ JSON, HTML/SVG/LaTeX fallbacks remain visible as bounded text; validated
 PNG/JPEG data becomes typed message parts. Cells are capped at eight images and
 768 KiB of decoded image data, with explicit notices for invalid or omitted
 content.
+
+JavaScript now uses Node's REPL evaluator for persistent lexical bindings and
+native top-level await. A syntax-aware scanner rewrites static ESM imports while
+leaving import-looking strings, templates, comments, and regular expressions
+untouched. Node 22's dependency-free transform executes TypeScript cell syntax,
+including enums and parameter properties, without pretending to type-check it.
+A synchronous loader hook applies the same transform recursively to explicit
+`.ts`/`.mts` ESM imports.
+Console/process output, structured JSON, final values, and Buffer/typed-array
+image displays enter the same bounded NDJSON and rich content paths as Python.
+Kernels and resets are isolated by language. On POSIX laptops and Linux server
+containers, protocol traffic travels on a dedicated descriptor while ordinary
+stdout/stderr—including inherited child output—is redirected away from it.
+Timeouts force-discard the Node process without replay, preserving AgentRay's
+side-effect ambiguity rule. A small `Dockerfile.eval` ships Node 22 plus Python
+3 for reproducible hosted use; local mode resolves the operator's installed
+runtimes.
+
+The next OMP slice is now adopted without copying its desktop trust model.
+JavaScript cells expose an awaitable callable/property `tool` proxy, and Python
+cells expose synchronous `tool(name, args)`. The Go host does not hand either
+kernel a raw `ToolSet`: it installs a run-owned `ToolInvoker` only while a live
+Agent dispatches the outer eval call. Each nested request re-enters
+`Agent.runToolCall`, so schema validation, policy and hooks, credential
+resolution, output/image bounds, interceptors, idempotency, cancellation,
+circuit breaking, and durable traces are identical to direct calls. Directly
+constructing EvalTool has no authority to call host tools.
+
+Nested results stay inside the eval value and do not synthesize provider tool
+messages, preserving call/result adjacency. Their traces and control metadata
+are nevertheless carried in the outer bounded durable outcome and restored on
+resume. JavaScript supports concurrent calls and deterministic request-order
+accounting; Python is synchronous. Recursive active-tool calls are rejected,
+parked human-input tools are direct-only, a per-cell cap complements the shared
+run cap, and `MaxToolCalls` now reserves atomically before every physical call—
+closing the pre-existing race where a parallel batch could exceed the limit.
+Cancellation gets a bounded settlement window so cooperative nested failures
+remain auditable without letting a tool that ignores context defeat the cell
+deadline. Floating JavaScript rejections are attributed to the cell rather than
+crashing its retained kernel.
 
 The optional `RichTool` contract is additive: existing `Tool` implementations
 and text-only consumers do not change. Rich parts are snapshotted by durable
@@ -452,8 +493,9 @@ Host mode receives only allowlisted environment variables; Docker mode reuses
 the hardened no-network process envelope with a writable workspace and
 read-only root. Configuration and lifecycle details live in [`EVAL.md`](EVAL.md).
 
-JavaScript, raw-byte/object-store backing, cell-to-tool/subagent bridges,
-auto-backgrounding, and speculative eval were not copied in this increment.
+Raw-byte/object-store backing, parser-backed JSX/TSX and local-module reload
+semantics, OMP's background handle/work-pool API, timeout pausing around host
+calls, and speculative eval were not copied in this increment.
 Those features need native AgentRay cancellation, artifact, and delegation
 contracts rather than a direct desktop-runtime port.
 
@@ -520,8 +562,8 @@ portable CI threshold.
    transactional rename/code actions over snapshot-checked multi-file writes.
 3. Measure an aggressive transcript-shake policy; keep it optional because
    artifact durability and the acceptable loss profile vary by deployment.
-4. Evaluate read-only speculative execution behind a budget and cancellation
-   gate; keep mutating tools strictly replay-safe.
+4. Evaluate read-only speculative execution and background eval handles behind
+   a budget and cancellation gate; keep mutating tools strictly replay-safe.
 5. Expand native provider families only where the generic OpenAI-compatible
    wire cannot represent required behavior.
 

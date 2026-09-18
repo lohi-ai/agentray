@@ -464,22 +464,23 @@ boundary. Continuation rows also persist the original durable-session id, so a
 run that parks twice keeps reopening one event stream instead of stranding its
 second question under a fresh run row.
 
-### Eval follow-up — retained Python without a desktop-only runtime
+### Eval follow-up — retained Python and JavaScript without a desktop-only runtime
 
-The same `ProcessSandbox` seam now backs configurable persistent Python eval.
+The same `ProcessSandbox` seam now backs configurable persistent Python and
+JavaScript eval.
 One typed `eval` call is one cell; imports, variables, functions, objects, and
 the event loop survive later calls in the same logical conversation. A bounded
-registry keys kernels by tenant/project/agent/conversation/workspace/runtime,
+registry keys kernels by tenant/project/agent/conversation/workspace/language,
 serializes cells, expires idle state, and permits clean replica misses. Reset is
-explicit. Ordinary Python exceptions retain mutations completed before the
-error, while timeout/cancellation/transport failure discards the process and
-never replays a possibly side-effecting cell.
+explicit and language-scoped. Ordinary Python and JavaScript exceptions retain
+mutations completed before the error, while timeout/cancellation/transport
+failure discards the process and never replays a possibly side-effecting cell.
 
-The self-contained runner keeps NDJSON protocol output on a duplicated file
-descriptor and drains user fd 1/2 through pipes, so child-process output cannot
-spoof frames or fill an unbounded capture file. Model-visible output retains a
-bounded head and tail. Host mode uses an allowlisted environment and is
-documented as trusted local execution; Docker mode keeps no network, resource
+The self-contained runners isolate NDJSON protocol output from ordinary fd 1/2,
+so child-process output cannot accidentally spoof frames or fill an unbounded
+capture file. Model-visible output retains a bounded head and tail. Host mode
+uses an allowlisted environment and is documented as trusted local execution;
+Docker mode keeps no network, resource
 caps, a read-only root, writable tmpfs home, and only the agent workspace
 mounted writable. Persistence, reset, isolation, environment filtering,
 timeouts/no-replay, output bounding, top-level await, serialization, registry
@@ -544,7 +545,8 @@ swatter re-verified (93 tests) against this tree.
 ### OMP follow-up — rich tool results and eval MIME output
 
 The neutral message and tool contracts now carry bounded text/image parts
-without breaking existing `Tool.Run` implementations. Persistent Python eval
+without breaking existing `Tool.Run` implementations. Persistent
+Python/JavaScript eval
 recognizes standard rich representations and matplotlib figures, validates and
 bounds PNG/JPEG output, and records explicit notices when a value is invalid or
 over limit. OpenAI Chat, OpenAI Responses, Codex, Google's compatible wire, and
@@ -566,8 +568,9 @@ Provider-wide request budgets now bound historical images as well as each tool
 result. The loop drops the oldest attachments copy-on-write with a visible
 notice using per-wire limits (or a conservative unknown-provider floor), so a
 fallback rung starts from the untouched transcript. Remaining OMP deltas are
-raw-byte/object-store backing, JavaScript eval, cell-to-tool/subagent bridges,
-background cells, and speculative execution.
+raw-byte/object-store backing, parser-backed JSX/TSX and local-module reload
+semantics, cell-to-tool/subagent bridges, background cells, and speculative
+execution.
 
 Rich images are now decoded and normalized centrally before persistence or
 provider translation: 16 MiB/16-megapixel input guards, a 1568 px maximum edge,

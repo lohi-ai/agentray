@@ -21,6 +21,9 @@ const maxEvalFrameBytes = 1024 * 1024
 const (
 	maxEvalImagesPerCell = 8
 	maxEvalImageBytes    = 768 * 1024
+	// A governed rich tool may return up to 768 KiB of decoded images, whose
+	// base64 representation is roughly 1 MiB. Leave bounded JSON-envelope room.
+	maxEvalBridgeValue = 1536 * 1024
 )
 
 type evalFrame struct {
@@ -30,6 +33,9 @@ type evalFrame struct {
 	Status         string                     `json:"status,omitempty"`
 	ExecutionCount int                        `json:"execution_count,omitempty"`
 	Bundle         map[string]json.RawMessage `json:"bundle,omitempty"`
+	RequestID      string                     `json:"request_id,omitempty"`
+	Name           string                     `json:"name,omitempty"`
+	Arguments      json.RawMessage            `json:"arguments,omitempty"`
 }
 
 type evalCellRequest struct {
@@ -43,6 +49,23 @@ type evalCellResult struct {
 	ExecutionCount int
 	RuntimeError   bool
 	Truncated      bool
+	Invocations    []agentcore.ToolInvocation
+	Extra          []agentcore.Message
+	Terminate      bool
+}
+
+type evalToolResultFrame struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	Value     any    `json:"value,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type evalBridgeResult struct {
+	invocations []agentcore.ToolInvocation
+	extra       []agentcore.Message
+	terminate   bool
 }
 
 type evalProcess struct {
@@ -115,7 +138,7 @@ func (p *evalProcess) readFrames(r io.Reader) {
 	}
 }
 
-func (p *evalProcess) execute(ctx context.Context, code string, limit int) (evalCellResult, error) {
+func (p *evalProcess) execute(ctx context.Context, code string, limit, maxBridgeCalls int, invoker agentcore.ToolInvoker) (evalCellResult, error) {
 	p.nextID++
 	id := fmt.Sprintf("cell-%d", p.nextID)
 	payload, err := json.Marshal(evalCellRequest{ID: id, Code: code})
@@ -132,19 +155,57 @@ func (p *evalProcess) execute(ctx context.Context, code string, limit int) (eval
 	output := newBoundedEvalOutput(limit)
 	result := evalCellResult{}
 	imageBytes := 0
+	var bridgeMu sync.Mutex
+	var bridgeWG sync.WaitGroup
+	bridgeResults := make([]evalBridgeResult, 0, maxBridgeCalls)
+	bridgeCount := 0
+	mergeBridgeResults := func() {
+		bridgeMu.Lock()
+		defer bridgeMu.Unlock()
+		for _, bridged := range bridgeResults {
+			result.Invocations = append(result.Invocations, bridged.invocations...)
+			result.Extra = append(result.Extra, bridged.extra...)
+			result.Terminate = result.Terminate || bridged.terminate
+		}
+	}
+	returnError := func(err error) (evalCellResult, error) {
+		settled := make(chan struct{})
+		go func() {
+			bridgeWG.Wait()
+			close(settled)
+		}()
+		select {
+		case <-settled:
+		case <-time.After(250 * time.Millisecond):
+			// A host tool that ignores cancellation must not defeat the cell
+			// deadline. Cooperative calls still get a short settlement window so
+			// their traces survive in the outer durable outcome.
+		}
+		result.Output, result.Truncated = output.String()
+		mergeBridgeResults()
+		return result, err
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			return evalCellResult{}, ctx.Err()
+			return returnError(ctx.Err())
 		case err := <-p.errs:
-			return evalCellResult{}, withEvalStderr(err, p.stderr.String())
+			return returnError(withEvalStderr(err, p.stderr.String()))
 		case <-p.done:
-			return evalCellResult{}, withEvalStderr(errEvalKernelClosed, p.stderr.String())
+			return returnError(withEvalStderr(errEvalKernelClosed, p.stderr.String()))
 		case frame := <-p.frames:
 			if frame.ID != id {
 				continue
 			}
 			switch frame.Type {
+			case "tool_call":
+				bridgeCount++
+				slot := bridgeCount - 1
+				bridgeMu.Lock()
+				bridgeResults = append(bridgeResults, evalBridgeResult{})
+				bridgeMu.Unlock()
+				bridgeWG.Add(1)
+				go p.handleToolCall(ctx, id, frame, slot, maxBridgeCalls, invoker, &bridgeMu, &bridgeResults, &bridgeWG)
 			case "stdout":
 				output.WriteSection("stdout", frame.Data)
 			case "stderr":
@@ -166,10 +227,106 @@ func (p *evalProcess) execute(ctx context.Context, code string, limit int) (eval
 			case "done":
 				result.ExecutionCount = frame.ExecutionCount
 				result.Output, result.Truncated = output.String()
+				mergeBridgeResults()
 				return result, nil
 			}
 		}
 	}
+}
+
+func (p *evalProcess) handleToolCall(
+	ctx context.Context,
+	cellID string,
+	frame evalFrame,
+	slot, maxBridgeCalls int,
+	invoker agentcore.ToolInvoker,
+	mu *sync.Mutex,
+	results *[]evalBridgeResult,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	response := evalToolResultFrame{Type: "tool_result", RequestID: frame.RequestID}
+	setResult := func(out agentcore.ToolOutput) {
+		mu.Lock()
+		(*results)[slot] = evalBridgeResult{
+			invocations: append([]agentcore.ToolInvocation(nil), out.Invocations...),
+			extra:       append([]agentcore.Message(nil), out.AdditionalContexts...),
+			terminate:   out.Terminate,
+		}
+		mu.Unlock()
+	}
+	if frame.RequestID == "" || len(frame.RequestID) > 160 {
+		response.Error = "invalid host tool request id"
+	} else if slot >= maxBridgeCalls {
+		response.Error = fmt.Sprintf("eval host-tool call limit reached (%d per cell)", maxBridgeCalls)
+	} else if strings.TrimSpace(frame.Name) == "" || len(frame.Name) > 128 {
+		response.Error = "invalid host tool name"
+	} else if invoker == nil {
+		response.Error = "host tool bridge is unavailable outside a live agent run"
+	} else if err := ctx.Err(); err != nil {
+		response.Error = err.Error()
+	} else {
+		arguments := frame.Arguments
+		if len(arguments) == 0 {
+			arguments = json.RawMessage(`{}`)
+		}
+		if !json.Valid(arguments) {
+			response.Error = "host tool arguments must be valid JSON"
+		} else {
+			out, err := invoker.InvokeTool(ctx, frame.Name, string(arguments))
+			setResult(out)
+			if err != nil {
+				response.Error = err.Error()
+			} else if value, valueErr := evalBridgeValue(out); valueErr != nil {
+				response.Error = valueErr.Error()
+			} else {
+				response.OK = true
+				response.Value = value
+			}
+		}
+	}
+	p.writeToolResult(cellID, response)
+}
+
+func evalBridgeValue(out agentcore.ToolOutput) (any, error) {
+	var value any
+	if len(out.Parts) == 0 {
+		value = out.Content
+	} else {
+		images := make([]map[string]string, 0, len(out.Parts))
+		for _, part := range out.Parts {
+			if part.Type != agentcore.ContentPartImage {
+				continue
+			}
+			images = append(images, map[string]string{"mimeType": part.MIMEType, "data": part.Data})
+		}
+		value = map[string]any{"text": out.Content, "images": images}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode host tool result: %w", err)
+	}
+	if len(encoded) > maxEvalBridgeValue {
+		return nil, fmt.Errorf("host tool result exceeds %d bytes", maxEvalBridgeValue)
+	}
+	return value, nil
+}
+
+func (p *evalProcess) writeToolResult(cellID string, response evalToolResultFrame) {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		payload, _ = json.Marshal(evalToolResultFrame{Type: "tool_result", RequestID: response.RequestID, Error: err.Error()})
+	}
+	// Cell ID is not needed by the runner to correlate a unique request ID, but
+	// keeping it in the envelope lets future kernels reject cross-cell replies.
+	var envelope map[string]any
+	if json.Unmarshal(payload, &envelope) == nil {
+		envelope["id"] = cellID
+		payload, _ = json.Marshal(envelope)
+	}
+	p.writeMu.Lock()
+	_, _ = p.in.Write(append(payload, '\n'))
+	p.writeMu.Unlock()
 }
 
 func renderEvalDisplay(bundle map[string]json.RawMessage, imageSlots, imageBudget int) (string, []agentcore.ContentPart, int) {

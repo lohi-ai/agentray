@@ -352,11 +352,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// not infer ownership from a different replica's latest chain node.
 			ParentID: intentID,
 			Outcome: &ToolOutcomeRecord{
-				Message:   out.message,
-				Trace:     out.trace,
-				Extra:     slices.Clone(out.extra),
-				Terminate: out.terminate,
-				Executed:  out.executed,
+				Message:     out.message,
+				Trace:       out.trace,
+				Invocations: slices.Clone(out.invocations),
+				Extra:       slices.Clone(out.extra),
+				Terminate:   out.terminate,
+				Executed:    out.executed,
 			},
 		}
 		// Outcome durability is stronger than best-effort progress telemetry. An
@@ -474,7 +475,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 	// toolCallCount counts real executions against MaxToolCalls across the whole
 	// run — resume replays included, so a resumed run can't spend more than a
 	// live one.
-	toolCallCount := 0
+	toolCallCount := newToolExecutionBudget(limits.MaxToolCalls)
 	// checkpoint mirrors the non-transcript state a fold of this log would
 	// produce, so a compaction can stamp it onto its completion entry and make
 	// that entry a place a resume may start reading from.
@@ -521,6 +522,44 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			msg.Content += fmt.Sprintf("\n\n[%s has failed %d times in a row and is now disabled for the rest of this run. Do not call it again — complete the task another way.]", name, toolFailures[name])
 			emit(StreamEvent{Type: StreamProgress, Note: fmt.Sprintf("Disabled %q after %d consecutive failures; continuing without it.", name, toolFailures[name]), Turn: res.Turns})
 		}
+	}
+	// Nested calls enter through runToolCall as well, but their trace/result is
+	// carried by the outer tool instead of becoming an extra provider tool
+	// message. The shared budget is installed on the context here; the guard
+	// mirrors the direct dispatch refusal for a circuit-broken tool.
+	ctx = withToolExecutionBudget(ctx, toolCallCount)
+	ctx = withToolBridgeGuard(ctx, func(name string) (bool, string) {
+		if disabledTools[name] {
+			return false, name + " was disabled for this run after repeated failures"
+		}
+		return true, ""
+	})
+	recordInvocations := func(invocations []ToolInvocation, outer *Message) {
+		for _, invocation := range invocations {
+			if sink != nil {
+				start := invocation.Trace
+				emit(StreamEvent{Type: StreamToolExecStart, Tool: &start, Turn: res.Turns})
+			}
+			nested := toolOutcome{trace: invocation.Trace, executed: invocation.Executed}
+			applyBreaker(nested, outer)
+			recordTool(invocation.Trace)
+		}
+	}
+	dispatchToolCall := func(call ToolCall) toolOutcome {
+		if disabledTools[call.Name] {
+			return disabledOutcome(call)
+		}
+		if !toolCallCount.reserve() {
+			return toolOutcome{
+				trace:   ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "tool-call budget exhausted"},
+				message: toolResult(call, "stopped: tool-call budget exhausted"),
+			}
+		}
+		out := a.runToolCall(ctx, exts, extExempt, tools, call, limits, emitUpdate)
+		if !out.executed {
+			toolCallCount.release()
+		}
+		return out
 	}
 
 	// Durable resume (P9, pi's harness resume): when this run continues an
@@ -637,17 +676,13 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				terminated := false
 				reparkedCall := ""
 				var reparkedArgs json.RawMessage
-				retried := map[string]Message{}
+				retried := map[string]toolOutcome{}
 				for _, call := range replay {
-					if ctx.Err() != nil || toolCallCount >= limits.MaxToolCalls {
+					if ctx.Err() != nil || toolCallCount.exhausted() {
 						break // the rest close with interrupted notes below
 					}
 					var out toolOutcome
-					if disabledTools[call.Name] {
-						out = disabledOutcome(call)
-					} else {
-						out = a.runToolCall(ctx, exts, extExempt, tools, call, limits, emitUpdate)
-					}
+					out = dispatchToolCall(call)
 					if out.parked {
 						// A replayed ask re-parked: the question is still
 						// unanswered. Leave the call dangling (no stitched
@@ -656,15 +691,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						reparkedCall = call.ID
 						reparkedArgs = json.RawMessage(call.Arguments)
 						res.Tools = append(res.Tools, out.trace)
-						toolCallCount++
 						break
 					}
+					recordInvocations(out.invocations, &out.message)
 					applyBreaker(out, &out.message)
-					if out.executed {
-						toolCallCount++
-					}
 					recordTool(out.trace)
-					retried[call.ID] = out.message
+					retried[call.ID] = out
 					terminated = terminated || out.terminate
 				}
 				// Stitch each dangling call's closure — the replayed result or an
@@ -691,7 +723,12 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 							// still open, so no closure is stitched or logged.
 							continue
 						}
-						closing, ok := retried[c.ID]
+						live, ok := retried[c.ID]
+						closing := live.message
+						if ok {
+							batchTerminate = batchTerminate || live.terminate
+							outcomeExtra = append(outcomeExtra, live.extra...)
+						}
 						if durable, found := plan.ToolOutcomes[c.ID]; found {
 							closing = durable.Message
 							if closing.Role == "" {
@@ -713,11 +750,20 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 							if trace.Args == "" {
 								trace.Args = c.Arguments
 							}
-							recovered := toolOutcome{message: closing, trace: trace, terminate: durable.Terminate, executed: durable.Executed}
+							recovered := toolOutcome{
+								message: closing, trace: trace, terminate: durable.Terminate, executed: durable.Executed,
+								invocations: slices.Clone(durable.Invocations),
+							}
+							recordInvocations(recovered.invocations, &closing)
 							applyBreaker(recovered, &closing)
 							recordTool(trace)
 							if durable.Executed {
-								toolCallCount++
+								toolCallCount.add(1)
+							}
+							for _, invocation := range durable.Invocations {
+								if invocation.Executed {
+									toolCallCount.add(1)
+								}
 							}
 							terminated = terminated || durable.Terminate
 							batchTerminate = batchTerminate || durable.Terminate
@@ -1567,7 +1613,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 		// Budget guard (§7): once the run has spent its tool-call budget, block
 		// the whole batch and stop cleanly. (Checked per batch, not per call, so
 		// a single turn may run its full batch before the cap takes effect.)
-		if toolCallCount >= limits.MaxToolCalls {
+		if toolCallCount.exhausted() {
 			for _, call := range calls {
 				recordTool(ToolTrace{CallID: call.ID, Tool: call.Name, Args: call.Arguments, Allowed: false, Reason: "tool-call budget exhausted"})
 				res.Messages = append(res.Messages, toolResult(call, "stopped: tool-call budget exhausted"))
@@ -1629,11 +1675,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				break
 			}
 			if hi-lo == 1 {
-				if disabledTools[calls[lo].Name] {
-					outcomes[lo] = disabledOutcome(calls[lo])
-				} else {
-					outcomes[lo] = a.runToolCall(ctx, exts, extExempt, tools, calls[lo], limits, emitUpdate)
-				}
+				outcomes[lo] = dispatchToolCall(calls[lo])
 				persistToolOutcome(outcomes[lo], toolIntentID)
 			} else {
 				var wg sync.WaitGroup
@@ -1644,12 +1686,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 						// disabledTools is only written in the (single-threaded)
 						// accounting loop after all groups finish, so reading it
 						// here during dispatch is safe.
-						if disabledTools[calls[i].Name] {
-							outcomes[i] = disabledOutcome(calls[i])
-							persistToolOutcome(outcomes[i], toolIntentID)
-							return
-						}
-						outcomes[i] = a.runToolCall(ctx, exts, extExempt, tools, calls[i], limits, emitUpdate)
+						outcomes[i] = dispatchToolCall(calls[i])
 						persistToolOutcome(outcomes[i], toolIntentID)
 					}(i)
 				}
@@ -1695,7 +1732,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				// the call did not finish, it is waiting.
 				parked = append(parked, i)
 				res.Tools = append(res.Tools, outcomes[i].trace)
-				toolCallCount++
 				continue
 			}
 			msg := outcomes[i].message
@@ -1705,6 +1741,7 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			delete(toolPartials, outcomes[i].trace.CallID)
 			delete(toolSince, outcomes[i].trace.CallID)
 			sinkMu.Unlock()
+			recordInvocations(outcomes[i].invocations, &msg)
 			applyBreaker(outcomes[i], &msg)
 			recordTool(outcomes[i].trace)
 			res.Messages = append(res.Messages, msg)
@@ -1712,9 +1749,6 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 				(outcomes[i].trace.Error == "" && !outcomes[i].trace.DeniedAborted())
 			if settled {
 				appendEntry(SessionEntry{Kind: EntryMessage, Turn: res.Turns, Message: &msg})
-			}
-			if outcomes[i].executed {
-				toolCallCount++
 			}
 			extra = append(extra, outcomes[i].extra...)
 			terminate = terminate || outcomes[i].terminate

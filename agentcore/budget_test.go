@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+type budgetParallelEcho struct{ *echoTool }
+
+func (*budgetParallelEcho) Parallel() bool { return true }
+
 // toolCallWithCost scripts a tool-calling turn that also reports model cost, so a
 // test can drive accumulated Usage across turns.
 func toolCallWithCost(id, name, args string, cost float64) ChatResponse {
@@ -200,6 +204,45 @@ func TestMaxToolCallsEndsWithAnAnswerNotSilence(t *testing.T) {
 	}
 	if work.called != 2 {
 		t.Fatalf("tool called %d times, want 2 — the blocked batch must not execute", work.called)
+	}
+}
+
+func TestMaxToolCallsIsHardCapForParallelBatch(t *testing.T) {
+	work := &budgetParallelEcho{echoTool: &echoTool{name: "parallel_work"}}
+	batch := ChatResponse{
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "c1", Name: work.Name(), Arguments: `{"q":1}`},
+			{ID: "c2", Name: work.Name(), Arguments: `{"q":2}`},
+		}},
+		StopReason: "tool_calls",
+	}
+	limits := DefaultLimits()
+	limits.MaxToolCalls = 1
+	agent, err := New(Config{
+		Provider: NewFauxProvider(batch, AssistantText("one call completed; the other hit the cap")),
+		Model:    "test", Tools: NewToolSet(work), Policy: NewAllowList(work.Name()), Limits: &limits,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := agent.Prompt(context.Background(), "run both")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if work.called != 1 {
+		t.Fatalf("parallel executions = %d, want hard cap of 1", work.called)
+	}
+	allowed, exhausted := 0, 0
+	for _, trace := range result.Tools {
+		if trace.Allowed {
+			allowed++
+		}
+		if trace.Reason == "tool-call budget exhausted" {
+			exhausted++
+		}
+	}
+	if allowed != 1 || exhausted != 1 {
+		t.Fatalf("traces = %+v, want one execution and one budget rejection", result.Tools)
 	}
 }
 

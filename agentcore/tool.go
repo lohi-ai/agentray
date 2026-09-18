@@ -29,6 +29,16 @@ type Tool interface {
 type ToolOutput struct {
 	Content string
 	Parts   []ContentPart
+
+	// Invocations records governed tools called from inside this tool. It is
+	// audit/control metadata, never provider-visible content. Eval uses it to
+	// preserve host-tool bridge traces in the outer call's durable outcome.
+	Invocations []ToolInvocation
+	// AdditionalContexts and Terminate propagate the same decisions a direct
+	// nested call would have produced, but the loop applies them only after the
+	// outer tool result so provider tool-call/result adjacency remains valid.
+	AdditionalContexts []Message
+	Terminate          bool
 }
 
 // RichTool is an additive tool capability for outputs such as eval-generated

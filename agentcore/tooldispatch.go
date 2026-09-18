@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -105,6 +106,10 @@ type toolOutcome struct {
 	message   Message
 	terminate bool
 	executed  bool
+	// invocations are governed calls made from inside this tool (currently eval
+	// kernels). They are recorded beside the outer trace and persisted inside
+	// its outcome, but do not become standalone provider tool messages.
+	invocations []ToolInvocation
 	// extra are messages an extension asked to add because of this call. They
 	// are buffered and appended by the caller AFTER every result in the batch,
 	// so tool-call/result adjacency is never broken.
@@ -192,7 +197,17 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	ikey := toolIdempotencyKey(a.sessionID, call.ID)
 	trace.IdempotencyKey = ikey
 	execStart := time.Now()
-	richOut, runErr := callTool(withToolCallID(withIdempotencyKey(ctx, ikey), call.ID), tool, runArgs, emit)
+	toolCtx := withToolCallID(withIdempotencyKey(ctx, ikey), call.ID)
+	if _, ok := ToolInvokerFrom(toolCtx); !ok {
+		if budget := toolExecutionBudgetFrom(toolCtx); budget != nil {
+			toolCtx = withToolInvoker(toolCtx, &nestedToolInvoker{
+				agent: a, exts: exts, exempt: exempt, tools: tools, limits: limits,
+				emitUpdate: emitUpdate, budget: budget,
+			})
+		}
+	}
+	toolCtx = withToolStack(toolCtx, call.Name)
+	richOut, runErr := callTool(toolCtx, tool, runArgs, emit)
 	out := richOut.Content
 	// A parked call ends the run here: no interceptors, no after hooks, no
 	// result message — the caller records the EntryQuestion and stops. The
@@ -201,7 +216,7 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	if errors.Is(runErr, ErrParked) {
 		trace.Allowed = true
 		trace.ResultMeta = "parked"
-		return toolOutcome{trace: trace, parked: true, executed: true}
+		return toolOutcome{trace: trace, parked: true, executed: true, invocations: richOut.Invocations}
 	}
 	trace.LatencyMS = time.Since(execStart).Milliseconds()
 	if runErr == nil {
@@ -231,12 +246,15 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	// the middle is gone for good. The loop does not know which extension, if
 	// any, took the job.
 	out, meta, resultRef, extra, replaced, extTerm := exts.interceptToolResult(ctx, gated, out, runErr)
+	if len(richOut.AdditionalContexts) > 0 {
+		extra = append(append([]Message(nil), richOut.AdditionalContexts...), extra...)
+	}
 	if !replaced {
 		out = truncateMiddle(out, limits.MaxToolResultLen)
 	}
 	trace.SpillLocator = resultRef
 	out, term := a.hooks.runAfter(ctx, gated, out, runErr)
-	term = term || extTerm
+	term = term || extTerm || richOut.Terminate
 
 	trace.Allowed = true
 	if runErr != nil {
@@ -248,13 +266,84 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	if len(richOut.Parts) > 0 {
 		trace.ResultMeta += fmt.Sprintf("; %d rich parts", len(richOut.Parts))
 	}
+	if len(richOut.Invocations) > 0 {
+		trace.ResultMeta += fmt.Sprintf("; %d nested tool calls", len(richOut.Invocations))
+	}
 	if meta != "" {
 		trace.ResultMeta += "; " + meta
 	}
 	message := toolResult(call, out)
 	message.ContentParts = append([]ContentPart(nil), richOut.Parts...)
 	message.ResultRef = resultRef
-	return toolOutcome{trace: trace, message: message, terminate: term, executed: true, extra: extra}
+	return toolOutcome{
+		trace: trace, message: message, terminate: term, executed: true, extra: extra,
+		invocations: append([]ToolInvocation(nil), richOut.Invocations...),
+	}
+}
+
+// nestedToolInvoker re-enters the exact same dispatch boundary as a direct
+// model call. It is intentionally created per outer call: sequence IDs are
+// scoped to that call, while the execution budget is shared across the run.
+type nestedToolInvoker struct {
+	agent      *Agent
+	exts       *extensionSet
+	exempt     map[string]bool
+	tools      *ToolSet
+	limits     Limits
+	emitUpdate func(ToolCall, string)
+	budget     *toolExecutionBudget
+	sequence   atomic.Uint64
+}
+
+func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (ToolOutput, error) {
+	name = strings.TrimSpace(name)
+	if err := validateNestedToolTarget(ctx, name); err != nil {
+		trace := ToolTrace{Tool: name, Args: args, Allowed: false, Reason: err.Error()}
+		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
+	}
+	if err := ctx.Err(); err != nil {
+		trace := ToolTrace{Tool: name, Args: args, Allowed: false, Reason: string(ToolDenialAborted)}
+		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
+	}
+	if !i.budget.reserve() {
+		err := errors.New("tool-call budget exhausted")
+		trace := ToolTrace{Tool: name, Args: args, Allowed: false, Reason: err.Error()}
+		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
+	}
+	parentID, _ := ToolCallID(ctx)
+	callID := fmt.Sprintf("%s/bridge-%d", parentID, i.sequence.Add(1))
+	if parentID == "" {
+		callID = fmt.Sprintf("bridge-%d", i.sequence.Load())
+	}
+	call := ToolCall{ID: callID, Name: name, Arguments: args}
+	outcome := i.agent.runToolCall(ctx, i.exts, i.exempt, i.tools, call, i.limits, i.emitUpdate)
+	if !outcome.executed {
+		i.budget.release()
+	}
+	invocations := make([]ToolInvocation, 0, 1+len(outcome.invocations))
+	invocations = append(invocations, ToolInvocation{Trace: outcome.trace, Executed: outcome.executed})
+	invocations = append(invocations, outcome.invocations...)
+	result := ToolOutput{
+		Content:            outcome.message.Content,
+		Parts:              append([]ContentPart(nil), outcome.message.ContentParts...),
+		Invocations:        invocations,
+		AdditionalContexts: append([]Message(nil), outcome.extra...),
+		Terminate:          outcome.terminate,
+	}
+	if outcome.parked {
+		return result, fmt.Errorf("tool %q cannot park for human input through a nested invocation; call it directly", name)
+	}
+	if !outcome.trace.Allowed {
+		reason := strings.TrimSpace(outcome.trace.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(outcome.message.Content)
+		}
+		return result, fmt.Errorf("tool %q blocked: %s", name, reason)
+	}
+	if outcome.trace.Error != "" {
+		return result, fmt.Errorf("tool %q failed: %s", name, outcome.trace.Error)
+	}
+	return result, nil
 }
 
 // isParallelTool reports whether one call targets a registered tool that opts

@@ -17,7 +17,7 @@ AIR ?= air
 WEB_PM ?= pnpm
 
 # --- Sandbox images -------------------------------------------------------
-# The computer_use / browser_use tools run in throwaway Docker session
+# The computer_use, browser_use, and hosted eval tools run in Docker session
 # containers (see internal/sandbox/docker.go). The API talks to a Docker daemon
 # via the `docker` CLI, so these images must be built ON THE HOST whose daemon
 # the API uses — locally, or on the GCE VM during/after deploy. The image names
@@ -27,6 +27,7 @@ DOCKER       ?= docker
 CU_IMAGE     ?= agentray-computeruse:latest
 BROWSER_IMAGE ?= agentray-browser:latest
 SHELL_IMAGE  ?= agentray-sandbox:latest
+EVAL_IMAGE   ?= agentray-eval:latest
 # Build for the host arch by default. Cross-build for the amd64 VM from an arm64
 # Mac with:  make sandbox-build PLATFORM=linux/amd64
 PLATFORM     ?=
@@ -42,7 +43,7 @@ LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a;
 
 .PHONY: help dev web build cli install-cli vet test test-agents test-agentcore-race test-session-conformance test-stress bench-session check agent-funcs \
         sdk-check sdk-check-npm sdk-check-python sdk-check-swift sdk-release sdk-resolve-tag \
-        sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell \
+        sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell sandbox-build-eval \
         sandbox-check sandbox-setup test-sandbox
 
 help: ## List available targets
@@ -171,11 +172,14 @@ sandbox-build-browser: ## Build the browser_use image (Chromium + agent-browser;
 sandbox-build-shell: ## Build the hardened run_shell image (opt-in; default backend is alpine)
 	DOCKER_BUILDKIT=1 $(DOCKER) build $(PLATFORM_ARG) -f Dockerfile.sandbox -t $(SHELL_IMAGE) .
 
-sandbox-build: sandbox-build-cu sandbox-build-browser ## Build the computer_use + browser_use images
+sandbox-build-eval: ## Build the persistent Python + JavaScript eval image
+	DOCKER_BUILDKIT=1 $(DOCKER) build $(PLATFORM_ARG) -f Dockerfile.eval -t $(EVAL_IMAGE) .
+
+sandbox-build: sandbox-build-cu sandbox-build-browser sandbox-build-eval ## Build the computer_use + browser_use + eval images
 
 sandbox-check: ## Report Docker availability and which sandbox images are present
 	@$(DOCKER) info >/dev/null 2>&1 && echo "docker: available" || { echo "docker: NOT available — install/start Docker on this host"; exit 1; }
-	@for img in $(CU_IMAGE) $(BROWSER_IMAGE) $(SHELL_IMAGE); do \
+	@for img in $(CU_IMAGE) $(BROWSER_IMAGE) $(SHELL_IMAGE) $(EVAL_IMAGE); do \
 	  if $(DOCKER) image inspect "$$img" >/dev/null 2>&1; then echo "image present: $$img"; \
 	  else echo "image MISSING: $$img"; fi; \
 	done

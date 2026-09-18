@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,9 +18,10 @@ import (
 
 var evalToolSequence atomic.Uint64
 
-// EvalTool executes one Python cell in a retained, conversation-scoped
-// subprocess. The registry—not this per-run tool instance—owns the process, so
-// state survives the runtime rebuilding tools on the next chat turn.
+// EvalTool executes one Python or JavaScript cell in a retained,
+// conversation-and-language-scoped subprocess. The registry—not this per-run
+// tool instance—owns the process, so state survives runtime rebuilding while
+// Python and JavaScript can never share globals accidentally.
 type EvalTool struct {
 	processSB   agentcore.ProcessSandbox
 	workspace   *Workspace
@@ -67,18 +69,20 @@ func (t *EvalTool) Name() string { return ToolEval }
 func (t *EvalTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name: ToolEval,
-		Description: "Execute one Python cell in a persistent conversation-scoped runtime. Variables, imports, functions, and objects survive later eval calls. " +
-			"Use reset=true to discard this conversation's Python state before the cell. Relative file access starts in the shared agent workspace. " +
-			"display(value), rich reprs, and final expressions preserve Markdown, JSON, PNG, and JPEG output; vision-capable models receive images natively. " +
+		Description: "Execute one Python or JavaScript cell in a persistent conversation-scoped runtime. Variables, imports, functions, and objects survive later calls in the same language. " +
+			"Use reset=true to discard only the selected language's state before the cell. Relative file access starts in the shared agent workspace. " +
+			"JavaScript accepts static or dynamic imports and TypeScript cell syntax when the runtime is Node.js 22.13 or newer. " +
+			"display(value), rich displays, and final expressions preserve Markdown, JSON, PNG, and JPEG output; vision-capable models receive images natively. " +
+			"Inside a live agent run, call governed host tools with await tool.read_file({...}) or await tool(\"read_file\", {...}) in JavaScript, and tool(\"read_file\", {...}) in Python. These calls use the same policy, validation, credentials, budgets, tracing, and cancellation as direct tool calls. " +
 			"Output is bounded; interactive input is unsupported. A timeout discards the kernel and never replays the cell. " +
 			"The runtime is operator-provisioned and server deployments execute it inside the configured sandbox.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"language":        map[string]any{"type": "string", "enum": []string{"python"}, "description": "Runtime language. Python is currently supported."},
-				"code":            map[string]any{"type": "string", "description": "One Python cell, executed verbatim. Top-level await and display(value) are supported."},
+				"language":        map[string]any{"type": "string", "enum": []string{"python", "javascript"}, "description": "Language runtime. State is isolated per language."},
+				"code":            map[string]any{"type": "string", "description": "One cell. Top-level await and display(value) are supported. JavaScript also accepts static imports and TypeScript syntax; TypeScript is transformed without type checking."},
 				"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": t.config.TimeoutSeconds, "description": "Optional cell timeout; defaults to the configured maximum."},
-				"reset":           map[string]any{"type": "boolean", "description": "Discard retained Python state before executing this cell."},
+				"reset":           map[string]any{"type": "boolean", "description": "Discard the selected language's retained state before executing this cell."},
 			},
 			"required": []string{"language", "code"},
 		},
@@ -111,7 +115,8 @@ func (t *EvalTool) run(ctx context.Context, args string) (agentcore.ToolOutput, 
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return agentcore.ToolOutput{}, fmt.Errorf("eval: invalid arguments: expected one JSON object")
 	}
-	if strings.ToLower(strings.TrimSpace(in.Language)) != "python" {
+	runtimeSpec, ok := t.runtimeFor(in.Language)
+	if !ok {
 		return agentcore.ToolOutput{}, fmt.Errorf("eval: unsupported language %q", in.Language)
 	}
 	if in.Code == nil {
@@ -128,10 +133,12 @@ func (t *EvalTool) run(ctx context.Context, args string) (agentcore.ToolOutput, 
 		return agentcore.ToolOutput{}, err
 	}
 
-	key := t.sessionKey(ctx)
-	kernel, err := t.registry.acquire(key, in.Reset, t.startProcess)
+	key := t.sessionKey(ctx, runtimeSpec.name)
+	kernel, err := t.registry.acquire(key, in.Reset, func() (*evalProcess, error) {
+		return t.startProcess(runtimeSpec)
+	})
 	if err != nil {
-		return agentcore.ToolOutput{}, fmt.Errorf("eval: start Python kernel: %w", err)
+		return agentcore.ToolOutput{}, fmt.Errorf("eval: start %s kernel: %w", runtimeSpec.label, err)
 	}
 	released := false
 	release := func() {
@@ -143,33 +150,43 @@ func (t *EvalTool) run(ctx context.Context, args string) (agentcore.ToolOutput, 
 	defer release()
 
 	cellCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	result, err := kernel.execute(cellCtx, *in.Code, t.config.MaxOutputBytes)
+	invoker, _ := agentcore.ToolInvokerFrom(cellCtx)
+	result, err := kernel.execute(cellCtx, *in.Code, t.config.MaxOutputBytes, t.config.MaxBridgeCalls, invoker)
 	cancel()
+	control := agentcore.ToolOutput{
+		Invocations:        result.Invocations,
+		AdditionalContexts: result.Extra,
+		Terminate:          result.Terminate,
+	}
 	if err != nil {
 		// The cell may already have performed side effects. Kill and forget the
 		// process, but never replay the code in a fresh kernel.
 		t.registry.invalidate(key, kernel)
 		released = true
 		if contextDeadline(cellCtx, err) {
-			return agentcore.ToolOutput{}, fmt.Errorf("eval: cell timed out after %ds; kernel discarded and cell not replayed", timeout)
+			return control, fmt.Errorf("eval: cell timed out after %ds; kernel discarded and cell not replayed", timeout)
 		}
-		return agentcore.ToolOutput{}, fmt.Errorf("eval: kernel discarded and cell not replayed: %w", err)
+		return control, fmt.Errorf("eval: kernel discarded and cell not replayed: %w", err)
 	}
 	output := strings.TrimSpace(result.Output)
 	if output == "" {
 		output = "(no output)"
 	}
 	if result.RuntimeError {
-		return agentcore.ToolOutput{}, fmt.Errorf("eval: Python cell %d failed; retained state before the error may remain:\n%s", result.ExecutionCount, output)
+		control.Content = output
+		control.Parts = result.Parts
+		return control, fmt.Errorf("eval: %s cell %d failed; retained state before the error may remain:\n%s", runtimeSpec.label, result.ExecutionCount, output)
 	}
-	return agentcore.ToolOutput{Content: output, Parts: result.Parts}, nil
+	control.Content = output
+	control.Parts = result.Parts
+	return control, nil
 }
 
 func contextDeadline(ctx context.Context, err error) bool {
 	return ctx.Err() == context.DeadlineExceeded || err == context.DeadlineExceeded
 }
 
-func (t *EvalTool) sessionKey(ctx context.Context) string {
+func (t *EvalTool) sessionKey(ctx context.Context, language string) string {
 	session := strings.TrimSpace(agentcore.SandboxSessionFrom(ctx))
 	if session == "" {
 		session = t.instance
@@ -178,13 +195,36 @@ func (t *EvalTool) sessionKey(ctx context.Context) string {
 	if namespace == "" {
 		namespace = t.instance
 	}
-	return strings.Join([]string{namespace, session, t.workspace.Root(), "python", t.fingerprint}, "\x00")
+	return strings.Join([]string{namespace, session, t.workspace.Root(), language, t.fingerprint}, "\x00")
 }
 
-func (t *EvalTool) startProcess() (*evalProcess, error) {
+type evalRuntimeSpec struct {
+	name, label, command, image, runner string
+	args                                []string
+}
+
+func (t *EvalTool) runtimeFor(language string) (evalRuntimeSpec, bool) {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "python", "py":
+		return evalRuntimeSpec{
+			name: "python", label: "Python", command: t.config.Python.Command,
+			args: t.config.Python.Args, image: t.config.Python.Image, runner: pythonEvalRunner,
+		}, true
+	case "javascript", "js":
+		return evalRuntimeSpec{
+			name: "javascript", label: "JavaScript", command: t.config.JavaScript.Command,
+			args: t.config.JavaScript.Args, image: t.config.JavaScript.Image, runner: javascriptEvalRunner,
+		}, true
+	default:
+		return evalRuntimeSpec{}, false
+	}
+}
+
+func (t *EvalTool) startProcess(spec evalRuntimeSpec) (*evalProcess, error) {
 	env := map[string]string{
 		"HOME": sandboxWorkdir, "TMPDIR": sandboxWorkdir,
 		"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
+		"NODE_NO_WARNINGS": "1",
 	}
 	cleanup := func() {}
 	if t.hosted {
@@ -194,16 +234,29 @@ func (t *EvalTool) startProcess() (*evalProcess, error) {
 		}
 		cleanup = func() { _ = os.RemoveAll(home) }
 		env["HOME"], env["TMPDIR"] = home, home
-		for _, key := range []string{"PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX"} {
+		for _, key := range []string{"PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "NODE_PATH"} {
 			if value := os.Getenv(key); value != "" {
 				env[key] = value
 			}
 		}
 	}
-	argv := append([]string{t.config.Python.Command}, t.config.Python.Args...)
-	argv = append(argv, "-u", "-c", pythonEvalRunner)
+	argv := append([]string{spec.command}, spec.args...)
+	if spec.name == "python" {
+		argv = append(argv, "-u", "-c", spec.runner)
+	} else if runtime.GOOS == "windows" && t.hosted {
+		// A trusted Windows laptop has no POSIX fd-redirection shell. The runner
+		// still captures console/process writes on stdout; hosted Linux containers
+		// and POSIX laptops use the stronger dedicated fd 3 path below.
+		env["AGENTRAY_EVAL_PROTOCOL_FD"] = "1"
+		argv = append(argv, "--eval", spec.runner)
+	} else {
+		env["AGENTRAY_EVAL_PROTOCOL_FD"] = "3"
+		nodeArgv := append([]string(nil), argv...)
+		nodeArgv = append(nodeArgv, "--eval", spec.runner)
+		argv = append([]string{"sh", "-c", `exec "$@" 3>&1 1>/dev/null 2>/dev/null`, "agentray-js-eval"}, nodeArgv...)
+	}
 	proc, err := t.processSB.Start(context.Background(), agentcore.SandboxExec{
-		Argv: argv, Env: env, Image: t.config.Python.Image,
+		Argv: argv, Env: env, Image: spec.image,
 		Mounts:  []agentcore.SandboxMount{{Source: t.workspace.Root(), Target: shellWorkdir}},
 		Workdir: shellWorkdir,
 		Constraints: agentcore.SandboxLimits{
