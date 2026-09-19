@@ -17,6 +17,7 @@ func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
 			"supports_tools":false,
 			"supports_reasoning":true,
 			"max_input_images":7,
+			"max_output_tokens":8192,
 			"capabilities":{"prompt_caching":"supported"},
 			"supported_parameters":["response_format"],
 			"architecture":{"input_modalities":["text"]}
@@ -40,7 +41,7 @@ func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
 		caps.ReasoningEffort != agentcore.CapabilitySupported ||
 		caps.StructuredOutput != agentcore.CapabilitySupported ||
 		caps.PromptCaching != agentcore.CapabilitySupported ||
-		caps.ImageInput != agentcore.CapabilityUnsupported || caps.MaxInputImages != 7 {
+		caps.ImageInput != agentcore.CapabilityUnsupported || caps.MaxInputImages != 7 || caps.MaxOutputTokens != 8192 {
 		t.Fatalf("listed capabilities = %+v", caps)
 	}
 
@@ -74,17 +75,22 @@ func TestDedicatedCapabilityBooleanWinsOverGenericHints(t *testing.T) {
 
 func TestCapabilityOverlayUsesOnlyKnownNewValues(t *testing.T) {
 	base := agentcore.ModelCapabilities{
-		Tools:          agentcore.CapabilitySupported,
-		PromptCaching:  agentcore.CapabilitySupported,
-		MaxInputImages: 90,
+		Tools:           agentcore.CapabilitySupported,
+		PromptCaching:   agentcore.CapabilitySupported,
+		MaxInputImages:  90,
+		MaxOutputTokens: 8192,
 	}
 	got := base.Overlay(agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported})
-	if got.Tools != agentcore.CapabilityUnsupported || got.PromptCaching != agentcore.CapabilitySupported || got.MaxInputImages != 90 {
+	if got.Tools != agentcore.CapabilityUnsupported || got.PromptCaching != agentcore.CapabilitySupported || got.MaxInputImages != 90 || got.MaxOutputTokens != 8192 {
 		t.Fatalf("overlay = %+v", got)
 	}
 	got = got.Overlay(agentcore.ModelCapabilities{MaxInputImages: 12})
 	if got.MaxInputImages != 12 {
 		t.Fatalf("numeric capability did not overlay: %+v", got)
+	}
+	got = got.Overlay(agentcore.ModelCapabilities{MaxOutputTokens: 4096})
+	if got.MaxOutputTokens != 4096 {
+		t.Fatalf("output-token capability did not overlay: %+v", got)
 	}
 }
 
@@ -104,6 +110,41 @@ func TestDiscoveredImageLimitAcceptsDedicatedAndCapabilityMapShapes(t *testing.T
 func TestModelCapabilitiesRejectsNegativeImageLimit(t *testing.T) {
 	if err := (agentcore.ModelCapabilities{MaxInputImages: -1}).Validate(); err == nil {
 		t.Fatal("negative image limit must be rejected")
+	}
+	if err := (agentcore.ModelCapabilities{MaxOutputTokens: -1}).Validate(); err == nil {
+		t.Fatal("negative output-token limit must be rejected")
+	}
+}
+
+func TestAntigravityAdvertisesModelOutputCeilings(t *testing.T) {
+	if got := CapabilitiesFor(VendorGoogleAntigravity, "claude-sonnet-4-6").MaxOutputTokens; got != 64000 {
+		t.Fatalf("Claude Antigravity max output = %d, want 64000", got)
+	}
+	if got := CapabilitiesFor(VendorGoogleAntigravity, "gemini-3-pro").MaxOutputTokens; got != 65536 {
+		t.Fatalf("Gemini Antigravity max output = %d, want 65536", got)
+	}
+}
+
+func TestOpenAICompatSelectsConfiguredMaxTokenField(t *testing.T) {
+	completion := NewOpenAIProvider("k", "http://local", Compat{
+		MaxTokensField: "max_completion_tokens", SupportsTools: true,
+	}).encode(agentcore.ChatRequest{Model: "reasoning", MaxTokens: 1234})
+	if completion.MaxCompletionTokens != 1234 || completion.MaxTokens != 0 {
+		t.Fatalf("completion-token request = %+v", completion)
+	}
+	standard := NewOpenAIProvider("k", "http://local", DefaultCompat()).encode(
+		agentcore.ChatRequest{Model: "chat", MaxTokens: 5678},
+	)
+	if standard.MaxTokens != 5678 || standard.MaxCompletionTokens != 0 {
+		t.Fatalf("standard-token request = %+v", standard)
+	}
+}
+
+func TestAntigravityHonorsSmallerRequestedOutputLimit(t *testing.T) {
+	p := NewAntigravityProvider()
+	body := p.encode(agentcore.ChatRequest{Model: "claude-sonnet-4-6", MaxTokens: 2048})
+	if body.Request.GenerationConfig == nil || body.Request.GenerationConfig.MaxOutputTokens != 2048 {
+		t.Fatalf("generation config = %+v, want maxOutputTokens=2048", body.Request.GenerationConfig)
 	}
 }
 

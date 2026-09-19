@@ -57,7 +57,7 @@ func TestListModelsForVendor_PerVendorWireContract(t *testing.T) {
 			},
 			// Gemini returns fully-qualified resource names; the "models/" prefix
 			// is not part of the id callers use.
-			body: `{"models":[{"name":"models/gemini-3-pro"},{"name":"gemini-3-flash"}]}`,
+			body: `{"models":[{"name":"models/gemini-3-pro","outputTokenLimit":65536},{"name":"gemini-3-flash"}]}`,
 			want: []string{"gemini-3-pro", "gemini-3-flash"},
 		},
 	}
@@ -83,6 +83,20 @@ func TestListModelsForVendor_PerVendorWireContract(t *testing.T) {
 				t.Fatalf("models = %v, want %v", modelIDs(got), c.want)
 			}
 		})
+	}
+}
+
+func TestListGoogleModelsCarriesOutputTokenLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-3-pro","inputTokenLimit":1000000,"outputTokenLimit":65536}]}`))
+	}))
+	defer srv.Close()
+	models, err := listGoogleModels(context.Background(), srv.Client(), srv.URL, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ContextWindow != 1000000 || models[0].Capabilities.MaxOutputTokens != 65536 {
+		t.Fatalf("models = %+v", models)
 	}
 }
 

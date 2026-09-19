@@ -34,7 +34,7 @@ func (p Monitor) Register(r *agentcore.Registry) error {
 		pricing = DefaultPricing()
 	}
 	r.WrapProvider(func(inner agentcore.LLMProvider) agentcore.LLMProvider {
-		return newTracingProvider(inner, pricing, p.Sink)
+		return wrapTracingProvider(inner, pricing, p.Sink)
 	})
 	return nil
 }
@@ -51,5 +51,13 @@ func Wrap(inner agentcore.LLMProvider, pricing Pricing, sink Sink) agentcore.LLM
 	if pricing == nil {
 		pricing = DefaultPricing()
 	}
-	return newTracingProvider(inner, pricing, sink)
+	return wrapTracingProvider(inner, pricing, sink)
+}
+
+func wrapTracingProvider(inner agentcore.LLMProvider, pricing Pricing, sink Sink) agentcore.LLMProvider {
+	wrapped := newTracingProvider(inner, pricing, sink)
+	if _, ok := inner.(agentcore.KeyUpdater); ok {
+		return &tracingKeyProvider{tracingProvider: wrapped}
+	}
+	return wrapped
 }

@@ -43,7 +43,8 @@ func (updateGoalTool) Name() string { return ToolName }
 
 func (updateGoalTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolName,
+		Name:   ToolName,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Revise this run's completion condition — what has to be true for the run to be finished. " +
 			"Use it ONLY when the work has shown the current condition to be wrong: impossible as stated, " +
 			"based on an assumption that turned out false, or the wrong shape for what you found. " +
@@ -52,7 +53,8 @@ func (updateGoalTool) Schema() agentcore.ToolSchema {
 			"asked for; the pinned requirement above it does not change. Every revision is recorded with " +
 			"your reason and is reviewable.",
 		Parameters: map[string]any{
-			"type": "object",
+			"type":                 "object",
+			"additionalProperties": false,
 			"properties": map[string]any{
 				"goal": map[string]any{
 					"type": "string",

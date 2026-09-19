@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -125,7 +124,9 @@ type agGenerationConfig struct {
 }
 
 type agThinkingConfig struct {
-	IncludeThoughts bool `json:"includeThoughts"`
+	IncludeThoughts bool   `json:"includeThoughts"`
+	ThinkingBudget  int    `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
 }
 
 type agFunctionDeclaration struct {
@@ -139,9 +140,12 @@ type agTool struct {
 }
 
 type agToolConfig struct {
-	FunctionCallingConfig struct {
-		Mode string `json:"mode"`
-	} `json:"functionCallingConfig"`
+	FunctionCallingConfig agFunctionCallingConfig `json:"functionCallingConfig"`
+}
+
+type agFunctionCallingConfig struct {
+	Mode                 string   `json:"mode"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 type agInnerRequest struct {
@@ -169,7 +173,7 @@ type agRequest struct {
 // is agent/<agent>/<unixms>/<trajectory>/<step> and last_step_index trails the
 // step by one.
 func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
-	isClaude := strings.HasPrefix(req.Model, "claude-")
+	isClaude := strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Model)), "claude-")
 	trajectory := uuid.NewString()
 	const step = 2
 
@@ -204,24 +208,39 @@ func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
 		// Claude routes on daily-cloudcode-pa reject maxOutputTokens > 64000.
 		maxOut = 64000
 	}
+	requestedOutput := req.MaxTokens
+	if requestedOutput > 0 && requestedOutput < maxOut {
+		maxOut = requestedOutput
+	}
 	gen := &agGenerationConfig{MaxOutputTokens: maxOut}
 	if req.Temperature > 0 {
 		gen.Temperature = req.Temperature
 	}
-	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" && effort != "none" {
-		gen.ThinkingConfig = &agThinkingConfig{IncludeThoughts: true}
+	if thinking, budget := antigravityThinking(req.Model, req.ReasoningEffort); thinking != nil {
+		gen.ThinkingConfig = thinking
+		// Budget-based CCA models count internal thinking against maxOutputTokens.
+		// Treat the neutral MaxTokens as desired visible output and make room for
+		// the requested thought budget, bounded by the provider/model ceiling.
+		if budget > 0 && requestedOutput > 0 {
+			ceiling := 65536
+			if isClaude {
+				ceiling = 64000
+			}
+			maxOut = ceiling
+			if requestedOutput <= ceiling-budget {
+				maxOut = requestedOutput + budget
+			}
+			gen.MaxOutputTokens = maxOut
+		}
 	}
 	inner.GenerationConfig = gen
 
 	if len(req.Tools) > 0 {
 		decls := make([]agFunctionDeclaration, 0, len(req.Tools))
 		for _, s := range req.Tools {
-			params := s.Parameters
-			if params == nil {
-				params = map[string]any{"type": "object", "properties": map[string]any{}}
-			}
 			decls = append(decls, agFunctionDeclaration{
-				Name: s.Name, Description: s.Description, Parameters: params,
+				Name: s.Name, Description: s.Description,
+				Parameters: toolParameters(s.Parameters, toolSchemaCloudCodeAssist),
 			})
 		}
 		inner.Tools = []agTool{{FunctionDeclarations: decls}}
@@ -233,6 +252,9 @@ func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
 		tc.FunctionCallingConfig.Mode = "VALIDATED"
 		inner.ToolConfig = tc
 	}
+	if config := googleToolChoice(req.ToolChoice, len(inner.Tools) > 0); config != nil {
+		inner.ToolConfig = &agToolConfig{FunctionCallingConfig: *config}
+	}
 
 	return agRequest{
 		Project:     p.tok.ProjectID,
@@ -242,6 +264,38 @@ func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
 		RequestID:   fmt.Sprintf("agent/%s/%d/%s/%d", uuid.NewString(), time.Now().UnixMilli(), trajectory, step),
 		Request:     inner,
 	}
+}
+
+var antigravityThinkingBudgets = map[string]int{
+	"minimal": 1024,
+	"low":     4096,
+	"medium":  8192,
+	"high":    16384,
+	"xhigh":   24575,
+	"max":     32768,
+}
+
+func antigravityThinking(model, effort string) (*agThinkingConfig, int) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || effort == "none" || effort == "off" {
+		return nil, 0
+	}
+	config := &agThinkingConfig{IncludeThoughts: true}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gemini-3") {
+		switch effort {
+		case "minimal":
+			config.ThinkingLevel = "MINIMAL"
+		case "low":
+			config.ThinkingLevel = "LOW"
+		case "medium":
+			config.ThinkingLevel = "MEDIUM"
+		case "high", "xhigh", "max":
+			config.ThinkingLevel = "HIGH"
+		}
+		return config, 0
+	}
+	config.ThinkingBudget = antigravityThinkingBudgets[effort]
+	return config, config.ThinkingBudget
 }
 
 // convertMessages maps the neutral transcript onto Cloud Code Assist contents.
@@ -386,14 +440,14 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 		}
 		if resp.StatusCode >= 500 && i < len(endpoints)-1 {
 			// 5xx before the first event: the next endpoint may be healthy.
-			data, _ := io.ReadAll(resp.Body)
+			data := readProviderErrorBody(resp.Body)
 			resp.Body.Close()
 			lastErr = agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 			resp = nil
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			data, _ := io.ReadAll(resp.Body)
+			data := readProviderErrorBody(resp.Body)
 			resp.Body.Close()
 			return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 		}
@@ -415,6 +469,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 		var stopReason string
 		var usage agentcore.Usage
 		callSeq := 0
+		terminal := false
 
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -432,7 +487,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 				continue
 			}
 			if chunk.Error != nil {
-				ch <- agentcore.ChatDelta{Done: true, Err: p.streamError(chunk.Error.Code, chunk.Error.Status, chunk.Error.Message)}
+				ch <- agentcore.ChatDelta{Done: true, Err: p.streamError(resp, chunk.Error.Code, chunk.Error.Status, chunk.Error.Message)}
 				return
 			}
 			r := chunk.Response
@@ -461,6 +516,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 				}
 				if cand.FinishReason != "" {
 					stopReason = mapAntigravityStopReason(cand.FinishReason)
+					terminal = true
 				}
 			}
 			if u := r.UsageMetadata; u != nil {
@@ -477,6 +533,11 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 			ch <- agentcore.ChatDelta{Done: true, Err: err}
 			return
 		}
+		if !terminal {
+			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil,
+				"antigravity stream ended before a terminal finish reason")}
+			return
+		}
 		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
 	return ch, nil
@@ -485,7 +546,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 // streamError maps an in-band stream error onto a ProviderError with the HTTP
 // status the code implies, so the retry ladder classifies it structurally:
 // RESOURCE_EXHAUSTED is a 429, UNAUTHENTICATED a 401, anything else a 500.
-func (p *AntigravityProvider) streamError(code int, status, message string) error {
+func (p *AntigravityProvider) streamError(resp *http.Response, code int, status, message string) error {
 	httpStatus := 500
 	switch status {
 	case "RESOURCE_EXHAUSTED":
@@ -499,7 +560,7 @@ func (p *AntigravityProvider) streamError(code int, status, message string) erro
 	if message == "" {
 		message = "antigravity stream error"
 	}
-	return &agentcore.ProviderError{Provider: p.Name(), Status: httpStatus, Message: message}
+	return providerErrorWithStatus(p.Name(), resp, httpStatus, message)
 }
 
 // mapAntigravityStopReason folds the generateContent finish reasons onto the

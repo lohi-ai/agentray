@@ -45,7 +45,9 @@ func (s *fakeTokenSource) Report(_ context.Context, tok OAuthToken, err error) {
 type fakeInner struct {
 	applied  OAuthToken
 	chatErr  error
+	chatFn   func(OAuthToken) (agentcore.ChatResponse, error)
 	streamCh chan agentcore.ChatDelta
+	streamFn func(OAuthToken) (<-chan agentcore.ChatDelta, error)
 }
 
 func (f *fakeInner) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
@@ -55,9 +57,15 @@ func (f *fakeInner) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
 func (f *fakeInner) Name() string        { return "fake" }
 func (f *fakeInner) SupportsTools() bool { return true }
 func (f *fakeInner) Chat(context.Context, agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	if f.chatFn != nil {
+		return f.chatFn(f.applied)
+	}
 	return agentcore.ChatResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "ok"}}, f.chatErr
 }
 func (f *fakeInner) Stream(context.Context, agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	if f.streamFn != nil {
+		return f.streamFn(f.applied)
+	}
 	return f.streamCh, nil
 }
 
@@ -121,6 +129,221 @@ func TestPooledProvider_ReportsErrorAndRotates(t *testing.T) {
 	}
 	if inner.applied.AccessToken != "tok-2" {
 		t.Fatalf("second call applied %q, want tok-2 (rotation)", inner.applied.AccessToken)
+	}
+}
+
+func TestPooledProvider_AuthFailureRetriesDistinctCredential(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{
+		{AccountID: "a1", AccessToken: "tok-1"},
+		{AccountID: "a2", AccessToken: "tok-2"},
+	}}
+	var wireCalls []string
+	inner := &fakeInner{chatFn: func(tok OAuthToken) (agentcore.ChatResponse, error) {
+		wireCalls = append(wireCalls, tok.AccountID)
+		if tok.AccountID == "a1" {
+			return agentcore.ChatResponse{}, &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
+		}
+		return agentcore.ChatResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "recovered"}}, nil
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
+	if err != nil || resp.Message.Content != "recovered" {
+		t.Fatalf("Chat = (%q, %v), want recovered", resp.Message.Content, err)
+	}
+	if strings.Join(wireCalls, ",") != "a1,a2" {
+		t.Fatalf("wire attempts = %v, want a1 then a2", wireCalls)
+	}
+	if len(src.reports) != 2 || src.reports[0].err == nil || src.reports[1].err != nil {
+		t.Fatalf("reports = %+v, want auth failure then success", src.reports)
+	}
+}
+
+func TestPooledProvider_AuthRetryStopsOnCredentialCycle(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "same-token"}}}
+	wireCalls := 0
+	inner := &fakeInner{chatFn: func(OAuthToken) (agentcore.ChatResponse, error) {
+		wireCalls++
+		return agentcore.ChatResponse{}, &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
+	var providerErr *agentcore.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Status != http.StatusUnauthorized {
+		t.Fatalf("error = %v, want original 401", err)
+	}
+	if wireCalls != 1 || src.acquireN != 2 || len(src.reports) != 1 {
+		t.Fatalf("wire calls=%d acquires=%d reports=%d, want 1/2/1", wireCalls, src.acquireN, len(src.reports))
+	}
+}
+
+func TestPooledProvider_StreamAuthFailureBeforeOutputRotates(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{
+		{AccountID: "a1", AccessToken: "tok-1"},
+		{AccountID: "a2", AccessToken: "tok-2"},
+	}}
+	var wireCalls []string
+	inner := &fakeInner{streamFn: func(tok OAuthToken) (<-chan agentcore.ChatDelta, error) {
+		wireCalls = append(wireCalls, tok.AccountID)
+		ch := make(chan agentcore.ChatDelta, 2)
+		if tok.AccountID == "a1" {
+			ch <- agentcore.ChatDelta{Done: true, Err: &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
+		} else {
+			ch <- agentcore.ChatDelta{ContentDelta: "recovered"}
+			ch <- agentcore.ChatDelta{Done: true, StopReason: "stop"}
+		}
+		close(ch)
+		return ch, nil
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	for delta := range ch {
+		if delta.Err != nil {
+			t.Fatalf("unexpected stream error: %v", delta.Err)
+		}
+		content += delta.ContentDelta
+	}
+	if content != "recovered" || strings.Join(wireCalls, ",") != "a1,a2" {
+		t.Fatalf("content=%q attempts=%v, want recovered / a1,a2", content, wireCalls)
+	}
+	if len(src.reports) != 2 || src.reports[0].err == nil || src.reports[1].err != nil {
+		t.Fatalf("reports = %+v, want auth failure then success", src.reports)
+	}
+}
+
+func TestClaudeCode_InBandAuthenticationErrorRotatesCredential(t *testing.T) {
+	var auth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = append(auth, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		if r.Header.Get("Authorization") == "Bearer tok-1" {
+			_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"expired\"}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"recovered\"}}\n\n"+
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"+
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	src := &fakeTokenSource{tokens: []OAuthToken{
+		{AccountID: "a1", AccessToken: "tok-1"},
+		{AccountID: "a2", AccessToken: "tok-2"},
+	}}
+	inner := NewAnthropicProvider("", srv.URL)
+	inner.OAuth = true
+	inner.HTTP, inner.StreamHTTP = srv.Client(), srv.Client()
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var content string
+	for delta := range ch {
+		if delta.Err != nil {
+			t.Fatalf("stream error: %v", delta.Err)
+		}
+		content += delta.ContentDelta
+	}
+	if content != "recovered" {
+		t.Fatalf("stream content = %q, want recovered", content)
+	}
+	if strings.Join(auth, ",") != "Bearer tok-1,Bearer tok-2" {
+		t.Fatalf("Authorization attempts = %v, want token rotation", auth)
+	}
+}
+
+func TestPooledProvider_StreamCancellationIsVisible(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "tok-1"}}}
+	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan agentcore.ChatDelta, error) {
+		return make(chan agentcore.ChatDelta), nil
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := p.Stream(ctx, agentcore.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	var got error
+	for delta := range ch {
+		if delta.Err != nil {
+			got = delta.Err
+		}
+	}
+	if !errors.Is(got, context.Canceled) {
+		t.Fatalf("stream cancellation = %v, want context.Canceled", got)
+	}
+}
+
+func TestPooledProvider_StreamAuthFailureAfterOutputDoesNotReplay(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{
+		{AccountID: "a1", AccessToken: "tok-1"},
+		{AccountID: "a2", AccessToken: "tok-2"},
+	}}
+	wireCalls := 0
+	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan agentcore.ChatDelta, error) {
+		wireCalls++
+		ch := make(chan agentcore.ChatDelta, 2)
+		ch <- agentcore.ChatDelta{ContentDelta: "partial"}
+		ch <- agentcore.ChatDelta{Done: true, Err: &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
+		close(ch)
+		return ch, nil
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	var streamErr error
+	for delta := range ch {
+		content += delta.ContentDelta
+		if delta.Err != nil {
+			streamErr = delta.Err
+		}
+	}
+	if content != "partial" || streamErr == nil || wireCalls != 1 || src.acquireN != 1 {
+		t.Fatalf("content=%q err=%v wire=%d acquires=%d, want partial/error/1/1", content, streamErr, wireCalls, src.acquireN)
+	}
+}
+
+func TestPooledProvider_Concurrency403DoesNotBurnCredential(t *testing.T) {
+	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "tok-1"}}}
+	inner := &fakeInner{chatErr: &agentcore.ProviderError{
+		Provider: "fake", Status: http.StatusForbidden, Message: "concurrent request limit reached",
+	}}
+	p, err := newPooledProvider(VendorClaudeCode, inner, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
+	if err == nil || !agentcore.IsRetryable(err) {
+		t.Fatalf("concurrency cap = %v, want retryable", err)
+	}
+	if len(src.reports) != 0 || src.acquireN != 1 {
+		t.Fatalf("reports=%d acquires=%d, concurrency cap must not rotate", len(src.reports), src.acquireN)
 	}
 }
 

@@ -152,8 +152,10 @@ type Agent struct {
 	// the provider (structured outputs). outputValidator is compiled at build
 	// time and enforces the same contract locally when a provider ignores it.
 	// Verdict-shaped agents only.
-	outputSchema    *OutputSchema
-	outputValidator outputValidator
+	outputSchema      *OutputSchema
+	outputValidator   outputValidator
+	toolChoice        ToolChoice
+	parallelToolCalls *bool
 	// childUsage accumulates the usage of sub-agent runs spawned during the
 	// current run (written by spawn_subagent, possibly from parallel tool
 	// goroutines); runLoop folds and resets it into the RunResult so a parent
@@ -408,6 +410,14 @@ type Config struct {
 	// the schema. Providers without the capability ignore it, so callers still
 	// validate the answer. nil — the default — leaves output free-form.
 	OutputSchema *OutputSchema
+	// ToolChoice optionally constrains model tool use on every ordinary turn.
+	// The zero value keeps provider defaults. Required/named choices are removed
+	// automatically from the loop's borrowed tool-free finalization turn.
+	ToolChoice ToolChoice
+	// ParallelToolCalls asks capable providers whether they may emit several
+	// tool calls in one assistant turn. nil omits the hint for compatibility.
+	// AgentCore still executes only tools that independently opt into ParallelTool.
+	ParallelToolCalls *bool
 	// Extensions are the run capabilities this agent is built with — spill,
 	// background jobs, session retrieval, delegation, the repeated-call
 	// reminder, verify-on-stop, log-invariant observation, and whatever a
@@ -571,6 +581,16 @@ func (a *Agent) Describe() string {
 	line("max_tokens", a.maxTokens)
 	line("reasoning_effort", orDash(a.reasoningEffort))
 	present("output_schema", a.outputSchema != nil)
+	choice := string(a.toolChoice.Mode)
+	if a.toolChoice.Mode == ToolChoiceNamed {
+		choice += ":" + a.toolChoice.Name
+	}
+	line("tool_choice", orDash(choice))
+	if a.parallelToolCalls == nil {
+		line("parallel_tool_calls", "-")
+	} else {
+		line("parallel_tool_calls", *a.parallelToolCalls)
+	}
 	line("prompt_cache", orDash(a.cacheKey))
 	present("refresh_key", a.refreshKey != nil)
 	line("retry", fmt.Sprintf("%d attempts", a.retry.MaxAttempts))

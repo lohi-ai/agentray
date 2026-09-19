@@ -89,7 +89,8 @@ func (t *learnTool) Bookkeeping() bool { return true }
 
 func (t *learnTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolLearn,
+		Name:   ToolLearn,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Save a reusable lesson to long-term memory for future runs — a pitfall, a workaround, " +
 			"a convention this project follows. Use it when you learn something that would still be true and " +
 			"useful next session; do not use it for task state or one-off facts.",
@@ -152,7 +153,8 @@ func (t *memoryEditTool) Name() string { return ToolMemoryEdit }
 
 func (t *memoryEditTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolMemoryEdit,
+		Name:   ToolMemoryEdit,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Update or retract one of your own long-term memories by id. " +
 			"'update' replaces the memory's content (the old version is kept as history); " +
 			"'forget' retracts a memory that is no longer worth keeping; " +

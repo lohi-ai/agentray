@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -34,6 +33,7 @@ const (
 // so correctness never depends on process affinity.
 type OpenAIResponsesProvider struct {
 	APIKey     string
+	keyMu      sync.RWMutex
 	BaseURL    string
 	HTTP       *http.Client
 	StreamHTTP *http.Client
@@ -73,8 +73,16 @@ func (p *OpenAIResponsesProvider) ModelCapabilities(model string) agentcore.Mode
 }
 func (p *OpenAIResponsesProvider) UpdateAPIKey(key string) {
 	if key != "" {
+		p.keyMu.Lock()
 		p.APIKey = key
+		p.keyMu.Unlock()
 	}
+}
+
+func (p *OpenAIResponsesProvider) apiKey() string {
+	p.keyMu.RLock()
+	defer p.keyMu.RUnlock()
+	return p.APIKey
 }
 
 func (p *OpenAIResponsesProvider) streamHTTP() *http.Client {
@@ -120,6 +128,7 @@ type responsesTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	Parameters  map[string]any `json:"parameters"`
+	Strict      *bool          `json:"strict,omitempty"`
 }
 
 type responsesReasoning struct {
@@ -150,22 +159,26 @@ type responsesRequest struct {
 	Reasoning          *responsesReasoning  `json:"reasoning,omitempty"`
 	Text               *responsesText       `json:"text,omitempty"`
 	PreviousResponseID string               `json:"previous_response_id,omitempty"`
+	ToolChoice         any                  `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool                `json:"parallel_tool_calls,omitempty"`
 }
 
 // controls is the exact top-level request identity used by the chain check.
 // Input and previous_response_id are deliberately absent; every other wire
 // option must remain equal before a suffix can be appended.
 type responsesControls struct {
-	Model           string
-	Instructions    string
-	Stream          bool
-	Store           bool
-	Tools           []responsesTool
-	MaxOutputTokens int
-	Temperature     float64
-	PromptCacheKey  string
-	Reasoning       *responsesReasoning
-	Text            *responsesText
+	Model             string
+	Instructions      string
+	Stream            bool
+	Store             bool
+	Tools             []responsesTool
+	MaxOutputTokens   int
+	Temperature       float64
+	PromptCacheKey    string
+	Reasoning         *responsesReasoning
+	Text              *responsesText
+	ToolChoice        any
+	ParallelToolCalls *bool
 }
 
 func (r responsesRequest) controls() responsesControls {
@@ -174,6 +187,7 @@ func (r responsesRequest) controls() responsesControls {
 		Store: r.Store, Tools: r.Tools, MaxOutputTokens: r.MaxOutputTokens,
 		Temperature: r.Temperature, PromptCacheKey: r.PromptCacheKey,
 		Reasoning: r.Reasoning, Text: r.Text,
+		ToolChoice: r.ToolChoice, ParallelToolCalls: r.ParallelToolCalls,
 	}
 }
 
@@ -181,6 +195,8 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 	out := responsesRequest{
 		Model: req.Model, Stream: true, MaxOutputTokens: req.MaxTokens,
 		Temperature: req.Temperature, PromptCacheKey: req.CacheKey,
+		ToolChoice:        openAIResponsesToolChoice(req.ToolChoice, len(req.Tools) > 0),
+		ParallelToolCalls: cloneOptionalBool(req.ParallelToolCalls, len(req.Tools) > 0),
 	}
 	var instructions []string
 	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
@@ -249,12 +265,10 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 	}
 	out.Instructions = strings.Join(instructions, "\n\n")
 	for _, schema := range req.Tools {
-		parameters := schema.Parameters
-		if parameters == nil {
-			parameters = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
+		parameters, strict := projectedToolParameters(schema, toolSchemaOpenAIResponses)
 		out.Tools = append(out.Tools, responsesTool{
-			Type: "function", Name: schema.Name, Description: schema.Description, Parameters: parameters,
+			Type: "function", Name: schema.Name, Description: schema.Description,
+			Parameters: parameters, Strict: strict,
 		})
 	}
 	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
@@ -353,7 +367,7 @@ type responsesPlan struct {
 	release   func()
 }
 
-func (p *OpenAIResponsesProvider) plan(req agentcore.ChatRequest) responsesPlan {
+func (p *OpenAIResponsesProvider) plan(req agentcore.ChatRequest, apiKey string) responsesPlan {
 	canonical := p.encode(req)
 	plan := responsesPlan{canonical: canonical, wire: canonical, release: func() {}}
 	if req.ProviderSession == nil || strings.TrimSpace(req.SessionID) == "" {
@@ -362,7 +376,7 @@ func (p *OpenAIResponsesProvider) plan(req agentcore.ChatRequest) responsesPlan 
 		plan.wire.Store = false
 		return plan
 	}
-	stateKey := responsesStatePrefix + p.Name() + "\x00" + strings.TrimRight(p.BaseURL, "/") + "\x00" + credentialFingerprint(p.APIKey)
+	stateKey := responsesStatePrefix + p.Name() + "\x00" + strings.TrimRight(p.BaseURL, "/") + "\x00" + credentialFingerprint(apiKey)
 	state, _ := req.ProviderSession.State(stateKey, newOpenAIResponsesState).(*openAIResponsesState)
 	if state == nil {
 		plan.wire.Store = false
@@ -570,23 +584,47 @@ func (p *OpenAIResponsesProvider) Chat(ctx context.Context, req agentcore.ChatRe
 }
 
 func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	plan := p.plan(req)
-	resp, err := p.open(ctx, plan.wire)
-	if err != nil && plan.chained && isStalePreviousResponse(err) {
-		plan.stale(isZeroDataRetention(err))
-		resp, err = p.open(ctx, plan.wire)
-	}
-	if err != nil {
-		plan.fail()
-		return nil, err
-	}
+	// Snapshot once: provider-session state and Authorization must refer to the
+	// same credential even if a sibling agent rotates the shared provider while
+	// this request is being planned.
+	apiKey := p.apiKey()
+	strictState, active := prepareStrictTools(req, p.Name(), p.BaseURL, toolSchemaOpenAIResponses)
+	retriedWithoutStrict := false
+	for {
+		plan := p.plan(active, apiKey)
+		resp, err := p.open(ctx, plan.wire, apiKey)
+		if err != nil && plan.chained && isStalePreviousResponse(err) {
+			plan.stale(isZeroDataRetention(err))
+			resp, err = p.open(ctx, plan.wire, apiKey)
+		}
+		if err != nil {
+			plan.fail()
+			if !retriedWithoutStrict && shouldRetryWithoutStrictTools(active, toolSchemaOpenAIResponses, err) {
+				rememberStrictToolsRejected(strictState, active.Model)
+				active = withoutStrictTools(active)
+				retriedWithoutStrict = true
+				continue
+			}
+			return nil, err
+		}
 
-	ch := make(chan agentcore.ChatDelta, 16)
-	go p.consume(resp, plan, ch)
-	return ch, nil
+		ch := make(chan agentcore.ChatDelta, 16)
+		go p.consume(resp, plan, ch)
+		ready, preflightErr, retryStrict := preflightStrictStream(ctx, active, toolSchemaOpenAIResponses, ch)
+		if retryStrict {
+			rememberStrictToolsRejected(strictState, active.Model)
+			active = withoutStrictTools(active)
+			retriedWithoutStrict = true
+			continue
+		}
+		if preflightErr != nil {
+			return nil, preflightErr
+		}
+		return ready, nil
+	}
 }
 
-func (p *OpenAIResponsesProvider) open(ctx context.Context, body responsesRequest) (*http.Response, error) {
+func (p *OpenAIResponsesProvider) open(ctx context.Context, body responsesRequest, apiKey string) (*http.Response, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -597,7 +635,7 @@ func (p *OpenAIResponsesProvider) open(ctx context.Context, body responsesReques
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	setOptionalBearerAuth(req, p.APIKey)
+	setOptionalBearerAuth(req, apiKey)
 	resp, err := p.streamHTTP().Do(req)
 	if err != nil {
 		return nil, err
@@ -605,7 +643,7 @@ func (p *OpenAIResponsesProvider) open(ctx context.Context, body responsesReques
 	if resp.StatusCode < 400 {
 		return resp, nil
 	}
-	data, _ := io.ReadAll(resp.Body)
+	data := readProviderErrorBody(resp.Body)
 	resp.Body.Close()
 	message := strings.TrimSpace(string(data))
 	var decoded struct {
@@ -726,7 +764,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 			}
 		case "response.failed", "error":
 			failed = true
-			ch <- agentcore.ChatDelta{Done: true, Err: p.responsesEventError(&event)}
+			ch <- agentcore.ChatDelta{Done: true, Err: p.responsesEventError(resp, &event)}
 			return
 		}
 	}
@@ -749,7 +787,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 	ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 }
 
-func (p *OpenAIResponsesProvider) responsesEventError(event *responsesStreamEvent) error {
+func (p *OpenAIResponsesProvider) responsesEventError(resp *http.Response, event *responsesStreamEvent) error {
 	message, code := event.Message, event.Code
 	if event.Error != nil {
 		message, code = event.Error.Message, event.Error.Code
@@ -763,16 +801,15 @@ func (p *OpenAIResponsesProvider) responsesEventError(event *responsesStreamEven
 	if code != "" {
 		message += " (code=" + code + ")"
 	}
-	status := http.StatusInternalServerError
-	switch code {
-	case "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached", "too_many_requests":
-		status = http.StatusTooManyRequests
-	case "unauthorized", "invalid_api_key", "authentication_error", "token_expired":
-		status = http.StatusUnauthorized
-	case "forbidden", "permission_denied":
-		status = http.StatusForbidden
+	status := providerStatusForCode(code)
+	if status == 0 {
+		if strictToolsRejectionMessage(message) {
+			status = http.StatusUnprocessableEntity
+		} else {
+			status = http.StatusInternalServerError
+		}
 	}
-	return &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: message}
+	return providerErrorWithStatus(p.Name(), resp, status, message)
 }
 
 func isStalePreviousResponse(err error) bool {

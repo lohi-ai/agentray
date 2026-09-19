@@ -182,6 +182,11 @@ type BuildParams struct {
 	// ReasoningEffort, when set ("low" | "medium" | "high"), is passed through
 	// to reasoning models on every turn (OpenAI-wire reasoning_effort).
 	ReasoningEffort string
+	// ToolChoice and ParallelToolCalls expose AgentCore's neutral tool-routing
+	// controls through the portable runtime. Their zero/nil defaults emit no
+	// provider fields and preserve existing local endpoint compatibility.
+	ToolChoice        agentcore.ToolChoice
+	ParallelToolCalls *bool
 	// OutputSchema, when non-nil, constrains every text answer to the given
 	// JSON Schema at the provider (structured outputs). For verdict-shaped
 	// agents (moderation / classification presets); nil leaves output free.
@@ -521,6 +526,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		BudgetGate:           p.BudgetGate,
 	}
 	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.ToolChoice = p.ToolChoice
+	cfg.ParallelToolCalls = p.ParallelToolCalls
 	cfg.OutputSchema = p.OutputSchema
 	cfg.Goal = p.Goal
 	cfg.Policy = agentcore.NewAllowList(names...)

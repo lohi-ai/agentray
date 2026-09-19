@@ -95,6 +95,58 @@ func TestOpenAIChatLearnsUnsupportedHintWithinProviderSession(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatLearnsMaxCompletionTokenDialect(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if _, legacy := body["max_tokens"]; legacy {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unsupported parameter: max_tokens; use max_completion_tokens"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
+	p.HTTP = srv.Client()
+	session := agentcore.NewProviderSession()
+	req := agentcore.ChatRequest{
+		Model: "reasoning-model", MaxTokens: 2048, ProviderSession: session,
+		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hello"}},
+	}
+	if _, err := p.Chat(context.Background(), req); err != nil {
+		t.Fatalf("first Chat: %v", err)
+	}
+	if _, err := p.Chat(context.Background(), req); err != nil {
+		t.Fatalf("second Chat: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 3 {
+		t.Fatalf("requests = %d, want legacy rejection + retry + learned call", len(bodies))
+	}
+	if _, ok := bodies[0]["max_tokens"]; !ok {
+		t.Fatalf("first request did not use max_tokens: %v", bodies[0])
+	}
+	for i := 1; i < 3; i++ {
+		if _, ok := bodies[i]["max_completion_tokens"]; !ok {
+			t.Fatalf("request %d did not use learned max_completion_tokens: %v", i+1, bodies[i])
+		}
+		if _, legacy := bodies[i]["max_tokens"]; legacy {
+			t.Fatalf("request %d retained max_tokens: %v", i+1, bodies[i])
+		}
+	}
+}
+
 func TestOpenAIStreamRetriesUnsupportedHintBeforeExposingOutput(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

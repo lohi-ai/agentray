@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,7 +147,7 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	gated.Arguments = args
 
 	// Validate arguments against the tool's schema before any hook runs.
-	if err := validateArgs(args, tool.Schema().Parameters); err != nil {
+	if err := tools.validateToolArgs(call.Name, args, tool.Schema().Parameters); err != nil {
 		trace.Allowed = false
 		trace.Error = err.Error()
 		return toolOutcome{trace: trace, message: toolResult(call, "invalid arguments: "+err.Error())}
@@ -378,36 +379,11 @@ func toolResult(call ToolCall, content string) Message {
 	return Message{Role: RoleTool, ToolCallID: call.ID, Name: call.Name, Content: content}
 }
 
-// validateArgs ensures the model emitted parseable JSON arguments AND that they
-// satisfy the tool's advertised JSON Schema (required fields, primitive types,
-// enums). Schema validation is shallow by design — our tool parameters are flat
-// objects — but it catches the common model failure (right JSON, wrong shape)
-// before execution and feeds a precise, self-correctable reason back to the
-// model (pi's validateToolArguments). A nil/empty/non-object schema falls back
-// to the JSON-parse check only.
-func validateArgs(args string, schema map[string]any) error {
-	args = strings.TrimSpace(args)
-	if args == "" {
-		// No-arg call: only valid if the schema requires nothing.
-		if missing := missingRequired(map[string]any{}, schema); len(missing) > 0 {
-			return fmt.Errorf("missing required field(s): %s", strings.Join(missing, ", "))
-		}
-		return nil
-	}
-	var parsed any
-	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
-		return fmt.Errorf("arguments are not valid JSON")
-	}
-	obj, ok := parsed.(map[string]any)
-	if !ok {
-		// Non-object arguments: nothing more we can check against an object schema.
-		return nil
-	}
-	return validateObject(obj, schema)
-}
-
 // validateObject checks an arguments object against a JSON Schema object node:
 // required presence first, then per-property type/enum for the fields present.
+// It exists to produce concise common-case errors before the complete compiled
+// JSON Schema validator handles nesting, arrays, combiners, patterns, bounds,
+// and additionalProperties.
 func validateObject(obj, schema map[string]any) error {
 	if !isObjectSchema(schema) {
 		return nil
@@ -529,11 +505,17 @@ func matchesJSONType(value any, typ string) bool {
 		_, ok := value.(bool)
 		return ok
 	case "number":
-		_, ok := value.(float64)
+		_, ok := numericValue(value)
 		return ok
 	case "integer":
-		f, ok := value.(float64)
-		return ok && f == float64(int64(f))
+		if _, ok := value.(json.Number); ok {
+			// JSON Schema supports arbitrary-precision numbers. Leave the exact
+			// integral check to the compiled validator rather than rejecting a
+			// valid value because it cannot fit in float64/int64 here.
+			return true
+		}
+		f, ok := numericValue(value)
+		return ok && !math.IsInf(f, 0) && math.Trunc(f) == f
 	case "array":
 		_, ok := value.([]any)
 		return ok
@@ -566,6 +548,9 @@ func enumContains(enum []any, value any) bool {
 // numericValue reads any Go numeric type as float64 for enum comparison.
 func numericValue(v any) (float64, bool) {
 	switch n := v.(type) {
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
 	case float64:
 		return n, true
 	case float32:

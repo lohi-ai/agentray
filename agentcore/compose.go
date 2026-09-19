@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Composition: turning a set of plugins into a runnable Agent.
@@ -81,18 +82,20 @@ func (p configPlugin) Register(r *Registry) error { return r.ApplyConfig(p.cfg) 
 func (r *Registry) ApplyConfig(cfg Config) error {
 	for _, p := range []Plugin{
 		ModelPlugin{
-			Provider:        cfg.Provider,
-			Model:           cfg.Model,
-			Capabilities:    cfg.ModelCapabilities,
-			ContextWindow:   cfg.ContextWindow,
-			Escalation:      cfg.Escalation,
-			Retry:           cfg.Retry,
-			RefreshKey:      cfg.RefreshKey,
-			MaxTokens:       cfg.MaxTokens,
-			ReasoningEffort: cfg.ReasoningEffort,
-			OutputSchema:    cfg.OutputSchema,
-			PromptCacheKey:  cfg.PromptCacheKey,
-			CacheRetention:  cfg.PromptCacheRetention,
+			Provider:          cfg.Provider,
+			Model:             cfg.Model,
+			Capabilities:      cfg.ModelCapabilities,
+			ContextWindow:     cfg.ContextWindow,
+			Escalation:        cfg.Escalation,
+			Retry:             cfg.Retry,
+			RefreshKey:        cfg.RefreshKey,
+			MaxTokens:         cfg.MaxTokens,
+			ReasoningEffort:   cfg.ReasoningEffort,
+			OutputSchema:      cfg.OutputSchema,
+			ToolChoice:        cfg.ToolChoice,
+			ParallelToolCalls: cfg.ParallelToolCalls,
+			PromptCacheKey:    cfg.PromptCacheKey,
+			CacheRetention:    cfg.PromptCacheRetention,
 		},
 		DefinitionPlugin{Definition: cfg.Definition, Limits: cfg.Limits, Env: cfg.Env},
 		ToolsFromSet(cfg.Tools),
@@ -196,6 +199,14 @@ func (r *Registry) build() (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := r.toolChoice.Validate(); err != nil {
+		return nil, fmt.Errorf("agentcore: invalid tool choice: %w", err)
+	}
+	var parallelToolCalls *bool
+	if r.parallelToolCalls != nil {
+		value := *r.parallelToolCalls
+		parallelToolCalls = &value
+	}
 
 	// Provider decorators are applied once, here, over every rung the run can
 	// reach. Doing it at compose time rather than in the loop is what keeps the
@@ -239,6 +250,8 @@ func (r *Registry) build() (*Agent, error) {
 		reasoningEffort:    r.reasoningEffort,
 		outputSchema:       r.outputSchema,
 		outputValidator:    outputValidator,
+		toolChoice:         r.toolChoice,
+		parallelToolCalls:  parallelToolCalls,
 	}
 	return a, nil
 }

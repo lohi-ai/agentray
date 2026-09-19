@@ -82,7 +82,8 @@ func (Tool) Name() string { return ToolName }
 // Schema advertises the tool to the model.
 func (Tool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolName,
+		Name:   ToolName,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Ask the user a structured question and wait for their answer. " +
 			"Use when you need a decision only the user can make — a choice between approaches, " +
 			"a missing detail, a confirmation. The run pauses until they answer; their reply " +

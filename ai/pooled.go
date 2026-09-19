@@ -2,7 +2,10 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -38,6 +41,69 @@ type pooledProvider struct {
 	sessionScope string
 	inner        agentcore.LLMProvider
 	src          TokenSource
+}
+
+// maxOAuthAuthAttempts is a hard safety ceiling for one logical provider
+// operation. A healthy pool normally succeeds in one or two attempts; the
+// larger ceiling lets a deliberately large server-side account pool rotate
+// past revoked siblings without creating an unbounded request loop.
+const maxOAuthAuthAttempts = 64
+
+type oauthAttemptState struct {
+	attempts int
+	seen     map[string]struct{}
+	lastAuth error
+}
+
+func newOAuthAttemptState() *oauthAttemptState {
+	return &oauthAttemptState{seen: make(map[string]struct{})}
+}
+
+func (s *oauthAttemptState) accept(tok OAuthToken) bool {
+	if s.attempts >= maxOAuthAuthAttempts || strings.TrimSpace(tok.AccessToken) == "" {
+		return false
+	}
+	// A refreshed bearer for the same account is a valid next attempt, while an
+	// exact account+bearer cycle proves the source has no new credential to offer.
+	identity := tok.AccountID + "\x00" + tok.AccessToken
+	if _, duplicate := s.seen[identity]; duplicate {
+		return false
+	}
+	s.seen[identity] = struct{}{}
+	s.attempts++
+	return true
+}
+
+func isOAuthAuthFailure(err error) bool {
+	var providerErr *agentcore.ProviderError
+	if !errors.As(err, &providerErr) {
+		return false
+	}
+	switch providerErr.Status {
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusForbidden:
+		// Some vendors encode a transient concurrency cap as 403. Let the normal
+		// backoff layer handle that instead of burning a healthy sibling account.
+		return !isOAuthConcurrencyCap(err)
+	default:
+		return false
+	}
+}
+
+func isOAuthConcurrencyCap(err error) bool {
+	var providerErr *agentcore.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Status != http.StatusForbidden {
+		return false
+	}
+	return strings.Contains(strings.ToLower(providerErr.Message), "concurren")
+}
+
+func (p *pooledProvider) report(ctx context.Context, tok OAuthToken, err error) {
+	if isOAuthConcurrencyCap(err) {
+		return
+	}
+	p.src.Report(ctx, tok, err)
 }
 
 // newPooledProvider wraps inner so each Chat/Stream call acquires an account
@@ -77,59 +143,168 @@ func (p *pooledProvider) ModelCapabilities(model string) agentcore.ModelCapabili
 }
 
 func (p *pooledProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	inner, tok, err := p.acquire(ctx)
-	if err != nil {
-		return agentcore.ChatResponse{}, err
+	state := newOAuthAttemptState()
+	for state.attempts < maxOAuthAuthAttempts {
+		inner, tok, err := p.acquire(ctx)
+		if err != nil {
+			if state.lastAuth != nil {
+				return agentcore.ChatResponse{}, state.lastAuth
+			}
+			return agentcore.ChatResponse{}, err
+		}
+		if !state.accept(tok) {
+			if state.lastAuth != nil {
+				return agentcore.ChatResponse{}, state.lastAuth
+			}
+			return agentcore.ChatResponse{}, agentcore.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
+		}
+		bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
+		resp, callErr := inner.Chat(ctx, req)
+		p.report(ctx, tok, callErr)
+		if callErr == nil || ctx.Err() != nil || !isOAuthAuthFailure(callErr) {
+			return resp, callErr
+		}
+		state.lastAuth = callErr
 	}
-	bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
-	resp, callErr := inner.Chat(ctx, req)
-	p.src.Report(ctx, tok, callErr)
-	return resp, callErr
+	return agentcore.ChatResponse{}, state.lastAuth
 }
 
 func (p *pooledProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	inner, tok, err := p.acquire(ctx)
+	state := newOAuthAttemptState()
+	ch, tok, cancel, err := p.startStreamAttempt(ctx, req, state)
 	if err != nil {
 		return nil, err
 	}
-	bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
-	ch, callErr := inner.Stream(ctx, req)
-	if callErr != nil {
-		// The call failed synchronously — report it here. A successful start is
-		// reported by reportStream once the stream actually closes, so the
-		// account is not stamped "used" before a single delta has flowed.
-		p.src.Report(ctx, tok, callErr)
-		return nil, callErr
-	}
-	return p.reportStream(ctx, tok, ch), nil
+	out := make(chan agentcore.ChatDelta, 16)
+	go p.runAuthStream(ctx, req, state, tok, ch, cancel, out)
+	return out, nil
 }
 
-// reportStream wraps the inner delta channel so the account that served the
-// request is marked when the stream fails mid-flight: the first delta carrying
-// Err is reported (once — later deltas may repeat the same failure), and a
-// clean close reports success so last_used_at advances. A caller-cancelled
-// context is not the account's fault, so it reports nothing.
-func (p *pooledProvider) reportStream(ctx context.Context, tok OAuthToken, ch <-chan agentcore.ChatDelta) <-chan agentcore.ChatDelta {
-	out := make(chan agentcore.ChatDelta, 16)
-	go func() {
-		defer close(out)
-		reported := false
-		for d := range ch {
-			if d.Err != nil && !reported {
-				reported = true
-				p.src.Report(ctx, tok, d.Err)
+// startStreamAttempt handles failures raised before a stream channel exists.
+// Those attempts have emitted nothing and are always replay-safe; only typed
+// 401/403 failures consume another credential.
+func (p *pooledProvider) startStreamAttempt(ctx context.Context, req agentcore.ChatRequest, state *oauthAttemptState) (<-chan agentcore.ChatDelta, OAuthToken, context.CancelFunc, error) {
+	for state.attempts < maxOAuthAuthAttempts {
+		inner, tok, err := p.acquire(ctx)
+		if err != nil {
+			if state.lastAuth != nil {
+				return nil, OAuthToken{}, nil, state.lastAuth
 			}
+			return nil, OAuthToken{}, nil, err
+		}
+		if !state.accept(tok) {
+			if state.lastAuth != nil {
+				return nil, OAuthToken{}, nil, state.lastAuth
+			}
+			return nil, OAuthToken{}, nil, agentcore.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
+		}
+		bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
+		attemptCtx, cancel := context.WithCancel(ctx)
+		ch, callErr := inner.Stream(attemptCtx, req)
+		if callErr == nil {
+			return ch, tok, cancel, nil
+		}
+		cancel()
+		p.report(ctx, tok, callErr)
+		if ctx.Err() != nil || !isOAuthAuthFailure(callErr) {
+			return nil, OAuthToken{}, nil, callErr
+		}
+		state.lastAuth = callErr
+	}
+	return nil, OAuthToken{}, nil, state.lastAuth
+}
+
+func drainChatDeltas(ch <-chan agentcore.ChatDelta) {
+	go func() {
+		for range ch {
+		}
+	}()
+}
+
+// runAuthStream buffers replay-safe metadata until an attempt succeeds. A
+// 401/403 before content rotates credentials and discards that attempt. The
+// first content delta is the commit boundary: after it, errors are forwarded
+// and never replayed, matching agentcore's visible-stream contract.
+func (p *pooledProvider) runAuthStream(ctx context.Context, req agentcore.ChatRequest, state *oauthAttemptState, tok OAuthToken, ch <-chan agentcore.ChatDelta, cancel context.CancelFunc, out chan<- agentcore.ChatDelta) {
+	defer close(out)
+	defer func() { cancel() }()
+	committed := false
+	var buffered []agentcore.ChatDelta
+
+	send := func(delta agentcore.ChatDelta) bool {
+		select {
+		case out <- delta:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	flush := func() bool {
+		for _, delta := range buffered {
+			if !send(delta) {
+				return false
+			}
+		}
+		buffered = buffered[:0]
+		return true
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Keep cancellation visible to direct Provider.Stream consumers. The
+			// non-blocking send avoids leaking this goroutine if the caller has
+			// abandoned a full output buffer; agentcore also checks ctx after close.
 			select {
-			case out <- d:
-			case <-ctx.Done():
-				// Consumer abandoned the stream — drain nothing, exit instead of
-				// blocking forever on a full buffer.
+			case out <- agentcore.ChatDelta{Done: true, Err: ctx.Err()}:
+			default:
+			}
+			return
+		case delta, open := <-ch:
+			if !open {
+				cancel()
+				if ctx.Err() == nil {
+					p.report(ctx, tok, nil)
+				}
+				flush()
+				return
+			}
+			if delta.Err != nil {
+				// An error delta is terminal for this attempt. Stop and drain it before
+				// Report performs any refresh I/O, so a chatty/broken provider cannot
+				// block behind its own full channel while credentials rotate.
+				stale := ch
+				cancel()
+				drainChatDeltas(stale)
+				p.report(ctx, tok, delta.Err)
+				if !committed && isOAuthAuthFailure(delta.Err) {
+					state.lastAuth = delta.Err
+					next, nextTok, nextCancel, err := p.startStreamAttempt(ctx, req, state)
+					if err == nil {
+						buffered = buffered[:0]
+						ch, tok, cancel = next, nextTok, nextCancel
+						continue
+					}
+				}
+				if !flush() {
+					return
+				}
+				send(delta)
+				return
+			}
+			if !committed && delta.ContentDelta == "" {
+				buffered = append(buffered, delta)
+				continue
+			}
+			if !committed {
+				if !flush() {
+					return
+				}
+				committed = true
+			}
+			if !send(delta) {
 				return
 			}
 		}
-		if !reported && ctx.Err() == nil {
-			p.src.Report(ctx, tok, nil)
-		}
-	}()
-	return out
+	}
 }

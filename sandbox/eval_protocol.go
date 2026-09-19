@@ -261,7 +261,7 @@ func (p *evalProcess) handleToolCall(
 		}
 		setResult(agentcore.ToolOutput{Invocations: []agentcore.ToolInvocation{{Trace: agentcore.ToolTrace{
 			CallID: frame.RequestID, Tool: frame.Name, Args: string(frame.Arguments), Allowed: false, Reason: reason,
-		}}})
+		}}}})
 	}
 	if frame.RequestID == "" || len(frame.RequestID) > 160 {
 		response.Error = "invalid host tool request id"

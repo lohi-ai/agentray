@@ -1406,12 +1406,22 @@ func (a *Agent) drive(ctx context.Context, messages []Message, task string, sink
 			// stable prefix on the request view and let each provider translate the
 			// marks into its native caching (or ignore them).
 			reqMessages = markCacheAnchors(reqMessages, res.Messages, a.cacheKey)
+			choice := a.toolChoice
+			parallel := cloneBool(a.parallelToolCalls)
+			if len(schemas) == 0 {
+				// Finalization and capability fallbacks deliberately borrow a
+				// tool-free turn; a run-wide required/named choice must not make
+				// that recovery request impossible.
+				choice = ToolChoice{}
+				parallel = nil
+			}
 			req := ChatRequest{
 				Messages: reqMessages, Tools: schemas,
 				SessionID: a.providerSessionID, ProviderSession: a.providerSession,
 				CacheKey: a.cacheKey, CacheRetention: a.cacheRetention,
 				MaxTokens: a.maxTokens, ReasoningEffort: a.reasoningEffort,
 				OutputSchema: a.outputSchema,
+				ToolChoice:   choice, ParallelToolCalls: parallel,
 			}
 			return a.hooks.runBeforeProviderRequest(ctx, req)
 		}

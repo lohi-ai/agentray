@@ -42,7 +42,10 @@ func RunSessionStoreConformance(t *testing.T, harness SessionStoreHarness) {
 		message := agentcore.Message{
 			Role: agentcore.RoleAssistant, Content: "calling", Directive: true,
 			ToolCalls: []agentcore.ToolCall{{ID: "call-1", Name: "read", Arguments: `{"path":"README.md"}`}},
-			Usage:     &agentcore.Usage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 3, CostUSD: 0.125},
+			ReasoningBlocks: []agentcore.ReasoningBlock{{
+				Type: agentcore.ReasoningBlockThinking, Text: "opaque", Signature: "sig", ReplayScope: "anthropic:scope",
+			}},
+			Usage: &agentcore.Usage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 3, CostUSD: 0.125},
 		}
 		first := agentcore.SessionEntry{
 			Kind: agentcore.EntryMessage, ID: "assistant-1", ParentID: "root", Turn: 2,
@@ -72,6 +75,7 @@ func RunSessionStoreConformance(t *testing.T, harness SessionStoreHarness) {
 		// caller's structs.
 		first.Message.Content = "mutated at source"
 		first.Message.ToolCalls[0].Name = "mutated"
+		first.Message.ReasoningBlocks[0].Signature = "mutated"
 		first.Message.Usage.InputTokens = 999
 		first.Tools[0] = "mutated"
 		first.Question[0] = 'X'
@@ -84,6 +88,7 @@ func RunSessionStoreConformance(t *testing.T, harness SessionStoreHarness) {
 		// Reads are snapshots too: mutating one result must not rewrite the log.
 		got[0].Message.Content = "mutated through read"
 		got[0].Message.ToolCalls[0].Name = "mutated through read"
+		got[0].Message.ReasoningBlocks[0].Signature = "mutated through read"
 		got[1].Outcome.Extra[0].Content = "mutated through read"
 		assertTypedEntries(t, mustLog(t, harness.Store, id), created)
 	})
@@ -506,7 +511,9 @@ func assertTypedEntries(t *testing.T, got []agentcore.SessionEntry, created time
 	if first.Kind != agentcore.EntryMessage || first.ID != "assistant-1" || first.ParentID != "root" || first.Turn != 2 || !first.CreatedAt.Equal(created) {
 		t.Fatalf("message envelope did not round-trip: %+v", first)
 	}
-	if first.Message == nil || first.Message.Content != "calling" || len(first.Message.ToolCalls) != 1 || first.Message.ToolCalls[0].Name != "read" || first.Message.Usage == nil || first.Message.Usage.InputTokens != 11 {
+	if first.Message == nil || first.Message.Content != "calling" || len(first.Message.ToolCalls) != 1 || first.Message.ToolCalls[0].Name != "read" ||
+		len(first.Message.ReasoningBlocks) != 1 || first.Message.ReasoningBlocks[0].Signature != "sig" ||
+		first.Message.Usage == nil || first.Message.Usage.InputTokens != 11 {
 		t.Fatalf("typed message did not round-trip: %+v", first.Message)
 	}
 	if !reflect.DeepEqual(first.Tools, []string{"read", "write"}) || string(first.Question) != `{"prompt":"continue?"}` {

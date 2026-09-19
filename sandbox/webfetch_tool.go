@@ -102,7 +102,8 @@ func (t *WebFetchTool) Schema() agentcore.ToolSchema {
 		props["save_as"] = saveAsParam()
 	}
 	return agentcore.ToolSchema{
-		Name: ToolWebFetch,
+		Name:   ToolWebFetch,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Fetch a public web page over HTTPS and return its readable text content. " +
 			"HTML is stripped to text; non-HTML text is returned as-is. Use this to read documentation, " +
 			"articles, or API docs. Internal/loopback/private addresses are refused. For authenticated " +

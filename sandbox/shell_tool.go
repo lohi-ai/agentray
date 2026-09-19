@@ -169,6 +169,7 @@ func (t *ShellTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:        t.name,
 		Description: t.description,
+		Strict:      agentcore.ToolStrictEnabled,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -62,7 +62,8 @@ func (t *GrepTool) Parallel() bool { return true }
 
 func (t *GrepTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolGrep,
+		Name:   ToolGrep,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Search file contents in the agent workspace by regular expression (Go/RE2 syntax). " +
 			"Returns matching lines as path:line:text, capped at " + fmt.Sprint(maxGrepMatches) + " matches. " +
 			"Use glob to narrow which files are searched, path to scope to a subdirectory, and context " +
@@ -259,7 +260,8 @@ func (t *GlobTool) Parallel() bool { return true }
 
 func (t *GlobTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolGlob,
+		Name:   ToolGlob,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "List files in the agent workspace whose relative path matches a glob pattern " +
 			"(supports *, ?, and ** for any depth, e.g. **/*.go or src/**/test_*.ts). " +
 			"Returns up to " + fmt.Sprint(maxGlobMatches) + " sorted paths.",

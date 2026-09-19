@@ -360,6 +360,27 @@ func TestMarkCacheAnchorsStopsAtChangedRichContent(t *testing.T) {
 	}
 }
 
+func TestMarkCacheAnchorsStopsAtChangedReasoningReplayState(t *testing.T) {
+	history := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleAssistant, Content: "same answer", ReasoningBlocks: []ReasoningBlock{{
+			Type: ReasoningBlockThinking, Signature: "old", ReplayScope: "anthropic:scope",
+		}}},
+		{Role: RoleUser, Content: "continue"},
+	}
+	req := cloneSessionMessages(history)
+	req[1].ReasoningBlocks[0].Signature = "new"
+	out := markCacheAnchors(req, history, "k")
+	if !out[0].CacheAnchor {
+		t.Fatal("cache prefix must stop before changed signed reasoning state")
+	}
+	for i := 1; i < len(out); i++ {
+		if out[i].CacheAnchor {
+			t.Fatalf("anchored at %d past changed reasoning state", i)
+		}
+	}
+}
+
 func TestMarkCacheAnchorsClearsStaleMarks(t *testing.T) {
 	// A hook (or a bug) leaving anchors on history must not accumulate into
 	// more breakpoints than a provider allows.

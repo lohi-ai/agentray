@@ -83,7 +83,8 @@ func (t *teamBoardTool) Schema() agentcore.ToolSchema {
 		names = append(names, tm.Name)
 	}
 	return agentcore.ToolSchema{
-		Name: ToolTeamBoard,
+		Name:   ToolTeamBoard,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Read and update the kanban board of the team(s) you lead (" + strings.Join(names, "; ") + "). " +
 			"Actions: list (the full board), add (new backlog card), move (change a card's status and/or assignee).",
 		Parameters: map[string]any{

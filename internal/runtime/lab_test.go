@@ -114,15 +114,16 @@ func TestExplainControlsDeliverSignals(t *testing.T) {
 func TestRecordsFromCalls(t *testing.T) {
 	calls := []storage.AgentLLMCall{
 		{
-			MessagesJSON:  `[{"role":"system","content":"# Identity\nYou help."},{"role":"user","content":"hi"}]`,
-			ToolCallsJSON: `[{"id":"c1","name":"search","arguments":"{\"q\":\"x\"}"}]`,
-			ToolGatesJSON: `[{"call_id":"c1","allowed":false,"reason":"not permitted"}]`,
-			Tools:         []string{"search"},
-			Response:      "thinking",
-			StopReason:    "tool_calls",
-			TokenInput:    100,
-			TokenOutput:   12,
-			CostUSD:       0.002,
+			MessagesJSON:        `[{"role":"system","content":"# Identity\nYou help."},{"role":"user","content":"hi"}]`,
+			ReasoningBlocksJSON: `[{"type":"thinking","text":"opaque","signature":"sig","replay_scope":"anthropic:scope"}]`,
+			ToolCallsJSON:       `[{"id":"c1","name":"search","arguments":"{\"q\":\"x\"}"}]`,
+			ToolGatesJSON:       `[{"call_id":"c1","allowed":false,"reason":"not permitted"}]`,
+			Tools:               []string{"search"},
+			Response:            "thinking",
+			StopReason:          "tool_calls",
+			TokenInput:          100,
+			TokenOutput:         12,
+			CostUSD:             0.002,
 		},
 	}
 	recs := recordsFromCalls(calls)
@@ -135,6 +136,9 @@ func TestRecordsFromCalls(t *testing.T) {
 	}
 	if len(r.ToolCalls) != 1 || r.ToolCalls[0].Name != "search" {
 		t.Fatalf("tool calls not parsed: %+v", r.ToolCalls)
+	}
+	if len(r.ReasoningBlocks) != 1 || r.ReasoningBlocks[0].Signature != "sig" {
+		t.Fatalf("reasoning blocks not parsed: %+v", r.ReasoningBlocks)
 	}
 	if len(r.ToolGates) != 1 || r.ToolGates[0].Allowed || r.ToolGates[0].CallID != "c1" {
 		t.Fatalf("tool gates not parsed: %+v", r.ToolGates)

@@ -3,8 +3,10 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -64,6 +66,57 @@ func TestOpenAICompatibleEmptyKeyOmitsAuthorizationEverywhere(t *testing.T) {
 	}
 	if len(paths) != 4 {
 		t.Fatalf("requests = %v, want chat + stream + embeddings + models", paths)
+	}
+}
+
+func TestOpenAIConcurrentKeyRotationUsesWholeCredential(t *testing.T) {
+	var serverErr error
+	var errMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer key-a" && auth != "Bearer key-b" {
+			errMu.Lock()
+			serverErr = fmt.Errorf("unexpected Authorization header %q", auth)
+			errMu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAIProvider("key-a", srv.URL, DefaultCompat())
+	p.HTTP = srv.Client()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			if i%2 == 0 {
+				p.UpdateAPIKey("key-a")
+			} else {
+				p.UpdateAPIKey("key-b")
+			}
+		}
+	}()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"}); err != nil {
+					errMu.Lock()
+					if serverErr == nil {
+						serverErr = err
+					}
+					errMu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	errMu.Lock()
+	defer errMu.Unlock()
+	if serverErr != nil {
+		t.Fatal(serverErr)
 	}
 }
 

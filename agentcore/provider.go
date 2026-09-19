@@ -37,7 +37,11 @@ type ModelCapabilities struct {
 	// means unknown, in which case the loop uses a conservative portable floor.
 	// It is separate from ImageInput: a model may accept images but only a
 	// bounded number of them in one accumulated conversation.
-	MaxInputImages    int               `json:"max_input_images,omitempty"`
+	MaxInputImages int `json:"max_input_images,omitempty"`
+	// MaxOutputTokens is the provider/model's hard output ceiling. Zero means
+	// unknown. The request path clamps only an explicit caller limit above this
+	// value; it leaves MaxTokens=0 to the provider's normal default.
+	MaxOutputTokens   int               `json:"max_output_tokens,omitempty"`
 	StructuredOutput  CapabilitySupport `json:"structured_output,omitempty"`
 	PromptCaching     CapabilitySupport `json:"prompt_caching,omitempty"`
 	StatefulResponses CapabilitySupport `json:"stateful_responses,omitempty"`
@@ -60,6 +64,9 @@ func (c ModelCapabilities) Overlay(newer ModelCapabilities) ModelCapabilities {
 	}
 	if newer.MaxInputImages > 0 {
 		c.MaxInputImages = newer.MaxInputImages
+	}
+	if newer.MaxOutputTokens > 0 {
+		c.MaxOutputTokens = newer.MaxOutputTokens
 	}
 	if newer.StructuredOutput != CapabilityUnknown {
 		c.StructuredOutput = newer.StructuredOutput
@@ -90,6 +97,9 @@ func (c ModelCapabilities) Validate() error {
 	if c.MaxInputImages < 0 {
 		return fmt.Errorf("max_input_images must be zero (unknown) or positive")
 	}
+	if c.MaxOutputTokens < 0 {
+		return fmt.Errorf("max_output_tokens must be zero (unknown) or positive")
+	}
 	return nil
 }
 
@@ -115,9 +125,15 @@ type Message struct {
 	// keep their stable contract; capable adapters append these parts natively
 	// and explicitly degrade them for text-only models.
 	ContentParts []ContentPart `json:"content_parts,omitempty"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID   string        `json:"tool_call_id,omitempty"`
-	Name         string        `json:"name,omitempty"` // tool name for tool-result messages
+	// ReasoningBlocks preserves provider-issued replay material such as
+	// Anthropic signed thinking and redacted-thinking blocks. It is durable but
+	// never rendered as assistant Content. Adapters must replay a block only
+	// when its opaque ReplayScope matches the exact endpoint/model that issued
+	// it; all other providers ignore it.
+	ReasoningBlocks []ReasoningBlock `json:"reasoning_blocks,omitempty"`
+	ToolCalls       []ToolCall       `json:"tool_calls,omitempty"`
+	ToolCallID      string           `json:"tool_call_id,omitempty"`
+	Name            string           `json:"name,omitempty"` // tool name for tool-result messages
 	// Usage is the provider-reported token usage for the turn that produced this
 	// message. Set only on assistant messages, and only when the provider
 	// reported it. Compaction prefers this over a byte heuristic to decide when
@@ -168,6 +184,23 @@ type Message struct {
 	CacheAnchor bool `json:"-"`
 }
 
+// ReasoningBlock is opaque provider replay state, not user-visible chain of
+// thought. Text is present only when a provider requires it beside a signature;
+// Data carries encrypted/redacted payloads. ReplayScope is provider-generated
+// and deliberately opaque to agentcore.
+type ReasoningBlock struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	Data        string `json:"data,omitempty"`
+	ReplayScope string `json:"replay_scope"`
+}
+
+const (
+	ReasoningBlockThinking = "thinking"
+	ReasoningBlockRedacted = "redacted_thinking"
+)
+
 // ContentPart is one structured message attachment. Image Data is base64
 // without a data-URL prefix; MIMEType identifies the bytes. Detail is the
 // provider-neutral resolution hint understood by OpenAI-family adapters.
@@ -204,6 +237,79 @@ type ToolSchema struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"` // JSON Schema object
+	// Strict controls provider-side constrained argument generation. It is a
+	// wire-quality hint, not the execution boundary: ToolSet always validates
+	// against Parameters locally. Default omits the vendor field for maximum
+	// compatibility with local/OpenAI-compatible endpoints; Enabled asks an
+	// adapter to use strict mode only when it can preserve schema semantics;
+	// Disabled explicitly emits strict:false where the wire API supports it.
+	Strict ToolStrictness `json:"strict,omitempty"`
+}
+
+// ToolStrictness is tri-state so an author can distinguish a compatibility-
+// preserving omission from an explicit false. String values keep persisted
+// agent definitions readable and avoid pointer ownership in copied schemas.
+type ToolStrictness string
+
+const (
+	ToolStrictDefault  ToolStrictness = ""
+	ToolStrictEnabled  ToolStrictness = "enabled"
+	ToolStrictDisabled ToolStrictness = "disabled"
+)
+
+func (s ToolStrictness) Validate() error {
+	switch s {
+	case ToolStrictDefault, ToolStrictEnabled, ToolStrictDisabled:
+		return nil
+	default:
+		return fmt.Errorf("unknown tool strictness %q", s)
+	}
+}
+
+// ToolChoiceMode is the provider-neutral policy for whether the model may or
+// must call a tool. The empty value preserves the provider default and is
+// deliberately different from Auto: strict compatible endpoints sometimes
+// reject even a redundant tool_choice field.
+type ToolChoiceMode string
+
+const (
+	ToolChoiceDefault  ToolChoiceMode = ""
+	ToolChoiceAuto     ToolChoiceMode = "auto"
+	ToolChoiceNone     ToolChoiceMode = "none"
+	ToolChoiceRequired ToolChoiceMode = "required"
+	ToolChoiceNamed    ToolChoiceMode = "named"
+)
+
+// ToolChoice selects the tool-routing policy for one request. Name is required
+// only for ToolChoiceNamed and is checked against the schemas that actually
+// survive capability filtering before a provider is called.
+type ToolChoice struct {
+	Mode ToolChoiceMode `json:"mode"`
+	Name string         `json:"name,omitempty"`
+}
+
+func (c ToolChoice) Validate() error {
+	switch c.Mode {
+	case ToolChoiceDefault, ToolChoiceAuto, ToolChoiceNone, ToolChoiceRequired:
+		if c.Name != "" {
+			return fmt.Errorf("tool choice %q cannot name a tool", c.Mode)
+		}
+	case ToolChoiceNamed:
+		if c.Name == "" {
+			return fmt.Errorf("named tool choice requires a tool name")
+		}
+	default:
+		return fmt.Errorf("tool choice mode must be auto, none, required, named, or empty")
+	}
+	return nil
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // Usage carries token/cost accounting surfaced from a provider response.
@@ -267,6 +373,13 @@ type ChatRequest struct {
 	// reasoning_effort; providers without the knob ignore it. Empty sends
 	// nothing, so strict compat servers are unaffected.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ToolChoice controls whether the model may, must, or must not call a tool;
+	// the zero value leaves provider behavior unchanged. ParallelToolCalls is a
+	// tri-state hint: nil omits the wire field, while false explicitly asks the
+	// provider to emit at most one call per turn. Local execution safety remains
+	// governed independently by each tool's ParallelTool opt-in.
+	ToolChoice        ToolChoice `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool      `json:"parallel_tool_calls,omitempty"`
 	// OutputSchema, when non-nil, constrains the model's text answer to the
 	// given JSON Schema (grammar-constrained decoding). OpenAI maps it to
 	// response_format json_schema with strict:true; Anthropic to the
@@ -320,10 +433,14 @@ type ChatResponse struct {
 type ChatDelta struct {
 	ContentDelta string    `json:"content_delta,omitempty"`
 	ToolCall     *ToolCall `json:"tool_call,omitempty"`
-	Done         bool      `json:"done,omitempty"`
-	StopReason   string    `json:"stop_reason,omitempty"`
-	Usage        Usage     `json:"usage,omitempty"`
-	Err          error     `json:"-"`
+	// ReasoningBlock carries one complete opaque replay block. Providers emit it
+	// only after the block's signature/data is complete; the loop persists it on
+	// the assistant message without exposing it through StreamToken.
+	ReasoningBlock *ReasoningBlock `json:"reasoning_block,omitempty"`
+	Done           bool            `json:"done,omitempty"`
+	StopReason     string          `json:"stop_reason,omitempty"`
+	Usage          Usage           `json:"usage,omitempty"`
+	Err            error           `json:"-"`
 }
 
 // LLMProvider is the narrow multi-provider seam. Starting with OpenAI; adding a

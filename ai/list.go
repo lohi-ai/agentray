@@ -36,7 +36,12 @@ func doJSON(ctx context.Context, client HTTPDoer, req *http.Request) ([]byte, in
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	var data []byte
+	if resp.StatusCode >= 400 {
+		data = readProviderErrorBody(resp.Body)
+	} else {
+		data, _ = io.ReadAll(resp.Body)
+	}
 	return data, resp.StatusCode, nil
 }
 
@@ -157,8 +162,9 @@ func listModelsV1(ctx context.Context, client HTTPDoer, baseURL string, auth fun
 	}
 	var decoded struct {
 		Data []struct {
-			ID            string `json:"id"`
-			ContextWindow int    `json:"context_window"`
+			ID              string `json:"id"`
+			ContextWindow   int    `json:"context_window"`
+			MaxOutputTokens int    `json:"max_output_tokens"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -167,7 +173,8 @@ func listModelsV1(ctx context.Context, client HTTPDoer, baseURL string, auth fun
 	out := make([]listedModel, 0, len(decoded.Data))
 	for _, m := range decoded.Data {
 		if id := strings.TrimSpace(m.ID); id != "" {
-			out = append(out, listedModel{ID: id, ContextWindow: m.ContextWindow})
+			out = append(out, listedModel{ID: id, ContextWindow: m.ContextWindow,
+				Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: m.MaxOutputTokens}})
 		}
 	}
 	return out, nil
@@ -223,8 +230,9 @@ func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 	}
 	var decoded struct {
 		Models []struct {
-			Name            string `json:"name"`
-			InputTokenLimit int    `json:"inputTokenLimit"`
+			Name             string `json:"name"`
+			InputTokenLimit  int    `json:"inputTokenLimit"`
+			OutputTokenLimit int    `json:"outputTokenLimit"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -235,7 +243,8 @@ func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 		id := strings.TrimSpace(m.Name)
 		id = strings.TrimPrefix(id, "models/")
 		if id != "" {
-			out = append(out, listedModel{ID: id, ContextWindow: m.InputTokenLimit})
+			out = append(out, listedModel{ID: id, ContextWindow: m.InputTokenLimit,
+				Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: m.OutputTokenLimit}})
 		}
 	}
 	return out, nil

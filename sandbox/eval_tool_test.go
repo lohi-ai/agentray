@@ -264,6 +264,28 @@ const dockerLabel: Label = { value: basename("/tmp/item.txt") };
 	if out, err := tool.Run(ctx, string(payload)); err != nil || !strings.Contains(out, "item.txt") || !strings.Contains(out, `"moduleValue": 42`) {
 		t.Fatalf("Docker JavaScript TypeScript/static import: out=%q err=%v", out, err)
 	}
+	probe := &evalBridgeProbeTool{}
+	bridgeArgs, _ := json.Marshal(map[string]any{
+		"language": "javascript", "code": `await tool.bridge_probe({value: "docker"})`,
+	})
+	agent, err := agentcore.New(agentcore.Config{
+		Provider: agentcore.NewFauxProvider(
+			agentcore.AssistantToolCall("docker-eval-call", ToolEval, string(bridgeArgs)),
+			agentcore.AssistantText("done"),
+		),
+		Model: "faux", Tools: agentcore.NewToolSet(tool, probe),
+		Policy: agentcore.NewAllowList(ToolEval, probeToolName),
+	})
+	if err != nil {
+		t.Fatalf("Docker bridge agent: %v", err)
+	}
+	bridgeResult, err := agent.Prompt(evalContext("docker-bridge"), "bridge from the container")
+	if err != nil {
+		t.Fatalf("Docker bridge prompt: %v", err)
+	}
+	if probe.calls.Load() != 1 || !strings.Contains(toolMessageFor(t, bridgeResult, ToolEval).Content, "probe:docker") {
+		t.Fatalf("Docker bridge failed: calls=%d result=%+v", probe.calls.Load(), bridgeResult)
+	}
 }
 
 func TestJavaScriptEvalKeepsPartialStateAfterRuntimeError(t *testing.T) {

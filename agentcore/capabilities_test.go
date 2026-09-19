@@ -107,6 +107,121 @@ func TestRequestForCapabilitiesStripsOnlyExplicitlyUnsupportedHints(t *testing.T
 	}
 }
 
+func TestRequestForCapabilitiesValidatesAndDegradesToolChoice(t *testing.T) {
+	tools := []ToolSchema{{Name: "query", Parameters: map[string]any{"type": "object"}}}
+	supported := &capabilityProbeProvider{name: "supported", caps: ModelCapabilities{ToolChoice: CapabilitySupported}}
+	named := ChatRequest{Tools: tools, ToolChoice: ToolChoice{Mode: ToolChoiceNamed, Name: "query"}}
+	got, err := requestForCapabilities(supported, "m", ModelCapabilities{}, named)
+	if err != nil || got.ToolChoice != named.ToolChoice {
+		t.Fatalf("supported named choice = %+v err=%v", got.ToolChoice, err)
+	}
+
+	missing := named
+	missing.ToolChoice.Name = "absent"
+	if _, err := requestForCapabilities(supported, "m", ModelCapabilities{}, missing); err == nil || !strings.Contains(err.Error(), "not present") {
+		t.Fatalf("missing named choice error = %v", err)
+	}
+	if _, err := requestForCapabilities(supported, "m", ModelCapabilities{}, ChatRequest{
+		ToolChoice: ToolChoice{Mode: ToolChoiceRequired},
+	}); err == nil || !strings.Contains(err.Error(), "at least one tool") {
+		t.Fatalf("required-without-tools error = %v", err)
+	}
+
+	unsupported := &capabilityProbeProvider{name: "legacy", caps: ModelCapabilities{ToolChoice: CapabilityUnsupported}}
+	parallel := false
+	got, err = requestForCapabilities(unsupported, "m", ModelCapabilities{}, ChatRequest{
+		Tools: tools, ToolChoice: ToolChoice{Mode: ToolChoiceNone}, ParallelToolCalls: &parallel,
+	})
+	if err != nil || len(got.Tools) != 0 || got.ToolChoice != (ToolChoice{}) || got.ParallelToolCalls != nil {
+		t.Fatalf("unsupported none choice was not locally enforced: %+v err=%v", got, err)
+	}
+	unsupported.caps.Tools = CapabilityUnsupported
+	got, err = requestForCapabilities(unsupported, "m", ModelCapabilities{}, ChatRequest{
+		Tools: tools, ToolChoice: ToolChoice{Mode: ToolChoiceNone}, ParallelToolCalls: &parallel,
+	})
+	if err != nil || len(got.Tools) != 0 {
+		t.Fatalf("text-only none choice was not locally enforced: %+v err=%v", got, err)
+	}
+	unsupported.caps.Tools = CapabilityUnknown
+	if _, err := requestForCapabilities(unsupported, "m", ModelCapabilities{}, named); err == nil {
+		t.Fatal("unsupported forced choice should fail for escalation")
+	} else {
+		var capabilityErr *ModelCapabilityError
+		if !errors.As(err, &capabilityErr) || capabilityErr.Feature != "forced tool choice" {
+			t.Fatalf("forced choice error = %T %v", err, err)
+		}
+	}
+}
+
+func TestRequestForCapabilitiesRejectsUnknownToolStrictness(t *testing.T) {
+	provider := &capabilityProbeProvider{name: "supported", caps: ModelCapabilities{Tools: CapabilitySupported}}
+	_, err := requestForCapabilities(provider, "m", ModelCapabilities{}, ChatRequest{Tools: []ToolSchema{{
+		Name: "query", Strict: ToolStrictness("sometimes"), Parameters: map[string]any{"type": "object"},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), `tool "query"`) || !strings.Contains(err.Error(), "unknown tool strictness") {
+		t.Fatalf("invalid strictness error = %v", err)
+	}
+}
+
+func TestConfigForwardsToolControlsAndClonesParallelFlag(t *testing.T) {
+	provider := &capabilityProbeProvider{
+		name: "capture", caps: ModelCapabilities{Tools: CapabilitySupported, ToolChoice: CapabilitySupported},
+		response: AssistantText("done"),
+	}
+	parallel := false
+	agent, err := New(Config{
+		Provider: provider, Model: "m", Tools: NewToolSet(capabilityProbeTool{}), Policy: NewAllowList("probe"),
+		ToolChoice: ToolChoice{Mode: ToolChoiceNamed, Name: "probe"}, ParallelToolCalls: &parallel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallel = true // the built agent must own a snapshot, not the caller's pointer
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.recorded) != 1 {
+		t.Fatalf("recorded requests = %d", len(provider.recorded))
+	}
+	req := provider.recorded[0]
+	if req.ToolChoice != (ToolChoice{Mode: ToolChoiceNamed, Name: "probe"}) || req.ParallelToolCalls == nil || *req.ParallelToolCalls {
+		t.Fatalf("forwarded controls = choice=%+v parallel=%v", req.ToolChoice, req.ParallelToolCalls)
+	}
+}
+
+func TestToolChoiceValidation(t *testing.T) {
+	cases := []struct {
+		choice  ToolChoice
+		wantErr bool
+	}{
+		{ToolChoice{}, false},
+		{ToolChoice{Mode: ToolChoiceAuto}, false},
+		{ToolChoice{Mode: ToolChoiceNone}, false},
+		{ToolChoice{Mode: ToolChoiceRequired}, false},
+		{ToolChoice{Mode: ToolChoiceNamed, Name: "query"}, false},
+		{ToolChoice{Mode: ToolChoiceNamed}, true},
+		{ToolChoice{Mode: ToolChoiceAuto, Name: "query"}, true},
+		{ToolChoice{Mode: "sometimes"}, true},
+	}
+	for _, tc := range cases {
+		if err := tc.choice.Validate(); (err != nil) != tc.wantErr {
+			t.Fatalf("Validate(%+v) = %v, wantErr=%v", tc.choice, err, tc.wantErr)
+		}
+	}
+}
+
+func TestRequestForCapabilitiesClampsOnlyExplicitOutputLimit(t *testing.T) {
+	limited := &capabilityProbeProvider{name: "limited", caps: ModelCapabilities{MaxOutputTokens: 4096}}
+	got, err := requestForCapabilities(limited, "m", ModelCapabilities{}, ChatRequest{MaxTokens: 32000})
+	if err != nil || got.MaxTokens != 4096 {
+		t.Fatalf("clamped request = %+v err=%v, want 4096", got, err)
+	}
+	got, err = requestForCapabilities(limited, "m", ModelCapabilities{}, ChatRequest{})
+	if err != nil || got.MaxTokens != 0 {
+		t.Fatalf("provider-default request = %+v err=%v, want MaxTokens=0", got, err)
+	}
+}
+
 func TestRequestForCapabilitiesDegradesImagesCopyOnWrite(t *testing.T) {
 	original := []Message{{
 		Role: RoleTool, Content: "plot", ToolCallID: "c1",

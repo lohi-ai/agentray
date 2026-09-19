@@ -47,19 +47,23 @@ type TraceRecord struct {
 	// undifferentiated stream. Empty outside a durable run.
 	SessionKey string `json:"session_key,omitempty"`
 	// Depth is the delegation depth of the caller: 0 for the top-level run.
-	Depth      int                  `json:"depth,omitempty"`
-	Timestamp  time.Time            `json:"timestamp"`
-	Provider   string               `json:"provider"`
-	Model      string               `json:"model"`
-	Messages   []agentcore.Message  `json:"messages"`             // the request sent to the model
-	Tools      []string             `json:"tools,omitempty"`      // tool names advertised this turn
-	Response   string               `json:"response,omitempty"`   // assistant text returned
-	ToolCalls  []agentcore.ToolCall `json:"tool_calls,omitempty"` // tool calls the model requested
-	StopReason string               `json:"stop_reason,omitempty"`
-	Usage      agentcore.Usage      `json:"usage"` // tokens + computed CostUSD
-	LatencyMS  int64                `json:"latency_ms"`
-	Streamed   bool                 `json:"streamed"`
-	Err        string               `json:"error,omitempty"`
+	Depth     int                 `json:"depth,omitempty"`
+	Timestamp time.Time           `json:"timestamp"`
+	Provider  string              `json:"provider"`
+	Model     string              `json:"model"`
+	Messages  []agentcore.Message `json:"messages"`           // the request sent to the model
+	Tools     []string            `json:"tools,omitempty"`    // tool names advertised this turn
+	Response  string              `json:"response,omitempty"` // assistant text returned
+	// ReasoningBlocks carries opaque provider replay state (for example,
+	// Anthropic signed thinking). It is recorded separately from Response so it
+	// can be replayed without ever rendering it as user-visible assistant text.
+	ReasoningBlocks []agentcore.ReasoningBlock `json:"reasoning_blocks,omitempty"`
+	ToolCalls       []agentcore.ToolCall       `json:"tool_calls,omitempty"` // tool calls the model requested
+	StopReason      string                     `json:"stop_reason,omitempty"`
+	Usage           agentcore.Usage            `json:"usage"` // tokens + computed CostUSD
+	LatencyMS       int64                      `json:"latency_ms"`
+	Streamed        bool                       `json:"streamed"`
+	Err             string                     `json:"error,omitempty"`
 }
 
 // Sink receives a TraceRecord per LLM call. Implementations fan out to a
@@ -138,13 +142,14 @@ func (t *tracingProvider) ModelCapabilities(model string) agentcore.ModelCapabil
 	return agentcore.CapabilitiesOf(t.inner, model)
 }
 
-// UpdateAPIKey forwards key rotation to the inner provider when it supports it,
-// so wrapping doesn't break long-run BYO-key refresh (the loop type-asserts the
-// provider for agentcore.KeyUpdater).
-func (t *tracingProvider) UpdateAPIKey(key string) {
-	if u, ok := t.inner.(agentcore.KeyUpdater); ok {
-		u.UpdateAPIKey(key)
-	}
+// tracingKeyProvider is installed only when the wrapped provider really
+// supports mutable static credentials. Keeping this method off tracingProvider
+// is important: Go interfaces are structural, so a forwarding no-op would make
+// an OAuth pool look like a KeyUpdater and trigger the run's static-key resolver.
+type tracingKeyProvider struct{ *tracingProvider }
+
+func (t *tracingKeyProvider) UpdateAPIKey(key string) {
+	t.inner.(agentcore.KeyUpdater).UpdateAPIKey(key)
 }
 
 // Chat runs the call, prices it, and emits one trace record.
@@ -177,6 +182,9 @@ func (t *tracingProvider) Stream(ctx context.Context, req agentcore.ChatRequest)
 			msg.Content += d.ContentDelta
 			if d.ToolCall != nil {
 				msg.ToolCalls = append(msg.ToolCalls, *d.ToolCall)
+			}
+			if d.ReasoningBlock != nil {
+				msg.ReasoningBlocks = append(msg.ReasoningBlocks, *d.ReasoningBlock)
 			}
 			if d.Done {
 				t.price(req.Model, &d.Usage)
@@ -213,20 +221,21 @@ func (t *tracingProvider) emit(ctx context.Context, req agentcore.ChatRequest, r
 		return
 	}
 	rec := TraceRecord{
-		TraceID:    traceIDFrom(ctx),
-		SessionKey: agentcore.RunSessionFrom(ctx),
-		Depth:      agentcore.DelegationDepth(ctx),
-		Timestamp:  start(dur),
-		Provider:   t.inner.Name(),
-		Model:      req.Model,
-		Messages:   req.Messages,
-		Tools:      toolNames(req.Tools),
-		Response:   resp.Message.Content,
-		ToolCalls:  resp.Message.ToolCalls,
-		StopReason: resp.StopReason,
-		Usage:      resp.Usage,
-		LatencyMS:  dur.Milliseconds(),
-		Streamed:   streamed,
+		TraceID:         traceIDFrom(ctx),
+		SessionKey:      agentcore.RunSessionFrom(ctx),
+		Depth:           agentcore.DelegationDepth(ctx),
+		Timestamp:       start(dur),
+		Provider:        t.inner.Name(),
+		Model:           req.Model,
+		Messages:        req.Messages,
+		Tools:           toolNames(req.Tools),
+		Response:        resp.Message.Content,
+		ReasoningBlocks: resp.Message.ReasoningBlocks,
+		ToolCalls:       resp.Message.ToolCalls,
+		StopReason:      resp.StopReason,
+		Usage:           resp.Usage,
+		LatencyMS:       dur.Milliseconds(),
+		Streamed:        streamed,
 	}
 	if err != nil {
 		rec.Err = err.Error()

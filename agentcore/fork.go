@@ -60,6 +60,8 @@ func (a *Agent) Fork(childSessionID string) *Agent {
 		reasoningEffort:    a.reasoningEffort,
 		outputSchema:       a.outputSchema,
 		outputValidator:    a.outputValidator,
+		toolChoice:         a.toolChoice,
+		parallelToolCalls:  cloneBool(a.parallelToolCalls),
 		providerSession:    a.providerSession,
 		providerSessionID:  childSessionID,
 		extensions:         a.extensions,

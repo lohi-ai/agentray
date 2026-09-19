@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -81,8 +82,54 @@ func (e *ModelCapabilityError) Error() string {
 // by Agent.outputValidator after the response).
 func requestForCapabilities(provider LLMProvider, model string, discovered ModelCapabilities, req ChatRequest) (ChatRequest, error) {
 	caps := CapabilitiesOf(provider, model).Overlay(discovered)
+	if err := req.ToolChoice.Validate(); err != nil {
+		return ChatRequest{}, fmt.Errorf("agentcore: invalid tool choice: %w", err)
+	}
+	for _, tool := range req.Tools {
+		if err := tool.Strict.Validate(); err != nil {
+			return ChatRequest{}, fmt.Errorf("agentcore: tool %q: %w", tool.Name, err)
+		}
+	}
 	if len(req.Tools) > 0 && caps.Tools == CapabilityUnsupported {
-		return ChatRequest{}, &ModelCapabilityError{Provider: provider.Name(), Model: model, Feature: "native tool calls"}
+		if req.ToolChoice.Mode == ToolChoiceNone {
+			// "none" can be honored even on a text-only model by removing the
+			// catalogue before network I/O. Other modes offered real capability
+			// the caller may rely on, so those escalate as before.
+			req.Tools = nil
+			req.ToolChoice = ToolChoice{}
+			req.ParallelToolCalls = nil
+		} else {
+			return ChatRequest{}, &ModelCapabilityError{Provider: provider.Name(), Model: model, Feature: "native tool calls"}
+		}
+	}
+	if req.ToolChoice.Mode == ToolChoiceNamed {
+		found := false
+		for _, tool := range req.Tools {
+			if tool.Name == req.ToolChoice.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ChatRequest{}, fmt.Errorf("agentcore: named tool choice %q is not present in this request", req.ToolChoice.Name)
+		}
+	}
+	if (req.ToolChoice.Mode == ToolChoiceRequired || req.ToolChoice.Mode == ToolChoiceNamed) && len(req.Tools) == 0 {
+		return ChatRequest{}, fmt.Errorf("agentcore: tool choice %q requires at least one tool", req.ToolChoice.Mode)
+	}
+	if caps.ToolChoice == CapabilityUnsupported {
+		switch req.ToolChoice.Mode {
+		case ToolChoiceNone:
+			// Enforce the caller's safety intent without relying on a wire feature.
+			req.Tools = nil
+			req.ToolChoice = ToolChoice{}
+			req.ParallelToolCalls = nil
+		case ToolChoiceDefault, ToolChoiceAuto:
+			req.ToolChoice = ToolChoice{}
+			req.ParallelToolCalls = nil
+		default:
+			return ChatRequest{}, &ModelCapabilityError{Provider: provider.Name(), Model: model, Feature: "forced tool choice"}
+		}
 	}
 	if caps.ReasoningEffort == CapabilityUnsupported {
 		req.ReasoningEffort = ""
@@ -93,6 +140,9 @@ func requestForCapabilities(provider LLMProvider, model string, discovered Model
 	if caps.PromptCaching == CapabilityUnsupported {
 		req.CacheKey = ""
 		req.CacheRetention = ""
+	}
+	if caps.MaxOutputTokens > 0 && req.MaxTokens > caps.MaxOutputTokens {
+		req.MaxTokens = caps.MaxOutputTokens
 	}
 	if caps.ImageInput == CapabilityUnsupported {
 		req.Messages = withoutImageContent(req.Messages)
@@ -230,9 +280,16 @@ func (a *Agent) reason(ctx context.Context, req ChatRequest, sink StreamSink, st
 
 		// Re-resolve this rung's API key before the call so an expiring BYO token
 		// doesn't kill a long run; applied only when the provider is a KeyUpdater.
+		// A resolver failure must fail closed. Continuing with the stale credential
+		// turns an explicit refresh outage into a misleading provider auth failure
+		// and can send a request with a credential the operator meant to retire.
 		if err == nil && a.refreshKey != nil {
-			if key, kerr := a.refreshKey(ctx, p.Provider.Name()); kerr == nil {
-				if u, ok := p.Provider.(KeyUpdater); ok {
+			if u, ok := p.Provider.(KeyUpdater); ok {
+				if key, kerr := a.refreshKey(ctx, p.Provider.Name()); kerr != nil {
+					err = fmt.Errorf("refresh %s provider credential: %w", p.Provider.Name(), kerr)
+				} else if strings.TrimSpace(key) == "" {
+					err = fmt.Errorf("refresh %s provider credential: resolver returned an empty credential", p.Provider.Name())
+				} else {
 					u.UpdateAPIKey(key)
 				}
 			}
@@ -352,6 +409,7 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 	var resp ChatResponse
 	var heldTokens []string
 	committed := false
+	terminal := false
 	sinceFrame := 0
 	for d := range ch {
 		// Some providers attach their last known usage to the error delta. Merge
@@ -394,6 +452,9 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		if d.ToolCall != nil {
 			msg.ToolCalls = append(msg.ToolCalls, *d.ToolCall)
 		}
+		if d.ReasoningBlock != nil {
+			msg.ReasoningBlocks = append(msg.ReasoningBlocks, *d.ReasoningBlock)
+		}
 		// Usage is not the Done delta's private property: providers report it in
 		// pieces (input up front, output at the end) and as running totals, so
 		// take the newest non-zero value of each field wherever it arrives. A
@@ -402,7 +463,20 @@ func (a *Agent) streamTurn(ctx context.Context, provider LLMProvider, req ChatRe
 		// on that number, so the loss is invisible until a run overshoots.
 		if d.Done {
 			resp.StopReason = d.StopReason
+			terminal = true
 		}
+	}
+	// A provider wrapper may close its channel while propagating cancellation.
+	// Never turn that closure into a successful empty assistant response. Check
+	// before releasing held interceptor output so cancelled drafts stay hidden.
+	// Once a terminal event was received, however, completion won the race: a
+	// sibling cancellation that lands a moment later must not erase a fully
+	// delivered response and make durable child work run twice on recovery.
+	if err := streamCtx.Err(); err != nil && !terminal {
+		if committed {
+			return ChatResponse{}, &committedStreamError{cause: err, usage: resp.Usage}
+		}
+		return ChatResponse{}, err
 	}
 	for _, token := range heldTokens {
 		sink(StreamEvent{Type: StreamToken, Token: token})
@@ -495,7 +569,7 @@ func isTruncatedStop(reason string) bool {
 type ProviderError struct {
 	Provider   string        // provider name ("openai", "anthropic")
 	Status     int           // HTTP status; 0 for a transport failure
-	RetryAfter time.Duration // parsed Retry-After header; 0 if absent
+	RetryAfter time.Duration // longest parsed retry/reset header; 0 if absent
 	Message    string        // server-supplied detail
 }
 
@@ -512,8 +586,9 @@ func (e *ProviderError) Error() string {
 	return e.Provider + ": provider error"
 }
 
-// NewProviderError builds a ProviderError from an HTTP response, parsing
-// Retry-After so the loop can pace a 429/503 backoff to the server's hint.
+// NewProviderError builds a ProviderError from an HTTP response, parsing the
+// standard and provider-specific retry/reset headers so the loop can pace a
+// 429/503 backoff to the server's longest hint.
 //
 // It is exported because it is the contract between a provider and the loop's
 // retry/escalation logic: IsRetryable classifies structurally first (status
@@ -525,7 +600,7 @@ func NewProviderError(provider string, resp *http.Response, message string) *Pro
 	pe := &ProviderError{Provider: provider, Message: message}
 	if resp != nil {
 		pe.Status = resp.StatusCode
-		pe.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		pe.RetryAfter = parseRetryHeaders(resp.Header, time.Now())
 	}
 	return pe
 }
@@ -533,19 +608,103 @@ func NewProviderError(provider string, resp *http.Response, message string) *Pro
 // parseRetryAfter reads a Retry-After header in either form (delay-seconds or an
 // HTTP date). An unparseable or absent value yields 0.
 func parseRetryAfter(v string) time.Duration {
+	return parseRetryAfterAt(v, time.Now())
+}
+
+func parseRetryAfterAt(v string, now time.Time) time.Duration {
 	if v == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
+	if secs, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+		if secs <= 0 {
 			return 0
 		}
-		return time.Duration(secs) * time.Second
+		return durationFromFloat(secs, time.Second)
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
+		if d := t.Sub(now); d > 0 {
 			return d
 		}
+	}
+	return 0
+}
+
+// parseRetryHeaders accepts the retry hints used by the major provider and
+// gateway families. When more than one is present the longest delay wins: a
+// short generic Retry-After must not override a more precise rate-limit reset.
+func parseRetryHeaders(h http.Header, now time.Time) time.Duration {
+	if h == nil {
+		return 0
+	}
+	candidates := []time.Duration{
+		parseMilliseconds(headerValue(h, "Retry-After-Ms")),
+		parseRetryAfterAt(headerValue(h, "Retry-After"), now),
+		parseRateLimitReset(headerValue(h, "X-RateLimit-Reset-Ms"), true, now),
+		parseRateLimitReset(headerValue(h, "X-RateLimit-Reset"), false, now),
+	}
+	var longest time.Duration
+	for _, candidate := range candidates {
+		if candidate > longest {
+			longest = candidate
+		}
+	}
+	return longest
+}
+
+func headerValue(h http.Header, name string) string {
+	if value := h.Get(name); value != "" {
+		return value
+	}
+	for key, values := range h {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
+}
+
+func parseMilliseconds(v string) time.Duration {
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return durationFromFloat(n, time.Millisecond)
+}
+
+// parseRateLimitReset accepts either a relative delta or an epoch timestamp.
+// Compat gateways are inconsistent about units, so values above 1e12 are epoch
+// milliseconds and values above 1e9 are epoch seconds, matching OMP's proven
+// interoperability rule; smaller values are relative in the header's unit.
+func parseRateLimitReset(v string, milliseconds bool, now time.Time) time.Duration {
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > 1e12 {
+		return positiveDuration(time.UnixMilli(int64(n)).Sub(now))
+	}
+	if n > 1e9 {
+		return positiveDuration(time.Unix(int64(n), 0).Sub(now))
+	}
+	if milliseconds {
+		return durationFromFloat(n, time.Millisecond)
+	}
+	return durationFromFloat(n, time.Second)
+}
+
+func durationFromFloat(value float64, unit time.Duration) time.Duration {
+	// time.Duration conversion truncates; add one sub-unit so a server's decimal
+	// hint is never honored for less time than requested.
+	d := time.Duration(math.Ceil(value * float64(unit)))
+	if d <= 0 {
+		return 0
+	}
+	return d
+}
+
+func positiveDuration(d time.Duration) time.Duration {
+	if d > 0 {
+		return d
 	}
 	return 0
 }
@@ -568,6 +727,7 @@ var exhaustedLimitPattern = regexp.MustCompile(
 // pi supports, because a false positive here retries something permanent.
 var retryableMessagePattern = regexp.MustCompile(
 	`(?i)overloaded|rate.?limit|too many requests|service.?unavailable|` +
+		`too many concurren|concurren(?:cy|t).{0,20}limit|` +
 		`server.?error|internal.?error|provider.?returned.?error|` +
 		`connection reset|connection refused|other side closed|fetch failed|` +
 		`socket hang up|stream ended before|ended without|truncated`)

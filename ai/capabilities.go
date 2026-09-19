@@ -11,7 +11,7 @@ import (
 // limits for a provider/model pair. It intentionally stays sparse: this is not
 // a model catalog, and unknown support preserves the optimistic request path.
 // Live discovery may overlay these defaults with explicit model-level facts.
-func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
+func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
 	supported := agentcore.CapabilitySupported
 	unsupported := agentcore.CapabilityUnsupported
 	switch NormalizeVendor(vendor) {
@@ -33,20 +33,25 @@ func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
 		}
 	case "anthropic":
 		return agentcore.ModelCapabilities{
-			Tools: supported, ImageInput: supported, MaxInputImages: 90,
+			Tools: supported, ToolChoice: supported, ImageInput: supported, MaxInputImages: 90,
 			StructuredOutput: supported, PromptCaching: supported,
 			// The neutral request has no Anthropic thinking/tool-choice mapper yet.
-			ToolChoice: unsupported, ReasoningEffort: unsupported,
+			ReasoningEffort:   unsupported,
 			StatefulResponses: unsupported,
 		}
 	case VendorOpenAICodex:
 		return agentcore.ModelCapabilities{
-			Tools: supported, ReasoningEffort: supported,
+			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			ImageInput: supported, MaxInputImages: 200,
 		}
 	case VendorGoogleAntigravity:
+		maxOutput := 65536
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-") {
+			maxOutput = 64000
+		}
 		return agentcore.ModelCapabilities{
-			Tools: supported, ReasoningEffort: supported,
+			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
+			MaxOutputTokens: maxOutput,
 			// The current Cloud Code function-response adapter has no native
 			// inline-image carrier. Say so explicitly instead of accepting parts
 			// and degrading only after request-level policy has run.
@@ -54,9 +59,9 @@ func CapabilitiesFor(vendor, _ string) agentcore.ModelCapabilities {
 		}
 	case VendorClaudeCode:
 		return agentcore.ModelCapabilities{
-			Tools: supported, ImageInput: supported, MaxInputImages: 90,
+			Tools: supported, ToolChoice: supported, ImageInput: supported, MaxInputImages: 90,
 			StructuredOutput: supported, PromptCaching: supported,
-			ToolChoice: unsupported, ReasoningEffort: unsupported,
+			ReasoningEffort:   unsupported,
 			StatefulResponses: unsupported,
 		}
 	case "google":
@@ -95,6 +100,9 @@ type discoveredCapabilities struct {
 	SupportsStatefulResponses *bool                      `json:"supports_stateful_responses"`
 	MaxInputImages            *int                       `json:"max_input_images"`
 	MaxImages                 *int                       `json:"max_images"`
+	MaxOutputTokens           *int                       `json:"max_output_tokens"`
+	MaxCompletionTokens       *int                       `json:"max_completion_tokens"`
+	OutputTokenLimit          *int                       `json:"output_token_limit"`
 	Capabilities              map[string]json.RawMessage `json:"capabilities"`
 	SupportedParameters       []string                   `json:"supported_parameters"`
 	InputModalities           []string                   `json:"input_modalities"`
@@ -112,6 +120,12 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 		if name == "maxinputimages" || name == "maximages" {
 			if value, ok := explicitPositiveInt(raw); ok {
 				out.MaxInputImages = value
+			}
+			continue
+		}
+		if name == "maxoutputtokens" || name == "maxcompletiontokens" || name == "outputtokenlimit" {
+			if value, ok := explicitPositiveInt(raw); ok {
+				out.MaxOutputTokens = value
 			}
 			continue
 		}
@@ -198,7 +212,17 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 	if d.MaxInputImages != nil && *d.MaxInputImages > 0 {
 		out.MaxInputImages = *d.MaxInputImages
 	}
+	out.MaxOutputTokens = firstPositivePointer(out.MaxOutputTokens, d.MaxOutputTokens, d.MaxCompletionTokens, d.OutputTokenLimit)
 	return out
+}
+
+func firstPositivePointer(fallback int, values ...*int) int {
+	for _, value := range values {
+		if value != nil && *value > 0 {
+			return *value
+		}
+	}
+	return fallback
 }
 
 func explicitPositiveInt(raw json.RawMessage) (int, bool) {

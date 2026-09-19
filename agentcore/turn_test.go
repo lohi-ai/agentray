@@ -5,10 +5,87 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type cancelCloseProvider struct{}
+
+func (cancelCloseProvider) Name() string        { return "cancel-close" }
+func (cancelCloseProvider) SupportsTools() bool { return true }
+func (cancelCloseProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
+	return ChatResponse{}, errors.New("unexpected Chat call")
+}
+func (cancelCloseProvider) Stream(ctx context.Context, _ ChatRequest) (<-chan ChatDelta, error) {
+	ch := make(chan ChatDelta)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestStreamTurnDoesNotTreatCancelledClosureAsSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (&Agent{}).streamTurn(ctx, cancelCloseProvider{}, ChatRequest{}, func(StreamEvent) {}, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("streamTurn error = %v, want context.Canceled", err)
+	}
+}
+
+type terminalThenCancelProvider struct{ cancel context.CancelFunc }
+
+func (terminalThenCancelProvider) Name() string        { return "terminal-then-cancel" }
+func (terminalThenCancelProvider) SupportsTools() bool { return true }
+func (terminalThenCancelProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
+	return ChatResponse{}, errors.New("unexpected Chat call")
+}
+func (p terminalThenCancelProvider) Stream(context.Context, ChatRequest) (<-chan ChatDelta, error) {
+	ch := make(chan ChatDelta, 2)
+	ch <- ChatDelta{ContentDelta: "finished"}
+	ch <- ChatDelta{Done: true, StopReason: "stop"}
+	close(ch)
+	p.cancel()
+	return ch, nil
+}
+
+func TestStreamTurnTerminalEventWinsCancellationRace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	resp, err := (&Agent{}).streamTurn(ctx, terminalThenCancelProvider{cancel: cancel}, ChatRequest{}, func(StreamEvent) {}, nil, nil)
+	if err != nil {
+		t.Fatalf("terminal response was discarded after cancellation: %v", err)
+	}
+	if resp.Message.Content != "finished" || resp.StopReason != "stop" {
+		t.Fatalf("terminal response = %+v", resp)
+	}
+}
+
+func TestStreamTurnPreservesReasoningWithoutRenderingIt(t *testing.T) {
+	block := ReasoningBlock{
+		Type: ReasoningBlockThinking, Text: "private replay text", Signature: "sig", ReplayScope: "anthropic:scope",
+	}
+	p := NewFauxProvider(ChatResponse{Message: Message{
+		Role: RoleAssistant, Content: "visible", ReasoningBlocks: []ReasoningBlock{block},
+	}, StopReason: "stop"})
+	var visible string
+	resp, err := (&Agent{}).streamTurn(context.Background(), p, ChatRequest{}, func(ev StreamEvent) {
+		if ev.Type == StreamToken {
+			visible += ev.Token
+		}
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("streamTurn: %v", err)
+	}
+	if visible != "visible" {
+		t.Fatalf("visible stream = %q, want only assistant content", visible)
+	}
+	if len(resp.Message.ReasoningBlocks) != 1 || resp.Message.ReasoningBlocks[0] != block {
+		t.Fatalf("reasoning block was not preserved: %+v", resp.Message.ReasoningBlocks)
+	}
+}
 
 // providerErr builds a ProviderError with a real *http.Response so the test
 // exercises the same construction path a provider uses.
@@ -404,6 +481,25 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 	if got := parseRetryAfter("garbage"); got != 0 {
 		t.Fatalf("parseRetryAfter(garbage) = %v, want 0", got)
+	}
+}
+
+func TestNewProviderErrorUsesLongestRetryHint(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	h := http.Header{
+		"Retry-After":          []string{"1"},
+		"Retry-After-Ms":       []string{"2500"},
+		"X-RateLimit-Reset-Ms": []string{"4200"},
+		"X-RateLimit-Reset":    []string{"3"},
+	}
+	if got := parseRetryHeaders(h, now); got != 4200*time.Millisecond {
+		t.Fatalf("parseRetryHeaders = %v, want 4.2s", got)
+	}
+
+	epoch := now.Add(7 * time.Second).Unix()
+	h = http.Header{"X-RateLimit-Reset": []string{strconv.FormatInt(epoch, 10)}}
+	if got := parseRetryHeaders(h, now); got != 7*time.Second {
+		t.Fatalf("epoch reset = %v, want 7s", got)
 	}
 }
 

@@ -269,21 +269,24 @@ func recordsFromCalls(calls []storage.AgentLLMCall) []agentcore.TurnRecord {
 
 		var toolCalls []agentcore.ToolCall
 		_ = json.Unmarshal([]byte(c.ToolCallsJSON), &toolCalls)
+		var reasoningBlocks []agentcore.ReasoningBlock
+		_ = json.Unmarshal([]byte(c.ReasoningBlocksJSON), &reasoningBlocks)
 		var toolGates []agentcore.ToolGate
 		if c.ToolGatesJSON != "" && c.ToolGatesJSON != "[]" {
 			_ = json.Unmarshal([]byte(c.ToolGatesJSON), &toolGates)
 		}
 		out = append(out, agentcore.TurnRecord{
-			Messages:   msgs,
-			Response:   c.Response,
-			ToolCalls:  toolCalls,
-			ToolGates:  toolGates,
-			Tools:      c.Tools,
-			StopReason: c.StopReason,
-			Error:      c.Error,
-			TokensIn:   c.TokenInput,
-			TokensOut:  c.TokenOutput,
-			CostUSD:    c.CostUSD,
+			Messages:        msgs,
+			Response:        c.Response,
+			ReasoningBlocks: reasoningBlocks,
+			ToolCalls:       toolCalls,
+			ToolGates:       toolGates,
+			Tools:           c.Tools,
+			StopReason:      c.StopReason,
+			Error:           c.Error,
+			TokensIn:        c.TokenInput,
+			TokensOut:       c.TokenOutput,
+			CostUSD:         c.CostUSD,
 		})
 	}
 	return out

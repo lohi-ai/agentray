@@ -167,6 +167,39 @@ func TestTraceDeltaRoundTripsExactly(t *testing.T) {
 	assertRoundTrip(t, reqs, st.rows)
 }
 
+func TestTraceReasoningBlocksPersistAndReplayExactly(t *testing.T) {
+	st := newRecordingStore()
+	sink := newTestSink(st)
+	block := agentcore.ReasoningBlock{
+		Type: agentcore.ReasoningBlockThinking, Text: "opaque", Signature: "sig", ReplayScope: "anthropic:scope",
+	}
+	sink.Record(observe.TraceRecord{
+		TraceID: "run-1", Provider: "anthropic", Model: "claude-test",
+		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+		Response: "done", ReasoningBlocks: []agentcore.ReasoningBlock{block},
+	})
+	if len(st.rows) != 1 || st.rows[0].ReasoningBlocksJSON == "" || st.rows[0].ReasoningBlocksJSON == "[]" {
+		t.Fatalf("reasoning blocks were not persisted: %+v", st.rows)
+	}
+	records := recordsFromCalls(st.rows)
+	if len(records) != 1 || len(records[0].ReasoningBlocks) != 1 || records[0].ReasoningBlocks[0] != block {
+		t.Fatalf("reasoning blocks did not replay exactly: %+v", records)
+	}
+}
+
+func TestTraceDeltaTreatsReasoningChangesAsMessageChanges(t *testing.T) {
+	a := agentcore.Message{Role: agentcore.RoleAssistant, Content: "same", ReasoningBlocks: []agentcore.ReasoningBlock{{
+		Type: agentcore.ReasoningBlockThinking, Signature: "sig-a", ReplayScope: "anthropic:scope",
+	}}}
+	b := a
+	b.ReasoningBlocks = []agentcore.ReasoningBlock{{
+		Type: agentcore.ReasoningBlockThinking, Signature: "sig-b", ReplayScope: "anthropic:scope",
+	}}
+	if sameMessage(a, b) {
+		t.Fatal("trace delta considered different signed reasoning blocks equal")
+	}
+}
+
 // TestTraceDeltaActuallyCompresses is the other half. Without it, an encoder
 // that gave up and wrote a keyframe every time would pass every correctness
 // test in this file while leaving the 51 MiB problem exactly where it was.

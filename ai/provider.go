@@ -47,6 +47,9 @@ type Spec struct {
 	APIKey  string
 	BaseURL string
 	HTTP    HTTPDoer
+	// Compat selects OpenAI-compatible wire details such as max_tokens versus
+	// max_completion_tokens. Zero uses the vendor default.
+	Compat Compat
 	// TokenSource is the OAuth account pool a subscription vendor draws
 	// per-request credentials from. Required for OAuth vendors, ignored by
 	// the rest.

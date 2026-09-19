@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
@@ -39,6 +40,7 @@ func DefaultCompat() Compat {
 // by the caller; this struct receives the resolved BaseURL.
 type OpenAIProvider struct {
 	APIKey  string
+	keyMu   sync.RWMutex
 	BaseURL string
 	Compat  Compat
 	// HTTP serves the non-streamed Chat path (absolute cap, no header deadline —
@@ -115,8 +117,16 @@ func NewGeminiProvider(apiKey string) *OpenAIProvider {
 // the loop refresh an expiring BYO token between turns.
 func (p *OpenAIProvider) UpdateAPIKey(key string) {
 	if key != "" {
+		p.keyMu.Lock()
 		p.APIKey = key
+		p.keyMu.Unlock()
 	}
+}
+
+func (p *OpenAIProvider) apiKey() string {
+	p.keyMu.RLock()
+	defer p.keyMu.RUnlock()
+	return p.APIKey
 }
 
 // --- wire types (OpenAI chat-completions) ---
@@ -155,16 +165,18 @@ type oaiTool struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description"`
 		Parameters  map[string]any `json:"parameters"`
+		Strict      *bool          `json:"strict,omitempty"`
 	} `json:"function"`
 }
 
 type oaiRequest struct {
-	Model         string            `json:"model"`
-	Messages      []oaiMessage      `json:"messages"`
-	Tools         []oaiTool         `json:"tools,omitempty"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []oaiMessage      `json:"messages"`
+	Tools               []oaiTool         `json:"tools,omitempty"`
+	MaxTokens           int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	Stream              bool              `json:"stream,omitempty"`
+	StreamOptions       *oaiStreamOptions `json:"stream_options,omitempty"`
 	// PromptCacheKey routes this call to a shared cached prefix (OpenAI prompt
 	// caching). Sent only when the neutral request opts in, so strict
 	// OpenAI-compatible servers that reject unknown fields are never sent it.
@@ -175,7 +187,9 @@ type oaiRequest struct {
 	// ResponseFormat constrains the answer to a JSON Schema (structured
 	// outputs). Sent only when the neutral request carries an agentcore.OutputSchema, so
 	// strict compat servers are otherwise unaffected.
-	ResponseFormat *oaiResponseFormat `json:"response_format,omitempty"`
+	ResponseFormat    *oaiResponseFormat `json:"response_format,omitempty"`
+	ToolChoice        any                `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
 }
 
 // oaiResponseFormat is OpenAI's structured-output selector; the json_schema
@@ -243,15 +257,32 @@ func (u oaiUsage) usage() agentcore.Usage {
 // hint, the adapter removes only that hint and retains the endpoint lesson in
 // the logical provider session.
 func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	state, active := p.adaptiveRequest(req)
+	state, active, maxTokenField := p.adaptiveRequest(req)
+	strictState, active := prepareStrictTools(active, p.Name(), p.BaseURL, toolSchemaGeneric)
 	var learned agentcore.ModelCapabilities
+	switchedMaxTokenField := false
+	retriedWithoutStrict := false
 	for {
-		resp, err := p.chatOnce(ctx, active)
+		resp, err := p.chatOnce(ctx, active, maxTokenField)
 		if err == nil {
 			if state != nil {
 				state.remember(active.Model, learned)
+				state.rememberMaxTokenField(active.Model, maxTokenField)
 			}
 			return resp, nil
+		}
+		if !switchedMaxTokenField {
+			if alternate, ok := alternateMaxTokenField(maxTokenField, active, err); ok {
+				maxTokenField = alternate
+				switchedMaxTokenField = true
+				continue
+			}
+		}
+		if !retriedWithoutStrict && shouldRetryWithoutStrictTools(active, toolSchemaGeneric, err) {
+			rememberStrictToolsRejected(strictState, active.Model)
+			active = withoutStrictTools(active)
+			retriedWithoutStrict = true
+			continue
 		}
 		next, demotion, ok := withoutRejectedOpenAIHint(active, err)
 		if !ok {
@@ -262,8 +293,8 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (a
 	}
 }
 
-func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	body := p.encode(req)
+func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest, maxTokenField string) (agentcore.ChatResponse, error) {
+	body := p.encodeWithMaxTokenField(req, maxTokenField)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return agentcore.ChatResponse{}, err
@@ -273,14 +304,20 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 		return agentcore.ChatResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	setOptionalBearerAuth(httpReq, p.APIKey)
+	setOptionalBearerAuth(httpReq, p.apiKey())
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
 		return agentcore.ChatResponse{}, err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
+	var data []byte
+	var readErr error
+	if resp.StatusCode >= 400 {
+		data = readProviderErrorBody(resp.Body)
+	} else {
+		data, readErr = io.ReadAll(resp.Body)
+	}
 
 	// A body that stopped mid-flight is a transport failure wearing a 200: the
 	// status line was written before the stream broke, so the status tells us
@@ -316,6 +353,9 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 			message = errBody.Error.Message
 		}
 		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), resp, message)
+	}
+	if providerErr, ok := inBandProviderError(p.Name(), resp, data); ok {
+		return agentcore.ChatResponse{}, providerErr
 	}
 
 	var decoded oaiResponse
@@ -375,6 +415,9 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 		payload := strings.TrimSpace(line[len("data:"):])
 		if payload == "" || payload == "[DONE]" {
 			continue
+		}
+		if providerErr, ok := inBandProviderError(p.Name(), resp, []byte(payload)); ok {
+			return agentcore.ChatResponse{}, providerErr
 		}
 		var chunk oaiStreamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -460,15 +503,43 @@ type oaiStreamChunk struct {
 // flushed before the terminal Done delta. The loop forwards content deltas to a
 // live SSE sink; tool execution is unchanged.
 func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	state, active := p.adaptiveRequest(req)
+	state, active, maxTokenField := p.adaptiveRequest(req)
+	strictState, active := prepareStrictTools(active, p.Name(), p.BaseURL, toolSchemaGeneric)
 	var learned agentcore.ModelCapabilities
+	switchedMaxTokenField := false
+	retriedWithoutStrict := false
 	for {
-		ch, err := p.streamOnce(ctx, active)
+		ch, err := p.streamOnce(ctx, active, maxTokenField)
 		if err == nil {
+			var retryStrict bool
+			ch, err, retryStrict = preflightStrictStream(ctx, active, toolSchemaGeneric, ch)
+			if retryStrict {
+				rememberStrictToolsRejected(strictState, active.Model)
+				active = withoutStrictTools(active)
+				retriedWithoutStrict = true
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
 			if state != nil {
 				state.remember(active.Model, learned)
+				state.rememberMaxTokenField(active.Model, maxTokenField)
 			}
 			return ch, nil
+		}
+		if !switchedMaxTokenField {
+			if alternate, ok := alternateMaxTokenField(maxTokenField, active, err); ok {
+				maxTokenField = alternate
+				switchedMaxTokenField = true
+				continue
+			}
+		}
+		if !retriedWithoutStrict && shouldRetryWithoutStrictTools(active, toolSchemaGeneric, err) {
+			rememberStrictToolsRejected(strictState, active.Model)
+			active = withoutStrictTools(active)
+			retriedWithoutStrict = true
+			continue
 		}
 		next, demotion, ok := withoutRejectedOpenAIHint(active, err)
 		if !ok {
@@ -479,8 +550,8 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 	}
 }
 
-func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	body := p.encode(req)
+func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatRequest, maxTokenField string) (<-chan agentcore.ChatDelta, error) {
+	body := p.encodeWithMaxTokenField(req, maxTokenField)
 	body.Stream = true
 	body.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
 	raw, err := json.Marshal(body)
@@ -493,14 +564,14 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
-	setOptionalBearerAuth(httpReq, p.APIKey)
+	setOptionalBearerAuth(httpReq, p.apiKey())
 
 	resp, err := p.streamHTTP().Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
+		data := readProviderErrorBody(resp.Body)
 		resp.Body.Close()
 		return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 	}
@@ -516,6 +587,7 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 		var order []int
 		var stopReason string
 		var usage agentcore.Usage
+		terminal := false
 
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -529,7 +601,12 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 				continue
 			}
 			if payload == "[DONE]" {
+				terminal = true
 				break
+			}
+			if providerErr, ok := inBandProviderError(p.Name(), resp, []byte(payload)); ok {
+				ch <- agentcore.ChatDelta{Done: true, Err: providerErr, Usage: usage}
+				return
 			}
 			var chunk oaiStreamChunk
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -562,10 +639,15 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 			}
 			if choice.FinishReason != "" {
 				stopReason = choice.FinishReason
+				terminal = true
 			}
 		}
 		if err := sc.Err(); err != nil {
-			ch <- agentcore.ChatDelta{Done: true, Err: err}
+			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream read failed: "+err.Error()), Usage: usage}
+			return
+		}
+		if !terminal {
+			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream ended before a terminal event"), Usage: usage}
 			return
 		}
 		for _, idx := range order {
@@ -643,7 +725,13 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
+	var data []byte
+	var readErr error
+	if resp.StatusCode >= 400 {
+		data = readProviderErrorBody(resp.Body)
+	} else {
+		data, readErr = io.ReadAll(resp.Body)
+	}
 	// Same trap as the chat path: a severed body would otherwise surface as a
 	// plain JSON decode error, which IsRetryable can't see, turning a transient
 	// truncation into a permanent embeddings failure.
@@ -652,15 +740,21 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 			fmt.Sprintf("truncated embeddings body (status %d): %s", resp.StatusCode, describeReadErr(ctx, e.HTTP, readErr)))
 	}
 
+	if resp.StatusCode >= 400 {
+		message := strings.TrimSpace(string(data))
+		var errorBody oaiEmbedResponse
+		if json.Unmarshal(data, &errorBody) == nil && errorBody.Error != nil && errorBody.Error.Message != "" {
+			message = errorBody.Error.Message
+		}
+		return nil, agentcore.NewProviderError("openai-embeddings", resp, message)
+	}
+	if providerErr, ok := inBandProviderError("openai-embeddings", resp, data); ok {
+		return nil, providerErr
+	}
+
 	var decoded oaiEmbedResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return nil, fmt.Errorf("decode embeddings response (status %d): %w", resp.StatusCode, err)
-	}
-	if decoded.Error != nil {
-		return nil, fmt.Errorf("openai embeddings: %s", decoded.Error.Message)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("openai embeddings: unexpected response (status %d)", resp.StatusCode)
 	}
 	out := make([][]float32, len(texts))
 	for _, d := range decoded.Data {
@@ -674,7 +768,27 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 // encode maps the neutral agentcore.ChatRequest onto the OpenAI wire format, honoring the
 // compat table.
 func (p *OpenAIProvider) encode(req agentcore.ChatRequest) oaiRequest {
-	out := oaiRequest{Model: req.Model, MaxTokens: req.MaxTokens, PromptCacheKey: req.CacheKey, ReasoningEffort: req.ReasoningEffort}
+	return p.encodeWithMaxTokenField(req, p.maxTokensField())
+}
+
+func (p *OpenAIProvider) maxTokensField() string {
+	if p.Compat.MaxTokensField == "max_completion_tokens" {
+		return "max_completion_tokens"
+	}
+	return "max_tokens"
+}
+
+func (p *OpenAIProvider) encodeWithMaxTokenField(req agentcore.ChatRequest, maxTokenField string) oaiRequest {
+	out := oaiRequest{
+		Model: req.Model, PromptCacheKey: req.CacheKey, ReasoningEffort: req.ReasoningEffort,
+		ToolChoice:        openAIChatToolChoice(req.ToolChoice, len(req.Tools) > 0),
+		ParallelToolCalls: cloneOptionalBool(req.ParallelToolCalls, len(req.Tools) > 0),
+	}
+	if maxTokenField == "max_completion_tokens" {
+		out.MaxCompletionTokens = req.MaxTokens
+	} else {
+		out.MaxTokens = req.MaxTokens
+	}
 	if req.OutputSchema != nil {
 		name := req.OutputSchema.Name
 		if name == "" {
@@ -756,7 +870,7 @@ func (p *OpenAIProvider) encode(req agentcore.ChatRequest) oaiRequest {
 			ot.Type = "function"
 			ot.Function.Name = s.Name
 			ot.Function.Description = s.Description
-			ot.Function.Parameters = s.Parameters
+			ot.Function.Parameters, ot.Function.Strict = projectedToolParameters(s, toolSchemaGeneric)
 			out.Tools = append(out.Tools, ot)
 		}
 	}

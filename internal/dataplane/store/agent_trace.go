@@ -46,11 +46,15 @@ type AgentLLMCall struct {
 	// BaseSeq names the call this one's context extends (0 = keyframe), and
 	// KeepPrefix how many of that call's messages are retained in front of the
 	// delta. Reconstruction is context(n) = context(BaseSeq)[:KeepPrefix] + delta.
-	BaseSeq       int      `json:"base_seq"`
-	KeepPrefix    int      `json:"keep_prefix"`
-	Tools         []string `json:"tools"`           // tool names advertised this turn
-	Response      string   `json:"response"`        // assistant text returned
-	ToolCallsJSON string   `json:"tool_calls_json"` // tool calls the model requested
+	BaseSeq    int      `json:"base_seq"`
+	KeepPrefix int      `json:"keep_prefix"`
+	Tools      []string `json:"tools"`    // tool names advertised this turn
+	Response   string   `json:"response"` // assistant text returned
+	// ReasoningBlocksJSON is opaque provider replay state returned beside the
+	// assistant response. Storage never interprets it; the runtime restores it
+	// into agentcore.TurnRecord for exact replay.
+	ReasoningBlocksJSON string `json:"reasoning_blocks_json"`
+	ToolCallsJSON       string `json:"tool_calls_json"` // tool calls the model requested
 	// ToolGatesJSON is the gate outcome of each tool call this turn requested
 	// (opaque JSON: [{call_id, allowed, reason, error}]). Empty ('[]') on rows
 	// written before the column existed and on the INSERT — Monitor records the
@@ -86,6 +90,7 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 	messages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
 	tools TEXT[] NOT NULL DEFAULT '{}',
 	response TEXT NOT NULL DEFAULT '',
+	reasoning_blocks_json JSONB NOT NULL DEFAULT '[]'::jsonb,
 	tool_calls_json JSONB NOT NULL DEFAULT '[]'::jsonb,
 	stop_reason VARCHAR(32) NOT NULL DEFAULT '',
 	token_input INT NOT NULL DEFAULT 0,
@@ -121,6 +126,10 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 		// rows read as "no gates recorded" (FoldSteps keeps Allowed true)
 		// without rewriting the table.
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS tool_gates_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		// Opaque signed/redacted provider reasoning is required for exact replay.
+		// Historical rows had none, so an empty JSON array is the truthful and
+		// rewrite-free default.
+		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS reasoning_blocks_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		// Deliberately NOT backfilled: an UPDATE over every historical row would
 		// rewrite the largest table in the database while deploy holds the
 		// migration open. Legacy rows keep session_key '' and are read as the
@@ -155,6 +164,10 @@ func (s *Store) RecordAgentLLMCall(ctx context.Context, c AgentLLMCall) (int, er
 	if calls == "" {
 		calls = "[]"
 	}
+	reasoning := c.ReasoningBlocksJSON
+	if reasoning == "" {
+		reasoning = "[]"
+	}
 	tools := c.Tools
 	if tools == nil {
 		tools = []string{}
@@ -167,16 +180,16 @@ func (s *Store) RecordAgentLLMCall(ctx context.Context, c AgentLLMCall) (int, er
 	err := s.pg.QueryRow(ctx, `
 INSERT INTO agent_llm_calls (
 	run_id, session_key, depth, seq, base_seq, keep_prefix,
-	provider, model, messages_json, tools, response, tool_calls_json,
+	provider, model, messages_json, tools, response, reasoning_blocks_json, tool_calls_json,
 	stop_reason, token_input, token_output, cost_usd, cost_unpriced, latency_ms, streamed, error
 ) VALUES (
 	$1, $2, $3,
 	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_llm_calls WHERE run_id = $1),
-	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19
+	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20
 )
 RETURNING seq`,
 		c.RunID, key, c.Depth, c.BaseSeq, c.KeepPrefix,
-		c.Provider, c.Model, msgs, tools, c.Response, calls,
+		c.Provider, c.Model, msgs, tools, c.Response, reasoning, calls,
 		c.StopReason, c.TokenInput, c.TokenOutput, c.CostUSD, c.CostUnpriced, c.LatencyMS, c.Streamed, c.Error).Scan(&seq)
 	return seq, err
 }
@@ -211,16 +224,17 @@ const llmCallColumns = `c.id::text, c.run_id::text,
        c.response, c.tool_calls_json::text, c.tool_gates_json::text, c.stop_reason, c.token_input, c.token_output,
        c.cost_usd, c.cost_unpriced, c.latency_ms, c.streamed, c.error, c.created_at`
 
-// scanLLMCall reads one row of llmCallColumns, optionally with the messages
-// delta appended to the projection.
-func scanLLMCall(rows interface{ Scan(...any) error }, withMessages bool) (AgentLLMCall, error) {
+// scanLLMCall reads one row of llmCallColumns. The full-trace path appends the
+// opaque reasoning response and messages delta; the metrics path deliberately
+// reads neither potentially-large payload.
+func scanLLMCall(rows interface{ Scan(...any) error }, withTrace bool) (AgentLLMCall, error) {
 	var c AgentLLMCall
 	dest := []any{&c.ID, &c.RunID, &c.SessionKey, &c.Depth, &c.Seq,
 		&c.Provider, &c.Model, &c.BaseSeq, &c.KeepPrefix, &c.Tools,
 		&c.Response, &c.ToolCallsJSON, &c.ToolGatesJSON, &c.StopReason, &c.TokenInput, &c.TokenOutput,
 		&c.CostUSD, &c.CostUnpriced, &c.LatencyMS, &c.Streamed, &c.Error, &c.CreatedAt}
-	if withMessages {
-		dest = append(dest, &c.MessagesJSON)
+	if withTrace {
+		dest = append(dest, &c.ReasoningBlocksJSON, &c.MessagesJSON)
 	}
 	err := rows.Scan(dest...)
 	return c, err
@@ -281,7 +295,7 @@ func (s *Store) AgentLLMCallTrace(ctx context.Context, userID, projectID, runID 
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT `+llmCallColumns+`, c.messages_json::text
+SELECT `+llmCallColumns+`, c.reasoning_blocks_json::text, c.messages_json::text
 FROM agent_llm_calls c
 JOIN agent_runs r ON r.id = c.run_id
 WHERE c.run_id = $1 AND r.project_id = $2

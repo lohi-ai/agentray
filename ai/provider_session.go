@@ -16,25 +16,32 @@ const openAIAdaptiveStatePrefix = "openai-chat-adaptive\x00"
 // or OAuth account changes. It therefore deliberately does not implement
 // agentcore.AccountScopedProviderState.
 type openAIAdaptiveState struct {
-	mu     sync.RWMutex
-	models map[string]agentcore.ModelCapabilities
-	closed bool
+	mu             sync.RWMutex
+	models         map[string]agentcore.ModelCapabilities
+	maxTokenFields map[string]string
+	closed         bool
 }
 
 func newOpenAIAdaptiveState() agentcore.ProviderSessionState {
-	return &openAIAdaptiveState{models: make(map[string]agentcore.ModelCapabilities)}
+	return &openAIAdaptiveState{
+		models: make(map[string]agentcore.ModelCapabilities), maxTokenFields: make(map[string]string),
+	}
 }
 
 func (s *openAIAdaptiveState) Close() {
 	s.mu.Lock()
 	s.closed = true
 	s.models = nil
+	s.maxTokenFields = nil
 	s.mu.Unlock()
 }
 
-func (s *openAIAdaptiveState) apply(req agentcore.ChatRequest) agentcore.ChatRequest {
+func (s *openAIAdaptiveState) apply(req agentcore.ChatRequest, maxTokenField string) (agentcore.ChatRequest, string) {
 	s.mu.RLock()
 	caps := s.models[req.Model]
+	if learned := s.maxTokenFields[req.Model]; learned != "" {
+		maxTokenField = learned
+	}
 	s.mu.RUnlock()
 	if caps.ReasoningEffort == agentcore.CapabilityUnsupported {
 		req.ReasoningEffort = ""
@@ -46,7 +53,7 @@ func (s *openAIAdaptiveState) apply(req agentcore.ChatRequest) agentcore.ChatReq
 		req.CacheKey = ""
 		req.CacheRetention = ""
 	}
-	return req
+	return req, maxTokenField
 }
 
 func (s *openAIAdaptiveState) remember(model string, learned agentcore.ModelCapabilities) {
@@ -60,16 +67,54 @@ func (s *openAIAdaptiveState) remember(model string, learned agentcore.ModelCapa
 	s.mu.Unlock()
 }
 
-func (p *OpenAIProvider) adaptiveRequest(req agentcore.ChatRequest) (*openAIAdaptiveState, agentcore.ChatRequest) {
+func (s *openAIAdaptiveState) rememberMaxTokenField(model, field string) {
+	if field != "max_tokens" && field != "max_completion_tokens" {
+		return
+	}
+	s.mu.Lock()
+	if !s.closed {
+		s.maxTokenFields[model] = field
+	}
+	s.mu.Unlock()
+}
+
+func (p *OpenAIProvider) adaptiveRequest(req agentcore.ChatRequest) (*openAIAdaptiveState, agentcore.ChatRequest, string) {
+	maxTokenField := p.maxTokensField()
 	if req.ProviderSession == nil {
-		return nil, req
+		return nil, req, maxTokenField
 	}
 	key := openAIAdaptiveStatePrefix + p.Name() + "\x00" + strings.TrimRight(p.BaseURL, "/")
 	state, _ := req.ProviderSession.State(key, newOpenAIAdaptiveState).(*openAIAdaptiveState)
 	if state == nil {
-		return nil, req
+		return nil, req, maxTokenField
 	}
-	return state, state.apply(req)
+	req, maxTokenField = state.apply(req, maxTokenField)
+	return state, req, maxTokenField
+}
+
+func alternateMaxTokenField(field string, req agentcore.ChatRequest, err error) (string, bool) {
+	if req.MaxTokens <= 0 {
+		return field, false
+	}
+	var providerErr *agentcore.ProviderError
+	if !errors.As(err, &providerErr) || (providerErr.Status != http.StatusBadRequest && providerErr.Status != http.StatusUnprocessableEntity) {
+		return field, false
+	}
+	message := strings.ToLower(providerErr.Message)
+	if !containsAny(message, "unsupported", "not supported", "unknown parameter", "unknown field", "unrecognized", "unexpected keyword", "extra inputs are not permitted") {
+		return field, false
+	}
+	switch field {
+	case "max_completion_tokens":
+		if strings.Contains(message, "max_completion_tokens") {
+			return "max_tokens", true
+		}
+	default:
+		if strings.Contains(message, "max_tokens") {
+			return "max_completion_tokens", true
+		}
+	}
+	return field, false
 }
 
 // withoutRejectedOpenAIHint recognizes only an explicit unsupported-parameter

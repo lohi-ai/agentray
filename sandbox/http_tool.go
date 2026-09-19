@@ -190,7 +190,8 @@ func (t *HTTPTool) Schema() agentcore.ToolSchema {
 		props["save_as"] = saveAsParam()
 	}
 	return agentcore.ToolSchema{
-		Name: ToolHTTPRequest,
+		Name:   ToolHTTPRequest,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Make an outbound HTTP request to an approved host. Use a " +
 			"{{cred:NAME}} placeholder for any secret (e.g. an Authorization " +
 			"header value); it is resolved securely and never exposed. Only " +

@@ -430,7 +430,8 @@ func (t *readSpillTool) Name() string { return readSpillToolName }
 
 func (t *readSpillTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: readSpillToolName,
+		Name:   readSpillToolName,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Read a tool result that was too large to include inline and was saved to a spill artifact. " +
 			"Pass the locator from the '(Omitted … Full result saved at: …)' notice. Reads a bounded byte window; " +
 			"page through a large artifact by advancing offset until eof is true.",

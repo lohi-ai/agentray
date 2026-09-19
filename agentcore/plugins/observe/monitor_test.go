@@ -202,6 +202,36 @@ func TestTracingProviderStream(t *testing.T) {
 	}
 }
 
+func TestTracingProviderPreservesReasoningBlocks(t *testing.T) {
+	block := agentcore.ReasoningBlock{
+		Type: agentcore.ReasoningBlockThinking, Text: "opaque", Signature: "sig", ReplayScope: "anthropic:scope",
+	}
+	response := scriptedText("answer", 4, 2)
+	response.Message.ReasoningBlocks = []agentcore.ReasoningBlock{block}
+
+	for _, streamed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "chat", true: "stream"}[streamed], func(t *testing.T) {
+			faux := agentcore.NewFauxProvider(response)
+			sink := &collectSink{}
+			tp := newTracingProvider(faux, nil, sink)
+			req := agentcore.ChatRequest{Model: "m", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "go"}}}
+			if streamed {
+				ch, err := tp.Stream(context.Background(), req)
+				if err != nil {
+					t.Fatalf("Stream: %v", err)
+				}
+				for range ch {
+				}
+			} else if _, err := tp.Chat(context.Background(), req); err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			if len(sink.records) != 1 || len(sink.records[0].ReasoningBlocks) != 1 || sink.records[0].ReasoningBlocks[0] != block {
+				t.Fatalf("reasoning blocks missing from trace: %+v", sink.records)
+			}
+		})
+	}
+}
+
 func readJSONL(t *testing.T, path string) []TraceRecord {
 	t.Helper()
 	f, err := os.Open(path)

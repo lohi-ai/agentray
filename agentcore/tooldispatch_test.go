@@ -3,6 +3,7 @@ package agentcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -279,8 +280,6 @@ func TestValidateArgs_UnionTypes(t *testing.T) {
 		"properties": map[string]any{
 			"tag":   map[string]any{"type": []any{"string", "null"}},
 			"items": map[string]any{"type": []any{"array", "null"}},
-			// A malformed member (7) must be skipped, not disable the union.
-			"mixed": map[string]any{"type": []any{"string", 7, "null"}},
 		},
 	}
 	cases := []struct {
@@ -293,8 +292,6 @@ func TestValidateArgs_UnionTypes(t *testing.T) {
 		{"non-member rejected", `{"tag":7}`, true},
 		{"array member ok", `{"items":[1,2]}`, false},
 		{"object not in union", `{"items":{"a":1}}`, true},
-		{"malformed member skipped, valid member ok", `{"mixed":"a"}`, false},
-		{"malformed member skipped, non-member rejected", `{"mixed":true}`, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -303,6 +300,113 @@ func TestValidateArgs_UnionTypes(t *testing.T) {
 				t.Fatalf("validateArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateArgs_FullJSONSchema(t *testing.T) {
+	schema := map[string]any{
+		"type":                 "object",
+		"required":             []string{"profile", "choice"},
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"profile": map[string]any{
+				"type":                 "object",
+				"required":             []string{"name", "roles"},
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string", "minLength": 3},
+					"roles": map[string]any{
+						"type":     "array",
+						"minItems": 1,
+						"items":    map[string]any{"type": "string", "enum": []string{"reader", "writer"}},
+					},
+				},
+			},
+			"choice": map[string]any{
+				"oneOf": []any{
+					map[string]any{"type": "integer", "minimum": 1},
+					map[string]any{"type": "string", "pattern": "^[a-z]+$"},
+				},
+			},
+		},
+	}
+	cases := []struct {
+		name    string
+		args    string
+		wantErr bool
+	}{
+		{"valid integer branch", `{"profile":{"name":"Ada","roles":["writer"]},"choice":2}`, false},
+		{"valid string branch", `{"profile":{"name":"Ada","roles":["reader"]},"choice":"alpha"}`, false},
+		{"nested required", `{"profile":{"name":"Ada"},"choice":2}`, true},
+		{"nested additional property", `{"profile":{"name":"Ada","roles":["reader"],"admin":true},"choice":2}`, true},
+		{"nested string bound", `{"profile":{"name":"Al","roles":["reader"]},"choice":2}`, true},
+		{"array item enum", `{"profile":{"name":"Ada","roles":["owner"]},"choice":2}`, true},
+		{"array minimum", `{"profile":{"name":"Ada","roles":[]},"choice":2}`, true},
+		{"oneOf numeric bound", `{"profile":{"name":"Ada","roles":["reader"]},"choice":0}`, true},
+		{"oneOf string pattern", `{"profile":{"name":"Ada","roles":["reader"]},"choice":"UPPER"}`, true},
+		{"root additional property", `{"profile":{"name":"Ada","roles":["reader"]},"choice":2,"extra":true}`, true},
+		{"object schema rejects scalar args", `[]`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgs(tc.args, schema)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateArgs(%s) err=%v, wantErr=%v", tc.args, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateArgs_InvalidSchemaFailsClosed(t *testing.T) {
+	invalid := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mixed": map[string]any{"type": []any{"string", 7, "null"}},
+		},
+	}
+	if err := validateArgs(`{"mixed":"a"}`, invalid); err == nil || !strings.Contains(err.Error(), "does not compile") {
+		t.Fatalf("invalid schema error = %v, want compile failure", err)
+	}
+}
+
+func TestValidateArgs_ExternalRefFailsWithoutNetworkLoader(t *testing.T) {
+	schema := map[string]any{"$ref": "https://example.invalid/tool.json"}
+	if err := validateArgs(`{}`, schema); err == nil || !strings.Contains(err.Error(), "no URLLoader set") {
+		t.Fatalf("external ref error = %v, want disabled-loader failure", err)
+	}
+}
+
+func TestToolValidatorCacheTracksSchemaFingerprint(t *testing.T) {
+	ts := NewToolSet()
+	first := map[string]any{
+		"type": "object", "required": []string{"a"},
+		"properties": map[string]any{"a": map[string]any{"type": "string"}},
+	}
+	second := map[string]any{
+		"type": "object", "required": []string{"b"},
+		"properties": map[string]any{"b": map[string]any{"type": "integer"}},
+	}
+	if err := ts.validateToolArgs("dynamic", `{"a":"ok"}`, first); err != nil {
+		t.Fatalf("first schema: %v", err)
+	}
+	if err := ts.validateToolArgs("dynamic", `{"a":"ok"}`, second); err == nil {
+		t.Fatal("same-name schema change reused stale validator")
+	}
+	if err := ts.validateToolArgs("dynamic", `{"b":2}`, second); err != nil {
+		t.Fatalf("second schema: %v", err)
+	}
+}
+
+func TestToolValidatorCacheIsBounded(t *testing.T) {
+	ts := NewToolSet()
+	schema := map[string]any{"type": "object", "properties": map[string]any{}}
+	for i := 0; i < maxToolValidatorCacheEntries+20; i++ {
+		if err := ts.validateToolArgs(fmt.Sprintf("dynamic_%d", i), `{}`, schema); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(ts.validators.entries); got > maxToolValidatorCacheEntries {
+		t.Fatalf("validator cache grew to %d entries, cap=%d", got, maxToolValidatorCacheEntries)
 	}
 }
 

@@ -34,7 +34,8 @@ func (t *EditFileTool) Name() string { return ToolEditFile }
 
 func (t *EditFileTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolEditFile,
+		Name:   ToolEditFile,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Replace an exact string in a UTF-8 text file inside the agent workspace. " +
 			"Pass expected_hash from the latest read_file, write_file, edit_file, or edit_lines result; the edit " +
 			"is refused if the file changed since that snapshot. " +

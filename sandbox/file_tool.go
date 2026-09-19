@@ -45,7 +45,8 @@ func (t *ReadFileTool) Name() string { return ToolReadFile }
 
 func (t *ReadFileTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolReadFile,
+		Name:   ToolReadFile,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Read a UTF-8 text file from the agent workspace. Content is returned with " +
 			"cat -n style line numbers so you can cite exact lines. Use offset and limit to read a " +
 			"window of a large file; a truncated read ends with the exact offset to continue from. " +
@@ -185,8 +186,10 @@ func (t *WriteFileTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:        ToolWriteFile,
 		Description: "Write a UTF-8 text file inside the agent workspace. The result includes a content_hash for a subsequent edit_file or edit_lines call. Parent directories are created; paths must be relative and cannot escape the workspace.",
+		Strict:      agentcore.ToolStrictEnabled,
 		Parameters: map[string]any{
-			"type": "object",
+			"type":                 "object",
+			"additionalProperties": false,
 			"properties": map[string]any{
 				"path":    map[string]any{"type": "string", "description": "Workspace-relative file path."},
 				"content": map[string]any{"type": "string", "description": "Complete file content to write."},

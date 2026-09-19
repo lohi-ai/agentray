@@ -235,6 +235,7 @@ func (t *subagentTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:        ToolSpawnSubagent,
 		Description: desc,
+		Strict:      agentcore.ToolStrictEnabled,
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": props,

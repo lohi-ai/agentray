@@ -323,6 +323,71 @@ func TestRefreshKeyAppliedPerTurn(t *testing.T) {
 	}
 }
 
+func TestRefreshKeyFailureDoesNotCallProvider(t *testing.T) {
+	kf := &keyFaux{FauxProvider: NewFauxProvider(AssistantText("must not run"))}
+	agent, err := New(Config{
+		Provider: kf,
+		Model:    "test",
+		RefreshKey: func(context.Context, string) (string, error) {
+			return "", errors.New("credential store unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = agent.Prompt(context.Background(), "go")
+	if err == nil || !strings.Contains(err.Error(), "refresh faux provider credential") {
+		t.Fatalf("Prompt error = %v, want refresh failure", err)
+	}
+	if got := len(kf.Recorded); got != 0 {
+		t.Fatalf("provider was called %d times with a stale credential", got)
+	}
+}
+
+func TestRefreshKeyEmptyCredentialDoesNotCallProvider(t *testing.T) {
+	kf := &keyFaux{FauxProvider: NewFauxProvider(AssistantText("must not run"))}
+	agent, err := New(Config{
+		Provider: kf,
+		Model:    "test",
+		RefreshKey: func(context.Context, string) (string, error) {
+			return "  ", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = agent.Prompt(context.Background(), "go")
+	if err == nil || !strings.Contains(err.Error(), "empty credential") {
+		t.Fatalf("Prompt error = %v, want empty credential failure", err)
+	}
+	if got := len(kf.Recorded); got != 0 {
+		t.Fatalf("provider was called %d times with a stale credential", got)
+	}
+}
+
+func TestRefreshKeyIsSkippedForProviderWithoutKeyUpdater(t *testing.T) {
+	provider := NewFauxProvider(AssistantText("ok"))
+	refreshCalls := 0
+	agent, err := New(Config{
+		Provider: provider,
+		Model:    "test",
+		RefreshKey: func(context.Context, string) (string, error) {
+			refreshCalls++
+			return "", errors.New("must not be called")
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	result, err := agent.Prompt(context.Background(), "go")
+	if err != nil || result.Final != "ok" {
+		t.Fatalf("Prompt = (%q, %v), want ok", result.Final, err)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refresh called %d times for a provider that cannot accept a key", refreshCalls)
+	}
+}
+
 // TestCancelledContextStopsBeforeProvider verifies an already-cancelled context
 // aborts the run before any provider call, with stop reason "aborted".
 func TestCancelledContextStopsBeforeProvider(t *testing.T) {

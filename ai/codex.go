@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -139,16 +138,19 @@ type codexTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	Parameters  map[string]any `json:"parameters"`
+	Strict      *bool          `json:"strict,omitempty"`
 }
 
 type codexRequest struct {
-	Model        string           `json:"model"`
-	Instructions string           `json:"instructions,omitempty"`
-	Input        []codexInputItem `json:"input"`
-	Stream       bool             `json:"stream"` // always true: the backend only streams
-	Store        bool             `json:"store"`  // always false: no server-side state
-	Tools        []codexTool      `json:"tools,omitempty"`
-	Reasoning    *codexReasoning  `json:"reasoning,omitempty"`
+	Model             string           `json:"model"`
+	Instructions      string           `json:"instructions,omitempty"`
+	Input             []codexInputItem `json:"input"`
+	Stream            bool             `json:"stream"` // always true: the backend only streams
+	Store             bool             `json:"store"`  // always false: no server-side state
+	Tools             []codexTool      `json:"tools,omitempty"`
+	Reasoning         *codexReasoning  `json:"reasoning,omitempty"`
+	ToolChoice        any              `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
 	// Sampling controls (temperature/top_p/max_output_tokens) are deliberately
 	// absent: the Codex backend rejects every one with a 400.
 }
@@ -161,7 +163,11 @@ type codexReasoning struct {
 // messages collapse into the top-level `instructions` field (never input
 // items); tool exchanges become function_call / function_call_output pairs.
 func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
-	out := codexRequest{Model: req.Model, Stream: true, Store: false}
+	out := codexRequest{
+		Model: req.Model, Stream: true, Store: false,
+		ToolChoice:        openAIResponsesToolChoice(req.ToolChoice, len(req.Tools) > 0),
+		ParallelToolCalls: cloneOptionalBool(req.ParallelToolCalls, len(req.Tools) > 0),
+	}
 	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
 
 	var systemParts []string
@@ -238,12 +244,10 @@ func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 	out.Instructions = strings.Join(systemParts, "\n\n")
 
 	for _, s := range req.Tools {
-		params := s.Parameters
-		if params == nil {
-			params = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
+		parameters, strict := projectedToolParameters(s, toolSchemaOpenAIResponses)
 		out.Tools = append(out.Tools, codexTool{
-			Type: "function", Name: s.Name, Description: s.Description, Parameters: params,
+			Type: "function", Name: s.Name, Description: s.Description,
+			Parameters: parameters, Strict: strict,
 		})
 	}
 	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
@@ -293,26 +297,39 @@ type codexStreamEvent struct {
 // whole on response.output_item.done; usage and the stop reason ride the
 // terminal response.completed/done/incomplete event.
 func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	raw, err := json.Marshal(p.encode(req))
-	if err != nil {
-		return nil, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.responsesURL(), bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	p.setHeaders(httpReq)
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Content-Type", "application/json")
+	strictState, active := prepareStrictTools(req, p.Name(), p.responsesURL(), toolSchemaOpenAIResponses)
+	retriedWithoutStrict := false
+	var resp *http.Response
+	for {
+		raw, err := json.Marshal(p.encode(active))
+		if err != nil {
+			return nil, err
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.responsesURL(), bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		p.setHeaders(httpReq)
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.streamHTTP().Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
+		resp, err = p.streamHTTP().Do(httpReq)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode < 400 {
+			break
+		}
+		data := readProviderErrorBody(resp.Body)
 		resp.Body.Close()
-		return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+		providerErr := agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+		if !retriedWithoutStrict && shouldRetryWithoutStrictTools(active, toolSchemaOpenAIResponses, providerErr) {
+			rememberStrictToolsRejected(strictState, active.Model)
+			active = withoutStrictTools(active)
+			retriedWithoutStrict = true
+			continue
+		}
+		return nil, providerErr
 	}
 
 	ch := make(chan agentcore.ChatDelta, 16)
@@ -373,7 +390,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 					}
 				}
 			case "response.failed", "error":
-				ch <- agentcore.ChatDelta{Done: true, Err: p.eventError(&ev)}
+				ch <- agentcore.ChatDelta{Done: true, Err: p.eventError(resp, &ev)}
 				return
 			}
 		}
@@ -388,7 +405,18 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 		}
 		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
-	return ch, nil
+	ready, preflightErr, retryStrict := preflightStrictStream(ctx, active, toolSchemaOpenAIResponses, ch)
+	if retryStrict {
+		rememberStrictToolsRejected(strictState, active.Model)
+		// The first transport succeeded but rejected strictness in-band. Re-enter
+		// Stream with the learned session state; the rebuilt request has no strict
+		// fields and the one-shot rule is still enforced by that state.
+		return p.Stream(ctx, withoutStrictTools(active))
+	}
+	if preflightErr != nil {
+		return nil, preflightErr
+	}
+	return ready, nil
 }
 
 // eventError folds a response.failed / error SSE event into a provider error,
@@ -396,7 +424,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 // onto the HTTP status it implies so the retry ladder and the account pool
 // classify it structurally — a Status-0 error is a transport failure to them,
 // so a rate limit reported in-band would never block the account.
-func (p *CodexProvider) eventError(ev *codexStreamEvent) error {
+func (p *CodexProvider) eventError(resp *http.Response, ev *codexStreamEvent) error {
 	msg, code := "", ""
 	if ev.Error != nil {
 		msg, code = ev.Error.Message, ev.Error.Code
@@ -416,16 +444,15 @@ func (p *CodexProvider) eventError(ev *codexStreamEvent) error {
 	if code != "" {
 		msg = fmt.Sprintf("%s (code=%s)", msg, code)
 	}
-	status := http.StatusInternalServerError
-	switch code {
-	case "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached", "too_many_requests":
-		status = http.StatusTooManyRequests
-	case "unauthorized", "invalid_api_key", "authentication_error", "token_expired":
-		status = http.StatusUnauthorized
-	case "forbidden", "permission_denied":
-		status = http.StatusForbidden
+	status := providerStatusForCode(code)
+	if status == 0 {
+		if strictToolsRejectionMessage(msg) {
+			status = http.StatusUnprocessableEntity
+		} else {
+			status = http.StatusInternalServerError
+		}
 	}
-	return &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: msg}
+	return providerErrorWithStatus(p.Name(), resp, status, msg)
 }
 
 // Chat consumes the SSE stream to completion and returns the assembled

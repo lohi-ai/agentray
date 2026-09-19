@@ -34,7 +34,7 @@ func New(spec Spec) (Provider, error) {
 	switch vendor {
 	case "openai":
 		inner, err = NewClient(ClientSpec{
-			Name: "openai", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
+			Name: "openai", APIKey: spec.APIKey, BaseURL: spec.BaseURL, Compat: spec.Compat,
 		})
 	case VendorOpenAIResponses:
 		inner, err = NewClient(ClientSpec{
@@ -59,8 +59,12 @@ func New(spec Spec) (Provider, error) {
 		if strings.TrimSpace(spec.BaseURL) == "" {
 			return nil, fmt.Errorf("ai: provider %q requires a base URL", spec.Vendor)
 		}
+		compat := spec.Compat
+		if compat.MaxTokensField == "" {
+			compat = DefaultCompat()
+		}
 		inner, err = NewClient(ClientSpec{
-			Name: spec.Vendor, APIKey: spec.APIKey, BaseURL: spec.BaseURL, Compat: DefaultCompat(),
+			Name: spec.Vendor, APIKey: spec.APIKey, BaseURL: spec.BaseURL, Compat: compat,
 		})
 	}
 	if err != nil {
@@ -101,6 +105,12 @@ func New(spec Spec) (Provider, error) {
 		// with: acquire a token, then call the vendor's list endpoint.
 		w.tokenSource = spec.TokenSource
 		w.listModels = oauthModelLister(vendor, pooled.inner, spec.HTTP, w.baseURL)
+	}
+	if _, ok := inner.(agentcore.KeyUpdater); ok {
+		return &wiredKeyProvider{wired: w}, nil
+	}
+	if _, ok := modelResponses.(agentcore.KeyUpdater); ok {
+		return &wiredKeyProvider{wired: w}, nil
 	}
 	return w, nil
 }
@@ -159,6 +169,7 @@ func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
 
 type wired struct {
 	id, vendor, name, baseURL, apiKey string
+	keyMu                             sync.RWMutex
 	inner                             agentcore.LLMProvider
 	// modelResponses is the optional Responses peer for an ordinary OpenAI
 	// provider row. It keeps the same identity and is selected only by explicit
@@ -180,7 +191,11 @@ func (w *wired) ID() string          { return w.id }
 func (w *wired) Vendor() string      { return w.vendor }
 func (w *wired) DisplayName() string { return w.name }
 func (w *wired) BaseURL() string     { return w.baseURL }
-func (w *wired) APIKey() string      { return w.apiKey }
+func (w *wired) APIKey() string {
+	w.keyMu.RLock()
+	defer w.keyMu.RUnlock()
+	return w.apiKey
+}
 func (w *wired) Name() string        { return w.inner.Name() }
 func (w *wired) SupportsTools() bool { return w.inner.SupportsTools() }
 
@@ -213,11 +228,18 @@ func (w *wired) providerForModel(model string) agentcore.LLMProvider {
 	return w.inner
 }
 
-func (w *wired) UpdateAPIKey(key string) {
+// wiredKeyProvider exists only for provider rows whose wire client accepts a
+// mutable static key. Keeping UpdateAPIKey off wired itself prevents an OAuth
+// account pool from regaining KeyUpdater through this identity decorator.
+type wiredKeyProvider struct{ *wired }
+
+func (w *wiredKeyProvider) UpdateAPIKey(key string) {
 	if key == "" {
 		return
 	}
+	w.keyMu.Lock()
 	w.apiKey = key
+	w.keyMu.Unlock()
 	if u, ok := w.inner.(agentcore.KeyUpdater); ok {
 		u.UpdateAPIKey(key)
 	}
@@ -242,7 +264,7 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 			return nil, err
 		}
 	} else {
-		raw, err := listModelsForVendor(ctx, w.http, w.vendor, w.effectiveBaseURL(), w.apiKey)
+		raw, err := listModelsForVendor(ctx, w.http, w.vendor, w.effectiveBaseURL(), w.APIKey())
 		if err != nil {
 			return nil, err
 		}

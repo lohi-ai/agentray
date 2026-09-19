@@ -103,6 +103,7 @@ func (t *BrowserTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:        ToolBrowserUse,
 		Description: desc,
+		Strict:      agentcore.ToolStrictEnabled,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

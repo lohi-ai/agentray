@@ -325,7 +325,8 @@ func (t *sessionQueryTool) Parallel() bool { return true }
 
 func (t *sessionQueryTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: sessionQueryToolName,
+		Name:   sessionQueryToolName,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Search this session's own history, including parts that were summarized away by compaction. " +
 			"Use it to recover a detail you no longer see in context — an earlier query result, a number, a decision — " +
 			"instead of re-running the tool that produced it. Matching ignores case and accents and requires every " +

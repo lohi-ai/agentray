@@ -36,7 +36,8 @@ func (t *EditLinesTool) Name() string { return ToolEditLines }
 
 func (t *EditLinesTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolEditLines,
+		Name:   ToolEditLines,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Apply up to 100 non-overlapping line edits to one UTF-8 workspace file as one guarded update. " +
 			"Pass expected_hash from the latest read_file, write_file, edit_file, or edit_lines result. " +
 			"All line numbers refer to that original snapshot, not to earlier edits in this call. " +

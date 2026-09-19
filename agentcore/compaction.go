@@ -207,6 +207,9 @@ func estimateBytesTokens(messages []Message) int {
 		for _, tc := range m.ToolCalls {
 			bytes += len(tc.Name) + len(tc.Arguments)
 		}
+		for _, block := range m.ReasoningBlocks {
+			bytes += len(block.Text) + len(block.Signature) + len(block.Data)
+		}
 	}
 	return bytes / bytesPerTokenEstimate
 }

@@ -118,6 +118,8 @@ type Registry struct {
 	maxTokens         int
 	reasoningEffort   string
 	outputSchema      *OutputSchema
+	toolChoice        ToolChoice
+	parallelToolCalls *bool
 	cacheKey          string
 	cacheRetention    string
 	promptResume      bool
@@ -269,6 +271,20 @@ func (r *Registry) SetReasoningEffort(e string) error {
 // SetOutputSchema constrains every text answer to a JSON Schema at the provider.
 func (r *Registry) SetOutputSchema(s *OutputSchema) error {
 	return setSeam(r, "output_schema", &r.outputSchema, s)
+}
+
+// SetToolChoice configures provider-neutral tool routing for ordinary turns.
+func (r *Registry) SetToolChoice(choice ToolChoice) error {
+	if err := choice.Validate(); err != nil {
+		return err
+	}
+	return setSeam(r, "tool_choice", &r.toolChoice, choice)
+}
+
+// SetParallelToolCalls configures the optional provider generation hint.
+func (r *Registry) SetParallelToolCalls(enabled bool) error {
+	value := enabled
+	return setSeam(r, "parallel_tool_calls", &r.parallelToolCalls, &value)
 }
 
 // SetPromptCache opts every provider call into prompt caching under key.

@@ -12,18 +12,20 @@ func ConfigPlugin(cfg Config) Plugin {
 
 // ModelPlugin installs the model spine into a Registry.
 type ModelPlugin struct {
-	Provider        LLMProvider
-	Model           string
-	Capabilities    ModelCapabilities
-	ContextWindow   int
-	Escalation      []ModelRung
-	Retry           *RetryPolicy
-	RefreshKey      func(ctx context.Context, provider string) (string, error)
-	MaxTokens       int
-	ReasoningEffort string
-	OutputSchema    *OutputSchema
-	PromptCacheKey  string
-	CacheRetention  string
+	Provider          LLMProvider
+	Model             string
+	Capabilities      ModelCapabilities
+	ContextWindow     int
+	Escalation        []ModelRung
+	Retry             *RetryPolicy
+	RefreshKey        func(ctx context.Context, provider string) (string, error)
+	MaxTokens         int
+	ReasoningEffort   string
+	OutputSchema      *OutputSchema
+	ToolChoice        ToolChoice
+	ParallelToolCalls *bool
+	PromptCacheKey    string
+	CacheRetention    string
 }
 
 // Name identifies the plugin.
@@ -71,6 +73,16 @@ func (p ModelPlugin) Register(r *Registry) error {
 	}
 	if p.OutputSchema != nil {
 		if err := r.SetOutputSchema(p.OutputSchema); err != nil {
+			return err
+		}
+	}
+	if p.ToolChoice != (ToolChoice{}) {
+		if err := r.SetToolChoice(p.ToolChoice); err != nil {
+			return err
+		}
+	}
+	if p.ParallelToolCalls != nil {
+		if err := r.SetParallelToolCalls(*p.ParallelToolCalls); err != nil {
 			return err
 		}
 	}

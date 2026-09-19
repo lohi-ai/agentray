@@ -606,6 +606,87 @@ the no-network server container. The bridge can await `spawn_subagent` when that
 tool is registered and permitted, but does not yet copy OMP's background
 handle/work-pool API, timeout pausing, or speculative shadow execution.
 
+### OMP follow-up — provider failure normalization
+
+OpenAI-compatible and Anthropic streams now classify in-band error envelopes
+instead of accepting a `200` SSE throttle as an empty successful answer. Flat
+and nested auth/permission/429/5xx signals, auth/rate-limit/overload codes,
+provider retry/reset headers, and incomplete terminal framing feed the same
+structured retry path as ordinary HTTP failures. Anthropic requires
+`message_stop`, while Antigravity requires a candidate finish reason. The
+visible-output commit boundary still forbids replay after content is delivered.
+Provider error bodies are bounded at 64 KiB.
+
+Credential refresh now fails closed before a request, and static-key provider
+reads/updates are synchronized for shared parent/subagent instances. OAuth
+providers continue to bind credentials through per-request clones. Construction
+and tracing decorators preserve the optional key-update capability instead of
+advertising it for OAuth pools, and an empty refreshed key fails closed. The
+result keeps local OpenAI-compatible engines dependency-free while making
+concurrent server workers safe under rotation.
+
+The OAuth wrapper now performs bounded in-request recovery as well: typed
+401/403 failures report the serving account and acquire a distinct refreshed or
+sibling credential. Pre-output SSE attempts are replayed with buffered metadata;
+post-output failures are not. Exact credential cycles stop immediately and all
+paths share a 64-attempt ceiling. Account switches continue through the existing
+provider-session binding, so server-side response handles never cross accounts.
+Explicit concurrency-cap 403s bypass rotation and account marking, leaving them
+to the normal retry backoff. Cancellation produces an error delta (with a
+consumer-side context guard) instead of becoming an empty successful turn. A
+received terminal event wins a later cancellation race, so a completed durable
+child stays completed rather than being paid for again during parent recovery.
+
+Live model capabilities now include hard output-token ceilings, applied per
+rung without mutating the canonical request. The OpenAI-compatible token-field
+dialect is wired through provider construction (`max_tokens` versus
+`max_completion_tokens`) instead of being a dead compatibility setting, and
+Antigravity honors smaller run limits beneath its provider ceilings.
+
+### OMP follow-up — provider tool-schema projections and thinking levels
+
+Tool parameter schemas now have separate canonical and wire roles. Provider
+encoders deep-clone before adapting, so the schema used by agentcore to validate
+an actual invocation is never weakened. Responses/Codex normalize their
+non-strict JSON Schema subset; Antigravity strips or rewrites Cloud Code Assist
+incompatibilities and falls back to an open wire object when a residual
+reference/combiner cannot be represented. Generic OpenAI Chat and Anthropic
+keep their broad schema dialect. Nil and empty roots are normalized consistently
+on every wire.
+
+Antigravity also maps neutral reasoning levels onto native Gemini 3 thinking
+levels or older budget-based controls. Budget tokens are added above an
+explicit desired output allowance, then clamped to the existing provider
+ceiling. This is deterministic adapter logic with no global catalog or new
+runtime dependency, so local and server deployments retain the same behavior.
+Anthropic thinking activation is intentionally separate from its replay
+foundation. The neutral transcript now durably preserves complete signed
+`thinking` and opaque `redacted_thinking` blocks across streaming, session
+storage, tracing, and deterministic replay. Blocks are scoped to a digest of
+provider endpoint plus model, bounded without truncating opaque payloads, and
+never emitted as visible tokens. PostgreSQL adds an idempotent JSONB trace
+column while the laptop memory store keeps the same contract with no external
+dependency. Budget/adaptive request controls and invalid-signature fallback
+remain the next provider tranche.
+
+The same neutral boundary now covers tool routing (`auto`, `none`, `required`,
+or one named tool) and an optional parallel-call hint. Adapters map these to
+OpenAI Chat/Responses/Codex, Anthropic, and Antigravity wire dialects without
+emitting anything by default. AgentCore validates forced names after
+capability filtering, degrades `none` locally on a provider that lacks native
+choice support, and keeps actual parallel execution behind each tool's
+read-only `ParallelTool` declaration.
+
+Tool schemas now also carry explicit tri-state strict intent. OpenAI Chat,
+Responses, and Codex apply a copy-on-write strict projection only when it can
+preserve the canonical argument contract; optional fields and explicit open
+or implicit open maps remain non-strict rather than being narrowed. A narrowly classified
+400/422 HTTP or in-band SSE rejection causes one pre-output replay without strict fields and is
+remembered per endpoint/model in the logical provider session. The default
+still emits no strict field, preserving arbitrary local and self-hosted
+OpenAI-compatible endpoints, while server conversations reuse the learned
+compatibility decision through the bounded session registry.
+
 ## Not done (deferred, low value now)
 
 - Argument/command-pattern policy facets for `computer_use` (governance roadmap

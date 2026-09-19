@@ -47,9 +47,10 @@ portable server configuration looks like:
 Build the supplied combined image with `make sandbox-build-eval` (or
 `docker build -f Dockerfile.eval -t agentray-eval:latest .`). `image` is ignored
 in trusted local host mode and selected by Docker mode. A custom image must
-already contain the configured executable; the tool never downloads a runtime
-or package. `timeout_seconds` is both the default and the maximum the model may
-request for one cell (1–300 seconds).
+already contain the configured executable; a JavaScript image must also contain
+a POSIX `sh` so the launcher can reserve a protocol-only file descriptor. The
+tool never downloads a runtime or package. `timeout_seconds` is both the default
+and the maximum the model may request for one cell (1–300 seconds).
 `max_output_bytes` accepts 4 KiB–1 MiB and retains a bounded head and tail.
 `max_bridge_calls` accepts 1–64 (default 16) and bounds host-tool requests from
 one cell independently of the run-wide tool-execution budget.

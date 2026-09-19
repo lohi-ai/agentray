@@ -2,11 +2,13 @@ package agentcore
 
 import (
 	"fmt"
+	"slices"
+	"strings"
+	"unicode"
+
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
-	"strings"
-	"unicode"
 )
 
 // clampBytes truncates a markdown part to the always-loaded budget (UTF-8 safe).
@@ -283,6 +285,9 @@ func sameForCache(a, b Message) bool {
 		if a.ContentParts[i] != b.ContentParts[i] {
 			return false
 		}
+	}
+	if !slices.Equal(a.ReasoningBlocks, b.ReasoningBlocks) {
+		return false
 	}
 	return true
 }

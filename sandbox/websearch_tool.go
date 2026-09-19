@@ -82,7 +82,8 @@ func (t *WebSearchTool) Parallel() bool { return true }
 
 func (t *WebSearchTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolWebSearch,
+		Name:   ToolWebSearch,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Search the public web and return ranked results as title / URL / snippet lines. " +
 			"Use this to find pages, then web_fetch to read one. Internal/loopback/private addresses " +
 			"are refused by the egress guard.",

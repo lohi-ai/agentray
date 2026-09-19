@@ -497,6 +497,7 @@ func jobIDSchema(name, description string, extra map[string]any) agentcore.ToolS
 	return agentcore.ToolSchema{
 		Name:        name,
 		Description: description,
+		Strict:      agentcore.ToolStrictEnabled,
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": props,
@@ -509,10 +510,11 @@ type jobListTool struct{ jobTool }
 
 func (t jobListTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: "job_list",
+		Name:   "job_list",
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "List the background jobs this session started, newest first, with their state and duration. " +
 			"Jobs still running when you finish your answer are cancelled — wait for the ones whose results you need.",
-		Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		Parameters: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 	}
 }
 

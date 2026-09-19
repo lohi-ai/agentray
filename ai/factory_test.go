@@ -7,7 +7,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lohi-ai/agentray/agentcore"
 )
+
+func unwrapWired(t *testing.T, provider Provider) *wired {
+	t.Helper()
+	switch value := provider.(type) {
+	case *wired:
+		return value
+	case *wiredKeyProvider:
+		return value.wired
+	default:
+		t.Fatalf("provider wrapper = %T, want wired", provider)
+		return nil
+	}
+}
 
 // New is the one construction path shared by a run and a list-models call, so
 // identity resolution has to be right: an empty ID or Name falls back to the
@@ -90,7 +105,7 @@ func TestNew_InjectsHTTPClientIntoTheWireProvider(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New(%s): %v", vendor, err)
 		}
-		inner := p.(*wired).inner
+		inner := unwrapWired(t, p).inner
 		var got *http.Client
 		switch w := inner.(type) {
 		case *OpenAIProvider:
@@ -106,9 +121,10 @@ func TestNew_InjectsHTTPClientIntoTheWireProvider(t *testing.T) {
 			t.Fatalf("%s: wire provider kept its own client, injection did not reach it", vendor)
 		}
 		if vendor == "openai" {
-			responses, ok := p.(*wired).modelResponses.(*OpenAIResponsesProvider)
+			w := unwrapWired(t, p)
+			responses, ok := w.modelResponses.(*OpenAIResponsesProvider)
 			if !ok || responses.HTTP != client || responses.StreamHTTP != client {
-				t.Fatalf("openai: Responses peer did not receive injected client: %T %+v", p.(*wired).modelResponses, responses)
+				t.Fatalf("openai: Responses peer did not receive injected client: %T %+v", w.modelResponses, responses)
 			}
 		}
 	}
@@ -121,8 +137,8 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	w := p.(*wired)
-	w.UpdateAPIKey("new")
+	w := unwrapWired(t, p)
+	p.(agentcore.KeyUpdater).UpdateAPIKey("new")
 	if w.APIKey() != "new" {
 		t.Fatalf("wrapper key = %q, want new", w.APIKey())
 	}
@@ -133,7 +149,7 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 		t.Fatalf("Responses peer key = %q, want new", peer.APIKey)
 	}
 	// An empty key is a no-op, not a way to erase the credential.
-	w.UpdateAPIKey("")
+	p.(agentcore.KeyUpdater).UpdateAPIKey("")
 	if w.APIKey() != "new" {
 		t.Fatalf("empty update erased the key: %q", w.APIKey())
 	}
@@ -142,10 +158,50 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New responses: %v", err)
 	}
-	rw := responses.(*wired)
-	rw.UpdateAPIKey("new")
+	rw := unwrapWired(t, responses)
+	responses.(agentcore.KeyUpdater).UpdateAPIKey("new")
 	if inner := rw.inner.(*OpenAIResponsesProvider); inner.APIKey != "new" {
 		t.Fatalf("responses wire key = %q, want new", inner.APIKey)
+	}
+}
+
+// Construction wrappers must preserve optional capabilities exactly. If an
+// OAuth pool accidentally looks like a KeyUpdater, agentcore will resolve a
+// static key before every turn and can fail a healthy pooled request closed.
+func TestNewPreservesKeyUpdaterCapability(t *testing.T) {
+	static, err := New(Spec{Vendor: "openai", APIKey: "key"})
+	if err != nil {
+		t.Fatalf("New static provider: %v", err)
+	}
+	if _, ok := static.(agentcore.KeyUpdater); !ok {
+		t.Fatalf("static provider %T does not expose KeyUpdater", static)
+	}
+
+	oauth, err := New(Spec{
+		Vendor: VendorClaudeCode,
+		TokenSource: &fakeTokenSource{tokens: []OAuthToken{{
+			AccountID: "account-1", AccessToken: "token-1",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("New OAuth provider: %v", err)
+	}
+	if _, ok := oauth.(agentcore.KeyUpdater); ok {
+		t.Fatalf("OAuth provider %T unexpectedly exposes KeyUpdater", oauth)
+	}
+}
+
+func TestNewThreadsOpenAICompatDialect(t *testing.T) {
+	provider, err := New(Spec{Vendor: "openai", APIKey: "k", Compat: Compat{
+		MaxTokensField: "max_completion_tokens", SupportsTools: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := unwrapWired(t, provider)
+	request := w.inner.(*OpenAIProvider).encode(agentcore.ChatRequest{Model: "reasoning", MaxTokens: 2048})
+	if request.MaxCompletionTokens != 2048 || request.MaxTokens != 0 {
+		t.Fatalf("request = %+v, want max_completion_tokens", request)
 	}
 }
 
@@ -166,7 +222,7 @@ func TestWiredSelectsResponsesByDiscoveredModelMetadata(t *testing.T) {
 	if _, err := p.ListModels(context.Background()); err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-	wired := p.(*wired)
+	wired := unwrapWired(t, p)
 	responses, ok := wired.providerForModel("gpt-responses").(*OpenAIResponsesProvider)
 	if !ok || responses.Name() != "openai" {
 		t.Fatalf("responses model provider = %T name=%q", wired.providerForModel("gpt-responses"), wired.providerForModel("gpt-responses").Name())
@@ -192,13 +248,13 @@ func TestWired_EffectiveBaseURLPerVendor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New(%s): %v", vendor, err)
 		}
-		if got := p.(*wired).effectiveBaseURL(); got != url {
+		if got := unwrapWired(t, p).effectiveBaseURL(); got != url {
 			t.Fatalf("%s effective base = %q, want %q", vendor, got, url)
 		}
 	}
 	// An explicit base URL always wins over the vendor default.
 	p, _ := New(Spec{Vendor: "openai", BaseURL: "https://gw.example/v1"})
-	if got := p.(*wired).effectiveBaseURL(); got != "https://gw.example/v1" {
+	if got := unwrapWired(t, p).effectiveBaseURL(); got != "https://gw.example/v1" {
 		t.Fatalf("explicit base URL was ignored: %q", got)
 	}
 }

@@ -40,6 +40,7 @@ func fullConfig() agentcore.Config {
 	env := agentcore.DefaultEnv()
 	comp := agentcore.DefaultCompactionSettings()
 	comp.KeepRecentTokens = 1234
+	parallel := false
 
 	return agentcore.Config{
 		Provider:   provider,
@@ -48,6 +49,7 @@ func fullConfig() agentcore.Config {
 		Retry:      &retry,
 		RefreshKey: func(ctx context.Context, p string) (string, error) { return "k", nil },
 		MaxTokens:  8192, ReasoningEffort: "high",
+		ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "echo"}, ParallelToolCalls: &parallel,
 		PromptCacheKey: "cache-key", PromptCacheRetention: "long",
 
 		Definition: agentcore.AgentDefinition{ScopeID: "scope", Soul: "soul"},

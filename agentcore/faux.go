@@ -56,6 +56,10 @@ func (f *FauxProvider) Stream(ctx context.Context, req ChatRequest) (<-chan Chat
 			}
 			ch <- ChatDelta{ContentDelta: frag}
 		}
+		for i := range resp.Message.ReasoningBlocks {
+			block := resp.Message.ReasoningBlocks[i]
+			ch <- ChatDelta{ReasoningBlock: &block}
+		}
 		for i := range resp.Message.ToolCalls {
 			tc := resp.Message.ToolCalls[i]
 			ch <- ChatDelta{ToolCall: &tc}
@@ -140,9 +144,10 @@ func (r *ReplayProvider) Chat(_ context.Context, req ChatRequest) (ChatResponse,
 	r.calls++
 	resp := ChatResponse{
 		Message: Message{
-			Role:      RoleAssistant,
-			Content:   rec.Response,
-			ToolCalls: rec.ToolCalls,
+			Role:            RoleAssistant,
+			Content:         rec.Response,
+			ReasoningBlocks: rec.ReasoningBlocks,
+			ToolCalls:       rec.ToolCalls,
 		},
 		StopReason: rec.StopReason,
 		Usage:      Usage{InputTokens: rec.TokensIn, OutputTokens: rec.TokensOut, CostUSD: rec.CostUSD},
@@ -172,6 +177,10 @@ func (r *ReplayProvider) Stream(ctx context.Context, req ChatRequest) (<-chan Ch
 				frag = " " + word
 			}
 			ch <- ChatDelta{ContentDelta: frag}
+		}
+		for i := range resp.Message.ReasoningBlocks {
+			block := resp.Message.ReasoningBlocks[i]
+			ch <- ChatDelta{ReasoningBlock: &block}
 		}
 		for i := range resp.Message.ToolCalls {
 			tc := resp.Message.ToolCalls[i]
@@ -227,6 +236,9 @@ func replayMessageEqual(got, want Message) bool {
 		if got.ContentParts[i] != want.ContentParts[i] {
 			return false
 		}
+	}
+	if !slices.Equal(got.ReasoningBlocks, want.ReasoningBlocks) {
+		return false
 	}
 	return true
 }

@@ -92,7 +92,8 @@ func (t *LSPTool) Name() string { return ToolLSP }
 
 func (t *LSPTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolLSP,
+		Name:   ToolLSP,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Query a configured Language Server Protocol server for read-only, symbol-aware code intelligence. " +
 			"Actions: status; diagnostics for a file; document_symbols; or hover/definition/references at a symbol. " +
 			"For position actions pass a 1-based line and the exact symbol substring on that line. If it occurs " +

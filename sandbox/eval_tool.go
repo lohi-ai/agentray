@@ -68,7 +68,8 @@ func (t *EvalTool) Name() string { return ToolEval }
 
 func (t *EvalTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolEval,
+		Name:   ToolEval,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Execute one Python or JavaScript cell in a persistent conversation-scoped runtime. Variables, imports, functions, and objects survive later calls in the same language. " +
 			"Use reset=true to discard only the selected language's state before the cell. Relative file access starts in the shared agent workspace. " +
 			"JavaScript accepts static or dynamic imports and TypeScript cell syntax when the runtime is Node.js 22.13 or newer. " +

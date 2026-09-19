@@ -284,7 +284,8 @@ func (t *planTool) Name() string { return ToolName }
 
 func (t *planTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
-		Name: ToolName,
+		Name:   ToolName,
+		Strict: agentcore.ToolStrictEnabled,
 		Description: "Record or update your plan as a todo list for a multi-step task. " +
 			"Send the FULL list every time (it replaces the previous plan). Mark exactly one " +
 			"item in_progress (the step you are doing now), completed for finished steps, and " +

@@ -500,6 +500,10 @@ type RunOptions struct {
 	// run tier's reasoning effort for this run — a chat magic keyword
 	// ("ultrathink") is the producer. Providers without the knob ignore it.
 	ReasoningEffort string
+	// ToolChoice and ParallelToolCalls optionally constrain provider tool
+	// generation for this run. Defaults preserve the selected provider's policy.
+	ToolChoice        agentcore.ToolChoice
+	ParallelToolCalls *bool
 }
 
 // Run executes one agent run and returns the persisted run row plus the loop
@@ -893,25 +897,27 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		FinishGuard: evidenceFinishGuard(ScopesFromMap(cfg.Scopes), runToolNames(runTools)),
 		// Consulted after the two rule-based gates above; nil when this agent's
 		// advisor is off, which makes the composition identical to before.
-		Advisor:         advisorReviewer,
-		AdvisorNotes:    advisorNotes,
-		Goal:            opts.Goal,
-		ReasoningEffort: opts.ReasoningEffort,
-		Soul:            def.SoulMD,
-		Agents:          def.AgentsMD,
-		Skills:          skills,
-		SkillLoader:     r.skillLoader(scopeID),
-		Data:            r.Store,
-		Memory:          mem,
-		Notifier:        r.Notifier,
-		SourceRunner:    r.SourceRunner,
-		RunID:           runID,
-		Sandbox:         r.Sandbox,
-		Credentials:     creds,
-		Tools:           runTools,
-		ReadOnly:        opts.ReadOnly,
-		Tracer:          r.Tracer,
-		StepGate:        opts.StepGate,
+		Advisor:           advisorReviewer,
+		AdvisorNotes:      advisorNotes,
+		Goal:              opts.Goal,
+		ReasoningEffort:   opts.ReasoningEffort,
+		ToolChoice:        opts.ToolChoice,
+		ParallelToolCalls: opts.ParallelToolCalls,
+		Soul:              def.SoulMD,
+		Agents:            def.AgentsMD,
+		Skills:            skills,
+		SkillLoader:       r.skillLoader(scopeID),
+		Data:              r.Store,
+		Memory:            mem,
+		Notifier:          r.Notifier,
+		SourceRunner:      r.SourceRunner,
+		RunID:             runID,
+		Sandbox:           r.Sandbox,
+		Credentials:       creds,
+		Tools:             runTools,
+		ReadOnly:          opts.ReadOnly,
+		Tracer:            r.Tracer,
+		StepGate:          opts.StepGate,
 		// Durable log: key the append-only log on the run id (the FK that the
 		// trace uses). nil store leaves runs in-memory.
 		Session:           r.SessionStore,

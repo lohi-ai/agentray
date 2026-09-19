@@ -57,11 +57,13 @@ func (t readSkillTool) Parallel() bool { return true }
 
 func (t readSkillTool) Schema() ToolSchema {
 	return ToolSchema{
-		Name: readSkillToolName,
+		Name:   readSkillToolName,
+		Strict: ToolStrictEnabled,
 		Description: "Load the full instructions for one of the available skills listed in the system prompt. " +
 			"Call this with the skill's id when the current task matches that skill's description, then follow the returned steps.",
 		Parameters: map[string]any{
-			"type": "object",
+			"type":                 "object",
+			"additionalProperties": false,
 			"properties": map[string]any{
 				"id": map[string]any{
 					"type":        "string",

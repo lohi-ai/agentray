@@ -98,9 +98,10 @@ type LabStep struct {
 // A consumer maps its persisted trace rows (storage.AgentLLMCall) onto this
 // neutral shape so the fold itself imports no storage.
 type TurnRecord struct {
-	Messages  []Message  // the request messages sent to the model this turn
-	Response  string     // assistant text returned
-	ToolCalls []ToolCall // the tool calls the model requested this turn
+	Messages        []Message        // the request messages sent to the model this turn
+	Response        string           // assistant text returned
+	ReasoningBlocks []ReasoningBlock // opaque provider replay blocks returned with the assistant turn
+	ToolCalls       []ToolCall       // the tool calls the model requested this turn
 	// ToolGates is the gate outcome of each call in ToolCalls. Empty means the
 	// recording predates this field (or the turn requested no tools) — FoldSteps
 	// then keeps the historical default rather than inventing denials. See ToolGate.

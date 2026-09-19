@@ -29,3 +29,28 @@ func TestTracingProviderPreservesModelCapabilities(t *testing.T) {
 		t.Fatalf("wrapped tools capability = %q", got)
 	}
 }
+
+type keyUpdatingInner struct {
+	capabilityInner
+	key string
+}
+
+func (p *keyUpdatingInner) UpdateAPIKey(key string) { p.key = key }
+
+func TestTracingProviderPreservesKeyUpdaterOnlyWhenSupported(t *testing.T) {
+	plain := Wrap(capabilityInner{}, nil, nil)
+	if _, ok := plain.(agentcore.KeyUpdater); ok {
+		t.Fatal("plain traced provider unexpectedly advertises KeyUpdater")
+	}
+
+	inner := &keyUpdatingInner{}
+	wrapped := Wrap(inner, nil, nil)
+	updater, ok := wrapped.(agentcore.KeyUpdater)
+	if !ok {
+		t.Fatal("traced key provider lost KeyUpdater")
+	}
+	updater.UpdateAPIKey("rotated")
+	if inner.key != "rotated" {
+		t.Fatalf("forwarded key = %q, want rotated", inner.key)
+	}
+}

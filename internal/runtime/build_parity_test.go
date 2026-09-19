@@ -31,6 +31,8 @@ model:                 gpt-5
 max_tokens:            4096
 reasoning_effort:      high
 output_schema:         -
+tool_choice:           -
+parallel_tool_calls:   -
 prompt_cache:          agent-1
 refresh_key:           set
 retry:                 3 attempts

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -147,13 +148,17 @@ type ParallelTool interface {
 
 // ToolSet is an ordered registry of tools keyed by name.
 type ToolSet struct {
-	order []string
-	byKey map[string]Tool
+	order      []string
+	byKey      map[string]Tool
+	validators *toolValidatorCache
 }
 
 // NewToolSet builds a registry from the given tools, preserving order.
 func NewToolSet(tools ...Tool) *ToolSet {
-	ts := &ToolSet{byKey: make(map[string]Tool, len(tools))}
+	ts := &ToolSet{
+		byKey:      make(map[string]Tool, len(tools)),
+		validators: newToolValidatorCache(),
+	}
 	for _, t := range tools {
 		ts.Add(t)
 	}
@@ -176,8 +181,9 @@ func (ts *ToolSet) Add(t Tool) {
 // definition cannot see each other's built-ins.
 func (ts *ToolSet) With(tools ...Tool) *ToolSet {
 	clone := &ToolSet{
-		order: append([]string{}, ts.order...),
-		byKey: make(map[string]Tool, len(ts.byKey)+len(tools)),
+		order:      append([]string{}, ts.order...),
+		byKey:      make(map[string]Tool, len(ts.byKey)+len(tools)),
+		validators: ts.validators,
 	}
 	for k, v := range ts.byKey {
 		clone.byKey[k] = v
@@ -186,6 +192,23 @@ func (ts *ToolSet) With(tools ...Tool) *ToolSet {
 		clone.Add(t)
 	}
 	return clone
+}
+
+// toolValidatorCache is shared by ToolSet.With clones. It stores at most one
+// compiled schema per tool name, capped across dynamic extension names, so
+// repeated runs avoid recompilation without creating unbounded state in a
+// long-lived server. The schema fingerprint prevents a same-named override (or
+// a dynamic Schema method) from ever reusing a validator for different
+// parameters.
+type toolValidatorCache struct {
+	mu      sync.Mutex
+	entries map[string]toolValidatorEntry
+}
+
+const maxToolValidatorCacheEntries = 256
+
+func newToolValidatorCache() *toolValidatorCache {
+	return &toolValidatorCache{entries: make(map[string]toolValidatorEntry)}
 }
 
 // Get returns the tool of the given name, if registered.

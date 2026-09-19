@@ -48,8 +48,8 @@ are deliberately smaller:
 | Backend conformance | Targeted agent/session tests plus provider/catalog conformance checks | Memory and PostgreSQL session stores previously had separate tests | Added one reusable suite for ordering, isolation, snapshots, batches, recovery, branches, and checkpoint windows; this also carries forward the earlier pi-harness review's strongest testing practice |
 | Streaming recovery | Retries only before meaningful output commits | Previously retried after visible output | Adopted replay-safe commit boundary |
 | Compaction | Provider-aware pruning, tool protection, cache-aware strategies | Window-aware summary compaction plus durable, protected, cache-aware batched pruning | Adopted deterministic pruning, warm-prefix protection, and a savings floor; aggressive shake remains optional future work |
-| Providers | Very broad registry, model-scoped API dialects, auth broker, session state | Four native families, model-scoped OpenAI Chat/Responses routing, OpenAI-compatible gateways, pooled OAuth, bounded conversation state, adaptive hint fallback | Keep generic wires; add native families only where their behavior cannot be represented |
-| Model capabilities | Generated, resolved model/compat records | Previously one provider-wide tools boolean | Adopted tri-state per-model capabilities with live discovery and rung snapshots |
+| Providers | Very broad registry, model-scoped API dialects, structured in-band/HTTP failures, auth broker, session state | Four native families, model-scoped OpenAI Chat/Responses routing, OpenAI-compatible gateways, pooled OAuth, bounded conversation state, adaptive hint fallback, governed retry metadata, and replay-safe stream failures | Keep generic wires; normalize failure semantics centrally and add native families only where their behavior cannot be represented |
+| Model capabilities | Generated, resolved model/compat records including output limits and reasoning dialect | Previously one provider-wide tools boolean | Adopted tri-state per-model capabilities, live discovery, output ceilings, and rung snapshots; keep wire-specific schema/thinking adaptation in adapters |
 | Local inference | Ollama and other local endpoints, optional credentials | Compatible wire existed but runtime required a key | Adopted explicit optional-auth local vendors |
 | Edit conflict safety | Hashline edits bind model-selected lines to a file snapshot | Exact/fuzzy replacement previously trusted only matching text | Adopted snapshot-bound edits; defer the full hashline grammar |
 | Tool surface | Coding-heavy suite: AST, LSP, DAP, rich eval, GitHub, browser/computer, memory | Portable filesystem/edit/LSP/rich Python/JavaScript eval with governed host-tool/subagent calls, shell/browser/computer/web/MCP, plus product tools | LSP read paths, persistent dual-language eval, provider-native image results, and the eval bridge adopted; DAP remains a measured follow-up |
@@ -106,6 +106,179 @@ not been shown or executed, so they remain safe to replay before visible text.
 Streams governed by interceptors are held until the attempt is accepted, so a
 rule that matches a later chunk cannot leak an earlier prefix into the visible
 stream ahead of its retry. Ordinary streams remain token-by-token live.
+
+### Provider failure normalization and credential concurrency
+
+The OpenAI-compatible and Anthropic streaming adapters now recognize provider
+errors carried inside an HTTP 200 SSE response. Nested and flat envelopes,
+explicit auth/permission/429/5xx fields, known auth/throttle/overload codes, and
+leading proxy status frames become one structured `ProviderError`;
+account/billing limits remain terminal. This closes the failure mode where a
+rate-limit frame with no choices was skipped and the stream ended as a
+successful empty answer. Live streams must also reach a provider terminal event
+(or an explicit finish reason on compatible protocols) before tool calls and
+final success are released. Anthropic requires `message_stop`; Antigravity
+requires a candidate finish reason. A failure after visible content still uses
+the existing commit boundary and is never replayed.
+
+Retry timing now takes the longest valid value from `Retry-After-Ms`,
+`Retry-After`, `X-RateLimit-Reset-Ms`, and `X-RateLimit-Reset`, including
+relative and epoch reset forms. The full hint reaches the OAuth pool so an
+account is blocked for the provider's actual window; the agent's own sleep
+remains capped by its retry policy. HTTP provider error bodies are capped at 64
+KiB, while successful model output keeps its normal transport semantics.
+Specialized Responses, Codex, and Antigravity in-band errors retain the same
+HTTP retry/reset headers instead of reconstructing a lossy error.
+
+A configured credential refresh failure now fails closed before the provider
+request rather than silently using a stale key. Static OpenAI, Anthropic, and
+Responses keys, plus the provider wrapper, synchronize official update/read
+paths because parent and subagent runs can share provider instances on a server.
+Identity and tracing decorators expose key rotation only when their wrapped
+provider actually supports it, so an OAuth pool cannot be mistaken for a static
+credential. Empty refresh results fail closed just like resolver errors. OAuth
+vendors retain their stronger per-request clone design. These contracts use only
+the Go HTTP/runtime layers, so local compatible endpoints and hosted
+multi-replica workers follow the same error and concurrency rules.
+
+Pooled OAuth calls now also recover inside the logical request. A typed 401 or
+403 is reported to the account pool, then retried with a refreshed or sibling
+credential only when that credential has not already served the operation.
+Chat and pre-output stream failures share the same distinct-credential set and
+64-attempt hard ceiling. Stream metadata is held until the attempt is accepted;
+switching accounts resets account-scoped provider-session state before the new
+wire call. Once a content token is visible, the account is still reported but
+the failure is forwarded without replay. A 403 that explicitly identifies a
+concurrency cap is neither rotated nor marked bad; it returns to the ordinary
+same-rung backoff path. Cancellation is surfaced as an error rather than a
+closed channel that could be mistaken for an empty successful turn. Conversely,
+once the stream's terminal success event has arrived, a sibling cancellation
+cannot erase that completed result; this keeps durable fan-out recovery from
+re-running a child whose answer won the completion race.
+
+### Model output dialect and ceilings
+
+`ModelCapabilities` now carries an optional hard output-token ceiling. OpenAI-
+compatible discovery accepts dedicated and capability-map spellings,
+Anthropic/Google listings retain limits when supplied, and the active rung
+clamps only an explicit request above the discovered ceiling. A zero request
+still means “use the provider default,” so unknown local endpoints keep their
+existing behavior and fallback rungs shape independent copies.
+
+The OpenAI-compatible `Compat.MaxTokensField` setting is now real wire policy:
+it selects `max_tokens` or `max_completion_tokens` and is exposed through the
+normal provider `Spec` construction path. Previously the field was documented
+but every request always serialized `max_tokens`. An explicit 400/422 rejection
+also switches to the alternate field and remembers that per endpoint/model
+provider session, covering workspace runtime calls where no static catalog row
+exists. Antigravity honors a smaller configured request limit while retaining
+its 64,000-token Claude and 65,536-token Gemini safety ceilings. These rules are
+metadata/configuration, not a generated catalog, so the same local or hosted
+provider can publish its own limits.
+
+### Provider-safe tool schemas and Antigravity thinking
+
+AgentRay now keeps two schema roles separate. The `ToolSchema` supplied by a
+tool remains the canonical execution-time contract, while each adapter sends a
+deep-cloned provider projection. OpenAI Responses and Codex rewrite `oneOf` to
+their accepted `anyOf` form, normalize empty subschemas, drop unsupported regex
+lookarounds, and ensure every object node declares `properties`. OpenAI Chat and
+Anthropic receive cloned/defaulted generic schemas without stricter rewrites.
+
+Antigravity uses a Cloud Code Assist projection: known snake-case schema keys
+are canonicalized, unsupported meta/validation fields are removed (useful
+constraints are retained in descriptions), `const` becomes a typed enum,
+nullable properties become optional, and object properties are made explicit.
+A reference or residual combiner that cannot be widened predictably falls back
+to an open object on the provider wire. The original schema is never mutated,
+so local argument validation still rejects values outside the tool contract.
+This mirrors OMP's canonical-schema/provider-projection boundary without
+copying its TypeScript schema engine or making a laptop depend on a server-side
+catalog.
+
+Antigravity reasoning effort is no longer a boolean alias. Gemini 3 requests
+map `minimal`/`low`/`medium`/higher levels to the native thinking-level enum;
+budget-based Gemini/CCA routes map the same neutral efforts to bounded token
+budgets. When the caller sets an output limit, the budget is added above the
+desired visible output and capped at the existing 65,536-token Gemini or
+64,000-token Claude ceiling. Empty/`off`/`none` preserves thinking-off behavior.
+Anthropic thinking activation remains deferred, but its replay prerequisite is
+now present: the neutral transcript preserves signed and redacted reasoning
+blocks durably across tool turns without mixing them into visible assistant
+text. Activation is the next adapter step rather than a transcript redesign.
+
+Tool routing is now provider-neutral as well. A request or agent may leave the
+provider default untouched, allow automatic selection, forbid tools, require
+some tool, or force one advertised name. OpenAI Chat, Responses, Codex,
+Anthropic/Claude Code, and Antigravity translate that contract into their native
+wire shapes; an absent control emits no new field for strict local gateways.
+The optional parallel-call hint remains tri-state and maps to
+`parallel_tool_calls` or Anthropic's inverted `disable_parallel_tool_use`.
+AgentCore validates named choices against the filtered tool catalogue before
+network I/O. A provider known not to support tool choice can still enforce
+`none` by removing tools locally, while forced choices fail early and may
+escalate to a capable rung. Local execution remains separately opt-in through
+`ParallelTool`, so a provider hint cannot make a mutating tool concurrent.
+
+### Per-tool strict generation without weakening execution safety
+
+`ToolSchema.Strict` now carries a provider-neutral tri-state policy: omit the
+vendor field by default, request strict generation explicitly, or explicitly
+send `strict:false`. OpenAI Chat, Responses, and Codex place that policy in
+their respective wire shapes. AgentRay-owned runtime and sandbox tools opt in;
+host/MCP tools retain their declared policy. Strict projection operates on a deep copy,
+normalizes the supported union dialect, strips generation-only constraints,
+requires explicitly closed object shapes, and emits `strict:true` only when every declared property
+is already required. Explicit or implicit open maps, optional properties, unconstrained
+branches, and malformed required lists degrade to the ordinary non-strict
+projection instead of silently changing the arguments a tool accepts.
+
+This is intentionally more conservative than OMP's required-and-nullable
+rewrite. AgentCore validates execution against the original schema, so forcing
+an absent optional field to appear as `null` on the wire would create arguments
+that the canonical validator may reject. Provider strictness remains a model
+quality hint; complete local Draft 2020-12 validation remains the safety
+boundary.
+
+OpenAI-family adapters recognize only narrow 400/422 strict-tool/schema or
+grammar rejection signatures, including statusless errors inside HTTP-200 SSE
+when their message matches that narrow classifier. Before any output is visible they retry once
+without every strict field, then remember that endpoint/model incompatibility
+inside the bounded logical `ProviderSession`. Later turns bypass the rejected
+feature, while another model, endpoint, or conversation can still use it. No
+session is required for correctness, auth/rate-limit failures are never
+weakened, and the state owns no transport, which keeps the same behavior viable
+in both an embedded laptop process and a leased server session.
+
+### Durable Anthropic reasoning replay
+
+OMP's Anthropic adapter preserves `thinking` blocks with their signatures and
+opaque `redacted_thinking` payloads because Anthropic may require the exact
+blocks again when a tool turn continues. AgentRay previously discarded them,
+which made enabling extended thinking unsafe: a response could look correct on
+the first turn and then fail signature validation on the next request.
+
+`agentcore.Message` now carries provider-neutral `ReasoningBlock` values beside
+visible content. Non-streaming and streaming Anthropic paths capture only
+complete signed/redacted blocks; `streamTurn`, session snapshots, cache-prefix
+comparison, compaction sizing, faux/replay providers, tracing, and Lab replay
+all preserve them. The PostgreSQL trace adds an idempotent JSONB column with an
+empty historical default. Lightweight metrics queries deliberately exclude the
+payload. The laptop `MemorySessionStore` needs no migration and deep-clones the
+same field, so both deployment modes retain identical transcript semantics.
+
+Replay is bound to a digest of provider identity, endpoint, and model. The
+endpoint itself is not persisted, and a block from another endpoint/model is
+dropped rather than forwarded. Unsigned thinking is also dropped. Capture is
+bounded to 32 blocks, 1 MiB per block, and 4 MiB per response; an oversized
+opaque block is discarded whole rather than truncated into an invalid
+signature or ciphertext. Reasoning deltas never become user-visible stream
+tokens.
+
+This lands the durability prerequisite only. Anthropic thinking budgets/
+adaptive mode and the selective strict-tool beta stay disabled until their
+request dialect and pre-output invalid-signature fallback are implemented and
+tested together.
 
 ### Durable tool intent and parallel outcomes
 
@@ -557,15 +730,19 @@ portable CI threshold.
 
 ## Next adoption order
 
-1. Benchmark typed `edit_lines` against oh-my-pi's syntax-block hashline mode;
+1. Enable Anthropic budget/adaptive thinking and selective strict-tool support
+   on top of the durable signed-block representation, with a bounded pre-output
+   fallback that drops rejected stale signatures rather than weakening an
+   already-visible turn.
+2. Benchmark typed `edit_lines` against oh-my-pi's syntax-block hashline mode;
    add syntax-aware blocks only if they materially improve edit success.
-2. Evaluate raw-byte/object-store backing for server artifacts, then evaluate
+3. Evaluate raw-byte/object-store backing for server artifacts, then evaluate
    transactional rename/code actions over snapshot-checked multi-file writes.
-3. Measure an aggressive transcript-shake policy; keep it optional because
+4. Measure an aggressive transcript-shake policy; keep it optional because
    artifact durability and the acceptable loss profile vary by deployment.
-4. Evaluate read-only speculative execution and background eval handles behind
+5. Evaluate read-only speculative execution and background eval handles behind
    a budget and cancellation gate; keep mutating tools strictly replay-safe.
-5. Expand native provider families only where the generic OpenAI-compatible
+6. Expand native provider families only where the generic OpenAI-compatible
    wire cannot represent required behavior.
 
 The target is behavioral parity where it improves correctness and agent quality,

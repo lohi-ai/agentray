@@ -37,6 +37,33 @@ func TestMemorySessionStoreSnapshotsRichContentParts(t *testing.T) {
 	}
 }
 
+func TestMemorySessionStoreSnapshotsReasoningBlocks(t *testing.T) {
+	store := NewMemorySessionStore()
+	ctx := context.Background()
+	msg := Message{Role: RoleAssistant, ReasoningBlocks: []ReasoningBlock{{
+		Type: ReasoningBlockThinking, Text: "original", Signature: "sig", ReplayScope: "anthropic:scope",
+	}}}
+	if err := store.Append(ctx, "reasoning", SessionEntry{Kind: EntryMessage, Message: &msg}); err != nil {
+		t.Fatal(err)
+	}
+	msg.ReasoningBlocks[0].Text = "writer mutation"
+	first, err := store.Log(ctx, "reasoning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first[0].Message.ReasoningBlocks[0].Text; got != "original" {
+		t.Fatalf("append did not snapshot reasoning blocks: %q", got)
+	}
+	first[0].Message.ReasoningBlocks[0].Text = "reader mutation"
+	second, err := store.Log(ctx, "reasoning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second[0].Message.ReasoningBlocks[0].Text; got != "original" {
+		t.Fatalf("log did not clone reasoning blocks: %q", got)
+	}
+}
+
 // runSessionStoreConformance is the backend contract in executable form. A new
 // in-package backend gets the same ordering/concurrency checks by adding one
 // call with its factory; optional capabilities are tested when implemented.

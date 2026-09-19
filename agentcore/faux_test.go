@@ -45,6 +45,41 @@ func TestReplayProviderReturnsRecordedError(t *testing.T) {
 	}
 }
 
+func TestReplayProviderReturnsReasoningBlocksInChatAndStream(t *testing.T) {
+	block := ReasoningBlock{
+		Type: ReasoningBlockThinking, Text: "opaque thought", Signature: "sig", ReplayScope: "anthropic:scope",
+	}
+	record := TurnRecord{
+		Messages:        []Message{{Role: RoleUser, Content: "hi"}},
+		Response:        "hello",
+		ReasoningBlocks: []ReasoningBlock{block},
+	}
+	req := ChatRequest{Messages: record.Messages}
+	chat := NewReplayProvider(record)
+	resp, err := chat.Chat(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(resp.Message.ReasoningBlocks) != 1 || resp.Message.ReasoningBlocks[0] != block {
+		t.Fatalf("chat reasoning blocks = %+v", resp.Message.ReasoningBlocks)
+	}
+
+	stream := NewReplayProvider(record)
+	ch, err := stream.Stream(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var got []ReasoningBlock
+	for delta := range ch {
+		if delta.ReasoningBlock != nil {
+			got = append(got, *delta.ReasoningBlock)
+		}
+	}
+	if len(got) != 1 || got[0] != block {
+		t.Fatalf("stream reasoning blocks = %+v", got)
+	}
+}
+
 func TestReplayProviderRejectsDrift(t *testing.T) {
 	p := NewReplayProvider(TurnRecord{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
@@ -140,14 +175,15 @@ func turnRecordsFromFaux(t *testing.T, f *FauxProvider) []TurnRecord {
 		req := f.Recorded[i]
 		resp := f.Responses[i]
 		out = append(out, TurnRecord{
-			Messages:   req.Messages,
-			Response:   resp.Message.Content,
-			ToolCalls:  resp.Message.ToolCalls,
-			Tools:      advertisedToolNames(req.Tools),
-			StopReason: resp.StopReason,
-			TokensIn:   resp.Usage.InputTokens,
-			TokensOut:  resp.Usage.OutputTokens,
-			CostUSD:    resp.Usage.CostUSD,
+			Messages:        req.Messages,
+			Response:        resp.Message.Content,
+			ReasoningBlocks: resp.Message.ReasoningBlocks,
+			ToolCalls:       resp.Message.ToolCalls,
+			Tools:           advertisedToolNames(req.Tools),
+			StopReason:      resp.StopReason,
+			TokensIn:        resp.Usage.InputTokens,
+			TokensOut:       resp.Usage.OutputTokens,
+			CostUSD:         resp.Usage.CostUSD,
 		})
 	}
 	return out

@@ -23,6 +23,7 @@ func (t opTool) Schema() agentcore.ToolSchema {
 		Name:        t.spec.OpName(),
 		Description: t.spec.OpSummary(),
 		Parameters:  t.spec.OpSchema(),
+		Strict:      agentcore.ToolStrictEnabled,
 	}
 }
 

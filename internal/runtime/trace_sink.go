@@ -100,27 +100,29 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 		msgs, base, keep = []byte("[]"), 0, 0
 	}
 	calls, _ := json.Marshal(r.ToolCalls)
+	reasoning, _ := json.Marshal(r.ReasoningBlocks)
 
 	seq, err := s.store.RecordAgentLLMCall(context.Background(), storage.AgentLLMCall{
-		RunID:         rootRunID(r.TraceID),
-		SessionKey:    session,
-		Depth:         r.Depth,
-		BaseSeq:       base,
-		KeepPrefix:    keep,
-		Provider:      r.Provider,
-		Model:         r.Model,
-		MessagesJSON:  string(msgs),
-		Tools:         r.Tools,
-		Response:      r.Response,
-		ToolCallsJSON: string(calls),
-		StopReason:    r.StopReason,
-		TokenInput:    r.Usage.InputTokens,
-		TokenOutput:   r.Usage.OutputTokens,
-		CostUSD:       r.Usage.CostUSD,
-		CostUnpriced:  r.Usage.CostUnpriced,
-		LatencyMS:     int(r.LatencyMS),
-		Streamed:      r.Streamed,
-		Error:         r.Err,
+		RunID:               rootRunID(r.TraceID),
+		SessionKey:          session,
+		Depth:               r.Depth,
+		BaseSeq:             base,
+		KeepPrefix:          keep,
+		Provider:            r.Provider,
+		Model:               r.Model,
+		MessagesJSON:        string(msgs),
+		Tools:               r.Tools,
+		Response:            r.Response,
+		ReasoningBlocksJSON: string(reasoning),
+		ToolCallsJSON:       string(calls),
+		StopReason:          r.StopReason,
+		TokenInput:          r.Usage.InputTokens,
+		TokenOutput:         r.Usage.OutputTokens,
+		CostUSD:             r.Usage.CostUSD,
+		CostUnpriced:        r.Usage.CostUnpriced,
+		LatencyMS:           int(r.LatencyMS),
+		Streamed:            r.Streamed,
+		Error:               r.Err,
 	})
 	if err != nil {
 		// The row did not land, so the next call must not chain onto it — forget
@@ -191,6 +193,14 @@ func commonPrefix(a, b []agentcore.Message) int {
 func sameMessage(a, b agentcore.Message) bool {
 	if a.Role != b.Role || a.Content != b.Content || a.Name != b.Name || a.ToolCallID != b.ToolCallID {
 		return false
+	}
+	if len(a.ReasoningBlocks) != len(b.ReasoningBlocks) {
+		return false
+	}
+	for i := range a.ReasoningBlocks {
+		if a.ReasoningBlocks[i] != b.ReasoningBlocks[i] {
+			return false
+		}
 	}
 	if len(a.ToolCalls) != len(b.ToolCalls) {
 		return false
