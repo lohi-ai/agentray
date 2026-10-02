@@ -86,15 +86,32 @@ func TestEvaluateReplay(t *testing.T) {
 			wantReason: ReplayBehind,
 		},
 		{
-			name:       "delivered but not applied yet",
+			name: "delivered but not applied yet: an in-flight flush is steady state, not replay",
+			// Sequences 8..10 are delivered and being written right now — every
+			// serving colour sits here once per flush interval. Refusing on it
+			// flapped a live colour's /readyz between 200 and 503 on its own
+			// write traffic (prod: AppNotReady firing mid-ingest). The refusals
+			// that matter ride on pending instead: a consumer that cannot settle
+			// stops taking deliveries and accumulates there.
 			applied:    7,
-			head:       40,
+			head:       10,
 			first:      1,
 			ackPending: 3,
 			wired:      true,
 			dedicated:  true,
-			wantReady:  false,
-			wantReason: ReplayBehind,
+			wantReady:  true,
+			wantReason: ReplayCaughtUp,
+		},
+		{
+			name:       "shared stream, delivered-but-unapplied is still ready",
+			applied:    7,
+			head:       900,
+			first:      1,
+			ackPending: 5,
+			wired:      true,
+			dedicated:  false,
+			wantReady:  true,
+			wantReason: ReplayCaughtUp,
 		},
 		{
 			name: "colour parked past the retention window: gap above its applied mark",

@@ -58,10 +58,9 @@ import (
 //     past the applied mark when only the OTHER env's messages age out — one
 //     branch blocking every deploy forever, the other reporting unrecoverable
 //     loss of rows that were never this colour's. Neither number is used there;
-//     NumPending and NumAckPending are counted in the consumer's own
-//     (filter-local) sequence space, so "nothing matching my filter is left to
-//     deliver and nothing delivered is left to apply" is a proof that this
-//     colour holds everything it can receive.
+//     NumPending is counted in the consumer's own (filter-local) sequence
+//     space, so "nothing matching my filter is left to deliver" is a proof
+//     that this colour holds everything it can receive.
 //
 // The price of that is named rather than hidden: on a stream whose subject list
 // is broader than this consumer's filter, a retention loss of this colour's OWN
@@ -88,7 +87,8 @@ import (
 // and the documented recovery is an operator decision to reset both colours,
 // not a repair this predicate performs.
 type ReplayVerdict struct {
-	// Ready is true only when this colour has applied everything it can receive.
+	// Ready is true only when this colour has been offered nothing left to
+	// deliver — delivered-but-unapplied work is one in-flight flush, not a hole.
 	Ready bool `json:"ready"`
 	// Applied is this colour's applied high-water mark (consumer ack floor).
 	Applied uint64 `json:"applied,omitempty"`
@@ -104,9 +104,12 @@ type ReplayVerdict struct {
 	// consumer's own sequence space; either way non-zero means waiting cannot
 	// help.
 	Missing uint64 `json:"missing,omitempty"`
-	// Pending is matching work not yet delivered; AckPending is delivered work
-	// not yet applied. Diagnostics — they are also the satisfiability half of
-	// the predicate.
+	// Pending is matching work not yet delivered — the number the verdict
+	// refuses on. AckPending is delivered work not yet applied; it is
+	// diagnostic ONLY. A colour under live ingest never holds it at zero —
+	// every delivered batch spends one flush interval in flight (see the
+	// batcher), so counting it in the verdict made a serving colour flap
+	// between caught-up and replaying with its own write traffic.
 	Pending    uint64 `json:"pending,omitempty"`
 	AckPending int    `json:"ack_pending,omitempty"`
 	// Reason is one of the Replay* values below — plus ReplayUnavailable, which
@@ -184,7 +187,13 @@ func EvaluateReplay(applied, head, first uint64, pending uint64, ackPending int,
 			return v
 		}
 	}
-	if (dedicated && applied >= head) || (pending == 0 && ackPending == 0) {
+	// Delivered-but-unapplied work is NOT a refusal: it is a batch this colour
+	// is writing right now, which is every serving colour's steady state — the
+	// file is always one flush behind the durable by construction. A colour
+	// that cannot settle refuses through pending instead: deliveries stop once
+	// MaxAckPending is reached or the consumer stalls, and undelivered work
+	// accumulates there.
+	if (dedicated && applied >= head) || pending == 0 {
 		v.Ready = true
 		v.Reason = ReplayCaughtUp
 		return v

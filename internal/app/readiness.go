@@ -38,9 +38,10 @@ type readyzBody struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// readyzHandler answers 200 only for a colour that has applied the whole stream,
-// and 503 otherwise — including when the answer cannot be read at all, because a
-// colour whose coherence cannot be established must not take traffic.
+// readyzHandler answers 200 only for a colour that has nothing left to deliver —
+// an in-flight flush does not count against it — and 503 otherwise, including
+// when the answer cannot be read at all, because a colour whose coherence
+// cannot be established must not take traffic.
 func readyzHandler(probe readinessProbe) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		if probe == nil {
