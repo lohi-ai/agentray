@@ -25,8 +25,11 @@ import (
 // RecordAgentLLMCall); storage never interprets it, and the consumer's
 // reconstruction turns a page of rows back into per-call context.
 type AgentLLMCall struct {
-	ID    string `json:"id"`
-	RunID string `json:"run_id"`
+	// NativeTraceJSON is an original native request/response and telemetry spans.
+	// It is read only by the full inspector; metrics queries omit this payload.
+	NativeTraceJSON string `json:"native_trace_json,omitempty"`
+	ID              string `json:"id"`
+	RunID           string `json:"run_id"`
 	// SessionKey identifies which agent produced the call: the run's own key for
 	// the top-level agent, "<runID>/<toolCallID>" for a spawned sub-agent. Before
 	// this existed every child's calls landed in the parent's flat list,
@@ -130,6 +133,7 @@ func (s *Store) migrateAgentTrace(ctx context.Context) error {
 		// Historical rows had none, so an empty JSON array is the truthful and
 		// rewrite-free default.
 		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS reasoning_blocks_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`ALTER TABLE agent_llm_calls ADD COLUMN IF NOT EXISTS native_trace_json JSONB NOT NULL DEFAULT 'null'::jsonb`,
 		// Deliberately NOT backfilled: an UPDATE over every historical row would
 		// rewrite the largest table in the database while deploy holds the
 		// migration open. Legacy rows keep session_key '' and are read as the
@@ -176,28 +180,48 @@ func (s *Store) RecordAgentLLMCall(ctx context.Context, c AgentLLMCall) (int, er
 	if key == "" {
 		key = c.RunID
 	}
+	native := c.NativeTraceJSON
+	if native == "" {
+		native = "null"
+	}
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	// Sibling native workers finish concurrently. Serialize sequence assignment
+	// on their shared run so pagination and delta bases remain unambiguous.
+	var runID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM agent_runs WHERE id=$1 FOR UPDATE`, c.RunID).Scan(&runID); err != nil {
+		return 0, err
+	}
 	var seq int
-	err := s.pg.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 INSERT INTO agent_llm_calls (
 	run_id, session_key, depth, seq, base_seq, keep_prefix,
 	provider, model, messages_json, tools, response, reasoning_blocks_json, tool_calls_json,
-	stop_reason, token_input, token_output, cost_usd, cost_unpriced, latency_ms, streamed, error
+	stop_reason, token_input, token_output, cost_usd, cost_unpriced, latency_ms, streamed, error, native_trace_json
 ) VALUES (
 	$1, $2, $3,
 	(SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_llm_calls WHERE run_id = $1),
-	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20
+	$4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb
 )
 RETURNING seq`,
 		c.RunID, key, c.Depth, c.BaseSeq, c.KeepPrefix,
 		c.Provider, c.Model, msgs, tools, c.Response, reasoning, calls,
-		c.StopReason, c.TokenInput, c.TokenOutput, c.CostUSD, c.CostUnpriced, c.LatencyMS, c.Streamed, c.Error).Scan(&seq)
-	return seq, err
+		c.StopReason, c.TokenInput, c.TokenOutput, c.CostUSD, c.CostUnpriced, c.LatencyMS, c.Streamed, c.Error, native).Scan(&seq)
+	if err != nil {
+		return 0, err
+	}
+	return seq, tx.Commit(ctx)
 }
 
 // AttachAgentLLMCallGates writes each tool's gate outcome onto the LLM-call
 // row that requested it. Matching is by ToolCall.ID inside tool_calls_json
 // against the gate's call_id; unmatched gates are dropped rather than attached
 // to the wrong turn. One UPDATE for the run — not a per-call rewrite.
+// Native rows obtain gates from their own native tool-result receipts instead;
+// provider call IDs alone cannot distinguish repeated or sibling invocations.
 func (s *Store) AttachAgentLLMCallGates(ctx context.Context, runID, gatesJSON string) error {
 	if gatesJSON == "" {
 		gatesJSON = "[]"
@@ -212,7 +236,7 @@ SET tool_gates_json = COALESCE((
 		WHERE tc->>'id' = g->>'call_id'
 	)
 ), '[]'::jsonb)
-WHERE c.run_id = $1`, runID, gatesJSON)
+WHERE c.run_id = $1 AND c.native_trace_json = 'null'::jsonb`, runID, gatesJSON)
 	return err
 }
 
@@ -234,7 +258,7 @@ func scanLLMCall(rows interface{ Scan(...any) error }, withTrace bool) (AgentLLM
 		&c.Response, &c.ToolCallsJSON, &c.ToolGatesJSON, &c.StopReason, &c.TokenInput, &c.TokenOutput,
 		&c.CostUSD, &c.CostUnpriced, &c.LatencyMS, &c.Streamed, &c.Error, &c.CreatedAt}
 	if withTrace {
-		dest = append(dest, &c.ReasoningBlocksJSON, &c.MessagesJSON)
+		dest = append(dest, &c.ReasoningBlocksJSON, &c.MessagesJSON, &c.NativeTraceJSON)
 	}
 	err := rows.Scan(dest...)
 	return c, err
@@ -295,7 +319,7 @@ func (s *Store) AgentLLMCallTrace(ctx context.Context, userID, projectID, runID 
 		return nil, err
 	}
 	rows, err := s.pg.Query(ctx, `
-SELECT `+llmCallColumns+`, c.reasoning_blocks_json::text, c.messages_json::text
+SELECT `+llmCallColumns+`, c.reasoning_blocks_json::text, c.messages_json::text, c.native_trace_json::text
 FROM agent_llm_calls c
 JOIN agent_runs r ON r.id = c.run_id
 WHERE c.run_id = $1 AND r.project_id = $2

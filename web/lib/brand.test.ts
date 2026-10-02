@@ -117,7 +117,7 @@ describe('siteOrigin', () => {
   });
 
   // The deployed shape: one hostname, web and API behind the same Caddy site
-  // (infra/gce/caddy/Caddyfile), so the API URL is the site origin.
+  // (deployments/lohi/gce/caddy/Caddyfile), so the API URL is the site origin.
   it('falls back to the API URL when web and API share a hostname', async () => {
     await expect(
       originWith({

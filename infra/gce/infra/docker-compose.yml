@@ -1,8 +1,7 @@
-# AgentRay shared infrastructure — ONE instance serves both dev and prod.
-# Env separation: Redis DB index (0 / 1) and NATS subject suffix (.dev /
-# .prod). Postgres is NOT here — it lives in the existing Cloud SQL instance;
-# DuckDB is embedded in the API container, one file per colour (see
-# ../dev/docker-compose.yml).
+# Existing AgentRay Redis/NATS dependencies. App releases do not apply this file.
+# Production also uses VM-owned image pins/hardening; inspect those before any
+# manual recreation. Postgres lives in Cloud SQL. DuckDB volumes and durables
+# are declared per colour in ../../../2server/api.runtime.yaml and api.yaml.
 #
 # LOG ROTATION IS PER-SERVICE HERE ON PURPOSE. /etc/docker/daemon.json sets the
 # same caps as a daemon default, but the daemon only reads it at start and
@@ -18,13 +17,16 @@ services:
     image: redis:7-alpine
     container_name: agentray-redis
     restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
     logging:
       driver: json-file
       options:
         max-size: 10m
         max-file: "3"
     # Only holds rate-limit counters — small and safe to evict.
-    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru", "--tcp-keepalive", "60"]
     mem_limit: 128m
     networks:
       - edge
@@ -38,19 +40,29 @@ services:
     image: nats:2-alpine
     container_name: agentray-nats
     restart: unless-stopped
+    stop_grace_period: 60s
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
     logging:
       driver: json-file
       options:
         max-size: 10m
         max-file: "3"
-    # -js enables JetStream; -sd persists the durable event stream across restarts
-    # so a broker bounce never drops queued events.
-    command: ["-js", "-sd", "/data"]
+    # Config enables durable JetStream, per-write fsync and loopback health.
+    # The existing named volume and private client contract are retained.
+    command: ["-c", "/etc/nats/nats.conf"]
+    healthcheck:
+      test: ["CMD", "wget", "-T", "2", "-qO-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
     mem_limit: 256m
     networks:
       - edge
     volumes:
       - nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
 
 volumes:
   nats-data:

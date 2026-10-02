@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -22,6 +23,12 @@ type AfterToolCall func(ctx context.Context, call ToolCall, result string, runEr
 // reminder. Returning nil keeps the input unchanged. It does not mutate the
 // persisted run history; only the outgoing request is affected.
 type ContextHook func(ctx context.Context, msgs []Message) []Message
+
+// PiContextHook transforms only the outgoing native message view. Provider
+// messages retain their original JSON, including signed and custom content.
+// Returning nil keeps the input. Failures are reported and retain the last
+// valid view, as Pi requires transformContext to resolve without throwing.
+type PiContextHook func(context.Context, []json.RawMessage) ([]json.RawMessage, error)
 
 // ProviderRequestHook inspects or rewrites the assembled ChatRequest right
 // before it is sent (pi's `before_provider_request`). Use it to pin a stop
@@ -170,6 +177,8 @@ type Hooks struct {
 	// Context runs in order before every provider request, each transforming the
 	// message view the next one sees (a reducer over the message list).
 	Context []ContextHook
+	// PiContext is the native counterpart of Context, used by the Pi host.
+	PiContext []PiContextHook
 	// BeforeProviderRequest runs in order on the assembled request, each seeing
 	// the previous one's output.
 	BeforeProviderRequest []ProviderRequestHook

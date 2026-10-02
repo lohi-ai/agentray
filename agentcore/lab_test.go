@@ -227,38 +227,6 @@ func TestApplyLiveGatesEmptyTracesIsIdentity(t *testing.T) {
 	}
 }
 
-func TestDiffStep(t *testing.T) {
-	steps := FoldSteps([]TurnRecord{
-		{
-			Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "m1", "- id: s — S: s")}, {Role: RoleUser, Content: "x"}},
-			ToolCalls: []ToolCall{{ID: "r", Name: readSkillToolName, Arguments: `{"id":"s"}`}},
-			TokensIn:  10, TokensOut: 5, CostUSD: 0.1,
-		},
-		{
-			Messages:  []Message{{Role: RoleSystem, Content: labPrompt("p", "m1", "- id: s — S: s")}, {Role: RoleUser, Content: "x"}, {Role: RoleAssistant, Content: "y"}},
-			ToolCalls: []ToolCall{{ID: "t", Name: "search", Arguments: `{}`}},
-			TokensIn:  20, TokensOut: 8, CostUSD: 0.2,
-		},
-	})
-	d := DiffStep(steps[0], steps[1])
-	if d.TokensInDelta != 20 || d.CostDelta != 0.2 {
-		t.Fatalf("delta wrong: %+v", d)
-	}
-	if len(d.ToolsCalled) != 1 || d.ToolsCalled[0] != "search" {
-		t.Fatalf("tools called = %v", d.ToolsCalled)
-	}
-	// Skill "s" was already loaded in step0; not new in step1.
-	if len(d.SkillsLoaded) != 0 {
-		t.Fatalf("no new skills expected, got %v", d.SkillsLoaded)
-	}
-
-	// First step diffs against empty: shows its full setup.
-	d0 := DiffStep(LabStep{}, steps[0])
-	if len(d0.SkillsLoaded) != 1 || len(d0.MemoryAdded) != 1 {
-		t.Fatalf("first-step diff should show full setup: %+v", d0)
-	}
-}
-
 // stepsWithCompactionsAt builds a folded step list of `turns` turns with a
 // compaction step closing the span at each of the given turns, and cumulative
 // accounting that advances one unit per step — enough to check that a chapter's

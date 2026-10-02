@@ -196,7 +196,11 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	// Hand the tool its crash-stable idempotency key: (sessionID, call ID) is
 	// replayed verbatim by RecoverSession, so a re-run after a crash presents
 	// the same key and the external system can dedupe the effect.
-	ikey := toolIdempotencyKey(a.sessionID, call.ID)
+	identity := call.ID
+	if scope := toolInvocationScope(ctx); scope != "" {
+		identity = scope + "/" + call.ID
+	}
+	ikey := toolIdempotencyKey(a.sessionID, identity)
 	trace.IdempotencyKey = ikey
 	execStart := time.Now()
 	toolCtx := withToolCallID(withIdempotencyKey(ctx, ikey), call.ID)
@@ -590,6 +594,22 @@ func formatEnum(enum []any) string {
 
 // idempotencyKeyCtx is the context key carrying the current invocation's key.
 type idempotencyKeyCtx struct{}
+
+// toolInvocationScopeKey lets a native host distinguish provider call IDs that
+// are reused in separate invocations. Nested calls inherit the same scope.
+type toolInvocationScopeKey struct{}
+
+// WithToolInvocationScope binds a tool call to an opaque durable invocation ID.
+// A native session host must persist this identity before executing a tool;
+// provider call IDs alone may be reused. Nested calls inherit the scope.
+func WithToolInvocationScope(ctx context.Context, invocationID string) context.Context {
+	return context.WithValue(ctx, toolInvocationScopeKey{}, invocationID)
+}
+
+func toolInvocationScope(ctx context.Context) string {
+	id, _ := ctx.Value(toolInvocationScopeKey{}).(string)
+	return id
+}
 
 // toolIdempotencyKey derives the stable key for one tool invocation. Hashing
 // keeps the key fixed-length and opaque (session IDs may embed user-visible

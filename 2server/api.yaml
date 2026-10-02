@@ -1,0 +1,69 @@
+apiVersion: 2server.app/v1
+metadata:
+  name: agentray-api
+requires:
+  []
+kind: App
+spec:
+  kind: service
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api@sha256:b139b084ed204e35c02b670141ed2e6306ae31db8231a7a552de69da469ac1b6
+  preDeploy:
+    command:
+      - agentray
+      - migrate
+    timeoutSeconds: 600
+  replicas: 1
+  port: 8080
+  healthPath: /readyz
+  stopTimeoutSeconds: 60
+  drainSeconds: 70
+  memoryMb: 1024
+  cpus: 2
+  env:
+    INGEST_STREAM_NAME: AGENTRAY_EVENTS
+    INGEST_SUBJECT: agentray.events.ingest.prod
+    CLICKHOUSE_DATABASE: agentray_prod
+    DEFAULT_PROJECT_NAME: LoHi prod
+    CLICKHOUSE_USER: agentray
+    GOMEMLIMIT: 256MiB
+    INGEST_DLQ_SUBJECT: agentray.events.dlq
+    CLICKHOUSE_ADDR: agentray-clickhouse:9000
+    DUCKDB_PATH: /data/agentray.duckdb
+    ALLOWED_ORIGINS: https://agentray.lohi2.com
+    HTTP_ADDR: ":8080"
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    RATE_LIMIT_PER_MINUTE: "1200"
+  secrets:
+    NATS_URL:
+      provider: vm
+      key: NATS_URL
+    REDIS_URL:
+      provider: vm
+      key: REDIS_URL
+    DEFAULT_PROJECT_API_KEY:
+      provider: vm
+      key: DEFAULT_PROJECT_API_KEY
+    AGENT_KEY_ENC_SECRET:
+      provider: vm
+      key: AGENT_KEY_ENC_SECRET
+    POSTGRES_URL:
+      provider: vm
+      key: POSTGRES_URL
+  healthCheck:
+    command:
+      - wget
+      - "--spider"
+      - "-q"
+      - http://127.0.0.1:8080/readyz
+    intervalSeconds: 30
+    timeoutSeconds: 5
+    startPeriodSeconds: 30
+    failureThreshold: 10
+  progressDeadlineSeconds: 3600
+  instanceEnv:
+    INGEST_DURABLE: "agentray-ingestors-prod-${generation}"
+  volumeMounts:
+    - name: duckdb
+      mountPath: /data
+domains:
+  []

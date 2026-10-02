@@ -137,6 +137,29 @@ func (r *LiveRegistry) FollowUp(projectID, sessionID, message string) bool {
 	}
 }
 
+// QueueInput persists a conversation input before exposing it to a live run.
+// If the final drain already passed, the durable input remains pending for the
+// next turn. persist is called only when this session belongs to a live run.
+func (r *LiveRegistry) QueueInput(projectID, sessionID string, followup bool, persist func() (agentcore.Message, error)) (bool, error) {
+	lr, ok := r.lookup(projectID, sessionID)
+	if !ok {
+		return false, nil
+	}
+	input, err := persist()
+	if err != nil {
+		return false, err
+	}
+	queue := lr.steer
+	if followup {
+		queue = lr.followup
+	}
+	select {
+	case queue <- input:
+	default:
+	}
+	return true, nil
+}
+
 // Cancel stops an in-flight run outright, so Stop is a server-side fact rather
 // than a client that merely looked away: the model loop unwinds with cause
 // ErrRunStopped and the run row settles as `stopped`, carrying whatever partial

@@ -86,7 +86,23 @@ type Plugin struct {
 	// an opaque closure the consumer injects — agentcore never loads another
 	// agent itself. Empty leaves only self-delegation.
 	Delegates []Delegate
+	// RunFork selects the consumer's runtime for self-delegation. The child is
+	// always created by Agent.Fork first, so runtime selection cannot widen its
+	// inherited capabilities. Nil uses the legacy Go driver.
+	RunFork ForkRunner
 }
+
+// ForkRequest describes one isolated task or one corrective retry. Previous is
+// the original result, including native state; adapters must not reconstruct a
+// native transcript from its display-only Messages projection.
+type ForkRequest struct {
+	SessionID string
+	Prompt    string
+	Task      string
+	Previous  *agentcore.RunResult
+}
+
+type ForkRunner func(context.Context, *agentcore.Agent, ForkRequest, agentcore.StreamSink) (agentcore.RunResult, error)
 
 // SelfOnly enables delegation to ephemeral forks of this agent, with no
 // cross-agent roster.
@@ -350,13 +366,14 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 		// answer without re-running (no duplicate spend or side effects), and a
 		// child that crashed mid-run resumes from its own log. This is what makes
 		// spawn_subagent safe to declare RetrySafe.
-		childSession := ""
-		if callID, ok := agentcore.ToolCallID(ctx); ok && t.durable {
-			childSession = t.parent.SessionID() + "/" + callID
-		}
+		childSession := t.childSession(ctx)
 		child := t.parent.Fork(childSession)
-		seed := []agentcore.Message{{Role: agentcore.RoleUser, Content: prompt}}
-		res, err = child.ContinueStream(ctx, seed, task, sink)
+		if t.settings.RunFork != nil {
+			res, err = t.settings.RunFork(ctx, child, ForkRequest{SessionID: childSession, Prompt: prompt, Task: task}, sink)
+		} else {
+			seed := []agentcore.Message{{Role: agentcore.RoleUser, Content: prompt}}
+			res, err = child.ContinueStream(ctx, seed, task, sink)
+		}
 		// Fold the child's spend before handling the error (a child's own
 		// children are already folded into res.Usage by its runLoop, recursively).
 		t.parent.AddChildUsage(res.Usage)
@@ -440,13 +457,35 @@ func (t *subagentTool) retryOnce(ctx context.Context, delegate *Delegate, prompt
 		final, usage, err := delegate.Run(ctx, retryTask, sink)
 		return final, agentcore.RunResult{Usage: usage}, err
 	}
-	retrySession := ""
-	if callID, ok := agentcore.ToolCallID(ctx); ok && t.durable {
-		retrySession = t.parent.SessionID() + "/" + callID + "/retry"
+	retrySession := t.childSession(ctx)
+	if retrySession != "" {
+		retrySession += "/retry"
 	}
 	child := t.parent.Fork(retrySession)
+	if t.settings.RunFork != nil {
+		correction := retrySeed(nil, validationErr)[0].Content
+		r, err := t.settings.RunFork(ctx, child, ForkRequest{SessionID: retrySession, Prompt: correction, Task: "correct the invalid final answer", Previous: &res}, sink)
+		return r.Final, r, err
+	}
 	r, err := child.ContinueStream(ctx, retrySeed(res.Messages, validationErr), "correct the invalid final answer", sink)
 	return r.Final, r, err
+}
+
+// Native invocations carry a persisted physical-effect key: provider call IDs
+// can repeat in later turns. Legacy forks retain their existing session IDs.
+func (t *subagentTool) childSession(ctx context.Context) string {
+	if !t.durable {
+		return ""
+	}
+	if t.settings.RunFork != nil {
+		if key, ok := agentcore.IdempotencyKey(ctx); ok {
+			return t.parent.SessionID() + "/" + key
+		}
+	}
+	if id, ok := agentcore.ToolCallID(ctx); ok {
+		return t.parent.SessionID() + "/" + id
+	}
+	return ""
 }
 
 // lastAssistantText returns the final assistant text in a transcript.

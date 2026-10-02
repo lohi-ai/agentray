@@ -30,7 +30,8 @@ const maxReasonBytes = 2000
 //
 // What keeps it accountable is not a restriction on the tool but the record it
 // leaves. Every revision requires a reason, is written to the durable log as an
-// EntryGoal the moment the loop drains it, and stays in the store's audit trail
+// EntryGoal when the legacy loop drains it (or committed before mutation by
+// the native session recorder), and stays in the store's audit trail
 // with the ones before it — so "the agent quietly narrowed its goal until it
 // could pass" is a thing you can see afterwards, in order, with the model's own
 // justification attached to each step.
@@ -72,7 +73,7 @@ func (updateGoalTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t updateGoalTool) Run(_ context.Context, args string) (string, error) {
+func (t updateGoalTool) Run(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Goal   string `json:"goal"`
 		Reason string `json:"reason"`
@@ -94,7 +95,11 @@ func (t updateGoalTool) Run(_ context.Context, args string) (string, error) {
 	if len(in.Reason) > maxReasonBytes {
 		in.Reason = in.Reason[:maxReasonBytes]
 	}
-	if !t.store.Update(in.Goal, in.Reason) {
+	changed, err := t.store.update(ctx, in.Goal, in.Reason)
+	if err != nil {
+		return "", fmt.Errorf("update_goal: %w", err)
+	}
+	if !changed {
 		// Not an error: the model asked for a state that already holds. Saying so
 		// plainly stops it retrying, which an error would invite.
 		return "The completion condition is already:\n" + t.store.Goal() + "\nNothing changed.", nil

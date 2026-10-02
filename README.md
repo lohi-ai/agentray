@@ -576,20 +576,17 @@ as-built data path, capture → store → analytics → agent, is
 
 ## Deployment
 
-`infra/gce/deploy.sh --env <dev|prod>` rolls the VM blue-green behind Caddy. A
-deploy starts the colour that is *not* serving, waits for it to report healthy,
-then flips the upstream; a broken build never sees a request, and rollback is
-just not flipping.
+`./infra/gce/deploy.sh --env prod` builds the API and web images, then calls
+`2server deploy -f` for each app. Production config is explicit in
+[`2server/`](2server/README.md); secret values remain on the VM. Dev on the Lohi
+VM is retired. See [`infra/README.md`](infra/README.md) for build, image override,
+standalone checkout and script verification commands.
 
-The healthcheck targets `/readyz`, not `/healthz`, and that gate is a **data
-coherence** gate. A fresh colour replays the durable stream on first boot, and
-until it has applied every row it answers `503` — because a colour still
-replaying would serve queries from a DuckDB file with a hole in it. Each colour
-owns its own file and its own durable; a shared file would lock out the incoming
-colour and a shared volume would corrupt it. `/readyz` refuses with a reason, and
-three of those reasons never clear by waiting (`purged-gap`, `store-behind`,
-`stream-mismatch`) — the deploy script's header documents what each means and
-what the operator owns.
+The API gate uses `/readyz`; an unready candidate never replaces the serving
+colour. Each colour retains its own DuckDB volume and NATS durable. A parked
+colour may need a long replay; data-loss and stream-mismatch refusals need repair,
+not a bypass. Read the [readiness guidance](2server/README.md#readiness-and-data)
+before changing the gate or touching volumes/consumers.
 
 ## End-to-End Test
 

@@ -7,8 +7,8 @@ import (
 )
 
 type Config struct {
-	HTTPAddr           string
-	PostgresURL        string
+	HTTPAddr    string
+	PostgresURL string
 	// DuckDBPath is the embedded analytics database file. DuckDB owns the
 	// directory: the WAL lands at <path>.wal and spill scratch at <dir>/tmp.
 	// Relative paths resolve against the server working directory; the default
@@ -23,9 +23,9 @@ type Config struct {
 	// silently widening them. It is also the only bound on the per-colour
 	// DuckDB file, which otherwise grows without limit on a single VM.
 	EventRetentionDays int
-	RedisURL             string
-	NATSURL              string
-	IngestSubject        string
+	RedisURL           string
+	NATSURL            string
+	IngestSubject      string
 	// IngestJetStream turns the event pipeline durable. When true (default) the
 	// ingest subject is backed by a file-storage JetStream stream: publishes wait
 	// for a broker ack (HTTP 200 means "durably queued") and the worker acks each
@@ -145,6 +145,11 @@ type Config struct {
 	// costs a real answer — the run wraps up honestly instead of finishing.
 	AgentMaxTurns     int
 	AgentMaxToolCalls int
+	// AgentPiWorker opts server runs into the original bundled Pi runtime.
+	// Empty retains the current driver during migration; AgentPiRuntime defaults
+	// to Bun when empty. These paths are operator configuration, never tenant input.
+	AgentPiWorker  string
+	AgentPiRuntime string
 	// The shared demo workspace — one feature, two keys.
 	//
 	// DemoProjectID is the project id of a real, read-only project every visitor
@@ -206,6 +211,8 @@ func FromEnv() Config {
 		AgentKeepRecentTokens:        envInt("AGENTRAY_AGENT_KEEP_RECENT_TOKENS", 0),
 		AgentMaxTurns:                envInt("AGENTRAY_AGENT_MAX_TURNS", 0),
 		AgentMaxToolCalls:            envInt("AGENTRAY_AGENT_MAX_TOOL_CALLS", 0),
+		AgentPiWorker:                os.Getenv("AGENTRAY_AGENT_PI_WORKER"),
+		AgentPiRuntime:               os.Getenv("AGENTRAY_AGENT_PI_RUNTIME"),
 		DemoProjectID:                os.Getenv("AGENTRAY_DEMO_PROJECT_ID"),
 		DemoAgentRunsPerUserPerDay:   envInt("AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY", 5),
 		// Hosted model: dedicated DEFAULT_* vars, then the real-provider test

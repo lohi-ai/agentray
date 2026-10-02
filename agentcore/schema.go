@@ -131,13 +131,6 @@ func (ts *ToolSet) validateToolArgs(name, args string, schema map[string]any) er
 	return nil
 }
 
-// validateArgs is the uncached compatibility helper used by focused tests.
-// Runtime dispatch always uses ToolSet.validateToolArgs so schemas compile at
-// most once per tool name and fingerprint.
-func validateArgs(args string, schema map[string]any) error {
-	return NewToolSet().validateToolArgs("<standalone>", args, schema)
-}
-
 func parseToolArgs(args string) (any, error) {
 	args = strings.TrimSpace(args)
 	if args == "" {

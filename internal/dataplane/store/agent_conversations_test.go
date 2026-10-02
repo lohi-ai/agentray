@@ -37,7 +37,7 @@ func openConvTestStore(t *testing.T) *Store {
 		t.Skipf("test database unreachable at %s (%v)", url, err)
 	}
 	s := &Store{pg: pool}
-	if err := s.migratePostgres(ctx, config.Config{
+	if err := s.migrate(ctx, config.Config{
 		PostgresURL:          url,
 		DefaultProjectName:   "conv-test",
 		DefaultProjectAPIKey: "conv_test_default_key",

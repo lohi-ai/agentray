@@ -3,3 +3,11 @@ node_modules/
 web/.next/
 bench/results/
 bench/solutions/
+.git
+.2server/
+.env
+.env.*
+**/.env
+**/.env.*
+**/secret.env
+infra/gce/*/app.env

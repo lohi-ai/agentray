@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
@@ -78,9 +79,10 @@ const forcedKeyframeInterval = 100
 
 // tracedContext is what the sink remembers about a session's previous call.
 type tracedContext struct {
-	messages []agentcore.Message
-	seq      int
-	sinceKey int // calls since the last keyframe
+	messages       []agentcore.Message
+	nativeMessages []json.RawMessage
+	seq            int
+	sinceKey       int // calls since the last keyframe
 }
 
 func (s *storeTraceSink) Record(r observe.TraceRecord) {
@@ -92,7 +94,12 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 		session = r.TraceID
 	}
 
-	base, keep, delta := s.encode(session, r.Messages)
+	// Delta bases belong to one run's SQL sequence space, even when a resumed
+	// invocation keeps the same durable session key.
+	cacheKey := r.TraceID + "\x00" + session
+	previous, _ := s.prev.get(cacheKey)
+	base, keep, delta := encodeTracedContext(previous, r.Messages)
+	native, nativeMessages := encodePiTrace(r.NativeTrace, previous.nativeMessages, base)
 	msgs, err := json.Marshal(delta)
 	if err != nil {
 		// An unencodable message must not cost the whole trace row: drop the
@@ -102,8 +109,11 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 	calls, _ := json.Marshal(r.ToolCalls)
 	reasoning, _ := json.Marshal(r.ReasoningBlocks)
 
-	seq, err := s.store.RecordAgentLLMCall(context.Background(), storage.AgentLLMCall{
+	wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	seq, err := s.store.RecordAgentLLMCall(wctx, storage.AgentLLMCall{
 		RunID:               rootRunID(r.TraceID),
+		NativeTraceJSON:     native,
 		SessionKey:          session,
 		Depth:               r.Depth,
 		BaseSeq:             base,
@@ -128,13 +138,18 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 		// The row did not land, so the next call must not chain onto it — forget
 		// the session and let the next call write a keyframe. Without this a
 		// single failed insert would silently break every delta after it.
-		s.prev.forget(session)
+		s.prev.forget(cacheKey)
 		return
 	}
-	s.prev.put(session, tracedContext{
-		messages: r.Messages,
-		seq:      seq,
-		sinceKey: s.nextSinceKey(session, base),
+	sinceKey := 0
+	if base != 0 {
+		sinceKey = previous.sinceKey + 1
+	}
+	s.prev.put(cacheKey, tracedContext{
+		nativeMessages: nativeMessages,
+		messages:       r.Messages,
+		seq:            seq,
+		sinceKey:       sinceKey,
 	})
 }
 
@@ -149,8 +164,14 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 // prefix diff handles that in the same shape it handles compaction, which
 // replaces a long head with a short summary.
 func (s *storeTraceSink) encode(session string, msgs []agentcore.Message) (baseSeq, keepPrefix int, delta []agentcore.Message) {
-	prev, ok := s.prev.get(session)
-	if !ok || prev.seq == 0 || prev.sinceKey >= forcedKeyframeInterval {
+	prev, _ := s.prev.get(session)
+	return encodeTracedContext(prev, msgs)
+}
+
+// Both projections must use the same cache snapshot: an overlapping timed-out
+// observer must not pair one call's sequence with another call's native prefix.
+func encodeTracedContext(prev tracedContext, msgs []agentcore.Message) (baseSeq, keepPrefix int, delta []agentcore.Message) {
+	if prev.seq == 0 || prev.sinceKey >= forcedKeyframeInterval {
 		return 0, 0, msgs
 	}
 	keep := commonPrefix(prev.messages, msgs)
@@ -160,19 +181,6 @@ func (s *storeTraceSink) encode(session string, msgs []agentcore.Message) (baseS
 		return 0, 0, msgs
 	}
 	return prev.seq, keep, msgs[keep:]
-}
-
-// nextSinceKey advances the keyframe counter: a keyframe resets it, a delta
-// extends the chain.
-func (s *storeTraceSink) nextSinceKey(session string, baseSeq int) int {
-	if baseSeq == 0 {
-		return 0
-	}
-	prev, ok := s.prev.get(session)
-	if !ok {
-		return 1
-	}
-	return prev.sinceKey + 1
 }
 
 // commonPrefix counts the leading messages two contexts agree on.

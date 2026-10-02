@@ -566,17 +566,14 @@ SELECT 的正则算不上租户边界。
 
 ## 部署
 
-`infra/gce/deploy.sh --env <dev|prod>` 在 Caddy 后面把 VM 做 blue-green
-滚动。一次 deploy 先起那个*没在服务*的颜色，等它报健康，再切
-upstream；构建坏掉的版本一个请求都收不到，回滚就是别切。
+`./infra/gce/deploy.sh --env prod` 构建 API 和 web 镜像，然后分别执行
+`2server deploy -f`。公开配置位于 [`2server/`](2server/README.md)，secret 值保留在
+VM 上。Lohi VM 的 dev 部署已停用。构建、镜像覆盖和脚本测试见
+[`infra/README.md`](infra/README.md)。
 
-healthcheck 打的是 `/readyz`，不是 `/healthz`，而这道门是**数据一致性**
-门。新起的颜色在首次启动时重放 durable stream，在把所有行都应用完之
-前，它一律回 `503`——因为一个还在重放的颜色，会拿一个中间有洞的 DuckDB 文
-件去服务查询。每个颜色有自己的文件和自己的 durable；共用文件会把进来的颜
-色锁在门外，共用 volume 会把它写坏。`/readyz` 拒绝时会给出原因，其中三个
-原因等再久也不会消失（`purged-gap`、`store-behind`、`stream-mismatch`）
-——部署脚本的头注释写了每个是什么意思、该由谁来处理。
+API 通过 `/readyz` 后才切换流量。每个颜色保留独立的 DuckDB volume 和 NATS
+durable；长期停止的颜色可能需要较长时间重放。不要绕过 gate 或删除 volume、
+重置 consumer 来强行部署。参见 [readiness 指南](2server/README.md#readiness-and-data)。
 
 ## 端到端测试
 

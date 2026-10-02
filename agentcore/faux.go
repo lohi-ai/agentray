@@ -138,6 +138,9 @@ func (r *ReplayProvider) Chat(_ context.Context, req ChatRequest) (ChatResponse,
 		return ChatResponse{}, fmt.Errorf("replay: extra call %d, recording has %d turns", r.calls+1, len(r.Records))
 	}
 	rec := r.Records[r.calls]
+	if len(rec.NativeTrace) > 0 && string(rec.NativeTrace) != "null" {
+		return ChatResponse{}, errors.New("replay: native traces require the native Pi runtime")
+	}
 	if drift := replayDrift(req, rec); drift != "" {
 		return ChatResponse{}, fmt.Errorf("replay: turn %d request drifted from recording: %s", r.calls+1, drift)
 	}

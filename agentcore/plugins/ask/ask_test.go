@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
@@ -82,6 +83,31 @@ func TestAskToolClamping(t *testing.T) {
 	}
 	if !out.Multi {
 		t.Error("expected multi=true preserved")
+	}
+}
+
+func TestAskClampsAtUTF8BoundariesAndIsIdempotent(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"question": strings.Repeat("q", 1999) + "三",
+		"options":  []any{map[string]string{"label": strings.Repeat("l", 199) + "🙂", "description": strings.Repeat("d", 199) + "ü"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := ask.Tool{}
+	prepared := tool.PrepareArguments(string(raw))
+	if strings.Contains(prepared, `\ufffd`) || tool.PrepareArguments(prepared) != prepared {
+		t.Fatalf("normalization damaged Unicode or changed twice: %s", prepared)
+	}
+	var out struct {
+		Question string
+		Options  []struct{ Label, Description string }
+	}
+	if err := json.Unmarshal([]byte(prepared), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(out.Question) || len(out.Question) != 1999 || len(out.Options[0].Label) != 199 || len(out.Options[0].Description) != 199 {
+		t.Fatal("clamp split a code point")
 	}
 }
 

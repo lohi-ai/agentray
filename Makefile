@@ -44,7 +44,7 @@ LOAD_ENV = set -a; [ -f .env ] && . ./.env; set +a;
 .PHONY: help dev web build cli install-cli vet test test-agents test-agentcore-race test-session-conformance test-stress bench-session check agent-funcs \
         sdk-check sdk-check-npm sdk-check-python sdk-check-swift sdk-release sdk-resolve-tag \
         sandbox-build sandbox-build-cu sandbox-build-browser sandbox-build-shell sandbox-build-eval \
-        sandbox-check sandbox-setup test-sandbox
+        sandbox-check sandbox-setup test-sandbox test-deploy
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -82,6 +82,16 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 test-agentcore-race: ## Race-check the kernel plus its runtime and sandbox lifecycle backends
 	$(GO) test -race ./agentcore/... ./internal/runtime ./sandbox -count=1
 
+.PHONY: pi-build test-pi
+pi-build: ## Build the byte-verified native Pi runtime and Go worker
+	cd third_party/pi && bun install --frozen-lockfile --ignore-scripts
+	cd third_party/pi && bun run typecheck:runtime && bun run build
+
+test-pi: pi-build ## Verify Pi source, upstream contracts, native bundles, and the Go bridge
+	cd third_party/pi && bun run prepare:reference && bun run test && bun run typecheck
+	cd third_party/pi && bun run test:runtime
+	$(GO) test -race -tags pi ./agentcore ./internal/runtime -run '^TestPi' -count=1
+
 test-session-conformance: ## Run memory + opt-in PostgreSQL session contracts (loads .env)
 	@$(LOAD_ENV) \
 	$(GO) test ./agentcore ./internal/runtime -run 'SessionStoreConformance|SessionLease|RecordSessionAnswer|ChainedAskResume' -v -count=1
@@ -93,6 +103,9 @@ bench-session: ## Benchmark append snapshots and long-log reduction/window reads
 	$(GO) test ./agentcore -run '^$$' -bench 'Session(Store)?' -benchmem
 
 check: vet test ## Vet + unit tests — the pre-commit gate
+
+test-deploy: ## Verify the release script without cloud access (Python 3)
+	python3 infra/deploy_test.py
 
 # --- Published SDKs (sdk/) ------------------------------------------------
 # Deliberately not part of `check`: these need npm/python/swift toolchains that
@@ -191,8 +204,8 @@ sandbox-setup: sandbox-build sandbox-check ## Build the sandbox images, verify, 
 	@echo "  AGENTRAY_SANDBOX_BROWSER_IMAGE=$(BROWSER_IMAGE)"
 	@echo "  # optional hardened run_shell backend:  AGENTRAY_SANDBOX_IMAGE=$(SHELL_IMAGE)"
 	@echo
-	@echo "On GCE these belong in infra/gce/<env>/app.env; the API container needs a Docker"
-	@echo "socket + the docker CLI to reach the host daemon. A missing image degrades safely."
+	@echo "Production public settings belong in 2server/api.yaml. Docker-backed tools also"
+	@echo "need a configured sandbox host; standard app manifests reject Docker socket binds."
 
 test-sandbox: ## Run the computer_use + browser_use integration tests (needs built images; loads .env)
 	@$(LOAD_ENV) \

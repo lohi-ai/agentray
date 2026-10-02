@@ -1,6 +1,17 @@
 web/node_modules
+third_party/pi/node_modules
+third_party/pi/.work
+third_party/pi/dist
+third_party/pi/__pycache__
 web/.next
 web/*.log
 .git
 .DS_Store
 server
+.2server/
+.env
+.env.*
+**/.env
+**/.env.*
+**/secret.env
+infra/gce/*/app.env

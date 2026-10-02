@@ -303,6 +303,9 @@ type StepInterceptor interface {
 // holds each condition the run has held, in order, so a narrowing is visible
 // afterwards rather than silent.
 type GoalReviser interface {
+	// Native Pi integrations must call RecordGoalRevision in a governed tool
+	// context before publishing the condition. The drain then refreshes the
+	// prompt; durability already belongs to that tool's physical effect.
 	// ReviseGoal returns the run's new completion condition and true when one
 	// has been set since the last call. It is drained, not polled: returning
 	// (x, true) twice for the same revision would write the same EntryGoal every
@@ -456,6 +459,7 @@ func beginExtensions(ctx context.Context, factories []ExtensionFactory, info Run
 	for _, f := range factories {
 		ext, err := f.BeginRun(ctx, info)
 		if err != nil {
+			set.closeRun()
 			return nil, err
 		}
 		if ext == nil {

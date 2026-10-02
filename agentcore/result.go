@@ -18,6 +18,11 @@ type RunResult struct {
 	Usage      Usage       `json:"usage"`
 	Turns      int         `json:"turns"`
 	StopReason string      `json:"stop_reason"`
+	// NativeState and NativeTelemetry retain the original Pi artifacts. When
+	// present, Messages is only a display projection and must not seed a run.
+	NativeState     json.RawMessage `json:"native_state,omitempty"`
+	NativeTelemetry json.RawMessage `json:"native_telemetry,omitempty"`
+	NativeRevision  string          `json:"native_revision,omitempty"`
 	// UnpersistedEntries counts durable session entries the run buffered but
 	// could not commit because the session store kept failing through the final
 	// flush. Zero on a healthy (or storeless) run. Non-zero means the durable

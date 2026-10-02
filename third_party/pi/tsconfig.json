@@ -1,0 +1,20 @@
+{
+  "extends": "./.work/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@earendil-works/pi-ai": ["./.work/packages/ai/src/index.ts"],
+      "@earendil-works/pi-ai/*": ["./.work/packages/ai/src/*.ts"],
+      "@earendil-works/pi-agent-core": ["./.work/packages/agent/src/index.ts"],
+      "@earendil-works/pi-telemetry": ["./.work/packages/telemetry/src/index.ts"]
+    }
+  },
+  "include": [
+    ".work/packages/agent/src/**/*.ts",
+    ".work/packages/agent/test/**/*.ts",
+    ".work/packages/telemetry/src/**/*.ts",
+    ".work/packages/telemetry/test/**/*.ts"
+  ]
+}

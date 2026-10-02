@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -209,11 +210,23 @@ UPDATE agent_conversations SET agent_id = $3, updated_at = now() WHERE id = $1 A
 //
 // When ParentID is empty the new entry is parented to the conversation's current
 // leaf, so a strictly linear thread needs no parent bookkeeping from the caller.
-// Two concurrent appends to the same parent both succeed; the later commit wins
-// the leaf and the earlier one remains a reachable branch (last-writer advances
-// leaf). No RBAC: callers (the chat handler, already authed; the runtime sink) own
+// The conversation row lock serializes appends and sequence assignment. With
+// no explicit parent, concurrent appends form a single chain. Explicit parents
+// can still create branches. No RBAC: callers (the chat handler, already authed; the runtime sink) own
 // authorization. Returns the inserted entry with its assigned id and seq.
 func (s *Store) AppendConversationEntry(ctx context.Context, e AgentConversationEntry) (AgentConversationEntry, error) {
+	return s.appendConversationEntry(ctx, e, nil)
+}
+
+var ErrConversationLeafChanged = errors.New("conversation branch changed while the turn was running")
+
+// AppendConversationEntryAtLeaf commits only if the branch still matches the
+// caller's observed leaf. Checking and advancing the leaf share the row lock.
+func (s *Store) AppendConversationEntryAtLeaf(ctx context.Context, e AgentConversationEntry, expectedLeaf string) (AgentConversationEntry, error) {
+	return s.appendConversationEntry(ctx, e, &expectedLeaf)
+}
+
+func (s *Store) appendConversationEntry(ctx context.Context, e AgentConversationEntry, expectedLeaf *string) (AgentConversationEntry, error) {
 	payload := e.PayloadJSON
 	if payload == "" {
 		payload = "{}"
@@ -226,12 +239,17 @@ func (s *Store) AppendConversationEntry(ctx context.Context, e AgentConversation
 
 	// Parent defaults to the current leaf (linear append). nullableUUID keeps empty
 	// strings out of the UUID columns (parent_id, author_user_id, run_id).
+	var leaf string
+	if err := tx.QueryRow(ctx, `
+SELECT coalesce(leaf_entry_id::text,'') FROM agent_conversations WHERE id = $1 FOR UPDATE`, e.ConversationID).Scan(&leaf); err != nil {
+		return AgentConversationEntry{}, err
+	}
+	if expectedLeaf != nil && leaf != *expectedLeaf {
+		return AgentConversationEntry{}, ErrConversationLeafChanged
+	}
 	parent := e.ParentID
 	if parent == "" {
-		if err := tx.QueryRow(ctx, `
-SELECT coalesce(leaf_entry_id::text,'') FROM agent_conversations WHERE id = $1`, e.ConversationID).Scan(&parent); err != nil {
-			return AgentConversationEntry{}, err
-		}
+		parent = leaf
 	}
 
 	var out AgentConversationEntry

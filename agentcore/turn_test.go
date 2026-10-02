@@ -473,13 +473,14 @@ func TestRetryClassification(t *testing.T) {
 // TestParseRetryAfter verifies the Retry-After parser handles the delay-seconds
 // form (the common case) and ignores garbage.
 func TestParseRetryAfter(t *testing.T) {
-	if got := parseRetryAfter("5"); got != 5*time.Second {
+	now := time.Unix(2_000_000_000, 0)
+	if got := parseRetryAfterAt("5", now); got != 5*time.Second {
 		t.Fatalf("parseRetryAfter(5) = %v, want 5s", got)
 	}
-	if got := parseRetryAfter(""); got != 0 {
+	if got := parseRetryAfterAt("", now); got != 0 {
 		t.Fatalf("parseRetryAfter(empty) = %v, want 0", got)
 	}
-	if got := parseRetryAfter("garbage"); got != 0 {
+	if got := parseRetryAfterAt("garbage", now); got != 0 {
 		t.Fatalf("parseRetryAfter(garbage) = %v, want 0", got)
 	}
 }

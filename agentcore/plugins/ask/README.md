@@ -6,6 +6,16 @@ question and the run parks until the answer arrives.
 
 ## Model Experience
 
+The Go driver uses the dangling-call workflow below. With the original Pi
+driver, the plugin's bundled `pi.mts` supplies its synchronous argument preparer.
+Both preparers trim and bound the same fields, retaining valid UTF-8 at byte
+limits. Pi emits an immutable waiting tool result; the host parks the run using
+the settled effect receipt. A human answer is a new native user message on
+resume, rather than a replacement of that result. The physical effect ID keeps
+questions distinct even when a provider reuses a tool-call ID. An unanswered
+resume makes no model request; durable native message events prevent a recorded
+answer from being delivered twice.
+
 ### A question parks the run
 
 The model calls `ask` with a prompt, optional labeled options, and a `multi`

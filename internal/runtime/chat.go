@@ -32,17 +32,19 @@ const (
 	routeCommand = "command"
 )
 
-// ChatOptions parameterize one chat turn. History is the prior conversation
-// (oldest first), client-held and threaded per turn — there is no server-side
-// conversation store.
+// ChatOptions parameterize one chat turn. Conversation routes supply history
+// derived from the durable active branch; legacy stateless callers may supply
+// their own prior turns.
 type ChatOptions struct {
 	ProjectID string
 	// AgentID selects which of the project's agents handles the turn (AgentGarden
 	// §3). Empty targets the project's default agent, preserving the single-agent
 	// path. It is threaded verbatim into the run.
-	AgentID string
-	Message string
-	History []agentcore.Message
+	AgentID   string
+	Message   string
+	History   []agentcore.Message
+	PiHistory *PiConversationHistory
+	InputID   string
 	// SessionID is the client-held conversation id. When set, the in-flight run
 	// registers under it (via the Runner's LiveRegistry) so a sibling request can
 	// steer or follow-up the run. Empty disables live control for the turn.
@@ -127,6 +129,8 @@ type chatWork struct {
 	AgentID   string
 	Message   string
 	History   []agentcore.Message
+	PiHistory *PiConversationHistory
+	InputID   string
 	SessionID string
 	// ConversationID, when set, mirrors each completed tool call into the
 	// conversation log (ConvKindToolTrace) so a second machine/user sees the same
@@ -167,6 +171,8 @@ func NewChatService(store *storage.Store, runnerOpts ...RunnerOption) *ChatServi
 	s.handle = s.handleData
 	return s
 }
+
+func (s *ChatService) UsesPiRuntime() bool { return s.runner != nil && s.runner.Pi != nil }
 
 // Chat runs one turn. When sink is non-nil the turn streams (an opening progress
 // beat, then either the typed-out reply or the agent's own tokens/progress/card)
@@ -209,7 +215,16 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	}
 
 	dec := chatDecision{Route: routeData}
-	if goal == "" {
+	if s.UsesPiRuntime() && len(opts.History) > 0 {
+		return ChatResult{}, errors.New("Pi chat requires native history; use a native conversation or clear the legacy context")
+	}
+	if s.UsesPiRuntime() && opts.ConversationID != "" && (opts.PiHistory == nil || opts.InputID == "") {
+		return ChatResult{}, errors.New("native conversation requires a history anchor and durable input ID")
+	}
+	// A selected Pi conversation is owned end-to-end by the original Agent.
+	// Its ordinary text response also handles small talk; no Go provider runs
+	// an extra classification pass ahead of the native model.
+	if goal == "" && !s.UsesPiRuntime() {
 		var err error
 		if dec, err = s.classify(ctx, opts.ProjectID, opts.History, message); err != nil {
 			s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), "", 0)
@@ -254,6 +269,7 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	res, err := s.handle(ctx, chatWork{
 		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
 		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
+		PiHistory: opts.PiHistory, InputID: opts.InputID,
 		OnRunID: opts.OnRunID, OnPlan: opts.OnPlan, Goal: goal,
 		ReasoningEffort: effort,
 		ReadOnly:        opts.ReadOnly,
@@ -351,17 +367,38 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 		return ChatResult{}, fmt.Errorf("call id mismatch: expected %q, got %q", pendingCallID, opts.CallID)
 	}
 
+	convID := opts.ConversationID
+	if convID == "" {
+		convID = waitingRun.SessionID
+	}
+	var piHistory *PiConversationHistory
+	if s.UsesPiRuntime() && convID != "" {
+		history, err := buildPiResumeHistory(ctx, s.runner.Store, convID)
+		if err != nil {
+			return ChatResult{}, err
+		}
+		state, err := recoverPiState(sessionLog)
+		if err != nil {
+			return ChatResult{}, err
+		}
+		if _, err := piConversationSuffix(history.Messages, state); err != nil {
+			return ChatResult{}, fmt.Errorf("parked conversation changed: %w", err)
+		}
+		piHistory = &history
+	}
 	appended, err := agentcore.RecordSessionAnswer(ctx, s.runner.SessionStore, durableSession, pendingCallID, opts.Answer)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("recording answer entry: %w", err)
 	}
 
-	convID := opts.ConversationID
-	if convID == "" {
-		convID = waitingRun.SessionID
-	}
 	if convID != "" && appended {
-		_, _ = AppendMessageEntry(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0)
+		_, err = appendMessageAtLeaf(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0, false, nil, s.UsesPiRuntime())
+		// Legacy callers may use an arbitrary client-held session ID with no
+		// saved conversation; their display mirror remains best-effort. Native
+		// conversation resume has already verified its durable branch above.
+		if err != nil && s.UsesPiRuntime() {
+			return ChatResult{}, err
+		}
 	}
 
 	work := chatWork{
@@ -373,6 +410,7 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 		OnPlan:          opts.OnPlan,
 		ReadOnly:        opts.ReadOnly,
 		ResumeFromRunID: durableSession,
+		PiHistory:       piHistory,
 	}
 	res, err := s.handle(ctx, work, sink)
 	res.Route = routeData
@@ -431,7 +469,7 @@ func (s *ChatService) persistAssistantTurn(ctx context.Context, opts ChatOptions
 	// Detach from the request cancellation so a client disconnect at the moment of
 	// completion can't abort the write of the answer the run already produced.
 	wctx := context.WithoutCancel(ctx)
-	_, _ = AppendMessageEntry(wctx, s.runner.Store, opts.ConversationID, string(agentcore.RoleAssistant), final, opts.AgentID, "", runID, turn)
+	_, _ = appendMessageAtLeaf(wctx, s.runner.Store, opts.ConversationID, string(agentcore.RoleAssistant), final, opts.AgentID, "", runID, turn, false, nil, s.UsesPiRuntime())
 }
 
 // maybeCompact appends a compaction entry when the conversation's live context
@@ -445,6 +483,11 @@ func (s *ChatService) maybeCompact(ctx context.Context, opts ChatOptions) {
 		return
 	}
 	wctx := context.WithoutCancel(ctx)
+	if s.UsesPiRuntime() {
+		_, _ = compactPiConversation(wctx, s.runner.Store, opts.ConversationID,
+			s.runner.RunTierWindow(wctx, opts.ProjectID), false, s.piSummarizer(opts.ProjectID))
+		return
+	}
 	// The window is the RUN tier's, not the summarizer's: it bounds how much
 	// history the next turn replays, and that turn runs on the run tier. 0 on
 	// error falls back to the conservative default rather than failing a
@@ -597,13 +640,23 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 		emit(ev) // tokens (and anything else) pass straight through
 	}
 
-	run, res, runErr := s.runner.RunStream(ctx, RunOptions{
-		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message,
+	opts := RunOptions{
+		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message, InputID: req.InputID,
 		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
 		ReasoningEffort: req.ReasoningEffort,
 		ReadOnly:        req.ReadOnly,
 		ResumeFromRunID: req.ResumeFromRunID,
-	}, wrapped)
+	}
+	if req.PiHistory != nil {
+		opts.NativeHistoryRevision = req.PiHistory.Revision
+		if req.ResumeFromRunID == "" {
+			opts.NativeHistory = req.PiHistory.Messages
+		}
+	}
+	run, res, runErr := s.runner.RunStream(ctx, opts, wrapped)
+	if persistErr := s.persistPiTurn(ctx, req, run.ID, res); persistErr != nil {
+		runErr = errors.Join(runErr, persistErr)
+	}
 	if runErr != nil {
 		// Final is carried even on the error return: a stopped run's partial answer
 		// is the whole point of stopping gracefully, and on a genuine failure it is

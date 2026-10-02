@@ -75,6 +75,18 @@ describe('entriesToMessages', () => {
 });
 
 describe('active branch', () => {
+  it('walks through hidden native history nodes without rendering their payload', () => {
+    seq = 0;
+    const user = msg('user', 'question');
+    const native = entry({ kind: 'pi_history', role: '', parent_id: user.id, payload_json: '{}' });
+    const answer = msg('assistant', 'answer', { parent_id: native.id });
+    const fork = entry({ kind: 'pi_history', role: '', parent_id: user.id, payload_json: '{}' });
+    const replacement = msg('assistant', 'replacement', { parent_id: fork.id });
+    const out = entriesToMessages([user, native, answer, fork, replacement], replacement.id);
+    expect(out.map((m) => m.text)).toEqual(['question', 'replacement']);
+    expect(renderEntries([user, native], native.id).messages.map((m) => m.text)).toEqual(['question']);
+  });
+
   // Editing forks the tree and the store keeps both branches; GET returns every
   // entry. Without the leaf walk the transcript shows the message the user just
   // replaced sitting directly above its replacement.

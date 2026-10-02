@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -55,21 +56,25 @@ type args struct {
 // one-question-per-call rule (a questions array is folded into the first).
 func clamp(in *args) {
 	in.Question = strings.TrimSpace(in.Question)
-	if len(in.Question) > maxQuestionLen {
-		in.Question = in.Question[:maxQuestionLen]
-	}
+	in.Question = boundedText(in.Question, maxQuestionLen)
 	if len(in.Options) > maxOptions {
 		in.Options = in.Options[:maxOptions]
 	}
 	for i := range in.Options {
 		in.Options[i].Label = strings.TrimSpace(in.Options[i].Label)
-		if len(in.Options[i].Label) > maxOptionLen {
-			in.Options[i].Label = in.Options[i].Label[:maxOptionLen]
-		}
-		if len(in.Options[i].Description) > maxOptionLen {
-			in.Options[i].Description = in.Options[i].Description[:maxOptionLen]
-		}
+		in.Options[i].Label = boundedText(in.Options[i].Label, maxOptionLen)
+		in.Options[i].Description = boundedText(in.Options[i].Description, maxOptionLen)
 	}
+}
+
+func boundedText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }
 
 // Tool is the ask capability. It carries no state: everything durable lives in
@@ -78,6 +83,9 @@ type Tool struct{}
 
 // Name identifies the tool.
 func (Tool) Name() string { return ToolName }
+
+// PiArgumentPreparation selects this plugin's bundled synchronous Pi hook.
+func (Tool) PiArgumentPreparation() string { return "ask-v1" }
 
 // Schema advertises the tool to the model.
 func (Tool) Schema() agentcore.ToolSchema {

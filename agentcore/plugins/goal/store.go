@@ -1,9 +1,12 @@
 package goal
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lohi-ai/agentray/agentcore"
 )
 
 // Store holds the run's live completion condition and the record of how it got
@@ -67,19 +70,27 @@ func (s *Store) Revisions() []Revision {
 // through would write an EntryGoal and rebuild the system prompt — invalidating
 // the provider's KV cache for the whole prefix — in exchange for nothing.
 func (s *Store) Update(goal, reason string) bool {
+	changed, _ := s.update(context.Background(), goal, reason)
+	return changed
+}
+
+func (s *Store) update(ctx context.Context, goal, reason string) (bool, error) {
 	goal = strings.TrimSpace(goal)
 	if goal == "" {
-		return false
+		return false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if goal == s.goal {
-		return false
+		return false, nil
+	}
+	if err := agentcore.RecordGoalRevision(ctx, agentcore.GoalRevision{Previous: s.goal, Goal: goal, Reason: strings.TrimSpace(reason)}); err != nil {
+		return false, err
 	}
 	s.goal = goal
 	s.pending = true
 	s.revisions = append(s.revisions, Revision{Goal: goal, Reason: strings.TrimSpace(reason), At: time.Now()})
-	return true
+	return true, nil
 }
 
 // adopt brings the store to a condition that is ALREADY durable — the one the

@@ -579,19 +579,15 @@ nó — được ghi ở [`docs/redesign/strategy.md`](docs/redesign/strategy.md
 
 ## Deploy
 
-`infra/gce/deploy.sh --env <dev|prod>` roll VM theo kiểu blue-green sau Caddy. Một
-lần deploy dựng colour đang *không* phục vụ lên, đợi nó báo healthy, rồi lật
-upstream; một bản build hỏng không bao giờ thấy request nào, và rollback chỉ đơn
-giản là không lật.
+`./infra/gce/deploy.sh --env prod` build image API và web, rồi gọi trực tiếp
+`2server deploy -f` cho từng app. Config công khai nằm ở [`2server/`](2server/README.md),
+giá trị secret nằm trên VM. Dev trên VM Lohi đã ngừng sử dụng. Xem
+[`infra/README.md`](infra/README.md) để build, override image và test deploy script.
 
-Healthcheck nhắm vào `/readyz`, không phải `/healthz`, và cái gate đó là gate
-**dữ liệu có khớp không**. Một colour mới sẽ replay stream bền ngay lần boot đầu,
-và tới khi áp hết mọi row thì nó trả `503` — vì một colour còn replay mà đi phục
-vụ query thì trả lời từ một file DuckDB đang thủng lỗ. Mỗi colour có file riêng và
-durable riêng; dùng chung file thì colour đang vào bị khoá, dùng chung volume thì
-file hỏng. `/readyz` từ chối kèm lý do, và ba trong số lý do đó không bao giờ tự
-hết bằng cách ngồi chờ (`purged-gap`, `store-behind`, `stream-mismatch`) — phần
-header của script deploy ghi rõ từng cái nghĩa là gì và operator phải lo gì.
+API dùng `/readyz` để kiểm tra trước khi chuyển traffic. Mỗi colour giữ volume
+DuckDB và durable NATS riêng; colour đã dừng lâu có thể cần replay nhiều dữ liệu.
+Không bỏ gate, xoá volume hoặc reset durable để ép deploy thành công. Hướng dẫn
+readiness và các trường hợp cần sửa dữ liệu nằm trong [`2server/README.md`](2server/README.md).
 
 ## Test end-to-end
 

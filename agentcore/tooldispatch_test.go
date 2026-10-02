@@ -263,9 +263,9 @@ func TestValidateArgs_RequiredAndTypes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateArgs(c.args, schema)
+			err := NewToolSet().validateToolArgs("<test>", c.args, schema)
 			if (err != nil) != c.wantErr {
-				t.Fatalf("validateArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
+				t.Fatalf("validateToolArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
 			}
 		})
 	}
@@ -295,9 +295,9 @@ func TestValidateArgs_UnionTypes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateArgs(c.args, schema)
+			err := NewToolSet().validateToolArgs("<test>", c.args, schema)
 			if (err != nil) != c.wantErr {
-				t.Fatalf("validateArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
+				t.Fatalf("validateToolArgs(%q) err=%v, wantErr=%v", c.args, err, c.wantErr)
 			}
 		})
 	}
@@ -349,9 +349,9 @@ func TestValidateArgs_FullJSONSchema(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateArgs(tc.args, schema)
+			err := NewToolSet().validateToolArgs("<test>", tc.args, schema)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateArgs(%s) err=%v, wantErr=%v", tc.args, err, tc.wantErr)
+				t.Fatalf("validateToolArgs(%s) err=%v, wantErr=%v", tc.args, err, tc.wantErr)
 			}
 		})
 	}
@@ -364,14 +364,14 @@ func TestValidateArgs_InvalidSchemaFailsClosed(t *testing.T) {
 			"mixed": map[string]any{"type": []any{"string", 7, "null"}},
 		},
 	}
-	if err := validateArgs(`{"mixed":"a"}`, invalid); err == nil || !strings.Contains(err.Error(), "does not compile") {
+	if err := NewToolSet().validateToolArgs("<test>", `{"mixed":"a"}`, invalid); err == nil || !strings.Contains(err.Error(), "does not compile") {
 		t.Fatalf("invalid schema error = %v, want compile failure", err)
 	}
 }
 
 func TestValidateArgs_ExternalRefFailsWithoutNetworkLoader(t *testing.T) {
 	schema := map[string]any{"$ref": "https://example.invalid/tool.json"}
-	if err := validateArgs(`{}`, schema); err == nil || !strings.Contains(err.Error(), "no URLLoader set") {
+	if err := NewToolSet().validateToolArgs("<test>", `{}`, schema); err == nil || !strings.Contains(err.Error(), "no URLLoader set") {
 		t.Fatalf("external ref error = %v, want disabled-loader failure", err)
 	}
 }

@@ -35,6 +35,9 @@ const defaultRunMaxTokens = 16000
 // optionally fires the reflect pass (§14.9). Both the chat handler and the NATS
 // scheduler go through this one path.
 type Runner struct {
+	// Pi selects the original native runtime when configured. Nil retains the
+	// existing driver while the remaining migration work is completed.
+	Pi    *PiRuntimeConfig
 	Store *storage.Store
 	// Sandbox, when non-nil, is threaded into every BuildParams so agents get
 	// selectable risky tools + injection guard running inside an isolated container.
@@ -446,6 +449,10 @@ type RunOptions struct {
 	// run so the analyst answers with multi-turn context. Empty = a fresh run.
 	// Cross-session persistence is out of scope; the caller (client) holds these.
 	History []agentcore.Message
+	// NativeHistory supplies unchanged Pi messages when the native runtime is selected.
+	NativeHistory         json.RawMessage
+	NativeHistoryRevision string
+	InputID               string
 	// ReadOnly strips the run down to the analytics reads (see
 	// BuildParams.ReadOnly). Set for a question asked from inside the shared
 	// demo by someone whose membership there is read-only.
@@ -881,13 +888,14 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		maxTokens = defaultRunMaxTokens
 	}
 
-	agent, err := Build(BuildParams{
+	params := BuildParams{
 		ProjectID:          opts.ProjectID,
 		ScopeID:            scopeID,
 		Rungs:              rungs,
 		Trigger:            trigger,
 		CompactionProvider: compactProvider,
 		CompactionModel:    compactTier.Model,
+		PiCompactionTier:   &compactTier,
 		Scopes:             ScopesFromMap(cfg.Scopes),
 		// Verify-on-stop rail: a figure-shaped answer produced with zero evidence
 		// tool executions re-opens the run once (verify or disclaim). nil when the
@@ -965,28 +973,11 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		ReportLogInvariant: func(v observe.LogInvariantViolation) {
 			log.Printf("agentray: run %s log invariant: %v", runID, v)
 		},
-	})
-	if err != nil {
-		_ = r.Store.FinishAgentRun(ctx, runID, "error", err.Error(), 0, 0, 0, false)
-		return storage.AgentRun{}, agentcore.RunResult{}, err
 	}
+	// Run on the cancellable context; trace and terminal persistence below use
+	// ctx so a user stop still settles the run row.
+	res, runErr := r.runModelLoop(runCtx, params, opts, runTier, sink)
 
-	messages := append([]agentcore.Message{}, opts.History...)
-	if opts.Prompt != "" || opts.ResumeFromRunID == "" {
-		messages = append(messages, agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
-	}
-
-	// The model loop runs on runCtx (cancellable by Stop); everything after it —
-	// the trace and the terminal row — runs on ctx, so a stopped run still writes
-	// what it got instead of leaving a `running` row for the poller to find.
-	var res agentcore.RunResult
-	var runErr error
-	switch {
-	case sink != nil:
-		res, runErr = agent.ContinueStream(runCtx, messages, opts.Prompt, sink)
-	default:
-		res, runErr = agent.Continue(runCtx, messages, opts.Prompt)
-	}
 	r.persistTrace(ctx, runID, res)
 	status := "done"
 	summary := res.Final
@@ -1118,36 +1109,44 @@ func (r *Runner) keyRefresher(projectID string) func(context.Context, string) (s
 // config. Returns an error when the agent is disabled or no key is configured, so
 // the caller degrades to a setup prompt rather than a dead end.
 func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore.LLMProvider, string, error) {
-	cfg, err := r.Store.AgentConfigForRun(ctx, projectID)
+	tier, err := r.cheapTier(ctx, projectID)
 	if err != nil {
 		return nil, "", err
 	}
-	if !cfg.Enabled {
-		return nil, "", fmt.Errorf("agent is disabled for this project")
-	}
-	wsID, err := r.Store.WorkspaceIDForProject(ctx, projectID)
-	if err != nil {
-		return nil, "", err
-	}
-	wsTiers, keys, err := r.Store.WorkspaceTiersForRun(ctx, wsID)
-	if err != nil {
-		return nil, "", err
-	}
-	if !wsTiers.HasKey {
-		return nil, "", fmt.Errorf("no workspace model key configured")
-	}
-	// The default agent's id is the project id (scope == project for triage).
-	taskMap, err := r.Store.TaskTiersForRun(ctx, projectID)
-	if err != nil {
-		return nil, "", err
-	}
-	tier := TierSetFromWorkspace(wsTiers, keys, r.PoolFor).For(TierFromName(taskMap[storage.TaskTriage]))
-	// Trace the classifier's cheap calls too — they carry real (small) cost.
 	prov, err := tier.TracedProvider(r.Tracer)
 	if err != nil {
 		return nil, "", err
 	}
 	return prov, tier.Model, nil
+}
+
+// cheapTier is shared by the legacy classifier and native conversation
+// summarizer, so both honor the same workspace model selection and enablement.
+func (r *Runner) cheapTier(ctx context.Context, projectID string) (ModelTier, error) {
+	cfg, err := r.Store.AgentConfigForRun(ctx, projectID)
+	if err != nil {
+		return ModelTier{}, err
+	}
+	if !cfg.Enabled {
+		return ModelTier{}, fmt.Errorf("agent is disabled for this project")
+	}
+	wsID, err := r.Store.WorkspaceIDForProject(ctx, projectID)
+	if err != nil {
+		return ModelTier{}, err
+	}
+	wsTiers, keys, err := r.Store.WorkspaceTiersForRun(ctx, wsID)
+	if err != nil {
+		return ModelTier{}, err
+	}
+	if !wsTiers.HasKey {
+		return ModelTier{}, fmt.Errorf("no workspace model key configured")
+	}
+	// The default agent's id is the project id (scope == project for triage).
+	taskMap, err := r.Store.TaskTiersForRun(ctx, projectID)
+	if err != nil {
+		return ModelTier{}, err
+	}
+	return TierSetFromWorkspace(wsTiers, keys, r.PoolFor).For(TierFromName(taskMap[storage.TaskTriage])), nil
 }
 
 // RunTierWindow reports the input context window, in tokens, of the model that

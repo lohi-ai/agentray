@@ -592,19 +592,16 @@ DuckDB を選んだ判断そのもの —— [`storage-evaluation/`](storage-eva
 
 ## デプロイ
 
-`infra/gce/deploy.sh --env <dev|prod>` が、Caddy の裏で VM を blue-green に
-切り替える。deploy は *動いていない* 側を起動し、healthy を報告するまで待っ
-てから upstream を切り替える。壊れた build がリクエストを受けることはないし、
-rollback は切り替えないだけだ。
+`./infra/gce/deploy.sh --env prod` で API と web のイメージをビルドし、
+各アプリに `2server deploy -f` を実行する。公開設定は
+[`2server/`](2server/README.md)、secret の値は VM に保存する。Lohi VM の dev
+デプロイは廃止済み。ビルド、イメージの上書き、スクリプトの検証方法は
+[`infra/README.md`](infra/README.md) を参照する。
 
-healthcheck が見るのは `/healthz` ではなく `/readyz` で、この gate は **data
-coherence** の gate だ。新しい側は初回起動時に durable stream を replay する。
-全部の行を適用し終えるまで `503` を返す —— replay 中の側が答えると、穴の空い
-た DuckDB ファイルからクエリを返すことになるからだ。それぞれの側が自分の
-ファイルと自分の durable stream を持つ。ファイルを共有すると新しい側が締め出
-され、volume を共有すると壊れる。`/readyz` は理由付きで拒否し、その理由のう
-ち 3 つは待っても消えない（`purged-gap`、`store-behind`、`stream-mismatch`）。
-それぞれの意味と運用者が何を負うかは、deploy script のヘッダーに書いてある。
+API は `/readyz` を通過してから traffic を切り替える。各 colour は別々の
+DuckDB volume と NATS durable を保持する。長く停止した colour の replay には
+時間がかかる場合がある。gate の回避や volume/consumer の削除ではなく、
+[readiness の説明](2server/README.md#readiness-and-data)を確認する。
 
 ## E2E テスト
 

@@ -63,7 +63,7 @@ func pruneFixture() []Message {
 
 func TestPruneContextBelowThresholdIsOriginalSlice(t *testing.T) {
 	msgs := pruneFixture()
-	out, changed := pruneContext(msgs, 10_000_000, DefaultCompactionSettings())
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 10_000_000, Settings: DefaultCompactionSettings()})
 	if changed {
 		t.Fatal("must not prune below the soft threshold")
 	}
@@ -74,7 +74,7 @@ func TestPruneContextBelowThresholdIsOriginalSlice(t *testing.T) {
 
 func TestPruneContextClearsSupersededStaleAndOldResults(t *testing.T) {
 	msgs := pruneFixture()
-	out, changed := pruneContext(msgs, 1000, CompactionSettings{KeepRecentTokens: 500})
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 500}})
 	if !changed {
 		t.Fatal("expected pruning")
 	}
@@ -119,7 +119,7 @@ func TestPruneContextClearsSupersededRichResultWithoutMutatingSource(t *testing.
 		{Role: RoleTool, ToolCallID: "new", Name: "eval", Content: "new plot"},
 		{Role: RoleUser, Content: strings.Repeat("recent ", 500)},
 	}
-	out, changed := pruneContext(msgs, 1000, CompactionSettings{KeepRecentTokens: 100})
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 100}})
 	if !changed {
 		t.Fatal("expected superseded rich result to be pruned")
 	}
@@ -141,7 +141,7 @@ func TestPruneContextRetainsUnseenProviderOverhead(t *testing.T) {
 		// estimateBytesTokens(messages) cannot observe.
 		{Role: RoleAssistant, Content: "continue", Usage: &Usage{InputTokens: 6000, CostUSD: 1.25}},
 	}
-	out, changed := pruneContext(msgs, 3000, CompactionSettings{KeepRecentTokens: 500})
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 3000, Settings: CompactionSettings{KeepRecentTokens: 500}})
 	if !changed {
 		t.Fatal("expected pruning")
 	}
@@ -161,7 +161,7 @@ func TestPruneContextPreservesRecoverableResultReference(t *testing.T) {
 		{Role: RoleTool, ToolCallID: "q", Name: "run_query", Content: strings.Repeat("x", 5000), ResultRef: "spill_abc123"},
 		{Role: RoleUser, Content: strings.Repeat("recent ", 500)},
 	}
-	out, changed := pruneContext(msgs, 1000, CompactionSettings{KeepRecentTokens: 500})
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 500}})
 	if !changed {
 		t.Fatal("expected old preview to be pruned")
 	}
@@ -240,11 +240,11 @@ func TestPruneContextBatchesGenericResultsBehindSavingsFloor(t *testing.T) {
 	}
 	settings := CompactionSettings{KeepRecentTokens: 500}
 	one := build(false)
-	if out, changed := pruneContext(one, 4000, settings); changed || !reflect.DeepEqual(out, one) {
+	if out, changed := pruneContextRequest(ContextPruneRequest{Messages: one, Budget: 4000, Settings: settings}); changed || !reflect.DeepEqual(out, one) {
 		t.Fatal("a sub-floor generic saving should not churn the prefix")
 	}
 	two := build(true)
-	if _, changed := pruneContext(two, 4000, settings); !changed {
+	if _, changed := pruneContextRequest(ContextPruneRequest{Messages: two, Budget: 4000, Settings: settings}); !changed {
 		t.Fatal("batched generic savings above the adaptive floor should prune")
 	}
 }
@@ -305,7 +305,7 @@ func TestPruneContextProtectsErrorsSkillsAndConfiguredTools(t *testing.T) {
 		KeepRecentTokens:    500,
 		PruneProtectedTools: []string{readSkillToolName, "capture_artifact"},
 	}
-	out, changed := pruneContext(msgs, 1000, settings)
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: settings})
 	if changed || !reflect.DeepEqual(out, msgs) {
 		t.Fatal("protected and error results must remain verbatim")
 	}
@@ -314,14 +314,14 @@ func TestPruneContextProtectsErrorsSkillsAndConfiguredTools(t *testing.T) {
 func TestPruneContextIsCopyOnWriteAndIdempotent(t *testing.T) {
 	msgs := pruneFixture()
 	want := append([]Message(nil), msgs...)
-	out, changed := pruneContext(msgs, 1000, CompactionSettings{KeepRecentTokens: 500})
+	out, changed := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 500}})
 	if !changed {
 		t.Fatal("first pass must prune")
 	}
 	if !reflect.DeepEqual(msgs, want) {
 		t.Fatal("pruning mutated its input")
 	}
-	again, changedAgain := pruneContext(out, 1000, CompactionSettings{KeepRecentTokens: 500})
+	again, changedAgain := pruneContextRequest(ContextPruneRequest{Messages: out, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 500}})
 	if changedAgain || !reflect.DeepEqual(again, out) {
 		t.Fatal("second pass must be an exact no-op")
 	}
@@ -335,7 +335,7 @@ func TestPruneContextKeepsRecentToolResults(t *testing.T) {
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "r1", Name: "read_file", Arguments: `{"path":"z.txt"}`}}},
 		{Role: RoleTool, ToolCallID: "r1", Name: "read_file", Content: big},
 	}
-	out, _ := pruneContext(msgs, 1000, CompactionSettings{KeepRecentTokens: 4000})
+	out, _ := pruneContextRequest(ContextPruneRequest{Messages: msgs, Budget: 1000, Settings: CompactionSettings{KeepRecentTokens: 4000}})
 	if got := out[len(out)-1].Content; got != big {
 		t.Fatalf("recent tool result changed: %.60q", got)
 	}

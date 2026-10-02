@@ -14,6 +14,28 @@ import (
 // rebuilt by reducing it, never by mutating a row in place.
 type SessionEntryKind string
 
+// Native Pi records keep opaque JSON in SessionEntry.Content. The host owns
+// their persistence; legacy RecoverSession must not project this transcript.
+const (
+	EntryPiState       SessionEntryKind = "pi_state"
+	EntryPiEvent       SessionEntryKind = "pi_event"
+	EntryPiEffectStart SessionEntryKind = "pi_effect_start"
+	EntryPiEffectDone  SessionEntryKind = "pi_effect_done"
+	// EntryPiAnswer is host workflow metadata. Content holds the exact native
+	// user message to append; it never replaces an already emitted tool result.
+	EntryPiAnswer SessionEntryKind = "pi_answer"
+	EntryPiGoal   SessionEntryKind = "pi_goal"
+	// EntryPiGoalRevision records a committed host contract change within a
+	// physical tool effect. It never substitutes for a native tool result.
+	EntryPiGoalRevision SessionEntryKind = "pi_goal_revision"
+	// Invocation binds an isolated native run to its immutable request; Result
+	// records a completed child's reattachable answer without rewriting messages.
+	EntryPiInvocation  SessionEntryKind = "pi_invocation"
+	EntryPiChildResult SessionEntryKind = "pi_child_result"
+	// Request-view summary metadata; never replaces native transcript messages.
+	EntryPiContextSummary SessionEntryKind = "pi_context_summary"
+)
+
 const (
 	// EntryMessage records one conversation message reaching its final form
 	// (message_end): a user prompt, an assistant turn, or a tool result.
@@ -294,13 +316,15 @@ func AcquireSessionLease(ctx context.Context, store SessionStore, sessionID stri
 // It is idempotent for an exact retry and rejects a different answer for the
 // same call. Hosts should call it while holding the session lease so the read
 // and append form one logical ownership interval.
+// Native Pi questions use a physical effect ID and an append-only user message;
+// legacy questions retain their original provider-call/tool-result workflow.
 func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, callID, answer string) (bool, error) {
 	log, err := store.Log(ctx, sessionID)
 	if err != nil {
 		return false, err
 	}
 	for _, entry := range log {
-		if entry.Kind != EntryAnswer || entry.CallID != callID {
+		if (entry.Kind != EntryAnswer && entry.Kind != EntryPiAnswer) || entry.CallID != callID {
 			continue
 		}
 		if entry.Answer == answer {
@@ -318,7 +342,22 @@ func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, cal
 	if callID != pendingID {
 		return false, fmt.Errorf("%w: expected call %q, got %q", ErrNoPendingQuestion, pendingID, callID)
 	}
-	if err := store.Append(ctx, sessionID, SessionEntry{Kind: EntryAnswer, CallID: callID, Answer: answer}); err != nil {
+	entry := SessionEntry{Kind: EntryAnswer, CallID: callID, Answer: answer}
+	for _, candidate := range log {
+		if id, question, native := PiQuestionFromEntry(candidate); native && id == callID {
+			entry.Kind = EntryPiAnswer
+			message, err := json.Marshal(map[string]any{
+				"role": "user", "content": "Human answer to question " + string(question) + ":\n" + answer,
+				"timestamp": time.Now().UnixMilli(), "agentrayAnswerId": callID,
+			})
+			if err != nil {
+				return false, err
+			}
+			entry.Content = string(message)
+			break
+		}
+	}
+	if err := store.Append(ctx, sessionID, entry); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -901,19 +940,24 @@ func logHasQuestion(log []SessionEntry, callID string) bool {
 }
 
 // PendingQuestion returns the newest parked call still awaiting an answer: an
-// EntryQuestion with no matching EntryAnswer. The second return is the
+// EntryQuestion with no matching EntryAnswer, or a settled native parked effect
+// with no EntryPiAnswer. Native IDs identify physical effects, not provider calls.
+// The second return is the
 // question's validated arguments; the third reports whether one was found.
 // Consumers (the answer route, the reattach read) use it to render or resolve
 // the open question without knowing which tool asked it.
 func PendingQuestion(log []SessionEntry) (callID string, question json.RawMessage, found bool) {
 	answered := map[string]bool{}
 	for _, e := range log {
-		if e.Kind == EntryAnswer {
+		if e.Kind == EntryAnswer || e.Kind == EntryPiAnswer {
 			answered[e.CallID] = true
 		}
 	}
 	for i := len(log) - 1; i >= 0; i-- {
 		e := log[i]
+		if id, question, native := PiQuestionFromEntry(e); native && !answered[id] {
+			return id, question, true
+		}
 		if e.Kind == EntryQuestion && !answered[e.CallID] {
 			return e.CallID, e.Question, true
 		}

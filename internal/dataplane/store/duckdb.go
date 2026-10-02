@@ -78,35 +78,30 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return nil, fmt.Errorf("duckdb: create tmp dir: %w", err)
 	}
-	// temp_directory is per-connection, so it goes through the connector's init
-	// hook: every pooled connection (writer and readers alike) spills to the
-	// directory beside the database file rather than the process cwd.
-	// TimeZone=UTC pins TIMESTAMPTZ bucketing (date_trunc, INTERVAL math) to
-	// UTC regardless of the host's ICU zone — host-local bucketing would
-	// shift every timeline/date boundary on a non-UTC deployment.
+	// Only connection-local settings belong in this hook. temp_directory is
+	// database-global and cannot be set again after the first spill, even to
+	// the same path: doing so prevents the pool from opening new connections.
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
-		for _, stmt := range []string{
-			"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
-			// The cgroup is the real ceiling, but DuckDB does not know that: with
-			// no limit of its own it treats the whole container as its budget.
-			// This instance is the trusted writer and the dashboard reader, so it
-			// gets its share of the envelope and spills the rest to disk — see
-			// the sandbox budget in duckdb_sandbox.go.
-			"SET memory_limit = '" + sandboxMainMemoryLimit + "'",
-			"SET max_temp_directory_size = '" + sandboxMainTempSize + "'",
-			"SET TimeZone = 'UTC'",
-		} {
-			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
-				return err
-			}
-		}
-		return nil
+		_, err := execer.ExecContext(context.Background(), "SET TimeZone = 'UTC'", nil)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("duckdb: connector: %w", err)
 	}
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(1 + maxDuckDBReaders)
+	// Configure this database once, before migrations or any concurrent work.
+	// The trusted instance keeps its existing memory/spill budget.
+	for _, stmt := range []string{
+		"SET temp_directory = '" + strings.ReplaceAll(tmpDir, "'", "''") + "'",
+		"SET memory_limit = '" + sandboxMainMemoryLimit + "'",
+		"SET max_temp_directory_size = '" + sandboxMainTempSize + "'",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("duckdb: configure instance: %w", err)
+		}
+	}
 	d := &DuckDB{
 		db:      db,
 		path:    path,

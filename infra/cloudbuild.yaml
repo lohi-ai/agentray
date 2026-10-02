@@ -28,8 +28,8 @@ substitutions:
   _API_IMAGE: 'asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api'
   _WEB_IMAGE: 'asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web'
   _TAG: 'latest'
-  _WEB_API_URL: 'https://agentray-dev.lohi2.com'
+  _WEB_API_URL: 'https://agentray.lohi2.com'
   # Same hostname as the API on both targets — web and the API sit behind one
   # Caddy site. Named separately anyway so a split-origin instance can set it
   # without lying about where the API is.
-  _WEB_SITE_URL: 'https://agentray-dev.lohi2.com'
+  _WEB_SITE_URL: 'https://agentray.lohi2.com'

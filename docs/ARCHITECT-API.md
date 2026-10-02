@@ -207,6 +207,41 @@ landing rows are kept.
 
 ## Configuration (`internal/shared/config/config.go`)
 
+### JetStream environment isolation and readiness recovery
+
+Lohi now runs **production only**. The deployment script rejects `--env dev`;
+AgentRay dev containers and routing are retired. The dev Compose template remains
+for recovery/testing, with isolated subjects so it cannot claim production data.
+
+Every environment sharing a broker declares its own `INGEST_STREAM_NAME` and
+`INGEST_DLQ_SUBJECT` on **both** API colour services. The per-service environment
+map replaces an anchor map. Lohi production retains `AGENTRAY_EVENTS` and
+`agentray.events.dlq` to preserve its existing stream and consumer positions;
+dev uses `AGENTRAY_EVENTS_DEV` and `agentray.events.dlq.dev`. Changing only
+`INGEST_SUBJECT` is insufficient: stream reconciliation can replace the other
+environment's captured subjects. Do not rename a populated production stream or
+reset its consumer just to clear readiness.
+
+`/readyz` must report `caught-up` after recovery. For `stream-mismatch`, compare
+the stream's captured subjects with the consumer filters and fix environment
+configuration. For `replaying`, inspect the ingestion error and whether the ack
+floor advances; it can mean a failed writer, not merely slow processing.
+
+DuckDB `temp_directory`, memory and spill limits are configured once before
+migration/concurrent work. The connection initializer only sets session timezone.
+Re-setting `temp_directory` after the first spill prevents new pooled connections,
+including ingestion checkpoints, with `Cannot switch temporary directory after
+the current one has been used`. Restarting alone clears that symptom only until
+the next spill. The regression test forces real disk spill before opening another
+connection and writing a checkpoint.
+
+For an existing affected instance, preserve its exact environment, image version,
+DuckDB volume and consumer identity. Take a consistent stopped-volume snapshot
+(including its WAL) before replacing the process with the patched build. Verify
+continued writes, zero pending/ack-pending work at readiness, and resolved
+monitoring alerts; never substitute `/healthz` for the readiness gate.
+
+
 ## Shutdown
 
 `Server.Shutdown()` drains the NATS subscription (flushes in-flight events), closes NATS, Redis, and Postgres in order. Triggered by SIGTERM in `cmd/server/main.go`.

@@ -10,10 +10,16 @@ import (
 // Model is one entry from a provider's live list-models response. IDs are
 // whatever the vendor returned — never a hardcoded catalog.
 type Model struct {
-	ProviderID     string `json:"provider_id"`
-	ProviderVendor string `json:"provider_vendor"`
-	ProviderName   string `json:"provider_name"`
-	ID             string `json:"id"`
+	// API and Provider identify Pi's wire implementation and provider separately.
+	// Input declares supported modalities for transcript replay. The workspace
+	// catalog fields below remain available to existing Go callers.
+	API            string   `json:"api,omitempty"`
+	Provider       string   `json:"provider,omitempty"`
+	Input          []string `json:"input,omitempty"`
+	ProviderID     string   `json:"provider_id"`
+	ProviderVendor string   `json:"provider_vendor"`
+	ProviderName   string   `json:"provider_name"`
+	ID             string   `json:"id"`
 	// ContextWindow is the model's input window in tokens: the vendor's own
 	// figure when its list-models response carried one, otherwise this package's
 	// fallback, otherwise 0 for "unknown". It is what the compaction budget is

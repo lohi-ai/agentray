@@ -1,3 +1,15 @@
+FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS pi-builder
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/third_party/pi
+COPY third_party/pi/package.json third_party/pi/bun.lock ./
+RUN bun install --frozen-lockfile --ignore-scripts
+COPY third_party/pi/ ./
+COPY agentcore/pi.ts agentcore/telemetry.ts /src/agentcore/
+COPY agentcore/plugins/ask/pi.mts /src/agentcore/plugins/ask/pi.mts
+RUN bun run typecheck:runtime && bun runtime/build.mjs
+
 FROM golang:1.25-bookworm AS builder
 # The embedded DuckDB engine (github.com/duckdb/duckdb-go) links a prebuilt
 # static bundle through cgo. Its Linux bundle targets glibc, so Alpine/musl is
@@ -28,5 +40,7 @@ USER lohi
 # every deployed environment so the file survives container recreation.
 ENV DUCKDB_PATH=/data/agentray.duckdb
 COPY --from=builder /out/agentray /usr/local/bin/agentray
+COPY --from=pi-builder /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=pi-builder /src/third_party/pi/dist /opt/agentray/pi
 EXPOSE 8080
 ENTRYPOINT ["agentray"]

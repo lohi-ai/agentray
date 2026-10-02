@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"github.com/jackc/pgx/v5/pgconn"
 	"log"
 	"os"
 	"os/signal"
@@ -26,7 +28,24 @@ func main() {
 		return
 	}
 
+	if len(os.Args) > 1 && os.Args[1] != "migrate" && os.Args[1] != "replay-dlq" {
+		log.Fatal("unknown command; supported: migrate, replay-dlq")
+	}
 	cfg := config.FromEnv()
+
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := storage.Migrate(ctx, cfg); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) {
+				log.Fatalf("PostgreSQL migration failed (SQLSTATE %s)", pgErr.Code)
+			}
+			log.Fatalf("PostgreSQL migration failed (%T)", err)
+		}
+		log.Print("PostgreSQL migrations complete")
+		return
+	}
 
 	// Operator subcommands run against the same config, then exit (they do not
 	// start the HTTP server). replay-dlq re-queues dead-lettered event batches.

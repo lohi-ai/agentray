@@ -1,0 +1,22 @@
+{
+  "extends": "./upstream/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@earendil-works/pi-ai": [
+        "./upstream/packages/ai/src/index.ts"
+      ],
+      "@earendil-works/pi-agent-core": [
+        "./upstream/packages/agent/src/index.ts"
+      ],
+      "@earendil-works/pi-telemetry": [
+        "./upstream/packages/telemetry/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "runtime/**/*.ts"
+  ]
+}

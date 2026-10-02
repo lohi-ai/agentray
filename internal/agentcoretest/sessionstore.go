@@ -6,6 +6,7 @@ package agentcoretest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync"
@@ -516,7 +517,10 @@ func assertTypedEntries(t *testing.T, got []agentcore.SessionEntry, created time
 		first.Message.Usage == nil || first.Message.Usage.InputTokens != 11 {
 		t.Fatalf("typed message did not round-trip: %+v", first.Message)
 	}
-	if !reflect.DeepEqual(first.Tools, []string{"read", "write"}) || string(first.Question) != `{"prompt":"continue?"}` {
+	// JSONB backends may reformat raw JSON. The contract is the immutable
+	// JSON value, including every field, rather than insignificant whitespace.
+	var question any
+	if !reflect.DeepEqual(first.Tools, []string{"read", "write"}) || json.Unmarshal(first.Question, &question) != nil || !reflect.DeepEqual(question, map[string]any{"prompt": "continue?"}) {
 		t.Fatalf("slice/raw fields did not round-trip: tools=%v question=%s", first.Tools, first.Question)
 	}
 	second := got[1]

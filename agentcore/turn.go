@@ -605,12 +605,8 @@ func NewProviderError(provider string, resp *http.Response, message string) *Pro
 	return pe
 }
 
-// parseRetryAfter reads a Retry-After header in either form (delay-seconds or an
-// HTTP date). An unparseable or absent value yields 0.
-func parseRetryAfter(v string) time.Duration {
-	return parseRetryAfterAt(v, time.Now())
-}
-
+// parseRetryAfterAt reads delay-seconds or an HTTP date relative to now.
+// An unparseable or absent value yields 0.
 func parseRetryAfterAt(v string, now time.Time) time.Duration {
 	if v == "" {
 		return 0

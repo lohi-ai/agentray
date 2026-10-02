@@ -26,9 +26,9 @@ func WithTraceID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, traceCtxKey{}, id)
 }
 
-// traceIDFrom reads the correlation id set by WithTraceID ("" when absent, e.g.
+// TraceIDFrom reads the correlation id set by WithTraceID ("" when absent, e.g.
 // a classifier call made outside any run).
-func traceIDFrom(ctx context.Context) string {
+func TraceIDFrom(ctx context.Context) string {
 	if v, ok := ctx.Value(traceCtxKey{}).(string); ok {
 		return v
 	}
@@ -40,7 +40,10 @@ func traceIDFrom(ctx context.Context) string {
 // run — the "message sent to the LLM + est. fee" trace. Emitted once per Chat or
 // streamed turn.
 type TraceRecord struct {
-	TraceID string `json:"trace_id,omitempty"` // correlation id (the run id), set via WithTraceID
+	// NativeTrace holds the authoritative native request, response, and spans.
+	// Messages and Response remain a display projection for legacy consumers.
+	NativeTrace json.RawMessage `json:"native_trace,omitempty"`
+	TraceID     string          `json:"trace_id,omitempty"` // correlation id (the run id), set via WithTraceID
 	// SessionKey identifies WHICH agent made the call — the run's own session,
 	// or a spawned child's derived session. A parent and its children share one
 	// provider and one ctx chain, so without this their calls are one
@@ -221,7 +224,7 @@ func (t *tracingProvider) emit(ctx context.Context, req agentcore.ChatRequest, r
 		return
 	}
 	rec := TraceRecord{
-		TraceID:         traceIDFrom(ctx),
+		TraceID:         TraceIDFrom(ctx),
 		SessionKey:      agentcore.RunSessionFrom(ctx),
 		Depth:           agentcore.DelegationDepth(ctx),
 		Timestamp:       start(dur),

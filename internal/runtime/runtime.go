@@ -65,6 +65,8 @@ type BuildParams struct {
 	// Both unset keeps agentcore's default (the active rung summarizes).
 	CompactionProvider agentcore.LLMProvider
 	CompactionModel    string
+	// Native runs bind the resolved tier directly to Pi's original provider.
+	PiCompactionTier *ModelTier
 	// ReadOnly withholds every tool that CHANGES the project (or reaches off the
 	// host) for the duration of this run, leaving the analytics reads.
 	//

@@ -57,9 +57,12 @@ type LabToolCall struct {
 // assistant response, and both per-step and cumulative token/cost accounting
 // (the real numbers from the run, never a re-estimate).
 type LabStep struct {
-	Index int         `json:"index"` // 0-based position in the step list
-	Turn  int         `json:"turn"`  // 1-based agent turn this step belongs to
-	Kind  LabStepKind `json:"kind"`
+	NativeTrace json.RawMessage `json:"native_trace,omitempty"`
+	SessionKey  string          `json:"session_key,omitempty"`
+	Depth       int             `json:"depth,omitempty"`
+	Index       int             `json:"index"` // 0-based position in the step list
+	Turn        int             `json:"turn"`  // 1-based agent turn this step belongs to
+	Kind        LabStepKind     `json:"kind"`
 
 	// Assembled context + prompt as it entered this step.
 	System  string    `json:"system"`  // the full assembled system prompt
@@ -98,6 +101,9 @@ type LabStep struct {
 // A consumer maps its persisted trace rows (storage.AgentLLMCall) onto this
 // neutral shape so the fold itself imports no storage.
 type TurnRecord struct {
+	NativeTrace     json.RawMessage
+	SessionKey      string
+	Depth           int
 	Messages        []Message        // the request messages sent to the model this turn
 	Response        string           // assistant text returned
 	ReasoningBlocks []ReasoningBlock // opaque provider replay blocks returned with the assistant turn
@@ -159,7 +165,7 @@ func ApplyLiveGates(records []TurnRecord, traces []ToolTrace) []TurnRecord {
 	out := make([]TurnRecord, len(records))
 	copy(out, records)
 	for i := range out {
-		if len(out[i].ToolGates) > 0 {
+		if len(out[i].ToolGates) > 0 || (len(out[i].NativeTrace) > 0 && string(out[i].NativeTrace) != "null") {
 			continue
 		}
 		gates := make([]ToolGate, 0, len(out[i].ToolCalls))
@@ -183,35 +189,50 @@ func ApplyLiveGates(records []TurnRecord, traces []ToolTrace) []TurnRecord {
 // turn) and emits it as its own step before that turn. Everything else is one
 // turn = one step. Pure: same input -> same steps, for live and replay alike.
 func FoldSteps(records []TurnRecord) []LabStep {
-	// A run-wide map of tool-call id -> result content, harvested from every
-	// tool-role message across all turns, so a call made on turn N can be paired
-	// with its result regardless of which turn's context the result was captured
-	// in (results land in the next turn's request messages).
-	results := map[string]string{}
-	for _, r := range records {
-		for _, m := range r.Messages {
-			if m.Role == RoleTool && m.ToolCallID != "" {
-				results[m.ToolCallID] = m.Content
+	// The immediately following request in the same session contains this
+	// turn's results. Sessions and repeated provider call IDs are independent;
+	// a run-wide ID map can attach a child's result to its parent's call.
+	results := make([]map[string]string, len(records))
+	nativeGates := make([][]ToolGate, len(records))
+	nextNative := map[string][]ToolGate{}
+	next := map[string]map[string]string{}
+	for i := len(records) - 1; i >= 0; i-- {
+		r := records[i]
+		results[i] = next[r.SessionKey]
+		nativeGates[i] = nextNative[r.SessionKey]
+		nextNative[r.SessionKey] = nativeTraceGates(r.NativeTrace)
+		current := map[string]string{}
+		for _, message := range r.Messages {
+			if message.Role == RoleTool && message.ToolCallID != "" {
+				current[message.ToolCallID] = message.Content
 			}
 		}
+		next[r.SessionKey] = current
 	}
 
 	steps := make([]LabStep, 0, len(records)+1)
-	loaded := []string{}
-	loadedSeen := map[string]bool{}
-	lastSummary := ""
+	loadedBySession := map[string][]string{}
+	seenBySession := map[string]map[string]bool{}
+	lastSummary := map[string]string{}
 	var cumIn, cumOut int
 	var cumCost float64
 
 	for i, r := range records {
 		turn := i + 1
+		loaded := loadedBySession[r.SessionKey]
+		loadedSeen := seenBySession[r.SessionKey]
+		if loadedSeen == nil {
+			loadedSeen = map[string]bool{}
+			seenBySession[r.SessionKey] = loadedSeen
+		}
 
 		// Compaction detection: the most recent summary message in this turn's
 		// context, if it differs from the last one we saw, means a compaction
 		// happened just before this turn.
 		summary := latestSummary(r.Messages)
-		if summary != "" && summary != lastSummary {
+		if summary != "" && summary != lastSummary[r.SessionKey] {
 			steps = append(steps, LabStep{
+				SessionKey: r.SessionKey, Depth: r.Depth,
 				Index:        len(steps),
 				Turn:         turn,
 				Kind:         LabStepCompaction,
@@ -221,7 +242,7 @@ func FoldSteps(records []TurnRecord) []LabStep {
 				CumTokensOut: cumOut,
 				CumCostUSD:   cumCost,
 			})
-			lastSummary = summary
+			lastSummary[r.SessionKey] = summary
 		}
 
 		// Accumulate read_skill loads visible at this step.
@@ -234,17 +255,22 @@ func FoldSteps(records []TurnRecord) []LabStep {
 			}
 		}
 
+		loadedBySession[r.SessionKey] = loaded
 		system := systemPrompt(r.Messages)
 		persona, memory, advertised := parseSystemPrompt(system)
 
 		calls := make([]LabToolCall, 0, len(r.ToolCalls))
 		for _, c := range r.ToolCalls {
-			allowed, errStr := gateOutcome(r.ToolGates, c.ID)
+			gates := r.ToolGates
+			if len(r.NativeTrace) > 0 && string(r.NativeTrace) != "null" {
+				gates = nativeGates[i]
+			}
+			allowed, errStr := gateOutcome(gates, c.ID)
 			calls = append(calls, LabToolCall{
 				ID:      c.ID,
 				Name:    c.Name,
 				Args:    c.Arguments,
-				Result:  results[c.ID],
+				Result:  results[i][c.ID],
 				Allowed: allowed,
 				Error:   errStr,
 			})
@@ -255,6 +281,8 @@ func FoldSteps(records []TurnRecord) []LabStep {
 		cumCost += r.CostUSD
 
 		steps = append(steps, LabStep{
+			NativeTrace: append(json.RawMessage(nil), r.NativeTrace...),
+			SessionKey:  r.SessionKey, Depth: r.Depth,
 			Index:            len(steps),
 			Turn:             turn,
 			Kind:             LabStepTurn,
@@ -278,6 +306,38 @@ func FoldSteps(records []TurnRecord) []LabStep {
 		})
 	}
 	return steps
+}
+
+// Native tool results carry their governed audit receipt. Match within the
+// next request of the same session, rather than overlaying a run-wide call-ID
+// map that can confuse siblings or repeated provider IDs.
+func nativeTraceGates(raw json.RawMessage) []ToolGate {
+	var trace struct {
+		Context struct{ Messages []json.RawMessage }
+	}
+	if json.Unmarshal(raw, &trace) != nil {
+		return nil
+	}
+	byID := map[string]ToolGate{}
+	for _, raw := range trace.Context.Messages {
+		var message struct {
+			Role, ToolCallID string
+			Details          PiToolOutcome
+		}
+		if json.Unmarshal(raw, &message) != nil || message.Role != "toolResult" || message.ToolCallID == "" {
+			continue
+		}
+		audit := message.Details.Trace
+		if audit.CallID != message.ToolCallID {
+			continue
+		}
+		byID[audit.CallID] = ToolGate{CallID: audit.CallID, Allowed: audit.Allowed, Reason: audit.Reason, Error: audit.Error}
+	}
+	out := make([]ToolGate, 0, len(byID))
+	for _, gate := range byID {
+		out = append(out, gate)
+	}
+	return out
 }
 
 // gateOutcome looks up the recorded gate for one tool call. No gates on the
@@ -405,62 +465,6 @@ func skillIDFromArgs(args string) string {
 	}
 	_ = json.Unmarshal([]byte(args), &a)
 	return strings.TrimSpace(a.ID)
-}
-
-// LabStepDiff is what changed between two adjacent steps — the explain-mode
-// "what changed since the previous step" view. Counts and added items keep it
-// compact; the UI renders the full state from the steps themselves.
-type LabStepDiff struct {
-	ContextAdded   int      `json:"context_added"` // new messages vs the prior step
-	SkillsLoaded   []string `json:"skills_loaded"` // skills loaded since the prior step
-	ToolsCalled    []string `json:"tools_called"`  // tools invoked in this step
-	MemoryAdded    []string `json:"memory_added"`  // recalled-memory lines new this step
-	TokensInDelta  int      `json:"tokens_in_delta"`
-	TokensOutDelta int      `json:"tokens_out_delta"`
-	CostDelta      float64  `json:"cost_delta"`
-	Compacted      bool     `json:"compacted"` // this step is a compaction
-}
-
-// DiffStep computes the change from prev to cur. A nil prev (the first step)
-// diffs against the empty state, so the opening step shows its full setup.
-func DiffStep(prev, cur LabStep) LabStepDiff {
-	d := LabStepDiff{
-		ContextAdded:   len(cur.Context),
-		TokensInDelta:  cur.TokensIn,
-		TokensOutDelta: cur.TokensOut,
-		CostDelta:      cur.CostUSD,
-		Compacted:      cur.Kind == LabStepCompaction,
-	}
-	for _, c := range cur.ToolCalls {
-		d.ToolsCalled = append(d.ToolsCalled, c.Name)
-	}
-	prevLoaded := map[string]bool{}
-	prevMemory := map[string]bool{}
-	prevContext := 0
-	if prev.Turn != 0 || prev.Kind != "" {
-		prevContext = len(prev.Context)
-		for _, s := range prev.SkillsLoaded {
-			prevLoaded[s] = true
-		}
-		for _, m := range prev.Memory {
-			prevMemory[m] = true
-		}
-	}
-	d.ContextAdded = len(cur.Context) - prevContext
-	if d.ContextAdded < 0 {
-		d.ContextAdded = 0 // compaction shrank the context; not an "add"
-	}
-	for _, s := range cur.SkillsLoaded {
-		if !prevLoaded[s] {
-			d.SkillsLoaded = append(d.SkillsLoaded, s)
-		}
-	}
-	for _, m := range cur.Memory {
-		if !prevMemory[m] {
-			d.MemoryAdded = append(d.MemoryAdded, m)
-		}
-	}
-	return d
 }
 
 // A long run's table of contents.

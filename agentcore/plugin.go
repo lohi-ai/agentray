@@ -574,6 +574,7 @@ func (r *Registry) mergedHooks() Hooks {
 		out.BeforeCompact = append(out.BeforeCompact, h.BeforeCompact...)
 		out.AgentEnd = append(out.AgentEnd, h.AgentEnd...)
 		out.Context = append(out.Context, h.Context...)
+		out.PiContext = append(out.PiContext, h.PiContext...)
 		out.BeforeProviderRequest = append(out.BeforeProviderRequest, h.BeforeProviderRequest...)
 		out.MessageEnd = append(out.MessageEnd, h.MessageEnd...)
 		out.AfterProviderResponse = append(out.AfterProviderResponse, h.AfterProviderResponse...)

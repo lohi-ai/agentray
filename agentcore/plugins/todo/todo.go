@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -270,6 +271,25 @@ func ContextHook(store *Store) agentcore.ContextHook {
 	}
 }
 
+// PiContextHook pins the same bounded plan into Pi's outgoing native view.
+// Raw provider messages pass through untouched, and the reminder never becomes
+// another persisted conversation message on each turn.
+func PiContextHook(store *Store) agentcore.PiContextHook {
+	return func(_ context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+		rendered := store.Render()
+		if rendered == "" {
+			return messages, nil
+		}
+		reminder, err := json.Marshal(map[string]any{"role": "system", "content": ContextPrefix + "\n" + rendered, "timestamp": time.Now().UnixMilli()})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]json.RawMessage, 0, len(messages)+1)
+		out = append(out, messages...)
+		return append(out, reminder), nil
+	}
+}
+
 // planTool is the model-facing tool that writes the run plan.
 type planTool struct {
 	store *Store
@@ -398,7 +418,8 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 	}
 	r.AddTools(NewTool(p.Store))
 	r.AddHooks(agentcore.PriorityDefault, agentcore.Hooks{
-		Context: []agentcore.ContextHook{ContextHook(p.Store)},
+		Context:   []agentcore.ContextHook{ContextHook(p.Store)},
+		PiContext: []agentcore.PiContextHook{PiContextHook(p.Store)},
 	})
 	r.AddExtension(p)
 	return nil
@@ -453,6 +474,29 @@ func planFromLog(entries []agentcore.SessionEntry) ([]Item, bool) {
 	ok := false
 	for _, e := range entries {
 		switch e.Kind {
+		case agentcore.EntryPiEffectDone:
+			// Only a settled, successful execution can update the native plan.
+			// An assistant's requested arguments are not proof of execution.
+			var receipt struct {
+				Error  string
+				Result struct{ Details agentcore.PiToolOutcome }
+			}
+			if json.Unmarshal([]byte(e.Content), &receipt) != nil || receipt.Error != "" {
+				continue
+			}
+			audit := receipt.Result.Details
+			if audit.Executed && audit.Trace.Tool == ToolName && audit.Trace.Allowed && audit.Trace.Error == "" {
+				if items, err := parseItems(audit.Trace.Args); err == nil {
+					found, ok = items, true
+				}
+			}
+			for _, call := range audit.Invocations {
+				if call.Executed && call.Trace.Tool == ToolName && call.Trace.Allowed && call.Trace.Error == "" {
+					if items, err := parseItems(call.Trace.Args); err == nil {
+						found, ok = items, true
+					}
+				}
+			}
 		case agentcore.EntryLeaf:
 			found, ok = nil, false
 		case agentcore.EntryMessage:

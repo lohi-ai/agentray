@@ -117,6 +117,9 @@ const (
 // messages that request tool execution; ToolCallID links a tool result back to
 // the call that produced it.
 type Message struct {
+	// InputID correlates host-authored input with its durable source. Providers
+	// never serialize it; native adapters retain it as message metadata.
+	InputID string `json:"input_id,omitempty"`
 	Role    Role   `json:"role"`
 	Content string `json:"content"`
 	// ContentParts carries structured content that cannot be represented by the

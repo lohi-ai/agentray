@@ -250,6 +250,7 @@ func foldRecords(calls []storage.AgentLLMCall, traces []agentcore.ToolTrace) []a
 func recordsFromCalls(calls []storage.AgentLLMCall) []agentcore.TurnRecord {
 	out := make([]agentcore.TurnRecord, 0, len(calls))
 	contexts := make(map[int][]agentcore.Message, len(calls))
+	nativeContexts := make(map[int]piTraceContext, len(calls))
 	for _, c := range calls {
 		var delta []agentcore.Message
 		_ = json.Unmarshal([]byte(c.MessagesJSON), &delta)
@@ -276,6 +277,8 @@ func recordsFromCalls(calls []storage.AgentLLMCall) []agentcore.TurnRecord {
 			_ = json.Unmarshal([]byte(c.ToolGatesJSON), &toolGates)
 		}
 		out = append(out, agentcore.TurnRecord{
+			NativeTrace: decodePiTrace(c.NativeTraceJSON, c.SessionKey, c.Seq, nativeContexts),
+			SessionKey:  c.SessionKey, Depth: c.Depth,
 			Messages:        msgs,
 			Response:        c.Response,
 			ReasoningBlocks: reasoningBlocks,

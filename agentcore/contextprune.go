@@ -12,7 +12,7 @@ import (
 // being useful long before the surrounding reasoning does: a newer identical
 // call superseded them, a later write made a file read stale, or the result is
 // old, bulky, and cheap to reproduce. Once the transcript crosses half of its
-// budget, pruneContext replaces those old results in one batch. Batching is
+// budget, the pruner replaces those old results in one batch. Batching is
 // deliberate: every rewrite invalidates the provider's prompt-cache prefix
 // from that point, so one thresholded pass is cheaper than editing every turn.
 
@@ -58,7 +58,7 @@ type ContextPruneRequest struct {
 	PromptCacheActive bool
 }
 
-// pruneContext batch-clears obsolete tool results after the transcript crosses
+// pruneContextRequest batch-clears obsolete tool results after the transcript crosses
 // half its context budget. Only the span before the keep-recent window is
 // touched. Within that old span it clears, in confidence order:
 //
@@ -69,10 +69,6 @@ type ContextPruneRequest struct {
 // Tool result identity and adjacency are preserved, so all provider tool-call
 // invariants remain valid. The operation is idempotent because its placeholders
 // are below every clearing threshold.
-func pruneContext(messages []Message, budget int, settings CompactionSettings) ([]Message, bool) {
-	return pruneContextRequest(ContextPruneRequest{Messages: messages, Budget: budget, Settings: settings})
-}
-
 func pruneContextRequest(req ContextPruneRequest) ([]Message, bool) {
 	messages, budget, settings := req.Messages, req.Budget, req.Settings
 	if budget <= 0 {

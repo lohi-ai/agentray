@@ -1093,9 +1093,23 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if agentID == "" {
 			agentID = conv.AgentID
 		}
-		history, err := agentruntime.BuildHistory(c.Request().Context(), store, conv.ID)
-		if err != nil {
-			return err
+		svc := agentruntime.NewChatService(store, runnerOpts...)
+		var history []agentcore.Message
+		var piHistory *agentruntime.PiConversationHistory
+		if !agentruntime.IsHandledCommand(message) {
+			if svc.UsesPiRuntime() {
+				value, err := agentruntime.BuildPiHistory(c.Request().Context(), store, conv.ID)
+				if err != nil {
+					return echo.NewHTTPError(http.StatusConflict, err.Error())
+				}
+				piHistory = &value
+			} else {
+				var err error
+				history, err = agentruntime.BuildHistory(c.Request().Context(), store, conv.ID)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		// A handled command is control plane, not conversation: it goes in the
 		// transcript so the user can see it happened, and stays out of the history
@@ -1106,17 +1120,26 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 				return agentruntime.AppendCommandEntry(ctx, st, convID, role, text, agentID, authorUserID)
 			}
 		}
-		if _, err := appendUser(c.Request().Context(), store, conv.ID,
-			string(agentcore.RoleUser), message, agentID, ctx.User.ID, "", 0); err != nil {
-			return err
+		inputID := ""
+		if piHistory != nil {
+			entry, err := agentruntime.AppendMessageEntryAtLeaf(c.Request().Context(), store, conv.ID, string(agentcore.RoleUser), message, agentID, ctx.User.ID, piHistory.LeafID)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusConflict, err.Error())
+			}
+			inputID = entry.ID
+		} else {
+			if _, err := appendUser(c.Request().Context(), store, conv.ID,
+				string(agentcore.RoleUser), message, agentID, ctx.User.ID, "", 0); err != nil {
+				return err
+			}
 		}
 		if err := meterDemoAsk(c, store, project, ctx.User.ID); err != nil {
 			return err
 		}
-		svc := agentruntime.NewChatService(store, runnerOpts...)
 		opts := agentruntime.ChatOptions{
 			ProjectID: project.ID, AgentID: agentID,
 			Message: message, History: history,
+			PiHistory: piHistory, InputID: inputID,
 			SessionID: conv.ID, ConversationID: conv.ID,
 			ReadOnly: !sessionAllowsWrite(project),
 		}
@@ -1203,10 +1226,11 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			return err
 		}
 		var leafSeq int64
-		for _, en := range entries {
+		for i, en := range entries {
 			if en.Seq > leafSeq {
 				leafSeq = en.Seq
 			}
+			entries[i] = conversationDisplayEntry(en)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"conversation": conv, "entries": entries, "leaf_seq": leafSeq})
 	})
@@ -1263,16 +1287,18 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// the literal text and compact nothing.
 		if liveReg != nil && !agentruntime.IsHandledCommand(payload.Message) {
 			mode := "steer"
-			delivered := false
 			if payload.Mode == "followup" {
 				mode = "followup"
-				delivered = liveReg.FollowUp(project.ID, convID, payload.Message)
-			} else {
-				delivered = liveReg.Steer(project.ID, convID, payload.Message)
+			}
+			delivered, err := liveReg.QueueInput(project.ID, convID, mode == "followup", func() (agentcore.Message, error) {
+				entry, err := agentruntime.AppendMessageEntry(c.Request().Context(), store, convID,
+					string(agentcore.RoleUser), payload.Message, actingAgent, ctx.User.ID, "", 0)
+				return agentcore.Message{Role: agentcore.RoleUser, Content: payload.Message, InputID: entry.ID}, err
+			})
+			if err != nil {
+				return err
 			}
 			if delivered {
-				_, _ = agentruntime.AppendMessageEntry(c.Request().Context(), store, convID,
-					string(agentcore.RoleUser), payload.Message, actingAgent, ctx.User.ID, "", 0)
 				if wantsEventStream(c) {
 					return steerAck(c, mode)
 				}
@@ -1490,11 +1516,17 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 // current when it was written, so an answer's immediate parent is usually the
 // last tool trace of its own turn. Bounded so a cycle in a corrupt log can't
 // hang the request.
-func userTurnAbove(ctx context.Context, store *storage.Store, convID, entryID string) (storage.AgentConversationEntry, error) {
+func userTurnAbove(ctx context.Context, store interface {
+	GetConversationEntry(context.Context, string, string) (storage.AgentConversationEntry, error)
+}, convID, entryID string) (storage.AgentConversationEntry, error) {
 	for i := 0; i < 128 && entryID != ""; i++ {
 		e, err := store.GetConversationEntry(ctx, convID, entryID)
 		if err != nil {
 			return storage.AgentConversationEntry{}, err
+		}
+		if inputID := agentruntime.PiConversationInputID(e); inputID != "" {
+			entryID = inputID
+			continue
 		}
 		if e.Kind == agentruntime.ConvKindMessage && e.Role == string(agentcore.RoleUser) {
 			return e, nil

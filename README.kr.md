@@ -567,19 +567,15 @@ DuckDB를 고른 결정 자체는 — [`storage-evaluation/`](storage-evaluation
 
 ## 배포
 
-`infra/gce/deploy.sh --env <dev|prod>`는 Caddy 뒤에서 VM을 blue-green으로 굴린다.
-deploy는 *서빙하지 않는* colour를 띄우고, healthy 보고를 기다린 다음, upstream을
-뒤집는다. 망가진 build는 request를 한 번도 받지 않고, rollback은 그냥 안 뒤집으면
-된다.
+`./infra/gce/deploy.sh --env prod`가 API와 web 이미지를 빌드한 뒤 각 앱에
+`2server deploy -f`를 실행한다. 공개 설정은 [`2server/`](2server/README.md)에,
+secret 값은 VM에 보관한다. Lohi VM의 dev 배포는 종료되었다. 빌드와 배포
+스크립트 검증 방법은 [`infra/README.md`](infra/README.md)를 참고한다.
 
-healthcheck는 `/healthz`가 아니라 `/readyz`를 본다. 그 gate는 **data coherence**
-gate다. 새 colour는 첫 부팅 때 durable stream을 replay하고, 모든 row를 적용하기
-전까지 `503`으로 답한다 — 아직 replay 중인 colour가 구멍 난 DuckDB 파일에서 query를
-서빙하게 되기 때문이다. 각 colour는 자기 파일과 자기 durable을 갖는다; 파일을
-공유하면 들어오는 colour를 잠그고, volume을 공유하면 파일이 깨진다. `/readyz`는
-이유를 붙여 거부하고, 그중 세 가지 이유는 기다려도 풀리지 않는다(`purged-gap`,
-`store-behind`, `stream-mismatch`) — deploy script 머리말에 각각의 뜻과 operator가
-책임질 부분이 적혀 있다.
+API는 `/readyz`를 통과한 뒤에만 traffic을 전환한다. 각 colour는 별도의
+DuckDB volume과 NATS durable을 유지한다. 오래 정지한 colour의 replay에는 시간이
+걸릴 수 있다. gate를 우회하거나 volume/consumer를 지우지 말고
+[`readiness 안내`](2server/README.md#readiness-and-data)를 확인한다.
 
 ## 엔드투엔드 테스트
 

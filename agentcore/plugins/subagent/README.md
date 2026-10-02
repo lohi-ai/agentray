@@ -158,3 +158,19 @@ answer.
   scope is narrower than the caller's; that guarantee is the consumer's.
 - **Depth is the only recursion bound.** There is no detection of a semantic
   cycle below `MaxDepth` (A asks B the same question A was asked).
+
+## Runtime selection
+
+`Plugin.RunFork` is an optional consumer hook for self-delegation. The plugin
+still creates the child with `Agent.Fork`, applies its depth and spawn limits,
+validates output, and folds usage into the parent. Without the hook it uses the
+Go driver. The Pi-selected runner installs a hook that runs the original Pi
+Agent with the fork's governed tools and inherited hooks.
+
+The hook receives `ForkRequest` with the durable child session ID, prompt,
+recall task, and (for a corrective attempt) the previous `RunResult`. Native
+adapters must seed retries from `Previous.NativeState`, never from the display
+projection in `Previous.Messages`. The adapter owns native persistence,
+completion verification, reattachment, and cancellation. A completed reattach
+must report zero new usage. Native self-forks derive session IDs from the
+persisted invocation key so reused provider call IDs remain distinct.

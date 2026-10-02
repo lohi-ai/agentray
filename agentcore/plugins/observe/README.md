@@ -146,12 +146,8 @@ Adopted from omp's `packages/agent/src/run-collector.ts`
   one provider and one `Sink`, so `FoldRun` keeps only `Depth == 0` records.
   Without that a subagent's advertisements land in the parent's coverage.
 - **Coverage is a PER-INVOCATION claim.** A resumed run's records start at the
-  resume point, so its `ToolsUnused` is not the session's. Use
-  `AggregateRunCoverage` to span invocations.
+  resume point, so its `ToolsUnused` is not the session's.
 - **No tokens, no cost — on purpose.** See "No aggregation" below.
-- **`AggregateRunSummaries` / `AggregateRunCoverage`** fold N runs into the same
-  shape, so a harness repeating a task has somewhere to put the repetitions and
-  a consumer needs no second rendering path.
 - **`IsGhostRun`** classifies a run with a failed provider call, no tool the
   model asked for, and no billable tokens as infrastructure noise rather than a
   model failure — omp's `isGhostRun`, whose point is to keep a flaky provider

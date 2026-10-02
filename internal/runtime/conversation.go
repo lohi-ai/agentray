@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +67,8 @@ const (
 // rendered text. Richer human-view fields (cards, steps) live on their own entry
 // kinds so the reducer can ignore them.
 type convMessagePayload struct {
-	Text string `json:"text"`
+	Text      string `json:"text"`
+	PiDisplay bool   `json:"pi_display,omitempty"` // native history lives in its own immutable entry
 	// Command marks a control-plane turn: a handled slash command (/clear,
 	// /compact, /help, /plan, /agents) and the server's canned reply to it. It
 	// belongs in the transcript — the user needs to see that the thread was
@@ -94,15 +96,31 @@ type convCompactionPayload struct {
 // leaves the model window without being deleted. Only ConvKindMessage entries
 // become History turns; every other kind is a human-only projection and skipped.
 //
-// The returned slice excludes the just-appended latest user turn only if the
-// caller hasn't appended it yet — callers append the new user message as an entry
-// before calling BuildHistory, so the model always sees the latest turn.
+// Callers build history before appending the new user entry: the prompt supplies
+// that current turn separately. Native paths require BuildPiHistory instead.
 func BuildHistory(ctx context.Context, store *storage.Store, convID string) ([]agentcore.Message, error) {
 	entries, err := store.PathToLeaf(ctx, convID)
 	if err != nil {
 		return nil, err
 	}
+	if err := requireLegacyConversation(entries); err != nil {
+		return nil, err
+	}
 	return foldHistory(entries), nil
+}
+
+// requireLegacyConversation prevents projecting native provider history through
+// the legacy text reducer. An explicit /clear starts a new runtime-neutral path.
+func requireLegacyConversation(entries []storage.AgentConversationEntry) error {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Kind == ConvKindClear {
+			break
+		}
+		if entries[i].Kind == ConvKindPiHistory || entries[i].Kind == ConvKindPiCompaction {
+			return errors.New("native conversation requires the Pi runtime or /clear")
+		}
+	}
+	return nil
 }
 
 // foldHistory is the pure reducer over an ordered (root→leaf) entry path, split
@@ -184,12 +202,20 @@ func AppendCommandEntry(ctx context.Context, store *storage.Store, convID, role,
 }
 
 func appendMessage(ctx context.Context, store *storage.Store, convID, role, text, agentID, authorUserID, runID string, turn int, command bool) (storage.AgentConversationEntry, error) {
-	payload, _ := json.Marshal(convMessagePayload{Text: text, Command: command})
+	return appendMessageAtLeaf(ctx, store, convID, role, text, agentID, authorUserID, runID, turn, command, nil, false)
+}
+
+func AppendMessageEntryAtLeaf(ctx context.Context, store *storage.Store, convID, role, text, agentID, authorUserID, expectedLeaf string) (storage.AgentConversationEntry, error) {
+	return appendMessageAtLeaf(ctx, store, convID, role, text, agentID, authorUserID, "", 0, false, &expectedLeaf, false)
+}
+
+func appendMessageAtLeaf(ctx context.Context, store *storage.Store, convID, role, text, agentID, authorUserID, runID string, turn int, command bool, expectedLeaf *string, piDisplay bool) (storage.AgentConversationEntry, error) {
+	payload, _ := json.Marshal(convMessagePayload{Text: text, Command: command, PiDisplay: piDisplay})
 	tokens := estimateTokens(text)
-	if command {
+	if command || piDisplay {
 		tokens = 0
 	}
-	return store.AppendConversationEntry(ctx, storage.AgentConversationEntry{
+	entry := storage.AgentConversationEntry{
 		ConversationID: convID,
 		Kind:           ConvKindMessage,
 		Role:           role,
@@ -199,7 +225,11 @@ func appendMessage(ctx context.Context, store *storage.Store, convID, role, text
 		Turn:           turn,
 		PayloadJSON:    string(payload),
 		TokenEstimate:  tokens,
-	})
+	}
+	if expectedLeaf != nil {
+		return store.AppendConversationEntryAtLeaf(ctx, entry, *expectedLeaf)
+	}
+	return store.AppendConversationEntry(ctx, entry)
 }
 
 // convPlanPayload is the body of a ConvKindPlan entry: one snapshot of the run's
@@ -503,6 +533,9 @@ func compactConversation(ctx context.Context, store *storage.Store, convID strin
 		return false, err
 	}
 
+	if err := requireLegacyConversation(entries); err != nil {
+		return false, err
+	}
 	plan := planCompaction(entries, window, force)
 	if !plan.ok {
 		return false, nil // below threshold, or no clean cut that keeps a recent window

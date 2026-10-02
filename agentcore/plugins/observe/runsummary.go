@@ -9,7 +9,7 @@ import (
 // Run-level rollup of facts agentcore has already finished producing.
 //
 // Adopted from omp's packages/agent/src/run-collector.ts
-// (`AgentRunSummary` / `AgentRunCoverage`, and their `aggregate*` folds), whose
+// (`AgentRunSummary` / `AgentRunCoverage`), whose
 // header states the design intent this file keeps: "Pure aggregation — no
 // references to spans, no callbacks, no live state. Safe to persist / diff /
 // assert."
@@ -110,19 +110,7 @@ func (c *ToolCounters) add(t agentcore.ToolTrace) {
 	}
 }
 
-// merge folds another counter set into this one (the aggregate path).
-func (c *ToolCounters) merge(o ToolCounters) {
-	c.Total += o.Total
-	c.OK += o.OK
-	c.Error += o.Error
-	c.Blocked += o.Blocked
-	c.Aborted += o.Aborted
-	c.TotalLatencyMS += o.TotalLatencyMS
-}
-
-// RunSummary is a stable, sorted, diffable rollup of one run — or, after
-// AggregateRunSummaries, of N runs in the SAME shape, so a consumer that renders
-// one renders a hundred unchanged.
+// RunSummary is a stable, sorted, diffable rollup of one run.
 //
 // It deliberately carries no token or cost totals: agent_runs owns those (see
 // the README's "No aggregation" note, which this file amends rather than
@@ -130,7 +118,7 @@ func (c *ToolCounters) merge(o ToolCounters) {
 // totals remain Postgres's job).
 type RunSummary struct {
 	// Runs is how many runs this value folds — 1 straight out of FoldRun. It
-	// exists so an aggregate stays honest about its denominator.
+	// is retained in the summary format and is always 1.
 	Runs                int            `json:"runs"`
 	Turns               int            `json:"turns"`
 	ProviderCalls       int            `json:"provider_calls"`
@@ -140,8 +128,7 @@ type RunSummary struct {
 	Tools  ToolCounters            `json:"tools"`
 	ByTool map[string]ToolCounters `json:"by_tool,omitempty"`
 	// Ghost marks this run as infrastructure noise rather than a model result
-	// (see IsGhostRun). On an aggregate it means EVERY folded run was a ghost;
-	// GhostRuns carries the count, so a score denominator is Runs - GhostRuns.
+	// (see IsGhostRun). GhostRuns is retained in the summary format as 0 or 1.
 	Ghost     bool `json:"ghost_run,omitempty"`
 	GhostRuns int  `json:"ghost_runs,omitempty"`
 }
@@ -155,8 +142,7 @@ type RunSummary struct {
 // PER-INVOCATION claim, not a per-session one. On a resumed run the trace
 // records start at the resume point, so ToolsUnused describes only that
 // invocation — a reader who conflates the two will call a tool dead when the
-// pre-crash span used it heavily. AggregateRunCoverage is the supported way to
-// span invocations.
+// pre-crash span used it heavily.
 type RunCoverage struct {
 	// ToolsAvailable is the union of names advertised on any provider call.
 	ToolsAvailable []string `json:"tools_available,omitempty"`
@@ -251,66 +237,6 @@ func FoldRun(res agentcore.RunResult, records []TraceRecord) (RunSummary, RunCov
 func IsGhostRun(s RunSummary, u agentcore.Usage) bool {
 	billable := u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
 	return s.FailedProviderCalls > 0 && s.Tools.Total == 0 && billable == 0
-}
-
-// AggregateRunSummaries folds N run summaries into one of the SAME shape, so a
-// caller driving the loop N times (a verify pass, a bench harness repeating a
-// task) has somewhere to put the repetitions. Same shape in, same shape out is
-// omp's stated reason for exporting its aggregate, and it is why dashboards and
-// artifacts need no second code path.
-func AggregateRunSummaries(summaries ...RunSummary) RunSummary {
-	out := RunSummary{ByStopReason: map[string]int{}, ByTool: map[string]ToolCounters{}}
-	for _, s := range summaries {
-		out.Runs += s.Runs
-		out.Turns += s.Turns
-		out.ProviderCalls += s.ProviderCalls
-		out.FailedProviderCalls += s.FailedProviderCalls
-		out.GhostRuns += s.GhostRuns
-		out.Tools.merge(s.Tools)
-		for reason, n := range s.ByStopReason {
-			out.ByStopReason[reason] += n
-		}
-		for name, c := range s.ByTool {
-			merged := out.ByTool[name]
-			merged.merge(c)
-			out.ByTool[name] = merged
-		}
-	}
-	// A rollup is "a ghost" only when there is nothing real in it at all;
-	// otherwise Runs - GhostRuns is the denominator to score against.
-	out.Ghost = out.Runs > 0 && out.GhostRuns == out.Runs
-	return out
-}
-
-// AggregateRunCoverage folds N coverages into one, again in the same shape.
-//
-// ToolsUnused is recomputed from the merged sets rather than unioned: a tool
-// unused in run 1 and called in run 2 is NOT unused across the pair, and
-// unioning the per-run answers would claim it was.
-func AggregateRunCoverage(coverages ...RunCoverage) RunCoverage {
-	available := map[string]bool{}
-	invoked := map[string]bool{}
-	models := map[string]bool{}
-	providers := map[string]bool{}
-	for _, c := range coverages {
-		addAll(available, c.ToolsAvailable)
-		addAll(invoked, c.ToolsInvoked)
-		addAll(models, c.ModelsUsed)
-		addAll(providers, c.ProvidersUsed)
-	}
-	return RunCoverage{
-		ToolsAvailable: sortedKeys(available),
-		ToolsInvoked:   sortedKeys(invoked),
-		ToolsUnused:    sortedMissing(available, invoked),
-		ModelsUsed:     sortedKeys(models),
-		ProvidersUsed:  sortedKeys(providers),
-	}
-}
-
-func addAll(set map[string]bool, names []string) {
-	for _, n := range names {
-		set[n] = true
-	}
 }
 
 // sortedKeys returns the set's members sorted, or nil when empty (so an absent

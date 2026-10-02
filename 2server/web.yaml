@@ -1,0 +1,27 @@
+apiVersion: 2server.app/v1
+metadata:
+  name: agentray-web
+requires:
+  []
+kind: App
+spec:
+  kind: service
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web@sha256:c6d692b91adcb1c5dd78137aab8511d72c39efe692f3d75db26b2b4cb3a649fb
+  replicas: 1
+  port: 3200
+  healthPath: /
+  stopTimeoutSeconds: 60
+  drainSeconds: 70
+  memoryMb: 384
+  cpus: 2
+  env:
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    NODE_VERSION: 24.21.0
+    YARN_VERSION: 1.22.22
+    NODE_ENV: production
+    PORT: "3200"
+    HOSTNAME: 0.0.0.0
+  secrets:
+    {}
+domains:
+  []
