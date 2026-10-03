@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { defaultFilters } from '@/lib/api';
-import { projectChartRows, resolveChartQuery } from './chart-query';
+import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
 
 const absolute = {
   ...defaultFilters,
@@ -39,10 +39,64 @@ describe('resolveChartQuery', () => {
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.status).toBe('applied');
     expect(result.sql).toContain("synced_at >= '2026-08-31T17:00:00.000Z'");
     expect(result.sql).toContain("synced_at < '2026-09-01T05:30:00.000Z'");
     expect(result.sql).toContain('12.5 > 0');
     expect(result.label).toContain('end exclusive');
+  });
+
+  it.each([
+    ['keywords directly adjacent to literals', `SELECT count(*) AS value FROM events WHERE timestamp>='{{from}}'AND timestamp<'{{to}}'`],
+    ['BETWEEN keywords directly adjacent to literals', `SELECT count(*) AS value FROM events WHERE timestamp BETWEEN'{{from}}'AND'{{to}}'`],
+    ['aliases directly adjacent to literals', `SELECT '{{from}}'lo, '{{to}}'hi FROM events LIMIT 1`],
+    ['binary literal before real bounds', `SELECT count(*) AS value, B'{{from}}' AS note FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`],
+  ])('binds ordinary quoted date values with %s', (_, sql) => {
+    expect(() => runDuckDB(sql)).not.toThrow();
+
+    const result = resolveChartQuery(sql, absolute);
+    expect(result).toMatchObject({ status: 'applied', ok: true });
+    if (!result.ok) return;
+    expect(runDuckDB(result.sql)).toEqual(runDuckDB(substituteDateLiterals(sql)));
+  });
+
+  it('returns and labels a distinct fixed range without applying the selected range', () => {
+    const sql = `SELECT count(*) AS value FROM events
+      WHERE timestamp >= '1999-01-01T00:00:00.000Z'
+        AND timestamp < '2001-01-01T00:00:00.000Z'`;
+
+    expect(runDuckDB(sql)).toEqual([{ value: 1 }]);
+    const result = resolveChartQuery(sql, absolute);
+    expect(result).toEqual({
+      status: 'fixed',
+      ok: true,
+      sql,
+      dates: ['1999-01-01T00:00:00.000Z', '2001-01-01T00:00:00.000Z'],
+      label: '1999-01-01T00:00:00.000Z to 2001-01-01T00:00:00.000Z',
+    });
+    expect(chartRangeCaption(result)).toBe(
+      'Fixed range — selected range not applied: 1999-01-01T00:00:00.000Z to 2001-01-01T00:00:00.000Z',
+    );
+    expect(resolveChartQuery(sql, { ...absolute, from: '2030-01-01', to: '2030-02-01' })).toEqual(result);
+  });
+
+  it.each([
+    ['no literal dates', `SELECT count(*) AS value FROM events`],
+    ['one literal date', `SELECT count(*) AS value FROM events WHERE timestamp >= '2026-08-31'`],
+    ['ambiguous literal dates', `SELECT '2026-08-01', '2026-09-01', '2026-10-01'`],
+    ['reversed literal dates', `SELECT '2026-09-02', '2026-09-01'`],
+    ['invalid calendar dates', `SELECT '2026-02-30', '2026-03-01'`],
+    ['dates only in inert text', `SELECT $$'2026-09-01' '2026-09-02'$$ AS note`],
+  ])('does not invent a fixed range for %s', (_, sql) => {
+    expect(resolveChartQuery(sql, absolute)).toMatchObject({ status: 'invalid', ok: false });
+  });
+
+  it.each([
+    ['binary string prefix', `SELECT B'{{from}}' AS lower_bound, '{{to}}' AS upper_bound`],
+    ['hex string prefix', `SELECT X'{{from}}' AS lower_bound, '{{to}}' AS upper_bound`],
+  ])('does not bind a date placeholder inside a %s', (_, sql) => {
+    expect(() => runDuckDB(sql)).not.toThrow();
+    expect(resolveChartQuery(sql, absolute)).toMatchObject({ status: 'invalid', ok: false });
   });
 
   it.each([

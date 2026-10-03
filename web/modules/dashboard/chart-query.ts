@@ -1,8 +1,9 @@
 import type { Filters } from '@/lib/api';
 
 export type ResolvedChartQuery =
-  | { ok: true; sql: string; from: Date; to: Date; hours: number; label: string }
-  | { ok: false; message: string };
+  | { status: 'applied'; ok: true; sql: string; from: Date; to: Date; hours: number; label: string }
+  | { status: 'fixed'; ok: true; sql: string; dates: [string, string]; label: string }
+  | { status: 'invalid'; ok: false; message: string };
 
 export type ProjectedChartRows =
   | { status: 'ready'; values: number[]; labels: (string | number)[] }
@@ -12,13 +13,18 @@ export type ProjectedChartRows =
 const RANGE_ERROR = 'This query cannot apply the selected date range';
 const tokenPattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
 
-type ScannedSQL = { executable: string; standaloneDateTokens: Set<number> };
+type ScannedSQL = {
+  executable: string;
+  standaloneDateTokens: Set<number>;
+  dateLiterals: Array<{ value: string; timestamp: number }>;
+};
 
 type SQLLexicalClass =
   | 'line-comment'
   | 'block-comment'
   | 'single-quoted-string'
   | 'escape-string'
+  | 'binary-string'
   | 'quoted-identifier'
   | 'dollar-quoted-string'
   | 'identifier-keyword'
@@ -72,6 +78,7 @@ function classifiedSpan(sql: string, start: number, end: number, state: SQLLexic
     case 'line-comment':
     case 'block-comment':
     case 'escape-string':
+    case 'binary-string':
     case 'quoted-identifier':
     case 'dollar-quoted-string':
       return masked(sql, start, end);
@@ -90,6 +97,7 @@ function scanSQL(sql: string): ScannedSQL {
   let out = '';
   let state: SQLLexicalClass = 'operator-punctuation';
   const standaloneDateTokens = new Set<number>();
+  const dateLiterals: Array<{ value: string; timestamp: number }> = [];
   let index = 0;
   while (index < sql.length) {
     const start = index;
@@ -150,6 +158,25 @@ function scanSQL(sql: string): ScannedSQL {
       continue;
     }
 
+    // DuckDB's B'...' and X'...' literals add a b/x prefix to their value.
+    // They are not ordinary date strings and must not establish a range.
+    if ((ch === 'B' || ch === 'b' || ch === 'X' || ch === 'x') && next === "'" && !isIdentifierContinuation(sql, index - 1)) {
+      state = 'binary-string';
+      index += 2;
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") {
+          index += 2;
+        } else if (sql[index] === "'") {
+          index += 1;
+          break;
+        } else {
+          index += codePointWidth(sql, index);
+        }
+      }
+      out += classifiedSpan(sql, start, index, state);
+      continue;
+    }
+
     if (ch === "'") {
       state = 'single-quoted-string';
       index += 1;
@@ -168,13 +195,11 @@ function scanSQL(sql: string): ScannedSQL {
       }
       out += classifiedSpan(sql, start, index, state);
       const literal = contentEnd < 0 ? '' : sql.slice(contentStart, contentEnd);
-      if (
-        /^\{\{\s*(from|to)\s*\}\}$/.test(literal) &&
-        !isIdentifierContinuation(sql, start - 1) &&
-        !isIdentifierContinuation(sql, index)
-      ) {
+      if (/^\{\{\s*(from|to)\s*\}\}$/.test(literal)) {
         standaloneDateTokens.add(contentStart);
       }
+      const timestamp = exactDateTimestamp(literal);
+      if (timestamp !== null) dateLiterals.push({ value: literal, timestamp });
       continue;
     }
 
@@ -221,32 +246,71 @@ function scanSQL(sql: string): ScannedSQL {
     index += codePointWidth(sql, index);
     out += classifiedSpan(sql, start, index, state);
   }
-  return { executable: out, standaloneDateTokens };
+  return { executable: out, standaloneDateTokens, dateLiterals };
+}
+
+function exactDateTimestamp(value: string): number | null {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:(?:T| )(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?$/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText ?? 0);
+  const minute = Number(minuteText ?? 0);
+  const second = Number(secondText ?? 0);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > lastDay || hour > 23 || minute > 59 || second > 59) return null;
+
+  let normalized = value.replace(' ', 'T');
+  if (/[+-]\d{2}$/.test(normalized)) normalized += ':00';
+  if (normalized.includes('T') && !/(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized)) normalized += 'Z';
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function fixedRange(dateLiterals: ScannedSQL['dateLiterals']): { dates: [string, string]; label: string } | null {
+  const unique = dateLiterals.filter((literal, index, all) => all.findIndex((candidate) => candidate.value === literal.value) === index);
+  if (unique.length !== 2 || unique[0].timestamp >= unique[1].timestamp) return null;
+  const dates: [string, string] = [unique[0].value, unique[1].value];
+  return { dates, label: `${dates[0]} to ${dates[1]}` };
+}
+
+export function chartRangeCaption(query: ResolvedChartQuery): string | null {
+  if (query.status === 'applied') return `Applied range: ${query.label}`;
+  if (query.status === 'fixed') return `Fixed range — selected range not applied: ${query.label}`;
+  return null;
 }
 
 export function resolveChartQuery(sql: string, filters: Filters, now = new Date()): ResolvedChartQuery {
-  const { executable, standaloneDateTokens } = scanSQL(sql);
+  const scanned = scanSQL(sql);
+  const { executable, standaloneDateTokens } = scanned;
   const matches = [...executable.matchAll(tokenPattern)];
   const names = matches.map((match) => match[1].trim());
   if (names.some((name) => !['from', 'to', 'hours'].includes(name))) {
-    return { ok: false, message: `${RANGE_ERROR}: use only '{{from}}', '{{to}}', and optional {{hours}} tokens.` };
+    return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: use only '{{from}}', '{{to}}', and optional {{hours}} tokens.` };
+  }
+  if (names.length === 0) {
+    const fixed = fixedRange(scanned.dateLiterals);
+    if (fixed) return { status: 'fixed', ok: true, sql, ...fixed };
+    return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: add both quoted '{{from}}' and '{{to}}' tokens.` };
   }
   if (!names.includes('from') || !names.includes('to')) {
-    return { ok: false, message: `${RANGE_ERROR}: add both quoted '{{from}}' and '{{to}}' tokens.` };
+    return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: add both quoted '{{from}}' and '{{to}}' tokens.` };
   }
   for (const match of matches) {
     if (
       (match[1].trim() === 'from' || match[1].trim() === 'to') &&
       !standaloneDateTokens.has(match.index ?? -1)
     ) {
-      return { ok: false, message: `${RANGE_ERROR}: date tokens must be single-quoted SQL values.` };
+      return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: date tokens must be single-quoted SQL values.` };
     }
   }
 
   const to = filters.to ? new Date(filters.to) : new Date(now);
   const from = filters.from ? new Date(filters.from) : new Date(to.getTime() - filters.hours * 3_600_000);
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {
-    return { ok: false, message: `${RANGE_ERROR}: choose a valid start before the end.` };
+    return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: choose a valid start before the end.` };
   }
   const hours = (to.getTime() - from.getTime()) / 3_600_000;
   const replacements: Record<string, string> = {
@@ -263,6 +327,7 @@ export function resolveChartQuery(sql: string, filters: Filters, now = new Date(
   }
   resolved += sql.slice(offset);
   return {
+    status: 'applied',
     ok: true,
     sql: resolved,
     from,

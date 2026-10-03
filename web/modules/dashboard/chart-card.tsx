@@ -12,7 +12,7 @@ import { AgentRayAPI, APIError, type ActivitySummary, type Chart } from '@/lib/a
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
-import { projectChartRows, resolveChartQuery } from './chart-query';
+import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -76,7 +76,11 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
         if (!active) return;
         const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
         if (projected.status === 'ready') setData({ key: queryKey, ...projected });
-        else if (projected.status === 'empty') setData({ key: queryKey, status: 'empty', message: 'No data in range' });
+        else if (projected.status === 'empty') setData({
+          key: queryKey,
+          status: 'empty',
+          message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
+        });
         else setData({ key: queryKey, ...projected });
       })
       .catch((error: unknown) => {
@@ -106,10 +110,11 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
         <Text type="supporting">{current.status === 'loading' ? 'Running query…' : current.message}</Text>
       </div>
     );
+  const rangeCaption = chartRangeCaption(query);
   return (
     <div>
       {body}
-      {query.ok ? <div className="mt-2"><Text type="supporting">Applied range: {query.label}</Text></div> : null}
+      {rangeCaption ? <div className="mt-2"><Text type="supporting">{rangeCaption}</Text></div> : null}
     </div>
   );
 }
