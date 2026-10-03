@@ -4741,21 +4741,24 @@ func replaceSQLMatches(sqlText string, matches [][]int, replacement string) stri
 	return out.String()
 }
 
-// maskSQLCommentsAndStrings blanks comments and single-quoted string literals
-// while preserving every byte position (including non-ASCII text). Double-
-// quoted identifiers deliberately remain visible: `FROM "events"` is not a
-// supported source form and the residual-source check must reject it.
+// maskSQLCommentsAndStrings blanks comments and quoted string literals while
+// preserving every byte position (including non-ASCII text). Double-quoted
+// identifiers deliberately remain visible: `FROM "events"` is not a supported
+// source form and the residual-source check must reject it.
 func maskSQLCommentsAndStrings(sqlText string) string {
 	out := []byte(sqlText)
 	const (
 		code = iota
 		singleQuoted
 		doubleQuoted
+		dollarQuoted
 		lineComment
 		blockComment
 	)
 	state := code
 	escapeQuoted := false
+	dollarDelimiter := ""
+	blockDepth := 0
 	for i := 0; i < len(out); i++ {
 		switch state {
 		case code:
@@ -4774,6 +4777,18 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				// guard can still reject FROM "events", but do not interpret
 				// apostrophes or comment markers inside an alias as SQL syntax.
 				state = doubleQuoted
+			case out[i] == '$' && (i == 0 || !isSQLIdentifierByte(out[i-1])):
+				// DuckDB supports PostgreSQL-style dollar-quoted strings. Mask the
+				// whole span so apostrophes and source-looking text inside it cannot
+				// alter source discovery.
+				dollarDelimiter = sqlDollarDelimiterAt(sqlText, i)
+				if dollarDelimiter != "" {
+					for j := 0; j < len(dollarDelimiter); j++ {
+						out[i+j] = ' '
+					}
+					i += len(dollarDelimiter) - 1
+					state = dollarQuoted
+				}
 			case out[i] == '#':
 				out[i] = ' '
 				state = lineComment
@@ -4784,6 +4799,7 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 			case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
 				out[i], out[i+1] = ' ', ' '
 				i++
+				blockDepth = 1
 				state = blockComment
 			}
 		case singleQuoted:
@@ -4813,6 +4829,18 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				}
 				state = code
 			}
+		case dollarQuoted:
+			if strings.HasPrefix(sqlText[i:], dollarDelimiter) {
+				for j := 0; j < len(dollarDelimiter); j++ {
+					out[i+j] = ' '
+				}
+				i += len(dollarDelimiter) - 1
+				state = code
+				continue
+			}
+			if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
 		case lineComment:
 			if out[i] == '\n' || out[i] == '\r' {
 				state = code
@@ -4820,16 +4848,55 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				out[i] = ' '
 			}
 		case blockComment:
-			if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+			if out[i] == '/' && i+1 < len(out) && out[i+1] == '*' {
 				out[i], out[i+1] = ' ', ' '
 				i++
-				state = code
+				blockDepth++
+			} else if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				blockDepth--
+				if blockDepth == 0 {
+					state = code
+				}
 			} else if out[i] != '\n' && out[i] != '\r' {
 				out[i] = ' '
 			}
 		}
 	}
 	return string(out)
+}
+
+// sqlDollarDelimiterAt returns a DuckDB dollar-string delimiter beginning at
+// start. Tags follow identifier spelling: an ASCII letter, underscore, or
+// non-ASCII byte first, followed by those bytes or ASCII digits.
+func sqlDollarDelimiterAt(sqlText string, start int) string {
+	if start < 0 || start >= len(sqlText) || sqlText[start] != '$' || start+1 >= len(sqlText) {
+		return ""
+	}
+	if sqlText[start+1] == '$' {
+		return "$$"
+	}
+	if !isSQLDollarTagStartByte(sqlText[start+1]) {
+		return ""
+	}
+	for i := start + 2; i < len(sqlText); i++ {
+		if sqlText[i] == '$' {
+			return sqlText[start : i+1]
+		}
+		if !isSQLDollarTagContinuationByte(sqlText[i]) {
+			return ""
+		}
+	}
+	return ""
+}
+
+func isSQLDollarTagStartByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= 0x80
+}
+
+func isSQLDollarTagContinuationByte(b byte) bool {
+	return isSQLDollarTagStartByte(b) || b >= '0' && b <= '9'
 }
 
 func isSQLIdentifierByte(b byte) bool {

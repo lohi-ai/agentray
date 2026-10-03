@@ -301,6 +301,28 @@ describe('projectChartRows', () => {
     });
   });
 
+  it('prefers the prior date/category field when automatic X has numeric metadata first', () => {
+    expect(projectChartRows([
+      { age_days: 7, cohort_date: '2026-09-01', value: 12 },
+      { age_days: 7, cohort_date: '2026-09-02', value: 19 },
+    ], 'value')).toEqual({
+      status: 'ready',
+      values: [12, 19],
+      labels: ['2026-09-01', '2026-09-02'],
+    });
+  });
+
+  it('falls back to a numeric X field when no date or category field exists', () => {
+    expect(projectChartRows([
+      { age_days: 7, value: 12 },
+      { age_days: 14, value: 19 },
+    ], 'value')).toEqual({
+      status: 'ready',
+      values: [12, 19],
+      labels: [7, 14],
+    });
+  });
+
   it.each([
     null,
     undefined,

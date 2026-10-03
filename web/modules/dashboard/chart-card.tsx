@@ -61,12 +61,17 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
   const api = useMemo(() => new AgentRayAPI(projectID), [projectID]);
   const applied = useFiltersStore((s) => s.appliedFilters);
   const query = useMemo(() => resolveChartQuery(chart.sql, applied), [chart.sql, applied]);
-  const queryKey = query.ok ? query.sql : `unsupported:${query.message}`;
+  const requestKey = useMemo(
+    () => Symbol(query.ok
+      ? `${projectID}\u0000${query.sql}\u0000${chart.y_field ?? ''}\u0000${chart.x_field ?? ''}`
+      : `${projectID}\u0000unsupported:${query.message}`),
+    [projectID, query, chart.y_field, chart.x_field],
+  );
   type State =
-    | { key: string; status: 'loading' }
-    | { key: string; status: 'ready'; values: number[]; labels: (string | number)[] }
-    | { key: string; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string };
-  const [data, setData] = useState<State>({ key: '', status: 'loading' });
+    | { key: symbol | null; status: 'loading' }
+    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[] }
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string };
+  const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
     if (!query.ok) return;
@@ -75,30 +80,30 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
       .then((res) => {
         if (!active) return;
         const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
-        if (projected.status === 'ready') setData({ key: queryKey, ...projected });
+        if (projected.status === 'ready') setData({ key: requestKey, ...projected });
         else if (projected.status === 'empty') setData({
-          key: queryKey,
+          key: requestKey,
           status: 'empty',
           message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
         });
-        else setData({ key: queryKey, ...projected });
+        else setData({ key: requestKey, ...projected });
       })
       .catch((error: unknown) => {
         if (!active) return;
         if (error instanceof APIError && (error.kind === 'retryable' || error.status === 503)) {
-          setData({ key: queryKey, status: 'capacity', message: 'Query capacity is busy. Retry shortly.' });
+          setData({ key: requestKey, status: 'capacity', message: 'Query capacity is busy. Retry shortly.' });
           return;
         }
-        setData({ key: queryKey, status: 'error', message: 'Query failed. Review the saved SQL and try again.' });
+        setData({ key: requestKey, status: 'error', message: 'Query failed. Review the saved SQL and try again.' });
       });
     return () => { active = false; };
-  }, [api, query, queryKey, chart.y_field, chart.x_field]);
+  }, [api, query, requestKey, chart.y_field, chart.x_field]);
 
-  const current: State = data.key === queryKey
+  const current: State = data.key === requestKey
     ? data
     : query.ok
-      ? { key: queryKey, status: 'loading' }
-      : { key: queryKey, status: 'unsupported', message: query.message };
+      ? { key: requestKey, status: 'loading' }
+      : { key: requestKey, status: 'unsupported', message: query.message };
   const body = current.status === 'ready'
     ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} />
     : (

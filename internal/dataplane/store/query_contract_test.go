@@ -118,6 +118,32 @@ func TestQueryContractOrdinaryBackslashLiteralExecutes(t *testing.T) {
 	}
 }
 
+func TestQueryContractDollarStringsAndNestedCommentsExecute(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedCanonicalQueryFixture(t, d)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	cases := []struct {
+		name  string
+		sql   string
+		value any
+	}{
+		{name: "dollar quoted apostrophe", sql: `SELECT $$can't$$ AS value FROM events LIMIT 1`, value: "can't"},
+		{name: "nested block comment", sql: `SELECT 1 AS value /* outer /* inner */ ' */ FROM events LIMIT 1`, value: int32(1)},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			query, args, err := scopedReadonlySQL(test.sql, fixture.ProjectID, nil)
+			if err != nil {
+				t.Fatalf("scope SQL: %v", err)
+			}
+			rows, err := pool.query(ctx, fixture.ProjectID, query, args)
+			if err != nil || len(rows) != 1 || rows[0]["value"] != test.value {
+				t.Fatalf("rows=%#v err=%v\n%s", rows, err, query)
+			}
+		})
+	}
+}
+
 func TestQueryContractQuotedAliasesDoNotHideTheSource(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedCanonicalQueryFixture(t, d)
