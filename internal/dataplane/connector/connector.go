@@ -23,8 +23,11 @@ type Column struct {
 
 // Table is one discovered source table.
 type Table struct {
-	Name    string   `json:"name"`
-	Columns []Column `json:"columns"`
+	Name         string   `json:"name"`
+	Columns      []Column `json:"columns"`
+	RelationKind string   `json:"relation_kind,omitempty"`
+	KeyColumn    string   `json:"key_column,omitempty"`
+	KeyStability string   `json:"key_stability,omitempty"`
 }
 
 // PullRequest asks a Source for the next incremental batch of one table.
@@ -46,6 +49,9 @@ type PullRequest struct {
 	CursorKey string
 	// Limit caps the batch size; the Engine loops until HasMore is false.
 	Limit int
+	// Snapshot requests key-only pagination. It is deliberately explicit:
+	// an empty CursorColumn remains the grandfathered legacy whole-table mode.
+	Snapshot bool
 }
 
 // Row is one pulled source row.
@@ -120,6 +126,12 @@ func Kinds() []string {
 
 // Open constructs a Source of the given kind from a DSN.
 func Open(ctx context.Context, kind, dsn string) (Source, error) {
+	// PostgreSQL is a network-bearing built-in and must always pass the
+	// operator policy boundary. Keep this guard here, rather than relying on
+	// every caller to remember the governed entrypoint.
+	if kind == "postgres" {
+		return nil, ErrSourcePolicyDenied
+	}
 	registryMu.RLock()
 	open, ok := registry[kind]
 	registryMu.RUnlock()
@@ -127,4 +139,21 @@ func Open(ctx context.Context, kind, dsn string) (Source, error) {
 		return nil, fmt.Errorf("connector: unknown source kind %q (available: %v)", kind, Kinds())
 	}
 	return open(ctx, dsn)
+}
+
+// OpenWithPolicy is the governed source entrypoint. PostgreSQL dials are
+// admitted against an operator-owned destination and export binding before a
+// socket is opened; other registered plugins retain their existing contract.
+func OpenWithPolicy(ctx context.Context, kind, dsn, projectID, connectorID string, policy *SourcePolicy) (Source, error) {
+	if kind != "postgres" {
+		return Open(ctx, kind, dsn)
+	}
+	if policy == nil {
+		return nil, ErrSourcePolicyDenied
+	}
+	binding, err := policy.Binding(projectID, connectorID)
+	if err != nil {
+		return nil, err
+	}
+	return openPostgresWithPolicy(ctx, dsn, policy, binding)
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
@@ -41,6 +42,10 @@ type Store struct {
 	hostModel       HostModelDefaults
 	manualFreshness time.Duration
 	now             func() time.Time
+	// sourcePolicy is loaded once at boot. It is never returned through a DTO;
+	// callers resolve only the binding for a concrete project/connector.
+	sourcePolicy           *connector.SourcePolicy
+	sourcePolicyConfigured bool
 
 	// The one shared demo (config.DemoProjectID): a REAL project fed by a real
 	// site, that every account is added to as a read-only viewer. Both empty
@@ -113,7 +118,7 @@ type Project struct {
 	Name        string `json:"name"`
 	// Timezone is a validated IANA name when set. Empty means an existing
 	// nullable row, which Overview reports as its explicit UTC fallback.
-	Timezone  string    `json:"timezone,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
 	// Goal is the owner's answer to "what are you trying to improve?" —
 	// activation | retention | revenue | traffic | skipped. A nil Goal means
 	// the prompt was never answered (the column is NULL); "skipped" means the
@@ -122,8 +127,8 @@ type Project struct {
 	// unset, and it is what the activation overview metric computes against.
 	Goal            *string   `json:"goal,omitempty"`
 	ActivationEvent string    `json:"activation_event,omitempty"`
-	APIKey    string    `json:"api_key"`
-	CreatedAt time.Time `json:"created_at"`
+	APIKey          string    `json:"api_key"`
+	CreatedAt       time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -622,6 +627,10 @@ type TemplateChart struct {
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Store, error) {
+	sourcePolicy, err := connector.LoadSourcePolicy(cfg.SourcePolicyFile)
+	if err != nil {
+		return nil, err
+	}
 	pgCfg, err := pgxpool.ParseConfig(cfg.PostgresURL)
 	if err != nil {
 		return nil, err
@@ -657,13 +666,15 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 	}
 	duck.diskReserve = NewDiskReserve(cfg.DuckDBPath, cfg.DataDiskReserveBytes)
 	store := &Store{
-		pg:              pg,
-		duck:            duck,
-		sandboxes:       newSQLSandboxPool(duck),
-		resolvers:       newResolverCache(30 * time.Second),
-		hostModel:       HostModelDefaultsFromConfig(cfg),
-		manualFreshness: cfg.SourceFreshnessMaxAge,
-		now:             time.Now,
+		pg:                     pg,
+		duck:                   duck,
+		sandboxes:              newSQLSandboxPool(duck),
+		resolvers:              newResolverCache(30 * time.Second),
+		hostModel:              HostModelDefaultsFromConfig(cfg),
+		manualFreshness:        cfg.SourceFreshnessMaxAge,
+		now:                    time.Now,
+		sourcePolicy:           sourcePolicy,
+		sourcePolicyConfigured: strings.TrimSpace(cfg.SourcePolicyFile) != "",
 	}
 	// Migrations run on their own single-connection pool with the per-statement
 	// cap lifted: DDL and one-time backfills on grown production tables can
@@ -1108,6 +1119,10 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 		return err
 	}
 
+	if err := s.migrateConnectorSnapshots(ctx); err != nil {
+		return err
+	}
+
 	if err := s.migrateSourceCredentials(ctx); err != nil {
 		return err
 	}
@@ -1261,10 +1276,10 @@ GROUP BY ` + visitorColumn + `
 // an email property deliberately. The template string covers both the Product
 // Overview and the Marketing & Acquisition charts; they shipped identically.
 const (
-	staleStarterGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	staleStarterGuestVsIdentifiedSQL  = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	staleTemplateGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 
-	legacyStarterGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	legacyStarterGuestVsIdentifiedSQL  = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	legacyTemplateGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 )
 

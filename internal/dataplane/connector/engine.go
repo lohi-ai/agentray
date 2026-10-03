@@ -55,6 +55,11 @@ type SyncJob struct {
 	// CursorKey is the key of the last synced row — the tie-breaking half of
 	// the keyset cursor, so rows sharing one cursor value are never skipped.
 	CursorKey string
+	// SyncMode is empty for the grandfathered path. Explicit snapshot selects
+	// the generation/outbox protocol; explicit incremental retains cursor flow.
+	SyncMode      string
+	SourcePolicy  *SourcePolicy
+	SourceBinding *SourceBinding
 }
 
 // LandedRow is one row ready for the DuckDB landing table.
@@ -113,6 +118,24 @@ type RowPublisher interface {
 	PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 }
 
+type SnapshotPublisher interface {
+	BuildSnapshotBatches(common SnapshotEnvelope, rows []LandedRow, startIndex int64) ([]SnapshotEnvelope, error)
+	PublishSnapshotEnvelope(ctx context.Context, env SnapshotEnvelope) error
+}
+
+type SnapshotStore interface {
+	ClaimSnapshotGeneration(ctx context.Context, job SyncJob, runID, owner string, leaseEpoch int64) (SnapshotGeneration, error)
+	PendingSnapshotOutbox(ctx context.Context, generation SnapshotGeneration) ([]SnapshotOutbox, error)
+	PrepareSnapshotEnvelope(ctx context.Context, generation SnapshotGeneration, env SnapshotEnvelope, lowerKey, upperKey string) (SnapshotOutbox, error)
+	SealSnapshotGeneration(ctx context.Context, generation SnapshotGeneration, env SnapshotEnvelope, runRows int) (SnapshotOutbox, error)
+	MarkSnapshotOutboxPublished(ctx context.Context, generation SnapshotGeneration, item SnapshotOutbox) error
+	YieldSnapshotGeneration(ctx context.Context, generation SnapshotGeneration) error
+	SnapshotManifest(ctx context.Context, generation string) ([]SnapshotManifestEntry, int64, error)
+	SnapshotGeneration(ctx context.Context, generation string) (SnapshotGeneration, error)
+	FailSnapshotGeneration(ctx context.Context, generation SnapshotGeneration) error
+	CancelSnapshotGeneration(ctx context.Context, runID, owner string, leaseEpoch int64) error
+}
+
 // Run is one durable sync-run record — the client-visible contract for
 // run_source/source_status/cancel_source_run. storage owns the row; the type
 // lives here so the engine's Store interface does not import its own
@@ -132,6 +155,7 @@ type Run struct {
 	QueuedAt        time.Time  `json:"queued_at"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	LeaseEpoch      int64      `json:"lease_epoch,omitempty"`
 }
 
 // Engine schedules and executes connector syncs. It rides the agent
@@ -372,7 +396,7 @@ func (e *Engine) executeRun(runID, syncID, projectID string) {
 		e.mu.Unlock()
 	}()
 
-	_, claimed, err := e.store.ClaimConnectorRun(runCtx, runID, e.id)
+	claimedRun, claimed, err := e.store.ClaimConnectorRun(runCtx, runID, e.id)
 	if err != nil {
 		if errors.Is(runCtx.Err(), context.Canceled) {
 			// Cancelled between admission and the claim: no worker will ever
@@ -436,15 +460,186 @@ func (e *Engine) executeRun(runID, syncID, projectID string) {
 	var result SyncResult
 	if err != nil {
 		result = SyncResult{Err: err.Error()}
+	} else if job.SyncMode == "snapshot" {
+		result = e.pullAndLandSnapshot(runCtx, job, claimedRun)
 	} else {
 		result = e.pullAndLand(runCtx, job)
 	}
 	cancelled := errors.Is(runCtx.Err(), context.Canceled)
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(runCtx), 30*time.Second)
 	defer finishCancel()
+	if cancelled && job.SyncMode == "snapshot" {
+		// A local shutdown or an unprovable lease ends this run but leaves the
+		// generation resumable. Only the durable operator cancellation flag is
+		// authority to make the generation terminal.
+		current, readErr := e.store.ConnectorRunForProject(finishCtx, projectID, runID)
+		if readErr == nil && current.CancelRequested {
+			if snapshotStore, ok := e.store.(SnapshotStore); ok {
+				if err := snapshotStore.CancelSnapshotGeneration(finishCtx, runID, e.id, claimedRun.LeaseEpoch); err != nil {
+					log.Printf("connector: cancel snapshot generation for run %s: %v", runID, err)
+				}
+			}
+		}
+	}
 	if err := e.store.FinishConnectorRun(finishCtx, runID, syncID, e.id, result, cancelled); err != nil {
 		log.Printf("connector: finish run %s: %v", runID, err)
 	}
+}
+
+func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) SyncResult {
+	store, ok := e.store.(SnapshotStore)
+	if !ok {
+		return SyncResult{Err: "snapshot persistence is unavailable"}
+	}
+	publisher, ok := e.publisher.(SnapshotPublisher)
+	if !ok {
+		return SyncResult{Err: "snapshot publisher is unavailable"}
+	}
+	g, err := store.ClaimSnapshotGeneration(ctx, job, run.ID, e.id, run.LeaseEpoch)
+	if err != nil {
+		return SyncResult{Err: err.Error()}
+	}
+	drain := func() error {
+		pending, err := store.PendingSnapshotOutbox(ctx, g)
+		if err != nil {
+			return err
+		}
+		for _, item := range pending {
+			env, err := ParseSnapshotEnvelope(item.Payload)
+			if err != nil {
+				return fmt.Errorf("read snapshot outbox: %w", err)
+			}
+			if err := publisher.PublishSnapshotEnvelope(ctx, env); err != nil {
+				return err
+			}
+			if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
+				return err
+			}
+		}
+		g, err = store.SnapshotGeneration(ctx, g.Generation)
+		return err
+	}
+	if err := drain(); err != nil {
+		return SyncResult{Err: fmt.Sprintf("publish snapshot outbox: %v", err)}
+	}
+	if g.State == "sealed" {
+		return SyncResult{}
+	}
+
+	var source Source
+	if job.SourcePolicy == nil {
+		return SyncResult{Err: "snapshot source policy is unavailable"}
+	}
+	source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy)
+	if err != nil {
+		return SyncResult{Err: err.Error()}
+	}
+	defer source.Close()
+	validator, ok := source.(interface {
+		ValidateSnapshotKey(context.Context, string, string) error
+	})
+	if !ok {
+		return SyncResult{Err: "snapshot source cannot validate stable keys"}
+	}
+	if err := validator.ValidateSnapshotKey(ctx, job.Table, job.KeyColumn); err != nil {
+		_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		return SyncResult{Err: err.Error()}
+	}
+
+	startRows := g.Rows
+	hasMore := false
+	for batch := 0; batch < maxBatchesPerRun; batch++ {
+		previousKey := g.KeyPosition
+		pull, err := source.PullRows(ctx, PullRequest{Table: job.Table, KeyColumn: job.KeyColumn, CursorKey: previousKey, Limit: pullBatchSize, Snapshot: true})
+		if err != nil {
+			return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+		}
+		if len(pull.Rows) == 0 {
+			if pull.HasMore {
+				_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+				return SyncResult{Rows: int(g.Rows - startRows), Err: "snapshot source reported more rows without keyset progress"}
+			}
+			hasMore = false
+			break
+		}
+		landed := make([]LandedRow, 0, len(pull.Rows))
+		for _, row := range pull.Rows {
+			data, err := json.Marshal(row.Data)
+			if err != nil {
+				return SyncResult{Rows: int(g.Rows - startRows), Err: fmt.Sprintf("encode snapshot source row: %v", err)}
+			}
+			landed = append(landed, LandedRow{Key: row.Key, Cursor: "", DataJSON: string(data)})
+		}
+		common := SnapshotEnvelope{Protocol: SnapshotProtocolV1, ProjectID: job.ProjectID, ConnectorID: job.ConnectorID, Table: job.Table,
+			SyncID: job.SyncID, RunID: run.ID, Generation: g.Generation, GenerationSeq: g.GenerationSeq, BindingDigest: g.BindingDigest,
+			CaptureStartedAt: g.CaptureStartedAt}
+		envelopes, err := publisher.BuildSnapshotBatches(common, landed, g.NextBatchIndex)
+		if err != nil {
+			return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+		}
+		lower := previousKey
+		for _, env := range envelopes {
+			upper := env.Rows[len(env.Rows)-1].Key
+			item, err := store.PrepareSnapshotEnvelope(ctx, g, env, lower, upper)
+			if err != nil {
+				return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+			}
+			if err := publisher.PublishSnapshotEnvelope(ctx, env); err != nil {
+				return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+			}
+			if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
+				return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+			}
+			g, err = store.SnapshotGeneration(ctx, g.Generation)
+			if err != nil {
+				return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+			}
+			lower = upper
+		}
+		hasMore = pull.HasMore
+		if pull.NextCursorKey == "" || pull.NextCursorKey == previousKey && pull.HasMore {
+			_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+			return SyncResult{Rows: int(g.Rows - startRows), Err: "snapshot source made no keyset progress"}
+		}
+		if !pull.HasMore {
+			break
+		}
+	}
+	if hasMore {
+		if err := store.YieldSnapshotGeneration(ctx, g); err != nil {
+			return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+		}
+		return SyncResult{Rows: int(g.Rows - startRows)}
+	}
+	if err := validator.ValidateSnapshotKey(ctx, job.Table, job.KeyColumn); err != nil {
+		_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	entries, expectedRows, err := store.SnapshotManifest(ctx, g.Generation)
+	if err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	manifest, err := SnapshotManifestDigest(entries)
+	if err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	finished := time.Now().UTC()
+	complete := SnapshotEnvelope{Protocol: SnapshotProtocolV1, ProjectID: job.ProjectID, ConnectorID: job.ConnectorID, Table: job.Table,
+		SyncID: job.SyncID, RunID: run.ID, Generation: g.Generation, GenerationSeq: g.GenerationSeq, BindingDigest: g.BindingDigest,
+		CaptureStartedAt: g.CaptureStartedAt, CaptureFinishedAt: &finished, Kind: SnapshotKindComplete,
+		ExpectedBatches: int64(len(entries)), ExpectedRows: expectedRows, BatchManifestSHA256: manifest}
+	item, err := store.SealSnapshotGeneration(ctx, g, complete, int(g.Rows-startRows))
+	if err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	if err := publisher.PublishSnapshotEnvelope(ctx, complete); err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	g.State = "sealed"
+	if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+	}
+	return SyncResult{Rows: int(g.Rows - startRows)}
 }
 
 // cancelQueuedRun records the terminal cancelled state for a run this process
@@ -491,7 +686,13 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 		return r
 	}
 
-	source, err := Open(ctx, job.Kind, job.DSN)
+	var source Source
+	var err error
+	if job.SourcePolicy != nil {
+		source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy)
+	} else {
+		source, err = Open(ctx, job.Kind, job.DSN)
+	}
 	if err != nil {
 		return result(err.Error())
 	}

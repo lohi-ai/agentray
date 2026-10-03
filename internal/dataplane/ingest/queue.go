@@ -341,9 +341,13 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink inge
 	go func() {
 		for msg := range ch {
 			if msg.Subject == connectorSubject {
-				var batch ExternalRowsBatch
-				if err := json.Unmarshal(msg.Data, &batch); err != nil {
+				batch, snapshot, err := decodeConnectorEnvelope(msg.Data)
+				if err != nil {
 					log.Printf("ingestion worker: decode connector batch: %v", err)
+					continue
+				}
+				if snapshot != nil {
+					log.Printf("ingestion worker: snapshot envelope refused: durable JetStream is required")
 					continue
 				}
 				// Bounded like the durable path's insert: this goroutine also
@@ -533,25 +537,34 @@ const (
 
 func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	handle := jsMsgHandle{msg: msg}
-	var batch ExternalRowsBatch
-	if err := json.Unmarshal(msg.Data(), &batch); err != nil {
+	batch, snapshot, err := decodeConnectorEnvelope(msg.Data())
+	if err != nil {
 		log.Printf("ingestion worker: decode connector batch (dead-lettering): %v", err)
 		s.poison(handle, msg.Data(), err)
 		return
 	}
-
-	// Decoded once: the batch is immutable from here, and the retry path should
-	// not re-allocate and re-copy every row payload per attempt.
-	landed := batch.LandedRows()
 	delivery := handle.delivery()
 	deliveries := []storage.DeliveryReceiptMark(nil)
 	if delivery.Replayed {
 		deliveries = append(deliveries, delivery)
 	}
-	var err error
+	var landed []connector.LandedRow
+	if batch != nil {
+		landed = batch.LandedRows()
+	}
 	for attempt := range connectorInsertAttempts {
 		insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries})
+		if snapshot != nil {
+			if snapshotSink, ok := s.sink.(interface {
+				ApplySnapshotEnvelope(context.Context, connector.SnapshotEnvelope, storage.AppliedMark) (*connector.SnapshotPromotion, error)
+			}); ok {
+				_, err = snapshotSink.ApplySnapshotEnvelope(insertCtx, *snapshot, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries})
+			} else {
+				err = fmt.Errorf("snapshot landing is unavailable")
+			}
+		} else {
+			err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries})
+		}
 		cancel()
 		if err == nil {
 			if ackErr := handle.ack(); ackErr != nil {

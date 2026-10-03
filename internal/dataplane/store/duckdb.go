@@ -414,6 +414,66 @@ var duckDBSchema = []string{
 		synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (project_id, connector_id, table_name, row_key)
 	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_batches (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		batch_index BIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		row_count BIGINT NOT NULL,
+		capture_started_at TIMESTAMPTZ NOT NULL,
+		run_id UUID NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation, batch_id),
+		UNIQUE (project_id, connector_id, table_name, generation, batch_index)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_rows (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		generation UUID NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		row_key VARCHAR NOT NULL,
+		data VARCHAR NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation, batch_id, row_key),
+		UNIQUE (project_id, connector_id, table_name, generation, row_key)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_completions (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		expected_batches BIGINT NOT NULL,
+		expected_rows BIGINT NOT NULL,
+		batch_manifest_sha256 VARCHAR NOT NULL,
+		capture_started_at TIMESTAMPTZ NOT NULL,
+		capture_finished_at TIMESTAMPTZ NOT NULL,
+		run_id UUID NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_promotions (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		expected_batches BIGINT NOT NULL,
+		expected_rows BIGINT NOT NULL,
+		batch_manifest_sha256 VARCHAR NOT NULL,
+		capture_started_at TIMESTAMPTZ NOT NULL,
+		capture_finished_at TIMESTAMPTZ NOT NULL,
+		promoted_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name)
+	)`,
 	// ingest_position is the store-side half of the readiness contract: how far
 	// this file's own writes have carried it along the durable stream, and the
 	// gap a boot proved the file can never fill. It lives INSIDE the file the
