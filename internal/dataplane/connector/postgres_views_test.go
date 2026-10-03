@@ -159,6 +159,57 @@ func TestRepairG2GovernedIncrementalRejectsActualRelationDrift(t *testing.T) {
 	}
 }
 
+func TestRepairR3GovernedIncrementalRejectsDuplicateKey(t *testing.T) {
+	ctx := context.Background()
+	_, dsn, policy, schema := repairPostgresSource(t, []string{
+		`CREATE TABLE %s.raw_rows(id bigint, updated_at bigint)`,
+		`INSERT INTO %s.raw_rows VALUES (1,1),(1,2)`,
+		`CREATE VIEW %s.rows_v1 AS SELECT id,updated_at FROM %s.raw_rows`,
+	}, SourceBinding{
+		Relation: "rows_v1", RelationKind: RelationKindView,
+		Columns:   []SourcePolicyColumn{{Name: "id", PGType: "bigint"}, {Name: "updated_at", PGType: "bigint"}},
+		KeyColumn: "id", KeyStability: KeyStabilityImmutableUnique, AllowedCursorColumns: []string{"updated_at"},
+	})
+	source, err := OpenWithPolicy(ctx, "postgres", dsn, "p", "c", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if pull, err := source.PullRows(ctx, PullRequest{Table: schema + ".rows_v1", KeyColumn: "id", CursorColumn: "updated_at", Limit: 10}); err == nil {
+		t.Fatalf("invalid unique-key contract accepted: rows=%+v", pull.Rows)
+	}
+}
+
+func TestRepairR4FinalValidationRechecksSchema(t *testing.T) {
+	ctx := context.Background()
+	admin, dsn, policy, schema := repairPostgresSource(t, []string{
+		`CREATE TABLE %s.raw_rows(id bigint)`,
+		`INSERT INTO %s.raw_rows VALUES (1)`,
+		`CREATE VIEW %s.rows_v1 AS SELECT id FROM %s.raw_rows`,
+	}, SourceBinding{
+		Relation: "rows_v1", RelationKind: RelationKindView,
+		Columns:   []SourcePolicyColumn{{Name: "id", PGType: "bigint"}},
+		KeyColumn: "id", KeyStability: KeyStabilityImmutableUnique,
+	})
+	source, err := OpenWithPolicy(ctx, "postgres", dsn, "p", "c", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	validator := source.(interface {
+		ValidateSnapshotKey(context.Context, string, string) error
+	})
+	if err := validator.ValidateSnapshotKey(ctx, schema+".rows_v1", "id"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE OR REPLACE VIEW %s.rows_v1 AS SELECT id,'private'::text AS extra FROM %s.raw_rows`, schema, schema)); err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.ValidateSnapshotKey(ctx, schema+".rows_v1", "id"); err == nil {
+		t.Fatal("final validation accepted schema drift after initial validation")
+	}
+}
+
 func TestRepairG6NumericSnapshotKeyRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	_, restrictedDSN, policy, schema := repairPostgresSource(t, []string{

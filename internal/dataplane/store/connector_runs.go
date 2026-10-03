@@ -277,13 +277,16 @@ WHERE id = $1 AND status = 'running' AND owner = $7`, runID, status, result.Rows
 	// The run row's final status (which may have become 'cancelled' inside the
 	// update above when a cancel raced the finish) drives the sync's last_*.
 	var finalStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM connector_runs WHERE id = $1`, runID).Scan(&finalStatus); err != nil {
+	var cancelRequested bool
+	if err := tx.QueryRow(ctx, `SELECT status,cancel_requested FROM connector_runs WHERE id = $1`, runID).Scan(&finalStatus, &cancelRequested); err != nil {
 		return err
 	}
-	if finalStatus == "cancelled" {
+	if cancelRequested {
 		// The run row is the durable cancellation authority. Terminalize its
 		// active generation in this same transaction so a cancellation racing
 		// the worker's last heartbeat can never leave resumable snapshot state.
+		// A local shutdown also finishes its run as cancelled, but without this
+		// durable flag its snapshot progress remains eligible for the next run.
 		if _, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations
 SET state='cancelled',terminal_at=now(),updated_at=now()
 WHERE run_id=$1 AND owner=$2 AND state IN ('capturing','yielded')`, runID, owner); err != nil {
@@ -327,8 +330,13 @@ RETURNING cancel_requested`, runID).Scan(&cancelRequested)
 // (in-process cancel func, or the heartbeat for a worker in another process).
 // Terminal rows are returned unchanged — cancel cannot rewrite history.
 func (s *Store) CancelConnectorRun(ctx context.Context, projectID, runID string) (ConnectorRun, error) {
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return ConnectorRun{}, err
+	}
+	defer tx.Rollback(ctx)
 	var r ConnectorRun
-	err := s.pg.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 UPDATE connector_runs
 SET cancel_requested = true,
     status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
@@ -340,18 +348,25 @@ RETURNING `+connectorRunColumns, runID, projectID).Scan(connectorRunScanDest(&r)
 		// Terminal or absent: return the row as-is (idempotent cancel) or
 		// not-found when the id does not exist in this project at all.
 		var existing ConnectorRun
-		if qerr := s.pg.QueryRow(ctx,
+		if qerr := tx.QueryRow(ctx,
 			`SELECT `+connectorRunColumns+` FROM connector_runs WHERE id = $1 AND project_id = $2`,
 			runID, projectID).Scan(connectorRunScanDest(&existing)...); qerr != nil {
 			return ConnectorRun{}, pgx.ErrNoRows
-		} else {
-			return existing, nil
 		}
+		return existing, tx.Commit(ctx)
 	}
 	if err != nil {
 		return ConnectorRun{}, err
 	}
-	return r, nil
+	// Cancellation is authoritative even if the worker disappears before it
+	// observes the run flag. Persist the generation terminal state in the same
+	// transaction so reconciliation can never resume the cancelled generation.
+	if _, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations
+SET state='cancelled',terminal_at=now(),updated_at=now()
+WHERE run_id=$1 AND state IN ('capturing','yielded')`, runID); err != nil {
+		return ConnectorRun{}, err
+	}
+	return r, tx.Commit(ctx)
 }
 
 // ConnectorRunForProject reads one run scoped to the project — an id from

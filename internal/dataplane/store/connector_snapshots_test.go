@@ -248,6 +248,52 @@ func TestRepairG1FinishCancellationTerminalizesGeneration(t *testing.T) {
 	}
 }
 
+func TestRepairR1LocalShutdownKeepsGenerationResumable(t *testing.T) {
+	s, ctx, _, syncID, run, _, g := seedRepairSnapshotGeneration(t, "r1-shutdown")
+	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-r1-shutdown", connector.SyncResult{Err: "context canceled"}, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "capturing" {
+		t.Fatalf("local shutdown changed generation to %s without durable cancellation", got.State)
+	}
+}
+
+func TestRepairR2CancelledCrashedRunCannotResumeGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, _, g := seedRepairSnapshotGeneration(t, "r2-crash")
+	if _, err := s.CancelConnectorRun(ctx, projectID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileConnectorRuns(ctx, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "after-cancelled-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimConnectorRun(ctx, next.ID, "owner-r2-next")
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := s.ClaimSnapshotGeneration(ctx, job, next.ID, "owner-r2-next", claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Generation == g.Generation {
+		t.Fatalf("durably cancelled generation resumed after crash: %s", g.Generation)
+	}
+}
+
 func TestRepairG5ExpiredOwnerCannotFailGeneration(t *testing.T) {
 	s, ctx, _, _, run, _, g := seedRepairSnapshotGeneration(t, "g5")
 	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {

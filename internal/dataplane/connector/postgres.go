@@ -29,6 +29,7 @@ type postgresSource struct {
 	conn              *pgx.Conn
 	bindings          []SourceBinding
 	validatedBindings map[string]struct{}
+	validatedKeys     map[string]struct{}
 	// columnTypes caches format_type lookups per "table\x00column" — the type
 	// cannot change within a Source's lifetime, and PullRows runs per batch.
 	columnTypes map[string]string
@@ -77,7 +78,7 @@ func openPostgresConfig(ctx context.Context, dsn string, policy *SourcePolicy, b
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect to %s:%d/%s failed: %s", cfg.Host, cfg.Port, cfg.Database, sanitizePGError(err, cfg.Password))
 	}
-	source := &postgresSource{conn: conn, bindings: bindings, validatedBindings: map[string]struct{}{}, columnTypes: map[string]string{}}
+	source := &postgresSource{conn: conn, bindings: bindings, validatedBindings: map[string]struct{}{}, validatedKeys: map[string]struct{}{}, columnTypes: map[string]string{}}
 	if policy != nil {
 		var super, createRole, createDB, bypassRLS, broadMembership, canCreateSchema, readOnly bool
 		schemas := map[string]struct{}{}
@@ -373,6 +374,11 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 		if err := p.ensureApprovedBinding(ctx, binding); err != nil {
 			return PullResult{}, err
 		}
+		if !req.Snapshot {
+			if err := p.ensureApprovedKey(ctx, binding); err != nil {
+				return PullResult{}, err
+			}
+		}
 	}
 	if req.Limit <= 0 {
 		req.Limit = 1000
@@ -512,14 +518,21 @@ func (p *postgresSource) ValidateSnapshotKey(ctx context.Context, table, keyColu
 	if err != nil || keyColumn != b.KeyColumn {
 		return fmt.Errorf("%w: postgres source relation or key is not approved", ErrSnapshotKeyInvalid)
 	}
-	if err := p.ensureApprovedBinding(ctx, b); err != nil {
+	// Snapshot validation is called before capture and again immediately before
+	// sealing. Do not use the per-connection structural cache here: the second
+	// call must observe relation-kind, column, or type drift during capture.
+	if _, err := p.discoverApprovedBinding(ctx, b); err != nil {
 		return err
 	}
+	return p.validateApprovedKey(ctx, b)
+}
+
+func (p *postgresSource) validateApprovedKey(ctx context.Context, b *SourceBinding) error {
 	tableIdent, err := quoteQualified(b.QualifiedRelation())
 	if err != nil {
 		return err
 	}
-	keyIdent := pgx.Identifier{keyColumn}.Sanitize()
+	keyIdent := pgx.Identifier{b.KeyColumn}.Sanitize()
 	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s WHERE %s IS NULL OR %s::text = '') OR EXISTS (SELECT 1 FROM %s GROUP BY %s HAVING count(*) > 1 LIMIT 1)`, tableIdent, keyIdent, keyIdent, tableIdent, keyIdent)
 	var invalid bool
 	if err := p.conn.QueryRow(ctx, query).Scan(&invalid); err != nil {
@@ -528,6 +541,18 @@ func (p *postgresSource) ValidateSnapshotKey(ctx context.Context, table, keyColu
 	if invalid {
 		return fmt.Errorf("%w: postgres approved key is null, empty, or duplicate", ErrSnapshotKeyInvalid)
 	}
+	return nil
+}
+
+func (p *postgresSource) ensureApprovedKey(ctx context.Context, b *SourceBinding) error {
+	key := b.QualifiedRelation() + "\x00" + b.KeyColumn
+	if _, ok := p.validatedKeys[key]; ok {
+		return nil
+	}
+	if err := p.validateApprovedKey(ctx, b); err != nil {
+		return err
+	}
+	p.validatedKeys[key] = struct{}{}
 	return nil
 }
 

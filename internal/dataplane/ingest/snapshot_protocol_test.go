@@ -137,3 +137,44 @@ func TestRepairG7OversizedSnapshotRejectedBeforePreparation(t *testing.T) {
 		t.Fatal("oversized snapshot envelope was accepted for persistence")
 	}
 }
+
+func TestRepairR5SnapshotRowsSplitForEnvelopeOverhead(t *testing.T) {
+	url := startBrokerWith(t, func(o *natsserver.Options) { o.MaxPayload = 8 << 10 })
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("snapshot-envelope-overhead")
+	if _, err := EnsureStreams(context.Background(), nc, cfg); err != nil {
+		t.Fatal(err)
+	}
+	q := NewJetStreamQueue(js, cfg.IngestSubject, cfg.IngestConnectorSubject)
+	common := connector.SnapshotEnvelope{ProjectID: "p", ConnectorID: "c", Table: "t", SyncID: "s", RunID: "r",
+		Generation: "g", GenerationSeq: 1, BindingDigest: strings.Repeat("a", 64), CaptureStartedAt: time.Now().UTC()}
+	rows := []connector.LandedRow{
+		{Key: "1", DataJSON: `{"blob":"` + strings.Repeat("x", 3400) + `"}`},
+		{Key: "2", DataJSON: `{"blob":"` + strings.Repeat("x", 3400) + `"}`},
+	}
+	for _, row := range rows {
+		if _, err := q.BuildSnapshotBatches(common, []connector.LandedRow{row}, 0); err != nil {
+			t.Fatalf("singleton must fit: %v", err)
+		}
+	}
+	envelopes, err := q.BuildSnapshotBatches(common, rows, 0)
+	if err != nil {
+		t.Fatalf("individually valid rows were rejected instead of split: %v", err)
+	}
+	if len(envelopes) < 2 {
+		t.Fatalf("rows requiring envelope-aware splitting produced %d envelope(s)", len(envelopes))
+	}
+	for _, envelope := range envelopes {
+		if err := q.PublishSnapshotEnvelope(context.Background(), envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
