@@ -31,6 +31,7 @@ type msgHandle interface {
 	// floor against what the store can show it applied. Zero when the broker
 	// cannot say.
 	seq() uint64
+	delivery() storage.DeliveryReceiptMark
 }
 
 // queued pairs a decoded message's events with its (optional) ack handle so the
@@ -56,15 +57,16 @@ type queued struct {
 // backoff), and a message that has exhausted maxDeliver attempts is dead-lettered
 // so one poison batch never wedges the stream.
 type EventBatcher struct {
-	sink       func(ctx context.Context, events []storage.Event, mark storage.AppliedMark) error
-	deadLetter func(body []byte) error
-	metrics    *PipelineMetrics
-	maxBatch   int
-	flushEvery time.Duration
-	insertTO   time.Duration
-	maxRetries int
-	maxDeliver int
-	nakDelay   time.Duration
+	sink                  func(ctx context.Context, events []storage.Event, mark storage.AppliedMark) error
+	deadLetter            func(body []byte) error
+	deadLetterWithReceipt func(storage.DeliveryReceiptMark, []byte) error
+	metrics               *PipelineMetrics
+	maxBatch              int
+	flushEvery            time.Duration
+	insertTO              time.Duration
+	maxRetries            int
+	maxDeliver            int
+	nakDelay              time.Duration
 	// durable names the consumer these batches arrive under, recorded with each
 	// flush as the store's applied position (see storage.AppliedMark). Empty on
 	// the legacy core-NATS path, where nothing replays and no position is kept.
@@ -72,7 +74,8 @@ type EventBatcher struct {
 	// record advances the store's applied position for a delivery that settles
 	// with nothing to write — an empty batch, a poison message leaving via the
 	// DLQ. Nil where there is no store position to keep.
-	record func(ctx context.Context, mark storage.AppliedMark) error
+	record     func(ctx context.Context, mark storage.AppliedMark) error
+	recordHole func(ctx context.Context, delivery storage.DeliveryReceiptMark, source *storage.SourceReceiptMark) error
 
 	in   chan queued
 	done chan struct{}
@@ -99,11 +102,16 @@ type EventBatcherConfig struct {
 	// DeadLetter republishes a poison batch's raw body to the DLQ. Nil disables
 	// dead-lettering (the batch is NAK'd indefinitely instead).
 	DeadLetter func(body []byte) error
+	// DeadLetterWithReceipt is the durable form: it preserves the original
+	// stream identity so replay can clear the exact hole. When set it takes
+	// precedence over DeadLetter.
+	DeadLetterWithReceipt func(storage.DeliveryReceiptMark, []byte) error
 	// RecordPosition writes the store's applied position for a delivery that
 	// settles without rows (see storage.RecordPosition). Set it on the durable
 	// path alongside Durable; with it nil, a settlement that writes no rows
 	// leaves the store's position behind the ack floor it just advanced.
 	RecordPosition func(ctx context.Context, mark storage.AppliedMark) error
+	RecordHole     func(ctx context.Context, delivery storage.DeliveryReceiptMark, source *storage.SourceReceiptMark) error
 	// Metrics, when set, counts flush/failure/retry/nak/dead-letter activity.
 	Metrics *PipelineMetrics
 }
@@ -133,19 +141,21 @@ func NewEventBatcher(sink func(ctx context.Context, events []storage.Event, mark
 		cfg.NakDelay = 5 * time.Second
 	}
 	b := &EventBatcher{
-		sink:       sink,
-		deadLetter: cfg.DeadLetter,
-		metrics:    cfg.Metrics,
-		maxBatch:   cfg.MaxBatch,
-		flushEvery: cfg.FlushEvery,
-		insertTO:   cfg.InsertTimeout,
-		maxRetries: cfg.MaxRetries,
-		maxDeliver: cfg.MaxDeliver,
-		nakDelay:   cfg.NakDelay,
-		durable:    cfg.Durable,
-		record:     cfg.RecordPosition,
-		in:         make(chan queued, cfg.QueueDepth),
-		done:       make(chan struct{}),
+		sink:                  sink,
+		deadLetter:            cfg.DeadLetter,
+		deadLetterWithReceipt: cfg.DeadLetterWithReceipt,
+		metrics:               cfg.Metrics,
+		maxBatch:              cfg.MaxBatch,
+		flushEvery:            cfg.FlushEvery,
+		insertTO:              cfg.InsertTimeout,
+		maxRetries:            cfg.MaxRetries,
+		maxDeliver:            cfg.MaxDeliver,
+		nakDelay:              cfg.NakDelay,
+		durable:               cfg.Durable,
+		record:                cfg.RecordPosition,
+		recordHole:            cfg.RecordHole,
+		in:                    make(chan queued, cfg.QueueDepth),
+		done:                  make(chan struct{}),
 	}
 	b.wg.Add(1)
 	go b.loop()
@@ -216,7 +226,7 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 		log.Printf("ingestion batcher: dropping undeliverable batch: %v", cause)
 		return
 	}
-	if b.deadLetter == nil {
+	if b.deadLetter == nil && b.deadLetterWithReceipt == nil {
 		log.Printf("ingestion batcher: poison batch has no DLQ, will retry: %v", cause)
 		_ = msg.nak(b.nakDelay)
 		if b.metrics != nil {
@@ -231,7 +241,7 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 		b.retrySettlement(msg, err)
 		return
 	}
-	if err := b.deadLetter(msg.body()); err != nil {
+	if err := b.publishDeadLetter(msg); err != nil {
 		log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
 		_ = msg.nak(b.nakDelay)
 		if b.metrics != nil {
@@ -239,11 +249,22 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 		}
 		return
 	}
+	if err := b.recordReadinessHole(msg.delivery(), nil); err != nil {
+		b.retrySettlement(msg, err)
+		return
+	}
 	if b.metrics != nil {
 		b.metrics.recordDeadLetter()
 	}
 	_ = msg.term()
 	log.Printf("ingestion batcher: terminated poison message: %v", cause)
+}
+
+func (b *EventBatcher) publishDeadLetter(msg msgHandle) error {
+	if b.deadLetterWithReceipt != nil {
+		return b.deadLetterWithReceipt(msg.delivery(), msg.body())
+	}
+	return b.deadLetter(msg.body())
 }
 
 // recordSettled moves the store's applied position over a delivery that is
@@ -265,6 +286,18 @@ func (b *EventBatcher) recordSettled(seq uint64) error {
 	defer cancel()
 	if err := b.record(ctx, storage.AppliedMark{Durable: b.durable, Seq: seq}); err != nil {
 		return fmt.Errorf("record applied position %d for durable %q: %w", seq, b.durable, err)
+	}
+	return nil
+}
+
+func (b *EventBatcher) recordReadinessHole(delivery storage.DeliveryReceiptMark, source *storage.SourceReceiptMark) error {
+	if b.recordHole == nil || delivery.StreamSeq == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
+	defer cancel()
+	if err := b.recordHole(ctx, delivery, source); err != nil {
+		return fmt.Errorf("record readiness hole: %w", err)
 	}
 	return nil
 }
@@ -343,6 +376,12 @@ func (b *EventBatcher) flush(items []queued) {
 		if it.msg != nil && it.msg.seq() > mark.Seq {
 			mark.Seq = it.msg.seq()
 		}
+		if it.msg != nil {
+			delivery := it.msg.delivery()
+			if delivery.Replayed {
+				mark.Deliveries = append(mark.Deliveries, delivery)
+			}
+		}
 	}
 
 	if err := b.sinkWithRetry(all, mark); err == nil {
@@ -378,7 +417,7 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 			logBatchError(cause)
 			continue
 		}
-		if it.msg.deliveries() >= uint64(b.maxDeliver) && b.deadLetter != nil {
+		if it.msg.deliveries() >= uint64(b.maxDeliver) && (b.deadLetter != nil || b.deadLetterWithReceipt != nil) {
 			// Recorded before the dead-letter and the terminate, like the poison
 			// path: settling moves the ack floor, and a store that could not take
 			// the record must not be left behind it.
@@ -386,12 +425,16 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 				b.retrySettlement(it.msg, err)
 				continue
 			}
-			if derr := b.deadLetter(it.msg.body()); derr != nil {
+			if derr := b.publishDeadLetter(it.msg); derr != nil {
 				// Couldn't dead-letter (DLQ unreachable); keep the message alive by
 				// asking for another redelivery rather than losing it.
 				log.Printf("ingestion batcher: dead-letter failed, will retry: %v", derr)
 				_ = it.msg.nak(b.nakDelay)
 				b.metrics.recordNak()
+				continue
+			}
+			if err := b.recordReadinessHole(it.msg.delivery(), nil); err != nil {
+				b.retrySettlement(it.msg, err)
 				continue
 			}
 			_ = it.msg.term()

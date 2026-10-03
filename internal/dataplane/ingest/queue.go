@@ -2,11 +2,13 @@ package ingestion
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
@@ -19,7 +21,15 @@ import (
 // `replay-dlq` puts it back on the subject whose decoder understands it.
 // Without it a replayed connector batch would land on the events subject and be
 // dead-lettered straight back.
-const OriginSubjectHeader = "AgentRay-Origin-Subject"
+const (
+	OriginSubjectHeader      = "AgentRay-Origin-Subject"
+	OriginStreamHeader       = "AgentRay-Origin-Stream"
+	OriginStreamSeqHeader    = "AgentRay-Origin-Stream-Sequence"
+	OriginDigestHeader       = "AgentRay-Origin-Payload-SHA256"
+	OriginPublishedAtHeader  = "AgentRay-Origin-Published-At"
+	OriginUnverifiableHeader = "AgentRay-Origin-Unverifiable"
+	LegacyDLQHeader          = "AgentRay-Legacy-DLQ"
+)
 
 // ingestStore is the DuckDB surface the worker needs. *storage.Store is the
 // production implementation; *storage.DuckDB stands in for one blue-green colour
@@ -38,6 +48,7 @@ type ingestStore interface {
 	// RecordPosition covers the settlements that carry no rows to write: an
 	// empty batch, a poison payload leaving via the DLQ. See storage.RecordPosition.
 	RecordPosition(ctx context.Context, mark storage.AppliedMark) error
+	RecordReadinessHole(ctx context.Context, delivery storage.DeliveryReceiptMark, source *storage.SourceReceiptMark) error
 }
 
 // EventQueue is the ingestion publisher. With a JetStream context it publishes
@@ -50,10 +61,13 @@ type ingestStore interface {
 // durable, so a blue-green colour switch replays landed connector rows exactly
 // like events — the fix for "connector rows bypass the durable stream".
 type EventQueue struct {
-	nc               *nats.Conn
-	js               jetstream.JetStream
-	subject          string
-	connectorSubject string
+	nc                  *nats.Conn
+	js                  jetstream.JetStream
+	subject             string
+	connectorSubject    string
+	publicationObserver interface {
+		RecordPublication(context.Context, storage.PublicationObservation) error
+	}
 }
 
 // NewEventQueue builds the legacy fire-and-forget publisher.
@@ -64,6 +78,13 @@ func NewEventQueue(nc *nats.Conn, subject, connectorSubject string) EventQueue {
 // NewJetStreamQueue builds the durable publisher.
 func NewJetStreamQueue(js jetstream.JetStream, subject, connectorSubject string) EventQueue {
 	return EventQueue{js: js, subject: subject, connectorSubject: connectorSubject}
+}
+
+func (q EventQueue) WithPublicationObserver(observer interface {
+	RecordPublication(context.Context, storage.PublicationObservation) error
+}) EventQueue {
+	q.publicationObserver = observer
+	return q
 }
 
 func (q EventQueue) InsertEvents(ctx context.Context, events []storage.Event) error {
@@ -216,12 +237,26 @@ func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connecto
 			return fmt.Errorf("encode connector batch: %w", err)
 		}
 		if q.js != nil {
+			if admission, ok := q.publicationObserver.(interface{ AdmitDataPublication() error }); ok {
+				if err := admission.AdmitDataPublication(); err != nil {
+					return fmt.Errorf("admit connector publication: %w", err)
+				}
+			}
 			// Same dedup key as the event path: a publish whose broker ack was
 			// lost to a timeout is retried by the engine, and the stream should
 			// collapse the identical body instead of storing a second copy that
 			// every colour has to re-apply.
 			if _, err := q.js.Publish(ctx, q.connectorSubject, body, jetstream.WithMsgID(bodyMsgID(body))); err != nil {
 				return fmt.Errorf("publish connector batch: %w", err)
+			}
+			if q.publicationObserver != nil {
+				digest := fmt.Sprintf("%x", sha256.Sum256(body))
+				if err := q.publicationObserver.RecordPublication(ctx, storage.PublicationObservation{
+					ProjectID: projectID, ConnectorID: connectorID, Table: table,
+					StableBatchID: digest, PayloadSHA256: digest, PublishedAt: time.Now().UTC(),
+				}); err != nil {
+					return fmt.Errorf("record accepted connector publication: %w", err)
+				}
 			}
 			continue
 		}
@@ -343,28 +378,46 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink inge
 // One consumer covers both subjects, so a single ack floor is this colour's
 // applied mark for events and connector rows alike (see ReplayStatus).
 func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, metrics *PipelineMetrics) (*EventWorker, error) {
-	dlqPublish := func(origin string, body []byte) error {
+	dlqPublish := func(origin string, delivery storage.DeliveryReceiptMark, body []byte) error {
 		pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// PublishMsg, not Publish: the origin subject rides a header so
 		// `replay-dlq` can put each body back on the subject that decodes it.
+		headers := nats.Header{OriginSubjectHeader: []string{origin}}
+		if delivery.StreamSeq != 0 {
+			headers.Set(OriginStreamHeader, delivery.StreamID)
+			headers.Set(OriginStreamSeqHeader, strconv.FormatUint(delivery.StreamSeq, 10))
+			headers.Set(OriginDigestHeader, delivery.PayloadSHA256)
+			if delivery.PublishedAt != nil {
+				headers.Set(OriginPublishedAtHeader, delivery.PublishedAt.UTC().Format(time.RFC3339Nano))
+			}
+			if delivery.Unverifiable {
+				headers.Set(OriginUnverifiableHeader, "true")
+			}
+		}
 		_, err := ss.JS.PublishMsg(pubCtx, &nats.Msg{
 			Subject: ss.DLQSubj,
 			Data:    body,
-			Header:  nats.Header{OriginSubjectHeader: []string{origin}},
+			Header:  headers,
 		})
 		return err
 	}
 	batcher := NewEventBatcher(sink.SinkEvents, EventBatcherConfig{
-		MaxDeliver:     ss.MaxDeliv,
-		Durable:        ss.durableName(),
-		DeadLetter:     func(body []byte) error { return dlqPublish(ss.Subject, body) },
+		MaxDeliver: ss.MaxDeliv,
+		Durable:    ss.durableName(),
+		DeadLetterWithReceipt: func(delivery storage.DeliveryReceiptMark, body []byte) error {
+			return dlqPublish(ss.Subject, delivery, body)
+		},
 		RecordPosition: sink.RecordPosition,
+		RecordHole:     sink.RecordReadinessHole,
 		Metrics:        metrics,
 	})
 	settler := externalRowsSettler{
-		sink:       sink,
-		deadLetter: func(body []byte) error { return dlqPublish(ss.ConnectorSubject, body) },
+		sink: sink,
+		deadLetterWithReceipt: func(delivery storage.DeliveryReceiptMark, body []byte) error {
+			return dlqPublish(ss.ConnectorSubject, delivery, body)
+		},
+		recordHole: sink.RecordReadinessHole,
 		maxDeliver: ss.MaxDeliv,
 		durable:    ss.durableName(),
 		nakDelay:   connectorNakDelay,
@@ -424,8 +477,14 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, 
 				_ = msg.NakWithDelay(5 * time.Second)
 				return
 			}
-			if derr := dlqPublish(ss.Subject, msg.Data()); derr != nil {
+			delivery := jsMsgHandle{msg: msg}.delivery()
+			if derr := dlqPublish(ss.Subject, delivery, msg.Data()); derr != nil {
 				log.Printf("ingestion worker: dead-letter undecodable batch: %v", derr)
+				_ = msg.NakWithDelay(5 * time.Second)
+				return
+			}
+			if herr := sink.RecordReadinessHole(context.Background(), delivery, nil); herr != nil {
+				log.Printf("ingestion worker: record undecodable readiness hole: %v", herr)
 				_ = msg.NakWithDelay(5 * time.Second)
 				return
 			}
@@ -449,9 +508,11 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, 
 // the message has exhausted its redeliveries. Connector messages need no
 // coalescing — the engine already sends pullBatchSize rows per message.
 type externalRowsSettler struct {
-	sink       ingestStore
-	deadLetter func(body []byte) error
-	maxDeliver int
+	sink                  ingestStore
+	deadLetter            func([]byte) error
+	deadLetterWithReceipt func(storage.DeliveryReceiptMark, []byte) error
+	recordHole            func(context.Context, storage.DeliveryReceiptMark, *storage.SourceReceiptMark) error
+	maxDeliver            int
 	// durable names the consumer these batches arrive under; connector rows are
 	// recorded against it exactly as events are, because one consumer carries
 	// both subjects (see storage.AppliedMark).
@@ -482,10 +543,15 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	// Decoded once: the batch is immutable from here, and the retry path should
 	// not re-allocate and re-copy every row payload per attempt.
 	landed := batch.LandedRows()
+	delivery := handle.delivery()
+	deliveries := []storage.DeliveryReceiptMark(nil)
+	if delivery.Replayed {
+		deliveries = append(deliveries, delivery)
+	}
 	var err error
 	for attempt := range connectorInsertAttempts {
 		insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq()})
+		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries})
 		cancel()
 		if err == nil {
 			if ackErr := handle.ack(); ackErr != nil {
@@ -500,7 +566,7 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	}
 
 	s.metrics.recordInsertFailure()
-	if handle.deliveries() >= uint64(s.maxDeliver) && s.deadLetter != nil {
+	if handle.deliveries() >= uint64(s.maxDeliver) && (s.deadLetter != nil || s.deadLetterWithReceipt != nil) {
 		// Recorded before the dead-letter and the terminate: settling moves the
 		// ack floor, so a store that cannot take the record leaves the batch to be
 		// retried instead of being left behind the floor.
@@ -509,10 +575,17 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 			s.nak(handle)
 			return
 		}
-		if derr := s.deadLetter(msg.Data()); derr != nil {
+		if derr := s.publishDeadLetter(delivery, msg.Data()); derr != nil {
 			log.Printf("ingestion worker: dead-letter connector batch failed, will retry: %v", derr)
 			s.nak(handle)
 			return
+		}
+		if s.recordHole != nil {
+			if herr := s.recordHole(context.Background(), delivery, nil); herr != nil {
+				log.Printf("ingestion worker: record connector readiness hole: %v", herr)
+				s.nak(handle)
+				return
+			}
 		}
 		s.metrics.recordDeadLetter()
 		_ = handle.term()
@@ -526,7 +599,7 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 // poison settles a connector batch that can never insert, with the same
 // DLQ-then-terminate contract the batcher uses for events.
 func (s externalRowsSettler) poison(handle jsMsgHandle, body []byte, cause error) {
-	if s.deadLetter == nil {
+	if s.deadLetter == nil && s.deadLetterWithReceipt == nil {
 		log.Printf("ingestion worker: connector poison batch has no DLQ, will retry: %v", cause)
 		s.nak(handle)
 		return
@@ -536,14 +609,29 @@ func (s externalRowsSettler) poison(handle jsMsgHandle, body []byte, cause error
 		s.nak(handle)
 		return
 	}
-	if err := s.deadLetter(body); err != nil {
+	delivery := handle.delivery()
+	if err := s.publishDeadLetter(delivery, body); err != nil {
 		log.Printf("ingestion worker: dead-letter failed, will retry: %v", err)
 		s.nak(handle)
 		return
 	}
+	if s.recordHole != nil {
+		if err := s.recordHole(context.Background(), delivery, nil); err != nil {
+			log.Printf("ingestion worker: record connector readiness hole: %v", err)
+			s.nak(handle)
+			return
+		}
+	}
 	s.metrics.recordDeadLetter()
 	_ = handle.term()
 	log.Printf("ingestion worker: terminated poison connector batch: %v", cause)
+}
+
+func (s externalRowsSettler) publishDeadLetter(delivery storage.DeliveryReceiptMark, body []byte) error {
+	if s.deadLetterWithReceipt != nil {
+		return s.deadLetterWithReceipt(delivery, body)
+	}
+	return s.deadLetter(body)
 }
 
 // recordSettled moves a store's applied position over a delivery that settles
@@ -610,6 +698,36 @@ func (h jsMsgHandle) ack() error                { return h.msg.Ack() }
 func (h jsMsgHandle) nak(d time.Duration) error { return h.msg.NakWithDelay(d) }
 func (h jsMsgHandle) term() error               { return h.msg.Term() }
 func (h jsMsgHandle) body() []byte              { return h.msg.Data() }
+func (h jsMsgHandle) delivery() storage.DeliveryReceiptMark {
+	data := h.msg.Data()
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	headers := h.msg.Headers()
+	if seq, err := strconv.ParseUint(headers.Get(OriginStreamSeqHeader), 10, 64); err == nil && seq > 0 {
+		published, _ := time.Parse(time.RFC3339Nano, headers.Get(OriginPublishedAtHeader))
+		if original := strings.TrimSpace(headers.Get(OriginDigestHeader)); original != "" {
+			digest = original
+		}
+		return storage.DeliveryReceiptMark{StreamID: headers.Get(OriginStreamHeader), Subject: headers.Get(OriginSubjectHeader),
+			StreamSeq: seq, PayloadSHA256: digest, PublishedAt: timePtr(published), Replayed: true,
+			Unverifiable: headers.Get(OriginUnverifiableHeader) == "true"}
+	}
+	md, err := h.msg.Metadata()
+	if err != nil {
+		return storage.DeliveryReceiptMark{Subject: h.msg.Subject(), PayloadSHA256: digest}
+	}
+	published := md.Timestamp.UTC()
+	legacy := headers.Get(LegacyDLQHeader) == "true"
+	return storage.DeliveryReceiptMark{StreamID: md.Stream, Subject: h.msg.Subject(), StreamSeq: md.Sequence.Stream,
+		PayloadSHA256: digest, PublishedAt: &published, Replayed: legacy, Unverifiable: legacy}
+}
+
+func timePtr(v time.Time) *time.Time {
+	if v.IsZero() {
+		return nil
+	}
+	v = v.UTC()
+	return &v
+}
 func (h jsMsgHandle) deliveries() uint64 {
 	md, err := h.msg.Metadata()
 	if err != nil {

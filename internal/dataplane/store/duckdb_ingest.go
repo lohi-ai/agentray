@@ -22,6 +22,9 @@ import (
 // Person projection is NOT applied here — this is the raw-event sink used by
 // pipeline self-metrics; the ingest worker's path is SinkEvents.
 func (d *DuckDB) InsertEvents(ctx context.Context, events []Event) error {
+	if err := d.admitDataWrite(); err != nil {
+		return err
+	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		return insertEventsTx(ctx, tx, events)
 	})
@@ -151,6 +154,9 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 // what this file can show it applied (see duckdb_position.go). An empty mark is
 // a write that did not come off the durable stream.
 func (d *DuckDB) SinkEvents(ctx context.Context, events []Event, mark AppliedMark) error {
+	if err := d.admitDataWrite(); err != nil {
+		return err
+	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		if err := insertEventsTx(ctx, tx, events); err != nil {
 			return err
@@ -158,7 +164,13 @@ func (d *DuckDB) SinkEvents(ctx context.Context, events []Event, mark AppliedMar
 		if err := d.applyPersonUpdatesTx(ctx, tx, events); err != nil {
 			return err
 		}
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		if err := recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC()); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -384,6 +396,11 @@ func (d *DuckDB) ReconcileAliases(ctx context.Context, rows [][3]string) error {
 // for events: one durable consumer carries both subjects, so the position it
 // records covers both (see duckdb_position.go).
 func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, mark AppliedMark) error {
+	if len(rows) > 0 {
+		if err := d.admitDataWrite(); err != nil {
+			return err
+		}
+	}
 	if len(rows) == 0 {
 		// An empty batch still settles its message, and settling advances the
 		// consumer's ack floor: record the position so the file does not fall
@@ -417,6 +434,12 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 				return err
 			}
 		}
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		if err := recordAppliedReceiptsTx(ctx, tx, mark, now); err != nil {
+			return err
+		}
+		return nil
 	})
 }

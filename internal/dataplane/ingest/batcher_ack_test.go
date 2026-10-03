@@ -34,6 +34,9 @@ func (m *fakeMsg) term() error             { m.mu.Lock(); m.termed = true; m.mu.
 func (m *fakeMsg) deliveries() uint64      { return m.deliv }
 func (m *fakeMsg) body() []byte            { return m.payload }
 func (m *fakeMsg) seq() uint64             { return m.seqN }
+func (m *fakeMsg) delivery() storage.DeliveryReceiptMark {
+	return storage.DeliveryReceiptMark{StreamID: "test", Subject: "events", StreamSeq: m.seqN, PayloadSHA256: "test-digest"}
+}
 func (m *fakeMsg) state() (bool, bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

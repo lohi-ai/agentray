@@ -90,7 +90,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject)
+		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject).WithPublicationObserver(store)
 		ready = ss
 	} else {
 		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, cfg.IngestConnectorSubject, store)

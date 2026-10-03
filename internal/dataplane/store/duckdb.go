@@ -27,11 +27,12 @@ import (
 // *sql.DB accessor: every caller goes through Read/Write so admission stays
 // bounded and the file is never touched outside this type.
 type DuckDB struct {
-	db      *sql.DB
-	path    string
-	writeCh chan struct{}
-	readCh  chan struct{}
-	closed  atomic.Bool
+	db          *sql.DB
+	path        string
+	writeCh     chan struct{}
+	readCh      chan struct{}
+	closed      atomic.Bool
+	diskReserve *DiskReserve
 }
 
 // maxDuckDBReaders bounds concurrent snapshot readers. Four is enough for the
@@ -41,7 +42,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 3
+const DuckDBSchemaVersion = 4
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -169,6 +170,43 @@ func (d *DuckDB) Read(ctx context.Context, fn func(conn *sql.Conn) error) error 
 	}
 	defer conn.Close()
 	return fn(conn)
+}
+
+// duckDBSnapshot deliberately exposes only reads. Both *sql.Tx and the
+// ordinary *sql.Conn satisfy it, but snapshot callers cannot accidentally
+// mutate the serving file while holding the long-lived sandbox-copy view.
+type duckDBSnapshot interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// ReadSnapshot runs every query in fn against one explicit MVCC transaction.
+// Unlike Write it does not take the single-writer gate: DuckDB readers retain
+// their snapshot while ingest continues committing newer versions.
+func (d *DuckDB) ReadSnapshot(ctx context.Context, fn func(duckDBSnapshot) error) error {
+	if d.closed.Load() {
+		return errDuckDBClosed
+	}
+	select {
+	case d.readCh <- struct{}{}:
+		defer func() { <-d.readCh }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // Close checkpoints the WAL into the database file and closes the pool. It
@@ -386,6 +424,56 @@ var duckDBSchema = []string{
 		applied_seq UBIGINT NOT NULL DEFAULT 0,
 		refused_missing UBIGINT NOT NULL DEFAULT 0,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// data_receipt_* is deliberately separate from ingest_position. The latter
+	// is a deploy replay high-water mark; these tables are hole-aware evidence
+	// about the data this exact serving file can expose to a query.
+	`CREATE TABLE IF NOT EXISTS data_receipt_sources (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID,
+		run_id UUID,
+		generation UUID,
+		generation_key VARCHAR NOT NULL,
+		generation_seq UBIGINT NOT NULL DEFAULT 0,
+		binding_digest VARCHAR NOT NULL DEFAULT '',
+		capture_started_at TIMESTAMPTZ,
+		capture_finished_at TIMESTAMPTZ,
+		published_at TIMESTAMPTZ,
+		landed_at TIMESTAMPTZ,
+		landed_generation_key VARCHAR,
+		last_complete_at TIMESTAMPTZ,
+		expected_batches UBIGINT,
+		expected_rows UBIGINT,
+		completion_seen BOOLEAN NOT NULL DEFAULT false,
+		mutation_seq UBIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, connector_id, table_name)
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_batches (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		generation_key VARCHAR NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		batch_index UBIGINT,
+		payload_sha256 VARCHAR NOT NULL,
+		landed_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation_key, batch_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_holes (
+		stream_id VARCHAR NOT NULL,
+		subject VARCHAR NOT NULL,
+		stream_seq UBIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		project_id UUID,
+		connector_id UUID,
+		table_name VARCHAR,
+		unverifiable BOOLEAN NOT NULL DEFAULT false,
+		recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		cleared_at TIMESTAMPTZ,
+		PRIMARY KEY (stream_id, subject, stream_seq, payload_sha256)
 	)`,
 	// resolved_events is the canonical-identity view every person-scoped read
 	// uses: raw distinct_id plus its stitched canonical id (self when no alias

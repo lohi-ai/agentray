@@ -317,11 +317,75 @@ type sourceStatusInput struct {
 type syncStatus struct {
 	Sync      storage.ConnectorSync `json:"sync"`
 	LatestRun *connector.Run        `json:"latest_run,omitempty"`
+	Readiness *storage.Readiness    `json:"readiness,omitempty"`
 }
 
 type sourceStatusOutput struct {
-	Syncs []syncStatus   `json:"syncs,omitempty"`
-	Run   *connector.Run `json:"run,omitempty"`
+	Syncs        []syncStatus       `json:"syncs,omitempty"`
+	Run          *connector.Run     `json:"run,omitempty"`
+	Readiness    *storage.Readiness `json:"readiness,omitempty"`
+	includeSyncs bool
+}
+
+func (o sourceStatusOutput) MarshalJSON() ([]byte, error) {
+	if o.includeSyncs {
+		return json.Marshal(struct {
+			Syncs     []syncStatus       `json:"syncs"`
+			Run       *connector.Run     `json:"run,omitempty"`
+			Readiness *storage.Readiness `json:"readiness,omitempty"`
+		}{Syncs: o.Syncs, Run: o.Run, Readiness: o.Readiness})
+	}
+	return json.Marshal(struct {
+		Run       *connector.Run     `json:"run,omitempty"`
+		Readiness *storage.Readiness `json:"readiness,omitempty"`
+	}{Run: o.Run, Readiness: o.Readiness})
+}
+
+type sourceReadinessRepo interface {
+	SourceReadiness(context.Context, string, []storage.ReadinessSource) (map[string]*storage.Readiness, error)
+}
+
+func sourceReadiness(ctx context.Context, repo Repo, projectID string, syncs []storage.ConnectorSync) map[string]*storage.Readiness {
+	provider, ok := repo.(sourceReadinessRepo)
+	if !ok || len(syncs) == 0 {
+		return nil
+	}
+	sources := make([]storage.ReadinessSource, 0, len(syncs))
+	for _, sync := range syncs {
+		sources = append(sources, storage.ReadinessSource{SyncID: sync.ID, ConnectorID: sync.ConnectorID,
+			Table: sync.SourceTable, ScheduleCron: sync.ScheduleCron,
+			Configured: strings.TrimSpace(sync.SourceTable) != "" && strings.TrimSpace(sync.KeyColumn) != ""})
+	}
+	readiness, err := provider.SourceReadiness(ctx, projectID, sources)
+	if err == nil {
+		return readiness
+	}
+	out := make(map[string]*storage.Readiness, len(syncs))
+	for _, sync := range syncs {
+		reason := "readiness_evidence_unavailable"
+		out[sync.ID] = &storage.Readiness{State: storage.ReadinessError, Reason: &reason}
+	}
+	return out
+}
+
+func readinessWithRun(readiness *storage.Readiness, run *connector.Run) *storage.Readiness {
+	if readiness == nil || run == nil || readiness.State == storage.ReadinessNotConfigured || readiness.State == storage.ReadinessIncomplete {
+		return readiness
+	}
+	copy := *readiness
+	switch run.Status {
+	case "queued", "running":
+		copy.State = storage.ReadinessSyncing
+		reason := "publication_in_progress"
+		copy.Reason = &reason
+		copy.QueryableAt = nil
+	case "failed", "cancelled":
+		copy.State = storage.ReadinessError
+		reason := "source_run_" + run.Status
+		copy.Reason = &reason
+		copy.QueryableAt = nil
+	}
+	return &copy
 }
 
 func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
@@ -346,6 +410,9 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 					return sourceStatusOutput{}, err
 				}
 				out.Run = &run
+				if sync, syncErr := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, run.SyncID); syncErr == nil {
+					out.Readiness = readinessWithRun(sourceReadiness(ctx, d.Repo, cc.ProjectID, []storage.ConnectorSync{sync})[sync.ID], &run)
+				}
 				return out, nil
 			case strings.TrimSpace(in.SyncID) != "":
 				sync, err := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, in.SyncID)
@@ -359,9 +426,12 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
-				entry := syncStatus{Sync: sync}
+				out.includeSyncs = true
+				readiness := sourceReadiness(ctx, d.Repo, cc.ProjectID, []storage.ConnectorSync{sync})
+				entry := syncStatus{Sync: sync, Readiness: readiness[sync.ID]}
 				if run, ok := runs[sync.ID]; ok {
 					entry.LatestRun = &run
+					entry.Readiness = readinessWithRun(entry.Readiness, &run)
 				}
 				out.Syncs = []syncStatus{entry}
 				return out, nil
@@ -378,6 +448,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
+				out.includeSyncs = true
 				ids := make([]string, 0, len(syncs))
 				for _, sync := range syncs {
 					ids = append(ids, sync.ID)
@@ -386,11 +457,13 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
+				readiness := sourceReadiness(ctx, d.Repo, cc.ProjectID, syncs)
 				out.Syncs = make([]syncStatus, 0, len(syncs))
 				for _, sync := range syncs {
-					entry := syncStatus{Sync: sync}
+					entry := syncStatus{Sync: sync, Readiness: readiness[sync.ID]}
 					if run, ok := runs[sync.ID]; ok {
 						entry.LatestRun = &run
+						entry.Readiness = readinessWithRun(entry.Readiness, &run)
 					}
 					out.Syncs = append(out.Syncs, entry)
 				}

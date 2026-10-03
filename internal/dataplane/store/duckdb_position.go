@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // This file is the store-side half of the readiness contract. /readyz answers
@@ -42,6 +43,14 @@ import (
 type AppliedMark struct {
 	Durable string
 	Seq     uint64
+	// Deliveries names every broker message represented by this write. It is
+	// intentionally not derived from Seq: coalescing and filtered consumers
+	// make a maximum consumer sequence insufficient to prove contiguous data.
+	Deliveries []DeliveryReceiptMark
+	// Source is optional source-publication evidence carried by a connector
+	// envelope. Legacy messages omit it and therefore never manufacture a
+	// complete/readiness claim.
+	Source *SourceReceiptMark
 }
 
 // AppliedPosition is what one store remembers about a durable's progress.
@@ -134,11 +143,14 @@ func (d *DuckDB) RefusePosition(ctx context.Context, durable string, missing uin
 // there, a record that could outlive its rows would be the very lie this file
 // exists to catch.
 func (d *DuckDB) RecordPosition(ctx context.Context, mark AppliedMark) error {
-	if mark.Durable == "" {
+	if mark.Durable == "" && len(mark.Deliveries) == 0 && mark.Source == nil {
 		return nil
 	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		return recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC())
 	})
 }
 

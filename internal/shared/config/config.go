@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -23,9 +24,18 @@ type Config struct {
 	// silently widening them. It is also the only bound on the per-colour
 	// DuckDB file, which otherwise grows without limit on a single VM.
 	EventRetentionDays int
-	RedisURL           string
-	NATSURL            string
-	IngestSubject      string
+	// SourceFreshnessMaxAge is the explicit freshness policy for manual or
+	// irregular source syncs. Zero keeps their completed data honestly stale.
+	SourceFreshnessMaxAge time.Duration
+	// SourceStagingTTL applies only after authoritative terminal/non-resumable
+	// eligibility. Zero disables automatic staging purge.
+	SourceStagingTTL time.Duration
+	// DataDiskReserveBytes rejects new data writes before WAL/spill exhausts
+	// the volume. Receipt/recovery writes retain the reserved headroom.
+	DataDiskReserveBytes uint64
+	RedisURL             string
+	NATSURL              string
+	IngestSubject        string
 	// IngestJetStream turns the event pipeline durable. When true (default) the
 	// ingest subject is backed by a file-storage JetStream stream: publishes wait
 	// for a broker ack (HTTP 200 means "durably queued") and the worker acks each
@@ -36,6 +46,9 @@ type Config struct {
 	IngestJetStream bool
 	// IngestStreamName is the JetStream stream that captures IngestSubject.
 	IngestStreamName string
+	// IngestStreamMaxBytes opts an operator into a broker byte ceiling with
+	// discard-new behavior. Zero preserves an existing stream's configuration.
+	IngestStreamMaxBytes int64
 	// IngestConnectorSubject carries connector sync batches on the SAME durable
 	// stream as events, so a blue-green colour switch replays landed
 	// external_rows exactly like events instead of losing them. Defaults to
@@ -178,12 +191,16 @@ func FromEnv() Config {
 		PostgresURL:                  env("POSTGRES_URL", "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"),
 		DuckDBPath:                   env("DUCKDB_PATH", "./data/agentray.duckdb"),
 		EventRetentionDays:           eventRetentionDays(),
+		SourceFreshnessMaxAge:        envDuration("SOURCE_FRESHNESS_MAX_AGE", 0),
+		SourceStagingTTL:             sourceStagingTTL(),
+		DataDiskReserveBytes:         envUint64("DATA_DISK_RESERVE_BYTES", 4<<30),
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),
 		NATSURL:                      env("NATS_URL", "nats://localhost:4223"),
 		IngestSubject:                env("INGEST_SUBJECT", "agentray.events.ingest"),
 		IngestConnectorSubject:       env("INGEST_CONNECTOR_SUBJECT", env("INGEST_SUBJECT", "agentray.events.ingest")+".connectors"),
 		IngestJetStream:              envBool("INGEST_JETSTREAM", true),
 		IngestStreamName:             env("INGEST_STREAM_NAME", "AGENTRAY_EVENTS"),
+		IngestStreamMaxBytes:         int64(envUint64("INGEST_STREAM_MAX_BYTES", 0)),
 		IngestDLQSubject:             env("INGEST_DLQ_SUBJECT", "agentray.events.dlq"),
 		IngestMaxDeliver:             envInt("INGEST_MAX_DELIVER", 5),
 		IngestDurable:                env("INGEST_DURABLE", "agentray-ingestors"),
@@ -238,6 +255,14 @@ func eventRetentionDays() int {
 	return days
 }
 
+func sourceStagingTTL() time.Duration {
+	days := envInt("SOURCE_STAGING_TTL_DAYS", 7)
+	if days < 0 {
+		days = 7
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
 func envBool(key string, fallback bool) bool {
 	value := os.Getenv(key)
 	if value == "" {
@@ -279,6 +304,30 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envUint64(key string, fallback uint64) uint64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
 		return fallback
 	}

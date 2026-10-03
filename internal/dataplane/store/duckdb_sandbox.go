@@ -3,7 +3,6 @@ package storage
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -266,6 +265,11 @@ func (p *sqlSandboxPool) closeAll() {
 // never gets a slot never creates an engine; a child is spawned only by a
 // caller that already holds one.
 func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, args []any) ([]map[string]any, error) {
+	rows, _, err := p.queryWithEvidence(ctx, projectID, query, args)
+	return rows, err
+}
+
+func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query string, args []any) ([]map[string]any, sandboxEvidence, error) {
 	rctx := ctx
 	if p.limits.requestTimeout > 0 {
 		var cancel context.CancelFunc
@@ -279,7 +283,7 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	case <-rctx.Done():
 		// Waiting behind other tenants is not the author's SQL being wrong: it
 		// is capacity, so it is retryable (503), not a limit refusal (400).
-		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
+		return nil, sandboxEvidence{}, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
 			"the analytics sandbox is busy; retry shortly")
 	}
 
@@ -292,26 +296,63 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 
 	sb, err := p.sandboxFor(rctx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, sandboxEvidence{}, err
 	}
 	// sandboxFor returns the sandbox already leased, so eviction cannot close it
 	// between lookup and this query starting.
 	defer sb.release()
 
-	if err := sb.refresh(rctx); err != nil {
-		p.drop(sb)
-		// A refresh reads the TRUSTED store, so its failures are the sandbox's,
-		// not the author's: without this wrap a driver or deadline error from
-		// the copy reaches the client as "bad SQL" (400).
-		return nil, sandboxRefreshError(err)
+	if err := sb.lockCtx(rctx); err != nil {
+		return nil, sandboxEvidence{}, err
 	}
-	rows, err := sb.run(rctx, query, args)
+	locked := true
+	defer func() {
+		if locked {
+			sb.mu.Unlock()
+		}
+	}()
+	var evidence sandboxEvidence
+	if err := p.main.ReadSnapshot(rctx, func(snapshot duckDBSnapshot) error {
+		if err := sb.refreshLockedSnapshot(rctx, snapshot); err != nil {
+			return err
+		}
+		var err error
+		evidence, err = projectEvidenceFrom(rctx, snapshot, projectID)
+		return err
+	}); err != nil {
+		sb.mu.Unlock()
+		locked = false
+		p.drop(sb)
+		return nil, sandboxEvidence{}, sandboxRefreshError(err)
+	}
+	confirmedAt := time.Now().UTC()
+	for key, confirmation := range evidence.Confirmations {
+		confirmation.ConfirmedAt = confirmedAt
+		evidence.Confirmations[key] = confirmation
+	}
+	sb.evidence = evidence
+	rows, err := sb.runLocked(rctx, query, args)
 	if err != nil && sb.dead.Load() {
-		// The child stopped answering: evict and reap it rather than leaving a
-		// wedged process holding the project's slot.
+		sb.mu.Unlock()
+		locked = false
 		p.drop(sb)
 	}
-	return rows, err
+	return rows, evidence, err
+}
+
+func (p *sqlSandboxPool) confirmations(projectID string) map[string]sourceConfirmation {
+	p.mu.Lock()
+	sb := p.sandboxes[projectID]
+	p.mu.Unlock()
+	if sb == nil || !sb.mu.TryLock() {
+		return nil
+	}
+	defer sb.mu.Unlock()
+	out := make(map[string]sourceConfirmation, len(sb.evidence.Confirmations))
+	for key, value := range sb.evidence.Confirmations {
+		out[key] = value
+	}
+	return out
 }
 
 // sandboxRefreshError classifies a failure from the copy phase. Anything the
@@ -537,10 +578,11 @@ type sqlSandbox struct {
 	refs atomic.Int64
 	// dead marks a child known to be broken (transport failure or a deadline it
 	// did not honour); the owner evicts and reaps it.
-	dead   atomic.Bool
-	usedAt atomic.Int64
-	mu     sync.Mutex
-	closed bool
+	dead     atomic.Bool
+	usedAt   atomic.Int64
+	mu       sync.Mutex
+	closed   bool
+	evidence sandboxEvidence
 }
 
 func (sb *sqlSandbox) lease() { sb.refs.Add(1) }
@@ -714,14 +756,24 @@ func (sb *sqlSandbox) refresh(ctx context.Context) error {
 	if sb.closed {
 		return sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, "analytics sandbox is closed")
 	}
-	if err := sb.refreshEvents(ctx); err != nil {
+	return sb.refreshLocked(ctx)
+}
+
+func (sb *sqlSandbox) refreshLocked(ctx context.Context) error {
+	return sb.pool.main.ReadSnapshot(ctx, func(snapshot duckDBSnapshot) error {
+		return sb.refreshLockedSnapshot(ctx, snapshot)
+	})
+}
+
+func (sb *sqlSandbox) refreshLockedSnapshot(ctx context.Context, snapshot duckDBSnapshot) error {
+	if err := sb.refreshEvents(ctx, snapshot); err != nil {
 		return err
 	}
-	if err := sb.refreshTable(ctx, "aliases",
+	if err := sb.refreshTable(ctx, snapshot, "aliases",
 		`SELECT project_id, anonymous_id, canonical_id FROM aliases WHERE project_id = ?`, 3, false); err != nil {
 		return err
 	}
-	if err := sb.refreshExternalRows(ctx); err != nil {
+	if err := sb.refreshExternalRows(ctx, snapshot); err != nil {
 		return err
 	}
 	return nil
@@ -762,12 +814,12 @@ const externalRowsCopy = `SELECT project_id, connector_id, table_name, row_key, 
 // Checking before it left a window: a sweep that deleted a row between the
 // count and the copy passed the check, and the copy cannot remove a row it
 // already holds, so that query served an event the main store had deleted.
-func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
+func (sb *sqlSandbox) refreshEvents(ctx context.Context, snapshot duckDBSnapshot) error {
 	cursor, err := sb.call(ctx, sandboxRequest{Op: "cursor"})
 	if err != nil {
 		return err
 	}
-	if err := sb.copyRows(ctx, sandboxEventCopy,
+	if err := sb.copyRows(ctx, snapshot, sandboxEventCopy,
 		[]any{sb.projectID, cursor.Watermark, cursor.Watermark, cursor.WatermarkID},
 		"events", 33, false); err != nil {
 		return err
@@ -778,17 +830,14 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		return err
 	}
 	var mainAtOrBelowHighWater int64
-	if err := sb.pool.main.Read(ctx, func(conn *sql.Conn) error {
-		// Count only what the child should hold — everything at or below the
-		// cursor the copy produced. Counting the whole main table instead lets
-		// an equal number of newly arrived rows hide a delete: retention
-		// removing D expired events while D new ones land leaves both totals
-		// agreeing.
-		return conn.QueryRowContext(ctx,
-			`SELECT count(*) FROM events WHERE project_id = ?
-			 AND (inserted_at < ? OR (inserted_at = ? AND event_id::VARCHAR <= ?))`,
-			sb.projectID, after.Watermark, after.Watermark, after.WatermarkID).Scan(&mainAtOrBelowHighWater)
-	}); err != nil {
+	// Count only what the child should hold — everything at or below the
+	// cursor the copy produced. Counting the whole main table instead lets
+	// an equal number of newly arrived rows hide a delete: retention removing D
+	// expired events while D new ones land leaves both totals agreeing.
+	if err := snapshot.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE project_id = ?
+		 AND (inserted_at < ? OR (inserted_at = ? AND event_id::VARCHAR <= ?))`,
+		sb.projectID, after.Watermark, after.Watermark, after.WatermarkID).Scan(&mainAtOrBelowHighWater); err != nil {
 		return err
 	}
 	if after.Count > mainAtOrBelowHighWater {
@@ -796,7 +845,7 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 		if _, err := sb.call(ctx, sandboxRequest{Op: "delete", Table: "events"}); err != nil {
 			return err
 		}
-		return sb.copyRows(ctx, sandboxEventCopy,
+		return sb.copyRows(ctx, snapshot, sandboxEventCopy,
 			[]any{sb.projectID, time.Time{}, time.Time{}, ""}, "events", 33, false)
 	}
 	return nil
@@ -811,24 +860,22 @@ func (sb *sqlSandbox) refreshEvents(ctx context.Context) error {
 // connector's landed data — and here those bytes also cross a pipe. The count
 // comparisons keep deletions honest: one before the copy catches a
 // deletion-only drift, one after it catches a delete a landing masked.
-func (sb *sqlSandbox) refreshExternalRows(ctx context.Context) error {
+func (sb *sqlSandbox) refreshExternalRows(ctx context.Context, snapshot duckDBSnapshot) error {
 	cursor, err := sb.call(ctx, sandboxRequest{Op: "cursor", Table: "external_rows"})
 	if err != nil {
 		return err
 	}
 	var mainCount int64
-	if err := sb.pool.main.Read(ctx, func(conn *sql.Conn) error {
-		return conn.QueryRowContext(ctx,
-			`SELECT count(*) FROM external_rows WHERE project_id = ?`, sb.projectID).Scan(&mainCount)
-	}); err != nil {
+	if err := snapshot.QueryRowContext(ctx,
+		`SELECT count(*) FROM external_rows WHERE project_id = ?`, sb.projectID).Scan(&mainCount); err != nil {
 		return err
 	}
 	if cursor.Count > mainCount {
 		// Rows vanished from the main file; rebuild rather than probe per row.
-		return sb.refreshTable(ctx, "external_rows", externalRowsSelect, 7, true)
+		return sb.refreshTable(ctx, snapshot, "external_rows", externalRowsSelect, 7, true)
 	}
 
-	if err := sb.copyRows(ctx, externalRowsCopy,
+	if err := sb.copyRows(ctx, snapshot, externalRowsCopy,
 		[]any{sb.projectID, cursor.Watermark, cursor.Watermark, cursor.WatermarkConnector,
 			cursor.WatermarkConnector, cursor.WatermarkTable, cursor.WatermarkTable, cursor.WatermarkRowKey},
 		"external_rows", 7, true); err != nil {
@@ -843,7 +890,7 @@ func (sb *sqlSandbox) refreshExternalRows(ctx context.Context) error {
 		return err
 	}
 	if after.Count != mainCount {
-		return sb.refreshTable(ctx, "external_rows", externalRowsSelect, 7, true)
+		return sb.refreshTable(ctx, snapshot, "external_rows", externalRowsSelect, 7, true)
 	}
 	return nil
 }
@@ -853,11 +900,11 @@ func (sb *sqlSandbox) refreshExternalRows(ctx context.Context) error {
 // pass replaceExisting=false; the landing table is keyed by
 // project/connector/table/row_key and passes true, which also lets the rebuild
 // absorb a row that arrived while it was streaming.
-func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string, nCols int, replaceExisting bool) error {
+func (sb *sqlSandbox) refreshTable(ctx context.Context, snapshot duckDBSnapshot, table, selectSQL string, nCols int, replaceExisting bool) error {
 	if _, err := sb.call(ctx, sandboxRequest{Op: "delete", Table: table}); err != nil {
 		return err
 	}
-	return sb.copyRows(ctx, selectSQL, []any{sb.projectID}, table, nCols, replaceExisting)
+	return sb.copyRows(ctx, snapshot, selectSQL, []any{sb.projectID}, table, nCols, replaceExisting)
 }
 
 // copyRows streams rows out of the main store and sends them to the child in
@@ -865,11 +912,11 @@ func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string,
 // replaceExisting turns the child's insert into INSERT OR REPLACE, which an
 // incremental copy of a re-landed row needs (external_rows is keyed by
 // project/connector/table/row_key); append-only tables pass false.
-func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int, replaceExisting bool) error {
+func (sb *sqlSandbox) copyRows(ctx context.Context, snapshot duckDBSnapshot, selectSQL string, selectArgs []any, table string, nCols int, replaceExisting bool) error {
 	batch := make([][]any, 0, sandboxCopyBatch)
 	batchBytes := 0
-	err := sb.pool.main.Read(ctx, func(conn *sql.Conn) error {
-		rows, err := conn.QueryContext(ctx, selectSQL, selectArgs...)
+	err := func() error {
+		rows, err := snapshot.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
 			return err
 		}
@@ -934,7 +981,7 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 			return err
 		}
 		return flush()
-	})
+	}()
 	batch = nil
 	return err
 }
@@ -949,6 +996,10 @@ func (sb *sqlSandbox) run(ctx context.Context, query string, args []any) ([]map[
 	if sb.closed {
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable, "analytics sandbox is closed")
 	}
+	return sb.runLocked(ctx, query, args)
+}
+
+func (sb *sqlSandbox) runLocked(ctx context.Context, query string, args []any) ([]map[string]any, error) {
 	deadline := int64(0)
 	if d, ok := ctx.Deadline(); ok {
 		deadline = d.UnixNano()
