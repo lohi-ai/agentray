@@ -106,9 +106,9 @@ sends TERM at 59m30s and KILL 30 seconds later, enforcing a 60-minute hard wall
 clock; the Go test timeout is 59 minutes, and the harness cancels its work at
 58 minutes to leave teardown headroom. PostgreSQL runs through an attached
 Docker client owned by an independent watchdog. Normal return, startup failure,
-panic, Go timeout, TERM, KILL, or parent disappearance therefore stops the
-client, forcibly removes the named disposable container, reaps the watchdog,
-and leaves no detached database behind. Any
+panic, Go timeout, TERM, KILL, or parent disappearance therefore force-removes
+the named disposable container before bounded client reaping, reaps the
+watchdog, and leaves no detached database or owned process behind. Any
 missing or different detected cap fails preflight; do not weaken the check.
 
 Do not replace the corpus constants or shorten the 15-minute steady phase to

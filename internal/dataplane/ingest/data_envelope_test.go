@@ -497,12 +497,18 @@ func TestDataEnvelopePostgresWatchdogNegativeControl(t *testing.T) {
 	script := `#!/bin/sh
 case "$1" in
 run)
+  # Model an attached client blocked on PostgreSQL smart shutdown while an
+  # active query is still running: TERM alone must not let cleanup proceed.
+  trap '' TERM INT HUP
+  mkfifo "$AGENTRAY_ENVELOPE_FAKE_FIFO"
   echo $$ > "$AGENTRAY_ENVELOPE_FAKE_RUN_PID"
-  trap 'exit 0' TERM INT HUP
-  while :; do sleep 1; done
+  IFS= read -r ignored < "$AGENTRAY_ENVELOPE_FAKE_FIFO"
   ;;
 rm)
-  : > "$AGENTRAY_ENVELOPE_FAKE_REMOVED"
+  if [ ! -e "$AGENTRAY_ENVELOPE_FAKE_REMOVED" ]; then
+    : > "$AGENTRAY_ENVELOPE_FAKE_REMOVED"
+    kill -KILL "$(cat "$AGENTRAY_ENVELOPE_FAKE_RUN_PID")" >/dev/null 2>&1 || true
+  fi
   ;;
 *) exit 1 ;;
 esac
@@ -516,6 +522,7 @@ esac
 		"AGENTRAY_ENVELOPE_WATCHDOG_READY="+ready,
 		"AGENTRAY_ENVELOPE_FAKE_RUN_PID="+runPID,
 		"AGENTRAY_ENVELOPE_FAKE_REMOVED="+removed,
+		"AGENTRAY_ENVELOPE_FAKE_FIFO="+filepath.Join(dir, "blocked-query"),
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	if err := cmd.Start(); err != nil {
@@ -550,6 +557,144 @@ esac
 	if envelopeProcessExists(watchdogPID) || envelopeProcessExists(dockerPID) {
 		t.Fatalf("orphan remained after parent death: watchdog_alive=%t docker_alive=%t", envelopeProcessExists(watchdogPID), envelopeProcessExists(dockerPID))
 	}
+}
+
+type envelopeRealWatchdogReady struct {
+	Container   string `json:"container"`
+	WatchdogPID int    `json:"watchdog_pid"`
+	DockerPID   int    `json:"docker_pid"`
+}
+
+// TestDataEnvelopePostgresWatchdogActiveQueryNegativeControl exercises the
+// actual Docker/PostgreSQL shutdown behavior that a fake client cannot fully
+// model. It is opt-in so ordinary unit runs do not pull images or require a
+// Docker daemon; the AC-DATA-03 repair verification enables it explicitly.
+func TestDataEnvelopePostgresWatchdogActiveQueryNegativeControl(t *testing.T) {
+	if readyPath := os.Getenv("AGENTRAY_ENVELOPE_REAL_WATCHDOG_CHILD"); readyPath != "" {
+		ctx := context.Background()
+		url, container, cleanup, err := startEnvelopePostgres(ctx, "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cleanup() }()
+		dockerPID := waitEnvelopePIDFile(t, os.Getenv("AGENTRAY_ENVELOPE_WATCHDOG_DOCKER_PID_FILE"), 5*time.Second)
+		pool, err := pgxpool.New(ctx, url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+		// The watchdog is the direct parent of the attached Docker client. Record
+		// its real PID instead of relying on adjacent PID allocation.
+		watchdogPID, err := envelopeParentPID(dockerPID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ready, err := json.Marshal(envelopeRealWatchdogReady{Container: container, WatchdogPID: watchdogPID, DockerPID: dockerPID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(readyPath, ready, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = pool.Exec(ctx, "SELECT pg_sleep(90)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	if os.Getenv("AGENTRAY_ENVELOPE_REAL_WATCHDOG") != "1" {
+		t.Skip("set AGENTRAY_ENVELOPE_REAL_WATCHDOG=1 to run the real active-query watchdog control")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Fatal("AGENTRAY_ENVELOPE_REAL_WATCHDOG=1 requires docker")
+	}
+	if out, err := exec.Command("docker", "info").CombinedOutput(); err != nil {
+		t.Fatalf("AGENTRAY_ENVELOPE_REAL_WATCHDOG=1 requires a running Docker daemon: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	dir := t.TempDir()
+	readyPath := filepath.Join(dir, "ready.json")
+	dockerPIDPath := filepath.Join(dir, "docker.pid")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDataEnvelopePostgresWatchdogActiveQueryNegativeControl$", "-test.timeout=2m", "-test.v")
+	cmd.Env = append(os.Environ(),
+		"AGENTRAY_ENVELOPE_REAL_WATCHDOG_CHILD="+readyPath,
+		"AGENTRAY_ENVELOPE_WATCHDOG_DOCKER_PID_FILE="+dockerPIDPath,
+	)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var ready envelopeRealWatchdogReady
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		if ready.Container != "" {
+			_ = exec.Command("docker", "rm", "--force", ready.Container).Run()
+		}
+	})
+	deadline := time.Now().Add(50 * time.Second)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(readyPath)
+		if err == nil {
+			if err := json.Unmarshal(body, &ready); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if ready.Container == "" || ready.WatchdogPID <= 0 || ready.DockerPID <= 0 {
+		t.Fatal("real PostgreSQL watchdog child did not become ready within 50s")
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		out, err := exec.Command("docker", "exec", ready.Container, "psql", "-U", "envelope", "-d", "envelope", "-Atc", "SELECT count(*) FROM pg_stat_activity WHERE query='SELECT pg_sleep(90)' AND state='active'").Output()
+		if err == nil && strings.TrimSpace(string(out)) == "1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SELECT pg_sleep(90) did not become active within 5s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	started := time.Now()
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("killed real PostgreSQL watchdog parent unexpectedly exited successfully")
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	containerAbsent := false
+	for time.Now().Before(deadline) {
+		_, inspectErr := exec.Command("docker", "inspect", ready.Container).Output()
+		containerAbsent = inspectErr != nil
+		if containerAbsent && !envelopeProcessExists(ready.WatchdogPID) && !envelopeProcessExists(ready.DockerPID) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("active-query cleanup elapsed=%s container_absent=%t watchdog_absent=%t docker_absent=%t", time.Since(started), containerAbsent, !envelopeProcessExists(ready.WatchdogPID), !envelopeProcessExists(ready.DockerPID))
+	if !containerAbsent || envelopeProcessExists(ready.WatchdogPID) || envelopeProcessExists(ready.DockerPID) {
+		t.Fatal("orphan remained after killing the real active-query parent")
+	}
+}
+
+func envelopeParentPID(pid int) (int, error) {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, err
+	}
+	parent, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || parent <= 0 {
+		return 0, fmt.Errorf("invalid parent PID %q for process %d", strings.TrimSpace(string(out)), pid)
+	}
+	return parent, nil
 }
 
 func waitEnvelopePIDFile(t *testing.T, path string, within time.Duration) int {
@@ -1372,17 +1517,48 @@ parent_pid=$1
 container=$2
 shift 2
 docker_pid=
+wait_bounded() {
+  child_pid=$1
+  attempts=0
+  while kill -0 "$child_pid" >/dev/null 2>&1; do
+    child_state=$(ps -o stat= -p "$child_pid" 2>/dev/null) || child_state=
+    case "$child_state" in
+      *Z*) break ;;
+    esac
+    if [ "$attempts" -ge 50 ]; then
+      kill -KILL "$child_pid" >/dev/null 2>&1 || true
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  wait "$child_pid" >/dev/null 2>&1 || true
+}
+force_remove() {
+  docker rm --force "$container" >/dev/null 2>&1 &
+  remove_pid=$!
+  wait_bounded "$remove_pid"
+}
 cleanup() {
   trap - EXIT HUP INT TERM
+  # Force removal before signalling or waiting on the attached client.
+  # PostgreSQL interprets TERM as smart shutdown and can otherwise keep that
+  # client (and this watchdog) alive for the duration of an active query.
+  force_remove
   if [ -n "$docker_pid" ]; then
     kill "$docker_pid" >/dev/null 2>&1 || true
-    wait "$docker_pid" >/dev/null 2>&1 || true
+    wait_bounded "$docker_pid"
   fi
-  docker rm --force "$container" >/dev/null 2>&1 || true
+  # Close the startup race where the first removal ran before docker created
+  # the named container but the attached client had already been launched.
+  force_remove
 }
 trap cleanup EXIT HUP INT TERM
 docker "$@" >/dev/null 2>&1 &
 docker_pid=$!
+if [ -n "$AGENTRAY_ENVELOPE_WATCHDOG_DOCKER_PID_FILE" ]; then
+  printf '%s\n' "$docker_pid" > "$AGENTRAY_ENVELOPE_WATCHDOG_DOCKER_PID_FILE"
+fi
 while kill -0 "$parent_pid" >/dev/null 2>&1; do
   if ! kill -0 "$docker_pid" >/dev/null 2>&1; then
     wait "$docker_pid"
@@ -1401,9 +1577,10 @@ exit 0
 func startEnvelopeDockerWatchdog(parentPID int, container string, dockerArgs []string) (*envelopeDockerWatchdog, error) {
 	args := append([]string{"-c", envelopeDockerWatchdogScript, "agentray-postgres-watchdog", strconv.Itoa(parentPID), container}, dockerArgs...)
 	cmd := exec.Command("sh", args...)
-	// Keep the watchdog out of the test/timeout process group. A group-wide
-	// SIGKILL must not remove the only process still able to tear down Docker.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Put the watchdog in its own session, not merely another process group.
+	// Parent/process-group death and terminal hangup must not remove the only
+	// process still able to tear down Docker and reap the attached client.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	watchdog := &envelopeDockerWatchdog{cmd: cmd, done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start disposable PostgreSQL watchdog: %w", err)
