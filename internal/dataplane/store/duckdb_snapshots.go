@@ -290,6 +290,22 @@ func (d *DuckDB) snapshotGenerationActive(ctx context.Context, generation string
 	return active, err
 }
 
+func (d *DuckDB) snapshotGenerationCleanupComplete(ctx context.Context, generation string) (bool, error) {
+	var complete bool
+	err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=?)`, generation).Scan(&complete)
+	})
+	return complete, err
+}
+
+func (d *DuckDB) storeIdentity(ctx context.Context) (string, error) {
+	var id string
+	err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT store_id::VARCHAR FROM data_store_identity WHERE slot=1`).Scan(&id)
+	})
+	return id, err
+}
+
 func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation string, limit int) (deleted int, more bool, err error) {
 	err = d.Write(ctx, func(tx *sql.Tx) error {
 		var active bool
@@ -318,6 +334,9 @@ func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation stri
 				if _, err := tx.ExecContext(ctx, stmt, generation); err != nil {
 					return err
 				}
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO connector_snapshot_cleanup_receipts(generation,cleaned_at) VALUES(?,now())`, generation); err != nil {
+				return err
 			}
 		}
 		return nil

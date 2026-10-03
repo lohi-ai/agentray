@@ -34,6 +34,14 @@ const (
 	ReadinessStale         = "stale"
 	ReadinessIncomplete    = "incomplete"
 	ReadinessError         = "error"
+
+	// Receipt journals retain an exact recent suffix for replay diagnosis while
+	// ingest_position and durable loss markers carry the long-lived store-binding
+	// proof. Unresolved holes are never subject to this bound.
+	deliveryReceiptSuffixLimit = 4096
+	// Legacy publications have no run/completion identity that can trigger the
+	// normal resolved-run compactor, so retain a bounded operator-visible suffix.
+	legacyPublicationReceiptLimit = 256
 )
 
 // DeliveryReceiptMark is the durable identity of one delivery. StreamSeq is
@@ -141,7 +149,12 @@ func (s *Store) RecordPublication(ctx context.Context, observation PublicationOb
 	if observation.Complete {
 		kind = "complete"
 	}
-	tag, err := s.pg.Exec(ctx, `INSERT INTO source_publication_receipts
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `INSERT INTO source_publication_receipts
 (project_id, connector_id, table_name, stable_batch_id, payload_sha256, first_published_at, last_observed_at,
  sync_id, run_id, generation, generation_seq, receipt_kind, capture_started_at, capture_finished_at)
 VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -163,7 +176,7 @@ WHERE source_publication_receipts.payload_sha256 = excluded.payload_sha256
 	// rows for this source are resolved history. Keeping the current identity's
 	// batch set preserves reconciliation while bounding repeated publications.
 	if observation.Complete && observation.RunID != "" && (observation.GenerationSeq > 0 || observation.CaptureStartedAt != nil) {
-		if _, err := s.pg.Exec(ctx, `DELETE FROM source_publication_receipts
+		if _, err := tx.Exec(ctx, `DELETE FROM source_publication_receipts
 WHERE project_id=$1 AND connector_id=$2 AND table_name=$3 AND run_id IS DISTINCT FROM $4
   AND (($5 > 0 AND generation_seq <= $5)
        OR ($5 = 0 AND (capture_started_at IS NULL OR capture_started_at <= $6)))`,
@@ -172,7 +185,19 @@ WHERE project_id=$1 AND connector_id=$2 AND table_name=$3 AND run_id IS DISTINCT
 			return err
 		}
 	}
-	return nil
+	if observation.RunID == "" && observation.Generation == "" {
+		if _, err := tx.Exec(ctx, `DELETE FROM source_publication_receipts
+WHERE project_id=$1 AND connector_id=$2 AND table_name=$3 AND run_id IS NULL AND generation IS NULL
+  AND stable_batch_id IN (
+	SELECT stable_batch_id FROM source_publication_receipts
+	WHERE project_id=$1 AND connector_id=$2 AND table_name=$3 AND run_id IS NULL AND generation IS NULL
+	ORDER BY last_observed_at DESC, stable_batch_id DESC
+	OFFSET $4
+  )`, observation.ProjectID, observation.ConnectorID, observation.Table, legacyPublicationReceiptLimit); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // RecordSnapshotPromotionTx adds receipt evidence to an existing promotion
@@ -219,13 +244,11 @@ func recordAppliedReceiptsTx(ctx context.Context, tx *sql.Tx, mark AppliedMark, 
 		if generationKey != "" {
 			generationValue = generationKey
 		}
-		if mark.Source != nil || d.Replayed {
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO data_receipt_deliveries
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO data_receipt_deliveries
 (stream_id, subject, stream_seq, payload_sha256, project_id, connector_id, table_name, generation_key, applied_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, d.StreamID, d.Subject, d.StreamSeq, d.PayloadSHA256,
-				pid, cid, tableValue, generationValue, landedAt); err != nil {
-				return err
-			}
+			pid, cid, tableValue, generationValue, landedAt); err != nil {
+			return err
 		}
 		if d.Unverifiable {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO data_receipt_holes
@@ -251,7 +274,31 @@ WHERE stream_id = ? AND subject = ? AND stream_seq = ? AND payload_sha256 = ? AN
 			if err := invalidateSourceConfirmationsTx(ctx, tx, holeProject, holeConnector, holeTable, landedAt); err != nil {
 				return err
 			}
+			// Once this exact replay repaired the hole, neither row carries live
+			// readiness authority. Remove both in the same transaction so event-only
+			// replay traffic cannot grow the journals forever.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM data_receipt_deliveries
+WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=?`,
+				d.StreamID, d.Subject, d.StreamSeq, d.PayloadSHA256); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM data_receipt_holes
+WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleared_at IS NOT NULL`,
+				d.StreamID, d.Subject, d.StreamSeq, d.PayloadSHA256); err != nil {
+				return err
+			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM data_receipt_deliveries WHERE rowid IN (
+	SELECT rowid FROM (
+		SELECT rowid, row_number() OVER (ORDER BY applied_at DESC, stream_id DESC, stream_seq DESC) AS receipt_rank
+		FROM data_receipt_deliveries
+	) ranked WHERE receipt_rank > ?
+)`, deliveryReceiptSuffixLimit); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM data_receipt_holes WHERE cleared_at IS NOT NULL`); err != nil {
+		return err
 	}
 	s := mark.Source
 	if s == nil {
@@ -275,30 +322,12 @@ WHERE stream_id = ? AND subject = ? AND stream_seq = ? AND payload_sha256 = ? AN
 	if generationKey == "" {
 		generationKey = "legacy-unknown"
 	}
-	var priorGenerationKey string
-	var priorGenerationSeq uint64
-	var priorCaptureStarted sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT generation_key, generation_seq, capture_started_at FROM data_receipt_sources
-WHERE project_id = ? AND connector_id = ? AND table_name = ?`, pid, cid, s.Table).
-		Scan(&priorGenerationKey, &priorGenerationSeq, &priorCaptureStarted)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	superseded, err := sourceReceiptSupersededTx(ctx, tx, s)
+	if err != nil {
 		return err
 	}
-	if err == nil {
-		if s.GenerationSeq < priorGenerationSeq {
-			return nil
-		}
-		if s.GenerationSeq > 0 && s.GenerationSeq == priorGenerationSeq && generationKey != priorGenerationKey {
-			return fmt.Errorf("generation sequence %d conflicts with current generation", s.GenerationSeq)
-		}
-		if s.GenerationSeq == 0 && priorGenerationSeq == 0 && generationKey != priorGenerationKey {
-			// Incremental runs do not have a generation sequence, so their capture
-			// boundary is the ordering fence. A delayed redelivery from an older
-			// run must not replace the source receipt for a newer landed run.
-			if s.CaptureStartedAt == nil || (priorCaptureStarted.Valid && !s.CaptureStartedAt.UTC().After(priorCaptureStarted.Time.UTC())) {
-				return nil
-			}
-		}
+	if superseded {
+		return nil
 	}
 	if s.BatchID != "" {
 		var prior string
@@ -386,7 +415,7 @@ ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
 		pid, cid, s.Table, syncID, runID, generation, generationKey, s.GenerationSeq, s.BindingDigest,
 		s.CaptureStartedAt, s.CaptureFinishedAt, publishedAt, sourceLandedAt, landedGenerationKey,
 		func() any {
-			if s.Promoted {
+			if s.Promoted && s.Complete {
 				return landedAt
 			}
 			return nil
@@ -406,11 +435,51 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key<>?`, p
 WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key IS NOT NULL AND generation_key<>?`, pid, cid, s.Table, generationKey); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM data_receipt_holes WHERE cleared_at IS NOT NULL`); err != nil {
-			return err
-		}
 	}
 	return nil
+}
+
+// sourceReceiptSupersededTx is the write fence shared by receipt-only and row
+// mutations. Callers that mutate source rows must evaluate it before the first
+// row statement so a delayed run cannot change data while preserving a newer
+// readiness proof.
+func sourceReceiptSupersededTx(ctx context.Context, tx *sql.Tx, s *SourceReceiptMark) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	generationKey := s.Generation
+	if generationKey == "" {
+		generationKey = s.RunID
+	}
+	if generationKey == "" {
+		generationKey = "legacy-unknown"
+	}
+	var priorGenerationKey string
+	var priorGenerationSeq uint64
+	var priorCaptureStarted sql.NullTime
+	err := tx.QueryRowContext(ctx, `SELECT generation_key, generation_seq, capture_started_at FROM data_receipt_sources
+WHERE project_id = ? AND connector_id = ? AND table_name = ?`, s.ProjectID, s.ConnectorID, s.Table).
+		Scan(&priorGenerationKey, &priorGenerationSeq, &priorCaptureStarted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if s.GenerationSeq < priorGenerationSeq {
+		return true, nil
+	}
+	if s.GenerationSeq > 0 && s.GenerationSeq == priorGenerationSeq && generationKey != priorGenerationKey {
+		return false, fmt.Errorf("generation sequence %d conflicts with current generation", s.GenerationSeq)
+	}
+	if s.GenerationSeq == 0 && priorGenerationSeq == 0 && generationKey != priorGenerationKey {
+		// Incremental runs do not have a generation sequence, so their capture
+		// boundary is the ordering fence.
+		if s.CaptureStartedAt == nil || (priorCaptureStarted.Valid && !s.CaptureStartedAt.UTC().After(priorCaptureStarted.Time.UTC())) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func invalidateSourceConfirmationsTx(ctx context.Context, tx *sql.Tx, projectID, connectorID, table sql.NullString, at time.Time) error {
@@ -688,7 +757,17 @@ func (s *Store) SourceReadiness(ctx context.Context, projectID string, sources [
 			out[source.SyncID] = ready
 			continue
 		}
-		if r.HasHole || (r.CompletionSeen && r.ExpectedBatches != nil && r.AppliedBatches != *r.ExpectedBatches) {
+		if r.HasHole {
+			ready.State, ready.Reason = ReadinessIncomplete, stringPtr("coverage_hole")
+			out[source.SyncID] = ready
+			continue
+		}
+		if !r.CompletionSeen {
+			ready.Reason = stringPtr("awaiting_completion")
+			out[source.SyncID] = ready
+			continue
+		}
+		if r.ExpectedBatches == nil || r.AppliedBatches != *r.ExpectedBatches {
 			ready.State, ready.Reason = ReadinessIncomplete, stringPtr("coverage_hole")
 			out[source.SyncID] = ready
 			continue
@@ -699,7 +778,7 @@ func (s *Store) SourceReadiness(ctx context.Context, projectID string, sources [
 			continue
 		}
 		confirmation, confirmed := confirmations[source.ConnectorID+"\x00"+source.Table]
-		if !confirmed || confirmation.MutationSeq != r.MutationSeq {
+		if !confirmed || !confirmation.matches(r) {
 			ready.Reason = stringPtr("awaiting_query_confirmation")
 			out[source.SyncID] = ready
 			continue

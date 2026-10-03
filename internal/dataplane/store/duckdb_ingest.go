@@ -416,6 +416,20 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		return err
 	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
+		if mark.Source != nil {
+			superseded, err := sourceReceiptSupersededTx(ctx, tx, mark.Source)
+			if err != nil {
+				return err
+			}
+			if superseded {
+				// Settle and journal the broker delivery, but fence the obsolete run
+				// before it can replace rows owned by the newer capture.
+				if err := advancePositionTx(ctx, tx, mark); err != nil {
+					return err
+				}
+				return recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC())
+			}
+		}
 		// Chunked multi-row statements, like the events insert: one statement
 		// per row keeps a row-group-sized buffer alive until commit, and a
 		// connector batch is up to 1,000 rows.
@@ -439,6 +453,15 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		}
 		if err := recordAppliedReceiptsTx(ctx, tx, mark, now); err != nil {
 			return err
+		}
+		if mark.Source == nil {
+			// Legacy envelopes can still mutate a configured source table. They do
+			// not carry a generation receipt, so invalidate any prior sandbox proof
+			// explicitly rather than letting changed rows inherit it.
+			return invalidateSourceConfirmationsTx(ctx, tx,
+				sql.NullString{String: projectID, Valid: true},
+				sql.NullString{String: connectorID, Valid: true},
+				sql.NullString{String: table, Valid: true}, now)
 		}
 		return nil
 	})

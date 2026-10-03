@@ -55,8 +55,25 @@ type sandboxEvidence struct {
 }
 
 type sourceConfirmation struct {
-	MutationSeq uint64
-	ConfirmedAt time.Time
+	MutationSeq       uint64
+	GenerationKey     string
+	CaptureStartedAt  *time.Time
+	CaptureFinishedAt *time.Time
+	ConfirmedAt       time.Time
+}
+
+func (c sourceConfirmation) matches(r localSourceReceipt) bool {
+	return c.MutationSeq == r.MutationSeq &&
+		c.GenerationKey == r.GenerationKey &&
+		sameInstant(c.CaptureStartedAt, r.CaptureStartedAt) &&
+		sameInstant(c.CaptureFinishedAt, r.CaptureFinishedAt)
+}
+
+func sameInstant(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
 
 func (d *DuckDB) projectEvidence(ctx context.Context, projectID string) (sandboxEvidence, error) {
@@ -91,8 +108,8 @@ coalesce((SELECT sum(mutation_seq) FROM data_receipt_sources WHERE project_id = 
 			v := eventAt.V.UTC()
 			e.Watermark.EventLandedAt = &v
 		}
-		rows, err := snapshot.QueryContext(ctx, `SELECT connector_id::VARCHAR, table_name, generation::VARCHAR,
-capture_started_at, capture_finished_at, landed_at, mutation_seq
+		rows, err := snapshot.QueryContext(ctx, `SELECT connector_id::VARCHAR, table_name, generation::VARCHAR, generation_key,
+	capture_started_at, capture_finished_at, landed_at, mutation_seq
 FROM data_receipt_sources WHERE project_id = ? AND landed_at IS NOT NULL
 ORDER BY updated_at DESC, connector_id, table_name`, projectID)
 		if err != nil {
@@ -102,9 +119,10 @@ ORDER BY updated_at DESC, connector_id, table_name`, projectID)
 		for rows.Next() {
 			var w ServingSourceWatermark
 			var generation sql.NullString
+			var generationKey string
 			var started, finished, landed sql.Null[time.Time]
 			var mutation uint64
-			if err := rows.Scan(&w.ConnectorID, &w.Table, &generation, &started, &finished, &landed, &mutation); err != nil {
+			if err := rows.Scan(&w.ConnectorID, &w.Table, &generation, &generationKey, &started, &finished, &landed, &mutation); err != nil {
 				return err
 			}
 			if generation.Valid {
@@ -123,7 +141,10 @@ ORDER BY updated_at DESC, connector_id, table_name`, projectID)
 				v := landed.V.UTC()
 				w.LandedAt = &v
 			}
-			e.Confirmations[w.ConnectorID+"\x00"+w.Table] = sourceConfirmation{MutationSeq: mutation}
+			e.Confirmations[w.ConnectorID+"\x00"+w.Table] = sourceConfirmation{
+				MutationSeq: mutation, GenerationKey: generationKey,
+				CaptureStartedAt: w.CaptureStartedAt, CaptureFinishedAt: w.CaptureFinishedAt,
+			}
 			e.Watermark.TotalSources++
 			if len(e.Watermark.Sources) < 64 {
 				e.Watermark.Sources = append(e.Watermark.Sources, w)

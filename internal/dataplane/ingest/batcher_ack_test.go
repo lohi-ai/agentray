@@ -60,6 +60,31 @@ func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {
 	}
 }
 
+func TestBatcherRecordsDeliveryIdentityForEmptySettlement(t *testing.T) {
+	recorded := make(chan storage.AppliedMark, 1)
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error { return nil }, EventBatcherConfig{
+		Durable: "empty-colour",
+		RecordPosition: func(_ context.Context, mark storage.AppliedMark) error {
+			recorded <- mark
+			return nil
+		},
+	})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 1, seqN: 9}
+	b.AddMsg(nil, msg)
+	select {
+	case mark := <-recorded:
+		if mark.Seq != 9 || len(mark.Deliveries) != 1 || mark.Deliveries[0].StreamSeq != 9 {
+			t.Fatalf("empty settlement mark = %+v", mark)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("empty settlement was not recorded")
+	}
+	if acked, _, _ := msg.state(); !acked {
+		t.Fatal("empty settlement was not acknowledged")
+	}
+}
+
 // A transient insert failure that recovers within the retry budget must still end
 // in an ack — no redelivery, no data loss.
 func TestBatcherRetriesThenAcks(t *testing.T) {

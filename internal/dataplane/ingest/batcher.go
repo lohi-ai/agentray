@@ -188,7 +188,7 @@ func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 		// the store must record the position first — and if it cannot, the
 		// delivery is retried instead of settling the floor over a hole.
 		if msg != nil {
-			if err := b.recordSettled(msg.seq()); err != nil {
+			if err := b.recordSettled(msg); err != nil {
 				b.retrySettlement(msg, err)
 				return
 			}
@@ -238,7 +238,7 @@ func (b *EventBatcher) poison(msg msgHandle, source *storage.SourceReceiptMark, 
 	// The position is recorded BEFORE the dead-letter and the terminate: both of
 	// those leave the delivery behind, and a store that fell behind the floor
 	// they advance would refuse this colour as store-behind on its next boot.
-	if err := b.recordSettled(msg.seq()); err != nil {
+	if err := b.recordSettled(msg); err != nil {
 		b.retrySettlement(msg, err)
 		return
 	}
@@ -283,14 +283,15 @@ func (b *EventBatcher) publishDeadLetter(msg msgHandle) error {
 // is the store's half of the same claim the ack makes, so a store that cannot
 // take it leaves the delivery to be retried rather than advancing the floor over
 // a gap only the next boot would see.
-func (b *EventBatcher) recordSettled(seq uint64) error {
+func (b *EventBatcher) recordSettled(msg msgHandle) error {
 	if b.record == nil || b.durable == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
 	defer cancel()
-	if err := b.record(ctx, storage.AppliedMark{Durable: b.durable, Seq: seq}); err != nil {
-		return fmt.Errorf("record applied position %d for durable %q: %w", seq, b.durable, err)
+	mark := storage.AppliedMark{Durable: b.durable, Seq: msg.seq(), Deliveries: []storage.DeliveryReceiptMark{msg.delivery()}}
+	if err := b.record(ctx, mark); err != nil {
+		return fmt.Errorf("record applied position %d for durable %q: %w", mark.Seq, b.durable, err)
 	}
 	return nil
 }
@@ -434,7 +435,7 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 			// Recorded before the dead-letter and the terminate, like the poison
 			// path: settling moves the ack floor, and a store that could not take
 			// the record must not be left behind it.
-			if err := b.recordSettled(it.msg.seq()); err != nil {
+			if err := b.recordSettled(it.msg); err != nil {
 				b.retrySettlement(it.msg, err)
 				continue
 			}

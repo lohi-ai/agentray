@@ -13,6 +13,7 @@ import (
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
+	"github.com/google/uuid"
 )
 
 // DuckDB is the embedded analytics engine: one process-local database file
@@ -42,7 +43,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 5
+const DuckDBSchemaVersion = 6
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -262,6 +263,9 @@ func (d *DuckDB) migrate(ctx context.Context) error {
 				return fmt.Errorf("duckdb schema: %w", err)
 			}
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO data_store_identity(slot,store_id) VALUES(1,?)`, uuid.NewString()); err != nil {
+			return fmt.Errorf("duckdb store identity: %w", err)
+		}
 		// utm_* columns are NOT NULL in the schema but arrive via ADD COLUMN,
 		// which DuckDB cannot do with the constraint attached. Tighten only the
 		// ones still nullable: ALTER ... SET NOT NULL writes a WAL entry that
@@ -317,6 +321,11 @@ var duckDBSchema = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		name VARCHAR PRIMARY KEY,
 		version INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_store_identity (
+		slot UTINYINT PRIMARY KEY,
+		store_id UUID NOT NULL,
+		CHECK (slot = 1)
 	)`,
 	`CREATE TABLE IF NOT EXISTS events (
 		project_id UUID NOT NULL,
@@ -469,10 +478,17 @@ var duckDBSchema = []string{
 		expected_batches BIGINT NOT NULL,
 		expected_rows BIGINT NOT NULL,
 		batch_manifest_sha256 VARCHAR NOT NULL,
-		capture_started_at TIMESTAMPTZ NOT NULL,
-		capture_finished_at TIMESTAMPTZ NOT NULL,
-		promoted_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (project_id, connector_id, table_name)
+			capture_started_at TIMESTAMPTZ NOT NULL,
+			capture_finished_at TIMESTAMPTZ NOT NULL,
+			promoted_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (project_id, connector_id, table_name)
+		)`,
+	// Cleanup completion is deliberately local to the serving file. PostgreSQL
+	// retains the terminal generation as shared authority; each colour records
+	// independently when its own staging copy is gone.
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_cleanup_receipts (
+		generation UUID PRIMARY KEY,
+		cleaned_at TIMESTAMPTZ NOT NULL
 	)`,
 	// ingest_position is the store-side half of the readiness contract: how far
 	// this file's own writes have carried it along the durable stream, and the

@@ -51,9 +51,16 @@ fabricate completeness or reset production consumers to make readiness green.
 Cleanup never deletes an active or resumable generation and never claims that a
 DuckDB `DELETE` shrinks the file. Checkpointing makes freed blocks reusable.
 
-Receipt journals are compacted only at an authoritative completion boundary.
-The current complete run/generation and its batch identities remain available
-for reconciliation, unresolved holes are retained indefinitely, and superseded
-complete-generation batch/delivery rows plus cleared-hole rows are removed.
+Receipt journals retain exact ordinary delivery identities for a bounded recent
+global suffix (4,096). A repaired hole and its replay receipt
+are removed atomically; unresolved and unverifiable holes remain indefinitely.
+Source batch detail is compacted at an authoritative completion boundary while
+the current complete run/generation stays available for reconciliation.
+
 PostgreSQL publication observations follow the same rule: a completed run keeps
 its own accepted batch set while resolved older run identities are deleted.
+Legacy observations have no completion identity, so the newest 256 identities
+per project/connector/table are retained. Terminal snapshot generation rows are
+small shared tombstones and remain authoritative across colours; each DuckDB
+records its own cleanup completion, and published outbox payloads are removed
+after local cleanup without deleting another colour's discovery authority.

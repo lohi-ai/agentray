@@ -19,11 +19,22 @@ func (s *Store) ListStagingGenerations(ctx context.Context, cutoff time.Time, li
 	if limit <= 0 {
 		return nil, nil
 	}
+	var storeID any
+	if s.duck != nil {
+		id, err := s.duck.storeIdentity(ctx)
+		if err != nil {
+			return nil, err
+		}
+		storeID = id
+	}
 	rows, err := s.pg.Query(ctx, `SELECT generation::text,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g
 WHERE state IN ('failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
-ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit)
+  AND ($3::uuid IS NULL OR NOT EXISTS (
+	SELECT 1 FROM connector_snapshot_cleanup_receipts c WHERE c.generation=g.generation AND c.store_id=$3
+  ))
+ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -76,15 +87,30 @@ FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generatio
 	if !EligibleForStagingCleanup(descriptor, cutoff) {
 		return 0, false, nil
 	}
-	deleted, more, err := s.duck.deleteSnapshotStagingChunk(ctx, generation, limit)
+	cleaned, err := s.duck.snapshotGenerationCleanupComplete(ctx, generation)
 	if err != nil {
 		return 0, false, err
+	}
+	deleted, more := 0, false
+	if !cleaned {
+		deleted, more, err = s.duck.deleteSnapshotStagingChunk(ctx, generation, limit)
+		if err != nil {
+			return 0, false, err
+		}
 	}
 	if !more {
 		if _, err := tx.Exec(ctx, `DELETE FROM connector_snapshot_outbox WHERE generation=$1`, generation); err != nil {
 			return 0, false, err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM connector_snapshot_generations WHERE generation=$1`, generation); err != nil {
+		// Keep the small terminal generation row as shared cleanup authority.
+		// Each serving DuckDB records its own completion; deleting this row after
+		// the first colour cleans would strand staging in every other colour.
+		storeID, err := s.duck.storeIdentity(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO connector_snapshot_cleanup_receipts(generation,store_id,cleaned_at)
+VALUES($1,$2,now()) ON CONFLICT(generation,store_id) DO UPDATE SET cleaned_at=excluded.cleaned_at`, generation, storeID); err != nil {
 			return 0, false, err
 		}
 	}
@@ -160,6 +186,12 @@ func (s *Store) migrateConnectorSnapshots(ctx context.Context) error {
 		`ALTER TABLE connector_snapshot_outbox ADD COLUMN IF NOT EXISTS lower_key TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS connector_snapshot_outbox_pending_idx ON connector_snapshot_outbox(generation,batch_index) WHERE NOT published`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS connector_snapshot_outbox_batch_index_idx ON connector_snapshot_outbox(project_id,connector_id,table_name,generation,kind,batch_index)`,
+		`CREATE TABLE IF NOT EXISTS connector_snapshot_cleanup_receipts (
+	generation UUID NOT NULL,
+	store_id UUID NOT NULL,
+	cleaned_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY(generation,store_id)
+)`,
 	} {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
 			return err
