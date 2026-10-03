@@ -50,4 +50,11 @@ func TestConnectorConfigIncrementalAndLegacyRules(t *testing.T) {
 	if err := s.validateSourceBinding("p", "c", "existing", in, ""); err != nil {
 		t.Fatal(err)
 	}
+	in.SourceTable = "orders"
+	if err := s.validateSourceBinding("p", "c", "existing", in, ""); err != nil {
+		t.Fatalf("pre-upgrade public table identity was not grandfathered: %v", err)
+	}
+	if got := p.Bindings[0].DisplayRelation(); got != "orders" {
+		t.Fatalf("legacy public display relation = %q, want persisted identity", got)
+	}
 }

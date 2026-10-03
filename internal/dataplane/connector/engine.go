@@ -57,9 +57,14 @@ type SyncJob struct {
 	CursorKey string
 	// SyncMode is empty for the grandfathered path. Explicit snapshot selects
 	// the generation/outbox protocol; explicit incremental retains cursor flow.
-	SyncMode      string
-	SourcePolicy  *SourcePolicy
-	SourceBinding *SourceBinding
+	SyncMode string
+	// SyncRevision and SourceRevision are loaded with the job and rechecked
+	// under the same row locks that claim a snapshot generation. They prevent
+	// a queued/stale job from capturing after either configuration changed.
+	SyncRevision   int64
+	SourceRevision int64
+	SourcePolicy   *SourcePolicy
+	SourceBinding  *SourceBinding
 }
 
 // LandedRow is one row ready for the DuckDB landing table.
@@ -81,6 +86,10 @@ type SyncResult struct {
 	// Err is the operator-readable failure ("" = success). Sources sanitize
 	// their own errors; the store additionally truncates.
 	Err string
+	// Finalized is set only when snapshot sealing atomically persisted the
+	// successful run. Publication/checkpoint errors after that point must not
+	// rewrite the originating run to failed or cancelled.
+	Finalized bool
 }
 
 // Store is the narrow persistence surface the engine needs; storage.Store
@@ -466,6 +475,12 @@ func (e *Engine) executeRun(runID, syncID, projectID string) {
 		result = e.pullAndLand(runCtx, job)
 	}
 	cancelled := errors.Is(runCtx.Err(), context.Canceled)
+	if result.Finalized {
+		// Snapshot sealing already committed the successful run together with
+		// the immutable completion. Later publication failure or shutdown is a
+		// drain concern and cannot rewrite that source-exhaustion fact.
+		return
+	}
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(runCtx), 30*time.Second)
 	defer finishCancel()
 	if cancelled && job.SyncMode == "snapshot" {
@@ -633,13 +648,13 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
 	}
 	if err := publisher.PublishSnapshotEnvelope(ctx, complete); err != nil {
-		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error(), Finalized: true}
 	}
 	g.State = "sealed"
 	if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
-		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
+		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error(), Finalized: true}
 	}
-	return SyncResult{Rows: int(g.Rows - startRows)}
+	return SyncResult{Rows: int(g.Rows - startRows), Finalized: true}
 }
 
 // cancelQueuedRun records the terminal cancelled state for a run this process

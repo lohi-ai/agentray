@@ -13,12 +13,12 @@ import (
 
 const snapshotGenerationColumns = `project_id::text,connector_id::text,table_name,sync_id::text,generation::text,generation_seq,
 binding_digest,state,key_position,next_batch_index,row_count,capture_started_at,capture_finished_at,created_at,updated_at,terminal_at,
-run_id::text,owner,lease_epoch`
+run_id::text,owner,lease_epoch,sync_revision,source_revision`
 
 func snapshotGenerationDest(g *connector.SnapshotGeneration) []any {
 	return []any{&g.ProjectID, &g.ConnectorID, &g.Table, &g.SyncID, &g.Generation, &g.GenerationSeq,
 		&g.BindingDigest, &g.State, &g.KeyPosition, &g.NextBatchIndex, &g.Rows, &g.CaptureStartedAt,
-		&g.CaptureFinishedAt, &g.CreatedAt, &g.UpdatedAt, &g.TerminalAt, &g.RunID, &g.Owner, &g.LeaseEpoch}
+		&g.CaptureFinishedAt, &g.CreatedAt, &g.UpdatedAt, &g.TerminalAt, &g.RunID, &g.Owner, &g.LeaseEpoch, &g.SyncRevision, &g.SourceRevision}
 }
 
 func (s *Store) migrateConnectorSnapshots(ctx context.Context) error {
@@ -43,6 +43,8 @@ func (s *Store) migrateConnectorSnapshots(ctx context.Context) error {
 	run_id UUID NOT NULL,
 	owner TEXT NOT NULL,
 	lease_epoch BIGINT NOT NULL,
+	sync_revision BIGINT NOT NULL,
+	source_revision BIGINT NOT NULL,
 	CHECK (generation_seq > 0),
 	CHECK (next_batch_index >= 0 AND row_count >= 0),
 	CHECK (state IN ('capturing','yielded','sealed','failed','cancelled')),
@@ -53,6 +55,25 @@ func (s *Store) migrateConnectorSnapshots(ctx context.Context) error {
 	ON connector_snapshot_generations(project_id,connector_id,table_name)
 	WHERE state IN ('capturing','yielded')`,
 		`CREATE INDEX IF NOT EXISTS connector_snapshot_sync_idx ON connector_snapshot_generations(sync_id,created_at DESC)`,
+		`ALTER TABLE connector_snapshot_generations ADD COLUMN IF NOT EXISTS sync_revision BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE connector_snapshot_generations ADD COLUMN IF NOT EXISTS source_revision BIGINT NOT NULL DEFAULT 0`,
+		// A pre-fence resumable generation has no provable source/config
+		// identity. Fail it closed so a fresh generation starts instead of
+		// mixing its prefix with current credentials. Sealed outbox remains
+		// immutable and is still eligible for independent draining below.
+		`UPDATE connector_snapshot_generations SET state='failed',terminal_at=COALESCE(terminal_at,now()),updated_at=now()
+	WHERE state IN ('capturing','yielded') AND (sync_revision=0 OR source_revision=0)`,
+		`CREATE TABLE IF NOT EXISTS connector_snapshot_sequences (
+	project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	connector_id UUID NOT NULL REFERENCES data_connectors(id) ON DELETE CASCADE,
+	table_name VARCHAR(256) NOT NULL,
+	last_sequence BIGINT NOT NULL,
+	PRIMARY KEY(project_id,connector_id,table_name),
+	CHECK(last_sequence > 0)
+)`,
+		`INSERT INTO connector_snapshot_sequences(project_id,connector_id,table_name,last_sequence)
+	SELECT project_id,connector_id,table_name,max(generation_seq) FROM connector_snapshot_generations GROUP BY project_id,connector_id,table_name
+	ON CONFLICT(project_id,connector_id,table_name) DO UPDATE SET last_sequence=GREATEST(connector_snapshot_sequences.last_sequence,EXCLUDED.last_sequence)`,
 		`CREATE TABLE IF NOT EXISTS connector_snapshot_outbox (
 	id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 	project_id UUID NOT NULL,
@@ -95,6 +116,16 @@ func (s *Store) ClaimSnapshotGeneration(ctx context.Context, job connector.SyncJ
 		return connector.SnapshotGeneration{}, err
 	}
 	defer tx.Rollback(ctx)
+	var syncRevision, sourceRevision int64
+	if err := tx.QueryRow(ctx, `SELECT cs.revision,dc.revision FROM connector_syncs cs
+JOIN data_connectors dc ON dc.id=cs.connector_id
+WHERE cs.id=$1 AND cs.project_id=$2 AND cs.connector_id=$3 FOR UPDATE OF cs,dc`,
+		job.SyncID, job.ProjectID, job.ConnectorID).Scan(&syncRevision, &sourceRevision); err != nil {
+		return connector.SnapshotGeneration{}, err
+	}
+	if syncRevision != job.SyncRevision || sourceRevision != job.SourceRevision {
+		return connector.SnapshotGeneration{}, fmt.Errorf("snapshot job configuration is stale; enqueue a new run")
+	}
 	if err := requireSnapshotRunFence(ctx, tx, runID, job.SyncID, owner, leaseEpoch); err != nil {
 		return connector.SnapshotGeneration{}, err
 	}
@@ -104,7 +135,8 @@ WHERE g.project_id=$1 AND g.connector_id=$2 AND g.table_name=$3 AND
 (g.state IN ('capturing','yielded') OR (g.state='sealed' AND EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)))
 ORDER BY g.generation_seq DESC LIMIT 1 FOR UPDATE`, job.ProjectID, job.ConnectorID, job.Table).Scan(snapshotGenerationDest(&g)...)
 	if err == nil {
-		if g.SyncID != job.SyncID || g.BindingDigest != bindingDigest {
+		if g.SyncID != job.SyncID || g.State != "sealed" &&
+			(g.BindingDigest != bindingDigest || g.SyncRevision != job.SyncRevision || g.SourceRevision != job.SourceRevision) {
 			return connector.SnapshotGeneration{}, fmt.Errorf("live snapshot generation binding changed; cancel it before reconfiguration")
 		}
 		if _, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations SET run_id=$2,owner=$3,lease_epoch=$4,
@@ -121,15 +153,17 @@ state=CASE WHEN state='yielded' THEN 'capturing' ELSE state END,updated_at=now()
 		return connector.SnapshotGeneration{}, err
 	}
 	var next int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(generation_seq),0)+1 FROM connector_snapshot_generations
-WHERE project_id=$1 AND connector_id=$2 AND table_name=$3`, job.ProjectID, job.ConnectorID, job.Table).Scan(&next); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO connector_snapshot_sequences(project_id,connector_id,table_name,last_sequence)
+VALUES($1,$2,$3,1) ON CONFLICT(project_id,connector_id,table_name) DO UPDATE
+SET last_sequence=connector_snapshot_sequences.last_sequence+1 RETURNING last_sequence`,
+		job.ProjectID, job.ConnectorID, job.Table).Scan(&next); err != nil {
 		return connector.SnapshotGeneration{}, err
 	}
 	generation := uuid.NewString()
 	err = tx.QueryRow(ctx, `INSERT INTO connector_snapshot_generations
-(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,run_id,owner,lease_epoch)
-VALUES($1,$2,$3,$4,$5,$6,$7,'capturing',now(),$8,$9,$10) RETURNING `+snapshotGenerationColumns,
-		job.ProjectID, job.ConnectorID, job.Table, job.SyncID, generation, next, bindingDigest, runID, owner, leaseEpoch).Scan(snapshotGenerationDest(&g)...)
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,run_id,owner,lease_epoch,sync_revision,source_revision)
+VALUES($1,$2,$3,$4,$5,$6,$7,'capturing',now(),$8,$9,$10,$11,$12) RETURNING `+snapshotGenerationColumns,
+		job.ProjectID, job.ConnectorID, job.Table, job.SyncID, generation, next, bindingDigest, runID, owner, leaseEpoch, job.SyncRevision, job.SourceRevision).Scan(snapshotGenerationDest(&g)...)
 	if err != nil {
 		return connector.SnapshotGeneration{}, err
 	}
@@ -253,7 +287,23 @@ WHERE generation=$1 AND state='capturing' AND run_id=$3 AND owner=$4 AND lease_e
 	if tag.RowsAffected() != 1 {
 		return connector.SnapshotOutbox{}, fmt.Errorf("snapshot generation could not be sealed")
 	}
-	_ = runRows // folded by FinishConnectorRun after the completion is published.
+	// Source exhaustion, the immutable completion outbox row, generation seal,
+	// and originating run success are one transaction. Publishing/draining the
+	// already-authorized completion is deliberately independent of this run's
+	// lease, so a lost acknowledgement cannot turn its origin into a failure.
+	tag, err = tx.Exec(ctx, `UPDATE connector_runs SET status='succeeded',rows=$2,error='',finished_at=now()
+WHERE id=$1 AND status='running' AND owner=$3 AND lease_epoch=$4 AND NOT cancel_requested`,
+		g.RunID, runRows, g.Owner, g.LeaseEpoch)
+	if err != nil {
+		return connector.SnapshotOutbox{}, err
+	}
+	if tag.RowsAffected() != 1 {
+		return connector.SnapshotOutbox{}, fmt.Errorf("snapshot run could not be finalized with its seal")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE connector_syncs SET last_run_at=now(),last_status='ok',last_error='',last_rows=$2,
+last_success_at=now(),total_rows=total_rows+$2::bigint,revision=revision+1,updated_at=now() WHERE id=$1`, g.SyncID, runRows); err != nil {
+		return connector.SnapshotOutbox{}, err
+	}
 	return out, tx.Commit(ctx)
 }
 

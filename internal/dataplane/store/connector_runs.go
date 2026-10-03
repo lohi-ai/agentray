@@ -82,6 +82,10 @@ func (s *Store) migrateConnectorRuns(ctx context.Context) error {
 		// Sync rows gain a revision for the same optimistic-concurrency
 		// contract dashboards have (pause/update carry the expected revision).
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1`,
+		// Snapshot jobs fence only interpretation-changing configuration. The
+		// public revision also moves for run/status bookkeeping and therefore
+		// cannot identify the immutable capture configuration by itself.
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS config_revision BIGINT NOT NULL DEFAULT 1`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {

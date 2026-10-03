@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,26 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	g, err := s.ClaimSnapshotGeneration(ctx, job, run.ID, "owner-a", claimed.LeaseEpoch)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if g.SyncRevision != job.SyncRevision || g.SourceRevision != job.SourceRevision || g.SyncRevision == 0 || g.SourceRevision == 0 {
+		t.Fatalf("generation did not persist config identity: generation=%+v job=%+v", g, job)
+	}
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementCredential := "00000000-0000-4000-8000-000000000099"
+	if _, err := updateDataConnectorRevision(ctx, tx, projectID, sync.ConnectorID, nil, &replacementCredential, job.SourceRevision); err == nil || !strings.Contains(err.Error(), "snapshot generation is active") {
+		t.Fatalf("credential change did not fence active generation: %v", err)
+	}
+	tx.Rollback(ctx)
+	var userID string
+	if err := s.pg.QueryRow(ctx, `SELECT owner_id::text FROM projects WHERE id=$1`, projectID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	mode := "snapshot"
+	if _, err := s.UpdateConnectorSync(ctx, userID, projectID, syncID, ConnectorSyncInput{SourceTable: "public.other", KeyColumn: "id", SyncMode: &mode, Enabled: true}); err == nil || !strings.Contains(err.Error(), "snapshot generation is active") {
+		t.Fatalf("sync reconfiguration did not fence active generation: %v", err)
 	}
 	wireRows, err := connector.SnapshotRows([]connector.LandedRow{{Key: "1", DataJSON: `{"id":"1"}`}})
 	if err != nil {
@@ -102,16 +123,19 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Once sealed, cancellation cannot revoke or rewrite the immutable success
-	// path; it returns the still-running receipt while publication finishes.
+	// Once sealed, the originating run is already succeeded atomically;
+	// cancellation cannot revoke or rewrite the immutable success path.
 	if got, err := s.CancelConnectorRun(ctx, projectID, run2.ID); err != nil || got.CancelRequested {
 		t.Fatalf("cancel after seal=%+v err=%v", got, err)
+	}
+	if got, err := s.ConnectorRunForProject(ctx, projectID, run2.ID); err != nil || got.Status != "succeeded" {
+		t.Fatalf("sealed run was not finalized atomically: %+v err=%v", got, err)
 	}
 	if err := s.MarkSnapshotOutboxPublished(ctx, g2, completion); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishConnectorRun(ctx, run2.ID, syncID, "owner-b", connector.SyncResult{}, false); err != nil {
-		t.Fatal(err)
+	if err := s.DeleteConnectorSync(ctx, userID, projectID, syncID); err == nil || !strings.Contains(err.Error(), "history protects") {
+		t.Fatalf("snapshot history was deleted with its sync: %v", err)
 	}
 	descriptors, err := s.SnapshotGenerationDescriptors(ctx, projectID, sync.ConnectorID, "public.users")
 	if err != nil {
@@ -119,5 +143,49 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	}
 	if len(descriptors) != 1 || descriptors[0].Resumable || descriptors[0].HasUnpublishedOutbox {
 		t.Fatalf("descriptors=%+v", descriptors)
+	}
+}
+
+func TestSnapshotClaimRejectsStaleSyncAndSourceRevisions(t *testing.T) {
+	for _, mutate := range []string{"sync", "source"} {
+		t.Run(mutate, func(t *testing.T) {
+			s := openConvTestStore(t)
+			ctx := context.Background()
+			projectID, syncID := seedConnectorSync(t, s)
+			sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := connector.SourceBinding{ProjectID: projectID, ConnectorID: sync.ConnectorID, Schema: "public", Relation: "users", RelationKind: connector.RelationKindView,
+				Columns: []connector.SourcePolicyColumn{{Name: "id", PGType: "text"}}, KeyColumn: "id", KeyStability: connector.KeyStabilityImmutableUnique}
+			s.sourcePolicy = &connector.SourcePolicy{Version: 1, Bindings: []connector.SourceBinding{binding}}
+			s.sourcePolicyConfigured = true
+			if _, err := s.pg.Exec(ctx, `UPDATE connector_syncs SET source_table='public.users',sync_mode='snapshot',cursor_column='' WHERE id=$1`, syncID); err != nil {
+				t.Fatal(err)
+			}
+			job, err := s.ConnectorSyncJob(ctx, syncID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mutate == "sync" {
+				_, err = s.pg.Exec(ctx, `UPDATE connector_syncs SET config_revision=config_revision+1 WHERE id=$1`, syncID)
+			} else {
+				_, err = s.pg.Exec(ctx, `UPDATE data_connectors SET source_config_revision=source_config_revision+1 WHERE id=$1`, sync.ConnectorID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "stale-"+mutate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimed, ok, err := s.ClaimConnectorRun(ctx, run.ID, "owner-stale")
+			if err != nil || !ok {
+				t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+			}
+			if _, err := s.ClaimSnapshotGeneration(ctx, job, run.ID, "owner-stale", claimed.LeaseEpoch); err == nil || !strings.Contains(err.Error(), "configuration is stale") {
+				t.Fatalf("stale %s job claimed a generation: %v", mutate, err)
+			}
+		})
 	}
 }

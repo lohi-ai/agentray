@@ -79,7 +79,7 @@ func (h *snapshotHarness) PrepareSnapshotEnvelope(_ context.Context, g SnapshotG
 	h.pending = append(h.pending, item)
 	return item, nil
 }
-func (h *snapshotHarness) SealSnapshotGeneration(_ context.Context, g SnapshotGeneration, env SnapshotEnvelope, _ int) (SnapshotOutbox, error) {
+func (h *snapshotHarness) SealSnapshotGeneration(_ context.Context, g SnapshotGeneration, env SnapshotEnvelope, runRows int) (SnapshotOutbox, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	raw, err := MarshalSnapshotEnvelope(env)
@@ -90,6 +90,14 @@ func (h *snapshotHarness) SealSnapshotGeneration(_ context.Context, g SnapshotGe
 	h.pending = append(h.pending, item)
 	h.gen.State = "sealed"
 	h.gen.CaptureFinishedAt = env.CaptureFinishedAt
+	h.fakeStore.mu.Lock()
+	if run := h.fakeStore.runs[g.RunID]; run != nil {
+		run.Status = "succeeded"
+		run.Rows = runRows
+		now := time.Now()
+		run.FinishedAt = &now
+	}
+	h.fakeStore.mu.Unlock()
 	return item, nil
 }
 func (h *snapshotHarness) MarkSnapshotOutboxPublished(_ context.Context, _ SnapshotGeneration, item SnapshotOutbox) error {
@@ -239,6 +247,31 @@ func TestSnapshotExplicitCancelIsTerminal(t *testing.T) {
 	engine.Wait()
 	if state, _ := h.generationState(); state != "cancelled" {
 		t.Fatalf("cancelled generation state=%s", state)
+	}
+}
+
+type completionAckLostPublisher struct{ *snapshotHarness }
+
+func (p completionAckLostPublisher) PublishSnapshotEnvelope(_ context.Context, env SnapshotEnvelope) error {
+	if env.Kind == SnapshotKindComplete {
+		return fmt.Errorf("completion acknowledgement lost")
+	}
+	return nil
+}
+
+func TestSnapshotCompletionAckLossDoesNotFailSealedRun(t *testing.T) {
+	useFakeSource(&capacitySource{total: 1}, nil)
+	base := newFakeStore(snapshotCapacityJob())
+	h := &snapshotHarness{fakeStore: base}
+	runSync(t, NewEngine(h, completionAckLostPublisher{h}), base, "s1")
+	if h.gen.State != "sealed" {
+		t.Fatalf("generation state=%s, want sealed", h.gen.State)
+	}
+	if got := base.runStatus("run-1"); got != "succeeded" {
+		t.Fatalf("originating run=%s, want succeeded despite lost completion ack", got)
+	}
+	if len(h.pending) != 1 || h.pending[0].Kind != SnapshotKindComplete {
+		t.Fatalf("completion was not left for independent drain: %+v", h.pending)
 	}
 }
 
