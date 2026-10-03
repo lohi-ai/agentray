@@ -294,6 +294,59 @@ func TestRepairR2CancelledCrashedRunCannotResumeGeneration(t *testing.T) {
 	}
 }
 
+func TestSnapshotClaimDoesNotResumeArchiveCancelledGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, _, generation := seedRepairSnapshotGeneration(t, "archive-crash")
+	dc, err := s.DataConnectorForProject(ctx, projectID, generation.ConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := s.ArchiveDataConnectorIdempotent(ctx, projectID, generation.ConnectorID, dc.Revision, "archive-crash", "archive-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelledRun, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
+	if err != nil || !cancelledRun.CancelRequested {
+		t.Fatalf("archive cancellation is not durable: run=%+v err=%v", cancelledRun, err)
+	}
+	// Simulate the worker disappearing before it observes cancel_requested and
+	// calls FinishConnectorRun, then restore the connector for a later run.
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileConnectorRuns(ctx, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UnarchiveDataConnectorIdempotent(ctx, projectID, generation.ConnectorID, archived.Revision, "unarchive-crash", "unarchive-crash"); err != nil {
+		t.Fatal(err)
+	}
+	nextRun, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "after-archive-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimConnectorRun(ctx, nextRun.ID, "owner-archive-next")
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextGeneration, err := s.ClaimSnapshotGeneration(ctx, job, nextRun.ID, "owner-archive-next", claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextGeneration.Generation == generation.Generation {
+		t.Fatalf("archive-cancelled generation resumed after crash: %s", generation.Generation)
+	}
+	retired, err := s.SnapshotGeneration(ctx, generation.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.State != "cancelled" {
+		t.Fatalf("archive-cancelled generation state=%q, want cancelled", retired.State)
+	}
+}
+
 func TestRepairG5ExpiredOwnerCannotFailGeneration(t *testing.T) {
 	s, ctx, _, _, run, _, g := seedRepairSnapshotGeneration(t, "g5")
 	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
