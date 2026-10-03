@@ -3266,6 +3266,9 @@ func (s *Store) runSQL(ctx context.Context, projectID string, sqlText string, wi
 	meta := QueryMeta{QueryRef: uuid.NewString(), QueryDigest: queryDigest(projectID, sqlText),
 		ExecutedAt: s.now().UTC(), ServingDataWatermark: evidence.Watermark,
 		ResultCompleteness: ResultComplete}
+	if evidence.Watermark != nil && evidence.Watermark.SourcesTruncated {
+		meta.AvailabilityReason = stringPtr("serving_watermark_sources_summarized")
+	}
 	if serverBounded && len(rows) >= 100 {
 		meta.ResultCompleteness = ResultBounded
 	}

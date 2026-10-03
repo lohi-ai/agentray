@@ -50,3 +50,10 @@ fabricate completeness or reset production consumers to make readiness green.
 
 Cleanup never deletes an active or resumable generation and never claims that a
 DuckDB `DELETE` shrinks the file. Checkpointing makes freed blocks reusable.
+
+Receipt journals are compacted only at an authoritative completion boundary.
+The current complete run/generation and its batch identities remain available
+for reconciliation, unresolved holes are retained indefinitely, and superseded
+complete-generation batch/delivery rows plus cleared-hole rows are removed.
+PostgreSQL publication observations follow the same rule: a completed run keeps
+its own accepted batch set while resolved older run identities are deleted.

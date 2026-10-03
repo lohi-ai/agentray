@@ -3,16 +3,59 @@ package ingestion
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+func TestIncrementalReceiptWireLandsRunAndCompletion(t *testing.T) {
+	url := startBroker(t)
+	ctx := context.Background()
+	colour := newColour(t, url, testConfig("incremental-receipt"))
+	colour.serve(t)
+	queue := NewJetStreamQueue(colour.ss.JS, colour.ss.Subject, colour.ss.ConnectorSubject)
+	syncID, runID := uuid.NewString(), uuid.NewString()
+	started := time.Now().UTC().Add(-time.Minute)
+	published, err := queue.PublishIncrementalBatch(ctx, parityProject, parityConnector, parityTable,
+		connector.IncrementalReceipt{SyncID: syncID, RunID: runID, CaptureStartedAt: started}, parityRows("k1", "k2"))
+	if err != nil || published != 1 {
+		t.Fatalf("publish incremental batch = %d err=%v", published, err)
+	}
+	finished := time.Now().UTC()
+	if err := queue.PublishIncrementalComplete(ctx, parityProject, parityConnector, parityTable,
+		connector.IncrementalReceipt{SyncID: syncID, RunID: runID, ExpectedBatches: published, ExpectedRows: 2,
+			CaptureStartedAt: started, CaptureFinishedAt: &finished}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var landedRun string
+		var complete bool
+		err := colour.duck.Read(ctx, func(conn *sql.Conn) error {
+			return conn.QueryRowContext(ctx, `SELECT run_id::VARCHAR,completion_seen FROM data_receipt_sources
+WHERE project_id=? AND connector_id=? AND table_name=?`, parityProject, parityConnector, parityTable).Scan(&landedRun, &complete)
+		})
+		if err == nil && landedRun == runID && complete {
+			break
+		}
+		if err != nil && err != sql.ErrNoRows {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("incremental receipt did not land: run=%q complete=%v err=%v", landedRun, complete, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
 func TestDataReadinessConsumesFrozenC1WireFixtures(t *testing.T) {
 	body, err := os.ReadFile("testdata/c1-wire-fixtures.json")

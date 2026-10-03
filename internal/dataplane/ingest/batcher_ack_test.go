@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -128,6 +129,24 @@ func TestBatcherDeadLettersAtMaxDeliver(t *testing.T) {
 	defer dlqMu.Unlock()
 	if len(dlq) != 1 || string(dlq[0]) != "poison-body" {
 		t.Fatalf("want body dead-lettered once, got %v", dlq)
+	}
+}
+
+func TestBatcherCapacityAtMaxDeliverStaysRetriable(t *testing.T) {
+	var deadLetters atomic.Int32
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
+		return fmt.Errorf("disk reserve: %w", storage.ErrDataCapacity)
+	}, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour, MaxRetries: 1, MaxDeliver: 1,
+		DeadLetter: func([]byte) error { deadLetters.Add(1); return nil }})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 99, payload: []byte("valid-accepted-event")}
+	b.AddMsg(ev(1), msg)
+	waitForState(t, msg, func() bool { _, n, _ := msg.state(); return n })
+	if acked, nacked, termed := msg.state(); acked || !nacked || termed {
+		t.Fatalf("capacity settlement = ack=%v nak=%v term=%v, want delayed retry", acked, nacked, termed)
+	}
+	if deadLetters.Load() != 0 {
+		t.Fatal("capacity pressure was classified as poison")
 	}
 }
 

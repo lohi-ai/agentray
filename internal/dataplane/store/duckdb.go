@@ -42,7 +42,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 4
+const DuckDBSchemaVersion = 5
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -521,6 +521,18 @@ var duckDBSchema = []string{
 		payload_sha256 VARCHAR NOT NULL,
 		landed_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (project_id, connector_id, table_name, generation_key, batch_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_deliveries (
+		stream_id VARCHAR NOT NULL,
+		subject VARCHAR NOT NULL,
+		stream_seq UBIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		project_id UUID,
+		connector_id UUID,
+		table_name VARCHAR,
+		generation_key VARCHAR,
+		applied_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (stream_id, subject, stream_seq, payload_sha256)
 	)`,
 	`CREATE TABLE IF NOT EXISTS data_receipt_holes (
 		stream_id VARCHAR NOT NULL,

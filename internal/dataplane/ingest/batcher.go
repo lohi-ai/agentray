@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -196,7 +197,7 @@ func (b *EventBatcher) AddMsg(events []storage.Event, msg msgHandle) {
 		return
 	}
 	if err := validateEvents(events); err != nil {
-		b.poison(msg, err)
+		b.poison(msg, eventSource(events), err)
 		return
 	}
 	b.in <- queued{events: events, msg: msg}
@@ -221,7 +222,7 @@ func validateEvents(events []storage.Event) error {
 // poison settles a message that can never insert. A configured DLQ receives
 // the raw body before the original terminates; if DLQ publication is disabled
 // or fails, the old durable contract is preserved by NAKing for redelivery.
-func (b *EventBatcher) poison(msg msgHandle, cause error) {
+func (b *EventBatcher) poison(msg msgHandle, source *storage.SourceReceiptMark, cause error) {
 	if msg == nil {
 		log.Printf("ingestion batcher: dropping undeliverable batch: %v", cause)
 		return
@@ -249,7 +250,11 @@ func (b *EventBatcher) poison(msg msgHandle, cause error) {
 		}
 		return
 	}
-	if err := b.recordReadinessHole(msg.delivery(), nil); err != nil {
+	delivery := msg.delivery()
+	if source != nil {
+		delivery.ProjectID = source.ProjectID
+	}
+	if err := b.recordReadinessHole(delivery, source); err != nil {
 		b.retrySettlement(msg, err)
 		return
 	}
@@ -378,9 +383,10 @@ func (b *EventBatcher) flush(items []queued) {
 		}
 		if it.msg != nil {
 			delivery := it.msg.delivery()
-			if delivery.Replayed {
-				mark.Deliveries = append(mark.Deliveries, delivery)
+			if source := eventSource(it.events); source != nil {
+				delivery.ProjectID = source.ProjectID
 			}
+			mark.Deliveries = append(mark.Deliveries, delivery)
 		}
 	}
 
@@ -417,6 +423,13 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 			logBatchError(cause)
 			continue
 		}
+		// Capacity pressure is recoverable operator state, never poison. Keep the
+		// accepted message on delayed broker retry even after MaxDeliver.
+		if errors.Is(cause, storage.ErrDataCapacity) {
+			_ = it.msg.nak(b.nakDelay)
+			b.metrics.recordNak()
+			continue
+		}
 		if it.msg.deliveries() >= uint64(b.maxDeliver) && (b.deadLetter != nil || b.deadLetterWithReceipt != nil) {
 			// Recorded before the dead-letter and the terminate, like the poison
 			// path: settling moves the ack floor, and a store that could not take
@@ -433,7 +446,12 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 				b.metrics.recordNak()
 				continue
 			}
-			if err := b.recordReadinessHole(it.msg.delivery(), nil); err != nil {
+			delivery := it.msg.delivery()
+			source := eventSource(it.events)
+			if source != nil {
+				delivery.ProjectID = source.ProjectID
+			}
+			if err := b.recordReadinessHole(delivery, source); err != nil {
 				b.retrySettlement(it.msg, err)
 				continue
 			}
@@ -445,6 +463,19 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 		_ = it.msg.nak(b.nakDelay)
 		b.metrics.recordNak()
 	}
+}
+
+func eventSource(events []storage.Event) *storage.SourceReceiptMark {
+	if len(events) == 0 || events[0].ProjectID == "" {
+		return nil
+	}
+	projectID := events[0].ProjectID
+	for _, event := range events[1:] {
+		if event.ProjectID != projectID {
+			return nil
+		}
+	}
+	return &storage.SourceReceiptMark{ProjectID: projectID}
 }
 
 // sinkWithRetry does a few quick, bounded retries with exponential backoff to ride

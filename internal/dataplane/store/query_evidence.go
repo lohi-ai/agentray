@@ -33,8 +33,10 @@ type QueryMeta struct {
 }
 
 type ServingWatermark struct {
-	EventLandedAt *time.Time               `json:"event_landed_at"`
-	Sources       []ServingSourceWatermark `json:"sources"`
+	EventLandedAt    *time.Time               `json:"event_landed_at"`
+	Sources          []ServingSourceWatermark `json:"sources"`
+	TotalSources     uint64                   `json:"total_sources"`
+	SourcesTruncated bool                     `json:"sources_truncated"`
 }
 
 type ServingSourceWatermark struct {
@@ -92,7 +94,7 @@ coalesce((SELECT sum(mutation_seq) FROM data_receipt_sources WHERE project_id = 
 		rows, err := snapshot.QueryContext(ctx, `SELECT connector_id::VARCHAR, table_name, generation::VARCHAR,
 capture_started_at, capture_finished_at, landed_at, mutation_seq
 FROM data_receipt_sources WHERE project_id = ? AND landed_at IS NOT NULL
-ORDER BY updated_at DESC, connector_id, table_name LIMIT 64`, projectID)
+ORDER BY updated_at DESC, connector_id, table_name`, projectID)
 		if err != nil {
 			return err
 		}
@@ -121,8 +123,13 @@ ORDER BY updated_at DESC, connector_id, table_name LIMIT 64`, projectID)
 				v := landed.V.UTC()
 				w.LandedAt = &v
 			}
-			e.Watermark.Sources = append(e.Watermark.Sources, w)
 			e.Confirmations[w.ConnectorID+"\x00"+w.Table] = sourceConfirmation{MutationSeq: mutation}
+			e.Watermark.TotalSources++
+			if len(e.Watermark.Sources) < 64 {
+				e.Watermark.Sources = append(e.Watermark.Sources, w)
+			} else {
+				e.Watermark.SourcesTruncated = true
+			}
 		}
 		return rows.Err()
 	}()

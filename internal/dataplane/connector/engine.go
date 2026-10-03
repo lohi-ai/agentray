@@ -118,6 +118,23 @@ type RowPublisher interface {
 	PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error
 }
 
+// IncrementalPublisher is the receipt-aware production path. It reports the
+// exact number of transport chunks so the completion marker can describe the
+// batch set the broker actually accepted rather than the source pull count.
+type IncrementalPublisher interface {
+	PublishIncrementalBatch(context.Context, string, string, string, IncrementalReceipt, []LandedRow) (int64, error)
+	PublishIncrementalComplete(context.Context, string, string, string, IncrementalReceipt) error
+}
+
+type IncrementalReceipt struct {
+	SyncID, RunID     string
+	BatchIndex        int64
+	ExpectedBatches   int64
+	ExpectedRows      int64
+	CaptureStartedAt  time.Time
+	CaptureFinishedAt *time.Time
+}
+
 type SnapshotPublisher interface {
 	BuildSnapshotBatches(common SnapshotEnvelope, rows []LandedRow, startIndex int64) ([]SnapshotEnvelope, error)
 	PublishSnapshotEnvelope(ctx context.Context, env SnapshotEnvelope) error
@@ -463,7 +480,7 @@ func (e *Engine) executeRun(runID, syncID, projectID string) {
 	} else if job.SyncMode == "snapshot" {
 		result = e.pullAndLandSnapshot(runCtx, job, claimedRun)
 	} else {
-		result = e.pullAndLand(runCtx, job)
+		result = e.pullAndLandRun(runCtx, job, claimedRun)
 	}
 	cancelled := errors.Is(runCtx.Err(), context.Canceled)
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(runCtx), 30*time.Second)
@@ -666,6 +683,10 @@ func (e *Engine) cancelQueuedRun(projectID, runID string) {
 // pullAndLand does the fallible middle of a run and always returns a
 // persistable result.
 func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
+	return e.pullAndLandRun(ctx, job, Run{})
+}
+
+func (e *Engine) pullAndLandRun(ctx context.Context, job SyncJob, run Run) SyncResult {
 	// Snapshot mode: order by the key column and never persist a cursor, so
 	// each run re-lands the full table (idempotent via the landing key).
 	cursorColumn := job.CursorColumn
@@ -677,6 +698,11 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 	cursor := job.Cursor
 	cursorKey := job.CursorKey
 	total := 0
+	transportBatches := int64(0)
+	captureStarted := time.Now().UTC()
+	if run.StartedAt != nil {
+		captureStarted = run.StartedAt.UTC()
+	}
 	result := func(errText string) SyncResult {
 		advance := persistCursor && (cursor != job.Cursor || cursorKey != job.CursorKey)
 		r := SyncResult{AdvanceCursor: advance, Rows: total, Err: errText}
@@ -723,8 +749,17 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 			}
 			landed = append(landed, LandedRow{Key: r.Key, Cursor: r.Cursor, DataJSON: string(data)})
 		}
-		if err := e.publisher.PublishExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed); err != nil {
-			return result(fmt.Sprintf("queue rows: %v", err))
+		var publishErr error
+		if publisher, ok := e.publisher.(IncrementalPublisher); ok && run.ID != "" {
+			var published int64
+			published, publishErr = publisher.PublishIncrementalBatch(ctx, job.ProjectID, job.ConnectorID, job.Table,
+				IncrementalReceipt{SyncID: job.SyncID, RunID: run.ID, BatchIndex: transportBatches, CaptureStartedAt: captureStarted}, landed)
+			transportBatches += published
+		} else {
+			publishErr = e.publisher.PublishExternalRows(ctx, job.ProjectID, job.ConnectorID, job.Table, landed)
+		}
+		if publishErr != nil {
+			return result(fmt.Sprintf("queue rows: %v", publishErr))
 		}
 		total += len(pull.Rows)
 		hasMore = pull.HasMore
@@ -743,6 +778,14 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 		// cap means the tail of the table will never land — surface it instead
 		// of reporting a silently truncated table as ok.
 		return result(fmt.Sprintf("table exceeds the %d-row snapshot limit; configure a cursor column for incremental sync", maxBatchesPerRun*pullBatchSize))
+	}
+	if publisher, ok := e.publisher.(IncrementalPublisher); ok && run.ID != "" {
+		finished := time.Now().UTC()
+		if err := publisher.PublishIncrementalComplete(ctx, job.ProjectID, job.ConnectorID, job.Table,
+			IncrementalReceipt{SyncID: job.SyncID, RunID: run.ID, ExpectedBatches: transportBatches,
+				ExpectedRows: int64(total), CaptureStartedAt: captureStarted, CaptureFinishedAt: &finished}); err != nil {
+			return result(fmt.Sprintf("queue completion: %v", err))
+		}
 	}
 	return result("")
 }

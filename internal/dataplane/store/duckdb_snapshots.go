@@ -19,8 +19,19 @@ func (d *DuckDB) ApplySnapshotEnvelope(ctx context.Context, env connector.Snapsh
 	if err := env.Validate(); err != nil {
 		return nil, err
 	}
+	if err := d.admitDataWrite(); err != nil {
+		return nil, err
+	}
 	var promotion *connector.SnapshotPromotion
 	err := d.Write(ctx, func(tx *sql.Tx) error {
+		source := sourceReceiptFromSnapshot(env)
+		for _, delivery := range mark.Deliveries {
+			if delivery.PublishedAt != nil {
+				source.PublishedAt = delivery.PublishedAt
+				break
+			}
+		}
+		mark.Source = source
 		var err error
 		switch env.Kind {
 		case connector.SnapshotKindBatch:
@@ -35,9 +46,41 @@ func (d *DuckDB) ApplySnapshotEnvelope(ctx context.Context, env connector.Snapsh
 		if err != nil {
 			return err
 		}
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		if promotion == nil {
+			return recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC())
+		}
+		// Promotion and readiness evidence share this exact transaction: no
+		// reader can observe active snapshot rows without their receipt.
+		mark.Source = nil
+		if err := recordAppliedReceiptsTx(ctx, tx, mark, promotion.PromotedAt); err != nil {
+			return err
+		}
+		source.Complete, source.Promoted = true, true
+		source.CaptureFinishedAt = &promotion.CaptureFinishedAt
+		expectedBatches, expectedRows := uint64(promotion.ExpectedBatches), uint64(promotion.ExpectedRows)
+		source.ExpectedBatches, source.ExpectedRows = &expectedBatches, &expectedRows
+		return RecordSnapshotPromotionTx(ctx, tx, SnapshotPromotion{SourceReceiptMark: *source, PromotedAt: promotion.PromotedAt})
 	})
 	return promotion, err
+}
+
+func sourceReceiptFromSnapshot(env connector.SnapshotEnvelope) *SourceReceiptMark {
+	seq := uint64(env.GenerationSeq)
+	mark := &SourceReceiptMark{ProjectID: env.ProjectID, ConnectorID: env.ConnectorID, Table: env.Table,
+		SyncID: env.SyncID, RunID: env.RunID, Generation: env.Generation, GenerationSeq: seq,
+		BindingDigest: env.BindingDigest, CaptureStartedAt: &env.CaptureStartedAt}
+	if env.Kind == connector.SnapshotKindBatch {
+		index := uint64(env.BatchIndex)
+		mark.BatchID, mark.BatchIndex, mark.PayloadSHA256 = env.BatchID, &index, env.PayloadSHA256
+	} else {
+		mark.Complete, mark.CaptureFinishedAt = true, env.CaptureFinishedAt
+		expectedBatches, expectedRows := uint64(env.ExpectedBatches), uint64(env.ExpectedRows)
+		mark.ExpectedBatches, mark.ExpectedRows = &expectedBatches, &expectedRows
+	}
+	return mark
 }
 
 func stageSnapshotBatch(ctx context.Context, tx *sql.Tx, env connector.SnapshotEnvelope) error {
@@ -237,4 +280,47 @@ WHERE project_id=? AND connector_id=? AND table_name=?`, projectID, connectorID,
 			&out.ExpectedBatches, &out.ExpectedRows, &out.BatchManifestSHA256)
 	})
 	return out, err
+}
+
+func (d *DuckDB) snapshotGenerationActive(ctx context.Context, generation string) (bool, error) {
+	var active bool
+	err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions WHERE generation=?)`, generation).Scan(&active)
+	})
+	return active, err
+}
+
+func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation string, limit int) (deleted int, more bool, err error) {
+	err = d.Write(ctx, func(tx *sql.Tx) error {
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions WHERE generation=?)`, generation).Scan(&active); err != nil {
+			return err
+		}
+		if active {
+			return nil
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM connector_snapshot_rows WHERE rowid IN
+(SELECT rowid FROM connector_snapshot_rows WHERE generation=? LIMIT ?)`, generation, limit)
+		if err != nil {
+			return err
+		}
+		if n, rowsErr := result.RowsAffected(); rowsErr == nil {
+			deleted = int(n)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_rows WHERE generation=?)`, generation).Scan(&more); err != nil {
+			return err
+		}
+		if !more {
+			for _, stmt := range []string{
+				`DELETE FROM connector_snapshot_batches WHERE generation=?`,
+				`DELETE FROM connector_snapshot_completions WHERE generation=?`,
+			} {
+				if _, err := tx.ExecContext(ctx, stmt, generation); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return deleted, more, err
 }

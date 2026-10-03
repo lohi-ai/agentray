@@ -62,6 +62,18 @@ func TestSnapshotAtomicPromotionAndReplay(t *testing.T) {
 	if promotion == nil || promotion.Generation != f.Complete.Generation {
 		t.Fatalf("promotion=%+v", promotion)
 	}
+	var receiptGeneration string
+	var completionSeen bool
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT generation::VARCHAR,completion_seen FROM data_receipt_sources
+WHERE project_id=? AND connector_id=? AND table_name=?`, f.Complete.ProjectID, f.Complete.ConnectorID, f.Complete.Table).
+			Scan(&receiptGeneration, &completionSeen)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if receiptGeneration != f.Complete.Generation || !completionSeen {
+		t.Fatalf("snapshot promotion receipt = generation %q complete=%v", receiptGeneration, completionSeen)
+	}
 	if got := snapshotLiveCount(t, d, f.Complete.ProjectID, f.Complete.ConnectorID, f.Complete.Table); got != 2 {
 		t.Fatalf("promoted rows=%d", got)
 	}
@@ -85,6 +97,47 @@ func TestSnapshotAtomicPromotionAndReplay(t *testing.T) {
 	}
 	if got := snapshotLiveCount(t, d, f.Complete.ProjectID, f.Complete.ConnectorID, f.Complete.Table); got != 0 {
 		t.Fatalf("older replay rolled back active generation: %d", got)
+	}
+}
+
+func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDuckDB(t)
+	raw, err := os.ReadFile(filepath.Join("..", "ingest", "testdata", "c1-wire-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Batches  []connector.SnapshotEnvelope `json:"batches"`
+		Complete connector.SnapshotEnvelope   `json:"complete"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApplySnapshotEnvelope(ctx, f.Batches[0], AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, more, err := d.deleteSnapshotStagingChunk(ctx, f.Batches[0].Generation, 50_000)
+	if err != nil || deleted == 0 || more {
+		t.Fatalf("partial cleanup = deleted %d more=%v err=%v", deleted, more, err)
+	}
+	for _, env := range f.Batches {
+		if _, err := d.ApplySnapshotEnvelope(ctx, env, AppliedMark{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.ApplySnapshotEnvelope(ctx, f.Complete, AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, _, err = d.deleteSnapshotStagingChunk(ctx, f.Complete.Generation, 50_000)
+	if err != nil || deleted != 0 {
+		t.Fatalf("active generation cleanup = deleted %d err=%v", deleted, err)
+	}
+	var rows int
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, f.Complete.Generation).Scan(&rows)
+	}); err != nil || rows == 0 {
+		t.Fatalf("active staging rows=%d err=%v", rows, err)
 	}
 }
 

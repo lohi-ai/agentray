@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -110,10 +111,11 @@ func (q EventQueue) InsertEvents(ctx context.Context, events []storage.Event) er
 // Row bodies ride as json.RawMessage so neither side re-encodes the row JSON —
 // the engine already holds it as a string and the landing table stores a string.
 type ExternalRowsBatch struct {
-	ProjectID   string        `json:"project_id"`
-	ConnectorID string        `json:"connector_id"`
-	Table       string        `json:"table"`
-	Rows        []ExternalRow `json:"rows"`
+	ProjectID   string                     `json:"project_id"`
+	ConnectorID string                     `json:"connector_id"`
+	Table       string                     `json:"table"`
+	Rows        []ExternalRow              `json:"rows"`
+	Source      *storage.SourceReceiptMark `json:"source_receipt,omitempty"`
 }
 
 // ExternalRow is one landed source row on the wire. The split from
@@ -265,6 +267,74 @@ func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connecto
 		}
 		if err := q.nc.FlushTimeout(2 * time.Second); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (q EventQueue) PublishIncrementalBatch(ctx context.Context, projectID, connectorID, table string, receipt connector.IncrementalReceipt, rows []connector.LandedRow) (int64, error) {
+	chunks := chunkRows(rows, q.publishBudget())
+	for i, chunk := range chunks {
+		index := uint64(receipt.BatchIndex + int64(i))
+		digestBody, err := json.Marshal(chunk)
+		if err != nil {
+			return int64(i), err
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256(digestBody))
+		mark := &storage.SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: table,
+			SyncID: receipt.SyncID, RunID: receipt.RunID, BatchID: fmt.Sprintf("batch-%06d", index),
+			BatchIndex: &index, PayloadSHA256: digest, CaptureStartedAt: &receipt.CaptureStartedAt}
+		if err := q.publishExternalEnvelope(ctx, ExternalRowsBatch{ProjectID: projectID, ConnectorID: connectorID, Table: table, Rows: chunk, Source: mark}); err != nil {
+			return int64(i), err
+		}
+	}
+	return int64(len(chunks)), nil
+}
+
+func (q EventQueue) PublishIncrementalComplete(ctx context.Context, projectID, connectorID, table string, receipt connector.IncrementalReceipt) error {
+	expectedBatches, expectedRows := uint64(receipt.ExpectedBatches), uint64(receipt.ExpectedRows)
+	mark := &storage.SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: table,
+		SyncID: receipt.SyncID, RunID: receipt.RunID, ExpectedBatches: &expectedBatches, ExpectedRows: &expectedRows,
+		CaptureStartedAt: &receipt.CaptureStartedAt, CaptureFinishedAt: receipt.CaptureFinishedAt, Complete: true}
+	return q.publishExternalEnvelope(ctx, ExternalRowsBatch{ProjectID: projectID, ConnectorID: connectorID, Table: table, Rows: []ExternalRow{}, Source: mark})
+}
+
+func (q EventQueue) publishExternalEnvelope(ctx context.Context, batch ExternalRowsBatch) error {
+	body, err := json.Marshal(batch)
+	if err != nil {
+		return fmt.Errorf("encode connector batch: %w", err)
+	}
+	published := time.Now().UTC()
+	if q.js != nil {
+		if admission, ok := q.publicationObserver.(interface{ AdmitDataPublication() error }); ok {
+			if err := admission.AdmitDataPublication(); err != nil {
+				return fmt.Errorf("admit connector publication: %w", err)
+			}
+		}
+		if _, err := q.js.Publish(ctx, q.connectorSubject, body, jetstream.WithMsgID(bodyMsgID(body))); err != nil {
+			return fmt.Errorf("publish connector batch: %w", err)
+		}
+	} else {
+		if err := q.nc.Publish(q.connectorSubject, body); err != nil {
+			return err
+		}
+		if err := q.nc.FlushTimeout(2 * time.Second); err != nil {
+			return err
+		}
+	}
+	if q.publicationObserver != nil && batch.Source != nil {
+		mark := *batch.Source
+		mark.PublishedAt = &published
+		stableID := mark.RunID + ":" + mark.BatchID
+		payloadDigest := mark.PayloadSHA256
+		if mark.Complete {
+			stableID = mark.RunID + ":complete"
+			payloadDigest = fmt.Sprintf("%x", sha256.Sum256(body))
+		}
+		if err := q.publicationObserver.RecordPublication(ctx, storage.PublicationObservation{
+			SourceReceiptMark: mark, StableBatchID: stableID, PayloadSHA256: payloadDigest, PublishedAt: published,
+		}); err != nil {
+			return fmt.Errorf("record accepted connector publication: %w", err)
 		}
 	}
 	return nil
@@ -460,6 +530,20 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, 
 		return nil, fmt.Errorf("bind this colour's store to durable %q: %w", ss.durableName(), err)
 	}
 	ss.latchBootGap(cinfo, streamInfo)
+	streamID := streamIncarnation(streamInfo.Config.Name, streamInfo.Created)
+	if missing := ss.bootGap.Load(); missing > 0 || ss.bootUnverified.Load() {
+		seq := missing
+		if seq == 0 {
+			seq = 1
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte("retention-loss\x00"+streamID)))
+		if err := sink.RecordReadinessHole(ctx, storage.DeliveryReceiptMark{StreamID: streamID,
+			Subject: "__retention_loss__", StreamSeq: seq, PayloadSHA256: digest, Unverifiable: true}, nil); err != nil {
+			batcher.Stop()
+			return nil, fmt.Errorf("record retention-loss readiness evidence: %w", err)
+		}
+	}
+	settler.streamID = streamID
 	consume, err := cons.Consume(func(msg jetstream.Msg) {
 		if msg.Subject() == ss.ConnectorSubject {
 			settler.settle(msg)
@@ -476,12 +560,12 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, 
 			// delivery moves the consumer's ack floor, so the store has to cover
 			// the position or its next boot reads the difference as a lost range.
 			// If the record will not land, the message is retried instead.
-			if recErr := recordSettled(sink, ss.durableName(), jsMsgHandle{msg: msg}.seq()); recErr != nil {
+			if recErr := recordSettled(sink, ss.durableName(), jsMsgHandle{msg: msg, streamID: streamID}.seq()); recErr != nil {
 				log.Printf("ingestion worker: %v; redelivering the undecodable batch instead of settling over it", recErr)
 				_ = msg.NakWithDelay(5 * time.Second)
 				return
 			}
-			delivery := jsMsgHandle{msg: msg}.delivery()
+			delivery := jsMsgHandle{msg: msg, streamID: streamID}.delivery()
 			if derr := dlqPublish(ss.Subject, delivery, msg.Data()); derr != nil {
 				log.Printf("ingestion worker: dead-letter undecodable batch: %v", derr)
 				_ = msg.NakWithDelay(5 * time.Second)
@@ -495,7 +579,7 @@ func StartJetStreamWorker(ctx context.Context, ss *StreamSet, sink ingestStore, 
 			_ = msg.Term()
 			return
 		}
-		batcher.AddMsg(events, jsMsgHandle{msg: msg})
+		batcher.AddMsg(events, jsMsgHandle{msg: msg, streamID: streamID})
 	})
 	if err != nil {
 		batcher.Stop()
@@ -520,7 +604,8 @@ type externalRowsSettler struct {
 	// durable names the consumer these batches arrive under; connector rows are
 	// recorded against it exactly as events are, because one consumer carries
 	// both subjects (see storage.AppliedMark).
-	durable string
+	durable  string
+	streamID string
 	// nakDelay is the redelivery delay asked of JetStream. Zero means
 	// connectorNakDelay; tests shorten it.
 	nakDelay time.Duration
@@ -536,7 +621,7 @@ const (
 )
 
 func (s externalRowsSettler) settle(msg jetstream.Msg) {
-	handle := jsMsgHandle{msg: msg}
+	handle := jsMsgHandle{msg: msg, streamID: s.streamID}
 	batch, snapshot, err := decodeConnectorEnvelope(msg.Data())
 	if err != nil {
 		log.Printf("ingestion worker: decode connector batch (dead-lettering): %v", err)
@@ -544,10 +629,22 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 		return
 	}
 	delivery := handle.delivery()
-	deliveries := []storage.DeliveryReceiptMark(nil)
-	if delivery.Replayed {
-		deliveries = append(deliveries, delivery)
+	var source *storage.SourceReceiptMark
+	if snapshot != nil {
+		source = sourceReceiptFromSnapshotEnvelope(*snapshot, delivery.PublishedAt)
+		delivery.ProjectID, delivery.ConnectorID, delivery.Table = snapshot.ProjectID, snapshot.ConnectorID, snapshot.Table
+	} else {
+		delivery.ProjectID, delivery.ConnectorID, delivery.Table = batch.ProjectID, batch.ConnectorID, batch.Table
+		if batch.Source != nil {
+			copy := *batch.Source
+			copy.Promoted = true
+			if copy.PublishedAt == nil {
+				copy.PublishedAt = delivery.PublishedAt
+			}
+			source = &copy
+		}
 	}
+	deliveries := []storage.DeliveryReceiptMark{delivery}
 	var landed []connector.LandedRow
 	if batch != nil {
 		landed = batch.LandedRows()
@@ -563,7 +660,7 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 				err = fmt.Errorf("snapshot landing is unavailable")
 			}
 		} else {
-			err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries})
+			err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq(), Deliveries: deliveries, Source: source})
 		}
 		cancel()
 		if err == nil {
@@ -579,6 +676,11 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	}
 
 	s.metrics.recordInsertFailure()
+	if errors.Is(err, storage.ErrDataCapacity) {
+		log.Printf("ingestion worker: connector capacity unavailable, redelivering: %v", err)
+		s.nak(handle)
+		return
+	}
 	if handle.deliveries() >= uint64(s.maxDeliver) && (s.deadLetter != nil || s.deadLetterWithReceipt != nil) {
 		// Recorded before the dead-letter and the terminate: settling moves the
 		// ack floor, so a store that cannot take the record leaves the batch to be
@@ -594,7 +696,7 @@ func (s externalRowsSettler) settle(msg jetstream.Msg) {
 			return
 		}
 		if s.recordHole != nil {
-			if herr := s.recordHole(context.Background(), delivery, nil); herr != nil {
+			if herr := s.recordHole(context.Background(), delivery, source); herr != nil {
 				log.Printf("ingestion worker: record connector readiness hole: %v", herr)
 				s.nak(handle)
 				return
@@ -705,7 +807,10 @@ func (w *EventWorker) Stop() error {
 }
 
 // jsMsgHandle adapts a JetStream message to the batcher's msgHandle contract.
-type jsMsgHandle struct{ msg jetstream.Msg }
+type jsMsgHandle struct {
+	msg      jetstream.Msg
+	streamID string
+}
 
 func (h jsMsgHandle) ack() error                { return h.msg.Ack() }
 func (h jsMsgHandle) nak(d time.Duration) error { return h.msg.NakWithDelay(d) }
@@ -730,8 +835,19 @@ func (h jsMsgHandle) delivery() storage.DeliveryReceiptMark {
 	}
 	published := md.Timestamp.UTC()
 	legacy := headers.Get(LegacyDLQHeader) == "true"
-	return storage.DeliveryReceiptMark{StreamID: md.Stream, Subject: h.msg.Subject(), StreamSeq: md.Sequence.Stream,
+	streamID := h.streamID
+	if streamID == "" {
+		streamID = md.Stream
+	}
+	return storage.DeliveryReceiptMark{StreamID: streamID, Subject: h.msg.Subject(), StreamSeq: md.Sequence.Stream,
 		PayloadSHA256: digest, PublishedAt: &published, Replayed: legacy, Unverifiable: legacy}
+}
+
+func streamIncarnation(name string, created time.Time) string {
+	if created.IsZero() {
+		return name
+	}
+	return name + "@" + created.UTC().Format(time.RFC3339Nano)
 }
 
 func timePtr(v time.Time) *time.Time {

@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"context"
 	"testing"
 	"time"
 )
+
+var _ StagingRetentionBackend = (*Store)(nil)
 
 func TestStagingRetentionRequiresAuthoritativeTerminalEligibility(t *testing.T) {
 	old := time.Now().Add(-8 * 24 * time.Hour)
@@ -26,4 +29,32 @@ func TestStagingRetentionRequiresAuthoritativeTerminalEligibility(t *testing.T) 
 			}
 		})
 	}
+}
+
+type stagingBackendProbe struct {
+	deleted chan string
+}
+
+func (b *stagingBackendProbe) ListStagingGenerations(_ context.Context, cutoff time.Time, _ int) ([]StagingGenerationDescriptor, error) {
+	terminal := cutoff.Add(-time.Hour)
+	return []StagingGenerationDescriptor{{Generation: "expired", State: "failed", TerminalAt: &terminal}}, nil
+}
+func (b *stagingBackendProbe) DeleteEligibleStagingChunk(_ context.Context, generation string, _ time.Time, _ int) (int, bool, error) {
+	b.deleted <- generation
+	return 1, true, nil
+}
+
+func TestStagingRetentionRunsConfiguredBackendAndStops(t *testing.T) {
+	backend := &stagingBackendProbe{deleted: make(chan string, 1)}
+	r := NewStagingRetention(backend, 7*24*time.Hour)
+	r.Tick(context.Background(), time.Now())
+	select {
+	case generation := <-backend.deleted:
+		if generation != "expired" {
+			t.Fatalf("deleted generation = %q", generation)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("configured staging retention never invoked its backend")
+	}
+	r.Stop()
 }
