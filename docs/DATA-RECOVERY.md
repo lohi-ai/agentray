@@ -73,11 +73,13 @@ The run is authorized only on the foreman-leased GCE instance `lohi-app` in
 project `lohi-dev-lohi`, zone `asia-southeast1-a`, for the
 `lohi-app-frozen-surface` class. The approval variables are an operator
 attestation, and the harness independently verifies that exact identity through
-GCE metadata before creating fixtures. It also refuses unless its process has
-exactly one allowed CPU, nice value 19, a 2–3 GiB cgroup `MemoryMax`, and an
-internal timeout of at most 60 minutes. The harness owns and removes a
-`postgres:16-alpine` container, embedded file-backed JetStream, DuckDB/WAL,
-sandbox children, spill files, and all generated corpus files.
+GCE metadata before creating fixtures. It also refuses outside 01:00–06:00 HCM
+or unless its process has exactly one allowed CPU, nice value 19, a 2–2.5 GiB
+cgroup `MemoryMax`, and an internal timeout of at most 60 minutes. The 2.5 GiB
+parent ceiling reserves the fixed 512 MiB PostgreSQL allocation, so the
+aggregate authorized ceiling can never exceed 3 GiB. The harness owns and
+removes a `postgres:16-alpine` container, embedded file-backed JetStream,
+DuckDB/WAL, sandbox children, spill files, and all generated corpus files.
 
 From the repository root, the complete non-interactive invocation is:
 
@@ -92,13 +94,21 @@ sudo systemd-run --scope --quiet --collect -p MemoryMax=2G \
   go test ./internal/dataplane/ingest -run '^TestDataEnvelope$' -count=1 -timeout 59m -v
 ```
 
-These are the authorized host caps, not tuning suggestions. The main test,
-embedded broker, and sandbox workers share the one-CPU, nice-19, 2 GiB scope;
-the harness launches disposable PostgreSQL pinned to that same CPU with a
-512 MiB hard memory/swap cap, for a 2.5 GiB aggregate ceiling. The outer runner
+Run this command only during the authorized 01:00–06:00 HCM window; the harness
+checks that window before creating any fixture. These are the authorized host
+caps, not tuning suggestions. The main test, embedded broker, and sandbox
+workers share the one-CPU, nice-19, 2 GiB scope; the harness launches disposable
+PostgreSQL pinned to that same CPU, at Docker's lowest CPU share weight, with a
+512 MiB hard memory/swap cap, for a 2.5 GiB aggregate ceiling. Preflight accepts
+no parent `MemoryMax` above 2.5 GiB because PostgreSQL's allocation would then
+exceed the 3 GiB aggregate authorization. The outer runner
 sends TERM at 59m30s and KILL 30 seconds later, enforcing a 60-minute hard wall
 clock; the Go test timeout is 59 minutes, and the harness cancels its work at
-58 minutes to leave teardown headroom. Any
+58 minutes to leave teardown headroom. PostgreSQL runs through an attached
+Docker client owned by an independent watchdog. Normal return, startup failure,
+panic, Go timeout, TERM, KILL, or parent disappearance therefore stops the
+client, forcibly removes the named disposable container, reaps the watchdog,
+and leaves no detached database behind. Any
 missing or different detected cap fails preflight; do not weaken the check.
 
 Do not replace the corpus constants or shorten the 15-minute steady phase to
@@ -117,8 +127,11 @@ when warm p95 exceeds 5s, cold p95 exceeds 30s, accepted-publication p95 exceeds
 1s, queryable p95 exceeds 60s, the accepted rate is missed, any investigation
 is refused/errors, cgroup OOM increases, RSS reaches 90% of available RAM or
 grows by more than 10% of RAM across the steady-state quartiles, tenant totals
-cross, or final event/external totals differ. Warm p95 includes every concurrent
-steady-state investigation, and queryability latency is recorded only after a
+cross, or final event/external totals differ. Each concurrent steady-state
+investigation is classified from the actual project sandbox process present
+before and after the timed call: a surviving worker is warm, while a
+spawned/replaced/evicted worker is cold. Warm p95 therefore excludes cold
+refreshes, and queryability latency is recorded only after a
 query proves the exact accepted event identities visible. RSS aggregates the
 test process, all descendants (including sandbox workers), and the disposable
 PostgreSQL process tree. A failed run is evidence; never edit the report or

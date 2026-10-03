@@ -47,7 +47,8 @@ const (
 	envelopeRunTimeout         = 58 * time.Minute
 	envelopePostgresMemory     = 512 * 1024 * 1024
 	envelopeMinMemoryLimit     = 2 * 1024 * 1024 * 1024
-	envelopeMaxMemoryLimit     = 3 * 1024 * 1024 * 1024
+	envelopeMaxAggregateMemory = 3 * 1024 * 1024 * 1024
+	envelopeMaxMemoryLimit     = envelopeMaxAggregateMemory - envelopePostgresMemory
 	envelopeRequiredGCEProject = "lohi-dev-lohi"
 	envelopeRequiredGCEZone    = "asia-southeast1-a"
 	envelopeRequiredGCEName    = "lohi-app"
@@ -376,14 +377,44 @@ func TestDataEnvelopeAssertionsRejectNegativeControl(t *testing.T) {
 }
 
 func TestDataEnvelopeSteadyLatencyNegativeControl(t *testing.T) {
-	report := &envelopeReport{
-		WarmSamples: []time.Duration{time.Second}, ColdSamples: []time.Duration{time.Second},
-		InvestigationSamples: []envelopeSample{{Phase: "steady", Duration: approvedEnvelopeThresholds.WarmP95 + time.Nanosecond}},
-	}
-	observed := passingEnvelopeObserved()
-	observed.Warm, observed.Cold = envelopeLatencyInputs(report)
-	if err := validateEnvelope(observed, approvedEnvelopeThresholds); err == nil || !strings.Contains(err.Error(), "warm_p95") {
-		t.Fatalf("slow steady-state investigation error = %v, want warm_p95 failure", err)
+	for _, tc := range []struct {
+		name, phase, want string
+		duration          time.Duration
+	}{
+		{name: "warm exceeds warm bound", phase: "warm", duration: approvedEnvelopeThresholds.WarmP95 + time.Nanosecond, want: "warm_p95"},
+		{name: "cold excludes warm bound but exceeds cold bound", phase: "cold", duration: approvedEnvelopeThresholds.ColdP95 + time.Nanosecond, want: "cold_p95"},
+		{name: "unknown phase fails closed", phase: "steady", duration: time.Second, want: "unknown investigation phase"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := &envelopeReport{
+				WarmSamples: []time.Duration{time.Second}, ColdSamples: []time.Duration{time.Second},
+				InvestigationSamples: []envelopeSample{{Phase: tc.phase, Duration: tc.duration}},
+			}
+			warm, cold, classifyErr := envelopeLatencyInputs(report)
+			if classifyErr != nil {
+				if !strings.Contains(classifyErr.Error(), tc.want) {
+					t.Fatalf("classification error = %v, want %q", classifyErr, tc.want)
+				}
+				return
+			}
+			observed := passingEnvelopeObserved()
+			observed.Warm, observed.Cold = warm, cold
+			if err := validateEnvelope(observed, approvedEnvelopeThresholds); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s investigation error = %v, want %s failure", tc.phase, err, tc.want)
+			}
+			if tc.phase == "cold" {
+				belowCold := *report
+				belowCold.InvestigationSamples = []envelopeSample{{Phase: "cold", Duration: approvedEnvelopeThresholds.WarmP95 + time.Second}}
+				warm, cold, err := envelopeLatencyInputs(&belowCold)
+				if err != nil {
+					t.Fatal(err)
+				}
+				observed.Warm, observed.Cold = warm, cold
+				if err := validateEnvelope(observed, approvedEnvelopeThresholds); err != nil {
+					t.Fatalf("valid cold refresh was subjected to warm bound: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -391,6 +422,31 @@ func TestDataEnvelopeHostIdentityNegativeControl(t *testing.T) {
 	err := validateEnvelopeHostIdentity(envelopeHostIdentity{Project: envelopeRequiredGCEProject, Zone: envelopeRequiredGCEZone, Instance: "some-other-linux-host"})
 	if err == nil || !strings.Contains(err.Error(), envelopeRequiredGCEName) {
 		t.Fatalf("wrong GCE identity error = %v, want lohi-app refusal", err)
+	}
+}
+
+func TestDataEnvelopeSandboxPhaseNegativeControl(t *testing.T) {
+	proc := t.TempDir()
+	writeCmdline := func(pid int, projectID string) {
+		t.Helper()
+		dir := filepath.Join(proc, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "test-binary\x00--duckdb-sandbox-worker\x00--tmp-dir=/tmp/sandbox-" + projectID + "-123\x00"
+		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCmdline(101, "tenant-a")
+	warmBefore := envelopeSandboxProcesses(proc, "tenant-a")
+	warmAfter := envelopeSandboxProcesses(proc, "tenant-a")
+	if phase := envelopeInvestigationPhase(warmBefore, warmAfter); phase != "warm" {
+		t.Fatalf("surviving sandbox phase = %q, want warm", phase)
+	}
+	writeCmdline(102, "tenant-b")
+	if phase := envelopeInvestigationPhase(warmBefore, envelopeSandboxProcesses(proc, "tenant-b")); phase != "cold" {
+		t.Fatalf("replaced sandbox phase = %q, want cold", phase)
 	}
 }
 
@@ -414,6 +470,113 @@ func TestDataEnvelopeRuntimeCapsNegativeControl(t *testing.T) {
 			t.Errorf("uncapped runtime error %q missing %q", err, want)
 		}
 	}
+	tooLarge := envelopeRuntimeCaps{AllowedCPUs: "0", AllowedCPUCount: 1, Nice: 19, MemoryMaxBytes: envelopeMaxMemoryLimit + 1, InternalTimeout: envelopeRunTimeout}
+	if err := validateEnvelopeRuntimeCaps(tooLarge); err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("aggregate memory ceiling violation error = %v, want refusal", err)
+	}
+	if err := validateEnvelopeRunWindow(time.Date(2026, time.October, 4, 6, 0, 0, 0, time.FixedZone("UTC+7", 7*60*60))); err == nil {
+		t.Fatal("out-of-window capacity run unexpectedly passed")
+	}
+}
+
+func TestDataEnvelopePostgresWatchdogNegativeControl(t *testing.T) {
+	if os.Getenv("AGENTRAY_ENVELOPE_WATCHDOG_CHILD") == "1" {
+		watchdog, err := startEnvelopeDockerWatchdog(os.Getpid(), "agentray-watchdog-negative-control", []string{"run", "--rm", "--name", "agentray-watchdog-negative-control", "fake-postgres"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("AGENTRAY_ENVELOPE_WATCHDOG_READY"), []byte(strconv.Itoa(watchdog.cmd.Process.Pid)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		select {}
+	}
+
+	dir := t.TempDir()
+	runPID, removed, ready := filepath.Join(dir, "run.pid"), filepath.Join(dir, "removed"), filepath.Join(dir, "ready")
+	docker := filepath.Join(dir, "docker")
+	script := `#!/bin/sh
+case "$1" in
+run)
+  echo $$ > "$AGENTRAY_ENVELOPE_FAKE_RUN_PID"
+  trap 'exit 0' TERM INT HUP
+  while :; do sleep 1; done
+  ;;
+rm)
+  : > "$AGENTRAY_ENVELOPE_FAKE_REMOVED"
+  ;;
+*) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDataEnvelopePostgresWatchdogNegativeControl$", "-test.v")
+	cmd.Env = append(os.Environ(),
+		"AGENTRAY_ENVELOPE_WATCHDOG_CHILD=1",
+		"AGENTRAY_ENVELOPE_WATCHDOG_READY="+ready,
+		"AGENTRAY_ENVELOPE_FAKE_RUN_PID="+runPID,
+		"AGENTRAY_ENVELOPE_FAKE_REMOVED="+removed,
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	watchdogPID := waitEnvelopePIDFile(t, ready, 5*time.Second)
+	dockerPID := waitEnvelopePIDFile(t, runPID, 5*time.Second)
+	parentPGID, parentPGErr := syscall.Getpgid(cmd.Process.Pid)
+	watchdogPGID, watchdogPGErr := syscall.Getpgid(watchdogPID)
+	if parentPGErr != nil || watchdogPGErr != nil || parentPGID == watchdogPGID {
+		t.Fatalf("watchdog process-group isolation: parent=%d err=%v watchdog=%d err=%v", parentPGID, parentPGErr, watchdogPGID, watchdogPGErr)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("killed watchdog parent unexpectedly exited successfully")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (!pathExists(removed) || envelopeProcessExists(watchdogPID) || envelopeProcessExists(dockerPID)) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !pathExists(removed) {
+		t.Fatal("watchdog did not remove the owned container after its parent was killed")
+	}
+	if envelopeProcessExists(watchdogPID) || envelopeProcessExists(dockerPID) {
+		t.Fatalf("orphan remained after parent death: watchdog_alive=%t docker_alive=%t", envelopeProcessExists(watchdogPID), envelopeProcessExists(dockerPID))
+	}
+}
+
+func waitEnvelopePIDFile(t *testing.T, path string, within time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+			if err == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("PID file %s was not written within %s", path, within)
+	return 0
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func envelopeProcessExists(pid int) bool {
+	process, err := os.FindProcess(pid)
+	return err == nil && process.Signal(syscall.Signal(0)) == nil
 }
 
 func TestDataEnvelopeProcessTreeRSSNegativeControl(t *testing.T) {
@@ -506,6 +669,10 @@ func TestDataEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := validateEnvelopeRuntimeCaps(caps); err != nil {
+		report.Failure = err.Error()
+		t.Fatal(err)
+	}
+	if err := validateEnvelopeRunWindow(time.Now()); err != nil {
 		report.Failure = err.Error()
 		t.Fatal(err)
 	}
@@ -731,7 +898,11 @@ func TestDataEnvelope(t *testing.T) {
 	report.ResourceSamples = append(report.ResourceSamples, finalResource)
 	reportMu.Unlock()
 	stopSampler()
-	warm, cold := envelopeLatencyInputs(report)
+	warm, cold, err := envelopeLatencyInputs(report)
+	if err != nil {
+		report.Status, report.Failure = "failed", err.Error()
+		t.Fatal(err)
+	}
 	observed := envelopeObserved{
 		Warm: warm, Cold: cold, Publication: envelopeDurations(report.PublicationSamples),
 		Queryable: envelopeDurations(report.QueryableSamples), Resources: report.ResourceSamples, RAMBytes: report.Hardware.RAMBytes,
@@ -763,14 +934,20 @@ func envelopeDurations(samples []envelopeSample) []time.Duration {
 	return out
 }
 
-func envelopeLatencyInputs(report *envelopeReport) (warm, cold []time.Duration) {
+func envelopeLatencyInputs(report *envelopeReport) (warm, cold []time.Duration, err error) {
 	warm = slices.Clone(report.WarmSamples)
 	cold = slices.Clone(report.ColdSamples)
-	// The steady phase runs only after every project's sandbox has completed its
-	// initial refresh. Every successful or failed concurrent investigation is
-	// therefore a warm-path measurement; errors are also rejected separately.
-	warm = append(warm, envelopeDurations(report.InvestigationSamples)...)
-	return warm, cold
+	for _, sample := range report.InvestigationSamples {
+		switch sample.Phase {
+		case "warm":
+			warm = append(warm, sample.Duration)
+		case "cold":
+			cold = append(cold, sample.Duration)
+		default:
+			return nil, nil, fmt.Errorf("unknown investigation phase %q for tenant=%q recipe=%q", sample.Phase, sample.Tenant, sample.Recipe)
+		}
+	}
+	return warm, cold, nil
 }
 
 type envelopeRecipe struct{ Name, SQL string }
@@ -1021,11 +1198,14 @@ func runEnvelopeInvestigation(ctx context.Context, store *storage.Store, project
 			candidates = accepted.pendingBatch(projectIndex, 1_000)
 			query = envelopeQueryableSQL(candidates)
 		}
+		before := envelopeSandboxProcesses("/proc", projects[projectIndex].ID)
 		started := time.Now()
 		rows, _, err := store.RunSQLWithMeta(ctx, projects[projectIndex].ID, query)
 		d := time.Since(started)
+		after := envelopeSandboxProcesses("/proc", projects[projectIndex].ID)
+		phase := envelopeInvestigationPhase(before, after)
 		reportMu.Lock()
-		report.InvestigationSamples = append(report.InvestigationSamples, envelopeSample{Phase: "steady", Tenant: projects[projectIndex].ID, Recipe: recipe.Name, StartedAt: started.UTC(), Duration: d})
+		report.InvestigationSamples = append(report.InvestigationSamples, envelopeSample{Phase: phase, Tenant: projects[projectIndex].ID, Recipe: recipe.Name, StartedAt: started.UTC(), Duration: d})
 		if err != nil && ctx.Err() == nil {
 			report.QueryErrors = append(report.QueryErrors, recipe.Name+": "+err.Error())
 			if strings.Contains(strings.ToLower(err.Error()), "busy") || strings.Contains(strings.ToLower(err.Error()), "capacity") {
@@ -1037,6 +1217,45 @@ func runEnvelopeInvestigation(ctx context.Context, store *storage.Store, project
 			accepted.observeVisibleBatch(projectIndex, projects[projectIndex].ID, candidates, numericCell(rows, "visible"), time.Now(), report, reportMu)
 		}
 	}
+}
+
+func envelopeSandboxProcesses(procRoot, projectID string) map[int]struct{} {
+	found := make(map[int]struct{})
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return found
+	}
+	prefix := "sandbox-" + projectID + "-"
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		for _, arg := range strings.Split(string(body), "\x00") {
+			if value, ok := strings.CutPrefix(arg, "--tmp-dir="); ok && strings.HasPrefix(filepath.Base(value), prefix) {
+				found[pid] = struct{}{}
+				break
+			}
+		}
+	}
+	return found
+}
+
+func envelopeInvestigationPhase(before, after map[int]struct{}) string {
+	for pid := range before {
+		if _, sameWorker := after[pid]; sameWorker {
+			return "warm"
+		}
+	}
+	// No same project worker survived across the timed call: the call either
+	// spawned/refreshed a new worker or raced with an eviction immediately after
+	// completion. Both must use the more permissive cold-refresh budget; neither
+	// may contaminate warm p95.
+	return "cold"
 }
 
 func envelopeQueryableSQL(candidates []envelopeAcceptance) string {
@@ -1141,29 +1360,113 @@ func startEnvelopeBroker(dir string) (string, func(), error) {
 	return srv.ClientURL(), srv.Shutdown, nil
 }
 
+type envelopeDockerWatchdog struct {
+	cmd      *exec.Cmd
+	done     chan struct{}
+	waitErr  error
+	stopOnce sync.Once
+}
+
+const envelopeDockerWatchdogScript = `
+parent_pid=$1
+container=$2
+shift 2
+docker_pid=
+cleanup() {
+  trap - EXIT HUP INT TERM
+  if [ -n "$docker_pid" ]; then
+    kill "$docker_pid" >/dev/null 2>&1 || true
+    wait "$docker_pid" >/dev/null 2>&1 || true
+  fi
+  docker rm --force "$container" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT HUP INT TERM
+docker "$@" >/dev/null 2>&1 &
+docker_pid=$!
+while kill -0 "$parent_pid" >/dev/null 2>&1; do
+  if ! kill -0 "$docker_pid" >/dev/null 2>&1; then
+    wait "$docker_pid"
+    exit $?
+  fi
+  sleep 0.1
+done
+exit 0
+`
+
+// startEnvelopeDockerWatchdog owns an attached docker client for the lifetime
+// of parentPID. It deliberately is not CommandContext-owned: if Go times out,
+// panics, is signalled, or is killed, this small independent process observes
+// the parent death, stops the client, forcibly removes the named container,
+// and exits. The outer timeout's TERM is also caught by the same cleanup trap.
+func startEnvelopeDockerWatchdog(parentPID int, container string, dockerArgs []string) (*envelopeDockerWatchdog, error) {
+	args := append([]string{"-c", envelopeDockerWatchdogScript, "agentray-postgres-watchdog", strconv.Itoa(parentPID), container}, dockerArgs...)
+	cmd := exec.Command("sh", args...)
+	// Keep the watchdog out of the test/timeout process group. A group-wide
+	// SIGKILL must not remove the only process still able to tear down Docker.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	watchdog := &envelopeDockerWatchdog{cmd: cmd, done: make(chan struct{})}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start disposable PostgreSQL watchdog: %w", err)
+	}
+	go func() {
+		watchdog.waitErr = cmd.Wait()
+		close(watchdog.done)
+	}()
+	return watchdog, nil
+}
+
+func (w *envelopeDockerWatchdog) exited() (bool, error) {
+	select {
+	case <-w.done:
+		return true, w.waitErr
+	default:
+		return false, nil
+	}
+}
+
+func (w *envelopeDockerWatchdog) stop(container string) error {
+	var result error
+	w.stopOnce.Do(func() {
+		_ = w.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-w.done:
+		case <-time.After(10 * time.Second):
+			_ = w.cmd.Process.Kill()
+			<-w.done
+			result = errors.New("disposable PostgreSQL watchdog did not exit within 10s")
+		}
+		out, err := exec.Command("docker", "rm", "--force", container).CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "No such container") {
+			result = errors.Join(result, fmt.Errorf("docker rm %s: %w (%s)", container, err, strings.TrimSpace(string(out))))
+		}
+	})
+	return result
+}
+
 func startEnvelopePostgres(ctx context.Context, allowedCPU string) (string, string, func() error, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return "", "", nil, errors.New("docker is required to own and clean up the disposable PostgreSQL resource")
 	}
 	name := "agentray-data-envelope-" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 	password := uuid.NewString()
-	cmd := exec.CommandContext(ctx, "docker", "run", "--detach", "--rm", "--name", name,
+	dockerArgs := []string{"run", "--rm", "--name", name,
 		"--cpuset-cpus", allowedCPU, "--memory", strconv.FormatInt(envelopePostgresMemory, 10), "--memory-swap", strconv.FormatInt(envelopePostgresMemory, 10), "--pids-limit", "128", "--cpu-shares", "2",
-		"--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=envelope", "--env", "POSTGRES_PASSWORD="+password, "--env", "POSTGRES_DB=envelope", "postgres:16-alpine")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", "", nil, fmt.Errorf("docker run postgres with required caps: %w (%s)", err, strings.TrimSpace(string(out)))
+		"--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=envelope", "--env", "POSTGRES_PASSWORD=" + password, "--env", "POSTGRES_DB=envelope", "postgres:16-alpine"}
+	watchdog, err := startEnvelopeDockerWatchdog(os.Getpid(), name, dockerArgs)
+	if err != nil {
+		return "", "", nil, err
 	}
-	cleanup := func() error {
-		out, err := exec.Command("docker", "rm", "--force", name).CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "No such container") {
-			return fmt.Errorf("docker rm %s: %w (%s)", name, err, strings.TrimSpace(string(out)))
-		}
-		return nil
-	}
+	cleanup := func() error { return watchdog.stop(name) }
 	fail := func(err error) (string, string, func() error, error) { _ = cleanup(); return "", "", nil, err }
 	var port string
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
+		if exited, err := watchdog.exited(); exited {
+			if err == nil {
+				err = errors.New("watchdog exited")
+			}
+			return fail(fmt.Errorf("docker run postgres with required caps exited before readiness: %w", err))
+		}
 		out, err := exec.CommandContext(ctx, "docker", "port", name, "5432/tcp").Output()
 		if err == nil {
 			line := strings.TrimSpace(string(out))
@@ -1184,7 +1487,11 @@ func startEnvelopePostgres(ctx context.Context, allowedCPU string) (string, stri
 				}
 			}
 		}
-		time.Sleep(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return fail(ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 	return fail(errors.New("disposable PostgreSQL did not become ready within 45s"))
 }
@@ -1282,12 +1589,22 @@ func validateEnvelopeRuntimeCaps(caps envelopeRuntimeCaps) error {
 		failures = append(failures, fmt.Sprintf("nice=19 required, got %d", caps.Nice))
 	}
 	if caps.MemoryMaxBytes < envelopeMinMemoryLimit || caps.MemoryMaxBytes > envelopeMaxMemoryLimit {
-		failures = append(failures, fmt.Sprintf("MemoryMax must be 2-3 GiB, got %d bytes", caps.MemoryMaxBytes))
+		failures = append(failures, fmt.Sprintf("parent MemoryMax must be 2-2.5 GiB so parent plus %d-byte PostgreSQL stays within the 3 GiB aggregate ceiling; got parent=%d aggregate=%d bytes", envelopePostgresMemory, caps.MemoryMaxBytes, caps.MemoryMaxBytes+envelopePostgresMemory))
 	}
 	if caps.InternalTimeout > 60*time.Minute {
 		failures = append(failures, fmt.Sprintf("timeout must be <=60m, got %s", caps.InternalTimeout))
 	}
 	return errors.Join(stringErrors(failures)...)
+}
+
+func validateEnvelopeRunWindow(now time.Time) error {
+	// Ho Chi Minh City does not observe daylight saving time. A fixed zone keeps
+	// this safety check independent of host timezone-database installation.
+	hcm := now.In(time.FixedZone("Asia/Ho_Chi_Minh", 7*60*60))
+	if hcm.Hour() < 1 || hcm.Hour() >= 6 {
+		return fmt.Errorf("AC-DATA-03 envelope refused outside the authorized 01:00-06:00 HCM window; current HCM time is %s", hcm.Format(time.RFC3339))
+	}
+	return nil
 }
 
 func countCPUList(value string) (int, error) {
