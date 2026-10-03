@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +44,14 @@ const (
 	envelopeAcceptedPerSecond  = 100
 	envelopeSteadyDuration     = 15 * time.Minute
 	envelopeStagingProbeRows   = 500
+	envelopeRunTimeout         = 58 * time.Minute
+	envelopePostgresMemory     = 512 * 1024 * 1024
+	envelopeMinMemoryLimit     = 2 * 1024 * 1024 * 1024
+	envelopeMaxMemoryLimit     = 3 * 1024 * 1024 * 1024
+	envelopeRequiredGCEProject = "lohi-dev-lohi"
+	envelopeRequiredGCEZone    = "asia-southeast1-a"
+	envelopeRequiredGCEName    = "lohi-app"
+	envelopeMetadataBaseURL    = "http://169.254.169.254/computeMetadata/v1"
 )
 
 type envelopeThresholds struct {
@@ -99,6 +109,21 @@ type envelopeHardware struct {
 	Filesystem       string `json:"filesystem"`
 	DiskTotalBytes   uint64 `json:"disk_total_bytes"`
 	DiskFreeBytes    uint64 `json:"disk_free_bytes"`
+	GCEProject       string `json:"gce_project"`
+	GCEZone          string `json:"gce_zone"`
+	GCEInstance      string `json:"gce_instance"`
+}
+
+type envelopeHostIdentity struct {
+	Project, Zone, Instance string
+}
+
+type envelopeRuntimeCaps struct {
+	AllowedCPUs     string
+	AllowedCPUCount int
+	Nice            int
+	MemoryMaxBytes  uint64
+	InternalTimeout time.Duration
 }
 
 type envelopeSample struct {
@@ -114,6 +139,7 @@ type envelopeResourceSample struct {
 	Phase       string    `json:"phase"`
 	At          time.Time `json:"at"`
 	RSSBytes    uint64    `json:"rss_bytes"`
+	RSSComplete bool      `json:"rss_complete"`
 	DuckDBBytes uint64    `json:"duckdb_bytes"`
 	WALBytes    uint64    `json:"wal_bytes"`
 	SpillBytes  uint64    `json:"spill_bytes"`
@@ -260,6 +286,10 @@ func validateEnvelope(o envelopeObserved, limits envelopeThresholds) error {
 	} else {
 		var maxRSS uint64
 		for _, sample := range steadyResources {
+			if !sample.RSSComplete {
+				failures = append(failures, "RSS process-tree sampling was incomplete")
+				break
+			}
 			maxRSS = max(maxRSS, sample.RSSBytes)
 		}
 		if maxRSS == 0 {
@@ -274,6 +304,19 @@ func validateEnvelope(o envelopeObserved, limits envelopeThresholds) error {
 		}
 	}
 	return errors.Join(stringErrors(failures)...)
+}
+
+func passingEnvelopeObserved() envelopeObserved {
+	return envelopeObserved{
+		Warm: []time.Duration{time.Second}, Cold: []time.Duration{time.Second},
+		Publication: []time.Duration{time.Millisecond}, Queryable: []time.Duration{time.Millisecond},
+		Resources: []envelopeResourceSample{
+			{RSSBytes: 10, RSSComplete: true}, {RSSBytes: 10, RSSComplete: true},
+			{RSSBytes: 10, RSSComplete: true}, {RSSBytes: 10, RSSComplete: true},
+		},
+		RAMBytes: 100, NoCrossProjectInterference: true, NoDataLoss: true,
+		AcceptedEvents: 10, ExpectedAccepted: 10, QueryableEvents: 10,
+	}
 }
 
 func stringErrors(in []string) []error {
@@ -318,7 +361,7 @@ func TestDataEnvelopeAssertionsRejectNegativeControl(t *testing.T) {
 	bad := envelopeObserved{
 		Warm: []time.Duration{limits.WarmP95 + time.Millisecond}, Cold: []time.Duration{limits.ColdP95 + time.Millisecond},
 		Publication: []time.Duration{limits.PublicationP95 + time.Millisecond}, Queryable: []time.Duration{limits.QueryableP95 + time.Millisecond},
-		Resources: []envelopeResourceSample{{RSSBytes: 10}, {RSSBytes: 20}, {RSSBytes: 30}, {RSSBytes: 95}}, RAMBytes: 100,
+		Resources: []envelopeResourceSample{{RSSBytes: 10, RSSComplete: true}, {RSSBytes: 20, RSSComplete: true}, {RSSBytes: 30, RSSComplete: true}, {RSSBytes: 95, RSSComplete: true}}, RAMBytes: 100,
 		OOMBefore: 1, OOMAfter: 2, QueryErrors: 1, RefusedQueries: 1, AcceptedEvents: 9, ExpectedAccepted: 10, QueryableEvents: 1,
 	}
 	err := validateEnvelope(bad, limits)
@@ -329,6 +372,78 @@ func TestDataEnvelopeAssertionsRejectNegativeControl(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("negative control error %q missing %q", err, want)
 		}
+	}
+}
+
+func TestDataEnvelopeSteadyLatencyNegativeControl(t *testing.T) {
+	report := &envelopeReport{
+		WarmSamples: []time.Duration{time.Second}, ColdSamples: []time.Duration{time.Second},
+		InvestigationSamples: []envelopeSample{{Phase: "steady", Duration: approvedEnvelopeThresholds.WarmP95 + time.Nanosecond}},
+	}
+	observed := passingEnvelopeObserved()
+	observed.Warm, observed.Cold = envelopeLatencyInputs(report)
+	if err := validateEnvelope(observed, approvedEnvelopeThresholds); err == nil || !strings.Contains(err.Error(), "warm_p95") {
+		t.Fatalf("slow steady-state investigation error = %v, want warm_p95 failure", err)
+	}
+}
+
+func TestDataEnvelopeHostIdentityNegativeControl(t *testing.T) {
+	err := validateEnvelopeHostIdentity(envelopeHostIdentity{Project: envelopeRequiredGCEProject, Zone: envelopeRequiredGCEZone, Instance: "some-other-linux-host"})
+	if err == nil || !strings.Contains(err.Error(), envelopeRequiredGCEName) {
+		t.Fatalf("wrong GCE identity error = %v, want lohi-app refusal", err)
+	}
+}
+
+func TestDataEnvelopeAcceptedRateNegativeControl(t *testing.T) {
+	observed := passingEnvelopeObserved()
+	observed.ExpectedAccepted = int64(envelopeAcceptedPerSecond) * int64(envelopeSteadyDuration/time.Second)
+	observed.AcceptedEvents = observed.ExpectedAccepted - 1
+	observed.QueryableEvents = observed.AcceptedEvents
+	if err := validateEnvelope(observed, approvedEnvelopeThresholds); err == nil || !strings.Contains(err.Error(), "accepted ingest rate") {
+		t.Fatalf("one-event rate shortfall error = %v, want inclusive 100 events/second failure", err)
+	}
+}
+
+func TestDataEnvelopeRuntimeCapsNegativeControl(t *testing.T) {
+	err := validateEnvelopeRuntimeCaps(envelopeRuntimeCaps{AllowedCPUs: "0-1", AllowedCPUCount: 2, Nice: 0, MemoryMaxBytes: 0, InternalTimeout: 61 * time.Minute})
+	if err == nil {
+		t.Fatal("uncapped runtime unexpectedly passed")
+	}
+	for _, want := range []string{"one allowed CPU", "nice=19", "MemoryMax", "timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("uncapped runtime error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestDataEnvelopeProcessTreeRSSNegativeControl(t *testing.T) {
+	proc := t.TempDir()
+	writeStatus := func(pid, ppid, rssKiB int) {
+		t.Helper()
+		dir := filepath.Join(proc, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := fmt.Sprintf("Name:\ttest\nPPid:\t%d\nVmRSS:\t%d kB\n", ppid, rssKiB)
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStatus(100, 1, 10)
+	writeStatus(101, 100, 40)
+	writeStatus(102, 101, 45)
+	writeStatus(999, 1, 500)
+	rss, err := processTreeRSSBytes(proc, []int{100})
+	if err != nil || rss != 95*1024 {
+		t.Fatalf("process-tree RSS = %d err=%v, want parent+children 97280", rss, err)
+	}
+	observed := passingEnvelopeObserved()
+	for i := range observed.Resources {
+		observed.Resources[i].RSSBytes = rss
+	}
+	observed.RAMBytes = 100 * 1024
+	if err := validateEnvelope(observed, approvedEnvelopeThresholds); err == nil || !strings.Contains(err.Error(), "rss_high_water") {
+		t.Fatalf("child-heavy RSS error = %v, want aggregate high-water failure", err)
 	}
 }
 
@@ -344,9 +459,8 @@ func TestDataEnvelope(t *testing.T) {
 		t.Skip("set AGENTRAY_DATA_ENVELOPE=1 on the approved capacity host to run AC-DATA-03")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 88*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), envelopeRunTimeout)
 	defer cancel()
-	root := t.TempDir()
 	report := &envelopeReport{
 		SchemaVersion: 1, Status: "running", StartedAt: time.Now().UTC(), HostClass: gate.HostClass,
 		Thresholds: approvedEnvelopeThresholds,
@@ -373,21 +487,42 @@ func TestDataEnvelope(t *testing.T) {
 		}
 	}()
 
+	if runtime.GOOS != "linux" {
+		report.Failure = fmt.Sprintf("AC-DATA-03 envelope refused: required host class %q is Linux; detected %s", envelopeRequiredHostClass, runtime.GOOS)
+		t.Fatal(report.Failure)
+	}
+	identity, err := inspectEnvelopeHostIdentity(ctx, &http.Client{Timeout: 2 * time.Second}, envelopeMetadataBaseURL)
+	if err != nil {
+		report.Failure = err.Error()
+		t.Fatal(err)
+	}
+	if err := validateEnvelopeHostIdentity(identity); err != nil {
+		report.Failure = err.Error()
+		t.Fatal(err)
+	}
+	caps, err := inspectEnvelopeRuntimeCaps()
+	if err != nil {
+		report.Failure = err.Error()
+		t.Fatal(err)
+	}
+	if err := validateEnvelopeRuntimeCaps(caps); err != nil {
+		report.Failure = err.Error()
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
 	report.Hardware, err = inspectEnvelopeHardware(root)
 	if err != nil {
 		report.Failure = err.Error()
 		t.Fatal(err)
 	}
+	report.Hardware.GCEProject, report.Hardware.GCEZone, report.Hardware.GCEInstance = identity.Project, identity.Zone, identity.Instance
 	if report.Hardware.CgroupLimitBytes > 0 && report.Hardware.CgroupLimitBytes < report.Hardware.RAMBytes {
 		report.Hardware.RAMBytes = report.Hardware.CgroupLimitBytes
 	}
-	if runtime.GOOS != "linux" {
-		report.Failure = fmt.Sprintf("AC-DATA-03 envelope refused: required host class %q is Linux; detected %s", envelopeRequiredHostClass, runtime.GOOS)
-		t.Fatal(report.Failure)
-	}
 	report.OOMEventsBefore = cgroupOOMEvents()
 
-	pgURL, cleanupPG, err := startEnvelopePostgres(ctx)
+	pgURL, postgresContainer, cleanupPG, err := startEnvelopePostgres(ctx, caps.AllowedCPUs)
 	if err != nil {
 		report.Failure = err.Error()
 		t.Fatalf("disposable PostgreSQL: %v", err)
@@ -411,6 +546,11 @@ func TestDataEnvelope(t *testing.T) {
 		"source_freshness_max_age": cfg.SourceFreshnessMaxAge.String(),
 		"ingest_stream_max_bytes":  cfg.IngestStreamMaxBytes,
 		"ingest_max_deliver":       cfg.IngestMaxDeliver,
+		"allowed_cpus":             caps.AllowedCPUs,
+		"nice":                     caps.Nice,
+		"memory_max_bytes":         caps.MemoryMaxBytes,
+		"internal_timeout":         caps.InternalTimeout.String(),
+		"postgres_memory_bytes":    envelopePostgresMemory,
 	}
 	store, err := storage.Open(ctx, cfg)
 	if err != nil {
@@ -482,7 +622,7 @@ func TestDataEnvelope(t *testing.T) {
 				return
 			case at := <-ticker.C:
 				reportMu.Lock()
-				sample := resourceEnvelopeSample(at, cfg.DuckDBPath, brokerDir)
+				sample := resourceEnvelopeSample(at, cfg.DuckDBPath, brokerDir, postgresContainer)
 				sample.Phase = samplePhase
 				report.ResourceSamples = append(report.ResourceSamples, sample)
 				reportMu.Unlock()
@@ -559,9 +699,10 @@ func TestDataEnvelope(t *testing.T) {
 	defer catchupCancel()
 	for !accepted.complete() && catchupCtx.Err() == nil {
 		for i, project := range projects {
-			rows, _, queryErr := store.RunSQLWithMeta(catchupCtx, project.ID, recipes[3].SQL)
+			candidates := accepted.pendingBatch(i, 1_000)
+			rows, _, queryErr := store.RunSQLWithMeta(catchupCtx, project.ID, envelopeQueryableSQL(candidates))
 			if queryErr == nil {
-				accepted.observe(i, project.ID, numericCell(rows, "max_seq"), time.Now(), report, &reportMu)
+				accepted.observeVisibleBatch(i, project.ID, candidates, numericCell(rows, "visible"), time.Now(), report, &reportMu)
 			}
 		}
 	}
@@ -585,18 +726,19 @@ func TestDataEnvelope(t *testing.T) {
 	}
 	report.OOMEventsAfter = cgroupOOMEvents()
 	reportMu.Lock()
-	finalResource := resourceEnvelopeSample(time.Now(), cfg.DuckDBPath, brokerDir)
+	finalResource := resourceEnvelopeSample(time.Now(), cfg.DuckDBPath, brokerDir, postgresContainer)
 	finalResource.Phase = samplePhase
 	report.ResourceSamples = append(report.ResourceSamples, finalResource)
 	reportMu.Unlock()
 	stopSampler()
+	warm, cold := envelopeLatencyInputs(report)
 	observed := envelopeObserved{
-		Warm: report.WarmSamples, Cold: report.ColdSamples, Publication: envelopeDurations(report.PublicationSamples),
+		Warm: warm, Cold: cold, Publication: envelopeDurations(report.PublicationSamples),
 		Queryable: envelopeDurations(report.QueryableSamples), Resources: report.ResourceSamples, RAMBytes: report.Hardware.RAMBytes,
 		OOMBefore: report.OOMEventsBefore, OOMAfter: report.OOMEventsAfter,
 		NoCrossProjectInterference: isolated, NoDataLoss: noLoss, QueryErrors: len(report.QueryErrors),
 		RefusedQueries: report.RefusedQueries, AcceptedEvents: accepted.total(),
-		ExpectedAccepted: int64(envelopeAcceptedPerSecond) * int64(envelopeSteadyDuration/time.Second) * 99 / 100,
+		ExpectedAccepted: int64(envelopeAcceptedPerSecond) * int64(envelopeSteadyDuration/time.Second),
 		QueryableEvents:  int64(len(report.QueryableSamples)),
 	}
 	report.Summary = map[string]any{
@@ -621,6 +763,16 @@ func envelopeDurations(samples []envelopeSample) []time.Duration {
 	return out
 }
 
+func envelopeLatencyInputs(report *envelopeReport) (warm, cold []time.Duration) {
+	warm = slices.Clone(report.WarmSamples)
+	cold = slices.Clone(report.ColdSamples)
+	// The steady phase runs only after every project's sandbox has completed its
+	// initial refresh. Every successful or failed concurrent investigation is
+	// therefore a warm-path measurement; errors are also rejected separately.
+	warm = append(warm, envelopeDurations(report.InvestigationSamples)...)
+	return warm, cold
+}
+
 type envelopeRecipe struct{ Name, SQL string }
 
 func envelopeRecipes() []envelopeRecipe {
@@ -628,7 +780,7 @@ func envelopeRecipes() []envelopeRecipe {
 		{"62_day_activity", `SELECT date_trunc('day', "timestamp") AS day, count(*) AS events FROM events WHERE "timestamp" >= current_timestamp - INTERVAL '62 days' GROUP BY day ORDER BY day`},
 		{"62_day_purchases", `SELECT date_trunc('day', "timestamp") AS day, count(*) AS purchases FROM events WHERE event_name='purchase' AND "timestamp" >= current_timestamp - INTERVAL '62 days' GROUP BY day ORDER BY day`},
 		{"lifetime_first_payer", `SELECT min(first_paid_at) AS first_paid_at FROM (SELECT canonical_id, min("timestamp") AS first_paid_at FROM events WHERE event_name='purchase' GROUP BY canonical_id) payers`},
-		{"queryable_watermark", `SELECT coalesce(max(CAST(json_extract_string(properties, '$.envelope_seq') AS BIGINT)), 0) AS max_seq FROM events WHERE event_name='envelope.live'`},
+		{"queryable_identities", `SELECT CAST(0 AS BIGINT) AS visible`},
 	}
 }
 
@@ -716,19 +868,38 @@ func runStagingProbe(ctx context.Context, t *testing.T, store *storage.Store, cf
 }
 
 type envelopeAcceptance struct {
-	Seq int64
-	At  time.Time
+	Seq     int64
+	EventID string
+	At      time.Time
 }
 type envelopeAcceptances struct {
-	mu             sync.Mutex
-	next, observed []int64
-	lastAccepted   []int64
-	successes      []int64
-	pending        [][]envelopeAcceptance
+	mu        sync.Mutex
+	next      []int64
+	successes []int64
+	pending   [][]envelopeAcceptance
 }
 
 func newEnvelopeAcceptances(projects int) *envelopeAcceptances {
-	return &envelopeAcceptances{next: make([]int64, projects), observed: make([]int64, projects), lastAccepted: make([]int64, projects), successes: make([]int64, projects), pending: make([][]envelopeAcceptance, projects)}
+	return &envelopeAcceptances{next: make([]int64, projects), successes: make([]int64, projects), pending: make([][]envelopeAcceptance, projects)}
+}
+
+func TestDataEnvelopeAcceptedIdentityNegativeControl(t *testing.T) {
+	accepted := newEnvelopeAcceptances(1)
+	first, second := accepted.reserve(0), accepted.reserve(0)
+	accepted.accepted(0, first, "event-one", time.Now())
+	accepted.accepted(0, second, "event-two", time.Now())
+	report := &envelopeReport{}
+	var reportMu sync.Mutex
+
+	// Seeing only the event with the maximum reserved sequence must not imply
+	// that the earlier accepted identity is queryable.
+	accepted.observeVisibleBatch(0, "tenant", []envelopeAcceptance{{Seq: second, EventID: "event-two"}}, 1, time.Now(), report, &reportMu)
+	if accepted.complete() {
+		t.Fatal("maximum accepted sequence incorrectly proved every accepted identity queryable")
+	}
+	if len(report.QueryableSamples) != 1 || report.QueryableSamples[0].Value != second {
+		t.Fatalf("identity samples = %+v, want only event-two", report.QueryableSamples)
+	}
 }
 
 func (a *envelopeAcceptances) reserve(project int) int64 {
@@ -737,31 +908,42 @@ func (a *envelopeAcceptances) reserve(project int) int64 {
 	a.next[project]++
 	return a.next[project]
 }
-func (a *envelopeAcceptances) accepted(project int, seq int64, at time.Time) bool {
+func (a *envelopeAcceptances) accepted(project int, seq int64, eventID string, at time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.successes[project]++
-	a.lastAccepted[project] = max(a.lastAccepted[project], seq)
-	if seq <= a.observed[project] {
-		return true
-	}
-	a.pending[project] = append(a.pending[project], envelopeAcceptance{Seq: seq, At: at})
-	return false
+	a.pending[project] = append(a.pending[project], envelopeAcceptance{Seq: seq, EventID: eventID, At: at})
 }
-func (a *envelopeAcceptances) observe(project int, tenant string, seq int64, at time.Time, report *envelopeReport, reportMu *sync.Mutex) {
+
+func (a *envelopeAcceptances) pendingBatch(project, limit int) []envelopeAcceptance {
 	a.mu.Lock()
-	if seq <= a.observed[project] {
-		a.mu.Unlock()
+	defer a.mu.Unlock()
+	if limit <= 0 || limit > len(a.pending[project]) {
+		limit = len(a.pending[project])
+	}
+	return slices.Clone(a.pending[project][:limit])
+}
+
+func (a *envelopeAcceptances) observeVisibleBatch(project int, tenant string, candidates []envelopeAcceptance, visible int64, at time.Time, report *envelopeReport, reportMu *sync.Mutex) {
+	if len(candidates) == 0 || visible != int64(len(candidates)) {
 		return
 	}
-	a.observed[project] = seq
-	var samples []envelopeSample
-	cut := 0
-	for cut < len(a.pending[project]) && a.pending[project][cut].Seq <= seq {
-		samples = append(samples, envelopeSample{Phase: "queryable", Tenant: tenant, StartedAt: a.pending[project][cut].At.UTC(), Duration: at.Sub(a.pending[project][cut].At), Value: a.pending[project][cut].Seq})
-		cut++
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		seen[candidate.EventID] = struct{}{}
 	}
-	a.pending[project] = append([]envelopeAcceptance(nil), a.pending[project][cut:]...)
+	a.mu.Lock()
+	remaining := a.pending[project][:0]
+	samples := make([]envelopeSample, 0, len(candidates))
+	for _, pending := range a.pending[project] {
+		if _, ok := seen[pending.EventID]; ok {
+			samples = append(samples, envelopeSample{Phase: "queryable", Tenant: tenant, StartedAt: pending.At.UTC(), Duration: at.Sub(pending.At), Value: pending.Seq})
+			delete(seen, pending.EventID)
+			continue
+		}
+		remaining = append(remaining, pending)
+	}
+	a.pending[project] = remaining
 	a.mu.Unlock()
 	reportMu.Lock()
 	report.QueryableSamples = append(report.QueryableSamples, samples...)
@@ -770,8 +952,8 @@ func (a *envelopeAcceptances) observe(project int, tenant string, seq int64, at 
 func (a *envelopeAcceptances) complete() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for i := range a.next {
-		if a.observed[i] < a.lastAccepted[i] {
+	for i := range a.pending {
+		if len(a.pending[i]) != 0 {
 			return false
 		}
 	}
@@ -796,32 +978,34 @@ func publishEnvelopeEvents(ctx context.Context, queue EventQueue, projects []sto
 	ticker := time.NewTicker(40 * time.Millisecond) // four publishers = 100 accepted events/s
 	defer ticker.Stop()
 	index := workerID
+	publish := func(at time.Time) {
+		projectIndex := index % len(projects)
+		index += 4
+		seq := accepted.reserve(projectIndex)
+		event := storage.Event{ProjectID: projects[projectIndex].ID, EventID: uuid.NewString(), DistinctID: fmt.Sprintf("live-%d-%d", workerID, seq%10_000), SessionID: fmt.Sprintf("live-session-%d", seq/5), EventName: "envelope.live", EventType: "user", Timestamp: at.UTC(), Platform: "web", Properties: fmt.Sprintf(`{"envelope_seq":%d,"publisher":%d}`, seq, workerID)}
+		started := time.Now()
+		err := queue.InsertEvents(ctx, []storage.Event{event})
+		d := time.Since(started)
+		reportMu.Lock()
+		report.PublicationSamples = append(report.PublicationSamples, envelopeSample{Phase: "publication", Tenant: projects[projectIndex].ID, StartedAt: started.UTC(), Duration: d, Value: seq})
+		if err != nil && ctx.Err() == nil {
+			report.QueryErrors = append(report.QueryErrors, "publish: "+err.Error())
+		}
+		reportMu.Unlock()
+		if err == nil {
+			accepted.accepted(projectIndex, seq, event.EventID, time.Now())
+		}
+	}
+	// Include the left edge of the 15-minute window. The following ticks cover
+	// [40ms, 15m), yielding exactly 25 attempts/s per publisher without relying
+	// on a timer firing at the cancellation boundary.
+	publish(time.Now())
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case at := <-ticker.C:
-			projectIndex := index % len(projects)
-			index += 4
-			seq := accepted.reserve(projectIndex)
-			event := storage.Event{ProjectID: projects[projectIndex].ID, EventID: uuid.NewString(), DistinctID: fmt.Sprintf("live-%d-%d", workerID, seq%10_000), SessionID: fmt.Sprintf("live-session-%d", seq/5), EventName: "envelope.live", EventType: "user", Timestamp: at.UTC(), Platform: "web", Properties: fmt.Sprintf(`{"envelope_seq":%d,"publisher":%d}`, seq, workerID)}
-			started := time.Now()
-			err := queue.InsertEvents(ctx, []storage.Event{event})
-			d := time.Since(started)
-			reportMu.Lock()
-			report.PublicationSamples = append(report.PublicationSamples, envelopeSample{Phase: "publication", Tenant: projects[projectIndex].ID, StartedAt: started.UTC(), Duration: d, Value: seq})
-			if err != nil {
-				report.QueryErrors = append(report.QueryErrors, "publish: "+err.Error())
-			}
-			reportMu.Unlock()
-			if err == nil {
-				acceptedAt := time.Now()
-				if accepted.accepted(projectIndex, seq, acceptedAt) {
-					reportMu.Lock()
-					report.QueryableSamples = append(report.QueryableSamples, envelopeSample{Phase: "queryable", Tenant: projects[projectIndex].ID, StartedAt: acceptedAt.UTC(), Duration: 0, Value: seq})
-					reportMu.Unlock()
-				}
-			}
+			publish(at)
 		}
 	}
 }
@@ -831,8 +1015,14 @@ func runEnvelopeInvestigation(ctx context.Context, store *storage.Store, project
 	for ctx.Err() == nil {
 		projectIndex := (workerID + iteration) % len(projects)
 		iteration++
+		query := recipe.SQL
+		var candidates []envelopeAcceptance
+		if recipe.Name == "queryable_identities" {
+			candidates = accepted.pendingBatch(projectIndex, 1_000)
+			query = envelopeQueryableSQL(candidates)
+		}
 		started := time.Now()
-		rows, _, err := store.RunSQLWithMeta(ctx, projects[projectIndex].ID, recipe.SQL)
+		rows, _, err := store.RunSQLWithMeta(ctx, projects[projectIndex].ID, query)
 		d := time.Since(started)
 		reportMu.Lock()
 		report.InvestigationSamples = append(report.InvestigationSamples, envelopeSample{Phase: "steady", Tenant: projects[projectIndex].ID, Recipe: recipe.Name, StartedAt: started.UTC(), Duration: d})
@@ -843,10 +1033,21 @@ func runEnvelopeInvestigation(ctx context.Context, store *storage.Store, project
 			}
 		}
 		reportMu.Unlock()
-		if err == nil && recipe.Name == "queryable_watermark" {
-			accepted.observe(projectIndex, projects[projectIndex].ID, numericCell(rows, "max_seq"), time.Now(), report, reportMu)
+		if err == nil && recipe.Name == "queryable_identities" {
+			accepted.observeVisibleBatch(projectIndex, projects[projectIndex].ID, candidates, numericCell(rows, "visible"), time.Now(), report, reportMu)
 		}
 	}
+}
+
+func envelopeQueryableSQL(candidates []envelopeAcceptance) string {
+	if len(candidates) == 0 {
+		return `SELECT CAST(0 AS BIGINT) AS visible`
+	}
+	ids := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		ids[i] = "'" + strings.ReplaceAll(candidate.EventID, "'", "''") + "'"
+	}
+	return `SELECT count(DISTINCT event_id) AS visible FROM events WHERE event_name='envelope.live' AND event_id IN (` + strings.Join(ids, ",") + `)`
 }
 
 func numericCell(rows []map[string]any, key string) int64 {
@@ -940,15 +1141,17 @@ func startEnvelopeBroker(dir string) (string, func(), error) {
 	return srv.ClientURL(), srv.Shutdown, nil
 }
 
-func startEnvelopePostgres(ctx context.Context) (string, func() error, error) {
+func startEnvelopePostgres(ctx context.Context, allowedCPU string) (string, string, func() error, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		return "", nil, errors.New("docker is required to own and clean up the disposable PostgreSQL resource")
+		return "", "", nil, errors.New("docker is required to own and clean up the disposable PostgreSQL resource")
 	}
 	name := "agentray-data-envelope-" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 	password := uuid.NewString()
-	cmd := exec.CommandContext(ctx, "docker", "run", "--detach", "--rm", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=envelope", "--env", "POSTGRES_PASSWORD="+password, "--env", "POSTGRES_DB=envelope", "postgres:16-alpine")
+	cmd := exec.CommandContext(ctx, "docker", "run", "--detach", "--rm", "--name", name,
+		"--cpuset-cpus", allowedCPU, "--memory", strconv.FormatInt(envelopePostgresMemory, 10), "--memory-swap", strconv.FormatInt(envelopePostgresMemory, 10), "--pids-limit", "128", "--cpu-shares", "2",
+		"--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=envelope", "--env", "POSTGRES_PASSWORD="+password, "--env", "POSTGRES_DB=envelope", "postgres:16-alpine")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", nil, fmt.Errorf("docker run postgres: %w (%s)", err, strings.TrimSpace(string(out)))
+		return "", "", nil, fmt.Errorf("docker run postgres with required caps: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	cleanup := func() error {
 		out, err := exec.Command("docker", "rm", "--force", name).CombinedOutput()
@@ -957,7 +1160,7 @@ func startEnvelopePostgres(ctx context.Context) (string, func() error, error) {
 		}
 		return nil
 	}
-	fail := func(err error) (string, func() error, error) { _ = cleanup(); return "", nil, err }
+	fail := func(err error) (string, string, func() error, error) { _ = cleanup(); return "", "", nil, err }
 	var port string
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
@@ -977,7 +1180,7 @@ func startEnvelopePostgres(ctx context.Context) (string, func() error, error) {
 				cancel()
 				pool.Close()
 				if err == nil {
-					return url, cleanup, nil
+					return url, name, cleanup, nil
 				}
 			}
 		}
@@ -1001,6 +1204,138 @@ func writeEnvelopeReport(path string, report *envelopeReport) error {
 	return os.Rename(tmp, path)
 }
 
+func inspectEnvelopeHostIdentity(ctx context.Context, client *http.Client, baseURL string) (envelopeHostIdentity, error) {
+	read := func(path string) (string, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Metadata-Flavor", "Google")
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("read GCE metadata %s: %w", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Metadata-Flavor") != "Google" {
+			return "", fmt.Errorf("read GCE metadata %s: status=%s metadata_flavor=%q", path, resp.Status, resp.Header.Get("Metadata-Flavor"))
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(body)), nil
+	}
+	project, err := read("/project/project-id")
+	if err != nil {
+		return envelopeHostIdentity{}, err
+	}
+	instance, err := read("/instance/name")
+	if err != nil {
+		return envelopeHostIdentity{}, err
+	}
+	zone, err := read("/instance/zone")
+	if err != nil {
+		return envelopeHostIdentity{}, err
+	}
+	if cut := strings.LastIndex(zone, "/"); cut >= 0 {
+		zone = zone[cut+1:]
+	}
+	return envelopeHostIdentity{Project: project, Zone: zone, Instance: instance}, nil
+}
+
+func validateEnvelopeHostIdentity(identity envelopeHostIdentity) error {
+	if identity.Project != envelopeRequiredGCEProject || identity.Zone != envelopeRequiredGCEZone || identity.Instance != envelopeRequiredGCEName {
+		return fmt.Errorf("AC-DATA-03 envelope refused: GCE identity project=%q zone=%q instance=%q; require project=%q zone=%q instance=%q", identity.Project, identity.Zone, identity.Instance, envelopeRequiredGCEProject, envelopeRequiredGCEZone, envelopeRequiredGCEName)
+	}
+	return nil
+}
+
+func inspectEnvelopeRuntimeCaps() (envelopeRuntimeCaps, error) {
+	body, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return envelopeRuntimeCaps{}, fmt.Errorf("inspect CPU affinity: %w", err)
+	}
+	var allowed string
+	for _, line := range strings.Split(string(body), "\n") {
+		if value, ok := strings.CutPrefix(line, "Cpus_allowed_list:"); ok {
+			allowed = strings.TrimSpace(value)
+			break
+		}
+	}
+	count, err := countCPUList(allowed)
+	if err != nil {
+		return envelopeRuntimeCaps{}, fmt.Errorf("inspect CPU affinity %q: %w", allowed, err)
+	}
+	nice, err := currentNiceValue("/proc/self/stat")
+	if err != nil {
+		return envelopeRuntimeCaps{}, err
+	}
+	return envelopeRuntimeCaps{AllowedCPUs: allowed, AllowedCPUCount: count, Nice: nice, MemoryMaxBytes: cgroupMemoryLimit(), InternalTimeout: envelopeRunTimeout}, nil
+}
+
+func validateEnvelopeRuntimeCaps(caps envelopeRuntimeCaps) error {
+	var failures []string
+	if caps.AllowedCPUCount != 1 {
+		failures = append(failures, fmt.Sprintf("one allowed CPU required, got %q (%d CPUs)", caps.AllowedCPUs, caps.AllowedCPUCount))
+	}
+	if caps.Nice != 19 {
+		failures = append(failures, fmt.Sprintf("nice=19 required, got %d", caps.Nice))
+	}
+	if caps.MemoryMaxBytes < envelopeMinMemoryLimit || caps.MemoryMaxBytes > envelopeMaxMemoryLimit {
+		failures = append(failures, fmt.Sprintf("MemoryMax must be 2-3 GiB, got %d bytes", caps.MemoryMaxBytes))
+	}
+	if caps.InternalTimeout > 60*time.Minute {
+		failures = append(failures, fmt.Sprintf("timeout must be <=60m, got %s", caps.InternalTimeout))
+	}
+	return errors.Join(stringErrors(failures)...)
+}
+
+func countCPUList(value string) (int, error) {
+	if value == "" {
+		return 0, errors.New("empty CPU list")
+	}
+	total := 0
+	for _, part := range strings.Split(value, ",") {
+		bounds := strings.SplitN(strings.TrimSpace(part), "-", 2)
+		start, err := strconv.Atoi(bounds[0])
+		if err != nil {
+			return 0, err
+		}
+		end := start
+		if len(bounds) == 2 {
+			end, err = strconv.Atoi(bounds[1])
+			if err != nil {
+				return 0, err
+			}
+		}
+		if start < 0 || end < start {
+			return 0, fmt.Errorf("invalid range %q", part)
+		}
+		total += end - start + 1
+	}
+	return total, nil
+}
+
+func currentNiceValue(statPath string) (int, error) {
+	body, err := os.ReadFile(statPath)
+	if err != nil {
+		return 0, fmt.Errorf("inspect nice value: %w", err)
+	}
+	end := strings.LastIndex(string(body), ") ")
+	if end < 0 {
+		return 0, errors.New("inspect nice value: malformed /proc stat")
+	}
+	fields := strings.Fields(string(body)[end+2:]) // starts at proc stat field 3
+	if len(fields) <= 16 {
+		return 0, errors.New("inspect nice value: incomplete /proc stat")
+	}
+	nice, err := strconv.Atoi(fields[16]) // field 19
+	if err != nil {
+		return 0, fmt.Errorf("inspect nice value: %w", err)
+	}
+	return nice, nil
+}
+
 func inspectEnvelopeHardware(path string) (envelopeHardware, error) {
 	h := envelopeHardware{OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: runtime.NumCPU(), CPUModel: cpuModel(), RAMBytes: physicalMemoryBytes(), CgroupLimitBytes: cgroupMemoryLimit(), Filesystem: filesystemType(path)}
 	var stat syscall.Statfs_t
@@ -1014,17 +1349,98 @@ func inspectEnvelopeHardware(path string) (envelopeHardware, error) {
 	return h, nil
 }
 
-func resourceEnvelopeSample(at time.Time, duckPath, brokerDir string) envelopeResourceSample {
-	return envelopeResourceSample{At: at.UTC(), RSSBytes: currentRSSBytes(), DuckDBBytes: uint64(max(0, fileSize(duckPath))), WALBytes: uint64(max(0, fileSize(duckPath+".wal"))), SpillBytes: treeSize(filepath.Join(filepath.Dir(duckPath), "tmp")), BrokerBytes: treeSize(brokerDir), DiskFree: diskFree(filepath.Dir(duckPath))}
+func resourceEnvelopeSample(at time.Time, duckPath, brokerDir, postgresContainer string) envelopeResourceSample {
+	rss, complete := currentOwnedRSSBytes(postgresContainer)
+	return envelopeResourceSample{At: at.UTC(), RSSBytes: rss, RSSComplete: complete, DuckDBBytes: uint64(max(0, fileSize(duckPath))), WALBytes: uint64(max(0, fileSize(duckPath+".wal"))), SpillBytes: treeSize(filepath.Join(filepath.Dir(duckPath), "tmp")), BrokerBytes: treeSize(brokerDir), DiskFree: diskFree(filepath.Dir(duckPath))}
 }
 
-func currentRSSBytes() uint64 {
-	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
+func currentOwnedRSSBytes(postgresContainer string) (uint64, bool) {
+	out, err := exec.Command("docker", "inspect", "--format", "{{.State.Pid}}", postgresContainer).Output()
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	kib, _ := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
-	return kib * 1024
+	postgresPID, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || postgresPID <= 0 {
+		return 0, false
+	}
+	rss, err := processTreeRSSBytes("/proc", []int{os.Getpid(), postgresPID})
+	return rss, err == nil
+}
+
+type envelopeProcessStat struct {
+	PID, PPID int
+	RSSBytes  uint64
+}
+
+func processTreeRSSBytes(procRoot string, roots []int) (uint64, error) {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return 0, err
+	}
+	stats := make(map[int]envelopeProcessStat)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		stat, err := readEnvelopeProcessStat(filepath.Join(procRoot, entry.Name(), "status"), pid)
+		if err == nil {
+			stats[pid] = stat
+		}
+	}
+	owned := make(map[int]struct{}, len(roots))
+	for _, root := range roots {
+		if _, ok := stats[root]; !ok {
+			return 0, fmt.Errorf("RSS root process %d was not readable", root)
+		}
+		owned[root] = struct{}{}
+	}
+	for changed := true; changed; {
+		changed = false
+		for pid, stat := range stats {
+			if _, already := owned[pid]; already {
+				continue
+			}
+			if _, parentOwned := owned[stat.PPID]; parentOwned {
+				owned[pid] = struct{}{}
+				changed = true
+			}
+		}
+	}
+	var total uint64
+	for pid := range owned {
+		total += stats[pid].RSSBytes
+	}
+	return total, nil
+}
+
+func readEnvelopeProcessStat(path string, pid int) (envelopeProcessStat, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return envelopeProcessStat{}, err
+	}
+	stat := envelopeProcessStat{PID: pid}
+	var havePPID, haveRSS bool
+	for _, line := range strings.Split(string(body), "\n") {
+		if value, ok := strings.CutPrefix(line, "PPid:"); ok {
+			stat.PPID, err = strconv.Atoi(strings.TrimSpace(value))
+			havePPID = err == nil
+		}
+		if value, ok := strings.CutPrefix(line, "VmRSS:"); ok {
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				var kib uint64
+				kib, err = strconv.ParseUint(fields[0], 10, 64)
+				if err == nil {
+					stat.RSSBytes, haveRSS = kib*1024, true
+				}
+			}
+		}
+	}
+	if !havePPID || !haveRSS {
+		return envelopeProcessStat{}, fmt.Errorf("incomplete status for process %d", pid)
+	}
+	return stat, nil
 }
 
 func physicalMemoryBytes() uint64 {
@@ -1072,7 +1488,7 @@ func cgroupMemoryLimit() uint64 {
 	if runtime.GOOS != "linux" {
 		return 0
 	}
-	body, err := os.ReadFile("/sys/fs/cgroup/memory.max")
+	body, err := os.ReadFile(currentCgroupV2File("memory.max"))
 	if err != nil || strings.TrimSpace(string(body)) == "max" {
 		return 0
 	}
@@ -1084,7 +1500,7 @@ func cgroupOOMEvents() uint64 {
 	if runtime.GOOS != "linux" {
 		return 0
 	}
-	body, _ := os.ReadFile("/sys/fs/cgroup/memory.events")
+	body, _ := os.ReadFile(currentCgroupV2File("memory.events"))
 	var total uint64
 	for _, line := range strings.Split(string(body), "\n") {
 		var name string
@@ -1094,6 +1510,18 @@ func cgroupOOMEvents() uint64 {
 		}
 	}
 	return total
+}
+
+func currentCgroupV2File(name string) string {
+	body, err := os.ReadFile("/proc/self/cgroup")
+	if err == nil {
+		for _, line := range strings.Split(string(body), "\n") {
+			if path, ok := strings.CutPrefix(line, "0::"); ok {
+				return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(strings.TrimSpace(path), "/"), name)
+			}
+		}
+	}
+	return filepath.Join("/sys/fs/cgroup", name)
 }
 
 func fileSize(path string) int64 {

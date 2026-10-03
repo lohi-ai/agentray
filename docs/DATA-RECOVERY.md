@@ -69,23 +69,45 @@ after local cleanup without deleting another colour's discovery authority.
 
 `TestDataEnvelope` is the assertion-bearing capacity harness. Its normal test
 behavior is a skip; setting only `AGENTRAY_DATA_ENVELOPE=1` fails preflight.
-The run is authorized only on a foreman-leased `lohi-app-frozen-surface` host,
-and the two approval variables are an operator attestation—not a way to turn a
-developer laptop into an approved host. The harness owns and removes a
+The run is authorized only on the foreman-leased GCE instance `lohi-app` in
+project `lohi-dev-lohi`, zone `asia-southeast1-a`, for the
+`lohi-app-frozen-surface` class. The approval variables are an operator
+attestation, and the harness independently verifies that exact identity through
+GCE metadata before creating fixtures. It also refuses unless its process has
+exactly one allowed CPU, nice value 19, a 2–3 GiB cgroup `MemoryMax`, and an
+internal timeout of at most 60 minutes. The harness owns and removes a
 `postgres:16-alpine` container, embedded file-backed JetStream, DuckDB/WAL,
 sandbox children, spill files, and all generated corpus files.
 
 From the repository root, the complete non-interactive invocation is:
 
 ```sh
-AGENTRAY_DATA_ENVELOPE=1 AGENTRAY_DATA_ENVELOPE_APPROVED=1 AGENTRAY_DATA_ENVELOPE_HOST_CLASS=lohi-app-frozen-surface AGENTRAY_DATA_ENVELOPE_REPORT=/var/tmp/agentray-ac-data-03.json go test ./internal/dataplane/ingest -run '^TestDataEnvelope$' -count=1 -timeout 90m -v
+sudo systemd-run --scope --quiet --collect -p MemoryMax=2G \
+  taskset -c 0 nice -n 19 \
+  timeout --signal=TERM --kill-after=30s 3570s env \
+  AGENTRAY_DATA_ENVELOPE=1 \
+  AGENTRAY_DATA_ENVELOPE_APPROVED=1 \
+  AGENTRAY_DATA_ENVELOPE_HOST_CLASS=lohi-app-frozen-surface \
+  AGENTRAY_DATA_ENVELOPE_REPORT=/var/tmp/agentray-ac-data-03.json \
+  go test ./internal/dataplane/ingest -run '^TestDataEnvelope$' -count=1 -timeout 59m -v
 ```
+
+These are the authorized host caps, not tuning suggestions. The main test,
+embedded broker, and sandbox workers share the one-CPU, nice-19, 2 GiB scope;
+the harness launches disposable PostgreSQL pinned to that same CPU with a
+512 MiB hard memory/swap cap, for a 2.5 GiB aggregate ceiling. The outer runner
+sends TERM at 59m30s and KILL 30 seconds later, enforcing a 60-minute hard wall
+clock; the Go test timeout is 59 minutes, and the harness cancels its work at
+58 minutes to leave teardown headroom. Any
+missing or different detected cap fails preflight; do not weaken the check.
 
 Do not replace the corpus constants or shorten the 15-minute steady phase to
 claim acceptance. The deterministic corpus is 10M events and 1M external rows
 per project for three projects. Four concurrent governed investigations cover
 62-day activity, 62-day purchases, lifetime-first-payer, and queryability while
 four publishers sustain a scheduled aggregate 100 accepted events/second.
+The rate assertion permits zero accepted-event shortfall: at least 90,000
+events must be accepted during the 15-minute steady phase (100/s inclusive).
 
 The JSON report contains raw request samples and p95 inputs, per-phase and
 per-tenant timings and totals, CPU/RAM/filesystem/disk facts, RSS, DuckDB/WAL,
@@ -95,5 +117,9 @@ when warm p95 exceeds 5s, cold p95 exceeds 30s, accepted-publication p95 exceeds
 1s, queryable p95 exceeds 60s, the accepted rate is missed, any investigation
 is refused/errors, cgroup OOM increases, RSS reaches 90% of available RAM or
 grows by more than 10% of RAM across the steady-state quartiles, tenant totals
-cross, or final event/external totals differ. A failed run is evidence; never
-edit the report or substitute logged estimates for the measured samples.
+cross, or final event/external totals differ. Warm p95 includes every concurrent
+steady-state investigation, and queryability latency is recorded only after a
+query proves the exact accepted event identities visible. RSS aggregates the
+test process, all descendants (including sandbox workers), and the disposable
+PostgreSQL process tree. A failed run is evidence; never edit the report or
+substitute logged estimates for the measured samples.
