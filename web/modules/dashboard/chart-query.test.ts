@@ -133,6 +133,45 @@ describe('resolveChartQuery', () => {
     expect(sql).toContain(`$é$'{{from}}' '{{to}}'$é$`);
   });
 
+  it('rejects the round-6 continued-bound reproduction instead of claiming the canonical range', () => {
+    const sql = `SELECT count(*) AS value FROM events WHERE timestamp >= '0000'\n'{{from}}' AND timestamp < '{{to}}'`;
+    const canonical = `SELECT count(*) AS value FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`;
+
+    expect(runDuckDB(substituteDateLiterals(sql))).toEqual([{ value: 2 }]);
+    expect(runDuckDB(substituteDateLiterals(canonical))).toEqual([{ value: 1 }]);
+    const result = resolveChartQuery(sql, absolute);
+    expect(result).toMatchObject({ status: 'invalid', ok: false });
+    expect(chartRangeCaption(result)).toBeNull();
+  });
+
+  it.each([
+    ['continued upper suffix', `SELECT count(*) AS value FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'\n'junk'`],
+    ['continued escape prefix', `SELECT E'prefix '\n'{{from}}' AS lo, '{{to}}' AS hi FROM events LIMIT 1`],
+    ['continued line-comment prefix', `SELECT 'prefix ' -- note\n'{{from}}' AS lo, '{{to}}' AS hi FROM events LIMIT 1`],
+    ['continued token note with real bounds', `SELECT count(*) AS value, 'prefix '\n'{{from}}' AS note FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`],
+    ['continued fixed lower prefix', `SELECT count(*) AS value FROM events WHERE timestamp >= '0000'\n'1999-01-01T00:00:00Z' AND timestamp < '2001-01-01T00:00:00Z'`],
+    ['continued fixed upper suffix', `SELECT count(*) AS value FROM events WHERE timestamp >= '1999-01-01T00:00:00Z' AND timestamp < '2001-01-01T00:00:00Z'\n'junk'`],
+  ])('rejects ambiguous %s without displaying a range claim', (_, sql) => {
+    expect(() => runDuckDB(sql)).not.toThrow();
+    const result = resolveChartQuery(sql, absolute);
+    expect(result).toMatchObject({ status: 'invalid', ok: false });
+    expect(chartRangeCaption(result)).toBeNull();
+  });
+
+  it.each([
+    ['multi-line ordinary string', `SELECT 'line\nnote', '{{from}}', '{{to}}'`],
+    ['Unicode-line-separated ordinary string', `SELECT 'line\u2028note', '{{from}}', '{{to}}'`],
+    ['backslash-newline escape string', `SELECT E'line\\\nnote', '{{from}}', '{{to}}'`],
+    ['unusual whitespace', `SELECT count(*) FROM events\u00a0WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`],
+    ['unterminated ordinary string', `SELECT '1999-01-01', '2001-01-01', 'unterminated`],
+    ['unterminated block comment', `SELECT '1999-01-01', '2001-01-01' /* unterminated`],
+    ['unterminated dollar string', `SELECT '1999-01-01', '2001-01-01', $tag$unterminated`],
+  ])('fails closed for uncertain lexical construct: %s', (_, sql) => {
+    const result = resolveChartQuery(sql, absolute);
+    expect(result).toMatchObject({ status: 'invalid', ok: false });
+    expect(chartRangeCaption(result)).toBeNull();
+  });
+
   it.each([
     {
       name: 'standalone scalar bounds',

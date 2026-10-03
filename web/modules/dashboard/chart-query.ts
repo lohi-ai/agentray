@@ -17,6 +17,7 @@ type ScannedSQL = {
   executable: string;
   standaloneDateTokens: Set<number>;
   dateLiterals: Array<{ value: string; timestamp: number }>;
+  fullyClassified: boolean;
 };
 
 type SQLLexicalClass =
@@ -41,7 +42,10 @@ function isASCIIIdentifierStart(codePoint: number): boolean {
 
 function isIdentifierStart(sql: string, index: number): boolean {
   const codePoint = sql.codePointAt(index);
-  return codePoint !== undefined && (isASCIIIdentifierStart(codePoint) || codePoint >= 0x80);
+  return codePoint !== undefined && (
+    isASCIIIdentifierStart(codePoint) ||
+    (codePoint >= 0x80 && !/\s/u.test(String.fromCodePoint(codePoint)))
+  );
 }
 
 function isIdentifierContinuation(sql: string, index: number): boolean {
@@ -50,6 +54,20 @@ function isIdentifierContinuation(sql: string, index: number): boolean {
     isASCIIIdentifierStart(codePoint) ||
     (codePoint >= 0x30 && codePoint <= 0x39) ||
     codePoint === 0x24 ||
+    (codePoint >= 0x80 && !/\s/u.test(String.fromCodePoint(codePoint)))
+  );
+}
+
+function isDollarTagStart(sql: string, index: number): boolean {
+  const codePoint = sql.codePointAt(index);
+  return codePoint !== undefined && (isASCIIIdentifierStart(codePoint) || codePoint >= 0x80);
+}
+
+function isDollarTagContinuation(sql: string, index: number): boolean {
+  const codePoint = sql.codePointAt(index);
+  return codePoint !== undefined && (
+    isASCIIIdentifierStart(codePoint) ||
+    (codePoint >= 0x30 && codePoint <= 0x39) ||
     codePoint >= 0x80
   );
 }
@@ -60,10 +78,10 @@ function dollarDelimiterAt(sql: string, start: number): string | null {
   if (sql[start] !== '$') return null;
   if (sql[start + 1] === '$') return '$$';
   let index = start + 1;
-  if (!isIdentifierStart(sql, index)) return null;
+  if (!isDollarTagStart(sql, index)) return null;
   index += codePointWidth(sql, index);
   while (index < sql.length && sql[index] !== '$') {
-    if (!isIdentifierContinuation(sql, index) || sql[index] === '$') return null;
+    if (!isDollarTagContinuation(sql, index) || sql[index] === '$') return null;
     index += codePointWidth(sql, index);
   }
   return sql[index] === '$' ? sql.slice(start, index + 1) : null;
@@ -71,6 +89,10 @@ function dollarDelimiterAt(sql: string, start: number): string | null {
 
 function masked(sql: string, start: number, end: number): string {
   return sql.slice(start, end).replace(/[^\r\n]/g, ' ');
+}
+
+function hasLineBreak(sql: string, start: number, end: number): boolean {
+  return /[\r\n\u2028\u2029]/.test(sql.slice(start, end));
 }
 
 function classifiedSpan(sql: string, start: number, end: number, state: SQLLexicalClass): string {
@@ -98,7 +120,26 @@ function scanSQL(sql: string): ScannedSQL {
   let state: SQLLexicalClass = 'operator-punctuation';
   const standaloneDateTokens = new Set<number>();
   const dateLiterals: Array<{ value: string; timestamp: number }> = [];
+  let fullyClassified = true;
+  let previousTokenWasString = false;
+  let separatorHasLineBreak = false;
   let index = 0;
+
+  const startStringToken = () => {
+    // DuckDB concatenates quoted strings across newline-bearing whitespace and
+    // comments. We do not try to reconstruct those values: any such sequence
+    // makes every range classification conservative-invalid.
+    if (previousTokenWasString && separatorHasLineBreak) fullyClassified = false;
+  };
+  const finishStringToken = () => {
+    previousTokenWasString = true;
+    separatorHasLineBreak = false;
+  };
+  const finishNonStringToken = () => {
+    previousTokenWasString = false;
+    separatorHasLineBreak = false;
+  };
+
   while (index < sql.length) {
     const start = index;
     const ch = sql[index];
@@ -108,6 +149,8 @@ function scanSQL(sql: string): ScannedSQL {
       state = 'whitespace';
       index += 1;
       while (index < sql.length && /\s/u.test(sql[index])) index += 1;
+      if (!/^[\t\n\f\r ]+$/.test(sql.slice(start, index))) fullyClassified = false;
+      if (previousTokenWasString && hasLineBreak(sql, start, index)) separatorHasLineBreak = true;
       out += classifiedSpan(sql, start, index, state);
       continue;
     }
@@ -135,13 +178,17 @@ function scanSQL(sql: string): ScannedSQL {
           index += codePointWidth(sql, index);
         }
       }
+      if (depth !== 0) fullyClassified = false;
+      if (previousTokenWasString && hasLineBreak(sql, start, index)) separatorHasLineBreak = true;
       out += classifiedSpan(sql, start, index, state);
       continue;
     }
 
     if ((ch === 'E' || ch === 'e') && next === "'" && !isIdentifierContinuation(sql, index - 1)) {
+      startStringToken();
       state = 'escape-string';
       index += 2;
+      let terminated = false;
       while (index < sql.length) {
         if (sql[index] === '\\' && index + 1 < sql.length) {
           index += 1 + codePointWidth(sql, index + 1);
@@ -149,35 +196,44 @@ function scanSQL(sql: string): ScannedSQL {
           index += 2;
         } else if (sql[index] === "'") {
           index += 1;
+          terminated = true;
           break;
         } else {
           index += codePointWidth(sql, index);
         }
       }
+      if (!terminated || hasLineBreak(sql, start, index)) fullyClassified = false;
       out += classifiedSpan(sql, start, index, state);
+      finishStringToken();
       continue;
     }
 
     // DuckDB's B'...' and X'...' literals add a b/x prefix to their value.
     // They are not ordinary date strings and must not establish a range.
     if ((ch === 'B' || ch === 'b' || ch === 'X' || ch === 'x') && next === "'" && !isIdentifierContinuation(sql, index - 1)) {
+      startStringToken();
       state = 'binary-string';
       index += 2;
+      let terminated = false;
       while (index < sql.length) {
         if (sql[index] === "'" && sql[index + 1] === "'") {
           index += 2;
         } else if (sql[index] === "'") {
           index += 1;
+          terminated = true;
           break;
         } else {
           index += codePointWidth(sql, index);
         }
       }
+      if (!terminated || hasLineBreak(sql, start, index)) fullyClassified = false;
       out += classifiedSpan(sql, start, index, state);
+      finishStringToken();
       continue;
     }
 
     if (ch === "'") {
+      startStringToken();
       state = 'single-quoted-string';
       index += 1;
       const contentStart = index;
@@ -193,6 +249,7 @@ function scanSQL(sql: string): ScannedSQL {
           index += codePointWidth(sql, index);
         }
       }
+      if (contentEnd < 0 || hasLineBreak(sql, start, index)) fullyClassified = false;
       out += classifiedSpan(sql, start, index, state);
       const literal = contentEnd < 0 ? '' : sql.slice(contentStart, contentEnd);
       if (/^\{\{\s*(from|to)\s*\}\}$/.test(literal)) {
@@ -200,23 +257,28 @@ function scanSQL(sql: string): ScannedSQL {
       }
       const timestamp = exactDateTimestamp(literal);
       if (timestamp !== null) dateLiterals.push({ value: literal, timestamp });
+      finishStringToken();
       continue;
     }
 
     if (ch === '"') {
       state = 'quoted-identifier';
       index += 1;
+      let terminated = false;
       while (index < sql.length) {
         if (sql[index] === '"' && sql[index + 1] === '"') {
           index += 2;
         } else if (sql[index] === '"') {
           index += 1;
+          terminated = true;
           break;
         } else {
           index += codePointWidth(sql, index);
         }
       }
+      if (!terminated) fullyClassified = false;
       out += classifiedSpan(sql, start, index, state);
+      finishNonStringToken();
       continue;
     }
 
@@ -224,11 +286,14 @@ function scanSQL(sql: string): ScannedSQL {
       ? dollarDelimiterAt(sql, index)
       : null;
     if (dollarDelimiter) {
+      startStringToken();
       state = 'dollar-quoted-string';
       index += dollarDelimiter.length;
       const close = sql.indexOf(dollarDelimiter, index);
       index = close < 0 ? sql.length : close + dollarDelimiter.length;
+      if (close < 0) fullyClassified = false;
       out += classifiedSpan(sql, start, index, state);
+      finishStringToken();
       continue;
     }
 
@@ -239,14 +304,18 @@ function scanSQL(sql: string): ScannedSQL {
         index += codePointWidth(sql, index);
       }
       out += classifiedSpan(sql, start, index, state);
+      finishNonStringToken();
       continue;
     }
 
     state = 'operator-punctuation';
     index += codePointWidth(sql, index);
+    const codePoint = ch.codePointAt(0) ?? 0;
+    if (codePoint < 0x21 || codePoint > 0x7e || ch === '\\' || ch === '$') fullyClassified = false;
     out += classifiedSpan(sql, start, index, state);
+    finishNonStringToken();
   }
-  return { executable: out, standaloneDateTokens, dateLiterals };
+  return { executable: out, standaloneDateTokens, dateLiterals, fullyClassified };
 }
 
 function exactDateTimestamp(value: string): number | null {
@@ -284,6 +353,9 @@ export function chartRangeCaption(query: ResolvedChartQuery): string | null {
 
 export function resolveChartQuery(sql: string, filters: Filters, now = new Date()): ResolvedChartQuery {
   const scanned = scanSQL(sql);
+  if (!scanned.fullyClassified) {
+    return { status: 'invalid', ok: false, message: `${RANGE_ERROR}: use unambiguous, fully terminated SQL literals.` };
+  }
   const { executable, standaloneDateTokens } = scanned;
   const matches = [...executable.matchAll(tokenPattern)];
   const names = matches.map((match) => match[1].trim());
