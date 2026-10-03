@@ -50,7 +50,8 @@ func (f *fakeSource) TestConnection(ctx context.Context) error { return nil }
 func (f *fakeSource) DiscoverSchema(ctx context.Context) ([]Table, error) {
 	return nil, nil
 }
-func (f *fakeSource) Close() {}
+func (f *fakeSource) Close()                                                    {}
+func (f *fakeSource) ValidateSnapshotKey(context.Context, string, string) error { return nil }
 func (f *fakeSource) PullRows(ctx context.Context, req PullRequest) (PullResult, error) {
 	if f.blockCh != nil {
 		select {
@@ -176,6 +177,7 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 		return Run{}, false, nil
 	}
 	r.Status = "running"
+	r.LeaseEpoch++
 	return *r, true, nil
 }
 

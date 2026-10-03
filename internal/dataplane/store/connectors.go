@@ -42,6 +42,9 @@ type ConnectorSync struct {
 	SourceTable  string     `json:"source_table"`
 	KeyColumn    string     `json:"key_column"`
 	CursorColumn string     `json:"cursor_column"`
+	SyncMode     string     `json:"sync_mode,omitempty"`
+	RelationKind string     `json:"relation_kind,omitempty"`
+	KeyStability string     `json:"key_stability,omitempty"`
 	ScheduleCron string     `json:"schedule_cron"`
 	Enabled      bool       `json:"enabled"`
 	Cursor       string     `json:"cursor"`
@@ -80,7 +83,7 @@ type ConnectorSync struct {
 }
 
 const connectorSyncColumns = `id::text, connector_id::text, project_id::text, source_table, key_column,
-	cursor_column, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
+	cursor_column, sync_mode, schedule_cron, enabled, cursor, cursor_key, last_run_at, last_status, last_error, last_rows, total_rows,
 	last_success_at, join_key, join_validated, deletion_mode, soft_delete_column, soft_delete_semantics,
 	revision, disabled_by_archive, created_at, updated_at`
 
@@ -119,6 +122,7 @@ func (s *Store) migrateConnectors(ctx context.Context) error {
 		// cursor_key is the tie-breaking half of the keyset cursor: the key of
 		// the last synced row, so rows sharing one cursor value are never
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS cursor_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS sync_mode VARCHAR(16) NOT NULL DEFAULT ''`,
 		// Slice-4 dataset contract: join/deletion config and the monotonic
 		// landing sequence feeding the external_rows version column.
 		`ALTER TABLE connector_syncs ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ`,
@@ -220,8 +224,43 @@ func (s *Store) DeleteDataConnector(ctx context.Context, userID, projectID, conn
 	if !canManage {
 		return ErrAgentForbidden
 	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID)
+	tx, err := s.pg.Begin(ctx)
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id FROM connector_syncs WHERE project_id=$1 AND connector_id=$2 FOR UPDATE`, projectID, connectorID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ignored string
+		if err := rows.Scan(&ignored); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM data_connectors WHERE project_id=$1 AND id=$2 FOR UPDATE`, projectID, connectorID).Scan(&exists); err != nil {
+		return err
+	}
+	var hasHistory bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_generations WHERE connector_id=$1)`, connectorID).Scan(&hasHistory); err != nil {
+		return err
+	}
+	if hasHistory {
+		return fmt.Errorf("snapshot generation history protects this connector from deletion")
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM data_connectors WHERE project_id = $1 AND id = $2`, projectID, connectorID)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "connector.delete", "project", project.ID, project.Name, "{}")
@@ -277,8 +316,11 @@ type ConnectorSyncInput struct {
 	SourceTable  string `json:"source_table"`
 	KeyColumn    string `json:"key_column"`
 	CursorColumn string `json:"cursor_column"`
-	ScheduleCron string `json:"schedule_cron"`
-	Enabled      bool   `json:"enabled"`
+	// nil distinguishes an old client that omitted sync_mode from an explicit
+	// mode choice. On update nil preserves the stored value.
+	SyncMode     *string `json:"sync_mode,omitempty"`
+	ScheduleCron string  `json:"schedule_cron"`
+	Enabled      bool    `json:"enabled"`
 	// JoinKey names the source column holding a person-identity value
 	// (resolved to distinct_id via aliases). Fact-level keys are rejected by
 	// the usecase layer's join validation.
@@ -320,18 +362,26 @@ func (s *Store) CreateConnectorSync(ctx context.Context, userID, projectID, conn
 	if archived {
 		return ConnectorSync{}, ErrSourceArchived
 	}
+	mode := ""
+	if in.SyncMode != nil {
+		mode = strings.TrimSpace(*in.SyncMode)
+	}
+	if err := s.validateSourceBinding(projectID, connectorID, "", in, mode); err != nil {
+		return ConnectorSync{}, err
+	}
 	var out ConnectorSync
 	err = s.pg.QueryRow(ctx, `
-INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, schedule_cron, enabled,
+INSERT INTO connector_syncs (connector_id, project_id, source_table, key_column, cursor_column, sync_mode, schedule_cron, enabled,
 	join_key, deletion_mode, soft_delete_column, soft_delete_semantics)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING `+connectorSyncColumns,
-		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
+		connectorID, projectID, in.SourceTable, in.KeyColumn, in.CursorColumn, mode, in.ScheduleCron, in.Enabled,
 		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
 	}
+	s.enrichConnectorSync(&out)
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "connector.sync.create", "project", project.ID, project.Name, "{}")
 	return out, nil
 }
@@ -354,35 +404,67 @@ func (s *Store) UpdateConnectorSync(ctx context.Context, userID, projectID, sync
 	if err := validateSyncInput(in); err != nil {
 		return ConnectorSync{}, err
 	}
-	// A sync under an archived connector cannot be edited or re-enabled —
-	// unarchive the source instead (same fail-closed rule as the pause path).
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return ConnectorSync{}, err
+	}
+	defer tx.Rollback(ctx)
+	// Lock the configuration row for the full validate/check/update decision.
+	// Snapshot claims take the same lock and compare the revision loaded into
+	// their job, so either the edit sees the generation or the claim sees a
+	// stale job; there is no check-then-claim gap.
 	var archived bool
-	if err := s.pg.QueryRow(ctx, `
-SELECT dc.archived_at IS NOT NULL
+	var connectorID, storedMode, storedSource, storedKey, storedCursor string
+	if err := tx.QueryRow(ctx, `
+SELECT dc.archived_at IS NOT NULL, cs.connector_id::text, cs.sync_mode, cs.source_table, cs.key_column, cs.cursor_column
 FROM connector_syncs cs JOIN data_connectors dc ON dc.id = cs.connector_id
-WHERE cs.project_id = $1 AND cs.id = $2`, projectID, syncID).Scan(&archived); err != nil {
+WHERE cs.project_id = $1 AND cs.id = $2 FOR UPDATE OF cs`, projectID, syncID).Scan(&archived, &connectorID, &storedMode, &storedSource, &storedKey, &storedCursor); err != nil {
 		return ConnectorSync{}, fmt.Errorf("sync not found")
 	}
 	if archived {
 		return ConnectorSync{}, ErrSourceArchived
 	}
+	mode := storedMode
+	if in.SyncMode != nil {
+		mode = strings.TrimSpace(*in.SyncMode)
+	}
+	captureChanged := storedSource != in.SourceTable || storedKey != in.KeyColumn || storedCursor != in.CursorColumn || storedMode != mode
+	if captureChanged {
+		var live bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_generations WHERE sync_id=$1 AND
+		(state IN ('capturing','yielded') OR (state='sealed' AND EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=connector_snapshot_generations.generation AND NOT o.published))))`, syncID).Scan(&live); err != nil {
+			return ConnectorSync{}, err
+		}
+		if live {
+			return ConnectorSync{}, fmt.Errorf("a snapshot generation is active; cancel it before changing source identity, key, cursor, or mode")
+		}
+	}
+	if err := s.validateSourceBinding(projectID, connectorID, syncID, in, mode); err != nil {
+		return ConnectorSync{}, err
+	}
 	var out ConnectorSync
-	err = s.pg.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 UPDATE connector_syncs SET
-	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, schedule_cron = $6, enabled = $7,
-	join_key = $8::text, deletion_mode = $9::text, soft_delete_column = $10::text, soft_delete_semantics = $11::text,
-	join_validated = CASE WHEN join_key IS DISTINCT FROM $8::text THEN '' ELSE join_validated END,
+	source_table = $3::text, key_column = $4::text, cursor_column = $5::text, sync_mode = $6::text, schedule_cron = $7, enabled = $8,
+	join_key = $9::text, deletion_mode = $10::text, soft_delete_column = $11::text, soft_delete_semantics = $12::text,
+	join_validated = CASE WHEN join_key IS DISTINCT FROM $9::text THEN '' ELSE join_validated END,
 	cursor = CASE WHEN source_table = $3::text AND cursor_column = $5::text THEN cursor ELSE '' END,
 	cursor_key = CASE WHEN source_table = $3::text AND cursor_column = $5::text AND key_column = $4::text THEN cursor_key ELSE '' END,
-	revision = revision + 1, updated_at = now()
+	revision = revision + 1,
+	config_revision = config_revision + CASE WHEN $13::boolean THEN 1 ELSE 0 END,
+	updated_at = now()
 WHERE project_id = $1 AND id = $2
 RETURNING `+connectorSyncColumns,
-		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, in.ScheduleCron, in.Enabled,
-		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics).
+		projectID, syncID, in.SourceTable, in.KeyColumn, in.CursorColumn, mode, in.ScheduleCron, in.Enabled,
+		in.JoinKey, in.DeletionMode, in.SoftDeleteColumn, in.SoftDeleteSemantics, captureChanged).
 		Scan(syncScanDest(&out)...)
 	if err != nil {
 		return ConnectorSync{}, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return ConnectorSync{}, err
+	}
+	s.enrichConnectorSync(&out)
 	return out, nil
 }
 
@@ -404,6 +486,7 @@ FROM connector_syncs WHERE project_id = $1 AND connector_id = $2 ORDER BY create
 		if err := rows.Scan(syncScanDest(&cs)...); err != nil {
 			return nil, err
 		}
+		s.enrichConnectorSync(&cs)
 		out = append(out, cs)
 	}
 	return out, rows.Err()
@@ -422,8 +505,26 @@ func (s *Store) DeleteConnectorSync(ctx context.Context, userID, projectID, sync
 	if !canManage {
 		return ErrAgentForbidden
 	}
-	_, err = s.pg.Exec(ctx, `DELETE FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID)
-	return err
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var lockedID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM connector_syncs WHERE project_id=$1 AND id=$2 FOR UPDATE`, projectID, syncID).Scan(&lockedID); err != nil {
+		return err
+	}
+	var hasHistory bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_generations WHERE sync_id=$1)`, syncID).Scan(&hasHistory); err != nil {
+		return err
+	}
+	if hasHistory {
+		return fmt.Errorf("snapshot generation history protects this sync from deletion")
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM connector_syncs WHERE project_id = $1 AND id = $2`, projectID, syncID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // SyncBelongsToProject reports whether a sync id is in the project — the
@@ -450,6 +551,21 @@ func validateSyncInput(in ConnectorSyncInput) error {
 	if in.ScheduleCron != "" && len(strings.Fields(in.ScheduleCron)) != 5 {
 		return fmt.Errorf("schedule must be a 5-field cron expression")
 	}
+	if in.SyncMode != nil {
+		switch strings.TrimSpace(*in.SyncMode) {
+		case "":
+		case "snapshot":
+			if strings.TrimSpace(in.CursorColumn) != "" {
+				return fmt.Errorf("snapshot sync_mode requires an empty cursor_column")
+			}
+		case "incremental":
+			if strings.TrimSpace(in.CursorColumn) == "" {
+				return fmt.Errorf("incremental sync_mode requires cursor_column")
+			}
+		default:
+			return fmt.Errorf("sync_mode must be 'incremental' or 'snapshot'")
+		}
+	}
 	switch in.DeletionMode {
 	case "", "none":
 		if in.SoftDeleteColumn != "" || in.SoftDeleteSemantics != "" {
@@ -474,10 +590,62 @@ func connectorKindKnown(kind string) bool {
 
 func syncScanDest(cs *ConnectorSync) []any {
 	return []any{&cs.ID, &cs.ConnectorID, &cs.ProjectID, &cs.SourceTable, &cs.KeyColumn,
-		&cs.CursorColumn, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
+		&cs.CursorColumn, &cs.SyncMode, &cs.ScheduleCron, &cs.Enabled, &cs.Cursor, &cs.CursorKey, &cs.LastRunAt, &cs.LastStatus,
 		&cs.LastError, &cs.LastRows, &cs.TotalRows, &cs.LastSuccessAt, &cs.JoinKey, &cs.JoinValidated,
 		&cs.DeletionMode, &cs.SoftDeleteColumn, &cs.SoftDeleteSemantics,
 		&cs.Revision, &cs.DisabledByArchive, &cs.CreatedAt, &cs.UpdatedAt}
+}
+
+func (s *Store) SourcePolicy() *connector.SourcePolicy { return s.sourcePolicy }
+
+func (s *Store) enrichConnectorSync(cs *ConnectorSync) {
+	if cs == nil || s.sourcePolicy == nil {
+		return
+	}
+	b, err := s.sourcePolicy.Binding(cs.ProjectID, cs.ConnectorID)
+	if err != nil || !b.MatchesRelation(cs.SourceTable) {
+		return
+	}
+	cs.RelationKind = b.RelationKind
+	cs.KeyStability = b.KeyStability
+}
+
+func (s *Store) SourceBinding(projectID, connectorID string) (*connector.SourceBinding, error) {
+	if s.sourcePolicy == nil {
+		return nil, connector.ErrSourcePolicyDenied
+	}
+	return s.sourcePolicy.Binding(projectID, connectorID)
+}
+
+func (s *Store) validateSourceBinding(projectID, connectorID, syncID string, in ConnectorSyncInput, mode string) error {
+	// Omitted legacy configurations retain their old semantics. They still
+	// cannot dial without policy; this compatibility allowance only preserves
+	// old CRUD clients during rollout.
+	if mode == "" && !s.sourcePolicyConfigured {
+		return nil
+	}
+	b, err := s.SourceBinding(projectID, connectorID)
+	if err != nil {
+		return fmt.Errorf("source binding is not operator-approved")
+	}
+	if !b.MatchesRelation(in.SourceTable) || in.KeyColumn != b.KeyColumn {
+		return fmt.Errorf("source relation or key is not operator-approved")
+	}
+	if b.RelationKind == connector.RelationKindLegacyTable && (syncID == "" || !b.AllowsSync(syncID)) {
+		return fmt.Errorf("legacy table binding is not approved for this existing sync")
+	}
+	if mode == "snapshot" && strings.TrimSpace(in.CursorColumn) != "" {
+		return fmt.Errorf("snapshot sync_mode requires an empty cursor_column")
+	}
+	if mode == "incremental" && !b.AllowsCursor(in.CursorColumn) {
+		return fmt.Errorf("cursor column is not operator-approved")
+	}
+	for _, name := range []string{in.JoinKey, in.SoftDeleteColumn} {
+		if name != "" && !b.AllowsColumn(name) {
+			return fmt.Errorf("configured column is not operator-approved")
+		}
+	}
+	return nil
 }
 
 // --- engine surface (connector.Store) ---
@@ -515,12 +683,12 @@ func (s *Store) ConnectorSyncJob(ctx context.Context, syncID string) (connector.
 	err := s.pg.QueryRow(ctx, `
 SELECT cs.id::text, cs.project_id::text, cs.connector_id::text, dc.kind, dc.dsn_ciphertext,
 	COALESCE(dc.credential_id::text, ''),
-	cs.source_table, cs.key_column, cs.cursor_column, cs.cursor, cs.cursor_key
+	cs.source_table, cs.key_column, cs.cursor_column, cs.sync_mode, cs.cursor, cs.cursor_key,cs.config_revision,dc.source_config_revision
 FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id = cs.connector_id
 WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 		Scan(&job.SyncID, &job.ProjectID, &job.ConnectorID, &job.Kind, &ciphertext, &credentialID,
-			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.Cursor, &job.CursorKey)
+			&job.Table, &job.KeyColumn, &job.CursorColumn, &job.SyncMode, &job.Cursor, &job.CursorKey, &job.SyncRevision, &job.SourceRevision)
 	if err != nil {
 		return connector.SyncJob{}, err
 	}
@@ -529,11 +697,23 @@ WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 		if err != nil {
 			return connector.SyncJob{}, err
 		}
-		return job, nil
+	} else {
+		job.DSN, err = decryptAgentKey(ciphertext)
+		if err != nil {
+			return connector.SyncJob{}, err
+		}
 	}
-	job.DSN, err = decryptAgentKey(ciphertext)
-	if err != nil {
-		return connector.SyncJob{}, err
+	if s.sourcePolicy != nil {
+		job.SourcePolicy = s.sourcePolicy
+		job.SourceBinding, err = s.sourcePolicy.Binding(job.ProjectID, job.ConnectorID)
+	}
+	if job.Kind == "postgres" {
+		if err != nil || job.SourceBinding == nil || !job.SourceBinding.MatchesRelation(job.Table) || job.SourceBinding.KeyColumn != job.KeyColumn {
+			return connector.SyncJob{}, fmt.Errorf("source binding is not operator-approved")
+		}
+		if job.SourceBinding.RelationKind == connector.RelationKindLegacyTable && !job.SourceBinding.AllowsSync(job.SyncID) {
+			return connector.SyncJob{}, fmt.Errorf("legacy table binding is not approved for this existing sync")
+		}
 	}
 	return job, nil
 }
