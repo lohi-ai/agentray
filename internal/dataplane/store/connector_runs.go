@@ -27,12 +27,12 @@ type ConnectorRun = connector.Run
 
 const connectorRunColumns = `id::text, project_id::text, sync_id::text, connector_id::text,
 	status, idempotency_key, cancel_requested, rows, cursor, cursor_key, error,
-	queued_at, started_at, finished_at`
+	queued_at, started_at, finished_at, lease_epoch`
 
 func connectorRunScanDest(r *ConnectorRun) []any {
 	return []any{&r.ID, &r.ProjectID, &r.SyncID, &r.ConnectorID, &r.Status,
 		&r.IdempotencyKey, &r.CancelRequested, &r.Rows, &r.Cursor, &r.CursorKey,
-		&r.Error, &r.QueuedAt, &r.StartedAt, &r.FinishedAt}
+		&r.Error, &r.QueuedAt, &r.StartedAt, &r.FinishedAt, &r.LeaseEpoch}
 }
 
 func (s *Store) migrateConnectorRuns(ctx context.Context) error {
@@ -51,12 +51,14 @@ func (s *Store) migrateConnectorRuns(ctx context.Context) error {
 	error TEXT NOT NULL DEFAULT '',
 	owner TEXT NOT NULL DEFAULT '',
 	heartbeat_at TIMESTAMPTZ,
+	lease_epoch BIGINT NOT NULL DEFAULT 0,
 	queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	started_at TIMESTAMPTZ,
 	finished_at TIMESTAMPTZ
 )`,
 		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`,
+		`ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS lease_epoch BIGINT NOT NULL DEFAULT 0`,
 		// One active run per sync — the DB-level guarantee that replaces the
 		// engine's in-memory running map for the client contract.
 		`CREATE UNIQUE INDEX IF NOT EXISTS connector_runs_one_active
@@ -111,7 +113,7 @@ func connectorRunByKey(ctx context.Context, q pgQuerier, projectID, syncID, idem
 	err = q.QueryRow(ctx,
 		`SELECT r.id::text, r.project_id::text, r.sync_id::text, r.connector_id::text, r.status,
 r.idempotency_key, r.cancel_requested, r.rows, r.cursor, r.cursor_key, r.error,
-r.queued_at, r.started_at, r.finished_at FROM connector_runs r
+r.queued_at, r.started_at, r.finished_at, r.lease_epoch FROM connector_runs r
 JOIN connector_run_keys k ON k.run_id = r.id
 WHERE k.sync_id = $1 AND k.project_id = $2 AND k.idempotency_key = $3`,
 		syncID, projectID, idemKey).Scan(connectorRunScanDest(&run)...)
@@ -214,7 +216,7 @@ func (s *Store) ClaimConnectorRun(ctx context.Context, runID, owner string) (Con
 	var r ConnectorRun
 	err := s.pg.QueryRow(ctx, `
 UPDATE connector_runs
-SET status = 'running', started_at = now(), owner = $2, heartbeat_at = now()
+SET status = 'running', started_at = now(), owner = $2, heartbeat_at = now(), lease_epoch = lease_epoch + 1
 WHERE id = $1 AND status = 'queued' AND NOT cancel_requested
 RETURNING `+connectorRunColumns, runID, owner).Scan(connectorRunScanDest(&r)...)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -318,6 +320,7 @@ SET cancel_requested = true,
     status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
     finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END
 WHERE id = $1 AND project_id = $2 AND status IN ('queued','running')
+AND NOT EXISTS (SELECT 1 FROM connector_snapshot_generations g WHERE g.run_id=connector_runs.id AND g.state='sealed')
 RETURNING `+connectorRunColumns, runID, projectID).Scan(connectorRunScanDest(&r)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Terminal or absent: return the row as-is (idempotent cancel) or
@@ -476,6 +479,7 @@ FROM connector_syncs WHERE project_id = $1 AND connector_id = $2 ORDER BY create
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
+		s.enrichConnectorSync(&cs)
 		out = append(out, cs)
 	}
 	return out, rows.Err()
@@ -488,6 +492,9 @@ func (s *Store) ConnectorSyncForProject(ctx context.Context, projectID, syncID s
 	err := s.pg.QueryRow(ctx,
 		`SELECT `+connectorSyncColumns+` FROM connector_syncs WHERE id = $1 AND project_id = $2`,
 		syncID, projectID).Scan(dest...)
+	if err == nil {
+		s.enrichConnectorSync(&cs)
+	}
 	return cs, err
 }
 

@@ -9,6 +9,10 @@ import (
 type Config struct {
 	HTTPAddr    string
 	PostgresURL string
+	// SourcePolicyFile is an absolute, operator-managed JSON allowlist for
+	// external PostgreSQL destinations and export relations. Empty means deny
+	// external source dials; malformed configured files fail storage startup.
+	SourcePolicyFile string
 	// DuckDBPath is the embedded analytics database file. DuckDB owns the
 	// directory: the WAL lands at <path>.wal and spill scratch at <dir>/tmp.
 	// Relative paths resolve against the server working directory; the default
@@ -176,6 +180,7 @@ func FromEnv() Config {
 	return Config{
 		HTTPAddr:                     env("HTTP_ADDR", ":8080"),
 		PostgresURL:                  env("POSTGRES_URL", "postgres://lohi:lohi@localhost:5434/lohi_analytics?sslmode=disable"),
+		SourcePolicyFile:             os.Getenv("AGENTRAY_SOURCE_POLICY_FILE"),
 		DuckDBPath:                   env("DUCKDB_PATH", "./data/agentray.duckdb"),
 		EventRetentionDays:           eventRetentionDays(),
 		RedisURL:                     env("REDIS_URL", "redis://localhost:6389/0"),

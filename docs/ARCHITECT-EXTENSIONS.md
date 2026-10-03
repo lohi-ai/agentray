@@ -181,3 +181,7 @@ These predate `Hooks` and stay separate because each has one owner, not a list:
   redaction, a guard rail → **a hook**.
 - The behavior is specific to one agent → it is config. It is not a hook, and it
   is definitely not Go.
+
+External database ingestion is another platform extension, not an agent tool:
+operator-approved PostgreSQL exports, source admission, and complete snapshot
+promotion are documented in [SOURCE-EXPORTS.md](SOURCE-EXPORTS.md).
