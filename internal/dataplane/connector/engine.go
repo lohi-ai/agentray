@@ -27,6 +27,13 @@ const pullBatchSize = 1000
 // cursor advanced per landed batch, so a timed-out run resumes cleanly.
 const syncRunTimeout = 10 * time.Minute
 
+// snapshotCompletionDrainTimeout bounds publication of an already-sealed
+// completion. Sealing atomically marks the originating run succeeded, which
+// makes its heartbeat cancel the run context; the immutable completion outbox
+// must therefore drain on an independent context or a terminal heartbeat can
+// prevent the generation from ever becoming queryable.
+const snapshotCompletionDrainTimeout = 30 * time.Second
+
 // ScheduledSync is the engine's view of one enabled sync config: enough to
 // decide "due now" without loading the connector or its credentials.
 type ScheduledSync struct {
@@ -514,8 +521,8 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 	if err != nil {
 		return SyncResult{Err: err.Error()}
 	}
-	drain := func() error {
-		pending, err := store.PendingSnapshotOutbox(ctx, g)
+	drain := func(drainCtx context.Context) error {
+		pending, err := store.PendingSnapshotOutbox(drainCtx, g)
 		if err != nil {
 			return err
 		}
@@ -524,17 +531,17 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 			if err != nil {
 				return fmt.Errorf("read snapshot outbox: %w", err)
 			}
-			if err := publisher.PublishSnapshotEnvelope(ctx, env); err != nil {
+			if err := publisher.PublishSnapshotEnvelope(drainCtx, env); err != nil {
 				return err
 			}
-			if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
+			if err := store.MarkSnapshotOutboxPublished(drainCtx, g, item); err != nil {
 				return err
 			}
 		}
-		g, err = store.SnapshotGeneration(ctx, g.Generation)
+		g, err = store.SnapshotGeneration(drainCtx, g.Generation)
 		return err
 	}
-	if err := drain(); err != nil {
+	if err := drain(ctx); err != nil {
 		return SyncResult{Err: fmt.Sprintf("publish snapshot outbox: %v", err)}
 	}
 	if g.State == "sealed" {
@@ -643,16 +650,15 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 		SyncID: job.SyncID, RunID: run.ID, Generation: g.Generation, GenerationSeq: g.GenerationSeq, BindingDigest: g.BindingDigest,
 		CaptureStartedAt: g.CaptureStartedAt, CaptureFinishedAt: &finished, Kind: SnapshotKindComplete,
 		ExpectedBatches: int64(len(entries)), ExpectedRows: expectedRows, BatchManifestSHA256: manifest}
-	item, err := store.SealSnapshotGeneration(ctx, g, complete, int(g.Rows-startRows))
+	_, err = store.SealSnapshotGeneration(ctx, g, complete, int(g.Rows-startRows))
 	if err != nil {
 		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
 	}
-	if err := publisher.PublishSnapshotEnvelope(ctx, complete); err != nil {
-		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error(), Finalized: true}
-	}
 	g.State = "sealed"
-	if err := store.MarkSnapshotOutboxPublished(ctx, g, item); err != nil {
-		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error(), Finalized: true}
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotCompletionDrainTimeout)
+	defer drainCancel()
+	if err := drain(drainCtx); err != nil {
+		return SyncResult{Rows: int(g.Rows - startRows), Err: fmt.Sprintf("publish sealed snapshot completion: %v", err), Finalized: true}
 	}
 	return SyncResult{Rows: int(g.Rows - startRows), Finalized: true}
 }

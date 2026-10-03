@@ -19,6 +19,15 @@ func (d *DuckDB) ApplySnapshotEnvelope(ctx context.Context, env connector.Snapsh
 	if err := env.Validate(); err != nil {
 		return nil, err
 	}
+	// A large generation arrives as many small committed transactions. Fold
+	// those staged row groups into the database before the all-or-nothing
+	// INSERT ... SELECT so DuckDB does not carry their WAL/buffer footprint
+	// into the promotion commit under the bounded 128 MiB memory budget.
+	if env.Kind == connector.SnapshotKindComplete {
+		if err := d.Checkpoint(ctx); err != nil {
+			return nil, fmt.Errorf("checkpoint snapshot staging: %w", err)
+		}
+	}
 	var promotion *connector.SnapshotPromotion
 	err := d.Write(ctx, func(tx *sql.Tx) error {
 		var err error

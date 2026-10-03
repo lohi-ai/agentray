@@ -275,6 +275,58 @@ func TestSnapshotCompletionAckLossDoesNotFailSealedRun(t *testing.T) {
 	}
 }
 
+type terminalHeartbeatSnapshotHarness struct {
+	*snapshotHarness
+	heartbeatObserved chan struct{}
+	heartbeatOnce     sync.Once
+}
+
+func (h *terminalHeartbeatSnapshotHarness) HeartbeatConnectorRun(ctx context.Context, runID string) (bool, bool, error) {
+	cancelRequested, stillRunning, err := h.fakeStore.HeartbeatConnectorRun(ctx, runID)
+	if err == nil && !stillRunning {
+		h.heartbeatOnce.Do(func() { close(h.heartbeatObserved) })
+	}
+	return cancelRequested, stillRunning, err
+}
+
+func (h *terminalHeartbeatSnapshotHarness) PublishSnapshotEnvelope(ctx context.Context, env SnapshotEnvelope) error {
+	if env.Kind != SnapshotKindComplete {
+		return nil
+	}
+	select {
+	case <-h.heartbeatObserved:
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("terminal heartbeat was not observed")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(25 * time.Millisecond):
+		return nil
+	}
+}
+
+func TestSnapshotCompletionDrainSurvivesTerminalRunHeartbeat(t *testing.T) {
+	useFakeSource(&capacitySource{total: 1}, nil)
+	base := newFakeStore(snapshotCapacityJob())
+	h := &terminalHeartbeatSnapshotHarness{
+		snapshotHarness:   &snapshotHarness{fakeStore: base},
+		heartbeatObserved: make(chan struct{}),
+	}
+	engine := NewEngine(h, h)
+	engine.heartbeatEvery = time.Millisecond
+	runSync(t, engine, base, "s1")
+	if h.gen.State != "sealed" {
+		t.Fatalf("generation state=%s, want sealed", h.gen.State)
+	}
+	if got := base.runStatus("run-1"); got != "succeeded" {
+		t.Fatalf("originating run=%s, want succeeded", got)
+	}
+	if len(h.pending) != 0 {
+		t.Fatalf("sealed completion was not drained after terminal heartbeat: %+v", h.pending)
+	}
+}
+
 func TestSnapshotEmptyBatchWithHasMoreFailsGeneration(t *testing.T) {
 	useFakeSource(&fakeSource{batches: []PullResult{{HasMore: true}}}, nil)
 	base := newFakeStore(snapshotCapacityJob())
