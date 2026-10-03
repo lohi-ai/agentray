@@ -51,6 +51,10 @@ type AppliedMark struct {
 	// envelope. Legacy messages omit it and therefore never manufacture a
 	// complete/readiness claim.
 	Source *SourceReceiptMark
+	// suppressSourceMutation keeps an idempotent envelope replay from advancing
+	// the per-source readiness state. Delivery identity and durable position are
+	// still recorded, but the already-applied source transition is not repeated.
+	suppressSourceMutation bool
 }
 
 // AppliedPosition is what one store remembers about a durable's progress.

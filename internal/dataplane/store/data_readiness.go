@@ -301,7 +301,7 @@ WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleare
 		return err
 	}
 	s := mark.Source
-	if s == nil {
+	if s == nil || mark.suppressSourceMutation {
 		return nil
 	}
 	pid, err := uuid.Parse(s.ProjectID)
@@ -410,8 +410,10 @@ ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
  expected_batches = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.expected_batches ELSE coalesce(excluded.expected_batches, data_receipt_sources.expected_batches) END,
  expected_rows = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.expected_rows ELSE coalesce(excluded.expected_rows, data_receipt_sources.expected_rows) END,
  completion_seen = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.completion_seen ELSE excluded.completion_seen OR data_receipt_sources.completion_seen END,
- ordering_ambiguous = CASE
+	ordering_ambiguous = CASE
 	WHEN excluded.generation_seq > 0 AND excluded.completion_seen AND excluded.landed_generation_key = excluded.generation_key
+		 AND (data_receipt_sources.landed_generation_key IS NULL
+		      OR data_receipt_sources.landed_generation_key <> excluded.landed_generation_key)
 		THEN false
 	ELSE coalesce(data_receipt_sources.ordering_ambiguous, false)
  END,
