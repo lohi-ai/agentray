@@ -392,8 +392,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pid, cid, s.Table, generationKey, s.BatchID, b
 	if _, err := tx.ExecContext(ctx, `INSERT INTO data_receipt_sources
 (project_id, connector_id, table_name, sync_id, run_id, generation, generation_key, generation_seq, binding_digest,
  capture_started_at, capture_finished_at, published_at, landed_at, landed_generation_key, last_complete_at,
- expected_batches, expected_rows, completion_seen, mutation_seq, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+ expected_batches, expected_rows, completion_seen, ordering_ambiguous, mutation_seq, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, 1, ?)
 ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
  sync_id = coalesce(excluded.sync_id, data_receipt_sources.sync_id),
  run_id = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.run_id ELSE coalesce(excluded.run_id, data_receipt_sources.run_id) END,
@@ -410,6 +410,11 @@ ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
  expected_batches = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.expected_batches ELSE coalesce(excluded.expected_batches, data_receipt_sources.expected_batches) END,
  expected_rows = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.expected_rows ELSE coalesce(excluded.expected_rows, data_receipt_sources.expected_rows) END,
  completion_seen = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.completion_seen ELSE excluded.completion_seen OR data_receipt_sources.completion_seen END,
+ ordering_ambiguous = CASE
+	WHEN excluded.generation_seq > 0 AND excluded.completion_seen AND excluded.landed_generation_key = excluded.generation_key
+		THEN false
+	ELSE coalesce(data_receipt_sources.ordering_ambiguous, false)
+ END,
  mutation_seq = data_receipt_sources.mutation_seq + 1,
  updated_at = excluded.updated_at`,
 		pid, cid, s.Table, syncID, runID, generation, generationKey, s.GenerationSeq, s.BindingDigest,
@@ -501,6 +506,24 @@ func invalidateSourceConfirmationsTx(ctx context.Context, tx *sql.Tx, projectID,
 	return err
 }
 
+// markSourceOrderingAmbiguousTx makes a conservative, durable claim about an
+// incremental merge. Once a newer run is already authoritative, row presence
+// alone cannot prove whether an overlapping key belongs to that run or to a
+// delayed run in between. A fresh query can prove visibility, but not key
+// ownership, so this bit deliberately survives query confirmation and restart.
+// Only an atomically promoted sequenced snapshot clears it in the receipt
+// upsert above because that is complete replacement evidence.
+func markSourceOrderingAmbiguousTx(ctx context.Context, tx *sql.Tx, source *SourceReceiptMark, at time.Time) error {
+	if source == nil {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE data_receipt_sources
+SET ordering_ambiguous=true, updated_at=?
+WHERE project_id=? AND connector_id=? AND table_name=? AND NOT coalesce(ordering_ambiguous, false)`,
+		at, source.ProjectID, source.ConnectorID, source.Table)
+	return err
+}
+
 // RecordReadinessHole durably records a delivery that was settled into DLQ.
 // It is separate from RecordPosition: settlement health must never erase the
 // fact that the serving data has a hole.
@@ -569,6 +592,7 @@ type localSourceReceipt struct {
 	AppliedBatches                                                             uint64
 	ExpectedBatches                                                            *uint64
 	HasHole                                                                    bool
+	OrderingAmbiguous                                                          bool
 }
 
 func (d *DuckDB) localReadiness(ctx context.Context, projectID string, sources []ReadinessSource) (map[string]localSourceReceipt, error) {
@@ -585,14 +609,14 @@ func (d *DuckDB) localReadiness(ctx context.Context, projectID string, sources [
 			err := conn.QueryRowContext(ctx, `SELECT published_at,
 CASE WHEN landed_generation_key = generation_key THEN landed_at ELSE NULL END, last_complete_at,
 capture_started_at, capture_finished_at, generation::VARCHAR, run_id::VARCHAR, generation_key, generation_seq,
-mutation_seq, completion_seen, expected_batches,
+mutation_seq, completion_seen, expected_batches, coalesce(ordering_ambiguous, false),
 (SELECT count(*) FROM data_receipt_batches b WHERE b.project_id = s.project_id AND b.connector_id = s.connector_id AND b.table_name = s.table_name
  AND b.generation_key = coalesce(s.generation::VARCHAR, s.run_id::VARCHAR, 'legacy-unknown')),
 EXISTS (SELECT 1 FROM ingest_position WHERE refused_missing > 0) OR EXISTS (SELECT 1 FROM data_receipt_holes h WHERE h.cleared_at IS NULL AND
  (h.project_id IS NULL OR (h.project_id = s.project_id AND (h.connector_id IS NULL OR h.connector_id = s.connector_id) AND (h.table_name IS NULL OR h.table_name = s.table_name))))
 FROM data_receipt_sources s WHERE project_id = ? AND connector_id = ? AND table_name = ?`,
 				projectID, source.ConnectorID, source.Table).Scan(&published, &landed, &complete, &started, &finished,
-				&generation, &runID, &r.GenerationKey, &r.GenerationSeq, &r.MutationSeq, &r.CompletionSeen, &expected, &r.AppliedBatches, &r.HasHole)
+				&generation, &runID, &r.GenerationKey, &r.GenerationSeq, &r.MutationSeq, &r.CompletionSeen, &expected, &r.OrderingAmbiguous, &r.AppliedBatches, &r.HasHole)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
@@ -759,6 +783,11 @@ func (s *Store) SourceReadiness(ctx context.Context, projectID string, sources [
 		}
 		if r.HasHole {
 			ready.State, ready.Reason = ReadinessIncomplete, stringPtr("coverage_hole")
+			out[source.SyncID] = ready
+			continue
+		}
+		if r.OrderingAmbiguous {
+			ready.State, ready.Reason = ReadinessIncomplete, stringPtr("incremental_ordering_ambiguous")
 			out[source.SyncID] = ready
 			continue
 		}

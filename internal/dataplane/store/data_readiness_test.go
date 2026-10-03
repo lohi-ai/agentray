@@ -627,7 +627,7 @@ func TestOlderIncrementalReplayMergesOnlyMissingKeys(t *testing.T) {
 	}
 }
 
-func TestOlderIncrementalReplayRequiresFreshQueryWhenMissingKeysLand(t *testing.T) {
+func TestOlderIncrementalReplayRemainsIncompleteAfterFreshQuery(t *testing.T) {
 	s := openConvTestStore(t)
 	_, projectID := seedConvProject(t, s)
 	ctx := context.Background()
@@ -672,7 +672,7 @@ func TestOlderIncrementalReplayRequiresFreshQueryWhenMissingKeysLand(t *testing.
 		t.Fatal(err)
 	}
 	got, err := s.SourceReadiness(ctx, projectID, sources)
-	if err != nil || got[syncID].State != ReadinessSyncing || got[syncID].Reason == nil || *got[syncID].Reason != "awaiting_query_confirmation" {
+	if err != nil || got[syncID].State != ReadinessIncomplete || got[syncID].Reason == nil || *got[syncID].Reason != "incremental_ordering_ambiguous" {
 		t.Fatalf("merged older delta readiness=%+v err=%v", got[syncID], err)
 	}
 	var shared, oldOnly int
@@ -690,8 +690,73 @@ func TestOlderIncrementalReplayRequiresFreshQueryWhenMissingKeysLand(t *testing.
 	if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM external_rows`); err != nil {
 		t.Fatal(err)
 	}
-	if got, err = s.SourceReadiness(ctx, projectID, sources); err != nil || got[syncID].State != ReadinessReady {
-		t.Fatalf("freshly queried merged delta readiness=%+v err=%v", got[syncID], err)
+	if got, err = s.SourceReadiness(ctx, projectID, sources); err != nil || got[syncID].State != ReadinessIncomplete || got[syncID].Reason == nil || *got[syncID].Reason != "incremental_ordering_ambiguous" {
+		t.Fatalf("fresh query cleared ordering ambiguity: readiness=%+v err=%v", got[syncID], err)
+	}
+}
+
+func TestDelayedIncrementalOrderingAmbiguityNeverReportsReady(t *testing.T) {
+	type step struct {
+		capture time.Duration
+		key     string
+		value   int
+	}
+	cases := map[string][]step{
+		// The first two cases flank the smallest delayed delivery: whether the
+		// ignored key overlaps or is absent, source-wide ordering cannot prove
+		// which incremental run owns every applied key.
+		"overlap-after-newer":  {{capture: -time.Minute, key: "shared", value: 2}, {capture: -2 * time.Minute, key: "shared", value: 1}},
+		"disjoint-after-newer": {{capture: 0, key: "unrelated", value: 3}, {capture: -time.Minute, key: "shared", value: 2}},
+		// These adjacent controls exercise both orders for two delayed runs. The
+		// stored value happens to be correct in reverse order, but readiness must
+		// still be conservative because that outcome is not provable per key.
+		"two-delayed-forward": {{capture: 0, key: "unrelated", value: 3}, {capture: -2 * time.Minute, key: "shared", value: 1}, {capture: -time.Minute, key: "shared", value: 2}},
+		"two-delayed-reverse": {{capture: 0, key: "unrelated", value: 3}, {capture: -time.Minute, key: "shared", value: 2}, {capture: -2 * time.Minute, key: "shared", value: 1}},
+	}
+	for name, steps := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := openConvTestStore(t)
+			_, projectID := seedConvProject(t, s)
+			ctx := context.Background()
+			var connectorID, syncID string
+			if err := s.pg.QueryRow(ctx, `INSERT INTO data_connectors(project_id,name,kind) VALUES($1,'ordering-ambiguity','postgres') RETURNING id::text`, projectID).Scan(&connectorID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.pg.QueryRow(ctx, `INSERT INTO connector_syncs(connector_id,project_id,source_table,key_column) VALUES($1,$2,'orders','id') RETURNING id::text`, connectorID, projectID).Scan(&syncID); err != nil {
+				t.Fatal(err)
+			}
+			s.duck = openTestDuckDB(t)
+			s.sandboxes = newSQLSandboxPool(s.duck)
+			t.Cleanup(s.sandboxes.closeAll)
+			now := time.Now().UTC()
+			s.now = func() time.Time { return now }
+			index, expected := uint64(0), uint64(1)
+			for i, item := range steps {
+				captured := now.Add(item.capture)
+				batch := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+					RunID: uuid.NewString(), BatchID: "batch-0", BatchIndex: &index, PayloadSHA256: fmt.Sprintf("%064d", i+1), CaptureStartedAt: &captured, Promoted: true}
+				if err := s.duck.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: item.key, DataJSON: fmt.Sprintf(`{"n":%d}`, item.value)}}, AppliedMark{Source: &batch}); err != nil {
+					t.Fatal(err)
+				}
+				complete := batch
+				complete.BatchID, complete.BatchIndex, complete.PayloadSHA256 = "", nil, ""
+				complete.ExpectedBatches, complete.CaptureFinishedAt, complete.Complete = &expected, &captured, true
+				if err := s.duck.RecordPosition(ctx, AppliedMark{Source: &complete}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM external_rows`); err != nil {
+				t.Fatal(err)
+			}
+			readiness, err := s.SourceReadiness(ctx, projectID, []ReadinessSource{{SyncID: syncID, ConnectorID: connectorID, Table: "orders", ScheduleCron: "* * * * *", Configured: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := readiness[syncID]
+			if got.State != ReadinessIncomplete || got.Reason == nil || *got.Reason != "incremental_ordering_ambiguous" {
+				t.Fatalf("delayed order became ready: %+v", got)
+			}
+		})
 	}
 }
 

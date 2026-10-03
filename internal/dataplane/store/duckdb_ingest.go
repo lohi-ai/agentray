@@ -463,6 +463,12 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 			return err
 		}
 		if superseded {
+			// Source-wide ordering cannot establish which run owns an existing
+			// incremental key. Persist uncertainty even when every row was ignored:
+			// that apparent no-op may have discarded a delayed middle update.
+			if err := markSourceOrderingAmbiguousTx(ctx, tx, mark.Source, now); err != nil {
+				return err
+			}
 			if inserted == 0 {
 				return nil
 			}

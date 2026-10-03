@@ -43,7 +43,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 6
+const DuckDBSchemaVersion = 7
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -523,10 +523,15 @@ var duckDBSchema = []string{
 		expected_batches UBIGINT,
 		expected_rows UBIGINT,
 		completion_seen BOOLEAN NOT NULL DEFAULT false,
+		ordering_ambiguous BOOLEAN NOT NULL DEFAULT false,
 		mutation_seq UBIGINT NOT NULL DEFAULT 0,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (project_id, connector_id, table_name)
 	)`,
+	// Existing serving files need the same durable uncertainty bit. It is kept
+	// on the source receipt rather than in process memory so restart, sandbox
+	// refresh and a blue-green read cannot turn unknown ordering into ready.
+	`ALTER TABLE data_receipt_sources ADD COLUMN IF NOT EXISTS ordering_ambiguous BOOLEAN DEFAULT false`,
 	`CREATE TABLE IF NOT EXISTS data_receipt_batches (
 		project_id UUID NOT NULL,
 		connector_id UUID NOT NULL,
