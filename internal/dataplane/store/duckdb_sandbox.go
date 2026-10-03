@@ -203,6 +203,16 @@ type sqlSandboxPool struct {
 	inFlight     atomic.Int64
 	peakInFlight atomic.Int64
 	reaped       atomic.Int64
+	// Capacity evidence keeps the distinct admission, startup/cold-copy,
+	// incremental refresh, and execution costs visible. Copy counters measure
+	// successfully transferred values, not merely rows scanned from the trusted
+	// store, so a failed refresh cannot masquerade as completed work.
+	admissionWaitNanos atomic.Int64
+	startupNanos       atomic.Int64
+	refreshNanos       atomic.Int64
+	executionNanos     atomic.Int64
+	copiedRows         atomic.Int64
+	copiedBytes        atomic.Int64
 
 	// done stops the idle janitor.
 	done      chan struct{}
@@ -273,10 +283,13 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 		defer cancel()
 	}
 
+	admissionStarted := time.Now()
 	select {
 	case p.sem <- struct{}{}:
+		p.admissionWaitNanos.Add(time.Since(admissionStarted).Nanoseconds())
 		defer func() { <-p.sem }()
 	case <-rctx.Done():
+		p.admissionWaitNanos.Add(time.Since(admissionStarted).Nanoseconds())
 		// Waiting behind other tenants is not the author's SQL being wrong: it
 		// is capacity, so it is retryable (503), not a limit refusal (400).
 		return nil, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
@@ -290,7 +303,9 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	}
 	defer p.inFlight.Add(-1)
 
+	startupStarted := time.Now()
 	sb, err := p.sandboxFor(rctx, projectID)
+	p.startupNanos.Add(time.Since(startupStarted).Nanoseconds())
 	if err != nil {
 		return nil, err
 	}
@@ -298,14 +313,19 @@ func (p *sqlSandboxPool) query(ctx context.Context, projectID, query string, arg
 	// between lookup and this query starting.
 	defer sb.release()
 
+	refreshStarted := time.Now()
 	if err := sb.refresh(rctx); err != nil {
+		p.refreshNanos.Add(time.Since(refreshStarted).Nanoseconds())
 		p.drop(sb)
 		// A refresh reads the TRUSTED store, so its failures are the sandbox's,
 		// not the author's: without this wrap a driver or deadline error from
 		// the copy reaches the client as "bad SQL" (400).
 		return nil, sandboxRefreshError(err)
 	}
+	p.refreshNanos.Add(time.Since(refreshStarted).Nanoseconds())
+	executionStarted := time.Now()
 	rows, err := sb.run(rctx, query, args)
+	p.executionNanos.Add(time.Since(executionStarted).Nanoseconds())
 	if err != nil && sb.dead.Load() {
 		// The child stopped answering: evict and reap it rather than leaving a
 		// wedged process holding the project's slot.
@@ -868,6 +888,7 @@ func (sb *sqlSandbox) refreshTable(ctx context.Context, table, selectSQL string,
 func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs []any, table string, nCols int, replaceExisting bool) error {
 	batch := make([][]any, 0, sandboxCopyBatch)
 	batchBytes := 0
+	var copiedRows, copiedBytes int64
 	err := sb.pool.main.Read(ctx, func(conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
@@ -921,6 +942,8 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 			}
 			batch = append(batch, dest)
 			batchBytes += size
+			copiedRows++
+			copiedBytes += int64(size)
 			// Bytes as well as rows: this batch is built in the API's own heap,
 			// so a tenant whose rows carry fat JSON could otherwise make the
 			// trusted process — not the sandbox — the one that dies.
@@ -936,6 +959,10 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, selectSQL string, selectArgs
 		return flush()
 	})
 	batch = nil
+	if err == nil {
+		sb.pool.copiedRows.Add(copiedRows)
+		sb.pool.copiedBytes.Add(copiedBytes)
+	}
 	return err
 }
 
