@@ -102,3 +102,36 @@ func TestPiSessionRecoveryRequiresNativeResult(t *testing.T) {
 		t.Fatalf("invented native message from an execution receipt: %v", err)
 	}
 }
+
+func TestPiSessionRecoveryPreservesRejectedCallsWithoutInventingEffects(t *testing.T) {
+	for _, stop := range []string{"error", "aborted"} {
+		t.Run(stop, func(t *testing.T) {
+			message := `{"role":"assistant","stopReason":"` + stop + `","content":[{"type":"toolCall","id":"reused","name":"write","arguments":{"partial":true}}],"extension":{"signature":"keep"}}`
+			initial := agentcore.SessionEntry{Kind: piStateEntry, Content: `{"messages":[` + message + `],"tools":[]}`}
+			state, err := recoverPiState([]agentcore.SessionEntry{initial})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored struct{ Messages []json.RawMessage }
+			if err := json.Unmarshal(state, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if len(restored.Messages) != 1 || string(restored.Messages[0]) != message {
+				t.Fatalf("rejected transcript changed: %s", state)
+			}
+			_, err = recoverPiState([]agentcore.SessionEntry{initial, {Kind: piEffectStart, CallID: "reused", Content: `{"effectId":"write-effect"}`}})
+			if !errors.Is(err, ErrPiUnsettledEffect) {
+				t.Fatalf("rejected message masked a physical effect: %v", err)
+			}
+			_, err = recoverPiState([]agentcore.SessionEntry{{Kind: piStateEntry, Content: `{"messages":[{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"reused","name":"write","arguments":{}}]},` + message + `]}`}})
+			if !errors.Is(err, ErrPiUnsettledEffect) {
+				t.Fatalf("rejected message masked an earlier batch: %v", err)
+			}
+		})
+	}
+	// Unlike error/aborted, Pi emits tool-result failures for length stops.
+	_, err := recoverPiState([]agentcore.SessionEntry{{Kind: piStateEntry, Content: `{"messages":[{"role":"assistant","stopReason":"length","content":[{"type":"toolCall","id":"truncated","name":"write"}]}]}`}})
+	if !errors.Is(err, ErrPiUnsettledEffect) {
+		t.Fatalf("length message lost its native result obligation: %v", err)
+	}
+}

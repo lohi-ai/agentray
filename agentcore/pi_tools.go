@@ -22,13 +22,39 @@ type PiArgumentPreparer interface {
 // Pi owns the native transcript; these projections are for the server's traces,
 // auxiliary context, and human-input workflow, not provider message replay.
 type PiToolOutcome struct {
-	Trace              ToolTrace        `json:"trace"`
-	Invocations        []ToolInvocation `json:"invocations,omitempty"`
-	AdditionalContexts []Message        `json:"additionalContexts,omitempty"`
-	Parked             bool             `json:"parked,omitempty"`
-	QuestionID         string           `json:"questionId,omitempty"`
-	Executed           bool             `json:"executed"`
-	Terminate          bool             `json:"terminate,omitempty"`
+	Trace              ToolTrace           `json:"trace"`
+	Invocations        []ToolInvocation    `json:"invocations,omitempty"`
+	AdditionalContexts []Message           `json:"additionalContexts,omitempty"`
+	Parked             bool                `json:"parked,omitempty"`
+	QuestionID         string              `json:"questionId,omitempty"`
+	ChildQuestion      *ChildQuestionError `json:"childQuestion,omitempty"`
+	Executed           bool                `json:"executed"`
+	Terminate          bool                `json:"terminate,omitempty"`
+}
+
+// ChildQuestionError identifies a delegated run waiting for human input.
+// It deliberately does not unwrap to ErrParked: the child's question is not
+// the parent's tool arguments, and its answer belongs to the child's session.
+// Native tool receipts retain this route even after the error is stringified.
+type ChildQuestionError struct {
+	SessionID  string          `json:"sessionId"`
+	QuestionID string          `json:"questionId"`
+	Question   json.RawMessage `json:"question"`
+}
+
+func (e *ChildQuestionError) Error() string { return "native child is waiting for a human answer" }
+
+func copyChildQuestion(question *ChildQuestionError) *ChildQuestionError {
+	if question == nil || strings.TrimSpace(question.SessionID) == "" || strings.TrimSpace(question.QuestionID) == "" {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(question.Question, &fields) != nil || fields == nil {
+		return nil
+	}
+	copy := *question
+	copy.Question = append(json.RawMessage(nil), question.Question...)
+	return &copy
 }
 
 // PiToolHost exposes a composed Agent's governed tools to the original Pi loop.
@@ -236,8 +262,16 @@ func (h *PiToolHost) Execute(ctx context.Context, params json.RawMessage, emit f
 			h.budget.release()
 		}
 	}
+	if outcome.childQuestion != nil {
+		// The child has already settled its ask. The parent parks on a routed
+		// workflow, retaining the original spawn arguments for audit/replay.
+		outcome.parked = true
+		outcome.trace.Error = ""
+		outcome.trace.ResultMeta = "waiting for child answer"
+	}
 	audit := PiToolOutcome{Trace: outcome.trace, Invocations: outcome.invocations,
-		AdditionalContexts: outcome.extra, Parked: outcome.parked, Executed: outcome.executed, Terminate: outcome.terminate}
+		AdditionalContexts: outcome.extra, Parked: outcome.parked, Executed: outcome.executed, Terminate: outcome.terminate,
+		ChildQuestion: outcome.childQuestion}
 	if outcome.parked {
 		audit.QuestionID = toolInvocationScope(ctx)
 		if audit.QuestionID == "" {
@@ -272,7 +306,7 @@ func (h *PiToolHost) Execute(ctx context.Context, params json.RawMessage, emit f
 // effect. The physical effect ID is the workflow ID: provider call IDs may be
 // reused by a later assistant turn and must not reuse a previous human answer.
 func PiQuestionFromEntry(entry SessionEntry) (string, json.RawMessage, bool) {
-	if entry.Kind != EntryPiEffectDone {
+	if entry.Kind != EntryPiEffectDone && entry.Kind != EntryPiDelegation {
 		return "", nil, false
 	}
 	var receipt struct {
@@ -286,7 +320,53 @@ func PiQuestionFromEntry(entry SessionEntry) (string, json.RawMessage, bool) {
 	if receipt.ID == "" || audit.QuestionID != receipt.ID || !audit.Parked || !audit.Executed || !audit.Trace.Allowed || audit.Trace.Error != "" || audit.Trace.CallID != entry.CallID || !json.Valid([]byte(audit.Trace.Args)) {
 		return "", nil, false
 	}
+	if audit.ChildQuestion != nil {
+		question := copyChildQuestion(audit.ChildQuestion)
+		if question == nil {
+			return "", nil, false
+		}
+		return receipt.ID, question.Question, true
+	}
 	return receipt.ID, json.RawMessage(audit.Trace.Args), true
+}
+
+// ResumeDelegation re-enters a retry-safe governed call with its original
+// physical identity. Self-delegation then reattaches the original child,
+// including any output-schema retry, instead of creating a new session.
+func (h *PiToolHost) ResumeDelegation(ctx context.Context, effectID string, original PiToolOutcome, emit func(json.RawMessage) error) (json.RawMessage, PiToolOutcome, error) {
+	if effectID == "" || copyChildQuestion(original.ChildQuestion) == nil || !original.Parked || !original.Executed || !original.Trace.Allowed || original.Trace.Error != "" {
+		return nil, PiToolOutcome{}, errors.New("invalid parked delegation")
+	}
+	call := ToolCall{ID: original.Trace.CallID, Name: original.Trace.Tool, Arguments: original.Trace.Args}
+	h.gate.RLock()
+	safe := !h.closed && isRetrySafe(h.tools, call)
+	h.gate.RUnlock()
+	if !safe {
+		return nil, PiToolOutcome{}, errors.New("parked delegation is not retry-safe under the current tool contract")
+	}
+	params, err := json.Marshal(map[string]any{"toolCallId": call.ID, "toolName": call.Name, "args": json.RawMessage(call.Arguments)})
+	if err != nil {
+		return nil, PiToolOutcome{}, err
+	}
+	return h.Execute(WithToolInvocationScope(ctx, effectID), params, emit)
+}
+
+// PiChildQuestionFromEntry returns the route only for a settled, governed
+// question receipt. Its first ID belongs to the parent; the route's ID belongs
+// to the child and must never be substituted into the parent's answer ledger.
+func PiChildQuestionFromEntry(entry SessionEntry) (string, *ChildQuestionError, bool) {
+	id, _, valid := PiQuestionFromEntry(entry)
+	if !valid {
+		return "", nil, false
+	}
+	var receipt struct {
+		Result struct{ Details PiToolOutcome }
+	}
+	if json.Unmarshal([]byte(entry.Content), &receipt) != nil {
+		return "", nil, false
+	}
+	route := copyChildQuestion(receipt.Result.Details.ChildQuestion)
+	return id, route, route != nil
 }
 
 // Keep per-call cancellation and fencing values while inheriting extensions

@@ -66,7 +66,7 @@ func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (
 		}
 		choice := opts.ToolChoice
 		switch api {
-		case "openai-completions", "openai-responses":
+		case "openai-completions", "openai-responses", "openai-codex-responses":
 			if choice.Mode == agentcore.ToolChoiceNamed {
 				value := map[string]any{"type": "function", "name": choice.Name}
 				if api == "openai-completions" {
@@ -120,7 +120,7 @@ func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (
 		switch api {
 		case "openai-completions":
 			err = set("response_format", map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": name, "strict": spec.Strict, "schema": spec.Schema}})
-		case "openai-responses", "anthropic-messages":
+		case "openai-responses", "anthropic-messages", "openai-codex-responses":
 			key := "text"
 			if api == "anthropic-messages" {
 				key = "output_config"

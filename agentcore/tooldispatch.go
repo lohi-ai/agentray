@@ -120,6 +120,9 @@ type toolOutcome struct {
 	// tool-result message is produced — the call stays dangling in the durable
 	// log behind an EntryQuestion until an EntryAnswer resolves it.
 	parked bool
+	// A delegated question retains its own session/physical identity. It must
+	// not masquerade as a local ask with the spawn arguments as its question.
+	childQuestion *ChildQuestionError
 }
 
 // runToolCall takes a single model tool call through lookup -> prepareArguments
@@ -214,6 +217,10 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	}
 	toolCtx = withToolStack(toolCtx, call.Name)
 	richOut, runErr := callTool(toolCtx, tool, runArgs, emit)
+	var childQuestion *ChildQuestionError
+	if errors.As(runErr, &childQuestion) {
+		childQuestion = copyChildQuestion(childQuestion)
+	}
 	out := richOut.Content
 	// A parked call ends the run here: no interceptors, no after hooks, no
 	// result message — the caller records the EntryQuestion and stops. The
@@ -283,7 +290,8 @@ func (a *Agent) runToolCall(ctx context.Context, exts *extensionSet, exempt map[
 	message.ResultRef = resultRef
 	return toolOutcome{
 		trace: trace, message: message, terminate: term, executed: true, extra: extra,
-		invocations: append([]ToolInvocation(nil), richOut.Invocations...),
+		invocations:   append([]ToolInvocation(nil), richOut.Invocations...),
+		childQuestion: childQuestion,
 	}
 }
 

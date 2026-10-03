@@ -205,6 +205,26 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 			if err != nil {
 				return nil, err
 			}
+			if decision.Parked && cfg.Session.Store != nil {
+				// Parallel tool callbacks can settle their receipts in a different
+				// order from native tool-result events. Present the same question
+				// that RecordSessionAnswer will select from the durable journal.
+				entries, err := cfg.Session.Store.Log(callCtx, cfg.Session.SessionID)
+				if err != nil {
+					return nil, err
+				}
+				_, question, pending := agentcore.PendingQuestion(entries)
+				if !pending {
+					return nil, errors.New("parked turn has no durable pending question")
+				}
+				projection.mu.Lock()
+				changed := !samePiJSON(projection.result.Question, question)
+				projection.result.Question = question
+				projection.mu.Unlock()
+				if changed {
+					projection.emit(agentcore.StreamEvent{Type: agentcore.StreamQuestion, Question: question})
+				}
+			}
 			life.mu.Lock()
 			life.parked = decision.Parked
 			if decision.Parked {

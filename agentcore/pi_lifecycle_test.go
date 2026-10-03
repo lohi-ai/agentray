@@ -4,10 +4,140 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+type piBatchTestExtension struct {
+	run func(context.Context, []ToolCall) BatchDecision
+}
+
+func (piBatchTestExtension) Name() string { return "batch-test" }
+func (e piBatchTestExtension) BeginRun(context.Context, RunInfo) (Extension, error) {
+	return e, nil
+}
+func (e piBatchTestExtension) InterceptBatch(ctx context.Context, calls []ToolCall) BatchDecision {
+	return e.run(ctx, calls)
+}
+
+func TestPiDelegationBatchPolicies(t *testing.T) {
+	for _, mode := range []string{"settled", "parked", "terminal", "finalizing", "cancelled", "not-started", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			var observed []ToolCall
+			var batchCalls, turnEnds int
+			calls := []ToolCall{{ID: "ordinary", Name: "read", Arguments: `{}`}, {ID: "child-a", Name: "spawn", Arguments: `{"task":"a"}`}, {ID: "child-b", Name: "spawn", Arguments: `{"task":"b"}`}}
+			original := slices.Clone(calls)
+			ext := piBatchTestExtension{run: func(_ context.Context, batch []ToolCall) BatchDecision {
+				batchCalls++
+				observed = slices.Clone(batch)
+				batch[0].ID = "extension mutation"
+				return BatchDecision{AdditionalContexts: []Message{{Role: RoleUser, Content: "batch"}}}
+			}}
+			a := piHostAgent(t, Config{Extensions: []ExtensionFactory{ext}, Hooks: Hooks{TurnEnd: []TurnHook{func(context.Context, TurnInfo) { turnEnds++ }}}})
+			host, err := a.OpenPiTools(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer host.Close()
+			if mode != "not-started" {
+				if _, err := host.StartPiRun(ctx, "task"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outcomes := []PiToolOutcome{
+				{AdditionalContexts: []Message{{Role: RoleUser, Content: "ordinary"}}},
+				{AdditionalContexts: []Message{{Role: RoleUser, Content: "child-a"}}},
+				{AdditionalContexts: []Message{{Role: RoleUser, Content: "child-b"}}},
+			}
+			switch mode {
+			case "parked":
+				outcomes[2].Parked = true
+			case "terminal":
+				outcomes[0].Terminate = true
+			case "finalizing":
+				host.finalizing.Store(true)
+			case "cancelled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "closed":
+				_ = host.Close()
+			}
+			decision, err := host.FinishPiDelegationBatch(ctx, calls, outcomes)
+			wantError := mode == "cancelled" || mode == "not-started" || mode == "closed"
+			if (err != nil) != wantError {
+				t.Fatalf("decision=%+v error=%v", decision, err)
+			}
+			if mode == "cancelled" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost cancellation: %v", err)
+			}
+			if turnEnds != 0 || !reflect.DeepEqual(calls, original) {
+				t.Fatalf("resumed batch reran TurnEnd or changed source calls: ends=%d calls=%+v", turnEnds, calls)
+			}
+			if mode == "settled" {
+				if batchCalls != 1 || !reflect.DeepEqual(observed, original) || decision.End {
+					t.Fatalf("missing original batch: calls=%+v decision=%+v", observed, decision)
+				}
+				var contexts []string
+				for _, m := range decision.Inject {
+					contexts = append(contexts, m.Content)
+				}
+				if !reflect.DeepEqual(contexts, []string{"ordinary", "child-a", "child-b", "batch"}) {
+					t.Fatalf("context order: %v", contexts)
+				}
+			} else if batchCalls != 0 || len(decision.Inject) != 0 || decision.End != !wantError || decision.Parked != (mode == "parked") {
+				t.Fatalf("unsettled/terminal batch leaked hook or context: calls=%d decision=%+v", batchCalls, decision)
+			}
+		})
+	}
+}
+
+func TestPiDelegationBatchCloseCancelsHook(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	ext := piBatchTestExtension{run: func(ctx context.Context, _ []ToolCall) BatchDecision {
+		close(started)
+		<-ctx.Done()
+		return BatchDecision{AdditionalContexts: []Message{{Role: RoleUser, Content: "must not persist"}}}
+	}}
+	a := piHostAgent(t, Config{Extensions: []ExtensionFactory{ext}})
+	host, err := a.OpenPiTools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if _, err := host.StartPiRun(ctx, "task"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		decision, err := host.FinishPiDelegationBatch(ctx, []ToolCall{{ID: "a", Name: "spawn", Arguments: `{}`}}, nil)
+		if len(decision.Inject) != 0 {
+			err = errors.New("cancelled batch retained contexts")
+		}
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	closed := make(chan struct{})
+	go func() { _ = host.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-ctx.Done():
+		t.Fatal("Close did not settle the batch callback")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled batch returned %v", err)
+	}
+}
 
 func TestPiLifecycleHostCloseCancelsBlockedStep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

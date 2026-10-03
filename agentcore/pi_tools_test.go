@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,10 @@ type piHostTool struct {
 	name string
 	run  func(context.Context, string) (string, error)
 }
+
+type piRetryHostTool struct{ piHostTool }
+
+func (piRetryHostTool) RetrySafe() bool { return true }
 
 func (t piHostTool) Name() string { return t.name }
 func (t piHostTool) Schema() ToolSchema {
@@ -34,6 +39,119 @@ func piHostAgent(t *testing.T, cfg Config) *Agent {
 func piHostCall(name, args string) json.RawMessage {
 	v, _ := json.Marshal(map[string]any{"toolCallId": "call", "toolName": name, "args": json.RawMessage(args)})
 	return v
+}
+
+func TestPiToolsRetainsWrappedChildQuestion(t *testing.T) {
+	question := &ChildQuestionError{SessionID: "parent/child", QuestionID: "child-effect", Question: json.RawMessage(`{"question":"Which scope?","options":["one","two"]}`)}
+	tool := piHostTool{"delegate", func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("sub-agent failed: %w", question)
+	}}
+	a := piHostAgent(t, Config{Tools: NewToolSet(tool), Policy: NewAllowList("delegate")})
+	host, err := a.OpenPiTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	raw, audit, err := host.Execute(context.Background(), piHostCall("delegate", `{"task":"work"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Details PiToolOutcome
+		IsError bool
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.IsError || !wire.Details.Parked || wire.Details.QuestionID == "" || wire.Details.QuestionID == question.QuestionID || wire.Details.Trace.Args != `{"task":"work"}` {
+		t.Fatalf("delegation did not retain separate parent/child identities: %s", raw)
+	}
+	route := wire.Details.ChildQuestion
+	if route == nil || route.SessionID != question.SessionID || route.QuestionID != question.QuestionID || string(route.Question) != string(question.Question) {
+		t.Fatalf("wrapped question lost its route: %s", raw)
+	}
+	question.Question[0] = '!'
+	if audit.ChildQuestion == nil || !json.Valid(audit.ChildQuestion.Question) {
+		t.Fatal("receipt aliases the tool's question buffer")
+	}
+}
+
+func TestPiToolsInvalidChildQuestionCannotCorruptReceipt(t *testing.T) {
+	for _, question := range []*ChildQuestionError{
+		{SessionID: "child", QuestionID: "effect", Question: json.RawMessage(`broken`)},
+		{SessionID: "child", QuestionID: "effect", Question: json.RawMessage(`null`)},
+		{SessionID: "child", QuestionID: "effect", Question: json.RawMessage(`[]`)},
+		{SessionID: "child", Question: json.RawMessage(`{}`)},
+		{QuestionID: "effect", Question: json.RawMessage(`{}`)},
+	} {
+		tool := piHostTool{"delegate", func(context.Context, string) (string, error) { return "", question }}
+		a := piHostAgent(t, Config{Tools: NewToolSet(tool), Policy: NewAllowList("delegate")})
+		host, err := a.OpenPiTools(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, audit, err := host.Execute(context.Background(), piHostCall("delegate", `{}`), nil)
+		host.Close()
+		if err != nil || !json.Valid(raw) || audit.ChildQuestion != nil || audit.Trace.Error == "" {
+			t.Fatalf("invalid child route corrupted the settled failure: %s %+v %v", raw, audit, err)
+		}
+	}
+}
+
+func TestPiResumeDelegationPreservesIdentityAndRechecksAuthority(t *testing.T) {
+	for _, mode := range []string{"allowed", "denied", "no longer retry safe"} {
+		t.Run(mode, func(t *testing.T) {
+			var keys []string
+			tool := piHostTool{"delegate", func(ctx context.Context, _ string) (string, error) {
+				key, _ := IdempotencyKey(ctx)
+				keys = append(keys, key)
+				if len(keys) == 1 {
+					return "", &ChildQuestionError{SessionID: "parent/child", QuestionID: "child-question", Question: json.RawMessage(`{"question":"Which?"}`)}
+				}
+				return "child completed", nil
+			}}
+			store := NewMemorySessionStore()
+			first := piHostAgent(t, Config{Tools: NewToolSet(piRetryHostTool{tool}), Policy: NewAllowList("delegate"), Session: store, SessionID: "parent"})
+			host, err := first.OpenPiTools(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, original, err := host.Execute(WithToolInvocationScope(context.Background(), "original-effect"), piHostCall("delegate", `{"task":"work"}`), nil)
+			host.Close()
+			if err != nil || !original.Parked {
+				t.Fatalf("initial delegation failed: %+v %v", original, err)
+			}
+			tools := NewToolSet(piRetryHostTool{tool})
+			policy := NewAllowList("delegate")
+			if mode == "denied" {
+				policy = NewAllowList()
+			}
+			if mode == "no longer retry safe" {
+				tools = NewToolSet(tool)
+			}
+			next := piHostAgent(t, Config{Tools: tools, Policy: policy, Session: store, SessionID: "parent"})
+			host, err = next.OpenPiTools(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer host.Close()
+			_, result, err := host.ResumeDelegation(context.Background(), "original-effect", original, nil)
+			switch mode {
+			case "allowed":
+				if err != nil || !result.Executed || result.Parked || len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+					t.Fatalf("resume changed physical identity: %+v %v keys=%v", result, err, keys)
+				}
+			case "denied":
+				if err != nil || result.Executed || result.Trace.Allowed || len(keys) != 1 {
+					t.Fatalf("resume bypassed current policy: %+v %v", result, err)
+				}
+			default:
+				if err == nil || len(keys) != 1 {
+					t.Fatal("resume ran a tool whose retry contract changed")
+				}
+			}
+		})
+	}
 }
 
 func TestPiToolsPreservesGovernedExecutionBoundary(t *testing.T) {

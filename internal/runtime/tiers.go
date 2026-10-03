@@ -118,74 +118,66 @@ func (t ModelTier) TracedProvider(tracer observe.Sink) (agentcore.LLMProvider, e
 // names a different provider gets its own client — its credentials, OAuth
 // pool, and derived context window are its own, never the primary's.
 func (t ModelTier) Rungs() ([]agentcore.ModelRung, error) {
-	prov, err := t.RawProvider()
-	if err != nil {
-		return nil, err
-	}
-	rungs := []agentcore.ModelRung{{
-		Provider:      prov,
-		Model:         t.Model,
-		Capabilities:  t.Capabilities,
-		ContextWindow: t.EffectiveWindow(),
-	}}
-	fb := t.Fallback
-	if fb == nil && strings.TrimSpace(t.FallbackModel) != "" {
-		// Same-provider shorthand: a directly-built tier may set only the
-		// model id — resolve() normalizes it into Fallback, but a caller that
-		// skips resolve still gets its second rung.
-		fb = &TierConfig{Model: t.FallbackModel}
-	}
-	if fb == nil || strings.TrimSpace(fb.Model) == "" {
-		return rungs, nil
-	}
-	// Cross-provider means a different provider ROW, not just a different
-	// vendor: two rows can share vendor and base URL yet hold different keys,
-	// and the fallback must authenticate with its own. A row-less fallback
-	// (legacy same-provider) falls through to the shared-instance path.
-	crossProvider := fb.ProviderID != "" && fb.ProviderID != t.ProviderID
-	if !crossProvider && strings.TrimSpace(fb.Provider) != "" {
-		crossProvider = ai.NormalizeVendor(fb.Provider) != ai.NormalizeVendor(t.Provider) ||
-			strings.TrimSpace(fb.BaseURL) != strings.TrimSpace(t.BaseURL)
-	}
-	if !crossProvider {
-		if fb.Model == t.Model {
-			return rungs, nil
-		}
-		// Provider identity and credentials may be shared while the selected
-		// models require different OpenAI wires. OMP stores API dialect on the
-		// model rather than the provider; retain that property here. Reuse the
-		// client only when both models resolve to the same wire.
-		if openAIWireFor(t.Provider, t.Capabilities) != openAIWireFor(t.Provider, fb.Capabilities) {
-			fbProv, err := buildProviderForModel(
-				t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID, fb.Capabilities,
-			)
+	resolved := t.resolvedRungs()
+	var primary agentcore.LLMProvider
+	rungs := make([]agentcore.ModelRung, 0, len(resolved))
+	for _, rung := range resolved {
+		provider := primary
+		if !rung.sharePrimary {
+			var err error
+			provider, err = rung.tier.RawProvider()
 			if err != nil {
 				return nil, err
 			}
-			return append(rungs, agentcore.ModelRung{
-				Provider:      fbProv,
-				Model:         fb.Model,
-				Capabilities:  fb.Capabilities,
-				ContextWindow: ai.ContextWindowFor(t.Provider, fb.Model),
-			}), nil
+			if primary == nil {
+				primary = provider
+			}
 		}
-		return append(rungs, agentcore.ModelRung{
-			Provider:      prov,
-			Model:         fb.Model,
-			Capabilities:  fb.Capabilities,
-			ContextWindow: ai.ContextWindowFor(t.Provider, fb.Model),
-		}), nil
+		rungs = append(rungs, agentcore.ModelRung{Provider: provider, Model: rung.tier.Model, Capabilities: rung.tier.Capabilities, ContextWindow: rung.tier.EffectiveWindow()})
 	}
-	fbProv, err := buildProviderForModel(fb.Provider, fb.BaseURL, fb.APIKey, fb.TokenSource, fb.ProviderID, fb.Capabilities)
-	if err != nil {
-		return nil, err
+	return rungs, nil
+}
+
+// resolvedTierRung is shared by legacy construction and native model binding.
+// It contains no live provider or acquired credential. Each tier is standalone,
+// with fallback edges removed, so binding cannot recurse into another ladder.
+type resolvedTierRung struct {
+	tier         ModelTier
+	sharePrimary bool
+}
+
+func (t ModelTier) resolvedRungs() []resolvedTierRung {
+	primary := t
+	primary.Fallback, primary.FallbackModel = nil, ""
+	rungs := []resolvedTierRung{{tier: primary}}
+	fallback := t.Fallback
+	if fallback == nil && strings.TrimSpace(t.FallbackModel) != "" {
+		fallback = &TierConfig{Model: t.FallbackModel}
 	}
-	return append(rungs, agentcore.ModelRung{
-		Provider:      fbProv,
-		Model:         fb.Model,
-		Capabilities:  fb.Capabilities,
-		ContextWindow: ai.ContextWindowFor(fb.Provider, fb.Model),
-	}), nil
+	if fallback == nil || strings.TrimSpace(fallback.Model) == "" {
+		return rungs
+	}
+	// Provider-row identity wins even when vendor and endpoint match: credentials
+	// and OAuth source must remain attached to the row that owns the fallback.
+	cross := fallback.ProviderID != "" && fallback.ProviderID != t.ProviderID
+	if !cross && strings.TrimSpace(fallback.Provider) != "" {
+		cross = ai.NormalizeVendor(fallback.Provider) != ai.NormalizeVendor(t.Provider) || strings.TrimSpace(fallback.BaseURL) != strings.TrimSpace(t.BaseURL)
+	}
+	next := ModelTier{*fallback}
+	share := false
+	if !cross {
+		if fallback.Model == t.Model {
+			return rungs
+		}
+		next = primary
+		next.Model, next.Capabilities = fallback.Model, fallback.Capabilities
+		share = openAIWireFor(t.Provider, t.Capabilities) == openAIWireFor(t.Provider, fallback.Capabilities)
+	}
+	next.Fallback, next.FallbackModel = nil, ""
+	// Existing rung semantics derive the fallback window from its model; the
+	// operator override belongs to the selected primary tier only.
+	next.ContextWindow = ai.ContextWindowFor(next.Provider, next.Model)
+	return append(rungs, resolvedTierRung{tier: next, sharePrimary: share})
 }
 
 // TierSet is the workspace's tier pool resolved for one run: the per-tier
@@ -306,6 +298,12 @@ func (ts TierSet) resolve(tier Tier) TierConfig {
 // OAuth vendors then build without a TokenSource and fail at call time with a
 // clear error rather than silently sending no credential.
 func TierSetFromWorkspace(cfg storage.WorkspaceModelTiers, keys map[string]string, poolFor func(providerID string) ai.TokenSource) TierSet {
+	// Host defaults replace the primary tiers' provider route and credentials.
+	// A credential-less workspace may still have old row selections; those rows
+	// do not own the host key and must not be used for refresh or pool identity.
+	if cfg.HostedDefault {
+		cfg.FlashProviderID, cfg.LiteProviderID, cfg.ProProviderID = "", "", ""
+	}
 	// Only OAuth vendors draw from an account pool; an API-key provider row id
 	// must not produce a TokenSource or the wire client would ignore its key.
 	src := func(vendor, providerID string) ai.TokenSource {

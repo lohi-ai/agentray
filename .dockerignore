@@ -1,8 +1,5 @@
 web/node_modules
-third_party/pi/node_modules
-third_party/pi/.work
-third_party/pi/dist
-third_party/pi/__pycache__
+third_party/pi
 web/.next
 web/*.log
 .git

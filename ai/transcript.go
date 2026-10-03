@@ -3,6 +3,9 @@ package ai
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -234,6 +237,7 @@ func stringifyDeclarationJSON(data []byte) ([]byte, error) {
 	// Decode each object's keys in source order. SystemSections implements the
 	// same integer-key ordering and duplicate-key replacement as JS objects.
 	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
 	var value func() ([]byte, error)
 	value = func() ([]byte, error) {
 		token, err := d.Token()
@@ -280,6 +284,21 @@ func stringifyDeclarationJSON(data []byte) ([]byte, error) {
 			}
 			return append(append([]byte{'['}, bytes.Join(parts, []byte{','})...), ']'), nil
 		default:
+			if number, ok := token.(json.Number); ok {
+				value, err := strconv.ParseFloat(string(number), 64)
+				if math.IsInf(value, 0) || math.IsNaN(value) {
+					return []byte("null"), nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				token = value
+			}
+			// JSON.stringify(-0) is "0". encoding/json otherwise retains
+			// the sign bit when a decoded JSON number was negative zero.
+			if number, ok := token.(float64); ok && number == 0 {
+				token = float64(0)
+			}
 			return json.Marshal(token)
 		}
 	}
@@ -292,6 +311,35 @@ func stringifyDeclarationJSON(data []byte) ([]byte, error) {
 type ToolStateChanges struct {
 	ToolsAdded   []Tool          `json:"toolsAdded"`
 	ToolsRemoved []ToolReference `json:"toolsRemoved"`
+}
+
+// WithToolChanges copies a system message with replacement declarations,
+// matching Pi's agent-loop helper. Empty lists remove the fields, including
+// retained null provenance. Other wire fields and the original message remain
+// untouched; unchanged declaration slices may share storage as in Pi.
+func WithToolChanges(message Message, changes ToolStateChanges) Message {
+	message.ToolsAdded, message.ToolsRemoved = nil, nil
+	if len(changes.ToolsAdded) > 0 {
+		message.ToolsAdded = changes.ToolsAdded
+	}
+	if len(changes.ToolsRemoved) > 0 {
+		message.ToolsRemoved = changes.ToolsRemoved
+	}
+	if message.encoding != nil {
+		message.encoding = &transcriptEncoding{original: maps.Clone(message.encoding.original), normalized: maps.Clone(message.encoding.normalized)}
+		for _, key := range []string{"toolsAdded", "toolsRemoved"} {
+			delete(message.encoding.original, key)
+			delete(message.encoding.normalized, key)
+		}
+	}
+	_, added := message.Extra["toolsAdded"]
+	_, removed := message.Extra["toolsRemoved"]
+	if added || removed {
+		message.Extra = maps.Clone(message.Extra)
+		delete(message.Extra, "toolsAdded")
+		delete(message.Extra, "toolsRemoved")
+	}
+	return message
 }
 
 func GetToolStateChanges(previous, current []Tool) ToolStateChanges {

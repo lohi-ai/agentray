@@ -145,11 +145,10 @@ type Config struct {
 	// costs a real answer — the run wraps up honestly instead of finishing.
 	AgentMaxTurns     int
 	AgentMaxToolCalls int
-	// AgentPiWorker opts server runs into the original bundled Pi runtime.
-	// Empty retains the current driver during migration; AgentPiRuntime defaults
-	// to Bun when empty. These paths are operator configuration, never tenant input.
-	AgentPiWorker  string
-	AgentPiRuntime string
+	// AgentNativeGo selects the in-process Pi-contract Go engine for server
+	// runs, children, and summaries. The legacy Go driver remains the default
+	// until OAuth account pools and fallback lifecycles have been migrated.
+	AgentNativeGo bool
 	// The shared demo workspace — one feature, two keys.
 	//
 	// DemoProjectID is the project id of a real, read-only project every visitor
@@ -211,8 +210,7 @@ func FromEnv() Config {
 		AgentKeepRecentTokens:        envInt("AGENTRAY_AGENT_KEEP_RECENT_TOKENS", 0),
 		AgentMaxTurns:                envInt("AGENTRAY_AGENT_MAX_TURNS", 0),
 		AgentMaxToolCalls:            envInt("AGENTRAY_AGENT_MAX_TOOL_CALLS", 0),
-		AgentPiWorker:                os.Getenv("AGENTRAY_AGENT_PI_WORKER"),
-		AgentPiRuntime:               os.Getenv("AGENTRAY_AGENT_PI_RUNTIME"),
+		AgentNativeGo:                envBool("AGENTRAY_AGENT_NATIVE_GO", false),
 		DemoProjectID:                os.Getenv("AGENTRAY_DEMO_PROJECT_ID"),
 		DemoAgentRunsPerUserPerDay:   envInt("AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY", 5),
 		// Hosted model: dedicated DEFAULT_* vars, then the real-provider test

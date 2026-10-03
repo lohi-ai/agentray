@@ -61,3 +61,34 @@ func TestPiChildCompletionBindsNativeTranscriptRevisionAndAnswer(t *testing.T) {
 		})
 	}
 }
+
+func TestPiChildDigestPreservesOpaqueLargeIntegers(t *testing.T) {
+	first := json.RawMessage(`{"messages":[{"role":"user","content":"task","opaque":9007199254740992}]}`)
+	second := json.RawMessage(`{"messages":[{"role":"user","content":"task","opaque":9007199254740993}]}`)
+	a, err := piMessagesDigest(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := piMessagesDigest(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("child receipt conflates distinct native fields above float64 precision")
+	}
+	reordered, err := piMessagesDigest(json.RawMessage(`{"messages":[{"opaque":9007199254740992,"content":"task","role":"user"}]}`))
+	if err != nil || reordered != a {
+		t.Fatalf("JSONB key ordering changed child identity: %v", err)
+	}
+}
+
+func TestPiChildDigestMatchesSQLDecimalExponentForms(t *testing.T) {
+	a, err := piMessagesDigest(json.RawMessage(`{"messages":[{"role":"assistant","usage":{"cost":{"total":4e-8}},"content":[]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := piMessagesDigest(json.RawMessage(`{"messages":[{"content":[],"usage":{"cost":{"total":0.0000000400}},"role":"assistant"}]}`))
+	if err != nil || a != b {
+		t.Fatalf("SQL number spelling invalidated the child receipt: %s / %s (%v)", a, b, err)
+	}
+}

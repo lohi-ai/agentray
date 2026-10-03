@@ -37,9 +37,10 @@ type PiRunResult struct {
 	Projection agentcore.RunResult
 }
 
-// RunPi drives the original Pi loop with server session policy and supplies the
-// server's existing streaming/result vocabulary. Native events and state remain
-// unchanged in the durable log and in the caller's original OnEvent callback.
+// RunPi drives the selected Pi-contract agent (Go unless a worker is explicit)
+// with server session policy and the server's streaming/result vocabulary.
+// Lossless events and state remain authoritative in the durable log and the
+// caller's original OnEvent callback.
 func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error) {
 	if cfg.Host != nil {
 		defer func() { result.Projection = cfg.Host.CompletePiRun(context.WithoutCancel(ctx), result.Projection) }()
@@ -47,6 +48,8 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 	var projection piRunProjection
 	projection.sink, projection.pricingKnown = cfg.Sink, cfg.PricingKnown
 	projection.calls = map[string]agentcore.ToolTrace{}
+	cfg.Session.nativeAttemptObserved = projection.accountNativeAttempt
+	cfg.Session.nativeTerminalPublished = projection.expectNativeTerminal
 	var lifecycle *piHostLifecycle
 	if cfg.Host != nil {
 		lifecycle, err = bindPiHostLifecycle(ctx, &cfg, &projection)
@@ -86,9 +89,22 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 	}
 	stopStartup()
 	defer func() { err = errors.Join(err, session.Close()) }()
+	if err := session.resumeDelegations(ctx, cfg.Host, &projection); err != nil {
+		projection.mu.Lock()
+		result.Projection = projection.result
+		projection.mu.Unlock()
+		return result, err
+	}
 	question, err := session.PendingQuestion(ctx)
 	if err != nil {
 		return result, err
+	}
+	terminated := false
+	if len(question) == 0 {
+		terminated, err = session.finishTerminalDelegations(ctx, cfg.Input)
+		if err != nil {
+			return result, err
+		}
 	}
 	if len(question) > 0 {
 		projection.result.Parked, projection.result.Question, projection.result.StopReason = true, question, "parked"
@@ -96,12 +112,17 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 		if lifecycle != nil {
 			lifecycle.parked, lifecycle.stopReason = true, "parked"
 		}
+	} else if terminated {
+		projection.result.StopReason = "toolUse"
+		if lifecycle != nil {
+			lifecycle.stopReason = "toolUse"
+		}
 	} else if lifecycle != nil {
 		if err := lifecycle.prepareFirst(ctx, session); err != nil {
 			return result, err
 		}
 	}
-	if len(question) > 0 {
+	if len(question) > 0 || terminated {
 		// Reopening a parked run is not a model turn. Keep the current native
 		// snapshot and surface the same question until the human answers.
 	} else if len(cfg.Input) == 0 {
@@ -152,11 +173,12 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 }
 
 type piRunProjection struct {
-	mu           sync.Mutex
-	sink         agentcore.StreamSink
-	pricingKnown bool
-	result       agentcore.RunResult
-	calls        map[string]agentcore.ToolTrace
+	mu             sync.Mutex
+	sink           agentcore.StreamSink
+	pricingKnown   bool
+	result         agentcore.RunResult
+	calls          map[string]agentcore.ToolTrace
+	nativeTerminal json.RawMessage
 }
 
 func (p *piRunProjection) emit(event agentcore.StreamEvent) {
@@ -164,6 +186,48 @@ func (p *piRunProjection) emit(event agentcore.StreamEvent) {
 	if p.sink != nil {
 		p.sink(event)
 	}
+}
+
+// Continuations emit host stream frames for real tool work. These are display
+// projections, not fabricated Pi events, and never enter native history.
+func (p *piRunProjection) delegationStart(original agentcore.ToolTrace) agentcore.ToolTrace {
+	trace := agentcore.ToolTrace{CallID: original.CallID, Tool: original.Tool, Args: original.Args, IdempotencyKey: original.IdempotencyKey}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(agentcore.StreamEvent{Type: agentcore.StreamToolExecStart, Tool: &trace})
+	return trace
+}
+
+func (p *piRunProjection) delegationUpdate(trace agentcore.ToolTrace, raw json.RawMessage) error {
+	var update struct{ Content json.RawMessage }
+	if err := json.Unmarshal(raw, &update); err != nil {
+		return err
+	}
+	text, _, _, err := projectPiContent(update.Content)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emit(agentcore.StreamEvent{Type: agentcore.StreamToolExecUpdate, Tool: &trace, Note: text})
+	return nil
+}
+
+func (p *piRunProjection) delegationEnd(trace agentcore.ToolTrace, audit agentcore.PiToolOutcome, failure error) {
+	if audit.Trace.CallID == trace.CallID && audit.Trace.Tool == trace.Tool {
+		trace = audit.Trace
+	}
+	if failure != nil {
+		trace.Error = failure.Error()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.result.Tools = append(p.result.Tools, trace)
+	for _, nested := range audit.Invocations {
+		p.result.Tools = append(p.result.Tools, nested.Trace)
+	}
+	p.emit(agentcore.StreamEvent{Type: agentcore.StreamToolExecEnd, Tool: &trace})
+	p.emit(agentcore.StreamEvent{Type: agentcore.StreamTool, Tool: &trace})
 }
 
 func (p *piRunProjection) event(raw json.RawMessage) error {
@@ -207,16 +271,21 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 		}
 		var native struct{ StopReason string }
 		_ = json.Unmarshal(event.Message, &native)
+		accounted := len(p.nativeTerminal) > 0
+		if accounted {
+			terminal, err := nativeUsageTerminal(event.Message)
+			if err != nil {
+				return err
+			}
+			if !samePiJSON(p.nativeTerminal, terminal) {
+				return errors.New("native terminal differs from accounted attempt")
+			}
+			p.nativeTerminal = nil
+		}
 		p.result.Final = message.Content
 		p.result.StopReason = native.StopReason
-		if message.Usage != nil {
-			u := message.Usage
-			p.result.Usage.InputTokens += u.InputTokens
-			p.result.Usage.OutputTokens += u.OutputTokens
-			p.result.Usage.CacheReadTokens += u.CacheReadTokens
-			p.result.Usage.CacheWriteTokens += u.CacheWriteTokens
-			p.result.Usage.CostUSD += u.CostUSD
-			p.result.Usage.CostUnpriced = p.result.Usage.CostUnpriced || u.CostUnpriced || (!p.pricingKnown && u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0)
+		if message.Usage != nil && !accounted {
+			p.addUsage(*message.Usage, p.pricingKnown)
 		}
 		p.emit(agentcore.StreamEvent{Type: agentcore.StreamMessageEnd})
 	case "message_update":
@@ -254,6 +323,9 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 			if audit.Parked {
 				p.result.Parked = true
 				p.result.Question = json.RawMessage(audit.Trace.Args)
+				if audit.ChildQuestion != nil {
+					p.result.Question = audit.ChildQuestion.Question
+				}
 				p.emit(agentcore.StreamEvent{Type: agentcore.StreamQuestion, Question: p.result.Question})
 			}
 		} else {

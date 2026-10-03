@@ -1,5 +1,12 @@
 # Pi reference for agentcore alignment
 
+The implementation target is now a **native Go port**, in `agentcore`, `ai`,
+and `telemetry`. This directory is the pinned development reference and test
+oracle. The worker bridge documented below remains available during the
+transition, but extending or deploying it is not the port strategy. Remove its
+runtime wiring after Go replacements cover the existing callers and durable
+session behavior. The first Go telemetry runtime is in [`telemetry`](../../telemetry/).
+
 `upstream/` preserves the complete `packages/agent`, `packages/telemetry`, and
 required `packages/ai` trees from [earendil-works/pi](https://github.com/earendil-works/pi)
 at `eeac84ca92498ac18b6832754d01aef1d3c5f654`, including tests and the MIT license.
@@ -257,13 +264,17 @@ until their native lifecycle integration is implemented.
 
 ## Select Pi in the server runner
 
-`WithPiRuntime(PiRuntimeConfig{Worker, Runtime})` selects the original Pi loop in
-`Runner`'s execution dispatch. The server wires it when
-`AGENTRAY_AGENT_PI_WORKER` is set; `AGENTRAY_AGENT_PI_RUNTIME` optionally overrides
-Bun. The Docker image includes Bun and the complete verified bundle at
-`/opt/agentray/pi/worker.mjs`. Set the worker variable to that path to select it.
-Leaving it empty retains the existing Go driver. No deployment is performed by
-building the image, and selecting Pi never silently falls back to the Go loop.
+The server selects the in-process Go port with `AGENTRAY_AGENT_NATIVE_GO=true`,
+which wires `WithPiRuntime(PiRuntimeConfig{NativeGo: true})` for parent runs,
+children, and auxiliary summaries. The Docker image contains only the Go server;
+it no longer builds or ships Bun or the Pi worker bundle. The old
+`AGENTRAY_AGENT_PI_WORKER` and `AGENTRAY_AGENT_PI_RUNTIME` settings are no longer
+read by the application. The legacy Go driver remains the default while native
+OAuth account pools and fallback lifecycles are being migrated. Native selection
+never silently falls back to either that driver or the TypeScript worker.
+
+The TypeScript bridge remains available to explicit development/test callers
+through `WithPiRuntime(PiRuntimeConfig{Worker, Runtime})` for differential testing.
 
 Selected runs use the same resolved workspace model, composed tool host, budget
 admission, run rows, terminal persistence, and tool traces. Their `RunResult`
@@ -339,12 +350,22 @@ child. An immutable invocation contract binds each child to its task, prompt,
 and native retry seed. Completed children return their recorded answer with
 zero new usage. The completion receipt is verified against the original native
 message digest and worker revision. Interrupted children may continue from a
-recoverable native prefix without repeating settled tool effects. An ended
-child with no host completion receipt requires explicit reconciliation: native
-`agent_end` alone cannot prove that host validation and finalization succeeded.
+recoverable native prefix without repeating settled tool effects. An ordinary
+ended child with no host completion receipt requires explicit reconciliation:
+native `agent_end` alone cannot prove host validation and finalization succeeded.
+
+A parked child is recognized from its settled question receipt and original
+native tool result in the last invocation's final batch. Reattachment returns
+`PiChildQuestionError` with its child session ID, physical question ID, and
+question, without starting a worker or charging historical usage. After
+`RecordSessionAnswer` under that child's lease, the same fork request resumes
+with the exact recorded answer as a new native user message. Reused provider
+call IDs cannot reuse prior answers. A physical receipt without the original
+native tool result still requires recovery; no replacement message is invented.
 Parent cancellation cancels native child work; cancelled or parked children
-cannot publish a successful completion receipt. Child ask/answer routing and
-reconciliation of an unsettled parent delegation effect remain separate work.
+cannot publish a successful completion receipt. Routing that child workflow
+through the parent UI and reconciling an unsettled parent delegation effect
+remain separate work.
 
 The runner rejects legacy history and legacy turn-preparation overrides. Model binding also rejects OAuth pools and fallback
 ladders. Migrating existing legacy transcripts

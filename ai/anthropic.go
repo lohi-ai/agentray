@@ -674,9 +674,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 		}
 		for _, idx := range order {
 			tc := *toolAcc[idx]
-			if strings.TrimSpace(tc.Arguments) == "" {
-				tc.Arguments = "{}"
-			}
+			tc.Arguments = string(ParseStreamingJSON(tc.Arguments))
 			ch <- agentcore.ChatDelta{ToolCall: &tc}
 		}
 		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}

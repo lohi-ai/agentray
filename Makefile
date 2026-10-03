@@ -82,8 +82,15 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 test-agentcore-race: ## Race-check the kernel plus its runtime and sandbox lifecycle backends
 	$(GO) test -race ./agentcore/... ./internal/runtime ./sandbox -count=1
 
-.PHONY: pi-build test-pi
-pi-build: ## Build the byte-verified native Pi runtime and Go worker
+.PHONY: pi-build test-pi test-ai-parity test-agentcore-native
+test-agentcore-native: ## Check the Go agent/AI/telemetry port without a JavaScript runtime
+	$(GO) test -race ./agentcore/engine ./ai ./telemetry/... -count=1
+	$(GO) test -race -tags pi_native ./internal/runtime -count=1
+
+test-ai-parity: ## Check the native Go AI port against recorded upstream fixtures
+	$(GO) test -race ./ai -run '^TestPi' -count=1
+
+pi-build: ## Build the transitional TypeScript Pi runtime and worker bridge
 	cd third_party/pi && bun install --frozen-lockfile --ignore-scripts
 	cd third_party/pi && bun run typecheck:runtime && bun run build
 

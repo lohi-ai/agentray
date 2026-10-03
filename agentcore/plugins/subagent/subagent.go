@@ -15,6 +15,7 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -405,7 +406,10 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	// Validate BEFORE TruncateMiddle: a truncated answer must fail honestly
 	// rather than pass on a prefix.
 	if schema != nil {
-		final = t.validateWithRetry(ctx, final, res, delegate, prompt, schema, sink)
+		final, err = t.validateWithRetry(ctx, final, res, delegate, prompt, schema, sink)
+		if err != nil {
+			return "", err
+		}
 	}
 	return agentcore.TruncateMiddle(final, t.settings.MaxOutputBytes), nil
 }
@@ -424,13 +428,17 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 // replay-safe: a re-issued spawn reattaches to whichever child log completed.
 // A delegate has no transcript to re-open — Run is an opaque closure — so its
 // retry is a single re-invocation carrying the error in the task.
-func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res agentcore.RunResult, delegate *Delegate, prompt string, schema *jsonschema.Schema, sink agentcore.StreamSink) string {
+func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res agentcore.RunResult, delegate *Delegate, prompt string, schema *jsonschema.Schema, sink agentcore.StreamSink) (string, error) {
 	verr := validateOutput(final, schema)
 	if verr == nil {
-		return final
+		return final, nil
 	}
 	retryFinal, retryRes, retryErr := t.retryOnce(ctx, delegate, prompt, res, verr, sink)
 	t.parent.AddChildUsage(retryRes.Usage)
+	var question *agentcore.ChildQuestionError
+	if errors.As(retryErr, &question) {
+		return "", retryErr
+	}
 	// Same guard as the main spawn path: an aborted retry must not hand the
 	// parent a killed child's partial answer — fall back to the first answer.
 	if retryErr == nil && retryRes.StopReason == "aborted" {
@@ -439,11 +447,11 @@ func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res 
 	if retryErr == nil && strings.TrimSpace(retryFinal) != "" {
 		rerr := validateOutput(retryFinal, schema)
 		if rerr == nil {
-			return strings.TrimSpace(retryFinal)
+			return strings.TrimSpace(retryFinal), nil
 		}
-		return strings.TrimSpace(retryFinal) + "\n\n[validation failed: " + rerr.Error() + "]"
+		return strings.TrimSpace(retryFinal) + "\n\n[validation failed: " + rerr.Error() + "]", nil
 	}
-	return final + "\n\n[validation failed: " + verr.Error() + "]"
+	return final + "\n\n[validation failed: " + verr.Error() + "]", nil
 }
 
 // retryOnce runs the single corrective attempt. Self-forks re-open the child's

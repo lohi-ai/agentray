@@ -104,3 +104,19 @@ func TestPiTraceMissingBaseDoesNotInventNativeContext(t *testing.T) {
 		}
 	}
 }
+
+func TestPiTraceUsesAttemptPricingKnowledge(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		var got observe.TraceRecord
+		cfg := bindPiTrace(agentcore.PiConfig{}, observe.SinkFunc(func(r observe.TraceRecord) { got = r }), !known, "run")
+		raw, _ := json.Marshal(map[string]any{
+			"model":    map[string]any{"id": "fallback", "provider": "openai"},
+			"attempt":  map[string]any{"rung": 1, "providerId": "row-b", "generation": 0, "pricingKnown": known},
+			"response": json.RawMessage(`{"role":"assistant","content":[],"stopReason":"stop","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}}}`),
+		})
+		cfg.OnTrace(context.Background(), raw)
+		if got.Usage.CostUnpriced == known || got.Usage.InputTokens != 2 || !samePiJSON(got.NativeTrace, raw) {
+			t.Fatal("attempt pricing inherited primary flag", got.Usage)
+		}
+	}
+}

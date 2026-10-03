@@ -1,0 +1,1134 @@
+{
+  "objective": "Port the complete Pi AI package into the Go ai module, preserving upstream contracts and observable behavior. The original TypeScript is a test oracle, not the Go implementation.",
+  "status": "in-progress",
+  "reference_commit": "eeac84ca92498ac18b6832754d01aef1d3c5f654",
+  "checked_main_commit": "69f0be6f0a6ca1bf66a2a9cf59c821b632e6bca1",
+  "reference_note": "Reference source lives outside this module. Go tests use checked-in expected data, never TypeScript implementation code. The full provider migration is still in progress.",
+  "integration_status": "Native Go implementation only; no Pi subprocess, Bun/Node runtime, or third_party source dependency. Existing provider adapters are being migrated to the ported contracts.",
+  "next": [
+    "Native Completions, Responses and Anthropic Messages include streamSimple and host routing. Anthropic workload federation is admitted by ModelTier for scoped/process configuration when no API key or explicit refresh callback is supplied. The concrete Anthropic messaging-client injection boundary is ported. Continue alternate-provider adapters, user OAuth lifecycle and remaining provider APIs. Audit SDK/Unicode/numeric edges before switching the app default and retiring the bridge.",
+    "Complete Pi model/options/provider contracts, model collections, auth and catalog support.",
+    "Port all API implementations and route Go callers through them.",
+    "Port remaining images/classifiers, OAuth, transport/session, utilities and CLI/build equivalents where applicable.",
+    "Run provider-level differential request/event/error fixtures and audit every source module against current upstream."
+  ],
+  "modules": [
+    {
+      "source": "src/api/anthropic-messages.lazy.ts",
+      "git_blob": "1da2172ec4e26e4531dc69739144bf812fb107dc",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/anthropic-messages.ts",
+      "git_blob": "452a3ccd03892e33b562997e0b1de69a61d4d94a",
+      "status": "partial",
+      "go_files": [
+        "ai/anthropic.go",
+        "ai/anthropic_native_messages.go",
+        "ai/anthropic_native_params.go",
+        "ai/anthropic_native_stream.go",
+        "ai/anthropic_native_sse.go",
+        "ai/anthropic_native_http.go",
+        "ai/anthropic_native_simple.go",
+        "internal/runtime/native_provider.go",
+        "ai/anthropic_native_federation.go",
+        "ai/anthropic_native_token_cache.go",
+        "internal/runtime/pi_model.go"
+      ],
+      "verification": "TestPiProviderToolArguments; TestPiAnthropicParamsOracle (156 transcript/tool/request/compat cases against unchanged source); TestPiAnthropicStreamOracle (86 event-time stream/SSE cases); TestAnthropicStreamConcurrentSnapshots (race and stable tool identity); TestAnthropicSSENilBody; TestPiAnthropicHTTPOracle (62 request/header/auth/callback/error/retry cases against SDK 0.129.0); TestAnthropicHTTPTimeoutAndAbort; TestPiAnthropicSimpleOracle (122 end-to-end option/budget/context/admission cases against unchanged streamSimple); TestNativeAnthropicHTTPProviderControlsAndDurability; TestNativeAnthropicHTTPProviderInheritedByChildrenAndSummary; TestNativeAnthropicTruncatedStreamHasNoEffect; TestPiAnthropicFederationOracle (33 exchange/auth/header/error/rotation cases against original streamSimple and SDK 0.129.0); TestPiAnthropicTokenCacheOracle (16 SDK cache cases); TestAnthropicTokenCacheConcurrentAndForcedRefresh; TestAnthropicTokenCacheForcedRefreshDoesNotJoinPending; TestPiModelBindingFederationAdmissionAndRefreshAuthority; TestNativeAnthropicFederationHTTPProviderControlsAndDurability; TestNativeAnthropicFederationScopedBinding; TestNativeAnthropicFederationInheritedByChildrenAndSummary; TestPiAnthropicClientOracle (20 injected-client cases); TestAnthropicInjectedClientClosesBodyOnCallbackFailure; TestAnthropicInjectedClientReceivesCancellation",
+      "remaining": "Native transcript/tool conversion, compatibility, request building, stream/SSE accumulation, streamSimple, HTTP transport and host routing are implemented, including API-key/header auth, OAuth-token Bearer identity, Copilot headers, payload replacement, SDK beta/header extraction, deprecated output_format conversion, request retries, header timeout and cancellation. Workload federation is implemented at the stream entry points: scoped/process env selection, identity-file exchange, bounded token responses, redacted errors, a shared per-client token cache, advisory/mandatory refresh and 401 invalidation. ModelTier now admits scoped/process federation when no key or explicit refresh callback is supplied. Local host HTTP tests cover shared token caching across parent/child/summary requests, durable effects and credential exclusion from state/telemetry. Explicit refresh errors and empty results remain authoritative. StreamAnthropicWithClient supports a concrete messaging-client callback that owns auth, endpoint adaptation and HTTP status interpretation. Twenty differential cases cover raw params/timeouts, OAuth identity bypass, callback ordering and retry ownership; Go lifecycle tests cover body closure and cancellation. Concrete alternate-provider adapters and user OAuth token acquisition/refresh remain pending. Invalid URL/file/network diagnostics retain Go wording; malformed token_type values and all Unicode/numeric edge behavior remain unproven. SDK platform diagnostic headers are excluded from HTTP fixtures. Full SDK URL/transport/environment behavior, non-empty malformed JSON diagnostics, JavaScript lone surrogates and all malformed typed/numeric values remain unproven. Simple mode retains adaptive effort mapping, budget expansion followed by context clamping, provider-option filtering, synchronous credential rejection and non-finite budget edge behavior. Shared base option projection is regression-tested through both OpenAI simple providers. NativeGo host tests cover refreshed credentials, structured/tool controls, reasoning replay, durable effects, child isolation, auxiliary summaries, usage/traces and recovery after a truncated stream without executing or replaying its calls. The server can select Go with AGENTRAY_AGENT_NATIVE_GO and no longer ships Bun or the worker bundle. The legacy Go default and explicit development/test bridge remain."
+    },
+    {
+      "source": "src/api/azure-openai-responses.lazy.ts",
+      "git_blob": "5921e10fab25b74b58aa6959aab601e4f3a5aea6",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/azure-openai-responses.ts",
+      "git_blob": "9089fd0e8d8ea5c4567aa9d62fb232b0735948e7",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/bedrock-converse-stream.lazy.ts",
+      "git_blob": "f9b30b35fde70d1b1a0a3abaaf04d174896c6057",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/bedrock-converse-stream.ts",
+      "git_blob": "74f32f5ee59729683f2afa0e842bae48ff5ac6b5",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/cloudflare-ai-binding.ts",
+      "git_blob": "1e5ad5fb4d45b116300b4ab5e6d67115994c6ed8",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/cloudflare-workers-ai-system-one.lazy.ts",
+      "git_blob": "87d13d91594485dc774a4d0ce2d5b7d0d4742674",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/cloudflare-workers-ai-system-one.ts",
+      "git_blob": "2aaae8c18aff20fa08138281231fb2b9f386c6a6",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/cloudflare.ts",
+      "git_blob": "238c9eaab2dc4c06a0b1346e66db44141f107cbf",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/constrained-sampling.ts",
+      "git_blob": "3f1cb262ed38db4fe257b4b21e5154be7e9ba8fe",
+      "status": "partial",
+      "go_files": [
+        "ai/constrained_sampling.go"
+      ],
+      "verification": "TestPiConstrainedSamplingOracle (66 cases), TestPiStrictSamplingPreservesErrorKindAndDoesNotMaskCallbackPanics, TestPiGrammarDeltasReconstructArguments; TestPiAnthropicParamsOracle (Anthropic strict keyword and format restrictions)",
+      "remaining": "Exported operations are ported for serialized schemas and Unicode scalar strings. Native Completions/Responses use request and stream helpers; native Anthropic request construction uses strict-schema validation with its provider restrictions. Remaining provider integrations and JavaScript lone-surrogate behavior are pending."
+    },
+    {
+      "source": "src/api/github-copilot-headers.ts",
+      "git_blob": "602750c4936e47afc530ae6b53ef23c9d9d8bf60",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/google-generative-ai.lazy.ts",
+      "git_blob": "136c5043d05d6856b0f9f7bf93501c41e1f29dcb",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/google-generative-ai.ts",
+      "git_blob": "24fe9134c33df57909da6ecfb2c28d4b53e67464",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/google-shared.ts",
+      "git_blob": "f546fbb00c29940281df6b7b7fafe91a03ea3f3c",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/google-vertex.lazy.ts",
+      "git_blob": "e79d4d0f7855a348381a52175efcfedce8afd5b5",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/google-vertex.ts",
+      "git_blob": "4e667df187bda7116634f88d0031e58c50aa4911",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/lazy.ts",
+      "git_blob": "55a564cdbc23c259e737536170fd32fca1da3acd",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/llama-cpp-classify.lazy.ts",
+      "git_blob": "1c726bd7236541a02bfc401cda257136a25f279f",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/llama-cpp-classify.ts",
+      "git_blob": "fcedc374b72105ccbc8bd09f7a4d7a366899aa2f",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/mistral-conversations.lazy.ts",
+      "git_blob": "84fd03ff9e99dfbee711aa4157dac9138364d88e",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/mistral-conversations.ts",
+      "git_blob": "a6a5b25647f86140575459b2dfd7175290781ac8",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openai-codex-responses.lazy.ts",
+      "git_blob": "a8d0907d1b81e7f0aeff0a9870d7d3e8cde549e3",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openai-codex-responses.ts",
+      "git_blob": "9c1831a021301c36f1669c326eb6c925a68ab11c",
+      "status": "partial",
+      "go_files": [
+        "ai/codex.go",
+        "ai/codex_native_params.go",
+        "ai/codex_native_stream.go",
+        "ai/codex_native_sse.go",
+        "ai/codex_native_auth.go",
+        "ai/codex_native_errors.go",
+        "ai/codex_native_http.go",
+        "ai/codex_native_simple.go",
+        "ai/codex_native_continuation.go",
+        "ai/codex_native_socket_cache.go",
+        "ai/codex_native_websocket_stream.go",
+        "ai/codex_native_websocket_conn.go",
+        "ai/codex_native_websocket_request.go",
+        "ai/codex_native_transport_policy.go",
+        "ai/codex_native_prepare.go",
+        "ai/codex_native_combined.go",
+        "ai/codex_native_debug.go",
+        "ai/codex_native_pool_error.go",
+        "ai/codex_native_pool.go"
+      ],
+      "verification": "TestPiProviderToolArguments; TestPiCodexResponsesParamsOracle (68 request-body cases against unchanged pinned source); TestPiCodexResponsesStreamOracle (112 event-time cases through the original SSE stream); TestPiCodexSSEOracle (17 framing/UTF-8 cases); TestCodexSSETerminalAndFailure; TestCodexSSECancellationClosesBlockedRead; TestPiCodexAuthOracle (44 URL/account/header cases); TestPiCodexErrorsOracle (112 retry classification, delay and HTTP-error cases); TestPiCodexHTTPOracle (24 full SSE request/callback/result cases); TestCodexSSEHTTPTimeoutAndCancellation; TestPiCodexSimpleOracle (44 end-to-end simple-mode cases); TestPiCodexContinuationOracle (24 WebSocket continuation-body cases); TestPiCodexSocketCacheOracle (16 session lifecycle cases); TestCodexSocketCacheConcurrentConnectionOwnership; TestPiCodexWebSocketStreamOracle (22 parser cases); TestCodexWebSocketParserConcurrentDelivery; TestCodexWebSocketParserCancellationAndMalformed; TestCodexWebSocketLocalReuse; TestCodexWebSocketLocalFailure; TestCodexWebSocketHandshakeTimeoutAndCancel; TestPiCodexWebSocketRequestOracle (110 full request/event/cache/statistics cases); TestCodexWebSocketRequestContinuationOnWire; TestPiCodexTransportPolicyOracle (19 original-stream retry/fallback/statistics cases); TestCodexProtocolErrorsDoNotFallback; TestCodexTransportRetryOwnsFreshSocketAndOneStart; TestCodexCombinedTransportLifecycle (real WebSocket reuse, fallback, sticky session bypass, shared payload callback and explicit SSE)",
+      "remaining": "Native Codex request construction is ported: instructions, transcript/tool conversion, strict/grammar contracts, mid-conversation tool declarations, cache identity, nullable controls and reasoning maps. The builder consumes an already selected cacheSessionID; transport-level cache selection/clamping remains outside it, as in Pi. It does not spread generic sampling parameters into Codex requests. Codex event mapping and shared Responses accumulation are ported, including first-terminal admission, end_turn, error precedence, status normalization, signatures, tool scratch cleanup and Codex service-tier pricing. The Codex SSE parser preserves LF framing, residual EOF, skipped DONE markers and streaming UTF-8. Codex URL resolution, JWT account extraction and SSE/WebSocket header precedence are ported, including atob Latin-1 decoding and nullable overrides. Platform user-agent text is checked separately from the portable fixtures. Exact malformed-header/JSON diagnostics and malformed typed events remain unproven. Retry classification, numeric/HTTP-date Retry-After delays, delay ceilings and quota error formatting are ported with source fixtures. Nonstandard JavaScript Date.parse formats remain unproven. StreamCodexResponsesSSE now executes explicit SSE in Go with zstd level-3 compression, per-request credentials, cache-key clamping, payload/response/event callbacks, HTTP retries and header-only timeout. Differential HTTP fixtures compare headers, decompressed request JSON, callback order and final messages; exact compressed bytes are not established. Real local HTTP tests cover header timeout, longer response-body lifetime and cancellation. StreamCodexResponsesSimpleSSE ports simple-mode option filtering, thinking-level clamping/mapping and synchronous explicit-key admission through the Go SSE transport. WebSocket continuation request selection is ported: settings and previous input/output prefix must retain JSON.stringify identity, including key order; mismatches invalidate continuation and preserve the full request. Socket cache ownership, reuse, busy-session isolation, idle/age expiry and explicit closure are ported with source fixtures and concurrent ownership checks. The WebSocket event queue/parser handles terminal admission, binary UTF-8/BOM, close/error metadata, cancellation and idle timeout with source fixtures. Exact malformed-JSON diagnostic text remains unproven. A native Gorilla WebSocket connection now drives the parser with one lifetime reader, per-request listener attachment/detachment, serialized sends, handshake timeout/cancellation and cache-compatible readiness. Local real-socket tests verify two requests on one cached socket, binary frames, early close metadata, idle timeout, cancellation and blocked HTTP-upgrade cleanup. Internal WebSocket request orchestration now acquires/releases leases, sends response.create, starts output on the first mapped event, retains typed callback failures, rejects unfinished tool calls before caching and persists continuation from converted assistant output. 110 source cases compare request JSON, event snapshots, output, error class, close behavior, continuation and debug statistics; a real socket test verifies full context then a delta request with previous_response_id. Internal transport policy now composes with WebSocket requests: one independent retry each for connection-limit and missing-continuation errors, start deduplication, non-transport error exclusion, no mid-message fallback and sticky per-session SSE fallback with reset. Original-stream fixtures verify 19 decision sequences, including explicit WebSocket fallback, after-start retry and cross-request failure memory. StreamCodexResponses and StreamCodexResponsesSimple now provide public combined native transport selection using shared immutable request preparation. SSE fallback reuses payload/auth/headers without invoking onPayload again; SSE source fixtures now execute through the combined entry points. Local end-to-end tests verify WebSocket reuse, fallback, sticky session bypass, explicit SSE and callback counts. CloseCodexResponsesSessions releases cached sockets without resetting fallback, matching source cleanup semantics. Transport diagnostics carry type, timestamp, error name/message/code and fallback/start/request-byte details; JavaScript stack serialization is not reproduced. Debug request/connection/context/failure/fallback counters and optional last-value fields are ported with source fixtures. GetCodexWebSocketDebugStats returns detached snapshots; ResetCodexWebSocketDebugStats atomically resets counters and fallback memory without closing sockets, while socket cleanup preserves them. Concurrent counter and reset/close ownership tests pass. Malformed URL/JSON diagnostics and timer overflow edges remain pending. NativeProviderStream now dispatches the Codex API through StreamCodexResponsesSimple. NativeAgent tracks nonempty Codex session IDs actually used and closes their cached sockets after its requests settle. Real host tests prove per-request getApiKey refresh, account-isolated sockets, missing-key rejection and close cleanup without erasing counters. Codex HTTP failures now preserve status and cloned retry headers outside Pi message JSON. An internal failure observer supplies the original cause before publishing an error result; the pool bridge translates only typed HTTP failures to the existing host ProviderError, preserving 401/403 rotation, 429 retry hints and the 403 concurrency exception without guessing from error text. StreamCodexResponsesPooled now acquires a per-attempt credential, runs the native simple stream, reports the same account, and rotates only typed authentication failures before visible text/thinking/tool events. It retains the existing 64-attempt and repeated-credential guards, avoids reporting transient concurrency caps, buffers replay-safe metadata and shares a payload mutex so forwarded live partial/result pointers remain identical. Tests cover rotation, repeated tokens, quota, concurrency, callback errors, success and progressive identity. This is a host adapter rather than an upstream Pi pool feature. The native runner now selects a bound Codex pool stream when the resolved tier supplies a TokenSource. Its model binding preserves endpoint/model checks and returns null from getApiKey without acquiring or serializing credentials; Acquire/Report stays inside the native stream. The full runner test proves auth rotation, final answer, exact account reporting and no credentials in native state/telemetry. Public BindPi/worker paths, custom stream overrides and other OAuth vendors retain explicit rejection until separately integrated. Fallback rung resolution is now shared with legacy construction and native binding, preserving provider-row identity, source/key ownership, API dialect and existing window rules without acquiring tokens. Native binding returns callbacks and dispatcher together. Built-in native runner ladders now perform scoped preparation, retries/escalation, row-aware refresh, durable selection before effects and recovery of the retained model. Children and auxiliary summaries own independent ladders. Real HTTP runner tests cover compaction, tools, fork, resume and selection-write failure; explicit custom streams and workers still reject configured fallback. The legacy pooled CodexProvider remains for legacy callers."
+    },
+    {
+      "source": "src/api/openai-completions.lazy.ts",
+      "git_blob": "6f6c6f61af3515ff0f6a651a0868b2ac18de7ab1",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openai-completions.ts",
+      "git_blob": "e4ebb7ce6ed7d91568f3a9f8c2eeaf512d31dfc4",
+      "status": "partial",
+      "go_files": [
+        "ai/openai.go",
+        "ai/openai_native_compat.go",
+        "ai/openai_native_messages.go",
+        "ai/openai_native_params.go",
+        "ai/openai_native_stream.go",
+        "ai/openai_native_http.go",
+        "ai/openai_native_sse.go",
+        "ai/openai_native_errors.go",
+        "ai/simple_options.go"
+      ],
+      "verification": "TestPiProviderToolArguments; TestPiOpenAICompletionsMessagesOracle (73 message/tool/compat cases); TestPiCompletionsArgumentStringification; TestPiOpenAICompletionsParamsOracle (111 request-body cases); TestPiOpenAICompletionsStreamOracle (55 event-time stream cases); TestCompletionsStreamConcurrentSnapshots (race and stable tool identity); TestPiOpenAICompletionsHTTPOracle (47 request/callback/HTTP/SSE cases); TestCompletionsHTTPTimeoutAndAbort; TestPiCompletionsRetryOracle (64 retry-policy cases); TestCompletionsRetryLifecycle; TestPiSimpleOptionsOracle (92 simple/estimate and 72 budget cases); TestNativeRunnerDefaultHTTPProviderControlsAndDurability; TestNativeDefaultHTTPProviderInheritedByChildrenAndSummary",
+      "remaining": "Native request conversion, buildParams, accumulator, HTTP/SSE, streamSimple and Go host dispatch are implemented. NativeGo defaults to this provider for openai-completions; Responses and Anthropic Messages are also available; remaining APIs are rejected unless an explicit Go stream is supplied. Local HTTP tests cover durable tools, child isolation, summary calls, credential refresh and tracing. The server exposes AGENTRAY_AGENT_NATIVE_GO and no longer ships the worker bundle. App default migration and removal of the development/test bridge remain. SDK platform diagnostic headers are excluded from HTTP fixtures; full SDK transport/error/URL behavior, nonstandard Retry-After dates, JavaScript lone surrogates, malformed chunk types and all numeric edges are not established."
+    },
+    {
+      "source": "src/api/openai-prompt-cache.ts",
+      "git_blob": "1c3355d52eeb79fab3924127559f533a59c1d34d",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openai-responses-shared.ts",
+      "git_blob": "59c9b5b428b9f8858ebc2a20ea243747b9f64c0b",
+      "status": "partial",
+      "go_files": [
+        "ai/openai_responses_native_messages.go",
+        "ai/openai_responses_native_stream.go",
+        "ai/json_parse.go"
+      ],
+      "verification": "TestPiResponsesMessagesOracle (83 transcript/tool cases); TestPiOpenAIResponsesStreamOracle (98 event-time cases); TestResponsesStreamConcurrentSnapshots (race and stable tool identity); TestPiProviderToolArguments",
+      "remaining": "Shared transcript/tool conversion and stream event accumulation are ported, including reasoning backfill, final signatures, grammar deltas, usage, incomplete reasons and unfinished-call rejection. The service-tier resolver hook for other Responses APIs is not yet exercised through those providers. Malformed signature JSON uses Go diagnostics; JavaScript lone surrogates and all malformed typed/numeric values remain unproven."
+    },
+    {
+      "source": "src/api/openai-responses.lazy.ts",
+      "git_blob": "066ca801dccf235e43d813a2fa033ac8f0afc498",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openai-responses.ts",
+      "git_blob": "addc3a5f7cb3c3c1dc8547f8621d9046334296d5",
+      "status": "partial",
+      "go_files": [
+        "ai/openai_responses_native_params.go",
+        "ai/openai_responses_native_stream.go",
+        "ai/openai_responses_native_http.go",
+        "ai/openai_native_http.go",
+        "ai/openai_native_errors.go",
+        "ai/simple_options.go",
+        "internal/runtime/native_provider.go"
+      ],
+      "verification": "TestPiOpenAIResponsesParamsOracle (119 request/compat cases); TestPiOpenAIResponsesStreamOracle (98 event-time cases); TestPiOpenAIResponsesHTTPOracle (55 HTTP/callback/error cases, SDK 7.19.0); TestResponsesHTTPTimeoutAndAbort; TestResponsesStreamConcurrentSnapshots; TestPiResponsesSimpleOracle (103 simple/admission cases); TestNativeResponsesHTTPProviderControlsAndDurability (model-selected and explicit Responses endpoints); TestNativeResponsesHTTPProviderInheritedByChildrenAndSummary; TestNativeResponsesUnfinishedToolHasNoEffect",
+      "remaining": "Native compatibility, request construction, stream accumulation, service-tier usage, HTTP/SSE, streamSimple and host dispatch are implemented. NativeGo supports Completions, Responses and Anthropic Messages, including durable tools, child runs, auxiliary summaries, credential refresh and tracing. Full OAuth lifecycle, SDK transport/error/URL behavior, platform diagnostic headers, nonstandard Retry-After dates, JavaScript lone surrogates and all malformed typed/numeric values remain unproven; other provider APIs, app default migration and removal of the development/test bridge are pending. The server exposes AGENTRAY_AGENT_NATIVE_GO and no longer ships Bun or the worker bundle."
+    },
+    {
+      "source": "src/api/openrouter-images.lazy.ts",
+      "git_blob": "834132a58d619f06b5ff63832842fd9f35dfc56b",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/openrouter-images.ts",
+      "git_blob": "cbb3b00050e8dd62c906ba7d781fc5dd56b8a2cd",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/pi-messages.lazy.ts",
+      "git_blob": "41af9ee58926bff19d8fe61778be32d8b18b4817",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/pi-messages.ts",
+      "git_blob": "2137b551f8f8e8c58d3bf0ebb5cf840e5b04183b",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/simple-options.ts",
+      "git_blob": "f2b888814d8c1998d50a695a3abf65c5136ba910",
+      "status": "partial",
+      "go_files": [
+        "ai/simple_options.go",
+        "ai/openai_native_params.go"
+      ],
+      "verification": "TestPiSimpleOptionsOracle (92 simple/estimate cases and 72 thinking-budget cases); existing 111 Completions request-body cases; TestPiResponsesSimpleOracle (103 simple/admission cases)",
+      "remaining": "Context ceilings, thinking budgets, level clamping and the base option projection are used by native Completions, Responses and Anthropic streamSimple. Shared adoption by remaining providers, non-serializable JS option shapes and all numeric edge behavior remain."
+    },
+    {
+      "source": "src/api/system-one-shared.ts",
+      "git_blob": "e1029588747031c670e9ec216c41df6b604390af",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/transform-messages.ts",
+      "git_blob": "94bf539ccb0c7aa47013f073cd7e77b5e8eb5f1b",
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/transform_messages.go"
+      ],
+      "verification": "TestPiTranscriptOracle"
+    },
+    {
+      "source": "src/api/typesafe-system-one.lazy.ts",
+      "git_blob": "0962e1ee7e004a3e0b6f4fd73096ec30b99e7334",
+      "status": "pending"
+    },
+    {
+      "source": "src/api/typesafe-system-one.ts",
+      "git_blob": "30dc25b16a58d06f8a700b581bee79c0cddc905f",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/context.ts",
+      "git_blob": "30e088bfac82a5aca05a8a6a564c2ae26ab3358f",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/credential-store.ts",
+      "git_blob": "fc17f6cc6e4f0442f80848cce6a07407f150e024",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/helpers.ts",
+      "git_blob": "980963e79061a448812214642189cf45b0a757f1",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/anthropic.ts",
+      "git_blob": "35215061399bb803d730be645c89a6f50cc5e536",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/callback-server.ts",
+      "git_blob": "00aa6aea1edd71edc095626eccc08227cf74793b",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/device-code.ts",
+      "git_blob": "a078155c89a9322f04f8eca11be82296dc358714",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/github-copilot.ts",
+      "git_blob": "5a17d07f059141b032829a75aaf6f223551eda74",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/kimi-coding.ts",
+      "git_blob": "6c5bd49532fc39bc4df280b79a8f3f909f3ee0a3",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/load.ts",
+      "git_blob": "839fe315234b8b82810eb3695fd74ede993f690f",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/meta.ts",
+      "git_blob": "b9f331cc80c6c2d61a143511e840947958f2be0e",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/openai-chatgpt.ts",
+      "git_blob": "c6b049139800f767a9db1dbf452fa4b73ac277d5",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/openai-codex.ts",
+      "git_blob": "d2917f1e1d9d4f2b7d2d68f4d5f71a100d7ffa0f",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/openrouter.ts",
+      "git_blob": "7d6e2863cb4bb2557bb14b7112c47013213e3d08",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/pkce.ts",
+      "git_blob": "bf7ac7d587326333a4e5cd2429b8e682a15ac6d4",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/radius.ts",
+      "git_blob": "0b82b9d7890954233dd643153f9f6ab1bed3cb15",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/oauth/xai.ts",
+      "git_blob": "bf999c34cfe68eb85bf4f834bef7bca420e091b8",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/resolve.ts",
+      "git_blob": "9f9117b9e5bbb8d2e352edbcf39e0004bc8143dd",
+      "status": "pending"
+    },
+    {
+      "source": "src/auth/types.ts",
+      "git_blob": "ce803b716a50a2125b82c997ec9fcedb91022290",
+      "status": "pending"
+    },
+    {
+      "source": "src/bedrock-provider.ts",
+      "git_blob": "10430092fd18d0cf7918e2a5bba1fa0ca82cbaf5",
+      "status": "pending"
+    },
+    {
+      "source": "src/bun-oauth.ts",
+      "git_blob": "5e77cf1b6bac4ff11e9d6d6d68dd9960b1d95620",
+      "status": "pending"
+    },
+    {
+      "source": "src/cli.ts",
+      "git_blob": "04fdbaa255c5f5ceb5d26fd15accba44ed0636f2",
+      "status": "pending"
+    },
+    {
+      "source": "src/compat.ts",
+      "git_blob": "e41ff083c187e36c10d3665aa7bbc74386ea3764",
+      "status": "pending"
+    },
+    {
+      "source": "src/compat/extension-oauth-types.ts",
+      "git_blob": "f1bf4e5d68f9fc614e13c7287f29fcca8b6369d2",
+      "status": "pending"
+    },
+    {
+      "source": "src/env-api-keys.ts",
+      "git_blob": "467ed0772a3316b4d96f3917503276cc310fbcf2",
+      "status": "pending"
+    },
+    {
+      "source": "src/image-models.ts",
+      "git_blob": "f9a003ef9a00a7486277cfda4b7f9699f72f049e",
+      "status": "pending"
+    },
+    {
+      "source": "src/images-api-registry.ts",
+      "git_blob": "527582e2dafe7d72dacbc1332d3180a0afa6eb6c",
+      "status": "pending"
+    },
+    {
+      "source": "src/images.ts",
+      "git_blob": "bd8ad189b602047522816be05ed8fc563ef51426",
+      "status": "pending"
+    },
+    {
+      "source": "src/index.ts",
+      "git_blob": "65d5eae7deabc5dc7f90183ccc3d620a675c7d66",
+      "status": "pending"
+    },
+    {
+      "source": "src/legacy-api-aliases.ts",
+      "git_blob": "b49c199cc68ce5afefc16babdc8f85f7eb78649d",
+      "status": "pending"
+    },
+    {
+      "source": "src/model-catalog.ts",
+      "git_blob": "5edea990f4ace9dfb9bdd1661fa3490abf7d8cd6",
+      "status": "pending"
+    },
+    {
+      "source": "src/models-store.ts",
+      "git_blob": "7cb1d04c4e40d7ec9af9f3e5b180ed8a60cebe38",
+      "status": "pending"
+    },
+    {
+      "source": "src/models.generated.ts",
+      "git_blob": "25ee9e6a07b24dfc82681e670cc901fd38ffad01",
+      "status": "pending"
+    },
+    {
+      "source": "src/models.ts",
+      "git_blob": "d8693c978c0f424808f70647f97f92fef6617e7d",
+      "status": "partial",
+      "go_files": [
+        "ai/simple_options.go",
+        "ai/openai_native_stream.go"
+      ],
+      "verification": "TestPiSimpleOptionsOracle; TestPiOpenAICompletionsStreamOracle tiered usage cases",
+      "remaining": "Supported thinking levels, clampThinkingLevel and Completions usage cost calculation are ported. The model catalog/collection API and remaining model helpers are not fully ported."
+    },
+    {
+      "source": "src/oauth.ts",
+      "git_blob": "039a587fb26c5e5209c7754f9039d0a1ea444c7b",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/all.ts",
+      "git_blob": "62e94944081ead3572cc6ff1a840bd2a76938c93",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/amazon-bedrock.models.ts",
+      "git_blob": "37b348ef78385427a7c1ff72749f0e2fbb3b697a",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/amazon-bedrock.ts",
+      "git_blob": "d629f1e1c3090718c782600e51f1d5228f6c3481",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/ant-ling.models.ts",
+      "git_blob": "bc42a8c62e1752ac4977b0714fb80262069bed73",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/ant-ling.ts",
+      "git_blob": "03bb314d9940f30130c7a99c0e7ad478ebc85452",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/anthropic.models.ts",
+      "git_blob": "c70b3160cbfcf1d312c15718f96ce38df3929d36",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/anthropic.ts",
+      "git_blob": "0f7e8b6e9dd1d949c39c94d13578d9b2992beac8",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/azure-openai-responses.models.ts",
+      "git_blob": "66d85c3c7328d2dbc4afbde82507377a3e7e41e6",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/azure-openai-responses.ts",
+      "git_blob": "78351deae417a06d0f05755105aba82fa2e0a76f",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/baseten.models.ts",
+      "git_blob": "864eb1f99dfdefb55e8dbaf1155de0507fb042ca",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/baseten.ts",
+      "git_blob": "79371dac0d4f9e00d21a3593dd6e78c6c201b475",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cerebras.models.ts",
+      "git_blob": "39b1d2900708dcba1111c7603f43661194b56b02",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cerebras.ts",
+      "git_blob": "9ffc737554bc51ea9a155854bcc9d9014c49046b",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-ai-gateway.models.ts",
+      "git_blob": "95e656542beb9d24f61b26dd0c138315266f6ba9",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-ai-gateway.ts",
+      "git_blob": "99d976225ad790cc86dd6954d0a6ad0b9a607e19",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-auth.ts",
+      "git_blob": "72fd23d07df18546c3575f7f4d724def1b74c824",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-stream.ts",
+      "git_blob": "c8acc48af3c1209149a4145af4483c16568623e5",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-workers-ai.models.ts",
+      "git_blob": "d84e49d16cb418dda156d2a7daf7b453f8c80867",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/cloudflare-workers-ai.ts",
+      "git_blob": "4798fa8a332c6e29b7d2b966a74a8ebada9cdece",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/data-json.d.ts",
+      "git_blob": "73212a8f9674a910d626722e94486a9000a48519",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/deepseek.models.ts",
+      "git_blob": "5ece8a19025fa0bb228076ec43429f47c56e8037",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/deepseek.ts",
+      "git_blob": "580e25c236feb1a283d96bbef538915a142d8416",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/faux.ts",
+      "git_blob": "a38c18774e53155641a75bbda7233d5e93216680",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/fireworks.models.ts",
+      "git_blob": "44cfa085662375110da0c25298c6b1295ee868dc",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/fireworks.ts",
+      "git_blob": "518fb259d350a5bf5277d3cbe78d33c1558a1e74",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/github-copilot.models.ts",
+      "git_blob": "4b853d477b6b71a11dddd0832c8039e31d03025f",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/github-copilot.ts",
+      "git_blob": "eab784d88840f4a29829066ee4b402d10d94e754",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/google-vertex.models.ts",
+      "git_blob": "a1778eecda75a7aaa1e8a276874a2f3787933867",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/google-vertex.ts",
+      "git_blob": "83c7d0fe89cbb7e425a3e79d2bf954e2c2b8324e",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/google.models.ts",
+      "git_blob": "726a47440d673cf221be33538fc0a0884402fda4",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/google.ts",
+      "git_blob": "0bd452373227e781b961a3eb37d6a0fc3aead8a6",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/groq.models.ts",
+      "git_blob": "75a84c36f79758455bb1375a0dc2208b1112b196",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/groq.ts",
+      "git_blob": "5892e0488264e2ef53e09ed581179f107e4528db",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/huggingface.models.ts",
+      "git_blob": "3bc971b6a47135a4516824ad5ac3c7eff87c9cfa",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/huggingface.ts",
+      "git_blob": "e8fb628e199203fc63423053bb30f79c4375c992",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/images/register-builtins.ts",
+      "git_blob": "08e804f54c926094e0b3b575b4d55db891cc73fb",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/kimi-coding.models.ts",
+      "git_blob": "5b6ea5404e8cd45f81f3aa8b1996fdb0365751a0",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/kimi-coding.ts",
+      "git_blob": "81ae4af2e92e08eb31eafab4d760c5692bc2b1c2",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/meta.models.ts",
+      "git_blob": "81cd83917e49fce2fb35b67f8ce9eb2d8c4e515f",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/meta.ts",
+      "git_blob": "228c6cde4eef7677b75abac8f236cebfc242694b",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/minimax-cn.models.ts",
+      "git_blob": "b6cab80c6cf6a8c2c6592170e31557d73ad2611d",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/minimax-cn.ts",
+      "git_blob": "5cbe5acc55926d52fac7ffa3008c2c903ed0d86b",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/minimax.models.ts",
+      "git_blob": "4a46241a8af6ac5c2066a2dbc3346c00d9aeb856",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/minimax.ts",
+      "git_blob": "6a956bd6bbdc29084c66ad2100a2ec72485de2f5",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/mistral.models.ts",
+      "git_blob": "0f7bed430b5abb2fd182fb050b2c81e13377851b",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/mistral.ts",
+      "git_blob": "9b84a71fb66f8a2cbfb81728d542281c16014548",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/moonshotai-cn.models.ts",
+      "git_blob": "e1cde46dc42f43e6c1472ed9c51a5f6930a58f57",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/moonshotai-cn.ts",
+      "git_blob": "b813734bcfe6761c4ae000bfce9571c02942f7a9",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/moonshotai.models.ts",
+      "git_blob": "19ac3d66ef31f178b68501be52b99daae9f9331c",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/moonshotai.ts",
+      "git_blob": "dc15c5706ad333e58d09daec9daf4b3840e778dd",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/nvidia.models.ts",
+      "git_blob": "f7dfc374fb720421e052ea0b9210a157d8eef0db",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/nvidia.ts",
+      "git_blob": "dc539f60b685c63842b0f68ce93d03cfdd05e7fd",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openai-codex.models.ts",
+      "git_blob": "996f1fd2fc459b24a1fe66273084c59eb75ab97c",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openai-codex.ts",
+      "git_blob": "c46bd2ba72103d45c5b371289170d5464c2df309",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openai.models.ts",
+      "git_blob": "06e0d4123a8905f0f8ba3b3eff661a84fa380d59",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openai.ts",
+      "git_blob": "f34b62034b390603670d86070dd7acf8e942e48f",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/opencode-go.models.ts",
+      "git_blob": "cb1dcc343d51dfc992dacf348df7c9c4ef5f542c",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/opencode-go.ts",
+      "git_blob": "3c0b58f4b7f7352307c4b8f09cbcd93750f4a5ad",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/opencode-headers.ts",
+      "git_blob": "4c73bfcac8a6bd46471467bb324a09d1520bedb9",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/opencode.models.ts",
+      "git_blob": "812c584e3220e5d831dbd356033d6e0a86c84c11",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/opencode.ts",
+      "git_blob": "7b3aae419732de34fcf6321d54f8221ca760f902",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openrouter.models.ts",
+      "git_blob": "75d808b5939edc609460b75ab3c5340fcbfeef4a",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/openrouter.ts",
+      "git_blob": "86efb8d9d19f5bed867ab162ec244eeafd3e95fe",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan-cn.models.ts",
+      "git_blob": "6b609faf7938084d55358074908886fb54525130",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan-cn.ts",
+      "git_blob": "259b5a7f028f302e421f91fec6490d5c2e862632",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan-individual.models.ts",
+      "git_blob": "8d48afd89a0ea9800fcbb191c1ad951fca212629",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan-individual.ts",
+      "git_blob": "a231d1b313d1646c5e9053e09d1b9767c2acb2a2",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan.models.ts",
+      "git_blob": "c546c44d30e788f55b5ddb0e37acd6116be20b5d",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/qwen-token-plan.ts",
+      "git_blob": "295560ba2afbcc74d2509d4acbb0c89ba6624f81",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/radius-config.ts",
+      "git_blob": "a2715aaec31ec99afe9b302d1d289546319a97f4",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/radius.models.ts",
+      "git_blob": "c8f3b12d763b38999a0203dc1c54d3e9bef7538e",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/radius.ts",
+      "git_blob": "78596256031e8f217b4b9e7f99a889a4d438a345",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/together.models.ts",
+      "git_blob": "d8d5c919bd75e493eb274ca25376f2a9eb15cc3a",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/together.ts",
+      "git_blob": "36631d11abea005e40b62e5f2a69ddc5663728ee",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/typesafe.models.ts",
+      "git_blob": "05429c3353c051cfaa0132c06726ed7d7d660eff",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/typesafe.ts",
+      "git_blob": "c7cfb8afa3179b005c55e31423c64266ed2a3591",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/vercel-ai-gateway.models.ts",
+      "git_blob": "e1c25832b459cc9b1c62b4b8e013cef0ab890903",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/vercel-ai-gateway.ts",
+      "git_blob": "ec2155793b9fb1cb7e5e64a98e759542c2133777",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xai.models.ts",
+      "git_blob": "b1fb5d302194bef14234c033daa605c76a8e6692",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xai.ts",
+      "git_blob": "8e2b179c28a8a7c930015fe629dba9b898f7a763",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-ams.models.ts",
+      "git_blob": "72b691d029f3e0ad01eb5217e43215eac1e028e9",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-ams.ts",
+      "git_blob": "017aa67192c8a1fd4685feb2bf67c08edf0a100c",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-cn.models.ts",
+      "git_blob": "cae4bc12a0a0a644915e67a34cc95b78f40899a0",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-cn.ts",
+      "git_blob": "f7ab14fa77a62f290350bc70c8d53cdbf13ca4fb",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-sgp.models.ts",
+      "git_blob": "13db578e94a070f647887c24b5ebfd7db7ba15b9",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi-token-plan-sgp.ts",
+      "git_blob": "e3762057f42f415fe45c8d5104cf9f453d985812",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi.models.ts",
+      "git_blob": "0ade9200d8c7fb035f895e8769b02ad23676f3fc",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/xiaomi.ts",
+      "git_blob": "5abf51691fe457443bb952abc2dc5b76291577a8",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/zai-coding-cn.models.ts",
+      "git_blob": "7dbd6a27c71fc6f97bb866109fcc2e716cc368f4",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/zai-coding-cn.ts",
+      "git_blob": "2f15a6ca31c3a4e85a35ed5b87c9d2dd3b552a30",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/zai.models.ts",
+      "git_blob": "7de6890f752c81953ef3d21acbac16de3d0a29ed",
+      "status": "pending"
+    },
+    {
+      "source": "src/providers/zai.ts",
+      "git_blob": "854010661655298b2774c99542c7292abf51b4bd",
+      "status": "pending"
+    },
+    {
+      "source": "src/session-resources.ts",
+      "git_blob": "d63009268edd040261e11016720e5c70324d4275",
+      "status": "pending"
+    },
+    {
+      "source": "src/types.ts",
+      "git_blob": "0358843d1b3b1b976d6b385259032ca5b1e8fc20",
+      "status": "partial",
+      "go_files": [
+        "ai/transcript_types.go",
+        "ai/provider.go",
+        "ai/event_stream.go"
+      ],
+      "remaining": "Streaming options, provider/model contracts, images/classifiers, and typed compatibility settings remain. Existing Go catalog and agentcore vocabulary are still in use. Decoded usage and nested cost retain absent/null counters and provider metadata while typed counter mutations remain serializable. Optional content signatures/redaction/namespace preserve explicit null through snapshots. Proxy terminal fields retain null versus omission and preserve usage extensions; malformed field types remain outside verified coverage.",
+      "verification": "TestTranscriptUsageWirePresenceAndMutation; TestProxyPiFixtures (51 source scenarios, live payload and snapshot comparison)"
+    },
+    {
+      "source": "src/utils/abort-signals.ts",
+      "git_blob": "8e1a9ade91c021e8d9b761a2fb8f0ac1316c9daf",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/abort.ts",
+      "git_blob": "5d76d19f412f82b26f9b856e332aa5637513f690",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/assistant-message-frame.ts",
+      "git_blob": "65e23ede5994dfc5efd15cc172177c8d402b096d",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/diagnostics.ts",
+      "git_blob": "fdb1b48190357d4e8f50a26979e0bbc751b0e57d",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/error-body.ts",
+      "git_blob": "cb8c1859a7dc33474e56e371ec05a1bf89fabf73",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/estimate.ts",
+      "git_blob": "165b4d4d2f90a9e26d6db61eafcbb7957fde15c0",
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/estimate.go"
+      ],
+      "verification": "TestPiSimpleOptionsOracle covers text/images, UTF-16 scalar lengths, system tool declarations, assistant blocks, usage fallback, stale-prefix timestamps and error/aborted usage exclusion.",
+      "remaining": "Contracts over valid native transcript messages are covered; malformed transcript shapes, lone JS surrogates and unsafe-integer timestamps are not established."
+    },
+    {
+      "source": "src/utils/event-stream.ts",
+      "git_blob": "c4f731d59bf192d6889d9b25ba3f3dd2b1b5a9e6",
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/event_stream.go"
+      ],
+      "verification": "TestPiEventStreamOracle and TestPiEventStream concurrency/lifecycle tests"
+    },
+    {
+      "source": "src/utils/hash.ts",
+      "git_blob": "1ff55e8b41647ead2e6a580bedf36b03fd72a8d3",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/headers.ts",
+      "git_blob": "b96d1514929a7353846c3942203d9ad210a30dc1",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/json-parse.ts",
+      "git_blob": "f39f9f09d6d6a5f6e42c09dcc474ed180bbc0634",
+      "status": "ported-with-fixture-tests",
+      "go_files": [
+        "ai/json_parse.go"
+      ],
+      "verification": "TestPiJSONParsingOracle (428 cases), TestPiProviderToolArguments and TestPiProviderNonstreamToolArguments (43 HTTP cases)"
+    },
+    {
+      "source": "src/utils/model-operations.ts",
+      "git_blob": "bdf510f9ccbd3e2ad4ca4b2e2ed6139eb0bd24af",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/models-error.ts",
+      "git_blob": "4d79ee5b379b8fcf812caff9202ee022a71616ec",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/node-http-proxy.ts",
+      "git_blob": "0550f2659435b58c933593f732f1817531e32f41",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/oauth-page.ts",
+      "git_blob": "2cf0ea4556865c5507423061541ab41a07abd942",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/overflow.ts",
+      "git_blob": "2c0a5dc6e7f51a092545e0304248d7f264a03c98",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/pi-user-agent.ts",
+      "git_blob": "93b23dd35114eb3c47bf86fdcd94ed0500090158",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/provider-env.ts",
+      "git_blob": "db49606722192f60ba8809333221696da8861632",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/provider-retry.ts",
+      "git_blob": "0cd097d238f9279999985fa4751cb7385c30fc9c",
+      "status": "partial",
+      "go_files": [
+        "ai/openai_native_errors.go"
+      ],
+      "verification": "TestPiCompletionsRetryOracle (64 cases); TestCompletionsRetryLifecycle; TestPiOpenAICompletionsHTTPOracle",
+      "remaining": "Native Completions request retry policy, server delay caps, jitter/backoff, maxRetries and cancellation are implemented. HTTP-date parsing is covered; JavaScript Date.parse nonstandard formats and reuse by other native providers remain."
+    },
+    {
+      "source": "src/utils/retry.ts",
+      "git_blob": "880dd0a4beebdd2a23a0a7067de20867e1867e32",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/sanitize-unicode.ts",
+      "git_blob": "d869ee9dc39afb6f1838bb23d08c61330af07d2c",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/sleep.ts",
+      "git_blob": "67b97aef90a0ff7628e3e817e51cdbc18b20f9df",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/text.ts",
+      "git_blob": "5798ed346fb36fe7c1376a8b6c75e6ba794e12c8",
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/transcript.go"
+      ],
+      "verification": "TestPiTranscriptOracle"
+    },
+    {
+      "source": "src/utils/transcript.ts",
+      "git_blob": "1212696cc911a5c112a064c0c1e179cc705e71f7",
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/transcript.go"
+      ],
+      "verification": "TestPiTranscriptOracle"
+    },
+    {
+      "source": "src/utils/typebox-helpers.ts",
+      "git_blob": "85a53555c9b1672e80a7058203c12e67a1f51709",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/uuid.ts",
+      "git_blob": "8dfc6dd71e101438afedf801ae1797a038a806c8",
+      "status": "pending"
+    },
+    {
+      "source": "src/utils/validation.ts",
+      "git_blob": "cf6902df263a672477b786a3e0fe15087d54fceb",
+      "status": "partial",
+      "go_files": [
+        "agentcore/engine/arguments.go",
+        "agentcore/engine/argument_schema.go",
+        "agentcore/engine/argument_numbers.go",
+        "agentcore/engine/argument_arrays.go",
+        "agentcore/engine/argument_objects.go",
+        "agentcore/engine/argument_regexp.go",
+        "agentcore/engine/argument_errors.go",
+        "agentcore/engine/argument_error_order.go",
+        "agentcore/engine/json.go",
+        "ai/js_number.go"
+      ],
+      "verification": "TestPiToolArgumentsOracle compares 323 source runToolCall cases: 104 numeric coercion cases, 26 constraint/path cases, 16 multi-error ordering/cap/reference cases 10 schema-valued additional-property/union cases 12 conditional/dependency cases 10 property-name cases 14 contains-bound/newer-keyword cases 12 dialect/metadata cases, 5 resource-reference cases 7 error-collection cases 10 type-list cases 16 floating-point multipleOf cases 11 prefixItems cases 7 tuple-tail cases 24 pattern-text/ECMAScript cases 9 unevaluated-data summary cases 12 object-evaluation cases 9 array-evaluation cases and 9 contains-evaluation cases, including hook/execution admission, exact argument/error text and immutable input. Existing loop fixtures cover optional nulls and common schema failures. ParseJSNumber is also shared by the native Anthropic federation expiry path.",
+      "remaining": "Full public validation API, native TypeBox symbol/schema extensions, complete keyword/error-order fidelity, malformed schemas and Unicode edge cases remain unproven. Current validation is integrated through the Go engine's serialized-schema tool path."
+    }
+  ],
+  "verification": {
+    "command": "make test-ai-parity (Go only; checked-in expected fixtures)",
+    "transcript_cases": 62,
+    "tool_state_cases": 7,
+    "transform_cases": 54,
+    "event_stream_cases": 5,
+    "additional_checks": [
+      "go test -race ./ai -count=1",
+      "go test ./... -run ^$ (compile all packages only)"
+    ],
+    "limitations": "Fixture comparisons cover implemented contracts only. Complete provider and package parity has not been established.",
+    "json_parse_cases": 428,
+    "provider_http_cases": 43
+  },
+  "implementation_constraint": "All AI execution and tests must run as Go code. No third_party implementation, TypeScript process, Bun, or Node dependency."
+}

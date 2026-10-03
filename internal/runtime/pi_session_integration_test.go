@@ -1,4 +1,4 @@
-//go:build pi
+//go:build pi || pi_native
 
 package agentruntime
 
@@ -46,6 +46,9 @@ func piSessionOptions() json.RawMessage {
 
 func piSessionWorker(t *testing.T) string {
 	t.Helper()
+	if piTestNative {
+		return ""
+	}
 	p, err := filepath.Abs("../../third_party/pi/dist/worker.mjs")
 	if err != nil {
 		t.Fatal(err)

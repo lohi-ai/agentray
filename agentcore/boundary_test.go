@@ -78,7 +78,8 @@ func TestKernelIsAModuleLeaf(t *testing.T) {
 
 // TestKernelTreeHoldsOnlyDeclaredBoundaries enforces README.md's opening claim:
 // the runtime is one flat package, plugins are ejectable capabilities, and
-// integration is a black-box test suite. Those are the only two subdirectories.
+// integration is a black-box test suite. engine is the native Pi port, with
+// its own dependency boundary while callers migrate from the flat kernel.
 //
 // The rule matters more than tidiness. "The kernel" has to name a tree a reader
 // can enumerate, or the boundary tests above are checking one package while the
@@ -88,7 +89,7 @@ func TestKernelIsAModuleLeaf(t *testing.T) {
 // integration/. Production packages that merely import agentcore belong beside
 // it (authoring/, ai/, sandbox/).
 func TestKernelTreeHoldsOnlyDeclaredBoundaries(t *testing.T) {
-	allowed := map[string]bool{"plugins": true, "integration": true}
+	allowed := map[string]bool{"plugins": true, "integration": true, "engine": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading the agentcore directory: %v", err)
@@ -103,12 +104,29 @@ func TestKernelTreeHoldsOnlyDeclaredBoundaries(t *testing.T) {
 			continue
 		}
 		t.Errorf("agentcore/%s/ is a subdirectory of the kernel.\n"+
-			"Only plugins/ and the black-box integration/ suite may live here. If it extends "+
+			"Only engine/, plugins/ and the black-box integration/ suite may live here. If it extends "+
 			"a running agent it is a plugin; otherwise it belongs beside agentcore.", e.Name())
 	}
 	for name := range allowed {
 		if !seen[name] {
 			t.Errorf("found no %s/ directory — the check is not looking at the real tree", name)
+		}
+	}
+}
+
+// The native port may consume provider-neutral AI contracts and telemetry, but
+// cannot reach application policy, storage, plugins, or the legacy core directly.
+func TestNativeEngineNamesNoHost(t *testing.T) {
+	pkg, err := build.ImportDir("engine", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, imp := range pkg.Imports {
+		if strings.HasPrefix(imp, modulePath+"/") && imp != modulePath+"/ai" && imp != modulePath+"/telemetry" {
+			t.Errorf("native engine imports host/legacy package %s", imp)
+		}
+		if imp == "os/exec" {
+			t.Error("native engine must not launch a runtime subprocess")
 		}
 	}
 }

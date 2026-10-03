@@ -823,6 +823,17 @@ func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{MaxAttempts: 3, BaseDelay: 500 * time.Millisecond, MaxDelay: 8 * time.Second}
 }
 
+// NextDelay applies the host's same-rung retry contract to a completed attempt
+// (numbered from one). Native stream orchestration uses the same normalization,
+// error classification, Retry-After cap and jitter as callRung.
+func (rp RetryPolicy) NextDelay(failedAttempt int, failure error) (time.Duration, bool) {
+	rp = rp.normalized()
+	if failedAttempt < 1 || failedAttempt >= rp.MaxAttempts || !IsRetryable(failure) {
+		return 0, false
+	}
+	return rp.delay(failedAttempt-1, retryAfterOf(failure)), true
+}
+
 // normalized fills any zero field from the default so a partial override is safe.
 func (rp RetryPolicy) normalized() RetryPolicy {
 	d := DefaultRetryPolicy()

@@ -89,6 +89,47 @@ func TestPiModelBindingHonorsLimitsAndFailingCredentialRefresh(t *testing.T) {
 	}
 }
 
+func TestPiModelBindingFederationAdmissionAndRefreshAuthority(t *testing.T) {
+	for _, key := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_WORKSPACE_ID", "ANTHROPIC_SERVICE_ACCOUNT_ID"} {
+		t.Setenv(key, "")
+	}
+	for _, tc := range []struct {
+		name, provider, key, options, want string
+		process                            bool
+		refresh                            func(context.Context, string) (string, error)
+	}{
+		{name: "scoped federation", provider: "anthropic", options: `{"streamOptions":{"env":{"ANTHROPIC_FEDERATION_RULE_ID":"rule","ANTHROPIC_ORGANIZATION_ID":"org","ANTHROPIC_IDENTITY_TOKEN_FILE":"/not-read-during-admission"}}}`, want: "null"},
+		{name: "process federation", provider: "anthropic", process: true, want: "null"},
+		{name: "incomplete federation", provider: "anthropic", options: `{"streamOptions":{"env":{"ANTHROPIC_FEDERATION_RULE_ID":"rule"}}}`, want: "Pi provider credential is empty"},
+		{name: "other provider", provider: "openai", process: true, want: "Pi provider credential is empty"},
+		{name: "explicit key wins", provider: "anthropic", process: true, key: "key", want: `"key"`},
+		{name: "refresh key wins", provider: "anthropic", process: true, want: `"fresh"`, refresh: func(context.Context, string) (string, error) { return "fresh", nil }},
+		{name: "empty refresh is authoritative", provider: "anthropic", process: true, want: "Pi provider credential is empty", refresh: func(context.Context, string) (string, error) { return "", nil }},
+		{name: "failed refresh is authoritative", provider: "anthropic", process: true, key: "stale-key", want: "refresh unavailable", refresh: func(context.Context, string) (string, error) { return "", errors.New("refresh unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.process {
+				t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "rule")
+				t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org")
+				t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "/not-read-during-admission")
+			}
+			tier := ModelTier{TierConfig: TierConfig{Provider: tc.provider, Model: "test", APIKey: tc.key}}
+			cfg, _, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(tc.options)}, PiModelOptions{RefreshKey: tc.refresh})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := cfg.Callback(context.Background(), "getApiKey", piModelJSON(tc.provider), nil)
+			if err != nil {
+				if err.Error() != tc.want || len(key) != 0 {
+					t.Fatalf("credential admission: %s %v", key, err)
+				}
+			} else if string(key) != tc.want {
+				t.Fatalf("credential: %s; want %s", key, tc.want)
+			}
+		})
+	}
+}
+
 func TestPiModelBindingRejectsUnsupportedLifecycle(t *testing.T) {
 	for _, config := range []TierConfig{
 		{Provider: "openai", Model: "test", FallbackModel: "fallback"},

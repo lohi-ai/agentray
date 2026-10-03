@@ -686,10 +686,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 				return
 			}
 			seenTools[key] = true
-			arguments := item.Arguments
-			if strings.TrimSpace(arguments) == "" {
-				arguments = "{}"
-			}
+			arguments := string(ParseStreamingJSON(item.Arguments))
 			call := agentcore.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments}
 			tools = append(tools, call)
 			ch <- agentcore.ChatDelta{ToolCall: &call}

@@ -1,4 +1,4 @@
-//go:build pi
+//go:build pi || pi_native
 
 package agentruntime
 

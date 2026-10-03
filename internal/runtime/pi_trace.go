@@ -22,6 +22,7 @@ func bindPiTrace(worker agentcore.PiConfig, sink observe.Sink, pricingKnown bool
 			func() { defer func() { _ = recover() }(); previous(ctx, append(json.RawMessage{}, raw...)) }()
 		}
 		var trace struct {
+			Attempt                 *struct{ PricingKnown *bool }
 			StartedAtMs, DurationMs int64
 			Model                   struct{ ID, Provider string }
 			Context                 struct {
@@ -34,6 +35,10 @@ func bindPiTrace(worker agentcore.PiConfig, sink observe.Sink, pricingKnown bool
 		}
 		if json.Unmarshal(raw, &trace) != nil {
 			return
+		}
+		known := pricingKnown
+		if trace.Attempt != nil && trace.Attempt.PricingKnown != nil {
+			known = *trace.Attempt.PricingKnown
 		}
 		runID := observe.TraceIDFrom(ctx)
 		if runID == "" {
@@ -66,7 +71,7 @@ func bindPiTrace(worker agentcore.PiConfig, sink observe.Sink, pricingKnown bool
 			if message.Usage != nil {
 				record.Usage = *message.Usage
 				u := record.Usage
-				record.Usage.CostUnpriced = u.CostUnpriced || (!pricingKnown && u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0)
+				record.Usage.CostUnpriced = u.CostUnpriced || (!known && u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0)
 			}
 			var terminal struct{ StopReason, ErrorMessage string }
 			_ = json.Unmarshal(trace.Response, &terminal)

@@ -363,10 +363,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 				}
 			case "response.output_item.done":
 				if ev.Item != nil && ev.Item.Type == "function_call" {
-					args := ev.Item.Arguments
-					if strings.TrimSpace(args) == "" {
-						args = "{}"
-					}
+					args := string(ParseStreamingJSON(ev.Item.Arguments))
 					ch <- agentcore.ChatDelta{ToolCall: &agentcore.ToolCall{
 						ID: ev.Item.CallID, Name: ev.Item.Name, Arguments: args,
 					}}

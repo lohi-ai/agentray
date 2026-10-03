@@ -374,7 +374,7 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 	msg := agentcore.Message{Role: agentcore.RoleAssistant, Content: choice.Message.Content}
 	for _, tc := range choice.Message.ToolCalls {
 		msg.ToolCalls = append(msg.ToolCalls, agentcore.ToolCall{
-			ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+			ID: tc.ID, Name: tc.Function.Name, Arguments: string(ParseStreamingJSON(tc.Function.Arguments)),
 		})
 	}
 	return agentcore.ChatResponse{
@@ -472,7 +472,9 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 
 	msg := agentcore.Message{Role: agentcore.RoleAssistant, Content: content.String()}
 	for _, idx := range order {
-		msg.ToolCalls = append(msg.ToolCalls, *toolAcc[idx])
+		call := *toolAcc[idx]
+		call.Arguments = string(ParseStreamingJSON(call.Arguments))
+		msg.ToolCalls = append(msg.ToolCalls, call)
 	}
 	return agentcore.ChatResponse{Message: msg, StopReason: stopReason, Usage: usage}, nil
 }
@@ -652,6 +654,7 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 		}
 		for _, idx := range order {
 			tc := *toolAcc[idx]
+			tc.Arguments = string(ParseStreamingJSON(tc.Arguments))
 			ch <- agentcore.ChatDelta{ToolCall: &tc}
 		}
 		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}

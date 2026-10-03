@@ -12,6 +12,7 @@ import (
 // agentcore.Message, content order, signatures, tool results, and system deltas
 // remain in their original representation. Extra retains application metadata.
 type Message struct {
+	encoding              *transcriptEncoding
 	Role                  string                     `json:"role"`
 	Content               MessageContent             `json:"content"`
 	Timestamp             int64                      `json:"timestamp"`
@@ -42,7 +43,9 @@ type Message struct {
 
 // ContentBlock is Pi's text/thinking/image/toolCall union. Optional signatures
 // use pointers so an explicit empty signature survives JSON round trips.
+// Decoded null entries are preserved for sparse streamed content arrays.
 type ContentBlock struct {
+	null              bool
 	Type              string                     `json:"type"`
 	Text              string                     `json:"text,omitempty"`
 	TextSignature     *string                    `json:"textSignature,omitempty"`
@@ -89,6 +92,7 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 }
 
 type Usage struct {
+	encoding     *transcriptEncoding
 	Input        float64   `json:"input"`
 	Output       float64   `json:"output"`
 	CacheRead    float64   `json:"cacheRead"`
@@ -99,6 +103,7 @@ type Usage struct {
 	Cost         UsageCost `json:"cost"`
 }
 type UsageCost struct {
+	encoding   *transcriptEncoding
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cacheRead"`
@@ -106,7 +111,45 @@ type UsageCost struct {
 	Total      float64 `json:"total"`
 }
 
+// Usage received from a proxy or saved transcript is a source record. Preserve
+// absent/null fields and provider extensions while allowing typed counters to
+// be changed by native callers, just as for the enclosing Message.
+func (u Usage) MarshalJSON() ([]byte, error) {
+	type plain Usage
+	raw, err := json.Marshal(plain(u))
+	return restoreTranscriptEncoding(raw, err, u.encoding)
+}
+
+func (u *Usage) UnmarshalJSON(raw []byte) error {
+	type plain Usage
+	*u = Usage{}
+	if err := json.Unmarshal(raw, (*plain)(u)); err != nil {
+		return err
+	}
+	var err error
+	u.encoding, err = captureTranscriptEncoding(raw, u)
+	return err
+}
+
+func (c UsageCost) MarshalJSON() ([]byte, error) {
+	type plain UsageCost
+	raw, err := json.Marshal(plain(c))
+	return restoreTranscriptEncoding(raw, err, c.encoding)
+}
+
+func (c *UsageCost) UnmarshalJSON(raw []byte) error {
+	type plain UsageCost
+	*c = UsageCost{}
+	if err := json.Unmarshal(raw, (*plain)(c)); err != nil {
+		return err
+	}
+	var err error
+	c.encoding, err = captureTranscriptEncoding(raw, c)
+	return err
+}
+
 type Tool struct {
+	encoding            *transcriptEncoding
 	Name                string                     `json:"name"`
 	Description         string                     `json:"description"`
 	Parameters          json.RawMessage            `json:"parameters"`
@@ -267,9 +310,13 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	if m.Sections != nil {
 		required["sections"] = m.Sections
 	}
-	return marshalTranscriptObject(plain(m), m.Extra, required)
+	raw, err := marshalTranscriptObject(plain(m), m.Extra, required)
+	return restoreTranscriptEncoding(raw, err, m.encoding)
 }
 func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	if b.null {
+		return []byte("null"), nil
+	}
 	type plain ContentBlock
 	required := map[string]any{}
 	switch b.Type {
@@ -286,7 +333,8 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 }
 func (t Tool) MarshalJSON() ([]byte, error) {
 	type plain Tool
-	return marshalTranscriptObject(plain(t), t.Extra, nil)
+	raw, err := marshalTranscriptObject(plain(t), t.Extra, nil)
+	return restoreTranscriptEncoding(raw, err, t.encoding)
 }
 
 func decodeTranscriptObject(data []byte, target any, known string) (map[string]json.RawMessage, error) {
@@ -310,12 +358,30 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	*m = Message{}
 	extra, err := decodeTranscriptObject(data, (*plain)(m), "role content timestamp sections toolsAdded toolsRemoved api provider model responseModel responseId providerThinkingLevel thinkingLevel diagnostics usage stopReason deferred errorMessage rawStopReason endTurn toolCallId toolName details nestedCalls isError")
 	m.Extra = extra
+	if err == nil {
+		m.encoding, err = captureTranscriptEncoding(data, m)
+	}
 	return err
 }
 func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	type plain ContentBlock
 	*b = ContentBlock{}
-	extra, err := decodeTranscriptObject(data, (*plain)(b), "type text textSignature thinking thinkingSignature redacted data mimeType id name arguments thoughtSignature namespace")
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		b.null = true
+		return nil
+	}
+	extra, err := decodeTranscriptObject(data, (*plain)(b), "type text thinking data mimeType id name arguments")
+	// Optional pointer fields distinguish strings/bools from null, but cannot
+	// distinguish null from omission alone. Keep explicit nulls in Extra so
+	// snapshots and proxy terminal updates retain the original wire shape.
+	for name, present := range map[string]bool{
+		"textSignature": b.TextSignature != nil, "thinkingSignature": b.ThinkingSignature != nil,
+		"thoughtSignature": b.ThoughtSignature != nil, "namespace": b.Namespace != nil, "redacted": b.Redacted != nil,
+	} {
+		if present {
+			delete(extra, name)
+		}
+	}
 	b.Extra = extra
 	return err
 }
@@ -324,5 +390,78 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 	*t = Tool{}
 	extra, err := decodeTranscriptObject(data, (*plain)(t), "name description parameters constrainedSampling")
 	t.Extra = extra
+	if err == nil {
+		t.encoding, err = captureTranscriptEncoding(data, t)
+	}
 	return err
+}
+
+// Retain the wire shape of decoded records. Pi accepts history objects as-is;
+// serializing a Go zero value must not add absent fields or replace explicit
+// nulls in those objects. Changed fields still serialize from their Go values.
+type transcriptEncoding struct {
+	original   map[string]json.RawMessage
+	normalized map[string]json.RawMessage
+}
+
+func captureTranscriptEncoding(raw []byte, value any) (*transcriptEncoding, error) {
+	var original, normalized map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &original); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return nil, err
+	}
+	encoding := &transcriptEncoding{original: map[string]json.RawMessage{}, normalized: map[string]json.RawMessage{}}
+	// Only presence/null differences need metadata. Do not retain another copy
+	// of large text, image, or tool-result bodies for already lossless fields.
+	for key, baseline := range normalized {
+		source, exists := original[key]
+		if !exists || (bytes.Equal(bytes.TrimSpace(source), []byte("null")) && !bytes.Equal(source, baseline)) {
+			encoding.normalized[key] = baseline
+			if exists {
+				encoding.original[key] = source
+			}
+		}
+	}
+	for key, source := range original {
+		if _, exists := normalized[key]; !exists {
+			encoding.original[key] = source
+		}
+	}
+	if len(encoding.original) == 0 && len(encoding.normalized) == 0 {
+		return nil, nil
+	}
+	return encoding, nil
+}
+
+func restoreTranscriptEncoding(raw []byte, err error, encoding *transcriptEncoding) ([]byte, error) {
+	if err != nil || encoding == nil {
+		return raw, err
+	}
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &current); err != nil {
+		return nil, err
+	}
+	for key, baseline := range encoding.normalized {
+		if bytes.Equal(current[key], baseline) {
+			if original, exists := encoding.original[key]; exists {
+				current[key] = original
+			} else {
+				delete(current, key)
+			}
+		}
+	}
+	for key, original := range encoding.original {
+		if _, known := encoding.normalized[key]; !known {
+			if _, changed := current[key]; !changed {
+				current[key] = original
+			}
+		}
+	}
+	return json.Marshal(current)
 }

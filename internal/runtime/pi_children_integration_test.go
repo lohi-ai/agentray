@@ -1,20 +1,27 @@
-//go:build pi
+//go:build pi || pi_native
 
 package agentruntime
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
 func piChildSSE(w http.ResponseWriter, tool, args, text string) {
@@ -119,7 +126,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fork := piForkRunner(worker, known, p.Session, p.ToolChoice, nil)
+	fork := piForkRunner(PiSessionConfig{Pi: worker}, known, p.Session, p.ToolChoice, nil)
 	parent, err := Build(p)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +163,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := piForkRunner(worker, known, resumedStore, p.ToolChoice, nil)(agentcore.WithDelegationDepth(ctx, 1), resumedParent.Fork(childID), req, nil)
+	resumed, err := piForkRunner(PiSessionConfig{Pi: worker}, known, resumedStore, p.ToolChoice, nil)(agentcore.WithDelegationDepth(ctx, 1), resumedParent.Fork(childID), req, nil)
 	if err != nil || resumed.Final != "child answer" || effects.Load() != 1 || children.Load() != 3 || resumed.Usage.InputTokens != 7 {
 		t.Fatalf("resume repeated settled work or lost current usage: %+v %v effects=%d requests=%d", resumed, err, effects.Load(), children.Load())
 	}
@@ -174,7 +181,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = piForkRunner(worker, known, missingReceipt, p.ToolChoice, nil)(ctx, missingParent.Fork(childID), req, nil)
+	_, err = piForkRunner(PiSessionConfig{Pi: worker}, known, missingReceipt, p.ToolChoice, nil)(ctx, missingParent.Fork(childID), req, nil)
 	if err == nil || !strings.Contains(err.Error(), "completion receipt") || children.Load() != 3 {
 		t.Fatalf("ambiguous completion repeated work: %v", err)
 	}
@@ -370,7 +377,7 @@ func TestPiForkKeepsInheritedPermissionHook(t *testing.T) {
 	worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: piSessionOptions(), Callback: func(_ context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		return piSessionReply(requests.Add(1) == 1), nil
 	}}
-	result, err := piForkRunner(worker, true, nil, agentcore.ToolChoice{}, nil)(ctx, parent.Fork(""), subagent.ForkRequest{Prompt: "try write", Task: "try write"}, nil)
+	result, err := piForkRunner(PiSessionConfig{Pi: worker}, true, nil, agentcore.ToolChoice{}, nil)(ctx, parent.Fork(""), subagent.ForkRequest{Prompt: "try write", Task: "try write"}, nil)
 	if err != nil || result.Final != "done" || requests.Load() != 2 || hooks.Load() != 1 || effects.Load() != 0 || !strings.Contains(string(result.NativeState), "inherited denial") {
 		t.Fatalf("native child widened inherited permissions: %+v %v requests=%d hooks=%d effects=%d", result, err, requests.Load(), hooks.Load(), effects.Load())
 	}
@@ -426,5 +433,179 @@ func TestPiRunnerParallelChildrenHaveSeparateSessions(t *testing.T) {
 	}
 	if ids := p.Session.(*agentcore.MemorySessionStore).Sessions(); len(ids) != 3 {
 		t.Fatalf("parallel children shared a session: %v", ids)
+	}
+}
+
+func TestPiChildParkReattachAndAnswerResume(t *testing.T) {
+	checkPiChildParkResume(t, agentcore.NewMemorySessionStore(), "parked-child")
+}
+
+func TestPiChildParkPostgresResume(t *testing.T) {
+	url := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set AGENTRAY_TEST_DATABASE_URL for native child workflow recovery")
+	}
+	ctx := piSessionContext(t)
+	st, err := storage.Open(ctx, config.Config{PostgresURL: url, DuckDBPath: filepath.Join(t.TempDir(), "child-questions.duckdb")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	boot, err := st.CreateAccount(ctx, "child-question-"+uuid.NewString()+"@test.local", "Child questions", "password1234", "Child questions", "Child questions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.CreateAgentRun(ctx, boot.Project.ID, "", "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPiChildParkResume(t, NewSessionStore(st), run+"/child")
+}
+
+func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id string) {
+	t.Helper()
+	ctx := agentcore.WithDelegationDepth(piSessionContext(t), 1)
+	parent, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "parent",
+		Tools: agentcore.NewToolSet(ask.Tool{}), Policy: agentcore.NewAllowList("ask")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+		if method != "stream" {
+			return nil, fmt.Errorf("unexpected %s", method)
+		}
+		n := requests.Add(1)
+		var request struct {
+			Context struct {
+				Messages []struct {
+					Role, AgentrayAnswerID string
+					Content                json.RawMessage
+				}
+			}
+		}
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, err
+		}
+		answers := map[string]bool{}
+		for _, message := range request.Context.Messages {
+			if message.AgentrayAnswerID != "" {
+				if answers[message.AgentrayAnswerID] {
+					t.Error("child answer was delivered twice")
+				}
+				answers[message.AgentrayAnswerID] = true
+			}
+		}
+		if len(answers) != int(n)-1 {
+			t.Errorf("request %d lost durable human answers: %s", n, params)
+		}
+		if n > 1 && !strings.Contains(string(params), "opaque-child-question") {
+			t.Error("resume rewrote original native thinking")
+		}
+		if n == 3 {
+			var reply map[string]any
+			_ = json.Unmarshal(piSessionReply(false), &reply)
+			// JSONB rewrites this cost's exponent spelling on persistence.
+			reply["usage"].(map[string]any)["cost"].(map[string]any)["total"] = 4e-8
+			return piSessionJSON(reply), nil
+		}
+		var reply map[string]any
+		_ = json.Unmarshal(piSessionReply(true), &reply)
+		reply["content"] = []any{map[string]any{"type": "thinking", "thinking": "need input", "thinkingSignature": "opaque-child-question"}, map[string]any{"type": "toolCall", "id": "reused-question", "name": "ask", "arguments": map[string]any{"question": fmt.Sprintf("Child question %d?", n)}}}
+		return piSessionJSON(reply), nil
+	}}
+	fork := piForkRunner(PiSessionConfig{Pi: worker}, true, store, agentcore.ToolChoice{}, nil)
+	// A parked/completed reattach must not even need a worker installation.
+	reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{Worker: "/missing/pi-worker"}}, true, store, agentcore.ToolChoice{}, nil)
+	req := subagent.ForkRequest{SessionID: id, Prompt: "child task", Task: "child task"}
+	previousID := ""
+	for n := 1; n <= 2; n++ {
+		result, err := fork(ctx, parent.Fork(id), req, nil)
+		var question *PiChildQuestionError
+		if !errors.As(err, &question) || !result.Parked || result.Final != "" || result.Usage.InputTokens != 1 || question.SessionID != id || question.QuestionID == "" || question.QuestionID == previousID {
+			t.Fatalf("child did not return a distinct durable workflow: %+v %v", result, err)
+		}
+		previousID = question.QuestionID
+		entries, err := store.Log(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 1 {
+			checkPiChildParkCrashBoundaries(t, entries)
+		}
+		var surfaced json.RawMessage
+		attached, err := reattach(ctx, parent.Fork(id), req, func(event agentcore.StreamEvent) {
+			if event.Type == agentcore.StreamQuestion {
+				surfaced = event.Question
+			}
+		})
+		var again *PiChildQuestionError
+		originalDigest, _ := piMessagesDigest(result.NativeState)
+		attachedDigest, _ := piMessagesDigest(attached.NativeState)
+		if !errors.As(err, &again) || again.QuestionID != question.QuestionID || attached.Usage != (agentcore.Usage{}) || requests.Load() != int32(n) || !samePiJSON(surfaced, question.Question) || originalDigest != attachedDigest || result.NativeRevision != attached.NativeRevision {
+			t.Fatalf("parked reattach changed state or performed work: usage=%+v requests=%d digest=%s/%s error=%v", attached.Usage, requests.Load(), originalDigest, attachedDigest, err)
+		}
+		after, _ := store.Log(ctx, id)
+		if len(after) != len(entries) {
+			t.Fatal("reattach appended duplicate workflow records")
+		}
+		leaseCtx, release, err := agentcore.AcquireSessionLease(ctx, store, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = agentcore.RecordSessionAnswer(leaseCtx, store, id, question.QuestionID, fmt.Sprintf("answer %d", n))
+		_ = release()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := fork(ctx, parent.Fork(id), req, nil)
+	if err != nil || result.Parked || result.Final != "done" || result.Usage.InputTokens != 1 || requests.Load() != 3 {
+		t.Fatalf("answered child did not complete: %+v %v requests=%d", result, err, requests.Load())
+	}
+	attached, err := reattach(ctx, parent.Fork(id), req, nil)
+	if err != nil || attached.Final != "done" || attached.StopReason != "reattached" || attached.Usage != (agentcore.Usage{}) || requests.Load() != 3 {
+		t.Fatalf("completed child reattachment failed: %+v %v", attached, err)
+	}
+}
+
+func checkPiChildParkCrashBoundaries(t *testing.T, entries []agentcore.SessionEntry) {
+	t.Helper()
+	// Only the original native tool-result event can complete the batch. The
+	// physical receipt alone must not manufacture the missing provider message.
+	var receiptIndex, nativeIndex int
+	for i, entry := range entries {
+		if _, _, valid := agentcore.PiQuestionFromEntry(entry); valid {
+			receiptIndex = i
+		}
+		var event struct {
+			Type    string
+			Message struct{ Role string }
+		}
+		if entry.Kind == piEventEntry && json.Unmarshal([]byte(entry.Content), &event) == nil && event.Type == "message_start" && event.Message.Role == "toolResult" {
+			nativeIndex = i
+		}
+	}
+	if receiptIndex == 0 || nativeIndex <= receiptIndex {
+		t.Fatal("missing parked effect/native-result boundaries")
+	}
+	if _, _, err := piParkedChild(entries[:receiptIndex+1]); !errors.Is(err, ErrPiUnsettledEffect) {
+		t.Fatalf("receipt invented a tool result: %v", err)
+	}
+	parked, id, err := piParkedChild(entries[:nativeIndex+1])
+	if err != nil || !parked.Parked || id == "" {
+		t.Fatalf("original result did not recover parked child before agent_end: %+v %v", parked, err)
+	}
+	// The old waiting result must not excuse a later unreceipted completion.
+	advanced := append([]agentcore.SessionEntry(nil), entries...)
+	advanced = append(advanced, agentcore.SessionEntry{Kind: piEventEntry, Content: `{"type":"agent_start"}`})
+	if _, id, err := piParkedChild(advanced); err != nil || id != "" {
+		t.Fatalf("old question authorized a new invocation: %q %v", id, err)
+	}
+	// A native details mutation cannot change the human question in its receipt.
+	changed := append([]agentcore.SessionEntry(nil), entries[:nativeIndex+1]...)
+	changed[nativeIndex].Content = strings.ReplaceAll(changed[nativeIndex].Content, "Child question 1?", "invented question")
+	if _, _, err := piParkedChild(changed); err == nil {
+		t.Fatal("accepted a changed native question")
 	}
 }

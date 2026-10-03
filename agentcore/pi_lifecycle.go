@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // PiTurnPreparation contains host-authored additions for the next native turn.
@@ -199,22 +200,15 @@ func (h *PiToolHost) FinishPiTurn(ctx context.Context, turn PiCompletedTurn) (Pi
 			return PiTurnDecision{}, err
 		}
 	}
-	var extra []Message
-	var parked, terminal bool
-	for _, outcome := range turn.Outcomes {
-		extra = append(extra, outcome.AdditionalContexts...)
-		parked = parked || outcome.Parked
-		terminal = terminal || outcome.Terminate
-	}
-	if parked || terminal || h.finalizing.Load() {
-		return PiTurnDecision{End: true, Parked: parked}, nil
+	batch, err := h.finishPiBatch(ctx, turn.Calls, turn.Outcomes)
+	if err != nil || batch.End {
+		return batch, err
 	}
 	if len(turn.Calls) > 0 {
-		extra = append(extra, h.exts.interceptBatch(ctx, turn.Calls)...)
 		// Pi decides whether this batch schedules another request. A native
 		// before/after-tool hook may have terminated every result; extra host
 		// context must not resurrect that deliberately ended batch.
-		return PiTurnDecision{StopDecision: StopDecision{Inject: extra}}, nil
+		return batch, nil
 	}
 	stop, _ := h.exts.turnStopping(ctx, turn.Info)
 	if stop.Continue {
@@ -235,6 +229,52 @@ func (h *PiToolHost) FinishPiTurn(ctx context.Context, turn PiCompletedTurn) (Pi
 		}
 	}
 	return PiTurnDecision{StopDecision: stop}, nil
+}
+
+// FinishPiDelegationBatch applies batch policy after every parked call in the
+// original assistant batch has settled. Calls and outcomes must retain source
+// order and include nondelegated siblings. This is not another model turn: it
+// does not rerun TurnEnd, output validation, steering, or stop guards. The
+// durable host must record the decision before delivering its contexts.
+func (h *PiToolHost) FinishPiDelegationBatch(ctx context.Context, calls []ToolCall, outcomes []PiToolOutcome) (PiTurnDecision, error) {
+	h.gate.RLock()
+	defer h.gate.RUnlock()
+	if h.closed || !h.lifecycle.Load() {
+		return PiTurnDecision{}, errors.New("Pi tool host is not running")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	detach := context.AfterFunc(h.ctx, cancel)
+	defer func() { detach(); cancel() }()
+	if h.ctx.Err() != nil {
+		cancel()
+	}
+	ctx = piToolContext{Context: ctx, values: h.ctx}
+	return h.finishPiBatch(ctx, calls, outcomes)
+}
+
+// Caller holds the host gate and has bound cancellation and host values.
+func (h *PiToolHost) finishPiBatch(ctx context.Context, calls []ToolCall, outcomes []PiToolOutcome) (PiTurnDecision, error) {
+	if err := ctx.Err(); err != nil {
+		return PiTurnDecision{}, err
+	}
+	var extra []Message
+	var parked, terminal bool
+	for _, outcome := range outcomes {
+		extra = append(extra, outcome.AdditionalContexts...)
+		parked = parked || outcome.Parked
+		terminal = terminal || outcome.Terminate
+	}
+	if parked || terminal || h.finalizing.Load() {
+		return PiTurnDecision{End: true, Parked: parked}, nil
+	}
+	if len(calls) > 0 {
+		// Extension callbacks may edit their slice; source history is immutable.
+		extra = append(extra, h.exts.interceptBatch(ctx, slices.Clone(calls))...)
+	}
+	if err := ctx.Err(); err != nil {
+		return PiTurnDecision{}, err
+	}
+	return PiTurnDecision{StopDecision: StopDecision{Inject: extra}}, nil
 }
 
 // CompletePiRun closes run resources, folds child spend once, and emits terminal

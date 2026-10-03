@@ -28,12 +28,16 @@ type PiModelOptions struct {
 	RefreshKey func(context.Context, string) (string, error)
 }
 
-// BindPi connects this tier's single API-key model to Pi's original provider
-// implementation. It preserves the resolver's provider identity, endpoint, and
-// chosen API dialect. OAuth pools and fallback ladders require their own host
-// lifecycle integration and are rejected until that integration is selected.
+// BindPi prepares this tier's model and credential callbacks for either
+// Pi-contract runtime. Provider execution is selected by the host. The binding
+// preserves the resolver's provider identity, endpoint, and chosen API dialect.
+// Public worker bindings reject OAuth pools and fallback ladders. The native
+// runner selects its internal Codex pool binding alongside the pooled stream.
 // The returned bool says whether the native cost metadata is known.
 func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcore.PiConfig, bool, error) {
+	return t.bindPi(cfg, opts, false)
+}
+func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCodexPool bool) (agentcore.PiConfig, bool, error) {
 	if strings.TrimSpace(t.Model) == "" {
 		return cfg, false, errors.New("Pi model ID is required")
 	}
@@ -57,16 +61,32 @@ func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcor
 	if t.Fallback != nil || strings.TrimSpace(t.FallbackModel) != "" {
 		return cfg, false, errors.New("Pi model binding requires explicit native fallback lifecycle integration")
 	}
-	if ai.IsOAuthVendor(t.Provider) || t.TokenSource != nil {
+	if nativeCodexPool && (ai.NormalizeOAuthVendor(t.Provider) != ai.VendorOpenAICodex || t.TokenSource == nil) {
+		return cfg, false, errors.New("native Codex binding requires its account pool")
+	}
+	if !nativeCodexPool && (ai.IsOAuthVendor(t.Provider) || t.TokenSource != nil) {
 		return cfg, false, errors.New("Pi model binding requires explicit OAuth account-pool lifecycle integration")
 	}
-	provider, err := t.RawProvider()
+	var provider agentcore.LLMProvider
+	var err error
+	if nativeCodexPool {
+		p := ai.NewCodexProvider()
+		p.BaseURL = t.BaseURL
+		provider = p
+	} else {
+		provider, err = t.RawProvider()
+	}
 	if err != nil {
 		return cfg, false, err
 	}
 	var api, endpoint string
 	var compat map[string]any
 	switch p := provider.(type) {
+	case *ai.CodexProvider:
+		api, endpoint = "openai-codex-responses", p.BaseURL
+		if endpoint == "" {
+			endpoint = "https://chatgpt.com/backend-api"
+		}
 	case *ai.OpenAIProvider:
 		api, endpoint = "openai-completions", p.BaseURL
 		compat = map[string]any{"maxTokensField": p.Compat.MaxTokensField}
@@ -237,6 +257,9 @@ func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcor
 			if err := json.Unmarshal(params, &requested); err != nil || requested != provider.Name() {
 				return nil, errors.New("Pi requested credentials for an unbound provider")
 			}
+			if nativeCodexPool {
+				return json.RawMessage(`null`), nil
+			}
 			key := t.APIKey
 			if opts.RefreshKey != nil {
 				var err error
@@ -246,6 +269,11 @@ func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcor
 				}
 			}
 			if strings.TrimSpace(key) == "" {
+				// An explicitly configured refresh callback remains authoritative:
+				// its empty result must not silently select another identity.
+				if opts.RefreshKey == nil && api == "anthropic-messages" && ai.HasAnthropicFederationConfig(provider.Name(), options["streamOptions"]) {
+					return json.RawMessage(`null`), nil
+				}
 				return nil, errors.New("Pi provider credential is empty")
 			}
 			return json.Marshal(key)

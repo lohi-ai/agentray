@@ -1,7 +1,6 @@
 package agentruntime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -48,13 +47,10 @@ func parsePiContextSummary(raw string) (piContextSummary, error) {
 
 func piPrefixDigest(messages []json.RawMessage) string {
 	raw, _ := json.Marshal(messages)
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if decoder.Decode(&value) != nil {
+	canonical, err := canonicalPiJSON(raw)
+	if err != nil {
 		return ""
 	}
-	canonical, _ := json.Marshal(value)
 	digest := sha256.Sum256(canonical)
 	return hex.EncodeToString(digest[:])
 }
@@ -71,6 +67,10 @@ type piRequestCompactor struct {
 // refers to a prefix of this exact view (after native host hooks), never to a Go
 // text projection. On mismatch the full native context is the safe fallback.
 func (c *piRequestCompactor) transform(ctx context.Context, raw json.RawMessage) (out json.RawMessage) {
+	return c.transformWithPolicy(ctx, raw, c.config)
+}
+
+func (c *piRequestCompactor) transformWithPolicy(ctx context.Context, raw json.RawMessage, policy PiContextCompaction) (out json.RawMessage) {
 	out = raw
 	defer func() {
 		if recover() != nil {
@@ -96,12 +96,12 @@ func (c *piRequestCompactor) transform(ctx context.Context, raw json.RawMessage)
 		}
 	}
 	out, _ = json.Marshal(view)
-	cut := piRequestCompactionCut(view, c.config.Budget, c.config.KeepRecent)
-	if cut <= headCount || c.config.Summarize == nil {
+	cut := piRequestCompactionCut(view, policy.Budget, policy.KeepRecent)
+	if cut <= headCount || policy.Summarize == nil {
 		return
 	}
 	prefix, _ := json.Marshal(view[:cut])
-	text, usage, err := c.config.Summarize(ctx, prefix, c.revision)
+	text, usage, err := policy.Summarize(ctx, prefix, c.revision)
 	if c.usage != nil {
 		c.usage(usage)
 	}
@@ -184,12 +184,6 @@ func bindPiRequestCompaction(cfg *PiRunConfig, projection *piRunProjection) (fun
 	if policy.Budget <= 0 && cfg.Host != nil {
 		policy.Budget, policy.KeepRecent = cfg.Host.PiCompactionPolicy()
 	}
-	if window := initial.Model.ContextWindow; window > 0 {
-		limit := window - min(ConvReserveTokens, max(1, window/4))
-		if policy.Budget <= 0 || policy.Budget > limit {
-			policy.Budget = limit
-		}
-	}
 	if policy.KeepRecent <= 0 {
 		policy.KeepRecent = ConvKeepRecentTokens
 	}
@@ -217,12 +211,25 @@ func bindPiRequestCompaction(cfg *PiRunConfig, projection *piRunProjection) (fun
 		v.CostUnpriced = v.CostUnpriced || u.CostUnpriced
 	}}
 	original := cfg.Session.Pi.Callback
+	ladder := cfg.Session.nativeLadder
 	cfg.Session.Pi.Callback = func(ctx context.Context, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "transformContext" {
 			if original == nil {
 				return nil, errors.New("missing native callback")
 			}
 			return original(ctx, method, params, emit)
+		}
+		window := initial.Model.ContextWindow
+		if ladder != nil {
+			rung, err := ladder.requestBinding(ctx)
+			if err != nil {
+				return nil, err
+			}
+			var model struct{ ContextWindow int }
+			if err := json.Unmarshal(rung.model, &model); err != nil {
+				return nil, err
+			}
+			window = model.ContextWindow
 		}
 		view := params
 		if hadTransform && original != nil {
@@ -234,7 +241,7 @@ func bindPiRequestCompaction(cfg *PiRunConfig, projection *piRunProjection) (fun
 				view = value
 			}
 		}
-		return compactor.transform(ctx, view), nil
+		return compactor.transformWithPolicy(ctx, view, piCompactionPolicyForWindow(policy, window)), nil
 	}
 	return func(session *PiSession) error {
 		compactor.revision = session.agent.UpstreamCommit()
@@ -263,4 +270,16 @@ func bindPiRequestCompaction(cfg *PiRunConfig, projection *piRunProjection) (fun
 		}
 		return nil
 	}, nil
+}
+
+// Clamp from the original host policy for every request. A previous small rung
+// must not permanently shrink the budget of a later larger model.
+func piCompactionPolicyForWindow(policy PiContextCompaction, window int) PiContextCompaction {
+	if window > 0 {
+		limit := window - min(ConvReserveTokens, max(1, window/4))
+		if policy.Budget <= 0 || policy.Budget > limit {
+			policy.Budget = limit
+		}
+	}
+	return policy
 }

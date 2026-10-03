@@ -1,0 +1,2245 @@
+{
+  "upstreamCommit": "eeac84ca92498ac18b6832754d01aef1d3c5f654",
+  "model": {
+    "id": "test",
+    "api": "test",
+    "provider": "test"
+  },
+  "context": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "test",
+        "timestamp": 100
+      }
+    ]
+  },
+  "cases": [
+    {
+      "input": {
+        "name": "final-only",
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "partial-and-final",
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "text_delta",
+            "contentIndex": 0,
+            "delta": "partial",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "text_delta",
+            "contentIndex": 0,
+            "delta": "partial",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "terminal-wins-returned-message",
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "ignored"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "terminal-wins-null",
+        "events": [
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": null
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "provider-error",
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "stopReason": "error",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "errorMessage": "provider rejected"
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "stopReason": "error",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "errorMessage": "provider rejected"
+            }
+          },
+          {
+            "type": "error",
+            "reason": "error",
+            "error": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "stopReason": "error",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "errorMessage": "provider rejected"
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "stopReason": "error",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "errorMessage": "provider rejected"
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "provider-aborted",
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "stopReason": "aborted",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "errorMessage": "aborted"
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "stopReason": "aborted",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "errorMessage": "aborted"
+            }
+          },
+          {
+            "type": "error",
+            "reason": "aborted",
+            "error": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "stopReason": "aborted",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "errorMessage": "aborted"
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "stopReason": "aborted",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "errorMessage": "aborted"
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "unfinished-message",
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "partial"
+            }
+          ],
+          "stopReason": "pending",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "stream callback returned an unfinished assistant message",
+        "resultError": "stream callback returned an unfinished assistant message",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "stream callback returned an unfinished assistant message"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "wrong-role",
+        "result": {
+          "role": "user",
+          "content": "bad",
+          "timestamp": 100
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "stream callback must return an assistant message",
+        "resultError": "stream callback must return an assistant message",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "stream callback must return an assistant message"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "missing-message"
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "stream callback must return an assistant message",
+        "resultError": "stream callback must return an assistant message",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "stream callback must return an assistant message"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "scalar-message",
+        "result": "not an assistant"
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "stream callback must return an assistant message",
+        "resultError": "stream callback must return an assistant message",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "stream callback must return an assistant message"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "null-message",
+        "result": null
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "stream callback must return an assistant message",
+        "resultError": "stream callback must return an assistant message",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "stream callback must return an assistant message"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "callback-failure",
+        "failure": "provider failed"
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "provider failed",
+        "resultError": "provider failed",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "provider failed"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "named-callback-failure",
+        "failure": "invalid request",
+        "failureName": "TypeError"
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [],
+        "result": null,
+        "iterationError": "invalid request",
+        "resultError": "invalid request",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "TypeError",
+                "message": "invalid request"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "callback-failure-after-progress",
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "failure": "provider failed after progress"
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": null,
+        "iterationError": "provider failed after progress",
+        "resultError": "provider failed after progress",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "provider failed after progress"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "callback-failure-after-terminal",
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "failure": "provider failed after terminal",
+        "settleAfterIteration": true
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": null,
+        "iterationError": null,
+        "resultError": "provider failed after terminal",
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Error",
+                "message": "provider failed after terminal"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "ignore-post-terminal-progress",
+        "events": [
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "text_delta",
+            "contentIndex": 0,
+            "delta": "ignored",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "partial"
+                }
+              ],
+              "stopReason": "pending",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {}
+          }
+        ],
+        "events": [
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "name": "options-filter",
+        "options": {
+          "apiKey": "callback-credential",
+          "maxTokens": 10,
+          "temperature": 0,
+          "signal": true,
+          "telemetryContext": true,
+          "onPayload": true,
+          "onResponse": true,
+          "onProviderStreamEvent": true,
+          "metadata": {
+            "task": "keep"
+          }
+        },
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        }
+      },
+      "expected": {
+        "requests": [
+          {
+            "model": {
+              "id": "test",
+              "api": "test",
+              "provider": "test"
+            },
+            "context": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "test",
+                  "timestamp": 100
+                }
+              ]
+            },
+            "options": {
+              "apiKey": "callback-credential",
+              "maxTokens": 10,
+              "temperature": 0,
+              "metadata": {
+                "task": "keep"
+              }
+            }
+          }
+        ],
+        "events": [
+          {
+            "type": "start",
+            "partial": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          },
+          {
+            "type": "done",
+            "reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stopReason": "stop",
+              "timestamp": 100,
+              "api": "test",
+              "provider": "test",
+              "model": "test",
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 2,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              }
+            }
+          }
+        ],
+        "result": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "stopReason": "stop",
+          "timestamp": 100,
+          "api": "test",
+          "provider": "test",
+          "model": "test",
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 2,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          }
+        },
+        "iterationError": null,
+        "resultError": null,
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "agentray.ai.request",
+            "attributes": {
+              "model.id": "test",
+              "agentray.request.id": 1
+            },
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ]
+      }
+    }
+  ]
+}

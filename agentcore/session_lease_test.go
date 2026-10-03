@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -10,6 +11,145 @@ import (
 type countingLeaseStore struct {
 	*MemorySessionStore
 	acquires int
+}
+
+type routedAnswerStore struct {
+	*MemorySessionStore
+	failParent bool
+}
+
+func (s *routedAnswerStore) Append(ctx context.Context, id string, entry SessionEntry) error {
+	if s.failParent && id == "parent" && entry.Kind == EntryPiAnswer {
+		return errors.New("parent answer write failed")
+	}
+	return s.MemorySessionStore.Append(ctx, id, entry)
+}
+
+func appendRoutedQuestion(t *testing.T, store SessionStore, session, effect string, route *ChildQuestionError) {
+	t.Helper()
+	audit := PiToolOutcome{Parked: true, Executed: true, QuestionID: effect, ChildQuestion: route,
+		Trace: ToolTrace{CallID: "provider-call", Tool: "ask", Allowed: true, Args: `{"question":"Which?","options":["one","two"]}`}}
+	if route != nil {
+		audit.Trace.Tool, audit.Trace.Args = "delegate", `{"task":"work"}`
+	}
+	raw, err := json.Marshal(map[string]any{"effectId": effect, "result": map[string]any{"details": audit}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), session, SessionEntry{Kind: EntryPiEffectDone, CallID: "provider-call", Content: string(raw)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecordSessionAnswerRoutesChildAcrossParentWriteFailure(t *testing.T) {
+	store := &routedAnswerStore{MemorySessionStore: NewMemorySessionStore(), failParent: true}
+	route := &ChildQuestionError{SessionID: "parent/child", QuestionID: "child-question", Question: json.RawMessage(`{"options":["one","two"],"question":"Which?"}`)}
+	appendRoutedQuestion(t, store, route.SessionID, route.QuestionID, nil)
+	appendRoutedQuestion(t, store, "parent", "parent-question", route)
+	ctx, release, err := AcquireSessionLease(context.Background(), store, "parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := RecordSessionAnswer(ctx, store, "parent", "parent-question", "one"); err == nil {
+		t.Fatal("parent write failure was lost")
+	}
+	parent, _ := store.Log(ctx, "parent")
+	child, _ := store.Log(ctx, route.SessionID)
+	if _, _, pending := PendingQuestion(parent); !pending {
+		t.Fatal("failed parent append closed its workflow")
+	}
+	if _, _, pending := PendingQuestion(child); pending {
+		t.Fatal("child answer was not committed first")
+	}
+	store.failParent = false
+	if _, err := RecordSessionAnswer(ctx, store, "parent", "parent-question", "two"); !errors.Is(err, ErrAnswerConflict) {
+		t.Fatalf("partial commit allowed a different answer: %v", err)
+	}
+	appended, err := RecordSessionAnswer(ctx, store, "parent", "parent-question", "one")
+	if err != nil || !appended {
+		t.Fatalf("exact retry did not finish parent append: %v %v", appended, err)
+	}
+	appended, err = RecordSessionAnswer(ctx, store, "parent", "parent-question", "one")
+	if err != nil || appended {
+		t.Fatalf("settled retry was not idempotent: %v %v", appended, err)
+	}
+	for id, questionID := range map[string]string{"parent": "parent-question", route.SessionID: route.QuestionID} {
+		entries, err := store.Log(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answers := 0
+		for _, entry := range entries {
+			if entry.Kind == EntryPiAnswer {
+				answers++
+				if entry.CallID != questionID || entry.Answer != "one" {
+					t.Fatalf("answer crossed workflow identities: %+v", entry)
+				}
+			}
+		}
+		if answers != 1 {
+			t.Fatalf("%s received %d answers", id, answers)
+		}
+	}
+}
+
+func TestRecordSessionAnswerRejectsInvalidChildRoutes(t *testing.T) {
+	for _, tc := range []struct{ name, session, questionID, question string }{
+		{"outside parent", "other/child", "child-question", `{"question":"Which?","options":["one","two"]}`},
+		{"self", "parent", "child-question", `{"question":"Which?","options":["one","two"]}`},
+		{"missing receipt", "parent/child", "missing", `{"question":"Which?","options":["one","two"]}`},
+		{"changed question", "parent/child", "child-question", `{"question":"Another?"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewMemorySessionStore()
+			appendRoutedQuestion(t, store, tc.session, "child-question", nil)
+			appendRoutedQuestion(t, store, "parent", "parent-question", &ChildQuestionError{SessionID: tc.session, QuestionID: tc.questionID, Question: json.RawMessage(tc.question)})
+			ctx, release, err := AcquireSessionLease(context.Background(), store, "parent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			if _, err := RecordSessionAnswer(ctx, store, "parent", "parent-question", "one"); err == nil {
+				t.Fatal("invalid child route accepted")
+			}
+			for _, session := range []string{"parent", tc.session} {
+				entries, err := store.Log(ctx, session)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if entry.Kind == EntryPiAnswer {
+						t.Fatal("invalid route committed an answer")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRecordSessionAnswerRoutesNestedChildren(t *testing.T) {
+	store := NewMemorySessionStore()
+	question := json.RawMessage(`{"question":"Which?","options":["one","two"]}`)
+	appendRoutedQuestion(t, store, "parent/child/grandchild", "leaf-question", nil)
+	appendRoutedQuestion(t, store, "parent/child", "child-question", &ChildQuestionError{SessionID: "parent/child/grandchild", QuestionID: "leaf-question", Question: question})
+	appendRoutedQuestion(t, store, "parent", "parent-question", &ChildQuestionError{SessionID: "parent/child", QuestionID: "child-question", Question: question})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx, release, err := AcquireSessionLease(ctx, store, "parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := RecordSessionAnswer(ctx, store, "parent", "parent-question", "one"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"parent", "parent/child", "parent/child/grandchild"} {
+		entries, err := store.Log(ctx, id)
+		if err != nil || len(entries) != 2 || entries[1].Kind != EntryPiAnswer || entries[1].Answer != "one" {
+			t.Fatalf("nested answer lost or repeated in %s: %+v %v", id, entries, err)
+		}
+	}
 }
 
 type leaseLossStore struct {

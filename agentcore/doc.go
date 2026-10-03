@@ -49,6 +49,10 @@
 //
 // # Reading this package
 //
+// The engine subpackage is the native Go port of Pi's state machine, using the
+// lossless ai transcript. It is replacing this legacy flat kernel in stages;
+// it does not call the TypeScript worker. Its dependencies are checked separately.
+//
 // The runtime root is deliberately flat: these files are not independent
 // concerns that happen to sit together, they are one machine reached through
 // unexported fields of one [Agent]. Black-box composition tests live in

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/engine"
 )
 
 const (
@@ -24,10 +25,19 @@ const (
 // recording its outcome. Replaying it automatically could duplicate a write.
 var ErrPiUnsettledEffect = errors.New("Pi session has an unsettled tool effect")
 
-// PiSessionConfig supplies host policy and persistence around the original Pi
-// Agent. It deliberately uses Pi JSON, not the older Go Message projection.
+// PiSessionConfig supplies host policy and persistence around the Pi contract.
+// It deliberately uses lossless Pi JSON, not the older Go Message projection.
 type PiSessionConfig struct {
-	Pi              agentcore.PiConfig
+	Pi                      agentcore.PiConfig
+	nativeLadder            *nativeModelLadder     // session-owned; routing is composed before host wrappers
+	nativeAttempts          *agentcore.RetryPolicy // nonnil installs native request admission
+	nativeAttemptObserved   func(nativeBoundRung, nativeRetryAttempt) error
+	nativeTerminalPublished func(nativeAttemptOutcome) error
+	// An empty Pi.Worker or NativeGo selects the in-process Go adapter, retaining this session's
+	// existing policy, lease and lossless journal. NativeStream optionally
+	// overrides the built-in Go provider in streamMode=native. Worker/Runtime are unused.
+	NativeGo        bool
+	NativeStream    engine.StreamFn
 	Policy          agentcore.Policy // nil is deny-all
 	Store           agentcore.SessionStore
 	SessionID       string
@@ -38,17 +48,19 @@ type PiSessionConfig struct {
 	HistoryRevision string          // revision of a seeded native transcript, when known
 }
 
-// PiSession owns a worker and its session lease. SessionEntry.Content retains
+// PiSession owns an agent and its session lease. SessionEntry.Content retains
 // the native JSON verbatim; the existing Postgres and memory stores can persist
 // it without changing or truncating Pi message fields.
 type PiSession struct {
-	agent     *agentcore.PiAgent
+	agent     *piSessionAgent
+	native    *NativeAgent
 	config    PiSessionConfig
 	ctx       context.Context
 	release   func() error
 	close     sync.Once
 	closeErr  error
 	writeMu   sync.Mutex
+	modelMu   sync.Mutex // serializes model selection with checkpoint snapshots
 	mu        sync.Mutex
 	fault     error
 	closed    bool
@@ -154,6 +166,16 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 			if err != nil {
 				return nil, err
 			}
+			for _, entry := range entries {
+				if entry.Kind == agentcore.EntryPiModelSelection && (cfg.nativeLadder == nil || (!cfg.NativeGo && cfg.Pi.Worker != "")) {
+					return nil, errors.New("native model selection requires current native ladder bindings")
+				}
+			}
+			if cfg.nativeLadder != nil {
+				if err := cfg.nativeLadder.restoreJournal(entries); err != nil {
+					return nil, err
+				}
+			}
 			// Execution code and callbacks are always supplied by this host;
 			// only persisted runtime state is restored from the log.
 			var restored, current map[string]json.RawMessage
@@ -190,7 +212,33 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 	worker.Callback = s.callback
 	worker.OnEvent = s.event
 	var err error
-	s.agent, err = agentcore.NewPi(s.ctx, worker)
+	if cfg.NativeGo || cfg.Pi.Worker == "" {
+		var native *NativeAgent
+		config := NativeAgentConfig{Options: worker.Options, Callback: worker.Callback, OnEvent: worker.OnEvent, OnTrace: worker.OnTrace, StreamFn: cfg.NativeStream}
+		if cfg.nativeAttempts != nil {
+			if cfg.nativeLadder == nil {
+				return nil, errors.New("native request admission requires a model ladder")
+			}
+			policy := *cfg.nativeAttempts
+			config.admitRequest = func(ctx context.Context, request engine.Request, options map[string]any) (*engine.RequestAdmission, error) {
+				return s.admitNativeRequest(ctx, request, options, policy)
+			}
+		}
+		native, err = NewNativeAgent(s.ctx, config)
+		if err == nil {
+			s.native = native
+			s.agent = &piSessionAgent{Call: native.Call, State: native.State, Prompt: native.Prompt, Continue: native.Continue, Close: native.Close, UpstreamCommit: native.UpstreamCommit, ObserveDelegation: native.observeDelegation}
+		}
+	} else {
+		if cfg.nativeAttempts != nil {
+			return nil, errors.New("native request admission cannot run in a worker")
+		}
+		var bridge *agentcore.PiAgent
+		bridge, err = agentcore.NewPi(s.ctx, worker)
+		if err == nil {
+			s.agent = &piSessionAgent{Call: bridge.Call, State: bridge.State, Prompt: bridge.Prompt, Continue: bridge.Continue, Close: bridge.Close, UpstreamCommit: bridge.UpstreamCommit}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -297,6 +345,8 @@ func (s *PiSession) record(ctx context.Context, kind agentcore.SessionEntryKind,
 }
 
 func (s *PiSession) checkpoint(ctx context.Context) error {
+	s.modelMu.Lock()
+	defer s.modelMu.Unlock()
 	state, err := s.agent.State(ctx)
 	if err != nil {
 		return err
@@ -329,7 +379,7 @@ func (s *PiSession) event(ctx context.Context, raw json.RawMessage) error {
 	return nil
 }
 
-func (s *PiSession) callback(ctx context.Context, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
+func (s *PiSession) hostCallback(ctx context.Context, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
 	if err := s.failure(); err != nil {
 		return nil, err
 	}
@@ -450,6 +500,9 @@ func (s *PiSession) Prompt(ctx context.Context, input json.RawMessage) error {
 	if err := s.failure(); err != nil {
 		return err
 	}
+	if stopped, err := s.finishTerminalDelegations(ctx, input); stopped || err != nil {
+		return err
+	}
 	input, err := s.answerInput(ctx, input)
 	if err != nil {
 		return err
@@ -463,6 +516,9 @@ func (s *PiSession) Prompt(ctx context.Context, input json.RawMessage) error {
 
 func (s *PiSession) Continue(ctx context.Context) error {
 	if err := s.failure(); err != nil {
+		return err
+	}
+	if stopped, err := s.finishTerminalDelegations(ctx, nil); stopped || err != nil {
 		return err
 	}
 	input, err := s.answerInput(ctx, nil)
@@ -502,13 +558,24 @@ func recoverPiState(entries []agentcore.SessionEntry) (json.RawMessage, error) {
 	var pendingResult json.RawMessage
 	unsettled := map[string]string{}
 	seenState := false
+	var selection *nativeLadderSelection
 	for _, entry := range entries {
 		switch entry.Kind {
+		case agentcore.EntryPiModelSelection:
+			if !seenState {
+				return nil, errors.New("native ladder selection precedes initial state")
+			}
+			next, err := parseNativeLadderSelection(entry.Content, selection)
+			if err != nil {
+				return nil, err
+			}
+			selection = &next
+			state["model"] = append(json.RawMessage(nil), next.Model...)
 		case agentcore.EntryPiContextSummary:
 			if _, err := parsePiContextSummary(entry.Content); err != nil {
 				return nil, err
 			}
-		case agentcore.EntryPiAnswer, agentcore.EntryPiGoal, agentcore.EntryPiGoalRevision, agentcore.EntryPiInvocation, agentcore.EntryPiChildResult:
+		case agentcore.EntryPiAnswer, agentcore.EntryPiDelegation, agentcore.EntryPiDelegationBatch, agentcore.EntryPiGoal, agentcore.EntryPiGoalRevision, agentcore.EntryPiInvocation, agentcore.EntryPiChildResult:
 			// Host workflow metadata is validated against parked effects and
 			// native history below; it does not rewrite any provider message.
 		case piEffectStart, piEffectDone:
@@ -531,6 +598,9 @@ func recoverPiState(entries []agentcore.SessionEntry) (json.RawMessage, error) {
 			}
 			if err := json.Unmarshal(state["messages"], &messages); err != nil {
 				return nil, err
+			}
+			if selection != nil && !nativeModelIdentityEqual(state["model"], selection.Model) {
+				return nil, errors.New("Pi checkpoint disagrees with committed native ladder model")
 			}
 			seenState = true
 		case piEventEntry:
@@ -591,8 +661,8 @@ func recoverPiState(entries []agentcore.SessionEntry) (json.RawMessage, error) {
 	open := map[string]int{}
 	for _, raw := range messages {
 		var m struct {
-			Role, ToolCallID string
-			Content          json.RawMessage
+			Role, ToolCallID, StopReason string
+			Content                      json.RawMessage
 		}
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, err
@@ -600,7 +670,12 @@ func recoverPiState(entries []agentcore.SessionEntry) (json.RawMessage, error) {
 		if m.Role != "toolResult" && len(open) > 0 {
 			return nil, fmt.Errorf("%w: incomplete tool batch", ErrPiUnsettledEffect)
 		}
-		if m.Role == "assistant" {
+		// Pi exits the turn before tool admission on error/aborted messages.
+		// Their partial calls remain in history but have no native results to
+		// await. Physical effects are checked independently above; this cannot
+		// clear an effect that started before a provider failure. A length stop
+		// still produces failure results, so it must finish its result batch.
+		if m.Role == "assistant" && m.StopReason != "error" && m.StopReason != "aborted" {
 			var blocks []struct{ Type, ID string }
 			if err := json.Unmarshal(m.Content, &blocks); err != nil {
 				return nil, err

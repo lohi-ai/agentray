@@ -2,8 +2,6 @@ package agentruntime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,17 +43,114 @@ func piMessagesDigest(state json.RawMessage) (string, error) {
 	}
 	// JSONB and worker transport can reorder object keys. Normalize JSON values,
 	// preserving every native field, before binding the completion receipt.
-	var messages any
-	raw, _ := json.Marshal(value.Messages)
-	if err := json.Unmarshal(raw, &messages); err != nil {
-		return "", err
-	}
-	canonical, err := json.Marshal(messages)
+	return piPrefixDigest(value.Messages), nil
+}
+
+// PiChildQuestionError identifies the durable child workflow a host must route
+// to the human. It is not a completed delegation answer. Wrapping it preserves
+// its session and physical question IDs through errors.As.
+type PiChildQuestionError = agentcore.ChildQuestionError
+
+// piParkedChild recognizes the original parked tool results in the last native
+// batch, backed by settled host receipts from this invocation. It does not
+// manufacture a tool result or treat an ordinary agent_end as host approval.
+// A nonempty question ID proves this is a waiting/answered workflow; Parked
+// distinguishes a still-pending question from an answer ready for delivery.
+func piParkedChild(entries []agentcore.SessionEntry) (agentcore.RunResult, string, error) {
+	state, err := recoverPiState(entries)
 	if err != nil {
-		return "", err
+		return agentcore.RunResult{}, "", err
 	}
-	digest := sha256.Sum256(canonical)
-	return hex.EncodeToString(digest[:]), nil
+	var native struct{ Messages []json.RawMessage }
+	_ = json.Unmarshal(state, &native)
+	start := 0
+	revision := ""
+	for i, entry := range entries {
+		if entry.Kind == piStateEntry {
+			if entry.Model == "" || (revision != "" && revision != entry.Model) {
+				return agentcore.RunResult{}, "", errors.New("native child state revision mismatch")
+			}
+			revision = entry.Model
+		}
+		if entry.Kind == piEventEntry {
+			var event struct{ Type string }
+			_ = json.Unmarshal([]byte(entry.Content), &event)
+			if event.Type == "agent_start" {
+				start = i
+			}
+		}
+	}
+	receipts := map[string]agentcore.SessionEntry{}
+	for _, entry := range entries[start:] {
+		if id, _, valid := agentcore.PiQuestionFromEntry(entry); valid {
+			receipts[id] = entry
+		}
+	}
+	pendingID, pendingQuestion, pending := agentcore.PendingQuestion(entries)
+	delegations, err := piDelegations(entries)
+	if err != nil {
+		return agentcore.RunResult{}, "", err
+	}
+	questionID := ""
+	for i := len(native.Messages) - 1; i >= 0; i-- {
+		var message struct {
+			Role, ToolCallID, ToolName string
+			Details                    agentcore.PiToolOutcome
+		}
+		if err := json.Unmarshal(native.Messages[i], &message); err != nil {
+			return agentcore.RunResult{}, "", err
+		}
+		if message.Role != "toolResult" {
+			break
+		}
+		audit := message.Details
+		entry, ok := receipts[audit.QuestionID]
+		if !ok || !audit.Parked || !audit.Executed || !audit.Trace.Allowed || audit.Trace.Error != "" || audit.Trace.CallID != message.ToolCallID || audit.Trace.Tool != message.ToolName || entry.CallID != message.ToolCallID {
+			continue
+		}
+		_, question, _ := agentcore.PiQuestionFromEntry(entry)
+		expected := json.RawMessage(audit.Trace.Args)
+		if audit.ChildQuestion != nil {
+			expected = audit.ChildQuestion.Question
+		}
+		if !samePiJSON(question, expected) {
+			return agentcore.RunResult{}, "", errors.New("native child question differs from its settled receipt")
+		}
+		workflowID := audit.QuestionID
+		for _, delegation := range delegations {
+			if delegation.OriginID == audit.QuestionID {
+				workflowID = delegation.QuestionID
+			}
+		}
+		if questionID == "" || workflowID == pendingID {
+			questionID = workflowID
+		}
+	}
+	if questionID == "" {
+		return agentcore.RunResult{}, "", nil
+	}
+	if pending && pendingID != questionID {
+		return agentcore.RunResult{}, "", errors.New("native child pending question is outside its last tool batch")
+	}
+	if !pending {
+		answers, err := piAnswerMessages(entries, state)
+		ready := len(answers) > 0
+		for _, delegation := range delegations {
+			ready = ready || (delegation.Answered && !delegation.Complete)
+		}
+		if err != nil || !ready {
+			return agentcore.RunResult{}, "", errors.New("native child parked batch has no answer ready for delivery")
+		}
+	}
+	result := agentcore.RunResult{Parked: pending, Question: pendingQuestion, StopReason: "parked", NativeState: state, NativeRevision: revision}
+	for _, raw := range native.Messages {
+		message, err := projectPiMessage(raw)
+		if err != nil {
+			return agentcore.RunResult{}, "", err
+		}
+		result.Messages = append(result.Messages, message)
+	}
+	return result, questionID, nil
 }
 
 type piChildCompletion struct {
@@ -140,9 +235,10 @@ func piChildEndedWithoutReceipt(entries []agentcore.SessionEntry) bool {
 }
 
 // piForkRunner executes only the already-governed Agent.Fork child. Native
-// options are copied per child; the parent's messages and worker process are
+// options are copied per child; the parent's messages and agent instance are
 // never shared. Session ownership encloses both execution and completion write.
-func piForkRunner(worker agentcore.PiConfig, pricingKnown bool, store agentcore.SessionStore, choice agentcore.ToolChoice, compaction *PiContextCompaction) subagent.ForkRunner {
+func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.SessionStore, choice agentcore.ToolChoice, compaction *PiContextCompaction) subagent.ForkRunner {
+	worker := runtime.Pi
 	return func(ctx context.Context, child *agentcore.Agent, request subagent.ForkRequest, sink agentcore.StreamSink) (agentcore.RunResult, error) {
 		history := json.RawMessage(`[]`)
 		revision := ""
@@ -203,14 +299,37 @@ func piForkRunner(worker agentcore.PiConfig, pricingKnown bool, store agentcore.
 					}
 					return result, nil
 				}
-				if piChildEndedWithoutReceipt(entries) {
+				parked, questionID, err := piParkedChild(entries)
+				if err != nil {
+					return agentcore.RunResult{}, err
+				}
+				if parked.Parked {
+					if sink != nil {
+						sink(agentcore.StreamEvent{Type: agentcore.StreamQuestion, Question: parked.Question})
+					}
+					return parked, &PiChildQuestionError{SessionID: request.SessionID, QuestionID: questionID, Question: parked.Question}
+				}
+				if questionID == "" && piChildEndedWithoutReceipt(entries) {
 					return agentcore.RunResult{}, errors.New("native child ended without a durable completion receipt; explicit reconciliation required")
 				}
 			}
 		}
 		cfg := worker
+		stream, known := runtime.NativeStream, pricingKnown
+		var ladder *nativeModelLadder
+		if runtime.nativeLadder != nil {
+			ladder = runtime.nativeLadder.fork()
+			var bound agentcore.PiConfig
+			bound, known, stream = ladder.sessionBinding()
+			if runtime.nativeAttempts != nil {
+				bound, known, stream = ladder.admissionBinding()
+			}
+			// Host policy/tool wrappers are composed below by RunPi. Keep the
+			// inherited trace/event sinks, but route requests through this child.
+			cfg.Callback, cfg.Options = bound.Callback, bound.Options
+		}
 		var options map[string]json.RawMessage
-		if err := json.Unmarshal(worker.Options, &options); err != nil {
+		if err := json.Unmarshal(cfg.Options, &options); err != nil {
 			return agentcore.RunResult{}, err
 		}
 		var initial map[string]json.RawMessage
@@ -240,8 +359,8 @@ func piForkRunner(worker agentcore.PiConfig, pricingKnown bool, store agentcore.
 		if !resume {
 			input, _ = json.Marshal(request.Prompt)
 		}
-		result, err := RunPi(ctx, PiRunConfig{Host: host, Task: request.Task, Input: input, Sink: sink, PricingKnown: pricingKnown, Compaction: compaction,
-			Session: PiSessionConfig{Pi: cfg, Policy: agentcore.NewAllowList(names...), Store: sessionStore, SessionID: request.SessionID, Resume: resume, HistoryRevision: revision, Invocation: invocation}})
+		result, err := RunPi(ctx, PiRunConfig{Host: host, Task: request.Task, Input: input, Sink: sink, PricingKnown: known, Compaction: compaction,
+			Session: PiSessionConfig{Pi: cfg, nativeLadder: ladder, nativeAttempts: runtime.nativeAttempts, NativeGo: runtime.NativeGo, NativeStream: stream, Policy: agentcore.NewAllowList(names...), Store: sessionStore, SessionID: request.SessionID, Resume: resume, HistoryRevision: revision, Invocation: invocation}})
 		projection := result.Projection
 		projection.NativeState, projection.NativeTelemetry, projection.NativeRevision = result.State, result.Telemetry, result.Revision
 		if err != nil {
@@ -251,7 +370,21 @@ func piForkRunner(worker agentcore.PiConfig, pricingKnown bool, store agentcore.
 			return projection, ctx.Err()
 		}
 		if projection.Parked {
-			return projection, errors.New("native child is waiting for a human answer")
+			if sessionStore == nil {
+				return projection, errors.New("native child needs a durable session to route its human question")
+			}
+			entries, err := sessionStore.Log(ctx, request.SessionID)
+			if err != nil {
+				return projection, err
+			}
+			parked, questionID, err := piParkedChild(entries)
+			if err != nil {
+				return projection, err
+			}
+			if !parked.Parked {
+				return projection, errors.New("native child parked without a recoverable question")
+			}
+			return projection, &PiChildQuestionError{SessionID: request.SessionID, QuestionID: questionID, Question: parked.Question}
 		}
 		if projection.StopReason == "error" || projection.StopReason == "aborted" || projection.StopReason == "" || strings.TrimSpace(projection.Final) == "" {
 			return projection, fmt.Errorf("native child did not complete an answer (%s)", projection.StopReason)

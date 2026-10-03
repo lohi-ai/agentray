@@ -1,4 +1,4 @@
-//go:build pi
+//go:build pi || pi_native
 
 package agentruntime
 
@@ -111,6 +111,9 @@ func TestPiTraceSinkPanicDoesNotChangeNativeResult(t *testing.T) {
 }
 
 func TestPiWorkerTraceIncludesCallbackFailureAndSettledSpans(t *testing.T) {
+	if piTestNative {
+		t.Skip("worker transport only; native telemetry is covered by TestNative trace tests")
+	}
 	traces := make(chan json.RawMessage, 1)
 	worker, err := agentcore.NewPi(piSessionContext(t), agentcore.PiConfig{Worker: piSessionWorker(t), Options: piSessionOptions(), OnTrace: func(_ context.Context, raw json.RawMessage) { traces <- append(json.RawMessage{}, raw...) }, Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		return nil, context.DeadlineExceeded

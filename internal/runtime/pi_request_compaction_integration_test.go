@@ -1,4 +1,4 @@
-//go:build pi
+//go:build pi || pi_native
 
 package agentruntime
 
@@ -34,6 +34,7 @@ func (t piLargeEvidenceTool) Run(context.Context, string) (string, error) {
 
 func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T) {
 	ctx := observe.WithTraceID(piSessionContext(t), "request-compaction")
+	native := piSessionWorker(t) == ""
 	var mainCalls, summaryCalls, effects, compactedCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -46,12 +47,18 @@ func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T
 		}
 		raw := string(body.Messages)
 		if body.Model == "summarizer" {
+			if native && r.Header.Get("Authorization") != "Bearer summary-current" {
+				t.Error("summary used the parent's provider-row credential")
+			}
 			summaryCalls.Add(1)
 			if len(body.Tools) != 0 || (!strings.Contains(raw, "tool-result-") && !strings.Contains(raw, "Earlier work summary")) {
 				t.Errorf("invalid native summary request: %s", raw)
 			}
 			piChildSSE(w, "", "", "Keep working on the original task. Earlier evidence has been checked.")
 			return
+		}
+		if native && r.Header.Get("Authorization") != "Bearer main-current" {
+			t.Error("parent did not refresh its provider-row credential")
 		}
 		n := mainCalls.Add(1)
 		if strings.Contains(raw, "Earlier work summary") {
@@ -75,9 +82,30 @@ func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T
 	traces := newRecordingStore()
 	p.Tracer = newTestSink(traces)
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "main", BaseURL: server.URL + "/v1", APIKey: "test"}}
+	tier.ProviderID = "main-row"
 	summaryTier := tier
 	summaryTier.Model = "summarizer"
+	summaryTier.ProviderID = "summary-row"
 	p.PiCompactionTier = &summaryTier
+	if native {
+		p.RefreshKey = func(context.Context, string) (string, error) {
+			t.Error("native runner used vendor-only credential refresh")
+			return "", fmt.Errorf("vendor-only refresh forbidden")
+		}
+		p.RefreshProviderKey = func(_ context.Context, id, vendor, endpoint string) (string, error) {
+			if vendor != "openai" || endpoint != server.URL+"/v1" {
+				return "", fmt.Errorf("unexpected credential route")
+			}
+			switch id {
+			case "main-row":
+				return "main-current", nil
+			case "summary-row":
+				return "summary-current", nil
+			default:
+				return "", fmt.Errorf("unexpected provider row")
+			}
+		}
+	}
 	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "complete the original task"}, tier, nil)
 	if err != nil || result.Final != "finished" || effects.Load() != 3 || mainCalls.Load() != 4 || summaryCalls.Load() == 0 || compactedCalls.Load() == 0 {

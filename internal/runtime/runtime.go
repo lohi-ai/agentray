@@ -142,6 +142,10 @@ type BuildParams struct {
 	// loop applies the returned key unconditionally, so "" would blank a valid key.
 	// nil — the default — keeps the key fixed for the whole run.
 	RefreshKey func(ctx context.Context, provider string) (string, error)
+	// RefreshProviderKey resolves a native binding by provider row and endpoint.
+	// It takes precedence over RefreshKey in native calls, including summaries.
+	// A blank providerID identifies a host/legacy configuration without a row.
+	RefreshProviderKey func(ctx context.Context, providerID, provider, baseURL string) (string, error)
 	// PrepareNextTurn is the per-turn save-point seam (agentcore P7): after each
 	// turn the returned TurnState drives the next one. nil keeps the run static.
 	PrepareNextTurn func(ctx context.Context, state agentcore.TurnState) agentcore.TurnState

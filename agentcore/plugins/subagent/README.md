@@ -50,6 +50,12 @@ reattaches to whichever child log completed. A delegate has no transcript to
 re-open (`Delegate.Run` is an opaque closure), so its retry is a single
 re-invocation carrying the error and the rejected answer in the task.
 
+For native durable runs, a human question from either the original child or
+its corrective retry parks the parent. Answering the parent forwards to the
+child's recorded question. Resume reattaches the same child and re-applies
+schema validation and output limits before delivering its answer. Additional
+questions keep the same delegation and receive distinct workflow IDs.
+
 #### Token effect
 
 **Replaced, and strongly net-negative.** The child's entire run — every tool
@@ -174,3 +180,10 @@ projection in `Previous.Messages`. The adapter owns native persistence,
 completion verification, reattachment, and cancellation. A completed reattach
 must report zero new usage. Native self-forks derive session IDs from the
 persisted invocation key so reused provider call IDs remain distinct.
+
+The native adapter distinguishes a parked child from a completed child. Its
+structured error identifies the durable child question, and reattaching while
+that question is pending performs no model work. Answering the child session
+allows that same fork request to resume. The parent plugin still returns this
+as a delegation error; forwarding the question and answer through the parent's
+human-input workflow requires consumer integration.

@@ -1,11 +1,14 @@
 package agentcore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -17,10 +20,12 @@ type SessionEntryKind string
 // Native Pi records keep opaque JSON in SessionEntry.Content. The host owns
 // their persistence; legacy RecoverSession must not project this transcript.
 const (
-	EntryPiState       SessionEntryKind = "pi_state"
-	EntryPiEvent       SessionEntryKind = "pi_event"
-	EntryPiEffectStart SessionEntryKind = "pi_effect_start"
-	EntryPiEffectDone  SessionEntryKind = "pi_effect_done"
+	EntryPiState SessionEntryKind = "pi_state"
+	// EntryPiModelSelection commits a host-owned native ladder identity without credentials.
+	EntryPiModelSelection SessionEntryKind = "pi_model_selection"
+	EntryPiEvent          SessionEntryKind = "pi_event"
+	EntryPiEffectStart    SessionEntryKind = "pi_effect_start"
+	EntryPiEffectDone     SessionEntryKind = "pi_effect_done"
 	// EntryPiAnswer is host workflow metadata. Content holds the exact native
 	// user message to append; it never replaces an already emitted tool result.
 	EntryPiAnswer SessionEntryKind = "pi_answer"
@@ -32,6 +37,13 @@ const (
 	// records a completed child's reattachable answer without rewriting messages.
 	EntryPiInvocation  SessionEntryKind = "pi_invocation"
 	EntryPiChildResult SessionEntryKind = "pi_child_result"
+	// EntryPiDelegation records continuation of a parked delegation. It links
+	// an answered parent question to a new child question or a final delivery,
+	// without replacing the original provider tool result.
+	EntryPiDelegation SessionEntryKind = "pi_delegation"
+	// EntryPiDelegationBatch commits the resumed batch policy and its deliveries
+	// before any completion context reaches the next native model request.
+	EntryPiDelegationBatch SessionEntryKind = "pi_delegation_batch"
 	// Request-view summary metadata; never replaces native transcript messages.
 	EntryPiContextSummary SessionEntryKind = "pi_context_summary"
 )
@@ -318,6 +330,9 @@ func AcquireSessionLease(ctx context.Context, store SessionStore, sessionID stri
 // and append form one logical ownership interval.
 // Native Pi questions use a physical effect ID and an append-only user message;
 // legacy questions retain their original provider-call/tool-result workflow.
+// Delegated questions forward to the settled child question under its lease
+// before recording the parent's acknowledgement. Exact retries finish a partial
+// child/parent commit without changing or duplicating the child's answer.
 func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, callID, answer string) (bool, error) {
 	log, err := store.Log(ctx, sessionID)
 	if err != nil {
@@ -345,6 +360,11 @@ func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, cal
 	entry := SessionEntry{Kind: EntryAnswer, CallID: callID, Answer: answer}
 	for _, candidate := range log {
 		if id, question, native := PiQuestionFromEntry(candidate); native && id == callID {
+			if _, route, routed := PiChildQuestionFromEntry(candidate); routed {
+				if err := forwardPiChildAnswer(ctx, store, sessionID, route, answer); err != nil {
+					return false, err
+				}
+			}
 			entry.Kind = EntryPiAnswer
 			message, err := json.Marshal(map[string]any{
 				"role": "user", "content": "Human answer to question " + string(question) + ":\n" + answer,
@@ -361,6 +381,46 @@ func RecordSessionAnswer(ctx context.Context, store SessionStore, sessionID, cal
 		return false, err
 	}
 	return true, nil
+}
+
+// Commit the child answer first. If the parent append fails, an exact retry
+// finds the identical child answer and finishes the parent append; conflicting
+// answers cannot partially overwrite either workflow. Leases always descend
+// through the session namespace, so a forged cyclic route cannot deadlock.
+func forwardPiChildAnswer(ctx context.Context, store SessionStore, parentID string, route *ChildQuestionError, answer string) (err error) {
+	if !strings.HasPrefix(route.SessionID, parentID+"/") {
+		return errors.New("delegated question is outside the parent session")
+	}
+	childCtx, release, err := AcquireSessionLease(ctx, store, route.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, release()) }()
+	entries, err := store.Log(childCtx, route.SessionID)
+	if err != nil {
+		return err
+	}
+	matched := false
+	for _, entry := range entries {
+		id, question, valid := PiQuestionFromEntry(entry)
+		if !valid || id != route.QuestionID {
+			continue
+		}
+		var actual, expected any
+		a, b := json.NewDecoder(bytes.NewReader(question)), json.NewDecoder(bytes.NewReader(route.Question))
+		a.UseNumber()
+		b.UseNumber()
+		if a.Decode(&actual) != nil || b.Decode(&expected) != nil || !reflect.DeepEqual(actual, expected) {
+			return errors.New("delegated question differs from the child's settled receipt")
+		}
+		matched = true
+		break
+	}
+	if !matched {
+		return errors.New("delegated question has no settled child receipt")
+	}
+	_, err = RecordSessionAnswer(childCtx, store, route.SessionID, route.QuestionID, answer)
+	return err
 }
 
 // SessionBatchStore is an optional SessionStore capability for committing one
@@ -942,6 +1002,8 @@ func logHasQuestion(log []SessionEntry, callID string) bool {
 // PendingQuestion returns the newest parked call still awaiting an answer: an
 // EntryQuestion with no matching EntryAnswer, or a settled native parked effect
 // with no EntryPiAnswer. Native IDs identify physical effects, not provider calls.
+// For a delegated ask, the ID belongs to this parent and the question comes
+// from the child's routed receipt; the original spawn arguments stay in audit.
 // The second return is the
 // question's validated arguments; the third reports whether one was found.
 // Consumers (the answer route, the reattach read) use it to render or resolve

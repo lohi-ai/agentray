@@ -1,8 +1,18 @@
 # agentcore
 
-The kernel. The runtime is one flat package, with two explicit subdirectories:
-ejectable [`plugins/`](plugins/) and black-box [`integration/`](integration/)
-tests. The runtime has a hard dependency rule in both directions:
+The migration target is a native Go port of Pi's agent behavior. The existing
+TypeScript worker bridge is transitional, not the target runtime. Go code lives
+in `agentcore`, providers in `ai`, and recording in [`telemetry`](../telemetry/);
+application composition and persistence adapters remain in `internal/runtime`.
+The pinned upstream source is a development oracle for differential tests.
+Matching source hashes of that reference does not establish Go behavior parity.
+The boundaries below describe the current kernel; package extraction should
+follow independent ownership and dependencies as the Go port replaces it.
+
+The existing kernel is one flat package. The native Go replacement lives in
+[`engine/`](engine/); the other subdirectories are ejectable
+[`plugins/`](plugins/) and black-box [`integration/`](integration/) tests.
+The existing root package has a hard dependency rule in both directions:
 
 > **The kernel names no plugin, and depends on nothing else in this module.**
 > `agentcore` imports only the standard library plus focused Unicode and JSON
@@ -21,7 +31,8 @@ only this file knows is a rule that drifts:
 |---|---|
 | `TestKernelNamesNoPlugin` | no `plugins/` import from the root package |
 | `TestKernelIsAModuleLeaf` | no in-module import at all |
-| `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only `plugins/` and black-box `integration/` tests sit below the kernel |
+| `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only the declared `engine/`, `plugins/`, and `integration/` boundaries sit below the root |
+| `TestNativeEngineNamesNoHost` | the native engine directly imports only AI/telemetry modules and libraries; it cannot launch a subprocess or import host policy |
 | `TestEveryKernelFileJustifiesItself` | every root `.go` file has a row below |
 | `TestPluginsDoNotNameEachOther` | no plugin imports a sibling (except `preset`) |
 | `TestEveryPluginDocumentsItself` | every plugin folder has a `README.md` |

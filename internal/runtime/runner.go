@@ -35,8 +35,8 @@ const defaultRunMaxTokens = 16000
 // optionally fires the reflect pass (§14.9). Both the chat handler and the NATS
 // scheduler go through this one path.
 type Runner struct {
-	// Pi selects the original native runtime when configured. Nil retains the
-	// existing driver while the remaining migration work is completed.
+	// Pi selects the Pi-contract runtime, including the in-process Go port. Nil
+	// retains the existing driver while provider migration is completed.
 	Pi    *PiRuntimeConfig
 	Store *storage.Store
 	// Sandbox, when non-nil, is threaded into every BuildParams so agents get
@@ -940,11 +940,12 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		PromptCacheKey:       scopeID,
 		PromptCacheRetention: "short",
 		// Live + per-turn seams.
-		GetSteering:     getSteering,
-		GetFollowUp:     getFollowUp,
-		RefreshKey:      r.keyRefresher(opts.ProjectID),
-		PrepareNextTurn: opts.PrepareNextTurn,
-		BudgetGate:      budgetGate,
+		GetSteering:        getSteering,
+		GetFollowUp:        getFollowUp,
+		RefreshKey:         r.keyRefresher(opts.ProjectID),
+		RefreshProviderKey: r.nativeKeyRefresher(opts.ProjectID),
+		PrepareNextTurn:    opts.PrepareNextTurn,
+		BudgetGate:         budgetGate,
 		// Built-in run todo list (goal stability across compaction) + the optional
 		// operator overrides for the compaction budget and the run ceilings. A fresh
 		// store per run scopes the plan to it.
