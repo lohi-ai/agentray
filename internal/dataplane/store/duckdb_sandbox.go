@@ -202,6 +202,16 @@ type sqlSandboxPool struct {
 	inFlight     atomic.Int64
 	peakInFlight atomic.Int64
 	reaped       atomic.Int64
+	// Capacity evidence keeps the distinct admission, startup/cold-copy,
+	// incremental refresh, and execution costs visible. Copy counters measure
+	// successfully transferred values, not merely rows scanned from the trusted
+	// store, so a failed refresh cannot masquerade as completed work.
+	admissionWaitNanos atomic.Int64
+	startupNanos       atomic.Int64
+	refreshNanos       atomic.Int64
+	executionNanos     atomic.Int64
+	copiedRows         atomic.Int64
+	copiedBytes        atomic.Int64
 
 	// done stops the idle janitor.
 	done      chan struct{}
@@ -277,10 +287,13 @@ func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query
 		defer cancel()
 	}
 
+	admissionStarted := time.Now()
 	select {
 	case p.sem <- struct{}{}:
+		p.admissionWaitNanos.Add(time.Since(admissionStarted).Nanoseconds())
 		defer func() { <-p.sem }()
 	case <-rctx.Done():
+		p.admissionWaitNanos.Add(time.Since(admissionStarted).Nanoseconds())
 		// Waiting behind other tenants is not the author's SQL being wrong: it
 		// is capacity, so it is retryable (503), not a limit refusal (400).
 		return nil, sandboxEvidence{}, sandboxError(SandboxKindUnavailable, ErrSandboxUnavailable,
@@ -294,7 +307,9 @@ func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query
 	}
 	defer p.inFlight.Add(-1)
 
+	startupStarted := time.Now()
 	sb, err := p.sandboxFor(rctx, projectID)
+	p.startupNanos.Add(time.Since(startupStarted).Nanoseconds())
 	if err != nil {
 		return nil, sandboxEvidence{}, err
 	}
@@ -312,6 +327,7 @@ func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query
 		}
 	}()
 	var evidence sandboxEvidence
+	refreshStarted := time.Now()
 	if err := p.main.ReadSnapshot(rctx, func(snapshot duckDBSnapshot) error {
 		if err := sb.refreshLockedSnapshot(rctx, snapshot); err != nil {
 			return err
@@ -320,18 +336,22 @@ func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query
 		evidence, err = projectEvidenceFrom(rctx, snapshot, projectID)
 		return err
 	}); err != nil {
+		p.refreshNanos.Add(time.Since(refreshStarted).Nanoseconds())
 		sb.mu.Unlock()
 		locked = false
 		p.drop(sb)
 		return nil, sandboxEvidence{}, sandboxRefreshError(err)
 	}
+	p.refreshNanos.Add(time.Since(refreshStarted).Nanoseconds())
 	confirmedAt := time.Now().UTC()
 	for key, confirmation := range evidence.Confirmations {
 		confirmation.ConfirmedAt = confirmedAt
 		evidence.Confirmations[key] = confirmation
 	}
 	sb.evidence = evidence
+	executionStarted := time.Now()
 	rows, err := sb.runLocked(rctx, query, args)
+	p.executionNanos.Add(time.Since(executionStarted).Nanoseconds())
 	if err != nil && sb.dead.Load() {
 		sb.mu.Unlock()
 		locked = false
@@ -915,6 +935,7 @@ func (sb *sqlSandbox) refreshTable(ctx context.Context, snapshot duckDBSnapshot,
 func (sb *sqlSandbox) copyRows(ctx context.Context, snapshot duckDBSnapshot, selectSQL string, selectArgs []any, table string, nCols int, replaceExisting bool) error {
 	batch := make([][]any, 0, sandboxCopyBatch)
 	batchBytes := 0
+	var copiedRows, copiedBytes int64
 	err := func() error {
 		rows, err := snapshot.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
@@ -968,6 +989,8 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, snapshot duckDBSnapshot, sel
 			}
 			batch = append(batch, dest)
 			batchBytes += size
+			copiedRows++
+			copiedBytes += int64(size)
 			// Bytes as well as rows: this batch is built in the API's own heap,
 			// so a tenant whose rows carry fat JSON could otherwise make the
 			// trusted process — not the sandbox — the one that dies.
@@ -983,6 +1006,10 @@ func (sb *sqlSandbox) copyRows(ctx context.Context, snapshot duckDBSnapshot, sel
 		return flush()
 	}()
 	batch = nil
+	if err == nil {
+		sb.pool.copiedRows.Add(copiedRows)
+		sb.pool.copiedBytes.Add(copiedBytes)
+	}
 	return err
 }
 

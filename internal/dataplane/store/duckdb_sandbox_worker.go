@@ -656,6 +656,10 @@ func (e *sandboxEngine) query(ctx context.Context, req sandboxRequest) sandboxRe
 		item := make(map[string]any, len(columns))
 		for i, column := range columns {
 			value := normalizeSQLValue(*(valuePtrs[i].(*any)))
+			if containsNonFiniteSQLValue(value) {
+				return errResponse(SandboxKindSQL,
+					"query result contains a non-finite number; filter NaN or infinity with isfinite(...) or return an explicit string")
+			}
 			bytes += sandboxValueBytes(column, value)
 			item[column] = value
 		}
