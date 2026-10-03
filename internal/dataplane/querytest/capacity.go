@@ -80,6 +80,18 @@ func CapacityConnectorID(index int) string {
 	return fmt.Sprintf("60000000-0000-4000-8000-%012d", index+1)
 }
 
+func capacityEventID(namespace uint32, projectIndex, row int) string {
+	return fmt.Sprintf("%08x-%04x-4000-8000-%012x", namespace, projectIndex&0xffff, row)
+}
+
+func CapacitySeedEventID(projectIndex, row int) string {
+	return capacityEventID(0x70000000, projectIndex, row)
+}
+
+func CapacityLiveEventID(projectIndex, row int) string {
+	return capacityEventID(0x71000000, projectIndex, row)
+}
+
 type CapacityEvent struct {
 	EventID, DistinctID string
 	Timestamp           time.Time
@@ -91,7 +103,7 @@ func CapacityEvents(projectIndex, start, count int) []CapacityEvent {
 	for i := range count {
 		row := start + i
 		out[i] = CapacityEvent{
-			EventID:    fmt.Sprintf("capacity-%d-%d", projectIndex, row),
+			EventID:    CapacitySeedEventID(projectIndex, row),
 			DistinctID: fmt.Sprintf("user-%d", row%1_000_000),
 			Timestamp:  base.Add(time.Duration(row%(90*24*60)) * time.Minute),
 		}
