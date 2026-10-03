@@ -1,0 +1,52 @@
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "other_project_id": "22222222-2222-4222-8222-222222222222",
+  "connectors": {
+    "payments": "33333333-3333-4333-8333-333333333333",
+    "shadow": "44444444-4444-4444-8444-444444444444"
+  },
+  "events": [
+    {"project_id":"11111111-1111-4111-8111-111111111111","event_id":"00000000-0000-4000-8000-000000000001","distinct_id":"anon-1","event_name":"signed_up","timestamp":"2026-09-01T00:00:00Z","properties":"{}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","event_id":"00000000-0000-4000-8000-000000000002","distinct_id":"user-2","event_name":"signed_up","timestamp":"2026-09-01T01:00:00Z","properties":"{}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","event_id":"00000000-0000-4000-8000-000000000003","distinct_id":"user-1","event_name":"purchased","timestamp":"2026-09-02T00:00:00Z","properties":"{}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","event_id":"00000000-0000-4000-8000-000000000004","distinct_id":"user-2","event_name":"purchased","timestamp":"2026-09-04T00:00:00Z","properties":"{}"},
+    {"project_id":"22222222-2222-4222-8222-222222222222","event_id":"00000000-0000-4000-8000-000000000005","distinct_id":"foreign-user","event_name":"signed_up","timestamp":"2026-09-01T00:00:00Z","properties":"{}"}
+  ],
+  "aliases": [
+    {"project_id":"11111111-1111-4111-8111-111111111111","anonymous_id":"anon-1","canonical_id":"user-1"}
+  ],
+  "external_rows": [
+    {"project_id":"11111111-1111-4111-8111-111111111111","connector_id":"33333333-3333-4333-8333-333333333333","table_name":"payments","row_key":"pay-1","data":"{\"user_id\":\"user-1\",\"amount\":\"10\",\"occurred_at\":\"2026-09-01T02:00:00Z\"}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","connector_id":"33333333-3333-4333-8333-333333333333","table_name":"payments","row_key":"pay-2","data":"{\"user_id\":\"user-1\",\"amount\":\"20\",\"occurred_at\":\"2026-09-01T03:00:00Z\"}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","connector_id":"33333333-3333-4333-8333-333333333333","table_name":"payments","row_key":"pay-3","data":"{\"user_id\":\"user-2\",\"amount\":\"5\",\"occurred_at\":\"2026-09-02T02:00:00Z\"}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","connector_id":"33333333-3333-4333-8333-333333333333","table_name":"payments","row_key":"pay-malformed","data":"{\"user_id\":\"user-3\",\"amount\":null,\"occurred_at\":\"not-a-date\"}"},
+    {"project_id":"11111111-1111-4111-8111-111111111111","connector_id":"44444444-4444-4444-8444-444444444444","table_name":"payments","row_key":"pay-1","data":"{\"user_id\":\"user-1\",\"amount\":\"1000\",\"occurred_at\":\"2026-09-01T02:00:00Z\"}"},
+    {"project_id":"22222222-2222-4222-8222-222222222222","connector_id":"33333333-3333-4333-8333-333333333333","table_name":"payments","row_key":"pay-1","data":"{\"user_id\":\"foreign-user\",\"amount\":\"9999\",\"occurred_at\":\"2026-09-01T02:00:00Z\"}"}
+  ],
+  "queries": [
+    {
+      "name": "event_people",
+      "sql": "SELECT strftime(timestamp, '%Y-%m-%d') AS date, 'people' AS series, count(DISTINCT canonical_id) AS value, 'people' AS unit, count(*) AS sample_size, 'complete' AS state, '' AS reason FROM events WHERE timestamp >= '2026-09-01T00:00:00Z' AND timestamp < '2026-09-03T00:00:00Z' GROUP BY date ORDER BY date",
+      "expected": [
+        {"date":"2026-09-01","series":"people","value":2,"unit":"people","sample_size":2,"state":"complete","reason":""},
+        {"date":"2026-09-02","series":"people","value":1,"unit":"people","sample_size":1,"state":"complete","reason":""}
+      ]
+    },
+    {
+      "name": "connector_revenue",
+      "sql": "WITH event_people AS (SELECT canonical_id AS user_id FROM events WHERE event_name = 'signed_up' GROUP BY 1), payment_facts AS (SELECT json_extract_string(data, '$.user_id') AS user_id, try_cast(json_extract_string(data, '$.amount') AS BIGINT) AS amount, try_cast(json_extract_string(data, '$.occurred_at') AS TIMESTAMPTZ) AS occurred_at FROM external_rows WHERE connector_id = '33333333-3333-4333-8333-333333333333' AND table_name = 'payments'), payments_by_user_day AS (SELECT user_id, CAST(occurred_at AS DATE) AS payment_date, sum(amount) AS amount FROM payment_facts WHERE amount IS NOT NULL AND occurred_at IS NOT NULL GROUP BY 1, 2) SELECT strftime(payment_date, '%Y-%m-%d') AS date, 'revenue' AS series, sum(amount) AS value, 'usd_cents' AS unit, count(*) AS sample_size, 'complete' AS state, '' AS reason FROM event_people e JOIN payments_by_user_day p ON p.user_id = e.user_id GROUP BY payment_date ORDER BY payment_date",
+      "expected": [
+        {"date":"2026-09-01","series":"revenue","value":"30","unit":"usd_cents","sample_size":1,"state":"complete","reason":""},
+        {"date":"2026-09-02","series":"revenue","value":"5","unit":"usd_cents","sample_size":1,"state":"complete","reason":""}
+      ]
+    },
+    {
+      "name": "cohort",
+      "sql": "WITH people AS (SELECT canonical_id AS user_id, min(CASE WHEN event_name = 'signed_up' THEN CAST(timestamp AS DATE) END) AS cohort_date, min(CASE WHEN event_name = 'purchased' THEN CAST(timestamp AS DATE) END) AS converted_date FROM events GROUP BY 1) SELECT strftime(cohort_date, '%Y-%m-%d') AS date, 'conversion' AS series, CASE WHEN converted_date IS NULL THEN 0 ELSE 1 END AS value, 'people' AS unit, 1 AS sample_size, 'complete' AS state, '' AS reason, strftime(cohort_date, '%Y-%m-%d') AS cohort_date, date_diff('day', cohort_date, converted_date) AS age_days, true AS eligible, converted_date IS NOT NULL AS converted FROM people ORDER BY user_id",
+      "expected": [
+        {"date":"2026-09-01","series":"conversion","value":1,"unit":"people","sample_size":1,"state":"complete","reason":"","cohort_date":"2026-09-01","age_days":1,"eligible":true,"converted":true},
+        {"date":"2026-09-01","series":"conversion","value":1,"unit":"people","sample_size":1,"state":"complete","reason":"","cohort_date":"2026-09-01","age_days":3,"eligible":true,"converted":true}
+      ]
+    }
+  ]
+}

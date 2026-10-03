@@ -14,6 +14,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/ingest"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
@@ -813,14 +814,15 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		cache := ops.reg.Allow(principal, legacyWrite(opcore.AccessDashboardsWrite))
 		result, err := store.RunSavedQuery(c.Request().Context(), project.ID, c.Param("query_id"), cache)
 		if err != nil {
-			// Same contract as /api/sql/run: a sandbox that could not run the
-			// query is retryable capacity, not a 500 — the identical query
-			// answered 503 there.
-			if storage.IsSandboxUnavailable(err) {
+			// Saved-query execution shares the operation error taxonomy: a
+			// foreign/missing id is a non-disclosing 404, SQL errors are 400, and
+			// sandbox capacity is retryable with the same hint as run_sql.
+			mapped := usecase.MapOpError(err)
+			var httpErr *echo.HTTPError
+			if errors.As(mapped, &httpErr) && httpErr.Code == http.StatusServiceUnavailable {
 				c.Response().Header().Set("Retry-After", "5")
-				return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 			}
-			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return mapped
 		}
 		return c.JSON(http.StatusOK, map[string]any{"result": result})
 	})
@@ -855,7 +857,7 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 	})
 
 	e.POST("/api/sql/run", func(c echo.Context) error {
-		project, err := authorizedProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
+		principal, _, err := authorizedPrincipalAndProject(c, store, ops, legacyRead(opcore.AccessAnalyticsRead))
 		if err != nil {
 			return err
 		}
@@ -865,22 +867,22 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		if err := c.Bind(&payload); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid json")
 		}
-		rows, err := store.RunSQL(c.Request().Context(), project.ID, payload.SQL)
+		out, err := ops.invoke(c, principal, "run_sql", payload)
 		if err != nil {
-			// A sandbox that could not run the query is not the author's fault,
-			// and must not read as bad SQL: answer 503 (retryable) for that case
-			// only. Everything else is the engine's answer to the query, which
-			// the SQL screen shows inline so users can fix it.
-			if storage.IsSandboxUnavailable(err) {
+			var httpErr *echo.HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code == http.StatusServiceUnavailable {
 				c.Response().Header().Set("Retry-After", "5")
-				return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error())
 			}
-			// Surface the underlying SQL error (e.g. DuckDB syntax/column
-			// errors) to the author instead of Echo's generic 500 — the SQL
-			// screen shows this message inline so users can fix their query.
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+			return err
 		}
-		return c.JSON(http.StatusOK, map[string]any{"rows": rows, "generated_at": time.Now().UTC()})
+		// Keep the legacy envelope while preserving every additive field the
+		// shared operation returns (including C2 metadata owned by its sibling).
+		var envelope map[string]any
+		if err := json.Unmarshal(out, &envelope); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "invalid run_sql operation response")
+		}
+		envelope["generated_at"] = time.Now().UTC()
+		return c.JSON(http.StatusOK, envelope)
 	})
 	mountDashboardLifecycle(e, store, ops)
 
