@@ -9,13 +9,18 @@ import (
 	"time"
 )
 
-type capacitySource struct{ total int }
+type capacitySource struct {
+	total         int
+	validationErr error
+}
 
-func (s *capacitySource) Kind() string                                              { return "faketest" }
-func (s *capacitySource) TestConnection(context.Context) error                      { return nil }
-func (s *capacitySource) DiscoverSchema(context.Context) ([]Table, error)           { return nil, nil }
-func (s *capacitySource) Close()                                                    {}
-func (s *capacitySource) ValidateSnapshotKey(context.Context, string, string) error { return nil }
+func (s *capacitySource) Kind() string                                    { return "faketest" }
+func (s *capacitySource) TestConnection(context.Context) error            { return nil }
+func (s *capacitySource) DiscoverSchema(context.Context) ([]Table, error) { return nil, nil }
+func (s *capacitySource) Close()                                          {}
+func (s *capacitySource) ValidateSnapshotKey(context.Context, string, string) error {
+	return s.validationErr
+}
 func (s *capacitySource) PullRows(_ context.Context, req PullRequest) (PullResult, error) {
 	start := 0
 	if req.CursorKey != "" {
@@ -186,6 +191,21 @@ func snapshotCapacityJob() SyncJob {
 
 func TestSourceCapacitySnapshotResume250001(t *testing.T) {
 	testSourceCapacitySnapshot(t, 250001, 2)
+}
+
+func TestRepairG4TransientValidationPreservesGeneration(t *testing.T) {
+	source := &capacitySource{validationErr: context.DeadlineExceeded}
+	useFakeSource(source, nil)
+	h := &snapshotHarness{fakeStore: newFakeStore(snapshotCapacityJob())}
+	e := NewEngine(h, h)
+	runSync(t, e, h.fakeStore, "snapshot-validation-interrupted")
+	state, exists := h.generationState()
+	if !exists {
+		t.Fatal("snapshot generation was not claimed")
+	}
+	if state == "failed" {
+		t.Fatal("transient validation interruption terminalized generation")
+	}
 }
 
 func TestSourceCapacitySnapshot1000001(t *testing.T) {

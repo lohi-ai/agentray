@@ -2,12 +2,18 @@ package ingestion
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestSnapshotFrozenWireFixture(t *testing.T) {
@@ -105,5 +111,29 @@ func TestLegacyConnectorBatchDecodeUnchanged(t *testing.T) {
 	landed := batch.LandedRows()
 	if len(landed) != 1 || landed[0].Key != "k1" {
 		t.Fatalf("landed=%+v", landed)
+	}
+}
+
+func TestRepairG7OversizedSnapshotRejectedBeforePreparation(t *testing.T) {
+	url := startBrokerWith(t, func(o *natsserver.Options) { o.MaxPayload = 8 << 10 })
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig("snapshot-payload")
+	if _, err := EnsureStreams(context.Background(), nc, cfg); err != nil {
+		t.Fatal(err)
+	}
+	q := NewJetStreamQueue(js, cfg.IngestSubject, cfg.IngestConnectorSubject)
+	common := connector.SnapshotEnvelope{ProjectID: "p", ConnectorID: "c", Table: "t", SyncID: "s", RunID: "r",
+		Generation: "g", GenerationSeq: 1, BindingDigest: strings.Repeat("a", 64), CaptureStartedAt: time.Now().UTC()}
+	_, err = q.BuildSnapshotBatches(common, []connector.LandedRow{{Key: "oversize", DataJSON: `{"blob":"` + strings.Repeat("x", 32<<10) + `"}`}}, 0)
+	if err == nil {
+		t.Fatal("oversized snapshot envelope was accepted for persistence")
 	}
 }

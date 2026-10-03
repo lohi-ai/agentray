@@ -602,7 +602,7 @@ func (s *Store) enrichConnectorSync(cs *ConnectorSync) {
 	if cs == nil || s.sourcePolicy == nil {
 		return
 	}
-	b, err := s.sourcePolicy.Binding(cs.ProjectID, cs.ConnectorID)
+	b, err := s.sourcePolicy.BindingForRelation(cs.ProjectID, cs.ConnectorID, cs.SourceTable)
 	if err != nil || !b.MatchesRelation(cs.SourceTable) {
 		return
 	}
@@ -617,6 +617,13 @@ func (s *Store) SourceBinding(projectID, connectorID string) (*connector.SourceB
 	return s.sourcePolicy.Binding(projectID, connectorID)
 }
 
+func (s *Store) sourceBindingForRelation(projectID, connectorID, relation string) (*connector.SourceBinding, error) {
+	if s.sourcePolicy == nil {
+		return nil, connector.ErrSourcePolicyDenied
+	}
+	return s.sourcePolicy.BindingForRelation(projectID, connectorID, relation)
+}
+
 func (s *Store) validateSourceBinding(projectID, connectorID, syncID string, in ConnectorSyncInput, mode string) error {
 	// Omitted legacy configurations retain their old semantics. They still
 	// cannot dial without policy; this compatibility allowance only preserves
@@ -624,7 +631,7 @@ func (s *Store) validateSourceBinding(projectID, connectorID, syncID string, in 
 	if mode == "" && !s.sourcePolicyConfigured {
 		return nil
 	}
-	b, err := s.SourceBinding(projectID, connectorID)
+	b, err := s.sourceBindingForRelation(projectID, connectorID, in.SourceTable)
 	if err != nil {
 		return fmt.Errorf("source binding is not operator-approved")
 	}
@@ -705,7 +712,7 @@ WHERE cs.id = $1 AND dc.archived_at IS NULL`, syncID).
 	}
 	if s.sourcePolicy != nil {
 		job.SourcePolicy = s.sourcePolicy
-		job.SourceBinding, err = s.sourcePolicy.Binding(job.ProjectID, job.ConnectorID)
+		job.SourceBinding, err = s.sourcePolicy.BindingForRelation(job.ProjectID, job.ConnectorID, job.Table)
 	}
 	if job.Kind == "postgres" {
 		if err != nil || job.SourceBinding == nil || !job.SourceBinding.MatchesRelation(job.Table) || job.SourceBinding.KeyColumn != job.KeyColumn {

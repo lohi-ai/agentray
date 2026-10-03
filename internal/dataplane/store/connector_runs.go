@@ -280,6 +280,16 @@ WHERE id = $1 AND status = 'running' AND owner = $7`, runID, status, result.Rows
 	if err := tx.QueryRow(ctx, `SELECT status FROM connector_runs WHERE id = $1`, runID).Scan(&finalStatus); err != nil {
 		return err
 	}
+	if finalStatus == "cancelled" {
+		// The run row is the durable cancellation authority. Terminalize its
+		// active generation in this same transaction so a cancellation racing
+		// the worker's last heartbeat can never leave resumable snapshot state.
+		if _, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations
+SET state='cancelled',terminal_at=now(),updated_at=now()
+WHERE run_id=$1 AND owner=$2 AND state IN ('capturing','yielded')`, runID, owner); err != nil {
+			return err
+		}
+	}
 	legacyStatus := "ok"
 	if finalStatus != "succeeded" {
 		legacyStatus = "error"

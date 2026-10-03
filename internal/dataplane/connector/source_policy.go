@@ -23,6 +23,7 @@ const (
 )
 
 var ErrSourcePolicyDenied = errors.New("source access is not approved by operator policy")
+var ErrSnapshotKeyInvalid = errors.New("snapshot key or export schema is invalid")
 
 // SourcePolicy is immutable process configuration. It names network
 // destinations separately from relation bindings so neither a stored DSN nor
@@ -145,9 +146,9 @@ func (p *SourcePolicy) Validate() error {
 				return fmt.Errorf("source policy: binding %d cursor %q is not allowlisted", i, c)
 			}
 		}
-		key := b.ProjectID + "\x00" + b.ConnectorID
+		key := b.ProjectID + "\x00" + b.ConnectorID + "\x00" + b.Schema + "\x00" + b.Relation
 		if _, dup := seenBinding[key]; dup {
-			return fmt.Errorf("source policy: duplicate project/connector binding")
+			return fmt.Errorf("source policy: duplicate relation binding")
 		}
 		seenBinding[key] = struct{}{}
 	}
@@ -169,13 +170,43 @@ func allowedSourcePGType(raw string) bool {
 }
 
 func (p *SourcePolicy) Binding(projectID, connectorID string) (*SourceBinding, error) {
+	bindings, err := p.BindingsForConnector(projectID, connectorID)
+	if err != nil {
+		return nil, err
+	}
+	if len(bindings) != 1 {
+		return nil, fmt.Errorf("%w: source relation is required", ErrSourcePolicyDenied)
+	}
+	return &bindings[0], nil
+}
+
+// BindingsForConnector returns every explicitly approved relation for a
+// connector. A connector can legitimately own several existing table syncs;
+// approval is therefore scoped by relation rather than connector alone.
+func (p *SourcePolicy) BindingsForConnector(projectID, connectorID string) ([]SourceBinding, error) {
 	if p == nil {
 		return nil, ErrSourcePolicyDenied
 	}
+	var out []SourceBinding
 	for i := range p.Bindings {
 		if p.Bindings[i].ProjectID == projectID && p.Bindings[i].ConnectorID == connectorID {
-			b := p.Bindings[i]
-			return &b, nil
+			out = append(out, p.Bindings[i])
+		}
+	}
+	if len(out) == 0 {
+		return nil, ErrSourcePolicyDenied
+	}
+	return out, nil
+}
+
+func (p *SourcePolicy) BindingForRelation(projectID, connectorID, relation string) (*SourceBinding, error) {
+	bindings, err := p.BindingsForConnector(projectID, connectorID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range bindings {
+		if bindings[i].MatchesRelation(relation) {
+			return &bindings[i], nil
 		}
 	}
 	return nil, ErrSourcePolicyDenied

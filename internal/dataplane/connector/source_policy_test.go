@@ -89,3 +89,24 @@ func TestSourcePolicyPostgresCannotBypassGovernedOpen(t *testing.T) {
 		t.Fatalf("Open postgres error = %v, want ErrSourcePolicyDenied", err)
 	}
 }
+
+func TestRepairG3PolicyAllowsMultipleRelationsPerConnector(t *testing.T) {
+	base := SourceBinding{ProjectID: "p", ConnectorID: "c", Schema: "public", RelationKind: RelationKindLegacyTable,
+		Columns: []SourcePolicyColumn{{Name: "id", PGType: "bigint"}}, KeyColumn: "id", KeyStability: KeyStabilityImmutableUnique}
+	users := base
+	users.Relation = "users"
+	users.LegacySyncIDs = []string{"sync-users"}
+	orders := base
+	orders.Relation = "orders"
+	orders.LegacySyncIDs = []string{"sync-orders"}
+	p := &SourcePolicy{Version: 1, Bindings: []SourceBinding{users, orders}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("two explicit relation bindings rejected: %v", err)
+	}
+	for relation, wantSync := range map[string]string{"users": "sync-users", "orders": "sync-orders"} {
+		binding, err := p.BindingForRelation("p", "c", relation)
+		if err != nil || !binding.AllowsSync(wantSync) {
+			t.Fatalf("binding for %s=%+v err=%v", relation, binding, err)
+		}
+	}
+}

@@ -78,18 +78,6 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation=? AND batc
 		return err
 	}
 
-	for _, row := range env.Rows {
-		var priorBatch string
-		err := tx.QueryRowContext(ctx, `SELECT batch_id FROM connector_snapshot_rows
-WHERE project_id=? AND connector_id=? AND table_name=? AND generation=? AND row_key=?`,
-			env.ProjectID, env.ConnectorID, env.Table, env.Generation, row.Key).Scan(&priorBatch)
-		if err == nil {
-			return fmt.Errorf("snapshot row key already belongs to another batch")
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_batches
 (project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,batch_id,batch_index,payload_sha256,row_count,capture_started_at,run_id)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, env.ProjectID, env.ConnectorID, env.Table, env.SyncID, env.Generation, env.GenerationSeq,

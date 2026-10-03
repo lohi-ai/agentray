@@ -228,3 +228,75 @@ func TestSnapshotClaimRejectsStaleSyncAndSourceRevisions(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairG1FinishCancellationTerminalizesGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, claimed, g := seedRepairSnapshotGeneration(t, "g1")
+	if _, err := s.CancelConnectorRun(ctx, projectID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the heartbeat race: durable cancellation is already visible,
+	// but the local run context has not observed it yet (cancelled=false).
+	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-g1", connector.SyncResult{}, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "cancelled" {
+		t.Fatalf("generation state=%q after durable cancellation, want cancelled (run=%s epoch=%d)", got.State, claimed.ID, claimed.LeaseEpoch)
+	}
+}
+
+func TestRepairG5ExpiredOwnerCannotFailGeneration(t *testing.T) {
+	s, ctx, _, _, run, _, g := seedRepairSnapshotGeneration(t, "g5")
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailSnapshotGeneration(ctx, g); err == nil {
+		t.Fatal("expired owner changed generation to failed")
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "capturing" {
+		t.Fatalf("generation state=%q, want capturing", got.State)
+	}
+}
+
+func seedRepairSnapshotGeneration(t *testing.T, suffix string) (*Store, context.Context, string, string, connector.Run, connector.Run, connector.SnapshotGeneration) {
+	t.Helper()
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := connector.SourceBinding{ProjectID: projectID, ConnectorID: sync.ConnectorID, Schema: "public", Relation: "users", RelationKind: connector.RelationKindView,
+		Columns: []connector.SourcePolicyColumn{{Name: "id", PGType: "text"}}, KeyColumn: "id", KeyStability: connector.KeyStabilityImmutableUnique}
+	s.sourcePolicy = &connector.SourcePolicy{Version: 1, Bindings: []connector.SourceBinding{binding}}
+	s.sourcePolicyConfigured = true
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_syncs SET source_table='public.users',sync_mode='snapshot',cursor_column='' WHERE id=$1`, syncID); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "repair-"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner-" + suffix
+	claimed, ok, err := s.ClaimConnectorRun(ctx, run.ID, owner)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.ClaimSnapshotGeneration(ctx, job, run.ID, owner, claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, ctx, projectID, syncID, run, claimed, g
+}

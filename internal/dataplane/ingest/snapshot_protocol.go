@@ -41,8 +41,16 @@ func (q EventQueue) BuildSnapshotBatches(common connector.SnapshotEnvelope, rows
 		if err != nil {
 			return nil, err
 		}
-		if _, err := connector.MarshalSnapshotEnvelope(env); err != nil {
+		raw, err := connector.MarshalSnapshotEnvelope(env)
+		if err != nil {
 			return nil, err
+		}
+		if len(raw) > q.publishBudget() {
+			key := ""
+			if len(env.Rows) > 0 {
+				key = env.Rows[0].Key
+			}
+			return nil, fmt.Errorf("snapshot batch starting at row %s is %d bytes, over the %d-byte publish budget", key, len(raw), q.publishBudget())
 		}
 		out = append(out, env)
 	}

@@ -552,7 +552,7 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 	if job.SourcePolicy == nil {
 		return SyncResult{Err: "snapshot source policy is unavailable"}
 	}
-	source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy)
+	source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy, job.Table)
 	if err != nil {
 		return SyncResult{Err: err.Error()}
 	}
@@ -564,7 +564,9 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 		return SyncResult{Err: "snapshot source cannot validate stable keys"}
 	}
 	if err := validator.ValidateSnapshotKey(ctx, job.Table, job.KeyColumn); err != nil {
-		_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		if errors.Is(err, ErrSnapshotKeyInvalid) {
+			_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		}
 		return SyncResult{Err: err.Error()}
 	}
 
@@ -634,7 +636,9 @@ func (e *Engine) pullAndLandSnapshot(ctx context.Context, job SyncJob, run Run) 
 		return SyncResult{Rows: int(g.Rows - startRows)}
 	}
 	if err := validator.ValidateSnapshotKey(ctx, job.Table, job.KeyColumn); err != nil {
-		_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		if errors.Is(err, ErrSnapshotKeyInvalid) {
+			_ = store.FailSnapshotGeneration(context.WithoutCancel(ctx), g)
+		}
 		return SyncResult{Rows: int(g.Rows - startRows), Err: err.Error()}
 	}
 	entries, expectedRows, err := store.SnapshotManifest(ctx, g.Generation)
@@ -710,7 +714,7 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 	var source Source
 	var err error
 	if job.SourcePolicy != nil {
-		source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy)
+		source, err = OpenWithPolicy(ctx, job.Kind, job.DSN, job.ProjectID, job.ConnectorID, job.SourcePolicy, job.Table)
 	} else {
 		source, err = Open(ctx, job.Kind, job.DSN)
 	}

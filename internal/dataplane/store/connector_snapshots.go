@@ -379,7 +379,15 @@ func (s *Store) SnapshotGeneration(ctx context.Context, generation string) (conn
 }
 
 func (s *Store) FailSnapshotGeneration(ctx context.Context, g connector.SnapshotGeneration) error {
-	tag, err := s.pg.Exec(ctx, `UPDATE connector_snapshot_generations SET state='failed',terminal_at=now(),updated_at=now()
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := requireSnapshotRunFence(ctx, tx, g.RunID, g.SyncID, g.Owner, g.LeaseEpoch); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations SET state='failed',terminal_at=now(),updated_at=now()
 WHERE generation=$1 AND state IN ('capturing','yielded') AND run_id=$2 AND owner=$3 AND lease_epoch=$4`, g.Generation, g.RunID, g.Owner, g.LeaseEpoch)
 	if err != nil {
 		return err
@@ -387,7 +395,7 @@ WHERE generation=$1 AND state IN ('capturing','yielded') AND run_id=$2 AND owner
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("snapshot generation failure was fenced")
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) CancelSnapshotGeneration(ctx context.Context, runID, owner string, leaseEpoch int64) error {
