@@ -2,10 +2,12 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
@@ -226,5 +228,95 @@ func TestSnapshotClaimRejectsStaleSyncAndSourceRevisions(t *testing.T) {
 				t.Fatalf("stale %s job claimed a generation: %v", mutate, err)
 			}
 		})
+	}
+}
+
+func TestStagingCleanupPreservesPerColourAuthority(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.duck = openTestDuckDB(t)
+	old := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	generation := uuid.NewString()
+	runID := uuid.NewString()
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,terminal_at,run_id,owner,lease_epoch)
+VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sync.ConnectorID, sync.SourceTable, syncID,
+		generation, strings.Repeat("a", 64), old, runID); err != nil {
+		t.Fatal(err)
+	}
+	green := &Store{pg: s.pg, duck: openTestDuckDB(t)}
+	for _, duck := range []*DuckDB{s.duck, green.duck} {
+		if err := duck.Write(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_rows
+(project_id,connector_id,table_name,generation,batch_id,row_key,data) VALUES(?,?,?,?,?,?,?)`,
+				projectID, sync.ConnectorID, sync.SourceTable, generation, "batch-0", "1", "{}")
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	if deleted, _, err := s.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || deleted != 1 {
+		t.Fatalf("blue cleanup = %d err=%v", deleted, err)
+	}
+	var authorityRows int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM connector_snapshot_generations WHERE generation=$1`, generation).Scan(&authorityRows); err != nil || authorityRows != 1 {
+		t.Fatalf("shared cleanup authority rows = %d err=%v", authorityRows, err)
+	}
+	rows := []connector.SnapshotRow{{Key: "late", Data: []byte(`{"n":1}`)}}
+	digest, err := connector.SnapshotPayloadDigest(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: sync.ConnectorID,
+		Table: sync.SourceTable, SyncID: syncID, Generation: generation, GenerationSeq: 1, BindingDigest: strings.Repeat("a", 64),
+		CaptureStartedAt: old, Kind: connector.SnapshotKindBatch, RunID: runID, BatchID: "late-batch", PayloadSHA256: digest, Rows: rows}
+	if _, err := s.ApplySnapshotEnvelope(ctx, late, AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	var blueRows int
+	if err := s.duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, generation).Scan(&blueRows)
+	}); err != nil || blueRows != 0 {
+		t.Fatalf("blue tombstone retained %d late rows err=%v", blueRows, err)
+	}
+	candidates, err := green.ListStagingGenerations(ctx, cutoff, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, candidate := range candidates {
+		found = found || candidate.Generation == generation
+	}
+	if !found {
+		t.Fatal("green colour lost shared cleanup authority after blue cleanup")
+	}
+	if deleted, _, err := green.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || deleted != 1 {
+		t.Fatalf("green cleanup = %d err=%v", deleted, err)
+	}
+	if _, err := green.ApplySnapshotEnvelope(ctx, late, AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	var greenRows int
+	if err := green.duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, generation).Scan(&greenRows)
+	}); err != nil || greenRows != 0 {
+		t.Fatalf("green tombstone retained %d late rows err=%v", greenRows, err)
+	}
+	for name, colour := range map[string]*Store{"blue": s, "green": green} {
+		candidates, err := colour.ListStagingGenerations(ctx, cutoff, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, candidate := range candidates {
+			if candidate.Generation == generation {
+				t.Fatalf("%s rediscovered locally completed cleanup", name)
+			}
+		}
 	}
 }

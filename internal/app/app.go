@@ -27,15 +27,16 @@ import (
 )
 
 type Server struct {
-	echo            *echo.Echo
-	db              *storage.Store
-	redis           *redis.Client
-	nats            *nats.Conn
-	worker          *ingestion.EventWorker
-	scheduler       *agentruntime.Scheduler
-	agentResources  *agentruntime.RuntimeResources
-	connectorEngine *connector.Engine
-	retention       *storage.Retention
+	echo             *echo.Echo
+	db               *storage.Store
+	redis            *redis.Client
+	nats             *nats.Conn
+	worker           *ingestion.EventWorker
+	scheduler        *agentruntime.Scheduler
+	agentResources   *agentruntime.RuntimeResources
+	connectorEngine  *connector.Engine
+	retention        *storage.Retention
+	stagingRetention *storage.StagingRetention
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
@@ -90,7 +91,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 			nc.Close()
 			return nil, err
 		}
-		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject)
+		queue = ingestion.NewJetStreamQueue(ss.JS, cfg.IngestSubject, cfg.IngestConnectorSubject).WithPublicationObserver(store)
 		ready = ss
 	} else {
 		worker, err = ingestion.StartEventWorker(nc, cfg.IngestSubject, cfg.IngestConnectorSubject, store)
@@ -283,10 +284,12 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// at most one daily sweep, on its own goroutine, because a multi-minute
 	// delete must not hold the clock alert evaluation and connector syncs share.
 	retention := storage.NewRetention(store, cfg.EventRetentionDays)
+	stagingRetention := storage.NewStagingRetention(store, cfg.SourceStagingTTL)
 	scheduler.OnTick(func(tickCtx context.Context, now time.Time) {
 		alertEval.Tick(tickCtx, now)
 		connectorEngine.Tick(tickCtx, now)
 		retention.Tick(tickCtx, now)
+		stagingRetention.Tick(tickCtx, now)
 		findingsScan.Tick(tickCtx, now)
 		experimentReview.Tick(tickCtx, now)
 	})
@@ -311,7 +314,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	registerCredentialRoutes(e, store)
 	registerTeamRoutes(e, store)
 
-	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, agentResources: agentResources, connectorEngine: connectorEngine, retention: retention}, nil
+	return &Server{echo: e, db: store, redis: redisClient, nats: nc, worker: worker, scheduler: scheduler, agentResources: agentResources, connectorEngine: connectorEngine, retention: retention, stagingRetention: stagingRetention}, nil
 }
 
 // buildPipelineMetrics resolves the project that ingest self-metrics are written
@@ -470,6 +473,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// cancels it and waits rather than closing the DuckDB handle underneath it.
 	if s.retention != nil {
 		s.retention.Stop()
+	}
+	if s.stagingRetention != nil {
+		s.stagingRetention.Stop()
 	}
 	// Requests and scheduler admission are stopped before warm provider/language
 	// resources. Closing here prevents retained subprocesses and transports from

@@ -5,11 +5,120 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
+
+// ListStagingGenerations implements StagingRetentionBackend from the
+// authoritative C1 generation journal. Only terminal candidates cross this
+// boundary; deletion rechecks every predicate under a row lock.
+func (s *Store) ListStagingGenerations(ctx context.Context, cutoff time.Time, limit int) ([]StagingGenerationDescriptor, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var storeID any
+	if s.duck != nil {
+		id, err := s.duck.storeIdentity(ctx)
+		if err != nil {
+			return nil, err
+		}
+		storeID = id
+	}
+	rows, err := s.pg.Query(ctx, `SELECT generation::text,state,terminal_at,
+EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
+FROM connector_snapshot_generations g
+WHERE state IN ('failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
+  AND ($3::uuid IS NULL OR NOT EXISTS (
+	SELECT 1 FROM connector_snapshot_cleanup_receipts c WHERE c.generation=g.generation AND c.store_id=$3
+  ))
+ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []StagingGenerationDescriptor{}
+	for rows.Next() {
+		var d StagingGenerationDescriptor
+		if err := rows.Scan(&d.Generation, &d.State, &d.TerminalAt, &d.HasUnpublishedOutbox); err != nil {
+			return nil, err
+		}
+		if s.duck != nil {
+			active, err := s.duck.snapshotGenerationActive(ctx, d.Generation)
+			if err != nil {
+				return nil, err
+			}
+			d.IsActiveOnThisStore = active
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteEligibleStagingChunk(ctx context.Context, generation string, cutoff time.Time, limit int) (int, bool, error) {
+	if s.duck == nil || limit <= 0 {
+		return 0, false, nil
+	}
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback(ctx)
+	var descriptor StagingGenerationDescriptor
+	var pending bool
+	err = tx.QueryRow(ctx, `SELECT generation::text,state,terminal_at,
+EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
+FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generation).
+		Scan(&descriptor.Generation, &descriptor.State, &descriptor.TerminalAt, &pending)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	descriptor.HasUnpublishedOutbox = pending
+	active, err := s.duck.snapshotGenerationActive(ctx, generation)
+	if err != nil {
+		return 0, false, err
+	}
+	descriptor.IsActiveOnThisStore = active
+	if !EligibleForStagingCleanup(descriptor, cutoff) {
+		return 0, false, nil
+	}
+	cleaned, err := s.duck.snapshotGenerationCleanupComplete(ctx, generation)
+	if err != nil {
+		return 0, false, err
+	}
+	deleted, more := 0, false
+	if !cleaned {
+		deleted, more, err = s.duck.deleteSnapshotStagingChunk(ctx, generation, limit)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	if !more {
+		if _, err := tx.Exec(ctx, `DELETE FROM connector_snapshot_outbox WHERE generation=$1`, generation); err != nil {
+			return 0, false, err
+		}
+		// Keep the small terminal generation row as shared cleanup authority.
+		// Each serving DuckDB records its own completion; deleting this row after
+		// the first colour cleans would strand staging in every other colour.
+		storeID, err := s.duck.storeIdentity(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO connector_snapshot_cleanup_receipts(generation,store_id,cleaned_at)
+VALUES($1,$2,now()) ON CONFLICT(generation,store_id) DO UPDATE SET cleaned_at=excluded.cleaned_at`, generation, storeID); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, err
+	}
+	return deleted, true, nil
+}
 
 const snapshotGenerationColumns = `project_id::text,connector_id::text,table_name,sync_id::text,generation::text,generation_seq,
 binding_digest,state,key_position,next_batch_index,row_count,capture_started_at,capture_finished_at,created_at,updated_at,terminal_at,
@@ -98,6 +207,12 @@ func (s *Store) migrateConnectorSnapshots(ctx context.Context) error {
 		`ALTER TABLE connector_snapshot_outbox ADD COLUMN IF NOT EXISTS lower_key TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS connector_snapshot_outbox_pending_idx ON connector_snapshot_outbox(generation,batch_index) WHERE NOT published`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS connector_snapshot_outbox_batch_index_idx ON connector_snapshot_outbox(project_id,connector_id,table_name,generation,kind,batch_index)`,
+		`CREATE TABLE IF NOT EXISTS connector_snapshot_cleanup_receipts (
+	generation UUID NOT NULL,
+	store_id UUID NOT NULL,
+	cleaned_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY(generation,store_id)
+)`,
 	} {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
 			return err

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -930,5 +931,86 @@ func TestConnectorBatchOverBrokerPayloadFailsSync(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "k-big") {
 		t.Fatalf("error must name the row that cannot ride the stream: %v", err)
+	}
+}
+
+type capacityStore struct{ holes atomic.Int32 }
+
+func (s *capacityStore) SinkEvents(context.Context, []storage.Event, storage.AppliedMark) error {
+	return storage.ErrDataCapacity
+}
+func (s *capacityStore) InsertExternalRows(context.Context, string, string, string, []connector.LandedRow, storage.AppliedMark) error {
+	return fmt.Errorf("reserve exhausted: %w", storage.ErrDataCapacity)
+}
+func (s *capacityStore) AppliedPosition(context.Context, string) (storage.AppliedPosition, error) {
+	return storage.AppliedPosition{}, nil
+}
+func (s *capacityStore) AdoptPosition(context.Context, string, uint64) error       { return nil }
+func (s *capacityStore) RefusePosition(context.Context, string, uint64) error      { return nil }
+func (s *capacityStore) RecordPosition(context.Context, storage.AppliedMark) error { return nil }
+func (s *capacityStore) RecordReadinessHole(context.Context, storage.DeliveryReceiptMark, *storage.SourceReceiptMark) error {
+	s.holes.Add(1)
+	return nil
+}
+
+func TestConnectorCapacityAtMaxDeliverStaysRetriable(t *testing.T) {
+	url := startBroker(t)
+	ctx := context.Background()
+	cfg := testConfig("capacity-retry")
+	cfg.IngestMaxDeliver = 1
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	ss, err := EnsureStreams(ctx, nc, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := ss.Ingest.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{Durable: cfg.IngestDurable,
+		AckPolicy: jetstream.AckExplicitPolicy, FilterSubject: cfg.IngestConnectorSubject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := NewJetStreamQueue(ss.JS, ss.Subject, ss.ConnectorSubject)
+	if err := queue.PublishExternalRows(ctx, parityProject, parityConnector, parityTable, parityRows("k1")); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &capacityStore{}
+	var dlq atomic.Int32
+	settler := externalRowsSettler{sink: store, maxDeliver: 1, nakDelay: 10 * time.Millisecond,
+		metrics: NewPipelineMetrics(nil, "", time.Hour), deadLetter: func([]byte) error { dlq.Add(1); return nil }}
+	var first jetstream.Msg
+	for msg := range fetched.Messages() {
+		first = msg
+		settler.settle(msg)
+	}
+	if first == nil {
+		t.Fatal("connector message was not delivered")
+	}
+	redelivered, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRedelivery := false
+	for msg := range redelivered.Messages() {
+		gotRedelivery = true
+		_ = msg.Ack()
+	}
+	if !gotRedelivery || dlq.Load() != 0 || store.holes.Load() != 0 {
+		t.Fatalf("capacity retry redelivered=%v dlq=%d holes=%d", gotRedelivery, dlq.Load(), store.holes.Load())
+	}
+}
+
+func TestStreamIdentityIncludesIncarnation(t *testing.T) {
+	created := time.Date(2026, 10, 3, 1, 2, 3, 4, time.UTC)
+	first := streamIncarnation("INGEST", created)
+	second := streamIncarnation("INGEST", created.Add(time.Second))
+	if first == second || !strings.HasPrefix(first, "INGEST@") {
+		t.Fatalf("stream incarnations collided: %q %q", first, second)
 	}
 }

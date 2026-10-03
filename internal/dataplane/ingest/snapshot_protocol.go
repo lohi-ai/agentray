@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
+	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -66,7 +68,40 @@ func (q EventQueue) PublishSnapshotEnvelope(ctx context.Context, env connector.S
 	if _, err := q.js.Publish(ctx, q.connectorSubject, body, jetstream.WithMsgID(id)); err != nil {
 		return fmt.Errorf("publish snapshot envelope: %w", err)
 	}
+	if q.publicationObserver != nil {
+		published := time.Now().UTC()
+		mark := sourceReceiptFromSnapshotEnvelope(env, &published)
+		stableID := env.Generation + ":" + env.Kind
+		payloadDigest := env.PayloadSHA256
+		if env.Kind == connector.SnapshotKindBatch {
+			stableID += ":" + env.BatchID
+		} else {
+			stableID += ":complete"
+			payloadDigest = env.BatchManifestSHA256
+		}
+		if err := q.publicationObserver.RecordPublication(ctx, storage.PublicationObservation{
+			SourceReceiptMark: *mark, StableBatchID: stableID, PayloadSHA256: payloadDigest, PublishedAt: published,
+		}); err != nil {
+			return fmt.Errorf("record accepted snapshot publication: %w", err)
+		}
+	}
 	return nil
+}
+
+func sourceReceiptFromSnapshotEnvelope(env connector.SnapshotEnvelope, published *time.Time) *storage.SourceReceiptMark {
+	seq := uint64(env.GenerationSeq)
+	mark := &storage.SourceReceiptMark{ProjectID: env.ProjectID, ConnectorID: env.ConnectorID, Table: env.Table,
+		SyncID: env.SyncID, RunID: env.RunID, Generation: env.Generation, GenerationSeq: seq,
+		BindingDigest: env.BindingDigest, CaptureStartedAt: &env.CaptureStartedAt, PublishedAt: published}
+	if env.Kind == connector.SnapshotKindBatch {
+		index := uint64(env.BatchIndex)
+		mark.BatchID, mark.BatchIndex, mark.PayloadSHA256 = env.BatchID, &index, env.PayloadSHA256
+	} else {
+		mark.Complete, mark.CaptureFinishedAt = true, env.CaptureFinishedAt
+		expectedBatches, expectedRows := uint64(env.ExpectedBatches), uint64(env.ExpectedRows)
+		mark.ExpectedBatches, mark.ExpectedRows = &expectedBatches, &expectedRows
+	}
+	return mark
 }
 
 func decodeConnectorEnvelope(raw []byte) (*ExternalRowsBatch, *connector.SnapshotEnvelope, error) {

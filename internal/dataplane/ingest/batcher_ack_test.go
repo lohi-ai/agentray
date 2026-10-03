@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,9 @@ func (m *fakeMsg) term() error             { m.mu.Lock(); m.termed = true; m.mu.
 func (m *fakeMsg) deliveries() uint64      { return m.deliv }
 func (m *fakeMsg) body() []byte            { return m.payload }
 func (m *fakeMsg) seq() uint64             { return m.seqN }
+func (m *fakeMsg) delivery() storage.DeliveryReceiptMark {
+	return storage.DeliveryReceiptMark{StreamID: "test", Subject: "events", StreamSeq: m.seqN, PayloadSHA256: "test-digest"}
+}
 func (m *fakeMsg) state() (bool, bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -53,6 +57,31 @@ func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {
 
 	if a, n, term := msg.state(); !a || n || term {
 		t.Fatalf("want acked only; got ack=%v nak=%v term=%v", a, n, term)
+	}
+}
+
+func TestBatcherRecordsDeliveryIdentityForEmptySettlement(t *testing.T) {
+	recorded := make(chan storage.AppliedMark, 1)
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error { return nil }, EventBatcherConfig{
+		Durable: "empty-colour",
+		RecordPosition: func(_ context.Context, mark storage.AppliedMark) error {
+			recorded <- mark
+			return nil
+		},
+	})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 1, seqN: 9}
+	b.AddMsg(nil, msg)
+	select {
+	case mark := <-recorded:
+		if mark.Seq != 9 || len(mark.Deliveries) != 1 || mark.Deliveries[0].StreamSeq != 9 {
+			t.Fatalf("empty settlement mark = %+v", mark)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("empty settlement was not recorded")
+	}
+	if acked, _, _ := msg.state(); !acked {
+		t.Fatal("empty settlement was not acknowledged")
 	}
 }
 
@@ -125,6 +154,24 @@ func TestBatcherDeadLettersAtMaxDeliver(t *testing.T) {
 	defer dlqMu.Unlock()
 	if len(dlq) != 1 || string(dlq[0]) != "poison-body" {
 		t.Fatalf("want body dead-lettered once, got %v", dlq)
+	}
+}
+
+func TestBatcherCapacityAtMaxDeliverStaysRetriable(t *testing.T) {
+	var deadLetters atomic.Int32
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
+		return fmt.Errorf("disk reserve: %w", storage.ErrDataCapacity)
+	}, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour, MaxRetries: 1, MaxDeliver: 1,
+		DeadLetter: func([]byte) error { deadLetters.Add(1); return nil }})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 99, payload: []byte("valid-accepted-event")}
+	b.AddMsg(ev(1), msg)
+	waitForState(t, msg, func() bool { _, n, _ := msg.state(); return n })
+	if acked, nacked, termed := msg.state(); acked || !nacked || termed {
+		t.Fatalf("capacity settlement = ack=%v nak=%v term=%v, want delayed retry", acked, nacked, termed)
+	}
+	if deadLetters.Load() != 0 {
+		t.Fatal("capacity pressure was classified as poison")
 	}
 }
 
