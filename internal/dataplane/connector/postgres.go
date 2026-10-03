@@ -98,12 +98,14 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 	type endpoint struct {
 		host string
 		port uint16
+		dest SourceDestination
 	}
-	endpoints := []endpoint{{cfg.Host, cfg.Port}}
+	endpoints := []endpoint{{host: cfg.Host, port: cfg.Port}}
 	for _, fallback := range cfg.Fallbacks {
-		endpoints = append(endpoints, endpoint{fallback.Host, fallback.Port})
+		endpoints = append(endpoints, endpoint{host: fallback.Host, port: fallback.Port})
 	}
-	for _, ep := range endpoints {
+	for i := range endpoints {
+		ep := &endpoints[i]
 		if strings.TrimSpace(ep.host) == "" || strings.HasPrefix(ep.host, "/") {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
@@ -111,6 +113,7 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 		if err != nil {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
+		ep.dest = *dest
 		ips, err := net.DefaultResolver.LookupIPAddr(ctx, ep.host)
 		if err != nil || len(ips) == 0 {
 			return fmt.Errorf("postgres: approved source host did not resolve")
@@ -132,17 +135,22 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 		if err != nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		dest, err := policy.Destination(host, uint16(port64))
-		if err != nil {
+		dialIP := net.ParseIP(host)
+		if dialIP == nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(dialCtx, host)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: approved source host did not resolve")
-		}
-		for _, ip := range ips {
-			if destinationAllowsIP(*dest, ip.IP) {
-				return (&net.Dialer{}).DialContext(dialCtx, network, net.JoinHostPort(ip.IP.String(), portText))
+		for _, ep := range endpoints {
+			if ep.port != uint16(port64) || !destinationAllowsIP(ep.dest, dialIP) {
+				continue
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(dialCtx, ep.host)
+			if err != nil {
+				continue
+			}
+			for _, ip := range ips {
+				if ip.IP.Equal(dialIP) {
+					return (&net.Dialer{}).DialContext(dialCtx, network, net.JoinHostPort(dialIP.String(), portText))
+				}
 			}
 		}
 		return nil, fmt.Errorf("postgres: resolved source address is not approved")

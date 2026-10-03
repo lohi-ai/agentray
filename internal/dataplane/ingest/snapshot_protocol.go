@@ -55,6 +55,11 @@ func (q EventQueue) PublishSnapshotEnvelope(ctx context.Context, env connector.S
 	if q.js == nil {
 		return fmt.Errorf("snapshot sync requires durable JetStream")
 	}
+	if admission, ok := q.publicationObserver.(interface{ AdmitDataPublication() error }); ok {
+		if err := admission.AdmitDataPublication(); err != nil {
+			return err
+		}
+	}
 	body, err := connector.MarshalSnapshotEnvelope(env)
 	if err != nil {
 		return err

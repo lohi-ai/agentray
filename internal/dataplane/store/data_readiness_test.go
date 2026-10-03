@@ -113,6 +113,151 @@ func TestDataReadinessRequiresPromotionSandboxAndNoHoles(t *testing.T) {
 	}
 }
 
+func TestSettlementOnlyReceiptDoesNotClearHole(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	delivery := DeliveryReceiptMark{StreamID: "stream", Subject: "events", StreamSeq: 5, PayloadSHA256: strings.Repeat("a", 64)}
+	if err := d.RecordReadinessHole(ctx, delivery, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordPosition(ctx, AppliedMark{Durable: "blue", Seq: 1, Deliveries: []DeliveryReceiptMark{delivery}}); err != nil {
+		t.Fatal(err)
+	}
+	var holes int
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if holes != 1 {
+		t.Fatalf("settlement-only receipt cleared holes=%d", holes)
+	}
+}
+
+func TestLaterIncrementalCompletionPreservesEarlierCoverageHole(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID, syncID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	at := time.Now().UTC().Add(-time.Minute)
+	one, zero := uint64(1), uint64(0)
+	first := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), CaptureStartedAt: &at, CaptureFinishedAt: &at, ExpectedBatches: &one, Complete: true, Promoted: true}
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &first}); err != nil {
+		t.Fatal(err)
+	}
+	later := at.Add(time.Second)
+	second := first
+	second.RunID, second.CaptureStartedAt, second.CaptureFinishedAt, second.ExpectedBatches = uuid.NewString(), &later, &later, &zero
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &second}); err != nil {
+		t.Fatal(err)
+	}
+	pool := newSQLSandboxPool(d)
+	t.Cleanup(pool.closeAll)
+	s := &Store{duck: d, sandboxes: pool, now: time.Now, manualFreshness: time.Hour}
+	if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SourceReadiness(ctx, projectID, []ReadinessSource{{SyncID: syncID, ConnectorID: connectorID, Table: "orders", Configured: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready := got[syncID]; ready.State != ReadinessIncomplete {
+		t.Fatalf("later empty delta forgot earlier coverage hole: %+v", ready)
+	}
+}
+
+func TestReadinessDoesNotCrossSyncIdentity(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID := uuid.NewString(), uuid.NewString()
+	oldSync, newSync, runID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC()
+	zero := uint64(0)
+	mark := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: oldSync,
+		RunID: runID, CaptureStartedAt: &now, CaptureFinishedAt: &now, ExpectedBatches: &zero, Complete: true, Promoted: true}
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &mark}); err != nil {
+		t.Fatal(err)
+	}
+	pool := newSQLSandboxPool(d)
+	t.Cleanup(pool.closeAll)
+	s := &Store{duck: d, sandboxes: pool, now: func() time.Time { return now }}
+	if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SourceReadiness(ctx, projectID, []ReadinessSource{{SyncID: newSync, ConnectorID: connectorID, Table: "orders", Configured: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready := got[newSync]; ready.State == ReadinessReady {
+		t.Fatalf("new sync inherited old sync evidence: %+v", ready)
+	}
+}
+
+func TestSnapshotToIncrementalTransitionAppliesNewerRow(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID := uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC()
+	index := uint64(0)
+	snapshot := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: uuid.NewString(),
+		RunID: uuid.NewString(), Generation: uuid.NewString(), GenerationSeq: 1, BatchID: "snapshot", BatchIndex: &index,
+		PayloadSHA256: strings.Repeat("a", 64), CaptureStartedAt: &now, Promoted: true}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: "same", DataJSON: `{"n":1}`}}, AppliedMark{Source: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(time.Minute)
+	incremental := snapshot
+	incremental.Generation, incremental.GenerationSeq, incremental.RunID, incremental.BatchID = "", 0, uuid.NewString(), "incremental"
+	incremental.CaptureStartedAt, incremental.PayloadSHA256 = &later, strings.Repeat("b", 64)
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: "same", DataJSON: `{"n":2}`}}, AppliedMark{Source: &incremental}); err != nil {
+		t.Fatal(err)
+	}
+	var value int
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows WHERE project_id=?`, projectID).Scan(&value)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if value != 2 {
+		t.Fatalf("snapshot-to-incremental update stored value=%d", value)
+	}
+}
+
+func TestIncompleteCompletionPreservesLastCompleteAt(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID, syncID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	oldTime := time.Now().UTC().Add(-time.Hour)
+	zero, two, index := uint64(0), uint64(2), uint64(0)
+	old := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), CaptureStartedAt: &oldTime, CaptureFinishedAt: &oldTime, ExpectedBatches: &zero, Complete: true, Promoted: true}
+	if err := d.Write(ctx, func(tx *sql.Tx) error {
+		return recordAppliedReceiptsTx(ctx, tx, AppliedMark{Source: &old}, oldTime)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-time.Minute)
+	batch := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), CaptureStartedAt: &started, BatchID: "one", BatchIndex: &index, PayloadSHA256: strings.Repeat("a", 64), Promoted: true}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: "1", DataJSON: `{}`}}, AppliedMark{Source: &batch}); err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Now().UTC()
+	complete := batch
+	complete.BatchID, complete.BatchIndex, complete.PayloadSHA256 = "", nil, ""
+	complete.ExpectedBatches, complete.Complete, complete.CaptureFinishedAt = &two, true, &finished
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &complete}); err != nil {
+		t.Fatal(err)
+	}
+	local, err := d.localReadiness(ctx, projectID, []ReadinessSource{{SyncID: syncID, ConnectorID: connectorID, Table: "orders", Configured: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := local[syncID].LastCompleteAt; got == nil || !got.Equal(oldTime) {
+		t.Fatalf("incomplete run advanced last_complete_at: old=%s got=%v", oldTime, got)
+	}
+}
+
 func TestPublicationTargetRejectsOlderServingRun(t *testing.T) {
 	local := localSourceReceipt{RunID: "run-old", GenerationSeq: 3}
 	if !publicationRequiresNewerLocal(publicationTarget{RunID: "run-new", GenerationSeq: 3}, local) {

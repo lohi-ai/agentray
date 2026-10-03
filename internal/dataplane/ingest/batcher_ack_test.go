@@ -44,6 +44,60 @@ func (m *fakeMsg) state() (bool, bool, bool) {
 	return m.acked, m.nakked, m.termed
 }
 
+func TestPoisonDLQFailurePreservesExistingReadinessHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "poison.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	msg := &fakeMsg{seqN: 17, deliv: 9, payload: []byte("poison")}
+	if err := duck.RecordReadinessHole(ctx, msg.delivery(), nil); err != nil {
+		t.Fatal(err)
+	}
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
+		return errors.New("sink unavailable")
+	}, EventBatcherConfig{
+		Durable: "probe", RecordPosition: duck.RecordPosition, RecordHole: duck.RecordReadinessHole,
+		DeadLetter: func([]byte) error { return errors.New("DLQ unavailable") }, FlushEvery: time.Hour,
+	})
+	defer b.Stop()
+	b.poison(msg, nil, errors.New("invalid event"))
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); holes != 1 || ack || !nak || term {
+		t.Fatalf("holes=%d ack=%v nak=%v term=%v", holes, ack, nak, term)
+	}
+}
+
+func TestMalformedProjectPoisonSettlesWithUnattributedHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "malformed.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	dlq := 0
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{Durable: "probe", RecordPosition: duck.RecordPosition,
+		RecordHole: duck.RecordReadinessHole, DeadLetter: func([]byte) error { dlq++; return nil }})
+	defer b.Stop()
+	msg := &fakeMsg{seqN: 1, deliv: 99, payload: []byte(`[{"project_id":"malformed"}]`)}
+	b.AddMsg([]storage.Event{{ProjectID: "malformed", EventID: uuid.NewString()}}, msg)
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE project_id IS NULL AND cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); dlq != 1 || holes != 1 || ack || nak || !term {
+		t.Fatalf("dlq=%d holes=%d ack=%v nak=%v term=%v", dlq, holes, ack, nak, term)
+	}
+}
+
 // A message whose insert succeeds must be acked (never redelivered).
 func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {
 	sink := newRecordingSink()
