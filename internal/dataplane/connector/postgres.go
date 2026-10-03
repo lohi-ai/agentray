@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,50 +104,69 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 	for _, fallback := range cfg.Fallbacks {
 		endpoints = append(endpoints, endpoint{fallback.Host, fallback.Port})
 	}
+	approvedByHost := make(map[string][]endpoint)
 	for _, ep := range endpoints {
 		if strings.TrimSpace(ep.host) == "" || strings.HasPrefix(ep.host, "/") {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
-		dest, err := policy.Destination(ep.host, ep.port)
-		if err != nil {
+		if _, err := policy.Destination(ep.host, ep.port); err != nil {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, ep.host)
-		if err != nil || len(ips) == 0 {
-			return fmt.Errorf("postgres: approved source host did not resolve")
-		}
-		for _, ip := range ips {
-			if !destinationAllowsIP(*dest, ip.IP) {
-				return fmt.Errorf("postgres: resolved source address is not approved")
-			}
-		}
+		host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(ep.host)), ".")
+		approvedByHost[host] = append(approvedByHost[host], ep)
 	}
-	// Re-resolve and re-check at every socket dial, then pin the socket to the
-	// validated address. TLS still sees cfg.Host as its server name.
+	// pgx resolves hostnames before DialFunc and passes DialFunc an IP address.
+	// Admit inside LookupFunc, retain the exact hostname/IP/port association,
+	// and require that association again for every socket dial. pgx retains the
+	// original hostname separately for TLS/SNI verification.
+	var resolvedMu sync.Mutex
+	resolved := make(map[string]struct{})
+	cfg.LookupFunc = func(lookupCtx context.Context, host string) ([]string, error) {
+		normalized := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		hostEndpoints := approvedByHost[normalized]
+		if len(hostEndpoints) == 0 {
+			return nil, fmt.Errorf("postgres: source destination is not approved")
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+		if err != nil || len(ips) == 0 {
+			return nil, fmt.Errorf("postgres: approved source host did not resolve")
+		}
+		out := make([]string, 0, len(ips))
+		for _, addr := range ips {
+			allowed := false
+			for _, ep := range hostEndpoints {
+				dest, _ := policy.Destination(ep.host, ep.port)
+				if dest != nil && destinationAllowsIP(*dest, addr.IP) {
+					resolvedMu.Lock()
+					resolved[net.JoinHostPort(addr.IP.String(), strconv.Itoa(int(ep.port)))] = struct{}{}
+					resolvedMu.Unlock()
+					allowed = true
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("postgres: resolved source address is not approved")
+			}
+			out = append(out, addr.IP.String())
+		}
+		return out, nil
+	}
 	cfg.DialFunc = func(dialCtx context.Context, network, address string) (net.Conn, error) {
 		host, portText, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		port64, err := strconv.ParseUint(portText, 10, 16)
-		if err != nil {
+		if net.ParseIP(host) == nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		dest, err := policy.Destination(host, uint16(port64))
-		if err != nil {
+		resolvedMu.Lock()
+		_, admitted := resolved[net.JoinHostPort(host, portText)]
+		resolvedMu.Unlock()
+		if !admitted {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(dialCtx, host)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: approved source host did not resolve")
-		}
-		for _, ip := range ips {
-			if destinationAllowsIP(*dest, ip.IP) {
-				return (&net.Dialer{}).DialContext(dialCtx, network, net.JoinHostPort(ip.IP.String(), portText))
-			}
-		}
-		return nil, fmt.Errorf("postgres: resolved source address is not approved")
+		return (&net.Dialer{}).DialContext(dialCtx, network, address)
 	}
+	_ = ctx // resolution is intentionally deferred to pgx's per-connect lookup.
 	return nil
 }
 
@@ -171,7 +191,13 @@ func sanitizePGError(err error, password string) string {
 	var pgErr *pgconn.PgError
 	msg := err.Error()
 	if errors.As(err, &pgErr) {
-		msg = pgErr.Message
+		// PostgreSQL messages can quote source values (for example 22P02 can
+		// include the rejected email/address). SQLSTATE is stable and contains
+		// no source data, so governed paths expose only that category.
+		if pgErr.Code == "" {
+			return "database request failed"
+		}
+		return fmt.Sprintf("database request failed (SQLSTATE %s)", pgErr.Code)
 	}
 	if password != "" {
 		msg = strings.ReplaceAll(msg, password, "•••")
@@ -302,7 +328,7 @@ ORDER BY a.attnum`, b.Schema, b.Relation)
 		}
 		cols = append(cols, Column{Name: allowed.Name, Type: allowed.PGType, IsPrimaryKey: allowed.Name == b.KeyColumn})
 	}
-	return []Table{{Name: b.QualifiedRelation(), Columns: cols, RelationKind: b.RelationKind, KeyColumn: b.KeyColumn, KeyStability: b.KeyStability}}, nil
+	return []Table{{Name: b.DisplayRelation(), Columns: cols, RelationKind: b.RelationKind, KeyColumn: b.KeyColumn, KeyStability: b.KeyStability}}, nil
 }
 
 // PullRows fetches the next incremental batch, keyset-paginated on
@@ -323,7 +349,13 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	if req.Limit <= 0 {
 		req.Limit = 1000
 	}
-	tableIdent, err := quoteQualified(req.Table)
+	queryTable := req.Table
+	if p.binding != nil {
+		// Keep the persisted/public landing identity untouched while always
+		// addressing the governed source relation with an explicit schema.
+		queryTable = p.binding.QualifiedRelation()
+	}
+	tableIdent, err := quoteQualified(queryTable)
 	if err != nil {
 		return PullResult{}, err
 	}
@@ -341,7 +373,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	query := fmt.Sprintf(`SELECT %s FROM %s`, selectList, tableIdent)
 	var args []any
 	if req.Snapshot {
-		keyType, err := p.columnType(ctx, req.Table, req.KeyColumn)
+		keyType, err := p.columnType(ctx, queryTable, req.KeyColumn)
 		if err != nil {
 			return PullResult{}, err
 		}
@@ -353,11 +385,11 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	} else {
 		switch {
 		case req.Cursor != "" && req.CursorKey != "":
-			cursorType, err := p.columnType(ctx, req.Table, req.CursorColumn)
+			cursorType, err := p.columnType(ctx, queryTable, req.CursorColumn)
 			if err != nil {
 				return PullResult{}, err
 			}
-			keyType, err := p.columnType(ctx, req.Table, req.KeyColumn)
+			keyType, err := p.columnType(ctx, queryTable, req.KeyColumn)
 			if err != nil {
 				return PullResult{}, err
 			}
@@ -366,7 +398,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 			args = append(args, req.Cursor, req.CursorKey)
 		case req.Cursor != "":
 			// Legacy position without a key half: strict cursor comparison.
-			cursorType, err := p.columnType(ctx, req.Table, req.CursorColumn)
+			cursorType, err := p.columnType(ctx, queryTable, req.CursorColumn)
 			if err != nil {
 				return PullResult{}, err
 			}
@@ -375,7 +407,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 		case req.CursorKey != "":
 			// Still inside the NULL-cursor region (sorted first): page by key,
 			// then flow into the non-NULL region.
-			keyType, err := p.columnType(ctx, req.Table, req.KeyColumn)
+			keyType, err := p.columnType(ctx, queryTable, req.KeyColumn)
 			if err != nil {
 				return PullResult{}, err
 			}
@@ -388,7 +420,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 
 	rows, err := p.conn.Query(ctx, query, args...)
 	if err != nil {
-		return PullResult{}, fmt.Errorf("postgres: pull %s: %s", req.Table, sanitizePGError(err, p.conn.Config().Password))
+		return PullResult{}, fmt.Errorf("postgres: pull %s: source query failed", req.Table)
 	}
 	defer rows.Close()
 
@@ -397,7 +429,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	for rows.Next() {
 		values, err := rows.Values()
 		if err != nil {
-			return PullResult{}, err
+			return PullResult{}, fmt.Errorf("postgres: pull %s: source row decoding failed", req.Table)
 		}
 		data := make(map[string]any, len(fields))
 		var key, cursor string
@@ -422,7 +454,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 		out.NextCursorKey = key
 	}
 	if err := rows.Err(); err != nil {
-		return PullResult{}, fmt.Errorf("postgres: pull %s: %s", req.Table, sanitizePGError(err, p.conn.Config().Password))
+		return PullResult{}, fmt.Errorf("postgres: pull %s: source query failed", req.Table)
 	}
 	out.HasMore = len(out.Rows) == req.Limit
 	return out, nil
@@ -430,7 +462,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 
 func (p *postgresSource) validateApprovedRequest(req PullRequest) error {
 	b := p.binding
-	if req.Table != b.QualifiedRelation() || req.KeyColumn != b.KeyColumn {
+	if !b.MatchesRelation(req.Table) || req.KeyColumn != b.KeyColumn {
 		return fmt.Errorf("postgres: source relation or key is not approved")
 	}
 	if req.Snapshot {
@@ -449,10 +481,10 @@ func (p *postgresSource) validateApprovedRequest(req PullRequest) error {
 // cannot establish uniqueness, so this query scans until it finds a violation
 // or proves none under the caller's deadline.
 func (p *postgresSource) ValidateSnapshotKey(ctx context.Context, table, keyColumn string) error {
-	if p.binding == nil || table != p.binding.QualifiedRelation() || keyColumn != p.binding.KeyColumn {
+	if p.binding == nil || !p.binding.MatchesRelation(table) || keyColumn != p.binding.KeyColumn {
 		return fmt.Errorf("postgres: source relation or key is not approved")
 	}
-	tableIdent, err := quoteQualified(table)
+	tableIdent, err := quoteQualified(p.binding.QualifiedRelation())
 	if err != nil {
 		return err
 	}

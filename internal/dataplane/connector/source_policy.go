@@ -194,6 +194,23 @@ func (p *SourcePolicy) Destination(host string, port uint16) (*SourceDestination
 
 func (b SourceBinding) QualifiedRelation() string { return b.Schema + "." + b.Relation }
 
+// MatchesRelation preserves the pre-policy PostgreSQL identity for public
+// tables. Legacy sync rows historically stored "users", while governed view
+// bindings and non-public relations use the qualified "schema.relation" form.
+func (b SourceBinding) MatchesRelation(name string) bool {
+	if name == b.QualifiedRelation() {
+		return true
+	}
+	return b.RelationKind == RelationKindLegacyTable && b.Schema == "public" && name == b.Relation
+}
+
+func (b SourceBinding) DisplayRelation() string {
+	if b.RelationKind == RelationKindLegacyTable && b.Schema == "public" {
+		return b.Relation
+	}
+	return b.QualifiedRelation()
+}
+
 func (b SourceBinding) AllowsColumn(name string) bool {
 	for _, c := range b.Columns {
 		if c.Name == name {

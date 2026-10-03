@@ -76,6 +76,8 @@ type SnapshotGeneration struct {
 	RunID             string     `json:"run_id,omitempty"`
 	Owner             string     `json:"-"`
 	LeaseEpoch        int64      `json:"-"`
+	SyncRevision      int64      `json:"sync_revision"`
+	SourceRevision    int64      `json:"source_revision"`
 }
 
 type SnapshotOutbox struct {
@@ -268,6 +270,13 @@ func MarshalSnapshotEnvelope(e SnapshotEnvelope) ([]byte, error) {
 
 func ParseSnapshotEnvelope(raw []byte) (SnapshotEnvelope, error) {
 	var env SnapshotEnvelope
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return env, err
+	}
+	if err := requireSnapshotFields(fields); err != nil {
+		return env, err
+	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return env, err
 	}
@@ -275,4 +284,41 @@ func ParseSnapshotEnvelope(raw []byte) (SnapshotEnvelope, error) {
 		return env, err
 	}
 	return env, nil
+}
+
+func requireSnapshotFields(fields map[string]json.RawMessage) error {
+	required := []string{"protocol", "project_id", "connector_id", "table", "sync_id", "generation", "generation_seq", "binding_digest", "capture_started_at", "kind", "run_id"}
+	for _, name := range required {
+		if raw, ok := fields[name]; !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("snapshot field %q is required", name)
+		}
+	}
+	var kind string
+	if err := json.Unmarshal(fields["kind"], &kind); err != nil {
+		return fmt.Errorf("snapshot field %q is invalid", "kind")
+	}
+	var kindRequired, forbidden []string
+	switch kind {
+	case SnapshotKindBatch:
+		kindRequired = []string{"batch_id", "batch_index", "payload_sha256", "capture_finished_at", "rows"}
+		forbidden = []string{"expected_batches", "expected_rows", "batch_manifest_sha256"}
+	case SnapshotKindComplete:
+		kindRequired = []string{"expected_batches", "expected_rows", "batch_manifest_sha256", "capture_finished_at"}
+		forbidden = []string{"batch_id", "batch_index", "payload_sha256", "rows"}
+	default:
+		return fmt.Errorf("unknown snapshot kind")
+	}
+	for _, name := range kindRequired {
+		raw, ok := fields[name]
+		// capture_finished_at is deliberately present-and-null on batches.
+		if !ok || name != "capture_finished_at" && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("snapshot field %q is required", name)
+		}
+	}
+	for _, name := range forbidden {
+		if _, ok := fields[name]; ok {
+			return fmt.Errorf("snapshot field %q is not valid for kind %q", name, kind)
+		}
+	}
+	return nil
 }

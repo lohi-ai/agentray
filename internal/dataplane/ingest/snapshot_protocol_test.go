@@ -85,6 +85,13 @@ func TestSnapshotDispatchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSnapshotDispatchRejectsMissingCompletionCounts(t *testing.T) {
+	raw := []byte(`{"protocol":"agentray.connector.snapshot.v1","project_id":"p","connector_id":"c","table":"t","sync_id":"s","run_id":"r","generation":"g","generation_seq":1,"binding_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","capture_started_at":"2026-10-01T00:00:00Z","capture_finished_at":"2026-10-01T00:00:01Z","kind":"complete","batch_manifest_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
+	if _, _, err := decodeConnectorEnvelope(raw); err == nil {
+		t.Fatal("completion without explicit expected counts was accepted")
+	}
+}
+
 func TestLegacyConnectorBatchDecodeUnchanged(t *testing.T) {
 	want := ExternalRowsBatch{ProjectID: "00000000-0000-4000-8000-000000000001", ConnectorID: "00000000-0000-4000-8000-000000000002", Table: "users", Rows: []ExternalRow{{Key: "k1", Cursor: "1", Data: json.RawMessage(`{"id":"k1","kind":"legacy","generation":"customer-value"}`)}}}
 	raw, err := json.Marshal(want)

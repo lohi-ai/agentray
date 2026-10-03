@@ -86,11 +86,8 @@ func decodeConnectorEnvelope(raw []byte) (*ExternalRowsBatch, *connector.Snapsho
 		if protocol != connector.SnapshotProtocolV1 {
 			return nil, nil, fmt.Errorf("unknown connector protocol %q", protocol)
 		}
-		var env connector.SnapshotEnvelope
-		if err := json.Unmarshal(raw, &env); err != nil {
-			return nil, nil, err
-		}
-		if err := env.Validate(); err != nil {
+		env, err := connector.ParseSnapshotEnvelope(raw)
+		if err != nil {
 			return nil, nil, err
 		}
 		return nil, &env, nil
