@@ -162,6 +162,24 @@ func TestQueryContractQuotedAliasesDoNotHideTheSource(t *testing.T) {
 	}
 }
 
+func TestQueryContractDollarBearingIdentifiersDoNotHideTheSource(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedCanonicalQueryFixture(t, d)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	for _, alias := range []string{"é$tag$", "a$tag$$tag$"} {
+		t.Run(alias, func(t *testing.T) {
+			query, args, err := scopedReadonlySQL("SELECT 1 AS "+alias+" FROM events LIMIT 1", fixture.ProjectID, nil)
+			if err != nil {
+				t.Fatalf("scope dollar-bearing alias: %v", err)
+			}
+			rows, err := pool.query(ctx, fixture.ProjectID, query, args)
+			if err != nil || len(rows) != 1 || rows[0][alias] != int32(1) {
+				t.Fatalf("execute dollar-bearing alias: rows=%#v err=%v\n%s", rows, err, query)
+			}
+		})
+	}
+}
+
 func TestQueryContractRecursiveCTEAndCheckedIntegerConversion(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedCanonicalQueryFixture(t, d)

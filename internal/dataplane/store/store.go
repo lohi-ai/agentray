@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
@@ -4769,7 +4771,7 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				// backslash as an escape can consume the closing quote and mask
 				// executable SQL that follows it (including FROM events).
 				escapeQuoted = i > 0 && (sqlText[i-1] == 'e' || sqlText[i-1] == 'E') &&
-					(i < 2 || !isSQLIdentifierByte(sqlText[i-2]))
+					!isSQLIdentifierContinuationBefore(sqlText, i-1)
 				out[i] = ' '
 				state = singleQuoted
 			case out[i] == '"':
@@ -4777,7 +4779,7 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				// guard can still reject FROM "events", but do not interpret
 				// apostrophes or comment markers inside an alias as SQL syntax.
 				state = doubleQuoted
-			case out[i] == '$' && (i == 0 || !isSQLIdentifierByte(out[i-1])):
+			case out[i] == '$' && !isSQLIdentifierContinuationBefore(sqlText, i):
 				// DuckDB supports PostgreSQL-style dollar-quoted strings. Mask the
 				// whole span so apostrophes and source-looking text inside it cannot
 				// alter source discovery.
@@ -4899,8 +4901,18 @@ func isSQLDollarTagContinuationByte(b byte) bool {
 	return isSQLDollarTagStartByte(b) || b >= '0' && b <= '9'
 }
 
-func isSQLIdentifierByte(b byte) bool {
-	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+// isSQLIdentifierContinuationBefore reports whether the rune immediately
+// before end can continue an unquoted DuckDB identifier. Dollar signs and
+// non-ASCII non-space runes are significant here: treating a following $tag$
+// as a string delimiter can otherwise mask executable SQL later in the query.
+func isSQLIdentifierContinuationBefore(sqlText string, end int) bool {
+	if end <= 0 || end > len(sqlText) {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(sqlText[:end])
+	return r == '_' || r == '$' ||
+		r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r >= utf8.RuneSelf && !unicode.IsSpace(r)
 }
 
 func validateReadonlySQL(sqlText string) error {

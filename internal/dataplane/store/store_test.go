@@ -270,6 +270,20 @@ func TestScopedReadonlySQLMasksDollarStringsAndNestedComments(t *testing.T) {
 	}
 }
 
+func TestScopedReadonlySQLKeepsDollarQuotedSyntaxInsideIdentifiersVisible(t *testing.T) {
+	for _, alias := range []string{"é$tag$", "a$tag$$tag$"} {
+		query := "SELECT 1 AS " + alias + " FROM events LIMIT 1"
+		scoped, _, err := scopedReadonlySQL(query, "project-1", nil)
+		if err != nil {
+			t.Errorf("valid dollar-bearing identifier rejected (%v): %s", err, query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("real events source was not scoped: %s", scoped)
+		}
+	}
+}
+
 func TestScopedReadonlySQLDistinguishesOrdinaryAndEscapeStrings(t *testing.T) {
 	ordinary := `SELECT '\' AS slash FROM events LIMIT 1`
 	query, args, err := scopedReadonlySQL(ordinary, "project-1", nil)
