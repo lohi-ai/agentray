@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func rowsJSON(t *testing.T, raw json.RawMessage) string {
 }
 
 func TestQueryContractAdaptersAndSavedArtifacts(t *testing.T) {
-	s := openAppTestStore(t)
+	s := openRequiredAppTestStore(t)
 	ctx := context.Background()
 	stamp := time.Now().UnixNano()
 	owner, err := s.CreateAccount(ctx, fmt.Sprintf("query-contract-%d@test.local", stamp), "Owner", "password-123", "ws", "query")
@@ -94,8 +95,6 @@ func TestQueryContractAdaptersAndSavedArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := seedAppQueryFixture(t, s, owner.Project.ID, foreign.Project.ID)
-	contract := fixture.Queries[1] // connector-aware revenue query
-
 	_, reader, err := s.CreateProjectCredential(ctx, owner.User.ID, owner.Project.ID, "investigator", []string{"analytics:read", "sources:read"})
 	if err != nil {
 		t.Fatal(err)
@@ -107,48 +106,51 @@ func TestQueryContractAdaptersAndSavedArtifacts(t *testing.T) {
 	e := mountServerRoutes(t, s)
 	registerOpRoutes(e, s, nil, nil)
 	registerMcpRoutes(e, s, nil, nil)
-	body, _ := json.Marshal(map[string]string{"sql": contract.SQL})
-
-	wantRaw, _ := json.Marshal(map[string]any{"rows": contract.Expected})
-	want := rowsJSON(t, wantRaw)
-	got := map[string]string{}
-	legacy := postJSON(t, e, "/api/sql/run?project_id="+owner.Project.ID, string(body), map[string]string{"Authorization": "Bearer " + reader})
-	if legacy.Code != http.StatusOK {
-		t.Fatalf("legacy run_sql: %d %s", legacy.Code, legacy.Body.String())
-	}
-	got["legacy"] = rowsJSON(t, legacy.Body.Bytes())
-
-	for name, invoke := range map[string]opInvoker{
+	invokers := map[string]opInvoker{
 		"op":      restInvoker(e, reader),
 		"mcp":     mcpInvoker(e, reader),
 		"runtime": runtimeInvoker(usecase.Registry(), opcore.CallContext{ProjectID: owner.Project.ID, Deps: &usecase.Deps{Repo: s}}),
-	} {
-		out := invoke(t, "run_sql", string(body))
-		if out.class != "ok" {
-			t.Fatalf("%s run_sql class = %s", name, out.class)
-		}
-		got[name] = rowsJSON(t, out.raw)
 	}
+	for _, contract := range fixture.Queries {
+		t.Run(contract.Name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"sql": contract.SQL})
+			wantRaw, _ := json.Marshal(map[string]any{"rows": contract.Expected})
+			want := rowsJSON(t, wantRaw)
+			got := map[string]string{}
+			legacy := postJSON(t, e, "/api/sql/run?project_id="+owner.Project.ID, string(body), map[string]string{"Authorization": "Bearer " + reader})
+			if legacy.Code != http.StatusOK {
+				t.Fatalf("legacy run_sql: %d %s", legacy.Code, legacy.Body.String())
+			}
+			got["legacy"] = rowsJSON(t, legacy.Body.Bytes())
+			for name, invoke := range invokers {
+				out := invoke(t, "run_sql", string(body))
+				if out.class != "ok" {
+					t.Fatalf("%s run_sql class = %s", name, out.class)
+				}
+				got[name] = rowsJSON(t, out.raw)
+			}
 
-	saved, err := s.CreateSavedQuery(ctx, owner.Project.ID, "Canonical revenue", contract.SQL, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	savedRec := postJSON(t, e, "/api/saved-queries/"+saved.ID+"/run?project_id="+owner.Project.ID, `{}`, map[string]string{"Authorization": "Bearer " + reader})
-	if savedRec.Code != http.StatusOK {
-		t.Fatalf("saved query: %d %s", savedRec.Code, savedRec.Body.String())
-	}
-	var savedEnvelope struct {
-		Result json.RawMessage `json:"result"`
-	}
-	if err := json.Unmarshal(savedRec.Body.Bytes(), &savedEnvelope); err != nil {
-		t.Fatal(err)
-	}
-	got["saved_query"] = rowsJSON(t, savedEnvelope.Result)
-	for adapter, rows := range got {
-		if rows != want {
-			t.Errorf("%s rows differ\n got: %s\nwant: %s", adapter, rows, want)
-		}
+			saved, err := s.CreateSavedQuery(ctx, owner.Project.ID, "Canonical "+contract.Name, contract.SQL, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			savedRec := postJSON(t, e, "/api/saved-queries/"+saved.ID+"/run?project_id="+owner.Project.ID, `{}`, map[string]string{"Authorization": "Bearer " + reader})
+			if savedRec.Code != http.StatusOK {
+				t.Fatalf("saved query: %d %s", savedRec.Code, savedRec.Body.String())
+			}
+			var savedEnvelope struct {
+				Result json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(savedRec.Body.Bytes(), &savedEnvelope); err != nil {
+				t.Fatal(err)
+			}
+			got["saved_query"] = rowsJSON(t, savedEnvelope.Result)
+			for adapter, rows := range got {
+				if rows != want {
+					t.Errorf("%s rows differ\n got: %s\nwant: %s", adapter, rows, want)
+				}
+			}
+		})
 	}
 
 	dashboardRec := postJSON(t, e, "/api/dashboards?project_id="+owner.Project.ID, `{"name":"Canonical evidence","description":"query contract"}`, map[string]string{"Authorization": "Bearer " + author})
@@ -161,8 +163,9 @@ func TestQueryContractAdaptersAndSavedArtifacts(t *testing.T) {
 	if err := json.Unmarshal(dashboardRec.Body.Bytes(), &dashboard); err != nil {
 		t.Fatal(err)
 	}
+	rangeSQL := `SELECT strftime(timestamp, '%Y-%m-%d') AS date, event_name AS series, count(*) AS value, 'events' AS unit, count(*) AS sample_size, 'complete' AS state, '' AS reason FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}' GROUP BY 1, 2 ORDER BY 1, 2`
 	chartInput, _ := json.Marshal(map[string]any{
-		"name": "Revenue", "kind": "line", "sql": contract.SQL,
+		"name": "Range-bound events", "kind": "line", "sql": rangeSQL,
 		"x_field": "date", "y_field": "value", "col_span": 2,
 	})
 	chartRec := postJSON(t, e, "/api/dashboards/"+dashboard.Dashboard.ID+"/charts?project_id="+owner.Project.ID, string(chartInput), map[string]string{"Authorization": "Bearer " + author})
@@ -175,7 +178,37 @@ func TestQueryContractAdaptersAndSavedArtifacts(t *testing.T) {
 	if err := json.Unmarshal(chartRec.Body.Bytes(), &chart); err != nil {
 		t.Fatal(err)
 	}
-	if chart.Chart.SQL != contract.SQL || chart.Chart.XField != "date" || chart.Chart.YField != "value" {
+	if chart.Chart.SQL != rangeSQL || chart.Chart.XField != "date" || chart.Chart.YField != "value" {
 		t.Fatalf("saved chart changed query contract: %+v", chart.Chart)
+	}
+
+	// Execute the SQL persisted on the chart after binding two disjoint
+	// inclusive/exclusive windows. This is the server-side half of the same
+	// contract chart-query.ts applies in the browser; the windows must yield
+	// different rows so a silently ignored range cannot pass.
+	windows := []struct {
+		name, from, to string
+		expected       []map[string]any
+	}{
+		{"first", "2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z", []map[string]any{{"date": "2026-09-01", "series": "signed_up", "value": 2, "unit": "events", "sample_size": 2, "state": "complete", "reason": ""}}},
+		{"second", "2026-09-02T00:00:00.000Z", "2026-09-03T00:00:00.000Z", []map[string]any{{"date": "2026-09-02", "series": "purchased", "value": 1, "unit": "events", "sample_size": 1, "state": "complete", "reason": ""}}},
+	}
+	for _, window := range windows {
+		t.Run("saved_chart_"+window.name, func(t *testing.T) {
+			resolved := strings.ReplaceAll(strings.ReplaceAll(chart.Chart.SQL, "{{from}}", window.from), "{{to}}", window.to)
+			body, _ := json.Marshal(map[string]string{"sql": resolved})
+			wantRaw, _ := json.Marshal(map[string]any{"rows": window.expected})
+			want := rowsJSON(t, wantRaw)
+			legacy := postJSON(t, e, "/api/sql/run?project_id="+owner.Project.ID, string(body), map[string]string{"Authorization": "Bearer " + reader})
+			if legacy.Code != http.StatusOK || rowsJSON(t, legacy.Body.Bytes()) != want {
+				t.Fatalf("legacy saved-chart window = %d %s; want rows %s", legacy.Code, legacy.Body.String(), want)
+			}
+			for name, invoke := range invokers {
+				out := invoke(t, "run_sql", string(body))
+				if out.class != "ok" || rowsJSON(t, out.raw) != want {
+					t.Fatalf("%s saved-chart window = %s %s; want rows %s", name, out.class, out.raw, want)
+				}
+			}
+		})
 	}
 }

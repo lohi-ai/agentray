@@ -877,11 +877,15 @@ func registerRoutes(e *echo.Echo, store *storage.Store, events ingestion.EventQu
 		}
 		// Keep the legacy envelope while preserving every additive field the
 		// shared operation returns (including C2 metadata owned by its sibling).
-		var envelope map[string]any
+		var envelope map[string]json.RawMessage
 		if err := json.Unmarshal(out, &envelope); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "invalid run_sql operation response")
 		}
-		envelope["generated_at"] = time.Now().UTC()
+		generatedAt, err := json.Marshal(time.Now().UTC())
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "invalid generated_at value")
+		}
+		envelope["generated_at"] = generatedAt
 		return c.JSON(http.StatusOK, envelope)
 	})
 	mountDashboardLifecycle(e, store, ops)

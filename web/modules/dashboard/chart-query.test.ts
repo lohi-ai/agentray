@@ -39,6 +39,14 @@ describe('resolveChartQuery', () => {
     expect(sql).toContain('{{from}}');
   });
 
+  it.each([
+    ['nested comment', `SELECT count(*) FROM events /* outer /* inner */ WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}' */`],
+    ['quoted identifier', `SELECT count(*) AS "'{{from}}' '{{to}}'" FROM events`],
+    ['larger string literal', `SELECT count(*) FROM events WHERE event_name = 'prefix {{from}}' AND timestamp < '{{to}}'`],
+  ])('rejects date tokens in a %s', (_, sql) => {
+    expect(resolveChartQuery(sql, absolute)).toMatchObject({ ok: false });
+  });
+
   it('rejects invalid or reversed applied bounds before executing SQL', () => {
     const sql = `SELECT count(*) FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`;
     expect(resolveChartQuery(sql, { ...absolute, from: 'invalid' })).toMatchObject({ ok: false });
@@ -58,7 +66,17 @@ describe('projectChartRows', () => {
     });
   });
 
-  it.each([null, undefined, 'not-a-number', '9007199254740993', Number.NaN, Number.POSITIVE_INFINITY])(
+  it.each([
+    null,
+    undefined,
+    'not-a-number',
+    '9007199254740993',
+    '9007199254740993.00',
+    '9.007199254740993e15',
+    '1e-400',
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])(
     'does not silently plot %s as zero',
     (value) => {
       expect(projectChartRows([{ date: '2026-09-01', value }], 'value', 'date')).toMatchObject({ status: 'non_plottable' });

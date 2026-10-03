@@ -12,18 +12,29 @@ export type ProjectedChartRows =
 const RANGE_ERROR = 'This query cannot apply the selected date range';
 const tokenPattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
 
-// SQL placeholders inside string literals are executable and intentionally
-// retained; placeholders inside comments are not part of the query contract.
-function withoutSQLComments(sql: string): string {
+type ScannedSQL = { executable: string; standaloneDateTokens: Set<number> };
+
+// Keep executable code and string literals byte-for-byte, while masking SQL
+// comments and quoted identifiers. Date placeholders are accepted only when
+// the complete contents of a real single-quoted literal are one token.
+function scanSQL(sql: string): ScannedSQL {
   let out = '';
   let state: 'code' | 'single' | 'double' | 'line' | 'block' = 'code';
+  let blockDepth = 0;
+  let literalStart = -1;
+  const standaloneDateTokens = new Set<number>();
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i];
     const next = sql[i + 1];
     if (state === 'code') {
-      if (ch === "'") state = 'single';
-      else if (ch === '"') state = 'double';
-      else if (ch === '-' && next === '-') {
+      if (ch === "'") {
+        state = 'single';
+        literalStart = i;
+      } else if (ch === '"') {
+        out += ' ';
+        state = 'double';
+        continue;
+      } else if (ch === '-' && next === '-') {
         out += '  ';
         i += 1;
         state = 'line';
@@ -36,21 +47,31 @@ function withoutSQLComments(sql: string): string {
         out += '  ';
         i += 1;
         state = 'block';
+        blockDepth = 1;
         continue;
       }
       out += ch;
       continue;
     }
-    if (state === 'single' || state === 'double') {
+    if (state === 'single') {
       out += ch;
-      const quote = state === 'single' ? "'" : '"';
-      if (ch === '\\' && next !== undefined) {
+      if (ch === "'" && next === "'") {
         out += next;
         i += 1;
-      } else if (ch === quote && next === quote) {
-        out += next;
+      } else if (ch === "'") {
+        const literal = sql.slice(literalStart + 1, i);
+        const token = literal.match(/^\{\{\s*(from|to)\s*\}\}$/);
+        if (token) standaloneDateTokens.add(literalStart + 1);
+        state = 'code';
+      }
+      continue;
+    }
+    if (state === 'double') {
+      out += ' ';
+      if (ch === '"' && next === '"') {
+        out += ' ';
         i += 1;
-      } else if (ch === quote) {
+      } else if (ch === '"') {
         state = 'code';
       }
       continue;
@@ -64,19 +85,24 @@ function withoutSQLComments(sql: string): string {
       }
       continue;
     }
-    if (ch === '*' && next === '/') {
+    if (ch === '/' && next === '*') {
       out += '  ';
       i += 1;
-      state = 'code';
+      blockDepth += 1;
+    } else if (ch === '*' && next === '/') {
+      out += '  ';
+      i += 1;
+      blockDepth -= 1;
+      if (blockDepth === 0) state = 'code';
     } else {
       out += ch === '\n' || ch === '\r' ? ch : ' ';
     }
   }
-  return out;
+  return { executable: out, standaloneDateTokens };
 }
 
 export function resolveChartQuery(sql: string, filters: Filters, now = new Date()): ResolvedChartQuery {
-  const executable = withoutSQLComments(sql);
+  const { executable, standaloneDateTokens } = scanSQL(sql);
   const matches = [...executable.matchAll(tokenPattern)];
   const names = matches.map((match) => match[1].trim());
   if (names.some((name) => !['from', 'to', 'hours'].includes(name))) {
@@ -86,8 +112,10 @@ export function resolveChartQuery(sql: string, filters: Filters, now = new Date(
     return { ok: false, message: `${RANGE_ERROR}: add both quoted '{{from}}' and '{{to}}' tokens.` };
   }
   for (const match of matches) {
-    if ((match[1].trim() === 'from' || match[1].trim() === 'to') &&
-        (executable[(match.index ?? 0) - 1] !== "'" || executable[(match.index ?? 0) + match[0].length] !== "'")) {
+    if (
+      (match[1].trim() === 'from' || match[1].trim() === 'to') &&
+      !standaloneDateTokens.has(match.index ?? -1)
+    ) {
       return { ok: false, message: `${RANGE_ERROR}: date tokens must be single-quoted SQL values.` };
     }
   }
@@ -131,7 +159,9 @@ function safeChartNumber(value: unknown): number | null {
   if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return null;
   const number = Number(text);
   if (!Number.isFinite(number)) return null;
-  if (/^[+-]?\d+$/.test(text) && !Number.isSafeInteger(number)) return null;
+  if (Number.isInteger(number) && !Number.isSafeInteger(number)) return null;
+  const mantissa = text.split(/[eE]/, 1)[0].replace(/[^0-9]/g, '');
+  if (number === 0 && /[1-9]/.test(mantissa)) return null;
   return number;
 }
 

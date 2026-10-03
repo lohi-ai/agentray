@@ -101,6 +101,23 @@ func TestQueryContractSourceNamesInCommentsAndLiteralsAreNotRewritten(t *testing
 	}
 }
 
+func TestQueryContractOrdinaryBackslashLiteralExecutes(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedCanonicalQueryFixture(t, d)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	query, args, err := scopedReadonlySQL(`SELECT '\' AS slash FROM events LIMIT 1`, fixture.ProjectID, nil)
+	if err != nil {
+		t.Fatalf("scope ordinary backslash literal: %v", err)
+	}
+	rows, err := pool.query(ctx, fixture.ProjectID, query, args)
+	if err != nil {
+		t.Fatalf("execute ordinary backslash literal: %v\n%s", err, query)
+	}
+	if len(rows) != 1 || rows[0]["slash"] != `\` {
+		t.Fatalf("ordinary backslash rows = %#v", rows)
+	}
+}
+
 func TestQueryContractRecursiveCTEAndCheckedIntegerConversion(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedCanonicalQueryFixture(t, d)

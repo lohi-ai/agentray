@@ -242,6 +242,31 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 	}
 }
 
+func TestScopedReadonlySQLDistinguishesOrdinaryAndEscapeStrings(t *testing.T) {
+	ordinary := `SELECT '\' AS slash FROM events LIMIT 1`
+	query, args, err := scopedReadonlySQL(ordinary, "project-1", nil)
+	if err != nil {
+		t.Fatalf("ordinary backslash literal rejected: %v", err)
+	}
+	if !strings.Contains(query, `SELECT '\' AS slash FROM scoped_events`) {
+		t.Fatalf("ordinary backslash consumed its closing quote: %s", query)
+	}
+	if len(args) != 1 || args[0] != "project-1" {
+		t.Fatalf("ordinary backslash args = %#v", args)
+	}
+
+	// E-strings deliberately retain backslash escaping, so an escaped quote
+	// cannot expose source-looking text inside the literal to the rewriter.
+	escaped := `SELECT E'it\'s FROM events' AS note FROM events LIMIT 1`
+	query, _, err = scopedReadonlySQL(escaped, "project-1", nil)
+	if err != nil {
+		t.Fatalf("escape string rejected: %v", err)
+	}
+	if strings.Count(query, "scoped_events") != 2 { // one CTE definition + one rewritten source
+		t.Fatalf("source-looking text inside E-string was rewritten: %s", query)
+	}
+}
+
 // Only FROM events is rewritten, so `… JOIN events` would read the bare table
 // cross-tenant — it must stay rejected even when external_rows is present.
 func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {

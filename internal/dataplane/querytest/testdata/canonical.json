@@ -47,6 +47,18 @@
         {"date":"2026-09-01","series":"conversion","value":1,"unit":"people","sample_size":1,"state":"complete","reason":"","cohort_date":"2026-09-01","age_days":1,"eligible":true,"converted":true},
         {"date":"2026-09-01","series":"conversion","value":1,"unit":"people","sample_size":1,"state":"complete","reason":"","cohort_date":"2026-09-01","age_days":3,"eligible":true,"converted":true}
       ]
+    },
+    {
+      "name": "empty",
+      "sql": "SELECT event_name AS series, count(*) AS value FROM events WHERE event_name = 'does.not.exist' GROUP BY 1",
+      "expected": []
+    },
+    {
+      "name": "numeric_boundaries",
+      "sql": "SELECT 9007199254740993::BIGINT AS unsafe_js_integer, 9223372036854775807::BIGINT AS max_bigint, 9007199254740993.00::DECIMAL(18,2) AS exact_decimal FROM events LIMIT 1",
+      "expected": [
+        {"unsafe_js_integer":9007199254740993,"max_bigint":9223372036854775807,"exact_decimal":"9007199254740993"}
+      ]
     }
   ]
 }

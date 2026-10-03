@@ -111,7 +111,7 @@ type Project struct {
 	Name        string `json:"name"`
 	// Timezone is a validated IANA name when set. Empty means an existing
 	// nullable row, which Overview reports as its explicit UTC fallback.
-	Timezone  string    `json:"timezone,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
 	// Goal is the owner's answer to "what are you trying to improve?" —
 	// activation | retention | revenue | traffic | skipped. A nil Goal means
 	// the prompt was never answered (the column is NULL); "skipped" means the
@@ -120,8 +120,8 @@ type Project struct {
 	// unset, and it is what the activation overview metric computes against.
 	Goal            *string   `json:"goal,omitempty"`
 	ActivationEvent string    `json:"activation_event,omitempty"`
-	APIKey    string    `json:"api_key"`
-	CreatedAt time.Time `json:"created_at"`
+	APIKey          string    `json:"api_key"`
+	CreatedAt       time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -1253,10 +1253,10 @@ GROUP BY ` + visitorColumn + `
 // an email property deliberately. The template string covers both the Product
 // Overview and the Marketing & Acquisition charts; they shipped identically.
 const (
-	staleStarterGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	staleStarterGuestVsIdentifiedSQL  = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	staleTemplateGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 
-	legacyStarterGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	legacyStarterGuestVsIdentifiedSQL  = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	legacyTemplateGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 )
 
@@ -4754,11 +4754,18 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 		blockComment
 	)
 	state := code
+	escapeQuoted := false
 	for i := 0; i < len(out); i++ {
 		switch state {
 		case code:
 			switch {
 			case out[i] == '\'':
+				// DuckDB ordinary string literals do not make backslash an
+				// escape character. Only E'...' strings do; treating every
+				// backslash as an escape can consume the closing quote and mask
+				// executable SQL that follows it (including FROM events).
+				escapeQuoted = i > 0 && (sqlText[i-1] == 'e' || sqlText[i-1] == 'E') &&
+					(i < 2 || !isSQLIdentifierByte(sqlText[i-2]))
 				out[i] = ' '
 				state = singleQuoted
 			case out[i] == '#':
@@ -4774,7 +4781,7 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 				state = blockComment
 			}
 		case singleQuoted:
-			if out[i] == '\\' && i+1 < len(out) {
+			if escapeQuoted && out[i] == '\\' && i+1 < len(out) {
 				out[i], out[i+1] = ' ', ' '
 				i++
 				continue
@@ -4809,6 +4816,10 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 		}
 	}
 	return string(out)
+}
+
+func isSQLIdentifierByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 func validateReadonlySQL(sqlText string) error {
