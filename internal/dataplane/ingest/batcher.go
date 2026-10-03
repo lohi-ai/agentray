@@ -289,7 +289,7 @@ func (b *EventBatcher) recordSettled(msg msgHandle) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
 	defer cancel()
-	mark := storage.AppliedMark{Durable: b.durable, Seq: msg.seq(), Deliveries: []storage.DeliveryReceiptMark{msg.delivery()}}
+	mark := storage.AppliedMark{Durable: b.durable, Seq: msg.seq(), Deliveries: []storage.DeliveryReceiptMark{msg.delivery()}, SettlementOnly: true}
 	if err := b.record(ctx, mark); err != nil {
 		return fmt.Errorf("record applied position %d for durable %q: %w", mark.Seq, b.durable, err)
 	}

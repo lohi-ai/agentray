@@ -261,7 +261,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, true)`, d.StreamID, d.Subject, d.StreamSeq, d.Paylo
 		// A delivery receipt proves that the consumer position was settled, not
 		// that missing business data was applied. Only a replay carrying the
 		// original DLQ identity has authority to repair its exact hole.
-		if !d.Replayed {
+		if mark.SettlementOnly || !d.Replayed {
 			continue
 		}
 		var holeProject, holeConnector, holeTable sql.NullString
@@ -336,6 +336,7 @@ WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleare
 		return nil
 	}
 	priorIncrementalIncomplete := false
+	priorOrderingAmbiguous := false
 	if s.GenerationSeq == 0 {
 		var priorKey string
 		var priorSeq, priorBatches uint64
@@ -343,9 +344,9 @@ WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleare
 		var priorExpected sql.Null[uint64]
 		err := tx.QueryRowContext(ctx, `SELECT s.generation_key,s.generation_seq,s.completion_seen,s.expected_batches,
 (SELECT count(*) FROM data_receipt_batches b WHERE b.project_id=s.project_id AND b.connector_id=s.connector_id
- AND b.table_name=s.table_name AND b.generation_key=s.generation_key)
+ AND b.table_name=s.table_name AND b.generation_key=s.generation_key),coalesce(s.ordering_ambiguous,false)
 FROM data_receipt_sources s WHERE s.project_id=? AND s.connector_id=? AND s.table_name=?`,
-			pid, cid, s.Table).Scan(&priorKey, &priorSeq, &priorCompletion, &priorExpected, &priorBatches)
+			pid, cid, s.Table).Scan(&priorKey, &priorSeq, &priorCompletion, &priorExpected, &priorBatches, &priorOrderingAmbiguous)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -420,7 +421,7 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key=?`,
 			pid, cid, s.Table, generationKey).Scan(&applied); err != nil {
 			return err
 		}
-		locallyComplete = applied == *s.ExpectedBatches && !priorIncrementalIncomplete
+		locallyComplete = applied == *s.ExpectedBatches && !priorIncrementalIncomplete && !priorOrderingAmbiguous
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO data_receipt_sources
 (project_id, connector_id, table_name, sync_id, run_id, generation, generation_key, generation_seq, binding_digest,

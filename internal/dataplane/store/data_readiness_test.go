@@ -166,6 +166,50 @@ func TestLaterIncrementalCompletionPreservesEarlierCoverageHole(t *testing.T) {
 	}
 }
 
+func TestInheritedIncrementalHolePreservesLastComplete(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID, syncID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	at := time.Now().UTC().Add(-time.Hour)
+	zero, one, index := uint64(0), uint64(1), uint64(0)
+	complete := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), CaptureStartedAt: &at, CaptureFinishedAt: &at, ExpectedBatches: &zero, Complete: true, Promoted: true}
+	if err := d.Write(ctx, func(tx *sql.Tx) error {
+		return recordAppliedReceiptsTx(ctx, tx, AppliedMark{Source: &complete}, at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	missingAt := at.Add(time.Minute)
+	missing := complete
+	missing.RunID, missing.CaptureStartedAt, missing.CaptureFinishedAt, missing.ExpectedBatches = uuid.NewString(), &missingAt, &missingAt, &one
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &missing}); err != nil {
+		t.Fatal(err)
+	}
+	nextAt := at.Add(2 * time.Minute)
+	next := complete
+	next.RunID, next.CaptureStartedAt, next.CaptureFinishedAt, next.Complete = uuid.NewString(), &nextAt, nil, false
+	next.ExpectedBatches, next.BatchID, next.BatchIndex, next.PayloadSHA256 = nil, "b0", &index, strings.Repeat("a", 64)
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: "new", DataJSON: `{}`}}, AppliedMark{Source: &next}); err != nil {
+		t.Fatal(err)
+	}
+	next.BatchID, next.BatchIndex, next.PayloadSHA256 = "", nil, ""
+	next.Complete, next.ExpectedBatches, next.CaptureFinishedAt = true, &one, &nextAt
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &next}); err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := d.localReadiness(ctx, projectID, []ReadinessSource{{SyncID: syncID, ConnectorID: connectorID, Table: "orders", Configured: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := receipts[syncID]
+	if !got.OrderingAmbiguous {
+		t.Fatal("setup did not preserve prior missing run")
+	}
+	if got.LastCompleteAt == nil || !got.LastCompleteAt.Equal(at) {
+		t.Fatalf("incomplete source advanced last_complete_at: old=%s got=%v", at, got.LastCompleteAt)
+	}
+}
+
 func TestReadinessDoesNotCrossSyncIdentity(t *testing.T) {
 	d := openTestDuckDB(t)
 	ctx := context.Background()

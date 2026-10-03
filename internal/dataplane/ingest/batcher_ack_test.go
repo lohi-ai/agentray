@@ -74,6 +74,45 @@ func TestPoisonDLQFailurePreservesExistingReadinessHole(t *testing.T) {
 	}
 }
 
+func TestPoisonReplaySettlementPreservesExistingReadinessHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "poison-replay.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	msg := &replayedFakeMsg{fakeMsg: fakeMsg{seqN: 17, deliv: 9, payload: []byte("poison")}}
+	if err := duck.RecordReadinessHole(ctx, msg.delivery(), nil); err != nil {
+		t.Fatal(err)
+	}
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{
+		Durable: "probe", RecordPosition: duck.RecordPosition,
+		DeadLetter: func([]byte) error { return nil },
+		RecordHole: func(context.Context, storage.DeliveryReceiptMark, *storage.SourceReceiptMark) error {
+			return errors.New("injected hole write failure after settlement")
+		},
+	})
+	defer b.Stop()
+	b.poison(msg, nil, errors.New("still-invalid replay"))
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); holes != 1 || ack || !nak || term {
+		t.Fatalf("holes=%d ack=%v nak=%v term=%v", holes, ack, nak, term)
+	}
+}
+
+type replayedFakeMsg struct{ fakeMsg }
+
+func (m *replayedFakeMsg) delivery() storage.DeliveryReceiptMark {
+	delivery := m.fakeMsg.delivery()
+	delivery.Replayed = true
+	return delivery
+}
+
 func TestMalformedProjectPoisonSettlesWithUnattributedHole(t *testing.T) {
 	ctx := context.Background()
 	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "malformed.duckdb"))
