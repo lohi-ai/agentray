@@ -49,6 +49,13 @@ describe('resolveChartQuery', () => {
     expect(resolveChartQuery(sql, absolute)).toMatchObject({ ok: false });
   });
 
+  it('rejects date tokens in a non-ASCII tagged dollar-quoted string without rewriting them', () => {
+    const sql = `SELECT count(*) AS value, $é$'{{from}}' '{{to}}'$é$ AS note FROM events`;
+
+    expect(resolveChartQuery(sql, absolute)).toMatchObject({ ok: false });
+    expect(sql).toContain(`$é$'{{from}}' '{{to}}'$é$`);
+  });
+
   it('rejects invalid or reversed applied bounds before executing SQL', () => {
     const sql = `SELECT count(*) FROM events WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`;
     expect(resolveChartQuery(sql, { ...absolute, from: 'invalid' })).toMatchObject({ ok: false });

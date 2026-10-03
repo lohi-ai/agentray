@@ -11,6 +11,9 @@ export type ProjectedChartRows =
 
 const RANGE_ERROR = 'This query cannot apply the selected date range';
 const tokenPattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
+// DuckDB dollar tags use identifier characters: ASCII letters/underscore or
+// any non-ASCII character first, then those characters or ASCII digits.
+const dollarDelimiterPattern = /^\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)?\$/u;
 
 type ScannedSQL = { executable: string; standaloneDateTokens: Set<number> };
 
@@ -36,7 +39,7 @@ function scanSQL(sql: string): ScannedSQL {
         state = 'double';
         continue;
       } else if (ch === '$') {
-        const delimiter = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+        const delimiter = sql.slice(i).match(dollarDelimiterPattern)?.[0];
         if (delimiter) {
           out += ' '.repeat(delimiter.length);
           i += delimiter.length - 1;
