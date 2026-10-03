@@ -36,6 +36,11 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Public/display metadata revisions are unrelated to the immutable source
+	// contract. They must not make an otherwise-current snapshot job stale.
+	if _, err := s.pg.Exec(ctx, `UPDATE data_connectors SET name=name || ' renamed',revision=revision+1 WHERE id=$1`, sync.ConnectorID); err != nil {
+		t.Fatal(err)
+	}
 	g, err := s.ClaimSnapshotGeneration(ctx, job, run.ID, "owner-a", claimed.LeaseEpoch)
 	if err != nil {
 		t.Fatal(err)
@@ -47,8 +52,13 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Rollback(ctx)
+	var connectorRevision int64
+	if err := tx.QueryRow(ctx, `SELECT revision FROM data_connectors WHERE id=$1`, sync.ConnectorID).Scan(&connectorRevision); err != nil {
+		t.Fatal(err)
+	}
 	replacementCredential := "00000000-0000-4000-8000-000000000099"
-	if _, err := updateDataConnectorRevision(ctx, tx, projectID, sync.ConnectorID, nil, &replacementCredential, job.SourceRevision); err == nil || !strings.Contains(err.Error(), "snapshot generation is active") {
+	if _, err := updateDataConnectorRevision(ctx, tx, projectID, sync.ConnectorID, nil, &replacementCredential, connectorRevision); err == nil || !strings.Contains(err.Error(), "snapshot generation is active") {
 		t.Fatalf("credential change did not fence active generation: %v", err)
 	}
 	tx.Rollback(ctx)
@@ -131,7 +141,36 @@ func TestSnapshotGenerationResumeFenceAndSeal(t *testing.T) {
 	if got, err := s.ConnectorRunForProject(ctx, projectID, run2.ID); err != nil || got.Status != "succeeded" {
 		t.Fatalf("sealed run was not finalized atomically: %+v err=%v", got, err)
 	}
-	if err := s.MarkSnapshotOutboxPublished(ctx, g2, completion); err != nil {
+	// Simulate losing the completion publish acknowledgement after the atomic
+	// seal. A later run must claim the sealed generation and drain the exact
+	// immutable completion instead of opening a replacement generation.
+	run3, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "snapshot-drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed3, ok, err := s.ClaimConnectorRun(ctx, run3.ID, "owner-c")
+	if err != nil || !ok {
+		t.Fatalf("claim3=%+v ok=%v err=%v", claimed3, ok, err)
+	}
+	job, err = s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g3, err := s.ClaimSnapshotGeneration(ctx, job, run3.ID, "owner-c", claimed3.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g3.Generation != g.Generation || g3.State != "sealed" {
+		t.Fatalf("sealed drain claimed wrong generation: %+v", g3)
+	}
+	pending, err = s.PendingSnapshotOutbox(ctx, g3)
+	if err != nil || len(pending) != 1 || pending[0].ID != completion.ID {
+		t.Fatalf("sealed completion pending=%+v err=%v", pending, err)
+	}
+	if err := s.MarkSnapshotOutboxPublished(ctx, g3, pending[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishConnectorRun(ctx, run3.ID, syncID, "owner-c", connector.SyncResult{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteConnectorSync(ctx, userID, projectID, syncID); err == nil || !strings.Contains(err.Error(), "history protects") {

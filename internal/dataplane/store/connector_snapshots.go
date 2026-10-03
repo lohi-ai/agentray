@@ -117,7 +117,7 @@ func (s *Store) ClaimSnapshotGeneration(ctx context.Context, job connector.SyncJ
 	}
 	defer tx.Rollback(ctx)
 	var syncRevision, sourceRevision int64
-	if err := tx.QueryRow(ctx, `SELECT cs.revision,dc.revision FROM connector_syncs cs
+	if err := tx.QueryRow(ctx, `SELECT cs.config_revision,dc.source_config_revision FROM connector_syncs cs
 JOIN data_connectors dc ON dc.id=cs.connector_id
 WHERE cs.id=$1 AND cs.project_id=$2 AND cs.connector_id=$3 FOR UPDATE OF cs,dc`,
 		job.SyncID, job.ProjectID, job.ConnectorID).Scan(&syncRevision, &sourceRevision); err != nil {
@@ -300,7 +300,7 @@ WHERE id=$1 AND status='running' AND owner=$3 AND lease_epoch=$4 AND NOT cancel_
 	if tag.RowsAffected() != 1 {
 		return connector.SnapshotOutbox{}, fmt.Errorf("snapshot run could not be finalized with its seal")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE connector_syncs SET last_run_at=now(),last_status='ok',last_error='',last_rows=$2,
+	if _, err := tx.Exec(ctx, `UPDATE connector_syncs SET last_run_at=now(),last_status='ok',last_error='',last_rows=$2::int,
 last_success_at=now(),total_rows=total_rows+$2::bigint,revision=revision+1,updated_at=now() WHERE id=$1`, g.SyncID, runRows); err != nil {
 		return connector.SnapshotOutbox{}, err
 	}
