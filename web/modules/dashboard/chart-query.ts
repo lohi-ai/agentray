@@ -11,116 +11,215 @@ export type ProjectedChartRows =
 
 const RANGE_ERROR = 'This query cannot apply the selected date range';
 const tokenPattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
-// DuckDB dollar tags use identifier characters: ASCII letters/underscore or
-// any non-ASCII character first, then those characters or ASCII digits.
-const dollarDelimiterPattern = /^\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*)?\$/u;
 
 type ScannedSQL = { executable: string; standaloneDateTokens: Set<number> };
 
-// Keep executable code and string literals byte-for-byte, while masking SQL
-// comments and quoted identifiers. Date placeholders are accepted only when
-// the complete contents of a real single-quoted literal are one token.
+type SQLLexicalClass =
+  | 'line-comment'
+  | 'block-comment'
+  | 'single-quoted-string'
+  | 'escape-string'
+  | 'quoted-identifier'
+  | 'dollar-quoted-string'
+  | 'identifier-keyword'
+  | 'operator-punctuation'
+  | 'whitespace';
+
+function codePointWidth(sql: string, index: number): number {
+  return (sql.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+}
+
+function isASCIIIdentifierStart(codePoint: number): boolean {
+  return codePoint === 0x5f || (codePoint >= 0x41 && codePoint <= 0x5a) || (codePoint >= 0x61 && codePoint <= 0x7a);
+}
+
+function isIdentifierStart(sql: string, index: number): boolean {
+  const codePoint = sql.codePointAt(index);
+  return codePoint !== undefined && (isASCIIIdentifierStart(codePoint) || codePoint >= 0x80);
+}
+
+function isIdentifierContinuation(sql: string, index: number): boolean {
+  const codePoint = sql.codePointAt(index);
+  return codePoint !== undefined && (
+    isASCIIIdentifierStart(codePoint) ||
+    (codePoint >= 0x30 && codePoint <= 0x39) ||
+    codePoint === 0x24 ||
+    codePoint >= 0x80
+  );
+}
+
+// DuckDB accepts an empty tag, or a tag beginning with an ASCII/Unicode
+// identifier character and continuing with those characters or ASCII digits.
+function dollarDelimiterAt(sql: string, start: number): string | null {
+  if (sql[start] !== '$') return null;
+  if (sql[start + 1] === '$') return '$$';
+  let index = start + 1;
+  if (!isIdentifierStart(sql, index)) return null;
+  index += codePointWidth(sql, index);
+  while (index < sql.length && sql[index] !== '$') {
+    if (!isIdentifierContinuation(sql, index) || sql[index] === '$') return null;
+    index += codePointWidth(sql, index);
+  }
+  return sql[index] === '$' ? sql.slice(start, index + 1) : null;
+}
+
+function masked(sql: string, start: number, end: number): string {
+  return sql.slice(start, end).replace(/[^\r\n]/g, ' ');
+}
+
+function classifiedSpan(sql: string, start: number, end: number, state: SQLLexicalClass): string {
+  switch (state) {
+    case 'line-comment':
+    case 'block-comment':
+    case 'escape-string':
+    case 'quoted-identifier':
+    case 'dollar-quoted-string':
+      return masked(sql, start, end);
+    case 'single-quoted-string':
+    case 'identifier-keyword':
+    case 'operator-punctuation':
+    case 'whitespace':
+      return sql.slice(start, end);
+  }
+}
+
+// A single pass over DuckDB lexical tokens. Only ordinary string literals are
+// retained for placeholder validation; non-code regions are position-preserving
+// masks so match offsets still refer to the original SQL.
 function scanSQL(sql: string): ScannedSQL {
   let out = '';
-  let state: 'code' | 'single' | 'double' | 'dollar' | 'line' | 'block' = 'code';
-  let blockDepth = 0;
-  let dollarDelimiter = '';
-  let literalStart = -1;
+  let state: SQLLexicalClass = 'operator-punctuation';
   const standaloneDateTokens = new Set<number>();
-  for (let i = 0; i < sql.length; i += 1) {
-    const ch = sql[i];
-    const next = sql[i + 1];
-    if (state === 'code') {
-      if (ch === "'") {
-        state = 'single';
-        literalStart = i;
-      } else if (ch === '"') {
-        out += ' ';
-        state = 'double';
-        continue;
-      } else if (ch === '$') {
-        const delimiter = sql.slice(i).match(dollarDelimiterPattern)?.[0];
-        if (delimiter) {
-          out += ' '.repeat(delimiter.length);
-          i += delimiter.length - 1;
-          dollarDelimiter = delimiter;
-          state = 'dollar';
-          continue;
-        }
-      } else if (ch === '-' && next === '-') {
-        out += '  ';
-        i += 1;
-        state = 'line';
-        continue;
-      } else if (ch === '#') {
-        out += ' ';
-        state = 'line';
-        continue;
-      } else if (ch === '/' && next === '*') {
-        out += '  ';
-        i += 1;
-        state = 'block';
-        blockDepth = 1;
-        continue;
-      }
-      out += ch;
+  let index = 0;
+  while (index < sql.length) {
+    const start = index;
+    const ch = sql[index];
+    const next = sql[index + 1];
+
+    if (/\s/u.test(ch)) {
+      state = 'whitespace';
+      index += 1;
+      while (index < sql.length && /\s/u.test(sql[index])) index += 1;
+      out += classifiedSpan(sql, start, index, state);
       continue;
     }
-    if (state === 'single') {
-      out += ch;
-      if (ch === "'" && next === "'") {
-        out += next;
-        i += 1;
-      } else if (ch === "'") {
-        const literal = sql.slice(literalStart + 1, i);
-        const token = literal.match(/^\{\{\s*(from|to)\s*\}\}$/);
-        if (token) standaloneDateTokens.add(literalStart + 1);
-        state = 'code';
-      }
+
+    if (ch === '-' && next === '-') {
+      state = 'line-comment';
+      index += 2;
+      while (index < sql.length && sql[index] !== '\n' && sql[index] !== '\r') index += 1;
+      out += classifiedSpan(sql, start, index, state);
       continue;
     }
-    if (state === 'double') {
-      out += ' ';
-      if (ch === '"' && next === '"') {
-        out += ' ';
-        i += 1;
-      } else if (ch === '"') {
-        state = 'code';
-      }
-      continue;
-    }
-    if (state === 'dollar') {
-      if (sql.startsWith(dollarDelimiter, i)) {
-        out += ' '.repeat(dollarDelimiter.length);
-        i += dollarDelimiter.length - 1;
-        dollarDelimiter = '';
-        state = 'code';
-      } else {
-        out += ch === '\n' || ch === '\r' ? ch : ' ';
-      }
-      continue;
-    }
-    if (state === 'line') {
-      if (ch === '\n' || ch === '\r') {
-        out += ch;
-        state = 'code';
-      } else {
-        out += ' ';
-      }
-      continue;
-    }
+
     if (ch === '/' && next === '*') {
-      out += '  ';
-      i += 1;
-      blockDepth += 1;
-    } else if (ch === '*' && next === '/') {
-      out += '  ';
-      i += 1;
-      blockDepth -= 1;
-      if (blockDepth === 0) state = 'code';
-    } else {
-      out += ch === '\n' || ch === '\r' ? ch : ' ';
+      state = 'block-comment';
+      let depth = 1;
+      index += 2;
+      while (index < sql.length && depth > 0) {
+        if (sql[index] === '/' && sql[index + 1] === '*') {
+          depth += 1;
+          index += 2;
+        } else if (sql[index] === '*' && sql[index + 1] === '/') {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += codePointWidth(sql, index);
+        }
+      }
+      out += classifiedSpan(sql, start, index, state);
+      continue;
     }
+
+    if ((ch === 'E' || ch === 'e') && next === "'" && !isIdentifierContinuation(sql, index - 1)) {
+      state = 'escape-string';
+      index += 2;
+      while (index < sql.length) {
+        if (sql[index] === '\\' && index + 1 < sql.length) {
+          index += 1 + codePointWidth(sql, index + 1);
+        } else if (sql[index] === "'" && sql[index + 1] === "'") {
+          index += 2;
+        } else if (sql[index] === "'") {
+          index += 1;
+          break;
+        } else {
+          index += codePointWidth(sql, index);
+        }
+      }
+      out += classifiedSpan(sql, start, index, state);
+      continue;
+    }
+
+    if (ch === "'") {
+      state = 'single-quoted-string';
+      index += 1;
+      const contentStart = index;
+      let contentEnd = -1;
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") {
+          index += 2;
+        } else if (sql[index] === "'") {
+          contentEnd = index;
+          index += 1;
+          break;
+        } else {
+          index += codePointWidth(sql, index);
+        }
+      }
+      out += classifiedSpan(sql, start, index, state);
+      const literal = contentEnd < 0 ? '' : sql.slice(contentStart, contentEnd);
+      if (
+        /^\{\{\s*(from|to)\s*\}\}$/.test(literal) &&
+        !isIdentifierContinuation(sql, start - 1) &&
+        !isIdentifierContinuation(sql, index)
+      ) {
+        standaloneDateTokens.add(contentStart);
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      state = 'quoted-identifier';
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === '"' && sql[index + 1] === '"') {
+          index += 2;
+        } else if (sql[index] === '"') {
+          index += 1;
+          break;
+        } else {
+          index += codePointWidth(sql, index);
+        }
+      }
+      out += classifiedSpan(sql, start, index, state);
+      continue;
+    }
+
+    const dollarDelimiter = ch === '$' && !isIdentifierContinuation(sql, index - 1)
+      ? dollarDelimiterAt(sql, index)
+      : null;
+    if (dollarDelimiter) {
+      state = 'dollar-quoted-string';
+      index += dollarDelimiter.length;
+      const close = sql.indexOf(dollarDelimiter, index);
+      index = close < 0 ? sql.length : close + dollarDelimiter.length;
+      out += classifiedSpan(sql, start, index, state);
+      continue;
+    }
+
+    if (isIdentifierStart(sql, index)) {
+      state = 'identifier-keyword';
+      index += codePointWidth(sql, index);
+      while (index < sql.length && isIdentifierContinuation(sql, index)) {
+        index += codePointWidth(sql, index);
+      }
+      out += classifiedSpan(sql, start, index, state);
+      continue;
+    }
+
+    state = 'operator-punctuation';
+    index += codePointWidth(sql, index);
+    out += classifiedSpan(sql, start, index, state);
   }
   return { executable: out, standaloneDateTokens };
 }

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { defaultFilters } from '@/lib/api';
 import { projectChartRows, resolveChartQuery } from './chart-query';
@@ -7,6 +8,28 @@ const absolute = {
   from: '2026-09-01T00:00:00+07:00',
   to: '2026-09-01T12:30:00+07:00',
 };
+
+function runDuckDB(sql: string): unknown {
+  const setup = `CREATE TABLE events(timestamp VARCHAR);
+    INSERT INTO events VALUES ('2000-01-01T00:00:00.000Z'), ('2026-08-31T18:00:00.000Z');`;
+  return JSON.parse(execFileSync('duckdb', ['-json', ':memory:', '-c', `${setup}\n${sql}`], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  }));
+}
+
+function substituteDateLiterals(sql: string): string {
+  const replacements = [
+    ["'{{from}}'", "'2026-08-31T17:00:00.000Z'"],
+    ["'{{to}}'", "'2026-09-01T05:30:00.000Z'"],
+  ] as const;
+  return replacements.reduce((resolved, [placeholder, literal]) => {
+    const index = resolved.lastIndexOf(placeholder);
+    return index < 0
+      ? resolved
+      : resolved.slice(0, index) + literal + resolved.slice(index + placeholder.length);
+  }, sql);
+}
 
 describe('resolveChartQuery', () => {
   it('binds an exact inclusive/exclusive UTC range without rounding sub-day precision', () => {
@@ -54,6 +77,116 @@ describe('resolveChartQuery', () => {
 
     expect(resolveChartQuery(sql, absolute)).toMatchObject({ ok: false });
     expect(sql).toContain(`$é$'{{from}}' '{{to}}'$é$`);
+  });
+
+  it.each([
+    {
+      name: 'standalone scalar bounds',
+      binds: true,
+      sql: `SELECT count(*) AS value FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'identifier-embedded Unicode dollar sequences with real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS value FROM events AS e$é$
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'nested comment before real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS value /* outer /* '{{from}}' */ '{{to}}' */ FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'quoted aliases before real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS "owner's" FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'comment-shaped quoted alias before real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS "--" FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'Unicode dollar body before real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS value, $aé$'{{from}}' '{{to}}'$aé$ AS note FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'ordinary backslash string before real bounds',
+      binds: true,
+      sql: `SELECT count(*) AS value, '\\' AS note FROM events
+        WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'`,
+    },
+    {
+      name: 'identifier-boundary false-applied-range reproduction',
+      binds: false,
+      sql: `SELECT count(e$é$.timestamp) AS value,
+        $é$'{{from}}' '{{to}}'$é$ AS note
+        FROM events AS e$é$`,
+    },
+    {
+      name: 'empty dollar body',
+      binds: false,
+      sql: `SELECT $$'{{from}}' '{{to}}'$$ AS note`,
+    },
+    {
+      name: 'Unicode dollar body',
+      binds: false,
+      sql: `SELECT $é$'{{from}}' '{{to}}'$é$ AS note`,
+    },
+    {
+      name: 'supplementary Unicode dollar body',
+      binds: false,
+      sql: `SELECT $😀$'{{from}}' '{{to}}'$😀$ AS note`,
+    },
+    {
+      name: 'nested block comment',
+      binds: false,
+      sql: `SELECT 1 AS value /* outer /* inner '{{from}}' */ still outer '{{to}}' */`,
+    },
+    {
+      name: 'quoted identifier',
+      binds: false,
+      sql: `SELECT 1 AS "'{{from}}' '{{to}}'"`,
+    },
+    {
+      name: 'doubled adjacent quotes inside one scalar',
+      binds: false,
+      sql: `SELECT '''{{from}}''' AS lower_bound, '{{to}}' AS upper_bound`,
+    },
+    {
+      name: 'escape string',
+      binds: false,
+      sql: `SELECT E'{{from}}' AS lower_bound, '{{to}}' AS upper_bound`,
+    },
+    {
+      name: 'larger regular strings',
+      binds: false,
+      sql: `SELECT 'prefix {{from}}' AS lower_bound, '{{to}} suffix' AS upper_bound`,
+    },
+    {
+      name: 'line comment',
+      binds: false,
+      sql: `SELECT 1 AS value -- '{{from}}' '{{to}}'`,
+    },
+  ])('matches DuckDB for $name', ({ binds, sql }) => {
+    expect(() => runDuckDB(sql)).not.toThrow();
+
+    const result = resolveChartQuery(sql, absolute);
+    expect(result.ok).toBe(binds);
+    if (!binds) {
+      expect('label' in result).toBe(false);
+      return;
+    }
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(runDuckDB(result.sql)).toEqual(runDuckDB(substituteDateLiterals(sql)));
   });
 
   it('rejects invalid or reversed applied bounds before executing SQL', () => {
