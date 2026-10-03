@@ -4750,6 +4750,7 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 	const (
 		code = iota
 		singleQuoted
+		doubleQuoted
 		lineComment
 		blockComment
 	)
@@ -4768,6 +4769,11 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 					(i < 2 || !isSQLIdentifierByte(sqlText[i-2]))
 				out[i] = ' '
 				state = singleQuoted
+			case out[i] == '"':
+				// Keep quoted identifier bytes visible so the residual-source
+				// guard can still reject FROM "events", but do not interpret
+				// apostrophes or comment markers inside an alias as SQL syntax.
+				state = doubleQuoted
 			case out[i] == '#':
 				out[i] = ' '
 				state = lineComment
@@ -4798,6 +4804,14 @@ func maskSQLCommentsAndStrings(sqlText string) string {
 			}
 			if out[i] != '\n' && out[i] != '\r' {
 				out[i] = ' '
+			}
+		case doubleQuoted:
+			if out[i] == '"' {
+				if i+1 < len(out) && out[i+1] == '"' {
+					i++
+					continue
+				}
+				state = code
 			}
 		case lineComment:
 			if out[i] == '\n' || out[i] == '\r' {

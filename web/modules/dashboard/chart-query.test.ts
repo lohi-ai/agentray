@@ -43,6 +43,8 @@ describe('resolveChartQuery', () => {
     ['nested comment', `SELECT count(*) FROM events /* outer /* inner */ WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}' */`],
     ['quoted identifier', `SELECT count(*) AS "'{{from}}' '{{to}}'" FROM events`],
     ['larger string literal', `SELECT count(*) FROM events WHERE event_name = 'prefix {{from}}' AND timestamp < '{{to}}'`],
+    ['dollar-quoted string', `SELECT count(*) AS value, $$'{{from}}' '{{to}}'$$ AS note FROM events`],
+    ['tagged dollar-quoted string', `SELECT count(*) AS value, $range$'{{from}}' '{{to}}'$range$ AS note FROM events`],
   ])('rejects date tokens in a %s', (_, sql) => {
     expect(resolveChartQuery(sql, absolute)).toMatchObject({ ok: false });
   });

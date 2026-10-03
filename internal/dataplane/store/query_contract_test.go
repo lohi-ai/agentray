@@ -118,6 +118,24 @@ func TestQueryContractOrdinaryBackslashLiteralExecutes(t *testing.T) {
 	}
 }
 
+func TestQueryContractQuotedAliasesDoNotHideTheSource(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedCanonicalQueryFixture(t, d)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	for _, alias := range []string{`"owner's"`, `"--"`, `"owner""s"`} {
+		t.Run(alias, func(t *testing.T) {
+			query, args, err := scopedReadonlySQL(`SELECT 1 AS `+alias+` FROM events LIMIT 1`, fixture.ProjectID, nil)
+			if err != nil {
+				t.Fatalf("scope quoted alias: %v", err)
+			}
+			rows, err := pool.query(ctx, fixture.ProjectID, query, args)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("execute quoted alias: rows=%#v err=%v\n%s", rows, err, query)
+			}
+		})
+	}
+}
+
 func TestQueryContractRecursiveCTEAndCheckedIntegerConversion(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedCanonicalQueryFixture(t, d)

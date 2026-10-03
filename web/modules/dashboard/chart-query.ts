@@ -19,8 +19,9 @@ type ScannedSQL = { executable: string; standaloneDateTokens: Set<number> };
 // the complete contents of a real single-quoted literal are one token.
 function scanSQL(sql: string): ScannedSQL {
   let out = '';
-  let state: 'code' | 'single' | 'double' | 'line' | 'block' = 'code';
+  let state: 'code' | 'single' | 'double' | 'dollar' | 'line' | 'block' = 'code';
   let blockDepth = 0;
+  let dollarDelimiter = '';
   let literalStart = -1;
   const standaloneDateTokens = new Set<number>();
   for (let i = 0; i < sql.length; i += 1) {
@@ -34,6 +35,15 @@ function scanSQL(sql: string): ScannedSQL {
         out += ' ';
         state = 'double';
         continue;
+      } else if (ch === '$') {
+        const delimiter = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+        if (delimiter) {
+          out += ' '.repeat(delimiter.length);
+          i += delimiter.length - 1;
+          dollarDelimiter = delimiter;
+          state = 'dollar';
+          continue;
+        }
       } else if (ch === '-' && next === '-') {
         out += '  ';
         i += 1;
@@ -73,6 +83,17 @@ function scanSQL(sql: string): ScannedSQL {
         i += 1;
       } else if (ch === '"') {
         state = 'code';
+      }
+      continue;
+    }
+    if (state === 'dollar') {
+      if (sql.startsWith(dollarDelimiter, i)) {
+        out += ' '.repeat(dollarDelimiter.length);
+        i += dollarDelimiter.length - 1;
+        dollarDelimiter = '';
+        state = 'code';
+      } else {
+        out += ch === '\n' || ch === '\r' ? ch : ' ';
       }
       continue;
     }
