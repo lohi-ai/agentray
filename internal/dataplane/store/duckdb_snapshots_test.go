@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
@@ -114,13 +115,6 @@ func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ApplySnapshotEnvelope(ctx, f.Batches[0], AppliedMark{}); err != nil {
-		t.Fatal(err)
-	}
-	deleted, more, err := d.deleteSnapshotStagingChunk(ctx, f.Batches[0].Generation, 50_000)
-	if err != nil || deleted == 0 || more {
-		t.Fatalf("partial cleanup = deleted %d more=%v err=%v", deleted, more, err)
-	}
 	for _, env := range f.Batches {
 		if _, err := d.ApplySnapshotEnvelope(ctx, env, AppliedMark{}); err != nil {
 			t.Fatal(err)
@@ -129,7 +123,7 @@ func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
 	if _, err := d.ApplySnapshotEnvelope(ctx, f.Complete, AppliedMark{}); err != nil {
 		t.Fatal(err)
 	}
-	deleted, _, err = d.deleteSnapshotStagingChunk(ctx, f.Complete.Generation, 50_000)
+	deleted, _, err := d.deleteSnapshotStagingChunk(ctx, f.Complete.Generation, 50_000)
 	if err != nil || deleted != 0 {
 		t.Fatalf("active generation cleanup = deleted %d err=%v", deleted, err)
 	}
@@ -138,6 +132,51 @@ func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
 		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, f.Complete.Generation).Scan(&rows)
 	}); err != nil || rows == 0 {
 		t.Fatalf("active staging rows=%d err=%v", rows, err)
+	}
+}
+
+func TestSnapshotCleanupTombstoneFencesLateRedelivery(t *testing.T) {
+	ctx := context.Background()
+	d := openTestDuckDB(t)
+	raw, err := os.ReadFile(filepath.Join("..", "ingest", "testdata", "c1-wire-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Batches  []connector.SnapshotEnvelope `json:"batches"`
+		Complete connector.SnapshotEnvelope   `json:"complete"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApplySnapshotEnvelope(ctx, f.Batches[0], AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, more, err := d.deleteSnapshotStagingChunk(ctx, f.Batches[0].Generation, 50_000)
+	if err != nil || deleted == 0 || more {
+		t.Fatalf("partial cleanup = deleted %d more=%v err=%v", deleted, more, err)
+	}
+	delivery := DeliveryReceiptMark{StreamID: "snapshots@test", Subject: "snapshots", StreamSeq: 9, PayloadSHA256: strings.Repeat("a", 64)}
+	for _, env := range []connector.SnapshotEnvelope{f.Batches[0], f.Complete} {
+		if promotion, err := d.ApplySnapshotEnvelope(ctx, env, AppliedMark{Durable: "blue", Seq: 9, Deliveries: []DeliveryReceiptMark{delivery}}); err != nil || promotion != nil {
+			t.Fatalf("late %s envelope promotion=%+v err=%v", env.Kind, promotion, err)
+		}
+	}
+	var rows, batches, completions, deliveries int
+	var position uint64
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT
+(SELECT count(*) FROM connector_snapshot_rows WHERE generation=?),
+(SELECT count(*) FROM connector_snapshot_batches WHERE generation=?),
+(SELECT count(*) FROM connector_snapshot_completions WHERE generation=?),
+(SELECT count(*) FROM data_receipt_deliveries WHERE stream_id='snapshots@test'),
+(SELECT applied_seq FROM ingest_position WHERE durable='blue')`,
+			f.Complete.Generation, f.Complete.Generation, f.Complete.Generation).Scan(&rows, &batches, &completions, &deliveries, &position)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 || batches != 0 || completions != 0 || deliveries != 1 || position != 9 {
+		t.Fatalf("late redelivery rows=%d batches=%d completions=%d deliveries=%d position=%d", rows, batches, completions, deliveries, position)
 	}
 }
 

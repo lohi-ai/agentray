@@ -19,9 +19,6 @@ func (d *DuckDB) ApplySnapshotEnvelope(ctx context.Context, env connector.Snapsh
 	if err := env.Validate(); err != nil {
 		return nil, err
 	}
-	if err := d.admitDataWrite(); err != nil {
-		return nil, err
-	}
 	var promotion *connector.SnapshotPromotion
 	err := d.Write(ctx, func(tx *sql.Tx) error {
 		source := sourceReceiptFromSnapshot(env)
@@ -32,6 +29,24 @@ func (d *DuckDB) ApplySnapshotEnvelope(ctx context.Context, env connector.Snapsh
 			}
 		}
 		mark.Source = source
+		var cleaned bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=?)`, env.Generation).Scan(&cleaned); err != nil {
+			return err
+		}
+		if cleaned {
+			// Cleanup receipts are local terminal-generation tombstones. A retained
+			// broker delivery may still arrive after cleanup, but it must only settle
+			// its durable position and delivery identity, never recreate staging or
+			// manufacture landed-source evidence for the discarded generation.
+			mark.Source = nil
+			if err := advancePositionTx(ctx, tx, mark); err != nil {
+				return err
+			}
+			return recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC())
+		}
+		if err := d.admitDataWrite(); err != nil {
+			return err
+		}
 		var err error
 		switch env.Kind {
 		case connector.SnapshotKindBatch:

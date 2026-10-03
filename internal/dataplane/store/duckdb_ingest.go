@@ -416,18 +416,11 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		return err
 	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
+		superseded := false
 		if mark.Source != nil {
-			superseded, err := sourceReceiptSupersededTx(ctx, tx, mark.Source)
+			superseded, err = sourceReceiptSupersededTx(ctx, tx, mark.Source)
 			if err != nil {
 				return err
-			}
-			if superseded {
-				// Settle and journal the broker delivery, but fence the obsolete run
-				// before it can replace rows owned by the newer capture.
-				if err := advancePositionTx(ctx, tx, mark); err != nil {
-					return err
-				}
-				return recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC())
 			}
 		}
 		// Chunked multi-row statements, like the events insert: one statement
@@ -436,7 +429,14 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		const cols = 7
 		row := placeholders(cols)
 		prefix := `INSERT OR REPLACE INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at) VALUES `
+		if superseded {
+			// Incremental runs are deltas, so an older run can still own keys that
+			// no newer run exported. Merge those missing keys while refusing to
+			// replace values already owned by the newer capture.
+			prefix = `INSERT OR IGNORE INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at) VALUES `
+		}
 		now := time.Now().UTC()
+		inserted := int64(0)
 		for start := 0; start < len(rows); start += insertEventsChunk {
 			chunk := rows[start:min(start+insertEventsChunk, len(rows))]
 			args := make([]any, 0, len(chunk)*cols)
@@ -444,8 +444,16 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 				args = append(args, pid, cid, table, r.Key, r.Cursor, r.DataJSON, now)
 			}
 			stmt := prefix + strings.TrimSuffix(strings.Repeat(row+",", len(chunk)), ",")
-			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+			result, err := tx.ExecContext(ctx, stmt, args...)
+			if err != nil {
 				return err
+			}
+			if superseded {
+				n, rowsErr := result.RowsAffected()
+				if rowsErr != nil {
+					return rowsErr
+				}
+				inserted += n
 			}
 		}
 		if err := advancePositionTx(ctx, tx, mark); err != nil {
@@ -453,6 +461,17 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		}
 		if err := recordAppliedReceiptsTx(ctx, tx, mark, now); err != nil {
 			return err
+		}
+		if superseded {
+			if inserted == 0 {
+				return nil
+			}
+			// The current source receipt remains authoritative, but its prior
+			// sandbox proof cannot cover keys newly recovered from the older run.
+			return invalidateSourceConfirmationsTx(ctx, tx,
+				sql.NullString{String: projectID, Valid: true},
+				sql.NullString{String: connectorID, Valid: true},
+				sql.NullString{String: table, Valid: true}, now)
 		}
 		if mark.Source == nil {
 			// Legacy envelopes can still mutate a configured source table. They do

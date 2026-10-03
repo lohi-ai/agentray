@@ -558,6 +558,143 @@ func TestOlderIncrementalReplayIsFencedBeforeRowMutation(t *testing.T) {
 	}
 }
 
+func TestOlderIncrementalReplayMergesOnlyMissingKeys(t *testing.T) {
+	d := openTestDuckDB(t)
+	ctx := context.Background()
+	projectID, connectorID, syncID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC()
+	index, expected := uint64(0), uint64(1)
+	current := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), BatchID: "batch-0", BatchIndex: &index, PayloadSHA256: strings.Repeat("a", 64), CaptureStartedAt: &now, Promoted: true}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{
+		{Key: "shared", DataJSON: `{"n":2}`},
+		{Key: "new-only", DataJSON: `{"n":3}`},
+	}, AppliedMark{Source: &current}); err != nil {
+		t.Fatal(err)
+	}
+	complete := current
+	complete.BatchID, complete.BatchIndex, complete.PayloadSHA256 = "", nil, ""
+	complete.ExpectedBatches, complete.CaptureFinishedAt, complete.Complete = &expected, &now, true
+	if err := d.RecordPosition(ctx, AppliedMark{Source: &complete}); err != nil {
+		t.Fatal(err)
+	}
+	var mutationBefore uint64
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT mutation_seq FROM data_receipt_sources WHERE project_id=? AND connector_id=? AND table_name='orders'`, projectID, connectorID).Scan(&mutationBefore)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	olderAt := now.Add(-time.Hour)
+	older := current
+	older.RunID, older.CaptureStartedAt, older.PayloadSHA256 = uuid.NewString(), &olderAt, strings.Repeat("b", 64)
+	rows := []connector.LandedRow{
+		{Key: "shared", DataJSON: `{"n":1}`},
+		{Key: "old-only", DataJSON: `{"n":1}`},
+	}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", rows, AppliedMark{Source: &older}); err != nil {
+		t.Fatal(err)
+	}
+	var shared, oldOnly int
+	var runID string
+	var mutationAfter uint64
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		if err := conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows WHERE project_id=? AND row_key='shared'`, projectID).Scan(&shared); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows WHERE project_id=? AND row_key='old-only'`, projectID).Scan(&oldOnly); err != nil {
+			return err
+		}
+		return conn.QueryRowContext(ctx, `SELECT run_id::VARCHAR,mutation_seq FROM data_receipt_sources WHERE project_id=? AND connector_id=? AND table_name='orders'`, projectID, connectorID).Scan(&runID, &mutationAfter)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if shared != 2 || oldOnly != 1 || runID != current.RunID || mutationAfter != mutationBefore+1 {
+		t.Fatalf("older merge shared=%d old-only=%d run=%s mutation=%d->%d", shared, oldOnly, runID, mutationBefore, mutationAfter)
+	}
+	// Once the missing key has landed, an exact replay is a no-op and must not
+	// invalidate a query proof again.
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders", rows, AppliedMark{Source: &older}); err != nil {
+		t.Fatal(err)
+	}
+	var mutationReplay uint64
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT mutation_seq FROM data_receipt_sources WHERE project_id=? AND connector_id=? AND table_name='orders'`, projectID, connectorID).Scan(&mutationReplay)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if mutationReplay != mutationAfter {
+		t.Fatalf("idempotent older replay changed proof token: %d -> %d", mutationAfter, mutationReplay)
+	}
+}
+
+func TestOlderIncrementalReplayRequiresFreshQueryWhenMissingKeysLand(t *testing.T) {
+	s := openConvTestStore(t)
+	_, projectID := seedConvProject(t, s)
+	ctx := context.Background()
+	var connectorID, syncID string
+	if err := s.pg.QueryRow(ctx, `INSERT INTO data_connectors(project_id,name,kind) VALUES($1,'older-delta','postgres') RETURNING id::text`, projectID).Scan(&connectorID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pg.QueryRow(ctx, `INSERT INTO connector_syncs(connector_id,project_id,source_table,key_column) VALUES($1,$2,'orders','id') RETURNING id::text`, connectorID, projectID).Scan(&syncID); err != nil {
+		t.Fatal(err)
+	}
+	s.duck = openTestDuckDB(t)
+	s.sandboxes = newSQLSandboxPool(s.duck)
+	t.Cleanup(s.sandboxes.closeAll)
+	now := time.Now().UTC()
+	s.now = func() time.Time { return now }
+	index, expected := uint64(0), uint64(1)
+	current := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+		RunID: uuid.NewString(), BatchID: "batch-0", BatchIndex: &index, PayloadSHA256: strings.Repeat("a", 64), CaptureStartedAt: &now, Promoted: true}
+	if err := s.duck.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{{Key: "shared", DataJSON: `{"n":2}`}}, AppliedMark{Source: &current}); err != nil {
+		t.Fatal(err)
+	}
+	complete := current
+	complete.BatchID, complete.BatchIndex, complete.PayloadSHA256 = "", nil, ""
+	complete.ExpectedBatches, complete.CaptureFinishedAt, complete.Complete = &expected, &now, true
+	if err := s.duck.RecordPosition(ctx, AppliedMark{Source: &complete}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM external_rows`); err != nil {
+		t.Fatal(err)
+	}
+	sources := []ReadinessSource{{SyncID: syncID, ConnectorID: connectorID, Table: "orders", ScheduleCron: "* * * * *", Configured: true}}
+	if got, err := s.SourceReadiness(ctx, projectID, sources); err != nil || got[syncID].State != ReadinessReady {
+		t.Fatalf("current run readiness=%+v err=%v", got[syncID], err)
+	}
+	olderAt := now.Add(-time.Hour)
+	older := current
+	older.RunID, older.CaptureStartedAt, older.PayloadSHA256 = uuid.NewString(), &olderAt, strings.Repeat("b", 64)
+	if err := s.duck.InsertExternalRows(ctx, projectID, connectorID, "orders", []connector.LandedRow{
+		{Key: "shared", DataJSON: `{"n":1}`},
+		{Key: "old-only", DataJSON: `{"n":1}`},
+	}, AppliedMark{Source: &older}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SourceReadiness(ctx, projectID, sources)
+	if err != nil || got[syncID].State != ReadinessSyncing || got[syncID].Reason == nil || *got[syncID].Reason != "awaiting_query_confirmation" {
+		t.Fatalf("merged older delta readiness=%+v err=%v", got[syncID], err)
+	}
+	var shared, oldOnly int
+	if err := s.duck.Read(ctx, func(conn *sql.Conn) error {
+		if err := conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows WHERE project_id=? AND row_key='shared'`, projectID).Scan(&shared); err != nil {
+			return err
+		}
+		return conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows WHERE project_id=? AND row_key='old-only'`, projectID).Scan(&oldOnly)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if shared != 2 || oldOnly != 1 {
+		t.Fatalf("merged rows shared=%d old-only=%d", shared, oldOnly)
+	}
+	if _, _, err := s.RunSQLWithMeta(ctx, projectID, `SELECT count(*) FROM external_rows`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = s.SourceReadiness(ctx, projectID, sources); err != nil || got[syncID].State != ReadinessReady {
+		t.Fatalf("freshly queried merged delta readiness=%+v err=%v", got[syncID], err)
+	}
+}
+
 func TestLegacyPublicationJournalRetainsBoundedSuffix(t *testing.T) {
 	s := openConvTestStore(t)
 	ctx := context.Background()

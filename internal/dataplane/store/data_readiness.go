@@ -439,10 +439,10 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key IS NOT
 	return nil
 }
 
-// sourceReceiptSupersededTx is the write fence shared by receipt-only and row
-// mutations. Callers that mutate source rows must evaluate it before the first
-// row statement so a delayed run cannot change data while preserving a newer
-// readiness proof.
+// sourceReceiptSupersededTx is the ordering fence shared by receipt-only and
+// row mutations. Callers must evaluate it before the first row statement so a
+// delayed incremental run can preserve newer values, merge only absent keys,
+// and invalidate the newer readiness proof when that merge changes data.
 func sourceReceiptSupersededTx(ctx context.Context, tx *sql.Tx, s *SourceReceiptMark) (bool, error) {
 	if s == nil {
 		return false, nil
