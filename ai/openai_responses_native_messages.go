@@ -80,7 +80,7 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 		return nil, err
 	}
 	normalized := ResolveTranscript(context, options.SupportsMidConvoSystemMessages)
-	transformed := TransformMessages(normalized.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ Model, source Message) string {
+	transformed := TransformMessages(normalized.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ *Model, source *Message) string {
 		if !slices.Contains(allowedToolCallProviders, model.Provider) || !strings.Contains(id, "|") {
 			return normalizeResponsesIDPart(id)
 		}
@@ -271,12 +271,12 @@ func parseResponsesTextSignature(signature *string) (id, phase string) {
 	}
 	return *signature, ""
 }
-func responsesImage(block ContentBlock) map[string]any {
+func responsesImage(block *ContentBlock) map[string]any {
 	return map[string]any{"type": "input_image", "detail": "auto", "image_url": "data:" + block.MIMEType + ";base64," + block.Data}
 }
-func responsesToolResultOutput(model completionsModel, blocks []ContentBlock) any {
+func responsesToolResultOutput(model completionsModel, blocks []*ContentBlock) any {
 	texts := []string{}
-	images := []ContentBlock{}
+	images := []*ContentBlock{}
 	for _, block := range blocks {
 		if block.Type == "text" {
 			texts = append(texts, block.Text)

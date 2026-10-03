@@ -74,8 +74,7 @@ func newCompletionsAccumulator(model completionsModel, compat OpenAICompletionsC
 }
 
 func (a *completionsAccumulator) publish(event AssistantMessageEvent) {
-	// Stable pointers back the lookup maps and toolcall_end events. The transcript
-	// representation uses values, so refresh its view before publishing an event.
+	// Publish the current list of shared blocks before exposing a new event.
 	a.refresh()
 	if event.Type != "done" && event.Type != "error" {
 		event.Partial = a.output
@@ -84,12 +83,7 @@ func (a *completionsAccumulator) publish(event AssistantMessageEvent) {
 }
 
 func (a *completionsAccumulator) refresh() {
-	for len(a.output.Content.Blocks) < len(a.blocks) {
-		a.output.Content.Blocks = append(a.output.Content.Blocks, ContentBlock{})
-	}
-	for i, block := range a.blocks {
-		a.output.Content.Blocks[i] = *block
-	}
+	a.output.Content = BlockReferences(a.blocks...)
 }
 
 func (a *completionsAccumulator) start() {

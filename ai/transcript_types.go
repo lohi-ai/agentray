@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // Message is Pi's transcript union. Role selects the applicable fields. Unlike
@@ -13,32 +14,33 @@ import (
 // remain in their original representation. Extra retains application metadata.
 type Message struct {
 	encoding              *transcriptEncoding
-	Role                  string                     `json:"role"`
-	Content               MessageContent             `json:"content"`
-	Timestamp             int64                      `json:"timestamp"`
-	Sections              SystemSections             `json:"sections,omitempty"`
-	ToolsAdded            []Tool                     `json:"toolsAdded,omitempty"`
-	ToolsRemoved          []ToolReference            `json:"toolsRemoved,omitempty"`
-	API                   string                     `json:"api,omitempty"`
-	Provider              string                     `json:"provider,omitempty"`
-	Model                 string                     `json:"model,omitempty"`
-	ResponseModel         *string                    `json:"responseModel,omitempty"`
-	ResponseID            *string                    `json:"responseId,omitempty"`
-	ProviderThinkingLevel *string                    `json:"providerThinkingLevel,omitempty"`
-	ThinkingLevel         *string                    `json:"thinkingLevel,omitempty"`
-	Diagnostics           json.RawMessage            `json:"diagnostics,omitempty"`
-	Usage                 *Usage                     `json:"usage,omitempty"`
-	StopReason            string                     `json:"stopReason,omitempty"`
-	Deferred              json.RawMessage            `json:"deferred,omitempty"`
-	ErrorMessage          *string                    `json:"errorMessage,omitempty"`
-	RawStopReason         *string                    `json:"rawStopReason,omitempty"`
-	EndTurn               *bool                      `json:"endTurn,omitempty"`
-	ToolCallID            string                     `json:"toolCallId,omitempty"`
-	ToolName              string                     `json:"toolName,omitempty"`
-	Details               json.RawMessage            `json:"details,omitempty"`
-	NestedCalls           json.RawMessage            `json:"nestedCalls,omitempty"`
-	IsError               bool                       `json:"isError,omitempty"`
-	Extra                 map[string]json.RawMessage `json:"-"`
+	Role                  string          `json:"role"`
+	Content               MessageContent  `json:"content"`
+	Timestamp             int64           `json:"timestamp"`
+	Sections              SystemSections  `json:"sections,omitempty"`
+	ToolsAdded            []Tool          `json:"toolsAdded,omitempty"`
+	ToolsRemoved          []ToolReference `json:"toolsRemoved,omitempty"`
+	API                   string          `json:"api,omitempty"`
+	Provider              string          `json:"provider,omitempty"`
+	Model                 string          `json:"model,omitempty"`
+	ResponseModel         *string         `json:"responseModel,omitempty"`
+	ResponseID            *string         `json:"responseId,omitempty"`
+	ProviderThinkingLevel *string         `json:"providerThinkingLevel,omitempty"`
+	ThinkingLevel         *string         `json:"thinkingLevel,omitempty"`
+	Diagnostics           json.RawMessage `json:"diagnostics,omitempty"`
+	Usage                 *Usage          `json:"usage,omitempty"`
+	StopReason            string          `json:"stopReason,omitempty"`
+	Deferred              json.RawMessage `json:"deferred,omitempty"`
+	ErrorMessage          *string         `json:"errorMessage,omitempty"`
+	RawStopReason         *string         `json:"rawStopReason,omitempty"`
+	EndTurn               *bool           `json:"endTurn,omitempty"`
+	ToolCallID            string          `json:"toolCallId,omitempty"`
+	ToolName              string          `json:"toolName,omitempty"`
+	// Details is a live JSON-shaped value. nil/Undefined mean absent; Null is explicit null.
+	Details     any                        `json:"-"`
+	NestedCalls json.RawMessage            `json:"nestedCalls,omitempty"`
+	IsError     bool                       `json:"isError,omitempty"`
+	Extra       map[string]json.RawMessage `json:"-"`
 }
 
 // ContentBlock is Pi's text/thinking/image/toolCall union. Optional signatures
@@ -66,13 +68,25 @@ type ContentBlock struct {
 // Its zero value is JSON null, as accepted by transformMessages for old logs.
 type MessageContent struct {
 	Text   *string
-	Blocks []ContentBlock
+	Blocks []*ContentBlock
 }
 
 func TextContent(text string) MessageContent { return MessageContent{Text: &text} }
 func BlockContent(blocks ...ContentBlock) MessageContent {
+	refs := make([]*ContentBlock, len(blocks))
+	for i, block := range blocks {
+		refs[i] = &block
+	}
+	return BlockReferences(refs...)
+}
+
+// BlockReferences preserves block identity across hooks and content lists.
+// Replacing a list entry or growing its backing array does not replace a block
+// retained by another list or callback. BlockContent constructs new objects
+// from values when the caller does not need to retain references.
+func BlockReferences(blocks ...*ContentBlock) MessageContent {
 	if blocks == nil {
-		blocks = []ContentBlock{}
+		blocks = []*ContentBlock{}
 	}
 	return MessageContent{Blocks: blocks}
 }
@@ -88,7 +102,16 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	if len(bytes.TrimSpace(data)) > 0 && bytes.TrimSpace(data)[0] == '"' {
 		return json.Unmarshal(data, &c.Text)
 	}
-	return json.Unmarshal(data, &c.Blocks)
+	if err := json.Unmarshal(data, &c.Blocks); err != nil {
+		return err
+	}
+	// Retain the explicit-null sentinel used for sparse streamed content.
+	for i, block := range c.Blocks {
+		if block == nil {
+			c.Blocks[i] = &ContentBlock{null: true}
+		}
+	}
+	return nil
 }
 
 type Usage struct {
@@ -109,43 +132,6 @@ type UsageCost struct {
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
 	Total      float64 `json:"total"`
-}
-
-// Usage received from a proxy or saved transcript is a source record. Preserve
-// absent/null fields and provider extensions while allowing typed counters to
-// be changed by native callers, just as for the enclosing Message.
-func (u Usage) MarshalJSON() ([]byte, error) {
-	type plain Usage
-	raw, err := json.Marshal(plain(u))
-	return restoreTranscriptEncoding(raw, err, u.encoding)
-}
-
-func (u *Usage) UnmarshalJSON(raw []byte) error {
-	type plain Usage
-	*u = Usage{}
-	if err := json.Unmarshal(raw, (*plain)(u)); err != nil {
-		return err
-	}
-	var err error
-	u.encoding, err = captureTranscriptEncoding(raw, u)
-	return err
-}
-
-func (c UsageCost) MarshalJSON() ([]byte, error) {
-	type plain UsageCost
-	raw, err := json.Marshal(plain(c))
-	return restoreTranscriptEncoding(raw, err, c.encoding)
-}
-
-func (c *UsageCost) UnmarshalJSON(raw []byte) error {
-	type plain UsageCost
-	*c = UsageCost{}
-	if err := json.Unmarshal(raw, (*plain)(c)); err != nil {
-		return err
-	}
-	var err error
-	c.encoding, err = captureTranscriptEncoding(raw, c)
-	return err
 }
 
 type Tool struct {
@@ -201,13 +187,9 @@ func (s SystemSections) ordered() SystemSections {
 			result = append(result, section)
 		}
 	}
-	index := func(name string) (uint64, bool) {
-		n, err := strconv.ParseUint(name, 10, 32)
-		return n, err == nil && n < 4294967295 && strconv.FormatUint(n, 10) == name
-	}
 	sort.SliceStable(result, func(i, j int) bool {
-		a, ai := index(result[i].Name)
-		b, bi := index(result[j].Name)
+		a, ai := jsonjs.ArrayIndex(result[i].Name)
+		b, bi := jsonjs.ArrayIndex(result[j].Name)
 		if ai && bi {
 			return a < b
 		}
@@ -279,6 +261,13 @@ func marshalTranscriptObject(value any, extra map[string]json.RawMessage, requir
 		}
 	}
 	for key, value := range required {
+		// Native validation/provider strings may contain decoded lone UTF-16
+		// surrogates. encoding/json replaces their WTF-8 bytes; retain their
+		// original code units when exporting required transcript text fields.
+		if text, ok := value.(string); ok {
+			fields[key] = jsonjs.QuoteString(text)
+			continue
+		}
 		encoded, err := json.Marshal(value)
 		if err != nil {
 			return nil, err
@@ -309,6 +298,13 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	}
 	if m.Sections != nil {
 		required["sections"] = m.Sections
+	}
+	details, err := jsonjs.MarshalOptional(m.Details)
+	if err != nil {
+		return nil, err
+	}
+	if details != nil {
+		required["details"] = json.RawMessage(details)
 	}
 	raw, err := marshalTranscriptObject(plain(m), m.Extra, required)
 	return restoreTranscriptEncoding(raw, err, m.encoding)
@@ -358,6 +354,12 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	*m = Message{}
 	extra, err := decodeTranscriptObject(data, (*plain)(m), "role content timestamp sections toolsAdded toolsRemoved api provider model responseModel responseId providerThinkingLevel thinkingLevel diagnostics usage stopReason deferred errorMessage rawStopReason endTurn toolCallId toolName details nestedCalls isError")
 	m.Extra = extra
+	if err == nil {
+		var fields map[string]json.RawMessage
+		if err = json.Unmarshal(data, &fields); err == nil {
+			m.Details, err = jsonjs.DecodeOptional(fields["details"])
+		}
+	}
 	if err == nil {
 		m.encoding, err = captureTranscriptEncoding(data, m)
 	}

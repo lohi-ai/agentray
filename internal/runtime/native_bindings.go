@@ -10,6 +10,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/engine"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"github.com/lohi-ai/agentray/telemetry"
 )
 
@@ -36,7 +37,7 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 			Model         json.RawMessage
 			ThinkingLevel string
 			Tools         json.RawMessage
-			Messages      []ai.Message
+			Messages      []*ai.Message
 		}
 		Callbacks                                            []string
 		StreamMode                                           string
@@ -117,22 +118,22 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 	for _, name := range wire.Callbacks {
 		switch name {
 		case "convertToLlm":
-			options.ConvertToLLM = func(messages []ai.Message) ([]ai.Message, error) {
+			options.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
 				raw, err := a.invoke(a.ctx, "convertToLlm", messages)
 				if err != nil {
 					return nil, err
 				}
-				var converted []ai.Message
+				var converted []*ai.Message
 				err = json.Unmarshal(raw, &converted)
 				return converted, err
 			}
 		case "transformContext":
-			options.TransformContext = func(ctx context.Context, messages []ai.Message) ([]ai.Message, error) {
+			options.TransformContext = func(ctx context.Context, messages []*ai.Message) ([]*ai.Message, error) {
 				raw, err := a.invoke(ctx, "transformContext", messages)
 				if err != nil {
 					return nil, err
 				}
-				var transformed []ai.Message
+				var transformed []*ai.Message
 				err = json.Unmarshal(raw, &transformed)
 				return transformed, err
 			}
@@ -224,11 +225,11 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 func nativeContext(c *engine.Context) map[string]any {
 	messages := c.Messages
 	if messages == nil {
-		messages = []ai.Message{}
+		messages = []*ai.Message{}
 	}
 	tools := c.Tools
 	if tools == nil {
-		tools = []engine.Tool{}
+		tools = []*engine.Tool{}
 	}
 	return map[string]any{"messages": messages, "tools": tools}
 }
@@ -248,10 +249,10 @@ func (a *NativeAgent) bindUpdate(raw json.RawMessage) (*engine.TurnUpdate, error
 	}
 	var update struct {
 		Context *struct {
-			Messages []ai.Message
+			Messages []*ai.Message
 			Tools    json.RawMessage
 		}
-		Messages      []ai.Message
+		Messages      []*ai.Message
 		Model         json.RawMessage
 		ThinkingLevel *string
 	}
@@ -269,8 +270,8 @@ func (a *NativeAgent) bindUpdate(raw json.RawMessage) (*engine.TurnUpdate, error
 	return result, nil
 }
 
-func (a *NativeAgent) bindTools(raw json.RawMessage) ([]engine.Tool, error) {
-	tools := []engine.Tool{}
+func (a *NativeAgent) bindTools(raw json.RawMessage) ([]*engine.Tool, error) {
+	tools := []*engine.Tool{}
 	if nativeNull(raw) {
 		return tools, nil
 	}
@@ -295,7 +296,7 @@ func (a *NativeAgent) bindTools(raw json.RawMessage) ([]engine.Tool, error) {
 		if len(fields.PrepareArguments) > 0 && !bytes.Equal(fields.PrepareArguments, []byte("false")) && !nativeNull(fields.PrepareArguments) {
 			return nil, errors.New("prepareArguments requires a Go tool binding")
 		}
-		tool := engine.Tool{Tool: declaration, Label: fields.Label, Replay: fields.Replay, ExecutionMode: fields.ExecutionMode, OutputSchema: fields.OutputSchema}
+		tool := &engine.Tool{Tool: declaration, Label: fields.Label, Replay: fields.Replay, ExecutionMode: fields.ExecutionMode, OutputSchema: fields.OutputSchema}
 		for _, key := range []string{"label", "replay", "executionMode", "outputSchema", "execute", "agentrayPrepareArguments"} {
 			delete(tool.Extra, key)
 		}
@@ -308,14 +309,18 @@ func (a *NativeAgent) bindTools(raw json.RawMessage) ([]engine.Tool, error) {
 				return json.RawMessage((ask.Tool{}).PrepareArguments(string(args))), nil
 			}
 		}
-		tool.Execute = func(ctx context.Context, id string, args json.RawMessage, onUpdate func(engine.ToolResult)) (engine.ToolResult, error) {
-			return telemetry.StartSpan(a.telemetryParent(), telemetry.SpanOptions{Name: "agentray.tool.execute", Attributes: telemetry.Attributes{"tool.name": declaration.Name}}, func(span *telemetry.Span) (engine.ToolResult, error) {
-				params, err := json.Marshal(map[string]any{"toolCallId": id, "toolName": declaration.Name, "args": args})
+		tool.Execute = func(ctx context.Context, id string, args any, onUpdate func(*engine.ToolResult)) (*engine.ToolResult, error) {
+			return telemetry.StartSpan(a.telemetryParent(), telemetry.SpanOptions{Name: "agentray.tool.execute", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "tool.name", Value: declaration.Name})}, func(span *telemetry.Span) (*engine.ToolResult, error) {
+				encodedArgs, err := jsonjs.MarshalValue(args)
 				if err != nil {
-					return engine.ToolResult{}, err
+					return nil, err
+				}
+				params, err := json.Marshal(map[string]any{"toolCallId": id, "toolName": declaration.Name, "args": json.RawMessage(encodedArgs)})
+				if err != nil {
+					return nil, err
 				}
 				raw, err := invokeNativeCallback(ctx, a.config.Callback, "tool", params, func(raw json.RawMessage) error {
-					var update engine.ToolResult
+					var update *engine.ToolResult
 					if err := json.Unmarshal(raw, &update); err != nil {
 						return err
 					}
@@ -323,13 +328,13 @@ func (a *NativeAgent) bindTools(raw json.RawMessage) ([]engine.Tool, error) {
 					return nil
 				})
 				if err != nil {
-					return engine.ToolResult{}, err
+					return nil, err
 				}
-				var result engine.ToolResult
+				var result *engine.ToolResult
 				if err := json.Unmarshal(raw, &result); err != nil {
-					return result, err
+					return nil, err
 				}
-				if result.IsError != nil && *result.IsError {
+				if result != nil && result.IsError != nil && *result.IsError {
 					span.SetStatus(telemetry.SpanStatus{Status: "error"})
 				}
 				return result, nil

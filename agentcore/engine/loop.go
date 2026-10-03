@@ -11,9 +11,9 @@ import (
 
 // Run starts a prompt invocation. Returned messages exclude pre-existing
 // history. Hooks and sink failures propagate without inventing agent_end.
-func Run(ctx context.Context, prompts []ai.Message, initial Context, config Config, emit EventSink, stream StreamFn) ([]ai.Message, error) {
+func Run(ctx context.Context, prompts []*ai.Message, initial Context, config Config, emit EventSink, stream StreamFn) ([]*ai.Message, error) {
 	initialMessages := declareToolChanges(initial, prompts, config.now)
-	newMessages := append([]ai.Message{}, initialMessages...)
+	newMessages := append([]*ai.Message{}, initialMessages...)
 	current := initial
 	current.Messages = append(slices.Clone(initial.Messages), initialMessages...)
 	if err := emit(Event{Type: "agent_start"}); err != nil {
@@ -22,8 +22,8 @@ func Run(ctx context.Context, prompts []ai.Message, initial Context, config Conf
 	if err := emit(Event{Type: "turn_start"}); err != nil {
 		return nil, err
 	}
-	for i := range initialMessages {
-		if err := emitMessage(&initialMessages[i], emit); err != nil {
+	for _, message := range initialMessages {
+		if err := emitMessage(message, emit); err != nil {
 			return nil, err
 		}
 	}
@@ -38,7 +38,7 @@ func Run(ctx context.Context, prompts []ai.Message, initial Context, config Conf
 }
 
 // Continue reuses the transcript without emitting the existing prompt again.
-func Continue(ctx context.Context, initial Context, config Config, emit EventSink, stream StreamFn) ([]ai.Message, error) {
+func Continue(ctx context.Context, initial Context, config Config, emit EventSink, stream StreamFn) ([]*ai.Message, error) {
 	if err := validateContinuation(initial); err != nil {
 		return nil, err
 	}
@@ -55,21 +55,21 @@ func Continue(ctx context.Context, initial Context, config Config, emit EventSin
 			return nil, err
 		}
 	}
-	return runLoop(ctx, &initial, []ai.Message{}, config, emit, stream)
+	return runLoop(ctx, &initial, []*ai.Message{}, config, emit, stream)
 }
 
-func runLoop(ctx context.Context, current *Context, messages []ai.Message, config Config, emit EventSink, stream StreamFn) ([]ai.Message, error) {
+func runLoop(ctx context.Context, current *Context, messages []*ai.Message, config Config, emit EventSink, stream StreamFn) ([]*ai.Message, error) {
 	var last *Turn
 	pending, err := poll(config.GetSteeringMessages)
 	if err != nil {
 		return nil, err
 	}
 	explicit := false
-	finish := func() ([]ai.Message, error) { return messages, emit(Event{Type: "agent_end", Messages: messages}) }
+	finish := func() ([]*ai.Message, error) { return messages, emit(Event{Type: "agent_end", Messages: messages}) }
 	for {
 		moreTools := true
 		for moreTools || len(pending) > 0 {
-			var prepared []ai.Message
+			var prepared []*ai.Message
 			if last != nil {
 				if config.PrepareNextTurn != nil {
 					update, err := config.PrepareNextTurn(*last)
@@ -92,7 +92,7 @@ func runLoop(ctx context.Context, current *Context, messages []ai.Message, confi
 				}
 			}
 			for _, message := range declareToolChanges(*current, append(slices.Clone(prepared), pending...), config.now) {
-				if err := emitMessage(&message, emit); err != nil {
+				if err := emitMessage(message, emit); err != nil {
 					return nil, err
 				}
 				current.Messages = append(current.Messages, message)
@@ -127,8 +127,8 @@ func runLoop(ctx context.Context, current *Context, messages []ai.Message, confi
 			if err != nil {
 				return nil, err
 			}
-			messages = append(messages, *message)
-			toolResults := []ai.Message{}
+			messages = append(messages, message)
+			toolResults := []*ai.Message{}
 			if message.StopReason == "error" || message.StopReason == "aborted" {
 				last = &Turn{Message: message, ToolResults: toolResults, Context: current, NewMessages: messages}
 				if config.FinishTurn != nil {
@@ -208,7 +208,7 @@ func applyUpdate(current *Context, config *Config, update *TurnUpdate) *Context 
 	return current
 }
 
-func poll(fn func() ([]ai.Message, error)) ([]ai.Message, error) {
+func poll(fn func() ([]*ai.Message, error)) ([]*ai.Message, error) {
 	if fn == nil {
 		return nil, nil
 	}
@@ -229,7 +229,7 @@ func emitMessage(message *ai.Message, emit EventSink) error {
 	return emit(Event{Type: "message_end", Message: message})
 }
 
-func declareToolChanges(current Context, pending []ai.Message, now func() int64) []ai.Message {
+func declareToolChanges(current Context, pending []*ai.Message, now func() int64) []*ai.Message {
 	systemIndex := -1
 	for i := len(pending) - 1; i >= 0; i-- {
 		if pending[i].Role == "system" {
@@ -240,19 +240,21 @@ func declareToolChanges(current Context, pending []ai.Message, now func() int64)
 	baseline := pending
 	if systemIndex >= 0 {
 		baseline = slices.Clone(pending)
-		baseline[systemIndex] = ai.WithToolChanges(pending[systemIndex], ai.ToolStateChanges{})
+		message := ai.WithToolChanges(*pending[systemIndex], ai.ToolStateChanges{})
+		baseline[systemIndex] = &message
 	}
 	tools := make([]ai.Tool, len(current.Tools))
 	for i, tool := range current.Tools {
 		tools[i] = ai.ToToolDeclaration(tool.Tool)
 	}
-	changes := ai.GetToolStateChanges(ai.GetCurrentTools(append(slices.Clone(current.Messages), baseline...)), tools)
+	changes := ai.GetToolStateChanges(ai.GetCurrentTools(MessageValues(append(slices.Clone(current.Messages), baseline...))), tools)
 	unchanged := len(changes.ToolsAdded) == 0 && len(changes.ToolsRemoved) == 0
 	if systemIndex >= 0 {
 		if unchanged && len(pending[systemIndex].ToolsAdded) == 0 && len(pending[systemIndex].ToolsRemoved) == 0 {
 			return pending
 		}
-		baseline[systemIndex] = ai.WithToolChanges(pending[systemIndex], changes)
+		message := ai.WithToolChanges(*pending[systemIndex], changes)
+		baseline[systemIndex] = &message
 		return baseline
 	}
 	if unchanged {
@@ -266,7 +268,7 @@ func declareToolChanges(current Context, pending []ai.Message, now func() int64)
 			break
 		}
 	}
-	return slices.Insert(slices.Clone(pending), index, update)
+	return slices.Insert(slices.Clone(pending), index, &update)
 }
 
 func streamAssistant(ctx context.Context, current *Context, config Config, emit EventSink, stream StreamFn) (*ai.Message, error) {
@@ -281,7 +283,7 @@ func streamAssistant(ctx context.Context, current *Context, config Config, emit 
 	if config.ConvertToLLM == nil {
 		return nil, errors.New("engine: convertToLLM is required")
 	}
-	messages, err = config.ConvertToLLM(messages)
+	llmMessages, err := config.ConvertToLLM(messages)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +303,7 @@ func streamAssistant(ctx context.Context, current *Context, config Config, emit 
 			options["apiKey"] = key
 		}
 	}
-	response, err := stream(ctx, config.Model, ai.NormalizeContext(ai.Context{Messages: messages}), options)
+	response, err := stream(ctx, config.Model, ai.NormalizeContext(ai.Context{Messages: MessageValues(llmMessages)}), options)
 	if err != nil {
 		return nil, err
 	}
@@ -345,9 +347,9 @@ func consumeAssistant(ctx context.Context, current *Context, config Config, emit
 		level := thinkingLevel(config.Reasoning)
 		message.ThinkingLevel = &level
 		if addedPartial {
-			current.Messages[len(current.Messages)-1] = *message
+			current.Messages[len(current.Messages)-1] = message
 		} else {
-			current.Messages = append(current.Messages, *message)
+			current.Messages = append(current.Messages, message)
 			copy := *message
 			if err := emit(Event{Type: "message_start", Message: &copy}); err != nil {
 				return nil, err
@@ -377,7 +379,7 @@ func consumeAssistant(ctx context.Context, current *Context, config Config, emit
 			if event.Partial == nil {
 				return nil, errors.New("engine: start event has no partial message")
 			}
-			current.Messages = append(current.Messages, *event.Partial)
+			current.Messages = append(current.Messages, event.Partial)
 			addedPartial, hasPartial = true, true
 			copy := *event.Partial
 			if err := emit(Event{Type: "message_start", Message: &copy}); err != nil {
@@ -388,7 +390,7 @@ func consumeAssistant(ctx context.Context, current *Context, config Config, emit
 				if event.Partial == nil {
 					return nil, errors.New("engine: update event has no partial message")
 				}
-				current.Messages[len(current.Messages)-1] = *event.Partial
+				current.Messages[len(current.Messages)-1] = event.Partial
 				copy := *event.Partial
 				if err := emit(Event{Type: "message_update", Message: &copy, AssistantMessageEvent: &event}); err != nil {
 					return nil, err

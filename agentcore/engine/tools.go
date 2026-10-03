@@ -1,28 +1,31 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"sync"
 
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 type preparedCall struct {
-	call      ai.ContentBlock
+	call      *ai.ContentBlock
 	tool      *Tool
-	args      json.RawMessage
+	args      any
 	immediate *ToolOutcome
 }
 
 // RunToolCall applies the same preparation, validation and hooks as a model
 // call, without emitting lifecycle events or appending transcript messages.
+// The input call, hook call and outcome call retain the same pointer.
+// The selected tool object survives replacement of its entry in tools.
+// Results and updates retain the tool's pointers unless a hook overrides or fails.
 // An update callback's panic propagates synchronously to the executing tool;
 // a returned error represents a rejected update promise and rejects the call
 // after execution settles. Tools that launch goroutines own their panic boundary.
-func RunToolCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assistant *ai.Message, current *Context, hooks ToolHooks, update func(ToolResult) error) (ToolOutcome, error) {
+func RunToolCall(ctx context.Context, call *ai.ContentBlock, tools []*Tool, assistant *ai.Message, current *Context, hooks ToolHooks, update func(*ToolResult) error) (ToolOutcome, error) {
 	prepared := prepareCall(ctx, call, tools, assistant, current, hooks)
 	if prepared.immediate != nil {
 		return *prepared.immediate, nil
@@ -30,9 +33,10 @@ func RunToolCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assist
 	return executeCall(ctx, prepared, assistant, current, hooks, update)
 }
 
-func toolCalls(message *ai.Message) []ai.ContentBlock {
-	calls := []ai.ContentBlock{}
-	for _, block := range message.Content.Blocks {
+func toolCalls(message *ai.Message) []*ai.ContentBlock {
+	calls := []*ai.ContentBlock{}
+	for i := range message.Content.Blocks {
+		block := message.Content.Blocks[i]
 		if block.Type == "toolCall" {
 			calls = append(calls, block)
 		}
@@ -40,11 +44,11 @@ func toolCalls(message *ai.Message) []ai.ContentBlock {
 	return calls
 }
 
-func errorResult(message string) ToolResult {
-	return ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: message}}, Details: json.RawMessage(`{}`)}
+func errorResult(message string) *ToolResult {
+	return &ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: message}}, Details: NewObject()}
 }
 
-func prepareCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assistant *ai.Message, current *Context, hooks ToolHooks) (prepared preparedCall) {
+func prepareCall(ctx context.Context, call *ai.ContentBlock, tools []*Tool, assistant *ai.Message, current *Context, hooks ToolHooks) (prepared preparedCall) {
 	prepared.call = call
 	fail := func(message string, terminate bool) {
 		result := errorResult(message)
@@ -60,7 +64,7 @@ func prepareCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assist
 	}()
 	for i := range tools {
 		if tools[i].Name == call.Name {
-			prepared.tool = &tools[i]
+			prepared.tool = tools[i]
 			break
 		}
 	}
@@ -77,11 +81,12 @@ func prepareCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assist
 			return
 		}
 	}
-	prepared.args, err = validateArguments(prepared.tool.Tool, args)
+	validated, err := validateArguments(prepared.tool.Tool, args)
 	if err != nil {
 		fail(err.Error(), false)
 		return
 	}
+	prepared.args = validated
 	if hooks.Before != nil {
 		before := BeforeToolCall{AssistantMessage: assistant, ToolCall: call, Args: prepared.args, Context: current}
 		decision, err := hooks.Before(ctx, &before)
@@ -89,7 +94,6 @@ func prepareCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assist
 			fail(err.Error(), false)
 			return
 		}
-		prepared.args = before.Args
 		if ctx.Err() != nil {
 			fail("Operation aborted", false)
 			return
@@ -109,7 +113,7 @@ func prepareCall(ctx context.Context, call ai.ContentBlock, tools []Tool, assist
 	return
 }
 
-func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Message, current *Context, hooks ToolHooks, update func(ToolResult) error) (ToolOutcome, error) {
+func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Message, current *Context, hooks ToolHooks, update func(*ToolResult) error) (ToolOutcome, error) {
 	// Updates belong to one Execute invocation. Closing admission before waiting
 	// ensures retained callbacks cannot create late events in a later tool call.
 	var mu sync.Mutex
@@ -118,7 +122,7 @@ func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Messa
 	var updateErr error
 	failureIndex := -1
 	failed, settled := make(chan struct{}), make(chan struct{})
-	onUpdate := func(partial ToolResult) {
+	onUpdate := func(partial *ToolResult) {
 		mu.Lock()
 		if !accepting {
 			mu.Unlock()
@@ -171,21 +175,30 @@ func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Messa
 	if pendingError != nil {
 		return ToolOutcome{}, pendingError
 	}
-	isError := result.IsError != nil && *result.IsError
+	if err == nil && result == nil {
+		// A Go nil result corresponds to a JS null result. Pi catches the
+		// property-read failure after all admitted updates have settled.
+		err = errors.New("null is not an object (evaluating 'result.isError')")
+	}
+	isError := false
 	if err != nil {
 		result, isError = errorResult(err.Error()), true
+	} else {
+		isError = result.IsError != nil && *result.IsError
 	}
 	if hooks.After != nil {
-		hookResult := result
 		override, err := afterCall(hooks.After, ctx, AfterToolCall{
 			BeforeToolCall: BeforeToolCall{AssistantMessage: assistant, ToolCall: prepared.call, Args: prepared.args, Context: current},
-			Result:         &hookResult, IsError: isError,
+			Result:         result, IsError: isError,
 		})
-		result = hookResult
 		if err != nil {
 			result, isError = errorResult(err.Error()), true
 		} else if override != nil {
-			if nonnull(override.StructuredContent) {
+			// Pi spreads the executed result whenever an override is returned,
+			// including when the hook returns the very same result object.
+			copy := *result
+			result = &copy
+			if !jsonjs.IsNullish(override.StructuredContent) {
 				result.StructuredContent = override.StructuredContent
 			} else if override.Content != nil {
 				result.StructuredContent = nil
@@ -193,7 +206,7 @@ func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Messa
 			if override.Content != nil {
 				result.Content = override.Content
 			}
-			if nonnull(override.Details) {
+			if !jsonjs.IsNullish(override.Details) {
 				result.Details = override.Details
 			}
 			if override.Usage != nil {
@@ -210,7 +223,7 @@ func executeCall(ctx context.Context, prepared preparedCall, assistant *ai.Messa
 	return ToolOutcome{ToolCall: prepared.call, Result: result, IsError: isError}, nil
 }
 
-func invoke(tool *Tool, ctx context.Context, id string, args json.RawMessage, update func(ToolResult)) (result ToolResult, err error) {
+func invoke(tool *Tool, ctx context.Context, id string, args any, update func(*ToolResult)) (result *ToolResult, err error) {
 	defer func() {
 		if value := recover(); value != nil {
 			err = failureError(value)
@@ -228,17 +241,13 @@ func afterCall(hook func(context.Context, AfterToolCall) (*AfterToolResult, erro
 	return hook(ctx, call)
 }
 
-func nonnull(raw json.RawMessage) bool {
-	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
-}
-
 type toolBatch struct {
-	messages  []ai.Message
+	messages  []*ai.Message
 	terminate bool
 }
 
-func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, calls []ai.ContentBlock, config Config, emit EventSink) (toolBatch, error) {
-	batch := toolBatch{messages: []ai.Message{}}
+func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, calls []*ai.ContentBlock, config Config, emit EventSink) (toolBatch, error) {
+	batch := toolBatch{messages: []*ai.Message{}}
 	sequential := config.ToolExecution == "sequential"
 	for _, call := range calls {
 		for _, tool := range current.Tools {
@@ -252,22 +261,24 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 	prepared := []preparedCall{}
 	appendResult := func(outcome ToolOutcome) error {
 		message := ai.Message{Role: "toolResult", ToolCallID: outcome.ToolCall.ID, ToolName: outcome.ToolCall.Name,
-			Content: ai.BlockContent(nonnil(outcome.Result.Content)...), Details: outcome.Result.Details, Usage: outcome.Result.Usage, IsError: outcome.IsError, Timestamp: config.now()}
+			Content: ai.BlockReferences(nonnil(outcome.Result.Content)...), Details: outcome.Result.Details, Usage: outcome.Result.Usage, IsError: outcome.IsError, Timestamp: config.now()}
 		if outcome.Result.Usage == nil && outcome.Result.preserved["usage"] != nil {
 			message.Extra = map[string]json.RawMessage{"usage": outcome.Result.preserved["usage"]}
 		}
 		if err := emitMessage(&message, emit); err != nil {
 			return err
 		}
-		batch.messages = append(batch.messages, message)
+		batch.messages = append(batch.messages, &message)
 		return nil
 	}
 	end := func(outcome ToolOutcome) error {
-		return emit(Event{Type: "tool_execution_end", ToolCallID: outcome.ToolCall.ID, ToolName: outcome.ToolCall.Name, Result: &outcome.Result, IsError: outcome.IsError})
+		// Replacing event.Result or event.IsError is local to the event;
+		// mutating the pointed-to result survives into later batch callbacks.
+		return emit(Event{Type: "tool_execution_end", ToolCallID: outcome.ToolCall.ID, ToolName: outcome.ToolCall.Name, Result: outcome.Result, IsError: outcome.IsError})
 	}
 	run := func(call preparedCall) (ToolOutcome, error) {
-		return executeCall(ctx, call, assistant, current, config.ToolHooks, func(result ToolResult) error {
-			return emit(Event{Type: "tool_execution_update", ToolCallID: call.call.ID, ToolName: call.call.Name, Args: call.call.Arguments, PartialResult: &result})
+		return executeCall(ctx, call, assistant, current, config.ToolHooks, func(result *ToolResult) error {
+			return emit(Event{Type: "tool_execution_update", ToolCallID: call.call.ID, ToolName: call.call.Name, Args: call.call.Arguments, PartialResult: result})
 		})
 	}
 	for _, call := range calls {
@@ -275,7 +286,7 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 			return batch, err
 		}
 		if assistant.StopReason == "length" {
-			outcome := ToolOutcome{ToolCall: call, IsError: true, Result: errorResult(fmt.Sprintf("Tool call %q was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.", call.Name))}
+			outcome := ToolOutcome{ToolCall: call, IsError: true, Result: errorResult("Tool call \"" + call.Name + "\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.")}
 			if err := end(outcome); err != nil {
 				return batch, err
 			}

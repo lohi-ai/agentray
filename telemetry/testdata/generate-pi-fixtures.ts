@@ -9,7 +9,7 @@ const destination = new URL("pi-spans.json", import.meta.url);
 
 type Action = {
   op: "span" | "attributes" | "event" | "status" | "snapshot" | "failure";
-  name?: string; attributes?: Record<string, any>; status?: any;
+  name?: string; attributes?: Record<string, any>; undefinedAttributes?: string[]; status?: any;
   actions?: Action[]; inspection?: Action[]; target?: string; message?: string;
 };
 const span = (name: string, actions: Action[] = [], attributes?: Record<string, any>): Action => ({ op: "span", name, actions, ...(attributes ? { attributes } : {}) });
@@ -17,12 +17,12 @@ const cases: { name: string; actions: Action[] }[] = [
   { name: "empty", actions: [] },
   { name: "success and active snapshot", actions: [span("success", [{ op: "snapshot" }])] },
   { name: "nested parentage and end order", actions: [span("parent", [span("first"), span("second", [span("grandchild")])]), span("another-root")] },
-  { name: "attribute merges and ordered events", actions: [span("recording", [
+  { name: "attribute merges and ordered events", actions: [{ ...span("recording", [
     { op: "attributes", attributes: { count: 1, overwrite: "middle" } },
-    { op: "attributes", attributes: { count: null, overwrite: "end" } },
-    { op: "event", name: "first", attributes: { index: 1, ignored: null } },
+    { op: "attributes", attributes: { overwrite: "end" }, undefinedAttributes: ["count"] },
+    { op: "event", name: "first", attributes: { index: 1 }, undefinedAttributes: ["ignored"] },
     { op: "event", name: "second", attributes: { index: 2 } },
-  ], { start: "value", overwrite: "start", ignored: null })] },
+  ], { start: "value", overwrite: "start" }), undefinedAttributes: ["ignored"] }] },
   { name: "array and scalar attributes", actions: [span("arrays", [
     { op: "event", name: "all", attributes: { strings: ["a", "b"], numbers: [1, 2.5], bools: [false, true], empty: [] } },
   ], { text: "xin chào", number: 3.5, flag: false, strings: ["initial"], numbers: [1], bools: [true] })] },
@@ -61,6 +61,23 @@ const cases: { name: string; actions: Action[] }[] = [
   ] },
 ];
 
+for (const [name, status] of [
+  ["missing status", {}],
+  ["empty status", {status: ""}],
+  ["unknown status", {status: "invalid"}],
+  ["case sensitive status", {status: "OK"}],
+  ["unknown status with details", {status: "pending", error: {name: "Explicit", message: "kept"}}],
+  ["ok ignores details", {status: "ok", error: {name: "Ignored", message: "ignored"}}],
+  ["empty error details", {status: "error", error: {name: "", message: ""}}],
+  ["null error details", {status: "error", error: null}],
+] as [string, any][]) {
+  for (const failure of ["none", "ordinary", "unreadable"]) {
+    const actions: Action[] = [{op: "status", status: {status: "ok"}}, {op: "status", status}, {op: "snapshot"}];
+    if (failure !== "none") actions.push({op: "failure", message: "callback failed", ...(failure === "unreadable" ? {inspection: [{op: "event", name: "must not inspect"}, {op: "failure", message: "unreadable"}] as Action[]} : {})});
+    cases.push({name: `status normalization/${name}/${failure}`, actions: [span("explicit", actions)]});
+  }
+}
+
 const results = [];
 for (const input of cases) {
   const recorder = new InMemoryTelemetryContext();
@@ -69,22 +86,22 @@ for (const input of cases) {
   const failures: string[] = [];
   const admitted: string[] = [];
   const inspectedFailures = new WeakMap<Error, string>();
-  const attributes = (values?: Record<string, any>) => Object.fromEntries(Object.entries(values ?? {}).map(([k, v]) => [k, v === null ? undefined : v]));
+  const attributes = (action: Action) => ({...action.attributes, ...Object.fromEntries((action.undefinedAttributes ?? []).map(key => [key, undefined]))});
   async function run(actions: Action[], context: TelemetryContext): Promise<void> {
     for (const action of actions) {
       const target = action.target ? retained.get(action.target)! : context;
       switch (action.op) {
         case "span":
           try {
-            await target.startSpan({ name: action.name!, attributes: attributes(action.attributes) }, async child => {
+            await target.startSpan({ name: action.name!, attributes: attributes(action) }, async child => {
               admitted.push(action.name!);
               retained.set(action.name!, child);
               await run(action.actions ?? [], child);
             });
           } catch (error) { failures.push(inspectedFailures.get(error as Error) ?? (error as Error).message); }
           break;
-        case "attributes": (target as TelemetrySpan).setAttributes(attributes(action.attributes)); break;
-        case "event": (target as TelemetrySpan).addEvent(action.name!, attributes(action.attributes)); break;
+        case "attributes": (target as TelemetrySpan).setAttributes(attributes(action)); break;
+        case "event": (target as TelemetrySpan).addEvent(action.name!, attributes(action)); break;
         case "status": (target as TelemetrySpan).setStatus(action.status); break;
         case "snapshot": snapshots.push(recorder.getSpans()); break;
         case "failure": {
@@ -94,8 +111,8 @@ for (const input of cases) {
             Object.defineProperty(failure, "message", { get() {
               for (const step of action.inspection!) {
                 switch (step.op) {
-                  case "attributes": (target as TelemetrySpan).setAttributes(attributes(step.attributes)); break;
-                  case "event": (target as TelemetrySpan).addEvent(step.name!, attributes(step.attributes)); break;
+                  case "attributes": (target as TelemetrySpan).setAttributes(attributes(step)); break;
+                  case "event": (target as TelemetrySpan).addEvent(step.name!, attributes(step)); break;
                   case "status": (target as TelemetrySpan).setStatus(step.status); break;
                   case "snapshot": snapshots.push(recorder.getSpans()); break;
                   case "failure": throw new Error(step.message);

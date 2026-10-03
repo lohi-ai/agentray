@@ -36,12 +36,7 @@ func newAnthropicAccumulator(model completionsModel, oauth bool, tools []Tool, o
 	return &anthropicAccumulator{model: model, cost: model.Cost, oauth: oauth, tools: tools, stream: stream, push: stream.Push, output: output, now: now}
 }
 func (a *anthropicAccumulator) refresh() {
-	for len(a.output.Content.Blocks) < len(a.blocks) {
-		a.output.Content.Blocks = append(a.output.Content.Blocks, ContentBlock{})
-	}
-	for i, block := range a.blocks {
-		a.output.Content.Blocks[i] = *block
-	}
+	a.output.Content = BlockReferences(a.blocks...)
 }
 func (a *anthropicAccumulator) publish(event AssistantMessageEvent) {
 	a.refresh()

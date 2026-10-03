@@ -11,8 +11,8 @@ const result = await build({
   absWorkingDir: root,
   tsconfig: "tsconfig.runtime.json",
   entryPoints: {
-    agentcore: "../../agentcore/pi.ts",
-    telemetry: "../../agentcore/telemetry.ts",
+    agentcore: "upstream/packages/agent/src/index.ts",
+    telemetry: "upstream/packages/telemetry/src/index.ts",
     "telemetry-testing": "upstream/packages/telemetry/src/testing/index.ts",
     worker: "runtime/main.ts",
     bridge: "runtime/worker.ts",

@@ -5,7 +5,7 @@ const { Agent } = await import(new URL("upstream/packages/agent/src/agent.ts", r
 const { runToolCall } = await import(new URL("upstream/packages/agent/src/agent-loop.ts", root).pathname);
 Date.now = () => 1700000000123;
 const model = { id: "model", api: "api", provider: "provider" };
-const values = [
+const values: {name:string; kind?:string; value?:any; nativeType?:string}[] = [
   { name: "error", kind: "error", value: "failure" },
   { name: "null", value: null }, { name: "false", value: false },
   { name: "empty-string", value: "" }, { name: "string", value: "xin chào" },
@@ -19,9 +19,37 @@ const values = [
   { name: "nan", kind: "number", value: "NaN" },
   { name: "infinity", kind: "number", value: "Infinity" },
 ];
+values.push(
+  {name:"native/string-slice", value:["a","b"], nativeType:"strings"},
+  {name:"native/bool-slice", value:[true,false], nativeType:"bools"},
+  {name:"native/integer-slice", value:[1,2,3], nativeType:"integers"},
+  {name:"native/nested-slice", value:[[1,2],[3]], nativeType:"nested"},
+  {name:"native/fixed-array", value:["a","b"], nativeType:"array"},
+  {name:"native/byte-slice", value:[65,66], nativeType:"bytes"},
+  {name:"native/nil-slice", value:[], nativeType:"nil-slice"},
+  {name:"native/typed-map", value:{code:7}, nativeType:"map"},
+  {name:"native/float32", value:1.5, nativeType:"float32"},
+  {name:"native/float32-infinity", kind:"number", value:"Infinity", nativeType:"float32"},
+  {name:"native/float32-zero", kind:"number", value:"-0", nativeType:"float32"},
+  {name:"native/int64-rounding", kind:"number", value:"9007199254740993", nativeType:"int64"},
+  {name:"native/uint64-rounding", kind:"number", value:"18446744073709551615", nativeType:"uint64"},
+  {name:"cycle/self", kind:"self-cycle"}, {name:"cycle/mutual", kind:"mutual-cycle"},
+  {name:"cycle/empty", kind:"empty-cycle"}, {name:"cycle/shared", kind:"shared-array"},
+  {name:"cycle/named-slice", kind:"self-cycle", nativeType:"named-cycle"},
+);
+function failureValue(spec:any):any {
+  if(spec.kind==="error") return new Error(spec.value);
+  if(spec.kind==="number") return Number(spec.value);
+  if(spec.kind==="self-cycle"){const value:any[]=[1,null,2];value[1]=value;return value;}
+  if(spec.kind==="mutual-cycle"){const a:any[]=[1,null],b:any[]=[2,a];a[1]=b;return a;}
+  if(spec.kind==="empty-cycle"){const value:any[]=[];value.push(value);return value;}
+  if(spec.kind==="shared-array"){const child=[1,2];return [child,child];}
+  return spec.value;
+}
+
 const cases = [];
 for (const spec of values) {
-  const failure = spec.kind === "error" ? new Error(spec.value as string) : spec.kind === "number" ? Number(spec.value) : spec.value;
+  const failure = failureValue(spec);
   const fail = () => { throw failure; };
   const agent = new Agent({ initialState: { model }, streamFn: fail });
   const events: unknown[] = [];

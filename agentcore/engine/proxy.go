@@ -33,26 +33,29 @@ type ProxyStreamOptions struct {
 // when inspecting payloads while the producer is still running.
 func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, options ProxyStreamOptions) *ai.AssistantMessageEventStream {
 	stream := ai.NewAssistantMessageEventStream()
-	// Freeze the request before returning so the goroutine does not retain a
-	// caller-owned map/transcript. JSON failures follow the asynchronous path.
-	controls := map[string]any{}
-	for _, key := range []string{"temperature", "samplingParams", "maxTokens", "reasoning", "cacheRetention", "sessionId", "headers", "metadata", "transport", "thinkingBudgets", "maxRetryDelayMs"} {
-		if value, ok := options.Options[key]; ok {
-			controls[key] = value
-		}
-	}
-	body, requestErr := json.Marshal(struct {
-		Model   json.RawMessage      `json:"model"`
-		Context ai.TranscriptContext `json:"context"`
-		Options map[string]any       `json:"options"`
-	}{model, transcript, controls})
+	// Pi captures identity before the clock, then timestamps the partial before
+	// JSON.stringify invokes user serializers. Those callbacks can mutate inputs.
 	var identity struct{ API, Provider, ID string }
-	if err := json.Unmarshal(model, &identity); requestErr == nil {
-		requestErr = err
-	}
+	identityErr := json.Unmarshal(model, &identity)
 	now := time.Now().UnixMilli()
 	if options.Now != nil {
 		now = options.Now()
+	}
+	// Freeze the request before returning so the goroutine does not retain a
+	// caller-owned map/transcript. JSON failures follow the asynchronous path.
+	controls := proxyRequestOptions{}
+	for _, key := range []string{"temperature", "samplingParams", "maxTokens", "reasoning", "cacheRetention", "sessionId", "headers", "metadata", "transport", "thinkingBudgets", "maxRetryDelayMs"} {
+		if value, ok := options.Options[key]; ok {
+			controls = append(controls, proxyRequestOption{key, value})
+		}
+	}
+	body, requestErr := marshalProxyRequest(struct {
+		Model   json.RawMessage      `json:"model"`
+		Context ai.TranscriptContext `json:"context"`
+		Options proxyRequestOptions  `json:"options"`
+	}{model, transcript, controls})
+	if requestErr == nil {
+		requestErr = identityErr
 	}
 	partial := &ai.Message{Role: "assistant", StopReason: "pending", Content: ai.BlockContent(), API: identity.API, Provider: identity.Provider, Model: identity.ID, Usage: &ai.Usage{}, Timestamp: now}
 	go func() {
@@ -65,7 +68,7 @@ func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.Trans
 			stream.Synchronize(func() {
 				reason, message := "error", err.Error()
 				if ctx.Err() != nil {
-					reason, message = "aborted", "Request aborted by user"
+					reason = "aborted"
 				}
 				partial.StopReason, partial.ErrorMessage = reason, &message
 				stream.Push(ai.AssistantMessageEvent{Type: "error", Reason: reason, Error: partial})
@@ -75,7 +78,37 @@ func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.Trans
 	return stream
 }
 
-func readProxy(ctx context.Context, stream *ai.AssistantMessageEventStream, partial *ai.Message, body []byte, options ProxyStreamOptions) error {
+// JSON.stringify runs inside Pi's producer try/catch. Go MarshalJSON callbacks
+// may return errors or panic; both must settle the stream instead of escaping
+// synchronously. encoding/json's wrapper is not part of the callback's error.
+func marshalProxyRequest(value any) (body []byte, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			body, err = nil, failureError(failure)
+		}
+	}()
+	body, err = marshalJSScalar(value)
+	if err == nil {
+		return ai.StringifyJSON(body)
+	}
+	for {
+		wrapped, ok := err.(*json.MarshalerError)
+		if !ok {
+			return body, err
+		}
+		err = wrapped.Err
+	}
+}
+
+func readProxy(ctx context.Context, stream *ai.AssistantMessageEventStream, partial *ai.Message, body []byte, options ProxyStreamOptions) (err error) {
+	// Pi catches both fetch rejection and reader rejection inside the producer.
+	// Go transport/reader callbacks may panic instead of returning an error;
+	// convert those at this boundary so the stream still publishes its result.
+	defer func() {
+		if value := recover(); value != nil {
+			err = failureError(value)
+		}
+	}()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, options.ProxyURL+"/api/stream", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -165,8 +198,8 @@ type proxyEvent struct {
 	ProviderThinkingLevel json.RawMessage            `json:"providerThinkingLevel"`
 }
 
-// Keep content objects separate from the value-based transcript slice: appending
-// another block must not detach a previously published toolCall pointer.
+// Content entries and toolcall_end events share stable block objects even when
+// appending another block reallocates the list.
 type proxyAccumulator struct {
 	message *ai.Message
 	blocks  []*ai.ContentBlock
@@ -174,16 +207,7 @@ type proxyAccumulator struct {
 
 func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, error) {
 	partial := p.message
-	defer func() {
-		partial.Content.Blocks = make([]ai.ContentBlock, len(p.blocks))
-		for i, block := range p.blocks {
-			if block != nil {
-				partial.Content.Blocks[i] = *block
-			} else {
-				_ = json.Unmarshal([]byte("null"), &partial.Content.Blocks[i])
-			}
-		}
-	}()
+	defer func() { partial.Content = ai.BlockReferences(p.blocks...) }()
 	event := ai.AssistantMessageEvent{Type: frame.Type, ContentIndex: frame.ContentIndex, Partial: partial}
 	var content *ai.ContentBlock
 	if frame.ContentIndex >= 0 && frame.ContentIndex < len(p.blocks) {
