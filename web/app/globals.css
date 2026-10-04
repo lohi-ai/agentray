@@ -14,6 +14,7 @@
    Importing them from layout.tsx makes Turbopack bundle them reliably. The
    cascade-layer order is pinned in app/cascade-layers.css (loaded first). */
 @import "tailwindcss/utilities.css" layer(utilities);
+@import "../lib/lohi-ui/styles/evidence.css" layer(components);
 
 @theme inline {
   --color-background: var(--background);

@@ -19,11 +19,12 @@ import {
 } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { formatCompact, formatRelative } from '@/lib/format';
-import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview } from '@/modules/app/hooks/connectors';
+import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview, useSourceReadinessOverview } from '@/modules/app/hooks/connectors';
 import { previewProjection } from './dataset-preview';
 import { ConfirmDialog, Modal, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/lohi-evidence-primitives';
+import { ConnectorReadinessSummary, SourceReadinessCell } from './source-readiness';
 
 // Data connectors settings tab: configure an external source (DSN write-only),
 // test it, browse its schema, and set up per-table syncs into the analytics
@@ -37,6 +38,7 @@ export function ConnectorsTab() {
   const [deleting, setDeleting] = useState<DataConnector | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; error?: string } | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const readiness = useSourceReadinessOverview(connectors.map((connector) => ({ id: connector.id, name: connector.name })));
 
   const selected = connectors.find((c) => c.id === selectedID) ?? null;
 
@@ -65,6 +67,13 @@ export function ConnectorsTab() {
     },
     { key: 'kind', header: 'Kind' },
     {
+      key: 'readiness',
+      header: 'Data ready to query',
+      sortable: false,
+      width: { type: 'proportional', value: 2, minWidth: 200 },
+      renderCell: (c) => <ConnectorReadinessSummary readiness={readiness.syncs.filter((sync) => sync.connector_id === c.id).map((sync) => sync.readiness)} loading={readiness.loading} denied={readiness.denied} />,
+    },
+    {
       key: 'created_at',
       header: 'Added',
       sortValue: (c) => c.created_at,
@@ -90,7 +99,7 @@ export function ConnectorsTab() {
     },
     // testConnector is stable enough for this table; testing drives the label.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [selectedID, testing]);
+  ], [selectedID, testing, readiness.syncs, readiness.loading, readiness.denied]);
 
   return (
     <>
@@ -130,6 +139,7 @@ export function ConnectorsTab() {
             title="Data connectors"
             columns={columns}
             data={connectors}
+            appearance="lohi-evidence"
             action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setAdding(true)}>Add connector</Button>}
             onRowClick={(c) => setSelectedID(c.id)}
           />
@@ -232,6 +242,13 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
 
   const columns = useMemo<DataColumn<ConnectorSync>[]>(() => [
     { key: 'source_table', header: 'Table', width: { type: 'proportional', value: 1, minWidth: 90 } },
+    {
+      key: 'readiness',
+      header: 'Data ready to query',
+      sortable: false,
+      width: { type: 'proportional', value: 2, minWidth: 210 },
+      renderCell: (s) => <SourceReadinessCell readiness={s.readiness} />,
+    },
     {
       key: 'key_column',
       header: 'Key / cursor',
@@ -432,7 +449,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
           <EmptyState title="No syncs configured" detail="Add a table sync (or let AI draft one) to start pulling rows into analytics." />
         ) : (
           <>
-            <DataTable columns={columns} data={syncs} pageSize={10} />
+            <DataTable columns={columns} data={syncs} pageSize={10} appearance="lohi-evidence" />
             {lastError ? (
               <Text type="supporting" className="mt-2 block" style={{ color: 'var(--danger)' }}>Last error: {lastError}</Text>
             ) : null}

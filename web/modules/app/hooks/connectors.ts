@@ -4,6 +4,32 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AgentRayAPI, APIError, apiErrorMessage, newIdempotencyKey, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
+export type ReadinessSync = ConnectorSync & { connector_name: string };
+
+// One read model for evidence consumers that need readiness across connectors.
+// It intentionally composes existing generic endpoints: no UI-only source or
+// Lohi route is introduced, and a 403 remains distinguishable from empty data.
+export function useSourceReadinessOverview(connectorIDs?: Array<{ id: string; name: string }>) {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const inputKey = connectorIDs?.map((c) => `${c.id}:${c.name}`).join('|') ?? 'all';
+  const query = useQuery({
+    queryKey: ['source-readiness-overview', projectID, inputKey],
+    queryFn: async () => {
+      const api = new AgentRayAPI(projectID!);
+      const connectors = connectorIDs ?? (await api.connectors()).connectors.map((c) => ({ id: c.id, name: c.name }));
+      const groups = await Promise.all(connectors.map(async (connector) => {
+        const result = await api.connectorSyncs(connector.id);
+        return result.syncs.map((sync) => ({ ...sync, connector_name: connector.name }));
+      }));
+      return groups.flat();
+    },
+    enabled: !!projectID,
+    refetchInterval: (q) => (q.state.data ?? []).some((s) => s.readiness?.state === 'syncing') ? 2000 : false,
+  });
+  const denied = query.error instanceof APIError && query.error.status === 403;
+  return { syncs: query.data ?? [], loading: query.isFetching, denied, error: denied ? null : query.error };
+}
+
 // useConnectors drives the Data connectors settings tab: the project's
 // configured external sources plus create / delete mutations. The DSN is
 // write-only — it goes up in create and never comes back down.

@@ -3,16 +3,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pencil, Sparkles, Trash2 } from 'lucide-react';
-import { Card } from '@astryxdesign/core/Card';
 import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Text } from '@astryxdesign/core/Text';
-import { AgentRayAPI, APIError, type ActivitySummary, type Chart } from '@/lib/api';
+import { AgentRayAPI, APIError, type ActivitySummary, type Chart, type QueryMeta } from '@/lib/api';
+import { Card } from '@/lib/lohi-ui';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
 import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
+import type { ChartEvidence } from './evidence-panel';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -38,7 +39,7 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
 // SeriesChart leads with the graph — that's the point of the card. A single
 // compact "latest" figure anchors the trend; peak/avg are left to the ECharts
 // hover tooltip rather than crowding the card with always-on labels.
-function SeriesChart({ values, labels, type, annotations }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[] }) {
+function SeriesChart({ values, labels, type, annotations, appearance, title }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; title?: string }) {
   if (values.length === 0) {
     return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
@@ -46,6 +47,18 @@ function SeriesChart({ values, labels, type, annotations }: { values: number[]; 
   return (
     <div>
       <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations }} />
+      {appearance === 'lohi-evidence' ? (
+        <details className="lohi-chart-table">
+          <summary>View data table</summary>
+          <div className="overflow-x-auto">
+            <table>
+              <caption>Tabular alternative for {title || 'this chart'}. Values reflect the current query result.</caption>
+              <thead><tr><th scope="col">Label</th><th scope="col">Value</th></tr></thead>
+              <tbody>{values.map((value, index) => <tr key={`${String(labels?.[index] ?? index)}-${index}`}><th scope="row">{labels?.[index] ?? index + 1}</th><td>{value.toLocaleString()}</td></tr>)}</tbody>
+            </table>
+          </div>
+        </details>
+      ) : null}
       <div className="mt-2">
         <Text type="supporting">
           latest <span className="font-mono tabular-nums font-semibold text-primary">{formatCompact(latest)}</span>
@@ -57,7 +70,7 @@ function SeriesChart({ values, labels, type, annotations }: { values: number[]; 
 
 // SqlGraph runs the chart's saved query and plots its y column against an x label
 // column (the first non-numeric field, or x_field if set).
-function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[] }) {
+function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; onEvidence?: (chartID: string, evidence: ChartEvidence) => void }) {
   const api = useMemo(() => new AgentRayAPI(projectID), [projectID]);
   const applied = useFiltersStore((s) => s.appliedFilters);
   const query = useMemo(() => resolveChartQuery(chart.sql, applied), [chart.sql, applied]);
@@ -69,8 +82,8 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
   );
   type State =
     | { key: symbol | null; status: 'loading' }
-    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[] }
-    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string };
+    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[]; meta?: QueryMeta }
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string; meta?: QueryMeta };
   const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
@@ -80,11 +93,12 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
       .then((res) => {
         if (!active) return;
         const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
-        if (projected.status === 'ready') setData({ key: requestKey, ...projected });
+        if (projected.status === 'ready') setData({ key: requestKey, ...projected, meta: res.meta });
         else if (projected.status === 'empty') setData({
           key: requestKey,
           status: 'empty',
           message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
+          meta: res.meta,
         });
         else setData({ key: requestKey, ...projected });
       })
@@ -104,8 +118,14 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
     : query.ok
       ? { key: requestKey, status: 'loading' }
       : { key: requestKey, status: 'unsupported', message: query.message };
+  const evidenceStatus: ChartEvidence['status'] = current.status === 'loading' ? 'loading' : current.status === 'ready' ? 'ready' : current.status === 'empty' ? 'empty' : 'error';
+  const evidenceMeta = 'meta' in current ? current.meta : undefined;
+  useEffect(() => {
+    if (!onEvidence) return;
+    onEvidence(chart.id, { status: evidenceStatus, meta: evidenceMeta });
+  }, [chart.id, evidenceStatus, evidenceMeta, onEvidence]);
   const body = current.status === 'ready'
-    ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} />
+    ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} appearance={appearance} title={chart.name} />
     : (
       <div
         className="grid w-full place-items-center px-3 text-center"
@@ -127,7 +147,7 @@ function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: 
 // ChartCard renders one saved chart. In `preview` mode (used by the editor) the
 // action row is hidden so the same render path drives both the live board and
 // the editor preview — one source of truth for how a chart looks.
-export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false, annotations }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean; annotations?: ChartAnnotation[] }) {
+export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false, annotations, appearance, onEvidence }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; onEvidence?: (chartID: string, evidence: ChartEvidence) => void }) {
   const router = useRouter();
 
   // Hand the chart to the agent chat to explain what it shows. Only offered for
@@ -145,7 +165,7 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
   // 44px touch target. IconButton's `label` is the accessible name and its
   // tooltip keeps the hover affordance.
   return (
-    <Card padding={4}>
+    <Card>
       <HStack align="center" gap={0} className="mb-3">
         {handle}
         <Heading level={5}>{chart.name || 'Untitled chart'}</Heading>
@@ -166,13 +186,15 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
       {chart.kind === 'stat' ? (
         <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
       ) : chart.sql ? (
-        projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} /> : <SeriesChart values={[]} type={specType(chart.kind)} />
+        projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} appearance={appearance} onEvidence={onEvidence} /> : <SeriesChart values={[]} type={specType(chart.kind)} appearance={appearance} title={chart.name} />
       ) : (
         <SeriesChart
           values={(summary?.timeline ?? []).map((p) => p.count)}
           labels={(summary?.timeline ?? []).map((p) => p.hour)}
           type={specType(chart.kind)}
           annotations={annotations}
+          appearance={appearance}
+          title={chart.name}
         />
       )}
     </Card>

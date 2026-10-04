@@ -1,0 +1,200 @@
+/* Scoped lohi-ui token bridge. Nothing outside an opted-in evidence surface is
+   restyled; portal content opts in with .lohi-evidence-popover. */
+.lohi-evidence,
+.lohi-evidence-popover {
+  --lohi-background: #fafaf9;
+  --lohi-foreground: #1a1a17;
+  --lohi-card: #ffffff;
+  --lohi-muted: #f5f5f0;
+  --lohi-muted-foreground: #6b6862;
+  --lohi-border: rgba(0, 0, 0, 0.14);
+  --lohi-brand-50: #fef2f2;
+  --lohi-brand-700: #991b1b;
+  --lohi-success-50: #f0fdf4;
+  --lohi-success-700: #15803d;
+  --lohi-warning-50: #fffbeb;
+  --lohi-warning-700: #a16207;
+  --lohi-error-50: #fef2f2;
+  --lohi-error-700: #b91c1c;
+  --lohi-info-50: #eff6ff;
+  --lohi-info-700: #1d4ed8;
+  --lohi-radius-sm: 8px;
+  --lohi-radius-md: 10px;
+  --lohi-radius-lg: 12px;
+  --lohi-radius-xl: 16px;
+
+  /* Bridge the kept Astryx shell/filter/table onto the lohi evidence palette. */
+  --background: var(--lohi-background);
+  --foreground: var(--lohi-foreground);
+  --surface-1: var(--lohi-card);
+  --surface-2: var(--lohi-muted);
+  --surface-3: #efefec;
+  --surface-4: #e7e7e2;
+  --muted-foreground: var(--lohi-muted-foreground);
+  --border: var(--lohi-border);
+  --input: var(--lohi-border);
+  --primary: var(--lohi-brand-700);
+  --primary-hover: #7f1d1d;
+  --primary-foreground: #ffffff;
+  --ring: rgba(153, 27, 27, 0.45);
+  --color-background-body: var(--lohi-background);
+  --color-background-card: var(--lohi-card);
+  --color-background-popover: var(--lohi-card);
+  --color-background-muted: var(--lohi-muted);
+  --color-background-surface: #efefec;
+  --color-text-primary: var(--lohi-foreground);
+  --color-text-secondary: var(--lohi-muted-foreground);
+  --color-text-disabled: #74716a;
+  --color-border: var(--lohi-border);
+  --color-border-emphasized: rgba(0, 0, 0, 0.28);
+  --color-accent: var(--lohi-brand-700);
+  color: var(--lohi-foreground);
+  font-family: var(--font-inter), Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+[data-theme='dark'] .lohi-evidence,
+[data-theme='dark'] .lohi-evidence-popover,
+.dark .lohi-evidence,
+.dark .lohi-evidence-popover {
+  --lohi-background: #000000;
+  --lohi-foreground: #f5f0e8;
+  --lohi-card: #11110f;
+  --lohi-muted: #1d1c19;
+  --lohi-muted-foreground: #aaa49a;
+  --lohi-border: rgba(255, 255, 255, 0.2);
+  --lohi-brand-50: rgba(239, 68, 68, 0.16);
+  --lohi-brand-700: #fca5a5;
+  --lohi-success-50: rgba(34, 197, 94, 0.16);
+  --lohi-success-700: #86efac;
+  --lohi-warning-50: rgba(245, 158, 11, 0.16);
+  --lohi-warning-700: #fcd34d;
+  --lohi-error-50: rgba(239, 68, 68, 0.16);
+  --lohi-error-700: #fca5a5;
+  --lohi-info-50: rgba(59, 130, 246, 0.16);
+  --lohi-info-700: #93c5fd;
+  --surface-3: #292824;
+  --surface-4: #34332e;
+  --color-background-surface: #292824;
+  --color-text-disabled: #8d887f;
+  --color-border-emphasized: rgba(255, 255, 255, 0.32);
+}
+
+.lohi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  border-radius: var(--lohi-radius-xl);
+  background: var(--lohi-card);
+}
+.lohi-card--bordered { border: 1px solid var(--lohi-border); }
+.lohi-card--small { gap: 12px; }
+.lohi-card--hoverable:hover { border-color: var(--color-border-emphasized); }
+.lohi-card__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 16px 0; }
+.lohi-card__title { margin: 0; font-size: 16px; line-height: 1.25; font-weight: 600; }
+.lohi-card__description { margin: 0; color: var(--lohi-muted-foreground); font-size: 14px; }
+.lohi-card__content { padding: 0 16px 16px; }
+.lohi-card__content:first-child { padding-top: 16px; }
+.lohi-card__loading { display: grid; gap: 8px; padding: 0 16px 16px; }
+
+.lohi-button {
+  display: inline-flex;
+  min-height: 44px;
+  min-width: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--lohi-radius-lg);
+  padding: 8px 16px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color 200ms, color 200ms, border-color 200ms;
+}
+.lohi-button:focus-visible,
+.lohi-accordion__trigger:focus-visible,
+.lohi-chart-table summary:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; }
+.lohi-button:disabled, .lohi-button[aria-disabled='true'] { cursor: not-allowed; opacity: .55; }
+.lohi-button--large { padding-inline: 20px; font-size: 16px; }
+.lohi-button--small { padding-inline: 12px; font-size: 13px; }
+.lohi-button--round { border-radius: 999px; }
+.lohi-button--square { padding: 0; }
+.lohi-button--block { width: 100%; }
+.lohi-button--default.lohi-button--brand { background: #991b1b; color: #fff; }
+.lohi-button--default.lohi-button--brand:hover { background: #7f1d1d; }
+.lohi-button--outlined { background: transparent; color: var(--lohi-foreground); border-color: var(--lohi-border); }
+.lohi-button--outlined:hover, .lohi-button--text:hover { background: var(--lohi-muted); }
+.lohi-button--text { background: transparent; color: var(--lohi-foreground); }
+.lohi-button--success { color: var(--lohi-success-700); }
+.lohi-button--warning { color: var(--lohi-warning-700); }
+.lohi-button--error { color: var(--lohi-error-700); }
+
+.lohi-badge { display: inline-flex; min-height: 22px; width: fit-content; align-items: center; border: 1px solid transparent; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; line-height: 1.35; white-space: nowrap; }
+.lohi-badge--default { color: var(--lohi-muted-foreground); background: var(--lohi-muted); }
+.lohi-badge--brand { color: var(--lohi-brand-700); background: var(--lohi-brand-50); }
+.lohi-badge--success { color: var(--lohi-success-700); background: var(--lohi-success-50); }
+.lohi-badge--warning { color: var(--lohi-warning-700); background: var(--lohi-warning-50); }
+.lohi-badge--error { color: var(--lohi-error-700); background: var(--lohi-error-50); }
+.lohi-badge--info { color: var(--lohi-info-700); background: var(--lohi-info-50); }
+.lohi-badge--outline { background: transparent; border-color: currentColor; }
+
+.lohi-alert { display: flex; align-items: flex-start; gap: 8px; width: 100%; border: 1px solid var(--lohi-border); border-radius: var(--lohi-radius-lg); background: var(--lohi-card); padding: 12px; color: var(--lohi-muted-foreground); font-size: 14px; }
+.lohi-alert--brand { border-top: 4px solid #991b1b; }
+.lohi-alert--success { border-top: 4px solid var(--lohi-success-700); }
+.lohi-alert--warning { border-top: 4px solid var(--lohi-warning-700); }
+.lohi-alert--error { border-top: 4px solid var(--lohi-error-700); }
+.lohi-alert__icon { color: currentColor; padding-top: 2px; }
+.lohi-alert__content { min-width: 0; flex: 1; }
+.lohi-alert__title { color: var(--lohi-foreground); font-weight: 600; }
+.lohi-alert__action { flex: none; }
+.lohi-alert__close { display: grid; min-width: 44px; min-height: 44px; place-items: center; border: 0; background: transparent; color: inherit; }
+
+.lohi-accordion__item { border-top: 1px solid var(--lohi-border); }
+.lohi-accordion__heading { margin: 0; }
+.lohi-accordion__trigger { display: flex; min-height: 44px; width: 100%; align-items: center; justify-content: space-between; gap: 16px; border: 0; border-radius: var(--lohi-radius-sm); background: transparent; padding: 12px 0; color: var(--lohi-foreground); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; }
+.lohi-accordion__chevron { flex: none; transition: transform 200ms; }
+.lohi-accordion__trigger[aria-expanded='true'] .lohi-accordion__chevron { transform: rotate(180deg); }
+.lohi-accordion__content { padding-bottom: 16px; color: var(--lohi-muted-foreground); font-size: 14px; }
+
+.lohi-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px 16px; color: var(--lohi-muted-foreground); text-align: center; }
+.lohi-empty-state h1, .lohi-empty-state h2, .lohi-empty-state h3 { margin: 0; color: var(--lohi-foreground); font-size: 14px; font-weight: 600; }
+.lohi-empty-state p { max-width: 34rem; margin: 4px 0 0; }
+.lohi-skeleton { min-height: 16px; border-radius: var(--lohi-radius-md); background: var(--lohi-muted); animation: lohi-pulse 1.5s ease-in-out infinite; }
+.lohi-spinner { width: 16px; height: 16px; animation: lohi-spin 1s linear infinite; }
+
+.lohi-evidence .astryx-button,
+.lohi-evidence [role='button'],
+.lohi-evidence button { min-height: 44px; }
+.lohi-evidence-table { min-width: 0; overflow-x: auto; border-radius: var(--lohi-radius-xl); }
+.lohi-evidence-filter { min-width: 0; border-radius: var(--lohi-radius-lg); background: var(--lohi-muted); padding: 8px; }
+.lohi-evidence-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.lohi-evidence-fact { min-width: 0; }
+.lohi-evidence-fact dt { color: var(--lohi-muted-foreground); font-size: 12px; }
+.lohi-evidence-fact dd { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--lohi-foreground); font-size: 14px; font-weight: 600; }
+.lohi-evidence-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 0; }
+.lohi-evidence-detail dt { color: var(--lohi-muted-foreground); font-size: 12px; }
+.lohi-evidence-detail dd { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--lohi-foreground); }
+.lohi-evidence-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.lohi-source-readiness { display: grid; min-width: 180px; gap: 4px; }
+.lohi-source-readiness__meta { color: var(--lohi-muted-foreground); font-size: 12px; line-height: 1.4; }
+.lohi-chart-table { margin-top: 8px; color: var(--lohi-muted-foreground); font-size: 12px; }
+.lohi-chart-table summary { display: inline-flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--lohi-foreground); font-weight: 600; }
+.lohi-chart-table table { width: 100%; border-collapse: collapse; }
+.lohi-chart-table caption { padding: 8px 0; text-align: left; }
+.lohi-chart-table th, .lohi-chart-table td { border-bottom: 1px solid var(--lohi-border); padding: 8px; text-align: left; }
+
+@keyframes lohi-pulse { 50% { opacity: .55; } }
+@keyframes lohi-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .lohi-evidence *, .lohi-evidence-popover *, .lohi-spinner, .lohi-skeleton { scroll-behavior: auto !important; animation: none !important; transition-duration: .01ms !important; }
+}
+@media (max-width: 640px) {
+  .lohi-evidence-grid, .lohi-evidence-detail { grid-template-columns: 1fr; }
+  .lohi-card__content { padding-inline: 12px; }
+  .lohi-evidence-filter { align-items: stretch; }
+  .lohi-evidence-filter > * { max-width: 100%; }
+}

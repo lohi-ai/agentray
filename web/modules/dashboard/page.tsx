@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, ChevronUp, LayoutGrid, Plus, Sparkles } from 'lucide-react';
 import { useAuthStore, useFiltersStore } from '@/lib/app-state';
@@ -9,11 +9,10 @@ import { formatCompact } from '@/lib/format';
 import { firstSessionNotice, firstValuePath, settingsPath } from '@/lib/ia';
 import { useActivity, useDashboards, useEventNames, useProjectAccess } from '@/modules/app/hooks';
 import { useWorkspaceModels } from '@/modules/agent/hooks';
-import { Callout } from '@/modules/shared/components/signal-primitives';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { FilterBar } from '@/modules/shared/components/filter-bar';
 import { PromptDialog } from '@/modules/shared/components/modal';
-import { Button, EmptyState, Loading, StatsStrip } from '@/modules/shared/components/signal-primitives';
+import { Button, Callout, EmptyState, Loading, StatsStrip } from '@/modules/shared/components/lohi-evidence-primitives';
 import { Selector } from '@astryxdesign/core/Selector';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { ChartCard } from './chart-card';
@@ -21,6 +20,8 @@ import { ChartEditor } from './chart-editor';
 import { DailyReadout } from './daily-readout';
 import { FirstEventQuickstart } from './first-event-quickstart';
 import { useAnnotations, annotationWindow } from '@/modules/annotations';
+import { useSourceReadinessOverview } from '@/modules/app/hooks/connectors';
+import { EvidencePanel, type ChartEvidence } from './evidence-panel';
 
 // spanClass maps a chart's column span onto the 3-column board grid; it collapses
 // to a single column on narrow screens where the grid itself is one column.
@@ -50,6 +51,11 @@ export function DashboardPage() {
   // Whether this board can be edited at all. A visitor reading the shared demo
   // owns none of these charts, and the API refuses every write to them.
   const access = useProjectAccess();
+  const sourceReadiness = useSourceReadinessOverview();
+  const [chartEvidence, setChartEvidence] = useState<Record<string, ChartEvidence>>({});
+  const reportChartEvidence = useCallback((chartID: string, evidence: ChartEvidence) => {
+    setChartEvidence((current) => current[chartID]?.status === evidence.status && current[chartID]?.meta === evidence.meta ? current : { ...current, [chartID]: evidence });
+  }, []);
 
   // The board's annotation window is the applied filter range — the same
   // window withTimeWindow injects into every SQL chart. The raw filter fields
@@ -136,6 +142,7 @@ export function DashboardPage() {
 
   return (
     <AppShell
+      appearance="lohi-evidence"
       title="Dashboards"
       sub={boardSubtitle}
       actions={<>
@@ -164,7 +171,16 @@ export function DashboardPage() {
           onClose={() => setEditing(null)}
         />
       ) : null}
-      <FilterBar extra={selector} />
+      <FilterBar extra={selector} appearance="lohi-evidence" />
+
+      <EvidencePanel
+        dashboard={selectedDashboard}
+        charts={charts}
+        syncs={sourceReadiness.syncs}
+        readinessLoading={sourceReadiness.loading}
+        readinessDenied={sourceReadiness.denied}
+        chartEvidence={chartEvidence}
+      />
 
       {/* Headline numbers in one strip above the board, never scattered across
           the chart cards (DESIGN.md §Data Trust). */}
@@ -185,7 +201,7 @@ export function DashboardPage() {
         </div>
       ) : null}
 
-      <DailyReadout />
+      <DailyReadout appearance="lohi-evidence" />
 
       {loading && charts.length === 0 ? (
         <Loading label="Loading dashboard…" />
@@ -219,10 +235,12 @@ export function DashboardPage() {
                   and no reorder handle — every one of those is a 403 waiting to
                   happen on somebody else's charts. */}
               <ChartCard
+                appearance="lohi-evidence"
                 chart={chart}
                 summary={summary}
                 projectID={projectID}
                 annotations={annotations.annotations}
+                onEvidence={reportChartEvidence}
                 onEdit={access.canWrite ? () => setEditing(chart) : undefined}
                 onDelete={access.canWrite ? () => void deleteChart(chart.id) : undefined}
                 handle={access.canWrite ? (

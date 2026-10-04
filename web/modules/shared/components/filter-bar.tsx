@@ -44,11 +44,13 @@ export function FilterBar({
   eventTypes = EVENT_TYPES,
   showEventType = true,
   showErrors = true,
+  appearance,
 }: {
   extra?: ReactNode;
   eventTypes?: string[];
   showEventType?: boolean;
   showErrors?: boolean;
+  appearance?: 'lohi-evidence';
 }) {
   // Keeps the address bar and the controls in step, so a filtered view is a
   // link someone can send. Mounted here rather than per page: FilterBar is the
@@ -114,7 +116,7 @@ export function FilterBar({
     : 'Custom range…';
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className={`flex flex-wrap items-center gap-2 ${appearance === 'lohi-evidence' ? 'lohi-evidence-filter' : ''}`}>
       <Chip><span>Project</span> <b className="font-medium text-[var(--color-text-primary)]">{project?.name || '—'}</b></Chip>
 
       {/* Time range: presets + a custom-range option that opens the calendar. */}
@@ -136,6 +138,7 @@ export function FilterBar({
           placement="below"
           alignment="start"
           label="Pick custom date range"
+          className={appearance === 'lohi-evidence' ? 'lohi-evidence-popover' : undefined}
           content={<Calendar mode="range" numberOfMonths={2} value={range} onChange={onCustomRange} />}
         >
           <button
