@@ -20,6 +20,9 @@ type Event struct {
 	EventName  string `json:"event_name"`
 	Timestamp  string `json:"timestamp"`
 	Properties string `json:"properties"`
+	InsertID   string `json:"insert_id,omitempty"`
+	Platform   string `json:"platform,omitempty"`
+	UTMSource  string `json:"utm_source,omitempty"`
 }
 
 type Alias struct {
@@ -58,6 +61,35 @@ func Canonical() (Fixture, error) {
 	decoder.UseNumber()
 	if err := decoder.Decode(&fixture); err != nil {
 		return Fixture{}, fmt.Errorf("decode canonical query fixture: %w", err)
+	}
+	return fixture, nil
+}
+
+//go:embed testdata/lohi_evidence_v1.json
+var lohiEvidenceJSON []byte
+
+type LohiAssertion struct {
+	Date       string `json:"date"`
+	Series     string `json:"series"`
+	Value      any    `json:"value,omitempty"`
+	State      string `json:"state,omitempty"`
+	ReasonLike string `json:"reason_like,omitempty"`
+	Eligible   any    `json:"eligible,omitempty"`
+	Converted  any    `json:"converted,omitempty"`
+}
+
+type LohiEvidenceFixture struct {
+	Fixture
+	Assertions map[string][]LohiAssertion `json:"assertions"`
+	Cases      []string                   `json:"cases"`
+}
+
+func LohiEvidenceV1() (LohiEvidenceFixture, error) {
+	var fixture LohiEvidenceFixture
+	decoder := json.NewDecoder(bytes.NewReader(lohiEvidenceJSON))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fixture); err != nil {
+		return LohiEvidenceFixture{}, fmt.Errorf("decode lohi evidence fixture: %w", err)
 	}
 	return fixture, nil
 }

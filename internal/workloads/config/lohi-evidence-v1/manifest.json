@@ -1,0 +1,46 @@
+{
+  "version": "lohi-evidence-v1",
+  "skill_sha256": "a3798acd40c3701328a8253fed8f75f7d794bb94ab093beb7b6f242b3e616118",
+  "connector_id": "51515151-5151-4515-8515-515151515151",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "as_of_exclusive": "2026-10-03T11:14:00Z",
+  "coverage": {
+    "source_snapshot": "frozen sanitized fixture; production verification requires operator-approved extract",
+    "events_start": "2026-09-01T00:00:00+07:00",
+    "partial_day": "2026-10-03"
+  },
+  "exports": [
+    {"table":"ar_lohi.users_v1","key":"id","mode":"incremental_maintained_updated_at_or_snapshot","fields":["id","user_id","registered_at","updated_at","signup_provider"]},
+    {"table":"ar_lohi.topups_v1","key":"id","mode":"snapshot","fields":["id","user_id","created_at","completed_at","expires_at","payment_status","provider","amount_vnd","lt_amount"]},
+    {"table":"ar_lohi.wallet_ledger_v1","key":"id","mode":"append_only_proven_cursor_or_snapshot","fields":["id","user_id","created_at","amount_lt","reason","reference_id"]},
+    {"table":"ar_lohi.tts_daily_v1","key":"id","mode":"snapshot","fields":["id","user_id","usage_date","pro_count","free_edge_count"]},
+    {"table":"ar_lohi.passes_v1","key":"id","mode":"snapshot_current_state","fields":["id","user_id","tier","created_at","status","source","ledger_reference_id"]},
+    {"table":"ar_lohi.reader_days_v1","key":"id","mode":"snapshot","fields":["id","user_id","day"]}
+  ],
+  "recipes": ["R01","R02","R03","R04","R05","R06","R07","R08","R09","R10","R11"],
+  "recipe_sha256": {
+    "R01":"82005bd1c9704b71b06147243d618f6aafcdf6635e375117758f614d41ed872d",
+    "R02":"30fbf93f9d3755108f8255fd83f17bac945ef0f62d6463c011dda40f683a6679",
+    "R03":"a41904c03671517f3a9770f490ef4bcda21d49394c589fc8061717da8dffa492",
+    "R04":"2c83e2797c78d804cecee434565b9658487f6d29dea35675bb5d5b1bcbdf36d2",
+    "R05":"625a31393197e11c5b346ba3060953041a349dabc142a9d562c065d2c7009ebd",
+    "R06":"d0c23c88da40341bb8c1da372a90bc64fe956edf2a48c72aa16d93ce89f98c3d",
+    "R07":"0685e9745748861c69e615996713552d6cb6ac965ececbcdc4a761976dc77ba2",
+    "R08":"1fdb7c226401390a1d0439c2809103f9415b89bf25736bf6916ed46ddeb305ff",
+    "R09":"39e61355cd909454f99902d3dceea9242059d23ce79538bb88f45c5c98d6a614",
+    "R10":"d576484145137203fb98bb080afbb8c5ca79b8cb7cb208f465a66796240e5e69",
+    "R11":"d5363ebf2a7fc00dc01d9ebfba60768bb47f242f292f3802b9b5d6ef994cb160"
+  },
+  "board": {
+    "mode": "extend_existing_only",
+    "overwrite_user_edits": false,
+    "description_fields": ["definition_version","exact_range","unit","coverage","recipe_ref"],
+    "recipe_refs": ["lohi-evidence-v1/R01","lohi-evidence-v1/R02","lohi-evidence-v1/R03","lohi-evidence-v1/R04","lohi-evidence-v1/R05","lohi-evidence-v1/R06","lohi-evidence-v1/R07","lohi-evidence-v1/R08","lohi-evidence-v1/R09","lohi-evidence-v1/R10","lohi-evidence-v1/R11"]
+  },
+  "install": {
+    "preset": "data-analyst",
+    "skill": "lohi-evidence-v1",
+    "external_mcp_export": "SKILL.md",
+    "reinstall": "idempotent_no_overwrite"
+  }
+}

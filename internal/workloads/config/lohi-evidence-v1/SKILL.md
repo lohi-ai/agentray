@@ -1,0 +1,476 @@
+# Lohi evidence pack v1
+
+Use this skill only for the Lohi revenue-drop investigation. It is portable: the
+text in this file is the exact body installed on the stock `data-analyst` preset
+and the exact body external MCP clients import.
+
+## Safety and evidence contract
+
+1. Call `list_sources`, `source_status`, and `explore_events` before a recipe.
+   The operator, never the agent, provisions the six reviewed `ar_lohi.*_v1`
+   views. Never issue source DDL or accept raw user PII, OAuth IDs, or a DSN.
+2. These recipes bind both `connector_id` and `table_name`. The reviewed v1
+   binding is `51515151-5151-4515-8515-515151515151`; an operator must update
+   every binding and the manifest together when installing in another project.
+3. Treat source readiness and coverage as evidence. A missing/incomplete source
+   is `unavailable`, never zero. The frozen post-mortem cutoff is
+   `2026-10-03T11:14:00Z` (18:14 HCM); October 3 is partial. Do not compare it to
+   a full day without that label.
+4. Money has three non-interchangeable universes: completed wallet topups are
+   gross VND; deduplicated `revenue` minus `revenue_reversed` is net event
+   revenue; wallet ledger amounts are LT credits, not money. Preserve exact
+   integer money/counts and round only ratios.
+5. Count event people by `canonical_id`. Join source users only on the approved
+   `user_id`. Unknown signup attribution remains unknown; a payment rail is not
+   an acquisition source. Never backfill TikTok from a later page view.
+6. Causal, campaign-cost, balance, and recovery claims require their own
+   evidence. Time alignment is association, projected loss is a scenario, and
+   CAC is unavailable without the optional approved spend binding.
+7. Before a board write, run the exact recipe and confirm non-empty evidence.
+   Save only after explicit authorization. Extend the existing board; do not
+   replace its description, charts, or user edits. Every added chart title or
+   description must carry the definition version, exact range, unit, and recipe
+   reference (`lohi-evidence-v1/Rnn`). Read-only users must stop before writes.
+
+## Export recipes (operator-owned)
+
+| View | Stable key | Minimal fields | Mode |
+|---|---|---|---|
+| `ar_lohi.users_v1` | `id` | `id,user_id,registered_at,updated_at,signup_provider` | maintained `updated_at` incremental or snapshot |
+| `ar_lohi.topups_v1` | `id` | `id,user_id,created_at,completed_at,expires_at,payment_status,provider,amount_vnd,lt_amount` | snapshot |
+| `ar_lohi.wallet_ledger_v1` | `id` | `id,user_id,created_at,amount_lt,reason,reference_id` | proven append-only cursor or snapshot |
+| `ar_lohi.tts_daily_v1` | `id` | `id,user_id,usage_date,pro_count,free_edge_count` | snapshot |
+| `ar_lohi.passes_v1` | `id` | `id,user_id,tier,created_at,status,source,ledger_reference_id` | snapshot; current-state limitation |
+| `ar_lohi.reader_days_v1` | encoded composite | `id,user_id,day` | snapshot; coverage start from manifest |
+
+Timestamps are ISO-8601 with offsets. IDs are opaque strings. `signup_provider`
+is only `google`, `apple`, or `unknown`; source SQL maps everything else to
+`unknown`. Views must exclude email, name, OAuth tokens/IDs, credentials, raw
+payment metadata, and free-form user content.
+
+## Canonical recipes
+
+Replace no identifiers casually. The fixed dates reproduce the October 3, 2026
+post-mortem. Results follow `date, series, value, unit, sample_size, state,
+reason`; R10 adds cohort fields.
+
+### R01 — daily completed topups
+
+<!-- recipe:R01 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.topups_v1'
+), topups AS (
+  SELECT
+    json_extract_string(data, '$.id') AS id,
+    json_extract_string(data, '$.user_id') AS user_id,
+    try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ) AS completed_at,
+    try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd,
+    json_extract_string(data, '$.payment_status') AS payment_status
+  FROM bound
+), daily AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', completed_at) AS DATE) AS day,
+         sum(amount_vnd)::BIGINT AS gross_vnd,
+         count(DISTINCT id)::BIGINT AS payments,
+         count(DISTINCT user_id)::BIGINT AS payers
+  FROM topups
+  WHERE payment_status = 'completed' AND completed_at < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+  GROUP BY 1
+), shaped AS (
+  SELECT day, 'gross_completed_vnd' AS series, gross_vnd AS value, 'VND' AS unit, payments AS sample_size FROM daily
+  UNION ALL SELECT day, 'completed_payments', payments, 'transactions', payments FROM daily
+  UNION ALL SELECT day, 'completed_payers', payers, 'people', payments FROM daily
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM' ELSE '' END AS reason
+FROM shaped ORDER BY day, series
+```
+
+For period averages, use 7 days for Sep 13–19, 7 for Sep 20–26, and 6 for
+Sep 27–Oct 2, including covered zero days. Gross VND is not net event revenue.
+
+### R02 — payment rail and denomination
+
+<!-- recipe:R02 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.topups_v1'
+), topups AS (
+  SELECT try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ) AS completed_at,
+         lower(coalesce(json_extract_string(data, '$.provider'), 'unknown')) AS provider,
+         try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd
+  FROM bound WHERE json_extract_string(data, '$.payment_status') = 'completed'
+)
+SELECT strftime(cast(timezone('Asia/Ho_Chi_Minh', completed_at) AS DATE), '%Y-%m-%d') AS date,
+       'rail:' || provider || ':amount:' || cast(amount_vnd AS VARCHAR) AS series,
+       count(*)::BIGINT AS value, 'transactions' AS unit, count(*)::BIGINT AS sample_size,
+       CASE WHEN cast(timezone('Asia/Ho_Chi_Minh', completed_at) AS DATE) = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN cast(timezone('Asia/Ho_Chi_Minh', completed_at) AS DATE) = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, rail is not acquisition' ELSE 'rail is not acquisition' END AS reason
+FROM topups WHERE completed_at < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+GROUP BY 1, 2, 6, 7 ORDER BY 1, 2
+```
+
+The “no 100k+ SePay” claim is `sum(value)` where `series` starts with
+`rail:sepay:` and its encoded amount is at least 100000. Include other/unknown
+rails rather than forcing them into Apple or SePay.
+
+### R03 — source registrations
+
+<!-- recipe:R03 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.users_v1'
+), users AS (
+  SELECT try_cast(json_extract_string(data, '$.registered_at') AS TIMESTAMPTZ) AS registered_at,
+         CASE lower(json_extract_string(data, '$.signup_provider'))
+           WHEN 'google' THEN 'google' WHEN 'apple' THEN 'apple' ELSE 'unknown' END AS provider
+  FROM bound
+)
+SELECT strftime(cast(timezone('Asia/Ho_Chi_Minh', registered_at) AS DATE), '%Y-%m-%d') AS date,
+       'signups:' || provider AS series, count(*)::BIGINT AS value, 'people' AS unit,
+       count(*)::BIGINT AS sample_size,
+       CASE WHEN cast(timezone('Asia/Ho_Chi_Minh', registered_at) AS DATE) = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN provider = 'unknown' THEN 'original signup provider unavailable' WHEN cast(timezone('Asia/Ho_Chi_Minh', registered_at) AS DATE) = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM' ELSE '' END AS reason
+FROM users WHERE registered_at < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+GROUP BY 1, 2, provider, 6, 7 ORDER BY 1, 2
+```
+
+Do not substitute sign-ins, first activity, or today’s linked OAuth account.
+
+### R04 — lifetime first payers
+
+<!-- recipe:R04 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.topups_v1'
+), completed AS (
+  SELECT json_extract_string(data, '$.id') AS id,
+         json_extract_string(data, '$.user_id') AS user_id,
+         try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ) AS completed_at,
+         try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd
+  FROM bound WHERE json_extract_string(data, '$.payment_status') = 'completed'
+), first_at AS (
+  SELECT user_id, min(completed_at) AS first_completed_at FROM completed GROUP BY 1
+), first_day AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', f.first_completed_at) AS DATE) AS day,
+         count(DISTINCT f.user_id)::BIGINT AS first_payers,
+         sum(c.amount_vnd)::BIGINT AS first_transaction_gross_vnd
+  FROM first_at f JOIN completed c ON c.user_id = f.user_id AND c.completed_at = f.first_completed_at
+  WHERE f.first_completed_at < TIMESTAMPTZ '2026-10-03 11:14:00+00' GROUP BY 1
+), shaped AS (
+  SELECT day, 'first_payers' AS series, first_payers AS value, 'people' AS unit, first_payers AS sample_size FROM first_day
+  UNION ALL SELECT day, 'first_transaction_gross_vnd', first_transaction_gross_vnd, 'VND', first_payers FROM first_day
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, lifetime history required' ELSE 'lifetime history required' END AS reason
+FROM shaped ORDER BY day, series
+```
+
+Never compute the minimum only inside the report window. This recipe reports the
+first transaction, not all same-day payments by the new payer.
+
+### R05 — TTS listeners and paid TTS ledger use
+
+<!-- recipe:R05 -->
+```sql
+WITH bound AS (
+  SELECT table_name, data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name IN ('ar_lohi.tts_daily_v1', 'ar_lohi.wallet_ledger_v1')
+), tts AS (
+  SELECT try_cast(json_extract_string(data, '$.usage_date') AS DATE) AS day,
+         json_extract_string(data, '$.user_id') AS user_id,
+         coalesce(try_cast(json_extract_string(data, '$.pro_count') AS BIGINT), 0) AS pro_count,
+         coalesce(try_cast(json_extract_string(data, '$.free_edge_count') AS BIGINT), 0) AS free_count
+  FROM bound WHERE table_name = 'ar_lohi.tts_daily_v1'
+), ledger AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         coalesce(try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT), 0) AS amount_lt
+  FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+    AND json_extract_string(data, '$.reason') = 'tts_pro'
+), metrics AS (
+  SELECT day, 'tts_listeners' AS series, count(DISTINCT user_id)::BIGINT AS value, 'people' AS unit, count(*)::BIGINT AS sample_size
+  FROM tts WHERE pro_count + free_count > 0 GROUP BY 1
+  UNION ALL
+  SELECT day, 'tts_pro_source_count', sum(pro_count)::BIGINT, 'uses', count(*)::BIGINT FROM tts GROUP BY 1
+  UNION ALL
+  SELECT day, 'tts_pro_paid_lt', sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END)::BIGINT, 'LT', count(*)::BIGINT FROM ledger GROUP BY 1
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN series = 'tts_listeners' THEN 'request/usage evidence, not proof of playback' ELSE 'paid ledger use is separate from listener count' END AS reason
+FROM metrics ORDER BY day, series
+```
+
+Do not sum distinct people across the source and ledger; `tts_requested` is
+intent and neither source proves audio playback.
+
+### R06 — LT issue/spend flow
+
+<!-- recipe:R06 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.wallet_ledger_v1'
+), ledger AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         json_extract_string(data, '$.user_id') AS user_id,
+         try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
+         json_extract_string(data, '$.reason') AS reason
+  FROM bound
+), daily AS (
+  SELECT day,
+         sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END)::BIGINT AS issued_lt,
+         sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END)::BIGINT AS spent_lt,
+         count(DISTINCT CASE WHEN amount_lt < 0 THEN user_id END)::BIGINT AS spenders,
+         sum(CASE WHEN amount_lt < 0 AND reason = 'tts_pro' THEN -amount_lt ELSE 0 END)::BIGINT AS audio_spent_lt
+  FROM ledger GROUP BY 1
+), metrics AS (
+  SELECT day, 'lt_issued' AS series, issued_lt::DOUBLE AS value, 'LT' AS unit, spenders AS sample_size FROM daily
+  UNION ALL SELECT day, 'lt_spent', spent_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_audio_spent', audio_spent_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_spenders', spenders::DOUBLE, 'people', spenders FROM daily
+  UNION ALL SELECT day, 'lt_per_spender', CASE WHEN spenders = 0 THEN NULL ELSE round(spent_lt::DOUBLE / spenders, 2) END, 'LT/person', spenders FROM daily
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
+       CASE WHEN value IS NULL THEN 'unavailable' ELSE 'complete' END AS state,
+       CASE WHEN value IS NULL THEN 'undefined denominator' WHEN series = 'lt_issued' THEN 'paid purchase, grant and refund issuance are not interchangeable' ELSE '' END AS reason
+FROM metrics ORDER BY day, series
+```
+
+A flow deficit does not prove current balances or the next purchase time.
+
+### R07 — reading controls
+
+<!-- recipe:R07 -->
+```sql
+WITH source_bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.reader_days_v1'
+), reader_days AS (
+  SELECT try_cast(json_extract_string(data, '$.day') AS DATE) AS day,
+         json_extract_string(data, '$.user_id') AS user_id FROM source_bound
+), covered_events AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', timestamp) AS DATE) AS day, canonical_id
+  FROM events
+  WHERE event_name = 'chapter_view' AND timestamp >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND timestamp < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+    AND coalesce(visitor_class, 'human') = 'human'
+), metrics AS (
+  SELECT day, 'reader_dau' AS series, count(DISTINCT user_id)::BIGINT AS value, 'people' AS unit, count(*)::BIGINT AS sample_size FROM reader_days GROUP BY 1
+  UNION ALL SELECT day, 'chapter_views', count(*)::BIGINT, 'events', count(*)::BIGINT FROM covered_events GROUP BY 1
+  UNION ALL SELECT day, 'chapter_view_people', count(DISTINCT canonical_id)::BIGINT, 'people', count(*)::BIGINT FROM covered_events GROUP BY 1
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
+       'complete' AS state,
+       CASE WHEN series = 'reader_dau' THEN 'durable daily-active control, not an event count' ELSE 'only within declared event coverage' END AS reason
+FROM metrics ORDER BY day, series
+```
+
+If coverage does not include September, the read-events/person claim is
+unavailable. Current reading history is not historical activity.
+
+### R08 — paid passes
+
+<!-- recipe:R08 -->
+```sql
+WITH bound AS (
+  SELECT table_name, data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name IN ('ar_lohi.passes_v1', 'ar_lohi.wallet_ledger_v1')
+), passes AS (
+  SELECT json_extract_string(data, '$.id') AS id,
+         json_extract_string(data, '$.tier') AS tier,
+         cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         json_extract_string(data, '$.status') AS status,
+         json_extract_string(data, '$.source') AS source,
+         json_extract_string(data, '$.ledger_reference_id') AS ledger_reference_id
+  FROM bound WHERE table_name = 'ar_lohi.passes_v1'
+), charges AS (
+  SELECT json_extract_string(data, '$.reference_id') AS reference_id,
+         try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
+         json_extract_string(data, '$.reason') AS reason
+  FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+), paid AS (
+  SELECT p.day, p.tier, p.id, c.amount_lt
+  FROM passes p JOIN charges c ON c.reference_id = p.ledger_reference_id
+  WHERE p.status = 'active' AND p.source = 'paid' AND c.amount_lt < 0
+    AND c.reason LIKE 'subscription_%'
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, 'paid_pass:' || tier AS series,
+       count(DISTINCT id)::BIGINT AS value, 'passes' AS unit, count(*)::BIGINT AS sample_size,
+       'complete' AS state, 'excludes free grants, LT charge is not VND revenue' AS reason
+FROM paid GROUP BY 1, 2 ORDER BY 1, 2
+```
+
+Current-state exports cannot reconstruct historical cancellations/switches
+without dated snapshots; qualify that limitation.
+
+### R09 — checkout state
+
+<!-- recipe:R09 -->
+```sql
+WITH bound AS (
+  SELECT data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name = 'ar_lohi.topups_v1'
+), checkouts AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         json_extract_string(data, '$.payment_status') AS status
+  FROM bound
+  WHERE try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ) < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+)
+SELECT strftime(day, '%Y-%m-%d') AS date, 'checkout_status:' || status AS series,
+       count(*)::BIGINT AS value, 'checkouts' AS unit, count(*)::BIGINT AS sample_size,
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN status = 'pending' THEN 'pending is not abandoned, exact as-of needs an immutable dated export' ELSE '' END AS reason
+FROM checkouts GROUP BY 1, 2, day, status ORDER BY 1, 2
+```
+
+Low pending count alone does not prove a healthy funnel.
+
+### R10 — signup-to-first-payment cohort lag and attribution
+
+<!-- recipe:R10 -->
+```sql
+WITH source_bound AS (
+  SELECT table_name, data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name IN ('ar_lohi.users_v1', 'ar_lohi.topups_v1')
+), users AS (
+  SELECT json_extract_string(data, '$.user_id') AS user_id,
+         try_cast(json_extract_string(data, '$.registered_at') AS TIMESTAMPTZ) AS registered_at
+  FROM source_bound WHERE table_name = 'ar_lohi.users_v1'
+), first_pay AS (
+  SELECT json_extract_string(data, '$.user_id') AS user_id,
+         min(try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)) AS first_completed_at
+  FROM source_bound
+  WHERE table_name = 'ar_lohi.topups_v1' AND json_extract_string(data, '$.payment_status') = 'completed'
+  GROUP BY 1
+), signup_events AS (
+  SELECT canonical_id AS user_id,
+         coalesce(nullif(arg_min(nullif(utm_source, ''), timestamp), ''), 'unknown') AS acquisition
+  FROM events WHERE event_name = 'user_registered' GROUP BY 1
+), people AS (
+  SELECT u.user_id, u.registered_at, cast(timezone('Asia/Ho_Chi_Minh', u.registered_at) AS DATE) AS cohort_date,
+         date_diff('day', cast(timezone('Asia/Ho_Chi_Minh', u.registered_at) AS DATE), DATE '2026-10-03') AS cohort_age_days,
+         fp.first_completed_at,
+         coalesce(se.acquisition, 'unknown') AS acquisition
+  FROM users u LEFT JOIN first_pay fp USING (user_id) LEFT JOIN signup_events se USING (user_id)
+), horizons AS (SELECT * FROM (VALUES (7), (14), (30)) AS h(days)), cohort AS (
+  SELECT cohort_date, acquisition, days,
+         max(cohort_age_days)::BIGINT AS age_days,
+         count(*) FILTER (WHERE cohort_age_days >= days)::BIGINT AS eligible,
+         count(*) FILTER (WHERE cohort_age_days >= days AND first_completed_at < registered_at + days * INTERVAL 1 DAY)::BIGINT AS converted
+  FROM people CROSS JOIN horizons GROUP BY 1, 2, 3
+)
+SELECT strftime(cohort_date, '%Y-%m-%d') AS date,
+       'conversion_' || cast(days AS VARCHAR) || 'd:' || acquisition AS series,
+       CASE WHEN eligible = 0 THEN NULL ELSE round(100.0 * converted / eligible, 2) END AS value,
+       'percent' AS unit, eligible AS sample_size,
+       CASE WHEN eligible = 0 THEN 'not_ready' ELSE 'complete' END AS state,
+       CASE WHEN eligible = 0 THEN 'cohort is younger than horizon' WHEN acquisition = 'unknown' THEN 'signup attribution unavailable' ELSE 'time alignment is association, not causation' END AS reason,
+       strftime(cohort_date, '%Y-%m-%d') AS cohort_date, age_days, eligible, converted
+FROM cohort ORDER BY cohort_date, days, acquisition
+```
+
+The campaign stop itself requires operator/ad-platform evidence. This recipe
+does not prove the seven-day allowance or causality.
+
+### R11 — scorecard and measurement-universe reconciliation
+
+<!-- recipe:R11 -->
+```sql
+WITH source_bound AS (
+  SELECT table_name, data FROM external_rows
+  WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+    AND table_name IN ('ar_lohi.topups_v1', 'ar_lohi.wallet_ledger_v1')
+), topups AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         json_extract_string(data, '$.user_id') AS user_id,
+         try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd
+  FROM source_bound WHERE table_name = 'ar_lohi.topups_v1'
+    AND json_extract_string(data, '$.payment_status') = 'completed'
+), ledger AS (
+  SELECT try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt
+  FROM source_bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+), event_input AS (
+  SELECT event_id, event_name, insert_id, timestamp, canonical_id, utm_source,
+         try_cast(json_extract_string(properties, '$.amount') AS BIGINT) AS amount,
+         upper(json_extract_string(properties, '$.currency')) AS currency
+  FROM events WHERE event_name IN ('revenue', 'revenue_reversed', 'user_registered')
+    AND timestamp < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+), event_money_raw AS (
+  SELECT event_id, event_name, insert_id, timestamp, amount, currency,
+         row_number() OVER (
+           PARTITION BY coalesce(nullif(insert_id, ''), cast(event_id AS VARCHAR))
+           ORDER BY timestamp DESC, event_id DESC
+         ) AS retry_rank
+  FROM event_input WHERE event_name IN ('revenue', 'revenue_reversed')
+), event_net AS (
+  SELECT coalesce(sum(CASE WHEN event_name = 'revenue_reversed' THEN -amount ELSE amount END), 0)::BIGINT AS value
+  FROM event_money_raw WHERE retry_rank = 1 AND currency = 'VND'
+), daily AS (
+  SELECT day, sum(amount_vnd)::BIGINT AS gross_vnd FROM topups GROUP BY 1
+), first_pay AS (
+  SELECT user_id, min(day) AS first_day FROM topups GROUP BY 1
+), signup_source AS (
+  SELECT canonical_id AS user_id,
+         coalesce(nullif(arg_min(nullif(utm_source, ''), timestamp), ''), 'unknown') AS acquisition
+  FROM event_input WHERE event_name = 'user_registered' GROUP BY 1
+), source_counts AS (
+  SELECT coalesce(s.acquisition, 'unknown') AS acquisition, count(*)::BIGINT AS payers
+  FROM first_pay f LEFT JOIN signup_source s USING (user_id) GROUP BY 1
+), source_mix AS (
+  SELECT coalesce(sum(payers) FILTER (WHERE acquisition <> 'unknown'), 0)::BIGINT AS known_payers,
+         coalesce(max(payers) FILTER (WHERE acquisition <> 'unknown'), 0)::BIGINT AS largest_known_source,
+         coalesce(sum(payers) FILTER (WHERE acquisition NOT IN ('unknown', 'tiktok')), 0)::BIGINT AS outside_tiktok
+  FROM source_counts
+), score AS (
+  SELECT
+    coalesce(sum(gross_vnd) FILTER (WHERE day BETWEEN DATE '2026-09-13' AND DATE '2026-09-19'), 0)::DOUBLE / 7 AS baseline_daily,
+    coalesce(sum(gross_vnd) FILTER (WHERE day BETWEEN DATE '2026-09-27' AND DATE '2026-10-02'), 0)::DOUBLE / 6 AS current_daily
+  FROM daily
+), rows AS (
+  SELECT 'baseline_gross_vnd_daily_avg' AS series, round(baseline_daily, 2) AS value, 'VND/day' AS unit, 7::BIGINT AS sample_size, 'complete' AS state, 'Sep 13-19, covered zero days included' AS reason FROM score
+  UNION ALL SELECT 'current_gross_vnd_daily_avg', round(current_daily, 2), 'VND/day', 6, 'complete', 'Sep 27-Oct 2, excludes partial Oct 3' FROM score
+  UNION ALL SELECT 'gross_vnd_daily_loss', round(baseline_daily-current_daily, 2), 'VND/day', 13, 'complete', 'gross wallet topups, not booked net revenue' FROM score
+  UNION ALL SELECT 'projected_30d_loss', round((baseline_daily-current_daily)*30, 2), 'VND/scenario', 13, 'qualified', 'scenario projection, not booked loss' FROM score
+  UNION ALL SELECT 'net_event_revenue_vnd', value::DOUBLE, 'VND', 1, 'complete', 'deduplicated revenue minus revenue_reversed, separate universe' FROM event_net
+  UNION ALL SELECT 'lt_issued', coalesce(sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END), 0)::DOUBLE, 'LT', count(*), 'complete', 'LT is not VND' FROM ledger
+  UNION ALL SELECT 'lt_spent', coalesce(sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END), 0)::DOUBLE, 'LT', count(*), 'complete', 'LT is not VND' FROM ledger
+  UNION ALL SELECT 'known_payer_source_max_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*largest_known_source/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, unknown remains separate, 60 percent is a target' FROM source_mix
+  UNION ALL SELECT 'payer_outside_tiktok_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*outside_tiktok/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, association not campaign proof' FROM source_mix
+  UNION ALL SELECT 'cost_per_signup', NULL::DOUBLE, 'VND/person', 0, 'unavailable', 'approved campaign-cost binding not installed'
+  UNION ALL SELECT 'cac_first_payer', NULL::DOUBLE, 'VND/person', 0, 'unavailable', 'approved campaign-cost binding not installed'
+  UNION ALL SELECT 'recovery', NULL::DOUBLE, 'state', 0, 'unavailable', 'no mature post-action cohort observed'
+)
+SELECT '2026-10-03' AS date, series, value, unit, sample_size, state, reason FROM rows ORDER BY series
+```
+
+The document’s 30–40M VND/month is approximate (`1.4M × 30 = 42M`). Do not
+report cost/signup, CAC, channel concentration, or recovery when their bindings
+or mature cohorts are absent.
+
+## Saved-board declaration
+
+Suggested existing-board charts are R01 daily VND/payments/payers; R02 rail and
+denomination; R03 signups/provider; R04 first payers; R05 TTS; R06 LT flow; R07
+reading; R08 paid passes; R09 checkout states; R10 cohort lag; and R11 scorecard.
+Append a `Lohi evidence — lohi-evidence-v1` section only after authorization.
+Every chart must include its fixed HCM range, source coverage, unit, and recipe
+reference. Re-read the board immediately before `save_board`, preserve unknown
+fields and existing chart IDs/order, and abort on a revision conflict instead of
+overwriting concurrent user edits.
