@@ -168,7 +168,8 @@
 
 .lohi-evidence .astryx-button,
 .lohi-evidence [role='button'],
-.lohi-evidence button { min-height: 44px; }
+.lohi-evidence button,
+.lohi-evidence [role='tab'] { min-height: 44px; }
 .lohi-evidence-table { min-width: 0; overflow-x: auto; border-radius: var(--lohi-radius-xl); }
 .lohi-evidence-filter { min-width: 0; border-radius: var(--lohi-radius-lg); background: var(--lohi-muted); padding: 8px; }
 .lohi-evidence-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
