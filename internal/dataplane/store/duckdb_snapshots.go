@@ -98,8 +98,13 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, env.ProjectID, env.ConnectorID, env.Table, 
 		query.WriteString("(?,?,?,?,?,?,?)")
 		args = append(args, env.ProjectID, env.ConnectorID, env.Table, env.Generation, env.BatchID, row.Key, string(row.Data))
 	}
-	_, err = tx.ExecContext(ctx, query.String(), args...)
-	return err
+	if _, err = tx.ExecContext(ctx, query.String(), args...); err != nil {
+		// DuckDB constraint messages include the rejected row_key. This error is
+		// logged by the ingestion settler, so keep the staging category while
+		// dropping database details that may contain source PII.
+		return errors.New("snapshot batch rows were rejected by staging")
+	}
+	return nil
 }
 
 func stageSnapshotCompletion(ctx context.Context, tx *sql.Tx, env connector.SnapshotEnvelope) error {

@@ -98,42 +98,48 @@ func TestConnectorRunLifecycle(t *testing.T) {
 	}
 }
 
-func TestConnectorRunPersistsSanitizedSnapshotError(t *testing.T) {
+func TestConnectorRunPersistsSanitizedSourceErrors(t *testing.T) {
 	s := openConvTestStore(t)
 	ctx := context.Background()
 	projectID, syncID := seedConnectorSync(t, s)
-	run, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "snapshot-pii-safe-error")
-	if err != nil || !enqueued {
-		t.Fatalf("enqueue = %+v %v %v", run, enqueued, err)
-	}
-	if _, claimed, err := s.ClaimConnectorRun(ctx, run.ID, "owner-pii-safe"); err != nil || !claimed {
-		t.Fatalf("claim = %v %v", claimed, err)
-	}
-
-	sensitiveKey := "fixture.patient.0042@example.test"
-	sanitizedErr := "snapshot batch 7 is 33327 bytes, over the 7168-byte publish budget"
-	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-pii-safe", connector.SyncResult{Err: sanitizedErr}, false); err != nil {
-		t.Fatal(err)
-	}
-
-	receipt, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lastError string
-	if err := s.pg.QueryRow(ctx, `SELECT last_error FROM connector_syncs WHERE id=$1`, syncID).Scan(&lastError); err != nil {
-		t.Fatal(err)
-	}
-	for name, got := range map[string]string{
-		"connector_runs.error":       receipt.Error,
-		"connector_syncs.last_error": lastError,
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	for name, sanitizedErr := range map[string]string{
+		"snapshot":    "snapshot batch 7 is 33327 bytes, over the 7168-byte publish budget",
+		"incremental": "encode source row: json: unsupported value: NaN",
 	} {
-		if got != sanitizedErr {
-			t.Errorf("%s = %q, want %q", name, got, sanitizedErr)
-		}
-		if strings.Contains(got, sensitiveKey) {
-			t.Errorf("%s exposed source row key: %q", name, got)
-		}
+		t.Run(name, func(t *testing.T) {
+			run, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, name+"-pii-safe-error")
+			if err != nil || !enqueued {
+				t.Fatalf("enqueue = %+v %v %v", run, enqueued, err)
+			}
+			owner := "owner-pii-safe-" + name
+			if _, claimed, err := s.ClaimConnectorRun(ctx, run.ID, owner); err != nil || !claimed {
+				t.Fatalf("claim = %v %v", claimed, err)
+			}
+			if err := s.FinishConnectorRun(ctx, run.ID, syncID, owner, connector.SyncResult{Err: sanitizedErr}, false); err != nil {
+				t.Fatal(err)
+			}
+
+			receipt, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var lastError string
+			if err := s.pg.QueryRow(ctx, `SELECT last_error FROM connector_syncs WHERE id=$1`, syncID).Scan(&lastError); err != nil {
+				t.Fatal(err)
+			}
+			for surface, got := range map[string]string{
+				"connector_runs.error":       receipt.Error,
+				"connector_syncs.last_error": lastError,
+			} {
+				if got != sanitizedErr {
+					t.Errorf("%s = %q, want %q", surface, got, sanitizedErr)
+				}
+				if strings.Contains(got, sensitiveKey) {
+					t.Errorf("%s exposed source row key: %q", surface, got)
+				}
+			}
+		})
 	}
 }
 

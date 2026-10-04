@@ -744,7 +744,7 @@ func (e *Engine) pullAndLand(ctx context.Context, job SyncJob) SyncResult {
 		for _, r := range pull.Rows {
 			data, err := json.Marshal(r.Data)
 			if err != nil {
-				return result(fmt.Sprintf("encode row %s: %v", r.Key, err))
+				return result(fmt.Sprintf("encode source row: %v", err))
 			}
 			landed = append(landed, LandedRow{Key: r.Key, Cursor: r.Cursor, DataJSON: string(data)})
 		}

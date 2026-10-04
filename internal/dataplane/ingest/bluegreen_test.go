@@ -1,10 +1,12 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -892,8 +894,9 @@ func TestChunkRowsFitsEscapedKeys(t *testing.T) {
 
 // TestConnectorBatchOverBrokerPayloadFailsSync is the guard for the one case the
 // wire format cannot carry: a source row larger than a single message. The sync
-// must fail naming the row — the cursor then holds, so both colours stay without
-// it together instead of one colour quietly holding a row the other never got.
+// must fail with actionable size/budget details but without naming the source
+// row. The cursor then holds, so both colours stay without it together instead
+// of one colour quietly holding a row the other never got.
 func TestConnectorBatchOverBrokerPayloadFailsSync(t *testing.T) {
 	url := startBrokerWith(t, func(o *natsserver.Options) { o.MaxPayload = 8 << 10 })
 	ctx := context.Background()
@@ -921,14 +924,97 @@ func TestConnectorBatchOverBrokerPayloadFailsSync(t *testing.T) {
 		t.Fatalf("publish a fitting batch: %v", err)
 	}
 
+	const sensitiveKey = "fixture.patient.0042@example.test"
 	over := append(append([]connector.LandedRow{}, fits...), connector.LandedRow{
-		Key: "k-big", Cursor: "3", DataJSON: `{"blob":"` + strings.Repeat("x", 32<<10) + `"}`,
+		Key: sensitiveKey, Cursor: "3", DataJSON: `{"blob":"` + strings.Repeat("x", 32<<10) + `"}`,
 	})
 	err = q.PublishExternalRows(ctx, "p", "c", parityTable, over)
 	if err == nil {
 		t.Fatal("an oversized row was published")
 	}
-	if !strings.Contains(err.Error(), "k-big") {
-		t.Fatalf("error must name the row that cannot ride the stream: %v", err)
+	if !strings.Contains(err.Error(), "publish budget") {
+		t.Fatalf("error lost actionable publish-budget details: %v", err)
+	}
+	if strings.Contains(err.Error(), sensitiveKey) {
+		t.Fatalf("error exposed source row key: %v", err)
+	}
+}
+
+func TestSnapshotStagingLogsDoNotExposeSourceKey(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig("staging-pii-log")
+	blue := newColour(t, startBroker(t), cfg)
+	raw, err := os.ReadFile("testdata/c1-wire-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Batches []connector.SnapshotEnvelope `json:"batches"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	first := fixture.Batches[0]
+	first.Rows[0].Key = sensitiveKey
+	first.PayloadSHA256, _ = connector.SnapshotPayloadDigest(first.Rows)
+	if _, err := blue.duck.ApplySnapshotEnvelope(ctx, first, storage.AppliedMark{}); err != nil {
+		t.Fatal(err)
+	}
+	conflict := fixture.Batches[1]
+	conflict.Rows = append([]connector.SnapshotRow(nil), first.Rows...)
+	conflict.PayloadSHA256, _ = connector.SnapshotPayloadDigest(conflict.Rows)
+	queue := NewJetStreamQueue(blue.ss.JS, blue.ss.Subject, blue.ss.ConnectorSubject)
+	if err := queue.PublishSnapshotEnvelope(ctx, conflict); err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := blue.ss.Ingest.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:        cfg.IngestDurable,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		FilterSubjects: []string{blue.ss.ConnectorSubject},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var captured bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&captured)
+	defer log.SetOutput(previous)
+	settler := externalRowsSettler{
+		sink:       blue.duck,
+		maxDeliver: 2,
+		nakDelay:   25 * time.Millisecond,
+		deadLetter: func([]byte) error { return nil },
+	}
+	deliveries := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for deliveries < 2 && time.Now().Before(deadline) {
+		for msg := range fetched.Messages() {
+			deliveries++
+			settler.settle(msg)
+		}
+		if deliveries < 2 {
+			fetched, err = consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if deliveries != 2 {
+		t.Fatalf("deliveries = %d, want one redelivery before dead-lettering", deliveries)
+	}
+	logged := captured.String()
+	t.Logf("actual ingestion logs: %s", logged)
+	if !strings.Contains(logged, "connector insert failed, redelivering") || !strings.Contains(logged, "dead-lettered connector batch") || !strings.Contains(logged, "rejected by staging") {
+		t.Fatalf("failure category missing from ingestion log: %s", logged)
+	}
+	if strings.Contains(logged, sensitiveKey) {
+		t.Fatalf("ingestion log exposed source row key: %s", logged)
 	}
 }

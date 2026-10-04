@@ -193,9 +193,10 @@ func (q EventQueue) publishBudget() int {
 // The landing key makes re-apply idempotent, so a redelivery (or a second
 // colour applying the same rows) is a replace, not a duplicate.
 //
-// A row too large for one message fails the sync with the row named: the cursor
-// holds, so both colours stay without it together (a loud, repairable stall)
-// rather than one colour quietly holding a row the other never got.
+// A row too large for one message fails the sync with its size and the broker
+// budget, but never its source key. The cursor holds, so both colours stay
+// without it together rather than one colour quietly holding a row the other
+// never got.
 func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -203,8 +204,8 @@ func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connecto
 	budget := q.publishBudget()
 	for _, chunk := range chunkRows(rows, budget) {
 		if len(chunk) == 1 && chunk[0].wireBytes() > budget {
-			return fmt.Errorf("connector row %s is %d bytes, over the %d-byte publish budget: raise the broker's max_payload before this source can sync",
-				chunk[0].Key, chunk[0].wireBytes(), budget)
+			return fmt.Errorf("connector row is %d bytes, over the %d-byte publish budget: raise the broker's max_payload before this source can sync",
+				chunk[0].wireBytes(), budget)
 		}
 		body, err := json.Marshal(ExternalRowsBatch{
 			ProjectID:   projectID,
