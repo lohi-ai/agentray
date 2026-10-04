@@ -182,6 +182,9 @@
 .lohi-evidence [role='tab'],
 .lohi-evidence-popover [role='button'],
 .lohi-evidence-popover button { min-width: 44px !important; min-height: 44px !important; }
+/* Astryx's 32px calendar tracks must grow with the evidence touch targets. */
+.lohi-evidence-popover [role='grid'] { grid-auto-rows: 44px !important; }
+.lohi-evidence-popover [role='row'] > div { height: 44px !important; }
 .lohi-evidence-table { min-width: 0; overflow-x: auto; border-radius: var(--lohi-radius-xl); }
 .lohi-evidence-filter { min-width: 0; border-radius: var(--lohi-radius-lg); background: var(--lohi-muted); padding: 8px; }
 .lohi-evidence-figures { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
