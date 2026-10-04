@@ -327,7 +327,7 @@ func openConnectorSource(ctx context.Context, store *storage.Store, userID, proj
 	if err != nil {
 		return nil, fmt.Errorf("connector not found or permission denied")
 	}
-	return connector.Open(ctx, kind, dsn)
+	return connector.OpenWithPolicy(ctx, kind, dsn, projectID, connectorID, store.SourcePolicy())
 }
 
 // workspaceTierReader is the one read the authoring-tier resolution needs.
@@ -371,6 +371,7 @@ type syncDraft struct {
 		SourceTable  string `json:"source_table"`
 		KeyColumn    string `json:"key_column"`
 		CursorColumn string `json:"cursor_column"`
+		SyncMode     string `json:"sync_mode"`
 		ScheduleCron string `json:"schedule_cron"`
 		Reason       string `json:"reason,omitempty"`
 	} `json:"syncs"`
@@ -379,11 +380,11 @@ type syncDraft struct {
 
 const syncDraftSystem = `You configure table syncs from an external database into an analytics store.
 Given the discovered schema (and an optional operator hint), propose which tables to sync.
-Return JSON only: {"syncs": [{"source_table", "key_column", "cursor_column", "schedule_cron", "reason"}], "warnings": [...]}.
+Return JSON only: {"syncs": [{"source_table", "key_column", "cursor_column", "sync_mode", "schedule_cron", "reason"}], "warnings": [...]}.
 
 Rules:
 - source_table and key_column must be names that appear in the schema; prefer the primary key as key_column.
-- cursor_column should be an updated_at/modified timestamp or monotonically increasing id when one exists; use "" to re-sync the full table each run (only sensible for small tables).
+- choose sync_mode "incremental" with an approved updated_at/modified cursor, or "snapshot" for a complete mutable export; snapshot uses cursor_column "".
 - schedule_cron is a standard 5-field cron; default "0 * * * *" (hourly) unless the hint says otherwise.
 - Skip migration/journal/log tables unless asked. Keep the list focused.
 - warnings is a short array only for real caveats (no primary key, no usable cursor, very wide table).`

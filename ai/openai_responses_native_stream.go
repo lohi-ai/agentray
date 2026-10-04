@@ -38,12 +38,7 @@ func newResponsesAccumulator(model completionsModel, grammar map[string]string, 
 		slots:  map[string]*responsesSlot{}, reasoning: map[string]*ContentBlock{}}
 }
 func (a *responsesAccumulator) refresh() {
-	for len(a.output.Content.Blocks) < len(a.blocks) {
-		a.output.Content.Blocks = append(a.output.Content.Blocks, ContentBlock{})
-	}
-	for i, block := range a.blocks {
-		a.output.Content.Blocks[i] = *block
-	}
+	a.output.Content = BlockReferences(a.blocks...)
 }
 func (a *responsesAccumulator) publish(event AssistantMessageEvent) {
 	a.refresh()

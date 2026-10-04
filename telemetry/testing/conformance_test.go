@@ -14,12 +14,21 @@ import (
 
 // Exercise the public callback backend seam as well as the native recorder.
 func forwardingContext(parent telemetry.Context) telemetry.Context {
-	return telemetry.NewContext(func(options telemetry.SpanOptions, callback func(*telemetry.Span) error) error {
-		return parent.StartSpan(options, func(span *telemetry.Span) error {
+	wrap := func(callback func(*telemetry.Span) error) func(*telemetry.Span) error {
+		return func(span *telemetry.Span) error {
 			return callback(telemetry.NewSpan(forwardingContext(span.Context()), telemetry.SpanCallbacks{
 				AddEvent: span.AddEvent, SetAttributes: span.SetAttributes, SetStatus: span.SetStatus,
+				AddEventFrom: span.AddEventFrom, SetAttributesFrom: span.SetAttributesFrom, SetStatusFrom: span.SetStatusFrom,
 			}))
-		})
+		}
+	}
+	return telemetry.NewContextWithCallbacks(telemetry.ContextCallbacks{
+		StartSpan: func(options telemetry.SpanOptions, callback func(*telemetry.Span) error) error {
+			return parent.StartSpan(options, wrap(callback))
+		},
+		StartSpanFrom: func(read func() telemetry.SpanOptions, callback func(*telemetry.Span) error) error {
+			return parent.StartSpanFrom(read, wrap(callback))
+		},
 	})
 }
 
@@ -47,10 +56,12 @@ func TestAdapterConformance(t *testing.T) {
 					}
 				})
 			}
-			if created != 9 || closed != created {
+			if created != 10 || closed != created {
 				t.Fatalf("fixture isolation/cleanup: created=%d closed=%d", created, closed)
 			}
-			// The reusable suite must cover every case exported by the pinned source.
+			// Preserve all nine source case names. Deferred status reads model
+			// the original throwing property access, separately from readable
+			// status-name normalization in the supplemental case.
 			data, err := os.ReadFile("../testdata/pi-schema.json")
 			if err != nil {
 				t.Fatal(err)
@@ -64,7 +75,10 @@ func TestAdapterConformance(t *testing.T) {
 			for _, test := range suite {
 				got = append(got, namePair{test.Group, test.Name})
 			}
-			if !reflect.DeepEqual(got, fixture.Conformance) {
+			if len(fixture.Conformance) != 9 {
+				t.Fatal("unexpected upstream conformance coverage")
+			}
+			if len(got) != 10 || !reflect.DeepEqual(got[:9], fixture.Conformance) || got[9] != (namePair{"status", "normalizes readable status names and preserves explicit precedence"}) {
 				t.Fatal("conformance coverage differs from upstream")
 			}
 		})

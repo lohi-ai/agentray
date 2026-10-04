@@ -20,7 +20,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 		return nil, err
 	}
 	normalized := ResolveTranscript(context, compat.SupportsMidConvoSystemMessages)
-	transformed := TransformMessages(normalized.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ Model, _ Message) string { return normalizeCompletionsToolID(id, model.Provider) })
+	transformed := TransformMessages(normalized.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ *Model, _ *Message) string { return normalizeCompletionsToolID(id, model.Provider) })
 	toolState := ResolveTranscriptTools(normalized.Messages(), compat.SupportsMidConvoSystemMessages && compat.SupportsMidConvoToolAdditions)
 	role := "system"
 	if model.Reasoning && compat.SupportsDeveloperRole {
@@ -78,8 +78,8 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 			}
 			parts := []map[string]any{}
 			texts := []string{}
-			thinking := []ContentBlock{}
-			calls := []ContentBlock{}
+			thinking := []*ContentBlock{}
+			calls := []*ContentBlock{}
 			for _, block := range message.Content.Blocks {
 				switch block.Type {
 				case "text":
@@ -116,7 +116,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 					}
 				}
 			}
-			nonempty := []ContentBlock{}
+			nonempty := []*ContentBlock{}
 			thinkingText := []string{}
 			for _, block := range thinking {
 				if strings.TrimFunc(block.Thinking, jsWhitespace) != "" {
@@ -261,7 +261,7 @@ func ConvertOpenAICompletionsTools(tools []Tool, compat OpenAICompletionsCompat)
 	}
 	return json.Marshal(output)
 }
-func completionsImage(block ContentBlock) map[string]any {
+func completionsImage(block *ContentBlock) map[string]any {
 	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + block.MIMEType + ";base64," + block.Data}}
 }
 func normalizeCompletionsToolID(id, provider string) string {

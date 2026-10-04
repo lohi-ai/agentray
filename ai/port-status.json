@@ -280,7 +280,8 @@
       "go_files": [
         "ai/transform_messages.go"
       ],
-      "verification": "TestPiTranscriptOracle"
+      "verification": "TestPiTranscriptOracle; TestPiBlockReferences (18 original-source cases comparing output and block identity across same/cross-model transforms, tool ID/signature changes and image replacement, with immutable input verification); TestPiTransformReferences (56 original-source cases covering shared message/model identity, normalizer mutations, pre-callback image conversion, signature-copy timing and ID remapping)",
+      "remaining": "TransformMessageReferences retains shared message/model pointers; TransformMessages remains a value adapter used by provider conversion. Normalizer callbacks receive pointers in both APIs. Input content normalization and image downgrade complete before callbacks, and tool ID comparison reads the original call after callbacks. Go slice headers still do not provide full JavaScript array identity/length semantics, including mutations after reallocation; arbitrary malformed typed values and lone-surrogate strings remain unproven."
     },
     {
       "source": "src/api/typesafe-system-one.lazy.ts",
@@ -939,11 +940,12 @@
       "status": "partial",
       "go_files": [
         "ai/transcript_types.go",
+        "ai/usage_json.go",
         "ai/provider.go",
         "ai/event_stream.go"
       ],
-      "remaining": "Streaming options, provider/model contracts, images/classifiers, and typed compatibility settings remain. Existing Go catalog and agentcore vocabulary are still in use. Decoded usage and nested cost retain absent/null counters and provider metadata while typed counter mutations remain serializable. Optional content signatures/redaction/namespace preserve explicit null through snapshots. Proxy terminal fields retain null versus omission and preserve usage extensions; malformed field types remain outside verified coverage.",
-      "verification": "TestTranscriptUsageWirePresenceAndMutation; TestProxyPiFixtures (51 source scenarios, live payload and snapshot comparison)"
+      "remaining": "Streaming options, provider/model contracts, images/classifiers, and typed compatibility settings remain. Existing Go catalog and agentcore vocabulary are still in use. Decoded usage and nested cost retain absent/null counters and provider metadata while typed counter mutations remain serializable. Assigning positive zero to an absent/null scalar cannot be distinguished from its unchanged Go zero value; explicit scalar write tracking remains unavailable. Optional content signatures/redaction/namespace preserve explicit null through snapshots. Proxy terminal fields retain null versus omission and preserve usage extensions; malformed field types remain outside verified coverage.",
+      "verification": "TestTranscriptUsageWirePresenceAndMutation; TestPiUsageJSONNumbers (48 source-runtime cases for sparse/null counters, overflow, negative zero, binary64 rounding, provider metadata and mutations); TestUsageRejectsNonNumberJSON; TestPiStreamNumbers (24 source loop/Agent cases comparing live numbers and exact usage JSON); TestProxyPiFixtures (67 source scenarios, live payload and snapshot comparison, transport/reader panic settlement and cancellation error text)"
     },
     {
       "source": "src/utils/abort-signals.ts",
@@ -985,9 +987,11 @@
       "git_blob": "c4f731d59bf192d6889d9b25ba3f3dd2b1b5a9e6",
       "status": "ported-with-differential-tests",
       "go_files": [
-        "ai/event_stream.go"
+        "ai/event_stream.go",
+        "ai/stream_snapshot.go"
       ],
-      "verification": "TestPiEventStreamOracle and TestPiEventStream concurrency/lifecycle tests"
+      "verification": "TestPiEventStreamOracle and TestPiEventStream concurrency/lifecycle tests; TestAssistantStreamSnapshotPreservesObjectGraph, TestAssistantStreamSnapshotDetachesEveryPublicField and TestAssistantStreamSnapshotDoesNotSerialize; TestPiStreamNumbers (24 source loop/Agent cases for live nonfinite numbers, negative zero, exact usage JSON and ignored stream events); TestPiStreamAliases (eight source loop/Agent cases checking within-event block identity and serialized output); native Completions/Responses/Anthropic concurrent snapshots preserve toolcall_end block identity",
+      "remaining": "Raw stream events/results retain provider pointers. Observation snapshots directly clone the typed graph, detaching public mutable fields while preserving repeated message, content-block and usage objects within each snapshot. Private transcript encoding metadata is immutable and shared. Snapshotting no longer requires JSON serialization, so nonfinite values and unreadable extension JSON do not interrupt consumption. Usage JSON export normalizes nonfinite numbers to null and negative zero to 0 without changing live values. Equal but distinct objects are not merged. The agent engine still uses these snapshots, so cross-event/provider live-object identity and JavaScript array identity are not yet preserved end to end."
     },
     {
       "source": "src/utils/hash.ts",
@@ -1004,9 +1008,12 @@
       "git_blob": "f39f9f09d6d6a5f6e42c09dcc474ed180bbc0634",
       "status": "ported-with-fixture-tests",
       "go_files": [
-        "ai/json_parse.go"
+        "ai/json_parse.go",
+        "ai/json_stringify.go",
+        "internal/jsonjs/json.go"
       ],
-      "verification": "TestPiJSONParsingOracle (428 cases), TestPiProviderToolArguments and TestPiProviderNonstreamToolArguments (43 HTTP cases)"
+      "verification": "TestPiJSONParsingOracle (428 cases), TestPiJSONPrefixOracle (848 source-generated prefixes with exact complete/streaming serialization), TestPiProviderToolArguments and TestPiProviderNonstreamToolArguments (43 HTTP cases); TestPiJSONStringifyUTF16Oracle (65,536 UTF-16 units and 1,048,576 surrogate pairs against pinned JSON.stringify)",
+      "remaining": "Complete and partial objects share a canonical-key serializer, preserving distinct escaped UTF-16 surrogate keys, duplicate replacement and numeric index ordering. Partial parsing retains the source __proto__ setter behavior. Prefix fixtures cover Unicode scalar boundaries, including truncated Unicode escapes; arbitrary raw lone-surrogate input strings, exhaustive binary64 formatting and malformed-input diagnostic text remain unproven. The canonical serializer now resides in internal/jsonjs, shared with telemetry error-detail decoding; ai.StringifyJSON retains its public API."
     },
     {
       "source": "src/utils/model-operations.ts",
@@ -1082,9 +1089,12 @@
       "git_blob": "1212696cc911a5c112a064c0c1e179cc705e71f7",
       "status": "ported-with-differential-tests",
       "go_files": [
-        "ai/transcript.go"
+        "ai/transcript.go",
+        "ai/json_stringify.go",
+        "internal/jsonjs/json.go"
       ],
-      "verification": "TestPiTranscriptOracle"
+      "verification": "TestPiTranscriptOracle; TestPiJSONStringifyUTF16Oracle (65,536 UTF-16 units and 1,048,576 surrogate pairs against pinned JSON.stringify); TestPiDeclarationJSONOracle (24 original-source cases); TestPiLoopOracle (four declaration JSON integration cases)",
+      "remaining": "Valid serialized parameters and constrainedSampling are normalized to JavaScript value/serialization semantics before declaration publication. Declaration comparison retains distinct lone-surrogate keys/values and source key ordering, including numeric index keys and duplicate replacement. The shared Go StringifyJSON implementation also serves complete JSON parsing and the agent proxy. Malformed or absent schema failure propagation and exhaustive binary64 decimal-format parity remain unproven; Go retains its previous detached RawMessage behavior for malformed/absent schemas. The canonical serializer now resides in internal/jsonjs, shared with telemetry error-detail decoding; ai.StringifyJSON retains its public API."
     },
     {
       "source": "src/utils/typebox-helpers.ts",
@@ -1107,13 +1117,25 @@
         "agentcore/engine/argument_arrays.go",
         "agentcore/engine/argument_objects.go",
         "agentcore/engine/argument_regexp.go",
+        "agentcore/engine/argument_regexp_syntax.go",
+        "agentcore/engine/argument_regexp_characters.go",
+        "agentcore/engine/argument_regexp_captures.go",
+        "agentcore/engine/argument_regexp_repetition.go",
+        "agentcore/engine/argument_regexp_progress.go",
+        "agentcore/engine/argument_regexp_properties.go",
+        "agentcore/engine/argument_unicode_properties.go",
         "agentcore/engine/argument_errors.go",
         "agentcore/engine/argument_error_order.go",
         "agentcore/engine/json.go",
-        "ai/js_number.go"
+        "ai/js_number.go",
+        "agentcore/engine/argument_formats.go",
+        "agentcore/engine/argument_format_patterns.go",
+        "agentcore/engine/argument_hostname.go",
+        "agentcore/engine/argument_punycode.go",
+        "agentcore/engine/argument_url.go"
       ],
-      "verification": "TestPiToolArgumentsOracle compares 323 source runToolCall cases: 104 numeric coercion cases, 26 constraint/path cases, 16 multi-error ordering/cap/reference cases 10 schema-valued additional-property/union cases 12 conditional/dependency cases 10 property-name cases 14 contains-bound/newer-keyword cases 12 dialect/metadata cases, 5 resource-reference cases 7 error-collection cases 10 type-list cases 16 floating-point multipleOf cases 11 prefixItems cases 7 tuple-tail cases 24 pattern-text/ECMAScript cases 9 unevaluated-data summary cases 12 object-evaluation cases 9 array-evaluation cases and 9 contains-evaluation cases, including hook/execution admission, exact argument/error text and immutable input. Existing loop fixtures cover optional nulls and common schema failures. ParseJSNumber is also shared by the native Anthropic federation expiry path.",
-      "remaining": "Full public validation API, native TypeBox symbol/schema extensions, complete keyword/error-order fidelity, malformed schemas and Unicode edge cases remain unproven. Current validation is integrated through the Go engine's serialized-schema tool path."
+      "verification": "TestPiToolArgumentsOracle compares 1812 source runToolCall cases: 104 numeric coercion cases, 26 constraint/path cases, 16 multi-error ordering/cap/reference cases 10 schema-valued additional-property/union cases 12 conditional/dependency cases 10 property-name cases 14 contains-bound/newer-keyword cases 12 dialect/metadata cases, 5 resource-reference cases 7 error-collection cases 10 type-list cases 16 floating-point multipleOf cases 11 prefixItems cases 7 tuple-tail cases 24 pattern-text/ECMAScript cases 9 unevaluated-data summary cases 12 object-evaluation cases 9 array-evaluation cases and 9 contains-evaluation cases, including hook/execution admission, exact argument/error text and immutable input. Existing loop fixtures cover optional nulls and common schema failures. ParseJSNumber is also shared by the native Anthropic federation expiry path. Another 113 cases cover 16 built-in format assertions, coercion, unknown formats, sibling diagnostic ordering, union checks and reference checks; patterns are translated from locked TypeBox 1.3.27. Another 190 hostname/IDN cases cover raw punycode, encoded-label and domain length limits, normalization, contextual joiners, bidi rules, malformed ACE labels, raw-decoder UTF-16 pair joining and corresponding Unicode/ACE inputs. Another 258 URL/IRI/reference cases cover relative references, Unicode hosts, IPv4/IPv6, ports, file/custom schemes, whitespace, percent encoding and the IPvFuture UTF-16 length boundary; runtime validation uses a pinned pure-Go WHATWG parser. Another 145 regex-format cases cover Unicode syntax admission, legacy and .NET extension rejection, named/numeric capture references, disjoint duplicate capture names, scoped modifiers, assertion quantifiers and class range endpoints. The pinned oracle accepts non-ASCII identity escapes; that behavior is retained. Another 42 matching cases cover named/numeric capture ordering, nested captures, forward/optional references, repeated duplicate alternatives and Unicode/escaped names; lowering preserves original pattern diagnostics. Another 101 tool-path cases cover Unicode property syntax, aliases, binary properties, general categories, scripts, script extensions, complements and mixed classes. TestPiUnicodePropertyOracle checks 419 generated property sets with 86903 boundary/interior probes in four matching forms and compiles all 1627 accepted aliases. The generator pins Bun 1.3.14 / Unicode 15.1 and enumerates all 1114112 code points; native runtime uses only Go tables. Another 205 cases cover scoped dot-all and multiline matching with all four JavaScript line terminators, modifier inheritance/disable/restore, CRLF, lookarounds, named captures and literal metacharacters. Parser-aware dot/anchor lowering replaces the unconditional dot rewrite. Another 145 tool cases cover repeated capture resets, optional descendants, duplicate names, bounded/lazy repetition, backtracking, lookarounds and optional/mandatory empty iterations. TestPiRegexpRepetitionOracle adds 11648 comparisons across all 364 a/b/c strings through length five and 32 source patterns. Lowering uses backtrackable capture resets and nullable-iteration guards, including right-to-left lookbehind. Progress flags replace repeated suffix/prefix scans and distinguish consuming atoms/nonempty references from lookaround-only activity. BenchmarkPiNullableRepetition on Apple M1 Pro (3 measured iterations) reduced the 8192-character case from 160.8 ms to 2.4 ms per match; this is a focused benchmark, not a general regex performance bound. Another 277 tool cases cover pinned Unicode admission in hostname/ACE/IDN-email formats, capture identifiers and escaped name delimiters. Hostname category/script checks and Unicode format patterns share the generated property tables. The native capture grammar rejects Letter_Number and Other_ID_Start/Other_ID_Continue exceptions as observed in the pinned JavaScriptCore runtime. TestPiUnicodePropertyOracle adds 4640 capture-name probes, each in literal/escaped start/continuation forms, and checks direct property lookups against all 86903 property probes. Escaped greater-than characters terminate names and references while preserving the following pattern body. TestPiLoopOracle also checks literal tool-name diagnostics against Pi, including quotes, backslashes, controls and Unicode; validation errors no longer apply Go string quoting. Thirteen tool cases and TestPiRegexpCharactersOracle verify word escapes/boundaries, class unions/complements, scoped ignore-case, lookbehind and repetition: 71 patterns over 255 inputs, 17340 matching comparisons for valid patterns, and 2224128 comparisons covering both word sets over every representable Unicode scalar. Explicit word sets and lookarounds replace the backend Unicode boundary behavior; scoped exact word branches avoid dotted-I/long-s folding differences.",
+      "remaining": "Full public validation API, native TypeBox symbol/schema extensions, complete keyword/error-order fidelity, malformed schemas and Unicode edge cases remain unproven. Current validation is integrated through the Go engine's serialized-schema tool path. All 21 default format names have native checks; full WHATWG parsing, ECMAScript regex syntax/case folding/arbitrary backtracking edges, lone UTF-16 surrogate inputs and Unicode normalization/case-mapping parity are not established. Arbitrary-pattern performance remains unproven."
     }
   ],
   "verification": {

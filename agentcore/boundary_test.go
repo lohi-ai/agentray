@@ -122,7 +122,7 @@ func TestNativeEngineNamesNoHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, imp := range pkg.Imports {
-		if strings.HasPrefix(imp, modulePath+"/") && imp != modulePath+"/ai" && imp != modulePath+"/telemetry" {
+		if strings.HasPrefix(imp, modulePath+"/") && imp != modulePath+"/ai" && imp != modulePath+"/telemetry" && imp != modulePath+"/internal/jsonjs" {
 			t.Errorf("native engine imports host/legacy package %s", imp)
 		}
 		if imp == "os/exec" {

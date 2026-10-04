@@ -57,6 +57,11 @@ func openProjectSource(ctx context.Context, d *Deps, projectID, connectorID stri
 		}
 		return nil, err
 	}
+	if governed, ok := d.Repo.(interface {
+		SourcePolicy() *connector.SourcePolicy
+	}); ok {
+		return connector.OpenWithPolicy(ctx, kind, dsn, projectID, connectorID, governed.SourcePolicy())
+	}
 	return connector.Open(ctx, kind, dsn)
 }
 
@@ -113,6 +118,7 @@ type previewSourceInput struct {
 	SourceTable  string `json:"source_table" required:"true" desc:"table to preview"`
 	KeyColumn    string `json:"key_column" required:"true" desc:"key/ordering column"`
 	CursorColumn string `json:"cursor_column" desc:"incremental cursor column (optional — snapshot preview when empty)"`
+	SyncMode     string `json:"sync_mode" desc:"incremental or snapshot; omit for legacy preview semantics"`
 }
 
 type previewSourceOutput struct {
@@ -179,6 +185,18 @@ func previewSource() opcore.Operation[previewSourceInput, previewSourceOutput] {
 				out.Error = fmt.Sprintf("cursor column %q not found on %q", in.CursorColumn, in.SourceTable)
 				return out, nil
 			}
+			if in.SyncMode != "" && in.SyncMode != "incremental" && in.SyncMode != "snapshot" {
+				out.Error = "sync_mode must be incremental or snapshot"
+				return out, nil
+			}
+			if in.SyncMode == "incremental" && in.CursorColumn == "" {
+				out.Error = "incremental sync_mode requires cursor_column"
+				return out, nil
+			}
+			if in.SyncMode == "snapshot" && in.CursorColumn != "" {
+				out.Error = "snapshot sync_mode requires an empty cursor_column"
+				return out, nil
+			}
 			for _, c := range table.Columns {
 				out.Columns = append(out.Columns, c.Name)
 			}
@@ -186,13 +204,32 @@ func previewSource() opcore.Operation[previewSourceInput, previewSourceOutput] {
 			cursorColumn := in.CursorColumn
 			if cursorColumn == "" {
 				cursorColumn = in.KeyColumn
-				out.Warnings = append(out.Warnings, "snapshot mode: no cursor column — a real sync re-pulls the whole table each run")
+				if in.SyncMode == "snapshot" {
+					out.Warnings = append(out.Warnings, "snapshot preview: live views are captured over an interval, not at one as-of instant")
+				} else {
+					out.Warnings = append(out.Warnings, "legacy mode: no cursor column — a real sync re-pulls the whole table each run")
+				}
+			}
+			if in.SyncMode == "snapshot" {
+				validator, ok := source.(interface {
+					ValidateSnapshotKey(context.Context, string, string) error
+				})
+				if !ok {
+					out.Error = "source cannot validate snapshot keys"
+					return out, nil
+				}
+				if err := validator.ValidateSnapshotKey(probeCtx, in.SourceTable, in.KeyColumn); err != nil {
+					out.Error = err.Error()
+					return out, nil
+				}
+				cursorColumn = ""
 			}
 			pull, err := source.PullRows(probeCtx, connector.PullRequest{
 				Table:        in.SourceTable,
 				KeyColumn:    in.KeyColumn,
 				CursorColumn: cursorColumn,
 				Limit:        previewRowLimit,
+				Snapshot:     in.SyncMode == "snapshot",
 			})
 			if err != nil {
 				out.Error = err.Error()
@@ -315,13 +352,78 @@ type sourceStatusInput struct {
 }
 
 type syncStatus struct {
-	Sync      storage.ConnectorSync `json:"sync"`
-	LatestRun *connector.Run        `json:"latest_run,omitempty"`
+	Sync       storage.ConnectorSync                   `json:"sync"`
+	LatestRun  *connector.Run                          `json:"latest_run,omitempty"`
+	Generation *connector.SnapshotGenerationDescriptor `json:"generation,omitempty"`
+	Readiness  *storage.Readiness                      `json:"readiness,omitempty"`
 }
 
 type sourceStatusOutput struct {
-	Syncs []syncStatus   `json:"syncs,omitempty"`
-	Run   *connector.Run `json:"run,omitempty"`
+	Syncs        []syncStatus       `json:"syncs,omitempty"`
+	Run          *connector.Run     `json:"run,omitempty"`
+	Readiness    *storage.Readiness `json:"readiness,omitempty"`
+	includeSyncs bool
+}
+
+func (o sourceStatusOutput) MarshalJSON() ([]byte, error) {
+	if o.includeSyncs {
+		return json.Marshal(struct {
+			Syncs     []syncStatus       `json:"syncs"`
+			Run       *connector.Run     `json:"run,omitempty"`
+			Readiness *storage.Readiness `json:"readiness,omitempty"`
+		}{Syncs: o.Syncs, Run: o.Run, Readiness: o.Readiness})
+	}
+	return json.Marshal(struct {
+		Run       *connector.Run     `json:"run,omitempty"`
+		Readiness *storage.Readiness `json:"readiness,omitempty"`
+	}{Run: o.Run, Readiness: o.Readiness})
+}
+
+type sourceReadinessRepo interface {
+	SourceReadiness(context.Context, string, []storage.ReadinessSource) (map[string]*storage.Readiness, error)
+}
+
+func sourceReadiness(ctx context.Context, repo Repo, projectID string, syncs []storage.ConnectorSync) map[string]*storage.Readiness {
+	provider, ok := repo.(sourceReadinessRepo)
+	if !ok || len(syncs) == 0 {
+		return nil
+	}
+	sources := make([]storage.ReadinessSource, 0, len(syncs))
+	for _, sync := range syncs {
+		sources = append(sources, storage.ReadinessSource{SyncID: sync.ID, ConnectorID: sync.ConnectorID,
+			Table: sync.SourceTable, ScheduleCron: sync.ScheduleCron,
+			Configured: strings.TrimSpace(sync.SourceTable) != "" && strings.TrimSpace(sync.KeyColumn) != ""})
+	}
+	readiness, err := provider.SourceReadiness(ctx, projectID, sources)
+	if err == nil {
+		return readiness
+	}
+	out := make(map[string]*storage.Readiness, len(syncs))
+	for _, sync := range syncs {
+		reason := "readiness_evidence_unavailable"
+		out[sync.ID] = &storage.Readiness{State: storage.ReadinessError, Reason: &reason}
+	}
+	return out
+}
+
+func readinessWithRun(readiness *storage.Readiness, run *connector.Run) *storage.Readiness {
+	if readiness == nil || run == nil || readiness.State == storage.ReadinessNotConfigured || readiness.State == storage.ReadinessIncomplete {
+		return readiness
+	}
+	copy := *readiness
+	switch run.Status {
+	case "queued", "running":
+		copy.State = storage.ReadinessSyncing
+		reason := "publication_in_progress"
+		copy.Reason = &reason
+		copy.QueryableAt = nil
+	case "failed", "cancelled":
+		copy.State = storage.ReadinessError
+		reason := "source_run_" + run.Status
+		copy.Reason = &reason
+		copy.QueryableAt = nil
+	}
+	return &copy
 }
 
 func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
@@ -346,6 +448,9 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 					return sourceStatusOutput{}, err
 				}
 				out.Run = &run
+				if sync, syncErr := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, run.SyncID); syncErr == nil {
+					out.Readiness = readinessWithRun(sourceReadiness(ctx, d.Repo, cc.ProjectID, []storage.ConnectorSync{sync})[sync.ID], &run)
+				}
 				return out, nil
 			case strings.TrimSpace(in.SyncID) != "":
 				sync, err := d.Repo.ConnectorSyncForProject(ctx, cc.ProjectID, in.SyncID)
@@ -359,9 +464,23 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
-				entry := syncStatus{Sync: sync}
+				out.includeSyncs = true
+				readiness := sourceReadiness(ctx, d.Repo, cc.ProjectID, []storage.ConnectorSync{sync})
+				entry := syncStatus{Sync: sync, Readiness: readiness[sync.ID]}
 				if run, ok := runs[sync.ID]; ok {
 					entry.LatestRun = &run
+					entry.Readiness = readinessWithRun(entry.Readiness, &run)
+				}
+				if reader, ok := d.Repo.(interface {
+					LatestSnapshotGenerationsForSyncs(context.Context, string, []string) (map[string]connector.SnapshotGenerationDescriptor, error)
+				}); ok {
+					generations, gerr := reader.LatestSnapshotGenerationsForSyncs(ctx, cc.ProjectID, []string{sync.ID})
+					if gerr != nil {
+						return sourceStatusOutput{}, gerr
+					}
+					if generation, found := generations[sync.ID]; found {
+						entry.Generation = &generation
+					}
 				}
 				out.Syncs = []syncStatus{entry}
 				return out, nil
@@ -378,6 +497,7 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
+				out.includeSyncs = true
 				ids := make([]string, 0, len(syncs))
 				for _, sync := range syncs {
 					ids = append(ids, sync.ID)
@@ -386,11 +506,25 @@ func sourceStatus() opcore.Operation[sourceStatusInput, sourceStatusOutput] {
 				if err != nil {
 					return sourceStatusOutput{}, err
 				}
+				readiness := sourceReadiness(ctx, d.Repo, cc.ProjectID, syncs)
 				out.Syncs = make([]syncStatus, 0, len(syncs))
+				generations := map[string]connector.SnapshotGenerationDescriptor{}
+				if reader, ok := d.Repo.(interface {
+					LatestSnapshotGenerationsForSyncs(context.Context, string, []string) (map[string]connector.SnapshotGenerationDescriptor, error)
+				}); ok {
+					generations, err = reader.LatestSnapshotGenerationsForSyncs(ctx, cc.ProjectID, ids)
+					if err != nil {
+						return sourceStatusOutput{}, err
+					}
+				}
 				for _, sync := range syncs {
-					entry := syncStatus{Sync: sync}
+					entry := syncStatus{Sync: sync, Readiness: readiness[sync.ID]}
 					if run, ok := runs[sync.ID]; ok {
 						entry.LatestRun = &run
+						entry.Readiness = readinessWithRun(entry.Readiness, &run)
+					}
+					if generation, ok := generations[sync.ID]; ok {
+						entry.Generation = &generation
 					}
 					out.Syncs = append(out.Syncs, entry)
 				}
@@ -596,9 +730,12 @@ func cancelSourceRun() opcore.Operation[cancelSourceRunInput, connector.Run] {
 			if err != nil {
 				return connector.Run{}, err
 			}
-			// The DB flag is the contract; the in-process cancel makes a live
-			// local worker stop promptly instead of at the next poll.
-			runner.CancelRun(run.ID)
+			// The DB flag is the contract; only nudge the local worker when the
+			// store accepted cancellation. A sealed snapshot deliberately
+			// returns its uncancelled receipt so immutable completion can drain.
+			if run.CancelRequested || run.Status == "cancelled" {
+				runner.CancelRun(run.ID)
+			}
 			return run, nil
 		},
 	}

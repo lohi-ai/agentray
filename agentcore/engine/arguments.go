@@ -10,17 +10,23 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // validateArguments follows Pi's serialized JSON-schema path. It clones the
 // arguments before optional-null normalization and primitive coercion.
-func validateArguments(tool ai.Tool, raw json.RawMessage) (json.RawMessage, error) {
-	var schema, args any
-	if err := json.Unmarshal(tool.Parameters, &schema); err != nil {
+func validateArguments(tool ai.Tool, raw json.RawMessage) (any, error) {
+	schema, err := jsonjs.DecodeJSON(tool.Parameters)
+	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(raw, &args); err != nil {
+	args, err := jsonjs.DecodeJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	template, err := jsonjs.DecodeValue(raw)
+	if err != nil {
 		return nil, err
 	}
 	normalizeNulls(args, schema)
@@ -36,15 +42,15 @@ func validateArguments(tool ai.Tool, raw json.RawMessage) (json.RawMessage, erro
 		_, b := coerced.(map[string]any)
 		if !a || !b {
 			if compiled.Validate(coerced) == nil {
-				return marshalArguments(coerced, raw)
+				return orderedArgumentValue(coerced, template), nil
 			}
-			return marshalArguments(args, raw)
+			return orderedArgumentValue(args, template), nil
 		}
 		args = coerced
 	}
 	if err := compiled.Validate(args); err != nil {
-		var original any
-		if decodeErr := json.Unmarshal(raw, &original); decodeErr != nil {
+		original, decodeErr := jsonjs.DecodeJSON(raw)
+		if decodeErr != nil {
 			return nil, decodeErr
 		}
 		canonical, marshalErr := marshalArguments(original, raw)
@@ -64,9 +70,9 @@ func validateArguments(tool ai.Tool, raw json.RawMessage) (json.RawMessage, erro
 			return nil, marshalErr
 		}
 		lines := orderedValidationLines(err.(*jsonschema.ValidationError), orderedSchema, orderedArgs)
-		return nil, fmt.Errorf("Validation failed for tool %q:\n%s\n\nReceived arguments:\n%s", tool.Name, strings.Join(lines, "\n"), pretty.String())
+		return nil, fmt.Errorf("Validation failed for tool \"%s\":\n%s\n\nReceived arguments:\n%s", tool.Name, strings.Join(lines, "\n"), pretty.String())
 	}
-	return marshalArguments(args, raw)
+	return orderedArgumentValue(args, template), nil
 }
 
 func compileSchema(schema any, source ...json.RawMessage) (*argumentValidator, error) {
@@ -77,6 +83,8 @@ func compileSchema(schema any, source ...json.RawMessage) (*argumentValidator, e
 	compiler.UseLoader(nil)
 	compiler.UseRegexpEngine(compileArgumentRegexp)
 	registerArgumentNumbers(compiler)
+	registerArgumentScalars(compiler)
+	registerArgumentFormats(compiler)
 	registerArgumentArrays(compiler)
 	var schemaSource, argumentSource json.RawMessage
 	if len(source) > 0 {
@@ -245,9 +253,7 @@ func coerceUnion(value any, schemas []any) any {
 		}
 	}
 	for _, schema := range schemas {
-		raw, _ := json.Marshal(value)
-		var cloned any
-		_ = json.Unmarshal(raw, &cloned)
+		cloned := cloneArgument(value)
 		candidate := coerce(cloned, schema)
 		if accepts, valid := matches(candidate, schema); valid && accepts {
 			return candidate
@@ -271,7 +277,7 @@ func typeMatches(value any, name string) bool {
 		return ok
 	case "integer":
 		number, ok := value.(float64)
-		return ok && math.Trunc(number) == number
+		return ok && !math.IsInf(number, 0) && math.Trunc(number) == number
 	case "object":
 		_, ok := value.(map[string]any)
 		return ok
@@ -334,8 +340,7 @@ func coercePrimitive(value any, name string) any {
 			return strconv.FormatBool(boolean)
 		}
 		if number, ok := value.(float64); ok {
-			raw, _ := marshalJSScalar(number)
-			return string(raw)
+			return jsNumberString(number)
 		}
 	case "null":
 		if text, ok := value.(string); ok && text == "" {

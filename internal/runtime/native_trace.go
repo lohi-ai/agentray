@@ -47,7 +47,7 @@ func (a *NativeAgent) observeDelegation(ctx context.Context, tool string, run fu
 	}()
 	err = a.recorder.StartSpan(telemetry.SpanOptions{Name: "agentray.delegation.resume"}, func(root *telemetry.Span) error {
 		var failure error
-		raw, failure = telemetry.StartSpan(root.Context(), telemetry.SpanOptions{Name: "agentray.tool.execute", Attributes: telemetry.Attributes{"tool.name": tool}}, func(span *telemetry.Span) (json.RawMessage, error) {
+		raw, failure = telemetry.StartSpan(root.Context(), telemetry.SpanOptions{Name: "agentray.tool.execute", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "tool.name", Value: tool})}, func(span *telemetry.Span) (json.RawMessage, error) {
 			result, err := run(runCtx)
 			var value struct{ IsError bool }
 			if json.Unmarshal(result, &value) == nil && value.IsError {
@@ -85,7 +85,7 @@ func (a *NativeAgent) observeRequest(ctx context.Context, model json.RawMessage,
 	if a.traceRequests {
 		requestContext = passiveNativeJSON(transcript)
 	}
-	response, err := telemetry.StartSpan(a.telemetryParent(), telemetry.SpanOptions{Name: "agentray.ai.request", Attributes: telemetry.Attributes{"model.id": identity.ID, "agentray.request.id": requestID}}, run)
+	response, err := telemetry.StartSpan(a.telemetryParent(), telemetry.SpanOptions{Name: "agentray.ai.request", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "model.id", Value: identity.ID}, telemetry.Property{Name: "agentray.request.id", Value: requestID})}, run)
 	if a.traceRequests {
 		a.recordRequest(ctx, requestID, started, model, requestContext, response, err)
 	}
@@ -113,7 +113,7 @@ func (a *NativeAgent) recordRequest(ctx context.Context, requestID uint64, start
 	selected := []telemetry.RecordedSpan{}
 	included := map[int]bool{}
 	for _, span := range spans {
-		root := span.Name == "agentray.ai.request" && span.Attributes["agentray.request.id"] == requestID
+		root := span.Name == "agentray.ai.request" && span.Attributes.Get("agentray.request.id") == requestID
 		if root || (span.ParentID != nil && included[*span.ParentID]) {
 			included[span.ID] = true
 			selected = append(selected, span)

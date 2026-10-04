@@ -13,7 +13,8 @@ at `eeac84ca92498ac18b6832754d01aef1d3c5f654`, including tests and the MIT licen
 `UPSTREAM.json` records every file's Git blob ID, SHA-256, and executable mode.
 Changes to the reference belong in a new upstream revision, never local patches.
 
-`agentcore/pi.ts` and `agentcore/telemetry.ts` expose these original APIs.
+The reference build exposes these original APIs directly from the pinned
+`upstream/` entry points, without TypeScript facades in the Go `agentcore` package.
 `agentcore.NewPi` runs the original Agent in a child process and connects Go
 providers, tools, and event listeners through JSON callbacks. The existing Go
 `Agent` is still a separate implementation. The server runner can explicitly

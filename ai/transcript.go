@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"maps"
-	"math"
-	"strconv"
 	"strings"
 )
 
@@ -209,7 +207,17 @@ func ResolveTranscript(context TranscriptContext, supportsMidConvoSystemMessages
 
 func ToToolDeclaration(tool Tool) Tool {
 	return Tool{Name: tool.Name, Description: tool.Description,
-		Parameters: bytes.Clone(tool.Parameters), ConstrainedSampling: bytes.Clone(tool.ConstrainedSampling)}
+		Parameters: cloneDeclarationJSON(tool.Parameters), ConstrainedSampling: cloneDeclarationJSON(tool.ConstrainedSampling)}
+}
+
+// Valid serialized declarations pass through the same JSON round-trip as Pi.
+// Keep the existing Go handling of absent/malformed RawMessage inputs: retain
+// a detached value so callers can report their existing validation errors.
+func cloneDeclarationJSON(raw json.RawMessage) json.RawMessage {
+	if normalized, err := StringifyJSON(raw); err == nil {
+		return normalized
+	}
+	return bytes.Clone(raw)
 }
 
 func DeclarationsEqual(left, right Tool) bool {
@@ -225,87 +233,12 @@ func declarationJSONEqual(left, right json.RawMessage) bool {
 	if len(left) == 0 || len(right) == 0 {
 		return len(left) == len(right)
 	}
-	l, err := stringifyDeclarationJSON(left)
+	l, err := StringifyJSON(left)
 	if err != nil {
 		return false
 	}
-	r, err := stringifyDeclarationJSON(right)
+	r, err := StringifyJSON(right)
 	return err == nil && bytes.Equal(l, r)
-}
-
-func stringifyDeclarationJSON(data []byte) ([]byte, error) {
-	// Decode each object's keys in source order. SystemSections implements the
-	// same integer-key ordering and duplicate-key replacement as JS objects.
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.UseNumber()
-	var value func() ([]byte, error)
-	value = func() ([]byte, error) {
-		token, err := d.Token()
-		if err != nil {
-			return nil, err
-		}
-		switch token {
-		case json.Delim('{'):
-			keys := SystemSections{}
-			values := map[string][]byte{}
-			for d.More() {
-				key, err := d.Token()
-				if err != nil {
-					return nil, err
-				}
-				encoded, err := value()
-				if err != nil {
-					return nil, err
-				}
-				name := key.(string)
-				keys = append(keys, SystemSection{Name: name})
-				values[name] = encoded
-			}
-			if _, err := d.Token(); err != nil {
-				return nil, err
-			}
-			parts := [][]byte{}
-			for _, key := range keys.ordered() {
-				name, _ := json.Marshal(key.Name)
-				parts = append(parts, append(append(name, ':'), values[key.Name]...))
-			}
-			return append(append([]byte{'{'}, bytes.Join(parts, []byte{','})...), '}'), nil
-		case json.Delim('['):
-			parts := [][]byte{}
-			for d.More() {
-				encoded, err := value()
-				if err != nil {
-					return nil, err
-				}
-				parts = append(parts, encoded)
-			}
-			if _, err := d.Token(); err != nil {
-				return nil, err
-			}
-			return append(append([]byte{'['}, bytes.Join(parts, []byte{','})...), ']'), nil
-		default:
-			if number, ok := token.(json.Number); ok {
-				value, err := strconv.ParseFloat(string(number), 64)
-				if math.IsInf(value, 0) || math.IsNaN(value) {
-					return []byte("null"), nil
-				}
-				if err != nil {
-					return nil, err
-				}
-				token = value
-			}
-			// JSON.stringify(-0) is "0". encoding/json otherwise retains
-			// the sign bit when a decoded JSON number was negative zero.
-			if number, ok := token.(float64); ok && number == 0 {
-				token = float64(0)
-			}
-			return json.Marshal(token)
-		}
-	}
-	if !json.Valid(data) {
-		return nil, &json.SyntaxError{}
-	}
-	return value()
 }
 
 type ToolStateChanges struct {

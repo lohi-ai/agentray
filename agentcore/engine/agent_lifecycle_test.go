@@ -170,8 +170,8 @@ func TestAgentAbortAndConcurrentQueueAccess(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			agent.Steer(ai.Message{Role: "user", Content: ai.TextContent("steer")})
-			agent.FollowUp(ai.Message{Role: "user", Content: ai.TextContent("follow")})
+			agent.Steer(&ai.Message{Role: "user", Content: ai.TextContent("steer")})
+			agent.FollowUp(&ai.Message{Role: "user", Content: ai.TextContent("follow")})
 			_ = agent.State()
 			_ = agent.PeekQueuedMessages()
 			_ = agent.HasQueuedMessages()
@@ -203,29 +203,32 @@ func TestAgentAbortAndConcurrentQueueAccess(t *testing.T) {
 	}
 }
 
-func TestAgentCopiesStateArrays(t *testing.T) {
-	messages := []ai.Message{{Role: "user", Content: ai.TextContent("original")}}
-	tools := []engine.Tool{{Tool: ai.Tool{Name: "original", Parameters: json.RawMessage(`{}`)}}}
+func TestAgentCopiesAssignedArraysAndSharesStateLists(t *testing.T) {
+	messages := []*ai.Message{{Role: "user", Content: ai.TextContent("original")}}
+	tools := []*engine.Tool{{Tool: ai.Tool{Name: "original", Parameters: json.RawMessage(`{}`)}}}
 	agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Messages: messages, Tools: tools}, AgentConfig: engine.AgentConfig{StreamFn: completedAgentStream}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages[0] = ai.Message{Role: "custom"}
-	tools[0] = engine.Tool{}
-	if agent.State().Messages[1].Role != "user" || agent.State().Tools[0].Name != "original" {
+	messages[0] = &ai.Message{Role: "custom"}
+	tools[0] = &engine.Tool{}
+	if agent.State().Messages.Get(1).Role != "user" || agent.State().Tools.Get(0).Name != "original" {
 		t.Fatal("constructor retained caller array")
 	}
-	newMessages := []ai.Message{{Role: "user", Content: ai.TextContent("replacement")}}
-	newTools := []engine.Tool{{Tool: ai.Tool{Name: "replacement"}}}
+	newMessages := []*ai.Message{{Role: "user", Content: ai.TextContent("replacement")}}
+	newTools := []*engine.Tool{{Tool: ai.Tool{Name: "replacement"}}}
 	agent.SetMessages(newMessages)
 	agent.SetTools(newTools)
-	newMessages[0] = ai.Message{}
-	newTools[0] = engine.Tool{}
+	newMessages[0] = &ai.Message{}
+	newTools[0] = &engine.Tool{}
 	state := agent.State()
-	state.Messages[0] = ai.Message{}
-	state.Tools[0] = engine.Tool{}
-	if agent.State().Messages[0].Role != "user" || agent.State().Tools[0].Name != "replacement" {
-		t.Fatal("state setter/getter retained top-level array")
+	if state.Messages.Get(0).Role != "user" || state.Tools.Get(0).Name != "replacement" {
+		t.Fatal("state setter retained caller array")
+	}
+	state.Messages.Set(0, &ai.Message{Role: "custom"})
+	state.Tools.Set(0, &engine.Tool{Tool: ai.Tool{Name: "edited"}})
+	if agent.State().Messages.Get(0).Role != "custom" || agent.State().Tools.Get(0).Name != "edited" {
+		t.Fatal("state getter detached live collection")
 	}
 }
 
@@ -289,7 +292,7 @@ func TestAgentParentCancellationAndDefaultBinding(t *testing.T) {
 		t.Fatal("parent cancellation did not reach stream")
 	}
 	state := agent.State()
-	if state.Messages[len(state.Messages)-1].StopReason != "aborted" || state.IsStreaming {
+	if state.Messages.Get(state.Messages.Len()-1).StopReason != "aborted" || state.IsStreaming {
 		t.Fatal("parent cancellation did not settle aborted lifecycle")
 	}
 }

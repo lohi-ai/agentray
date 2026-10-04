@@ -46,8 +46,8 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 			defer cancel()
 			events := []engine.Event{}
 			requests := []map[string]any{}
-			config := engine.Config{Model: fixture.Model, Now: func() int64 { return fixture.Now }, ConvertToLLM: func(messages []ai.Message) ([]ai.Message, error) {
-				copy := append([]ai.Message(nil), messages...)
+			config := engine.Config{Model: fixture.Model, Now: func() int64 { return fixture.Now }, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) {
+				copy := engine.MessagePointers(engine.MessageValues(messages))
 				for i := range copy {
 					if copy[i].Role == "custom" {
 						copy[i].Role = "user"
@@ -56,16 +56,16 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 				return copy, nil
 			}}
 			if tc.Input.TransformFailure != "" {
-				config.TransformContext = func(context.Context, []ai.Message) ([]ai.Message, error) {
+				config.TransformContext = func(context.Context, []*ai.Message) ([]*ai.Message, error) {
 					return nil, errors.New(tc.Input.TransformFailure)
 				}
 			}
-			tools := []engine.Tool{}
+			tools := []*engine.Tool{}
 			if tc.Input.Tool {
-				tools = append(tools, engine.Tool{Tool: ai.Tool{Name: "echo", Description: "Echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Label: "Echo", Execute: func(_ context.Context, _ string, _ json.RawMessage, update func(engine.ToolResult)) (engine.ToolResult, error) {
-					update(engine.ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: "working"}}})
+				tools = append(tools, &engine.Tool{Tool: ai.Tool{Name: "echo", Description: "Echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Label: "Echo", Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
+					update(&engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "working"}}})
 					terminate := true
-					return engine.ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: "done"}}, Terminate: &terminate}, nil
+					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "done"}}, Terminate: &terminate}, nil
 				}})
 			}
 			provider := engine.StreamFn(func(_ context.Context, model json.RawMessage, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
@@ -103,11 +103,11 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 				provider = nil
 			}
 			user := ai.Message{Role: "user", Content: ai.TextContent("go"), Timestamp: fixture.Now}
-			messages := []ai.Message{user}
+			messages := []*ai.Message{&user}
 			if tc.Input.Empty {
 				messages = nil
 			} else if tc.Input.AssistantTail {
-				messages = []ai.Message{fixture.Assistant}
+				messages = []*ai.Message{&fixture.Assistant}
 			} else if tc.Input.Custom {
 				messages[0].Role = "custom"
 			}
@@ -116,14 +116,14 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 			if tc.Input.Resume {
 				stream, err = engine.AgentLoopContinue(ctx, engine.Context{Messages: messages, Tools: tools}, config, provider)
 			} else {
-				stream = engine.AgentLoop(ctx, []ai.Message{user}, engine.Context{Tools: tools}, config, provider)
+				stream = engine.AgentLoop(ctx, []*ai.Message{&user}, engine.Context{Tools: tools}, config, provider)
 				err = nil
 			}
 			if err != nil {
 				failure := err.Error()
 				syncError = &failure
 			}
-			var result []ai.Message
+			var result []*ai.Message
 			resultPending, queuePending := false, false
 			if stream != nil {
 				// Pi queues the first event synchronously. A cancelled reader must still
@@ -165,7 +165,7 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 					_, err := stream.Result(reader)
 					stop()
 					resultPending = errors.Is(err, context.DeadlineExceeded)
-					stream.End([]ai.Message{})
+					stream.End([]*ai.Message{})
 				}
 			}
 			actual, err := json.Marshal(map[string]any{"events": events, "requests": requests, "result": result, "syncError": syncError, "producerError": producerError, "resultPending": resultPending, "queuePending": queuePending})
@@ -189,8 +189,8 @@ func TestAgentLoopStreamDoesNotWaitForReaders(t *testing.T) {
 	release := make(chan struct{})
 	releaseProvider := sync.OnceFunc(func() { close(release) })
 	defer releaseProvider()
-	config := engine.Config{Model: json.RawMessage(`{"id":"test"}`), ConvertToLLM: func(messages []ai.Message) ([]ai.Message, error) { return messages, nil }}
-	stream := engine.AgentLoop(ctx, []ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{}, config, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+	config := engine.Config{Model: json.RawMessage(`{"id":"test"}`), ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}
+	stream := engine.AgentLoop(ctx, []*ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{}, config, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 		close(providerStarted)
 		<-release
 		response := ai.NewAssistantMessageEventStream()
@@ -240,7 +240,7 @@ func TestAgentLoopStreamReportsPanickingProducerWithoutInventingEnd(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	original := errors.New("hook panic")
-	stream := engine.AgentLoop(ctx, nil, engine.Context{}, engine.Config{GetSteeringMessages: func() ([]ai.Message, error) { panic(original) }}, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+	stream := engine.AgentLoop(ctx, nil, engine.Context{}, engine.Config{GetSteeringMessages: func() ([]*ai.Message, error) { panic(original) }}, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 		t.Error("unexpected provider")
 		return nil, nil
 	})

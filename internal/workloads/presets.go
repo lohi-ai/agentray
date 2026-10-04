@@ -110,6 +110,7 @@ in the stream, then write the query against reality.`,
    with ` + "`json_extract_string(properties, '$.key')`" + ` (never JSON_EXTRACT),
    query the ` + "`events`" + ` table, and keep every query SELECT-only.` + analystGuardrails,
 		Skills: []Skill{
+			LohiEvidenceSkill(),
 			{
 				Name:        "write-sql",
 				Description: "Turn a plain-language question into a correct, runnable DuckDB query over the events table.",

@@ -9,22 +9,45 @@ import (
 const nonVisionUserImagePlaceholder = "(image omitted: model does not support images)"
 const nonVisionToolImagePlaceholder = "(tool image omitted: model does not support images)"
 
-type ToolCallIDNormalizer func(id string, model Model, source Message) string
+type ToolCallIDNormalizer func(id string, model *Model, source *Message) string
 
 // TransformMessages ports Pi's api/transform-messages.ts: replay signatures
 // only on the originating model, repair unanswered tool calls, and downgrade
-// images for models that accept only text. Input messages are not mutated.
+// images for models that accept only text. Transformation itself does not mutate
+// input messages; the normalizer receives their shared objects and may edit them.
+// This value adapter snapshots the model and returned message structs. Use
+// TransformMessageReferences to retain message/model identity throughout.
 func TransformMessages(messages []Message, model Model, normalize ToolCallIDNormalizer) []Message {
 	return transformMessagesAt(messages, model, normalize, func() int64 { return time.Now().UnixMilli() })
 }
 
-func replaceImagesWithPlaceholder(content []ContentBlock, placeholder string) []ContentBlock {
-	result := []ContentBlock{}
+// TransformMessageReferences retains Pi's message/model object identity and
+// shallow-copy boundaries, including edits made by the ID normalizer. Callers
+// must synchronize concurrent access to these shared objects.
+func TransformMessageReferences(messages []*Message, model *Model, normalize ToolCallIDNormalizer) []*Message {
+	return transformMessageReferencesAt(messages, model, normalize, func() int64 { return time.Now().UnixMilli() })
+}
+
+func transformMessagesAt(messages []Message, model Model, normalize ToolCallIDNormalizer, now func() int64) []Message {
+	refs := make([]*Message, len(messages))
+	for i := range messages {
+		refs[i] = &messages[i]
+	}
+	transformed := transformMessageReferencesAt(refs, &model, normalize, now)
+	result := make([]Message, len(transformed))
+	for i, message := range transformed {
+		result[i] = *message
+	}
+	return result
+}
+
+func replaceImagesWithPlaceholder(content []*ContentBlock, placeholder string) []*ContentBlock {
+	result := []*ContentBlock{}
 	previousWasPlaceholder := false
 	for _, block := range content {
 		if block.Type == "image" {
 			if !previousWasPlaceholder {
-				result = append(result, ContentBlock{Type: "text", Text: placeholder})
+				result = append(result, &ContentBlock{Type: "text", Text: placeholder})
 			}
 			previousWasPlaceholder = true
 			continue
@@ -35,29 +58,46 @@ func replaceImagesWithPlaceholder(content []ContentBlock, placeholder string) []
 	return result
 }
 
-func transformMessagesAt(messages []Message, model Model, normalize ToolCallIDNormalizer, now func() int64) []Message {
+func transformMessageReferencesAt(messages []*Message, model *Model, normalize ToolCallIDNormalizer, now func() int64) []*Message {
 	ids := map[string]string{}
-	transformed := make([]Message, 0, len(messages))
-	for _, original := range messages {
-		message := original
+	// Pi completes content normalization and image conversion for the whole
+	// transcript before invoking any ID callback. Later callback edits must not
+	// change which images were converted or leak top-level edits into copies.
+	prepared := make([]*Message, len(messages))
+	for i, message := range messages {
 		if message.Content.Text == nil && message.Content.Blocks == nil {
+			copy := *message
+			message = &copy
 			message.Content = BlockContent()
 		}
-		if !slices.Contains(model.Input, "image") {
+		prepared[i] = message
+	}
+	if !slices.Contains(model.Input, "image") {
+		for i, message := range prepared {
 			if message.Role == "user" && message.Content.Text == nil {
-				message.Content = BlockContent(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionUserImagePlaceholder)...)
+				copy := *message
+				message = &copy
+				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionUserImagePlaceholder)...)
 			} else if message.Role == "toolResult" {
-				message.Content = BlockContent(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionToolImagePlaceholder)...)
+				copy := *message
+				message = &copy
+				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionToolImagePlaceholder)...)
 			}
+			prepared[i] = message
 		}
+	}
+	transformed := make([]*Message, 0, len(prepared))
+	for _, message := range prepared {
 		if message.Role == "toolResult" {
 			if id := ids[message.ToolCallID]; id != "" && id != message.ToolCallID {
+				copy := *message
+				message = &copy
 				message.ToolCallID = id
 			}
 		}
 		if message.Role == "assistant" {
 			same := message.Provider == model.Provider && message.API == model.API && message.Model == model.ID
-			blocks := []ContentBlock{}
+			blocks := []*ContentBlock{}
 			for _, block := range message.Content.Blocks {
 				switch block.Type {
 				case "thinking":
@@ -75,40 +115,47 @@ func transformMessagesAt(messages []Message, model Model, normalize ToolCallIDNo
 						continue
 					}
 					if !same {
-						block = ContentBlock{Type: "text", Text: block.Thinking}
+						block = &ContentBlock{Type: "text", Text: block.Thinking}
 					}
 				case "text":
 					if !same {
-						block = ContentBlock{Type: "text", Text: block.Text}
+						block = &ContentBlock{Type: "text", Text: block.Text}
 					}
 				case "toolCall":
+					original := block
 					if !same && block.ThoughtSignature != nil && *block.ThoughtSignature != "" {
+						copy := *block
+						block = &copy
 						block.ThoughtSignature = nil
 					}
 					if !same && normalize != nil {
-						id := normalize(block.ID, model, message)
-						if id != block.ID {
-							ids[block.ID] = id
+						id := normalize(original.ID, model, message)
+						if id != original.ID {
+							ids[original.ID] = id
+							copy := *block
+							block = &copy
 							block.ID = id
 						}
 					}
 				}
 				blocks = append(blocks, block)
 			}
-			message.Content = BlockContent(blocks...)
+			copy := *message
+			message = &copy
+			message.Content = BlockReferences(blocks...)
 		}
 		transformed = append(transformed, message)
 	}
 
-	result := []Message{}
-	pending := []ContentBlock{}
+	result := []*Message{}
+	pending := []*ContentBlock{}
 	answered := map[string]bool{}
-	held := []Message{}
+	held := []*Message{}
 	closePending := func() {
 		if len(pending) > 0 {
 			for _, call := range pending {
 				if !answered[call.ID] {
-					result = append(result, Message{Role: "toolResult", ToolCallID: call.ID, ToolName: call.Name,
+					result = append(result, &Message{Role: "toolResult", ToolCallID: call.ID, ToolName: call.Name,
 						Content: BlockContent(ContentBlock{Type: "text", Text: "No result provided"}), IsError: true, Timestamp: now()})
 				}
 			}

@@ -134,7 +134,7 @@ func TestNativeRequestPreparationUsesFreshCandidateContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	source := engine.Request{Context: &engine.Context{Messages: []ai.Message{{Role: "user", Content: ai.TextContent("original")}}}, Model: ladder.rungs[0].model, ThinkingLevel: "high"}
+	source := engine.Request{Context: &engine.Context{Messages: []*ai.Message{{Role: "user", Content: ai.TextContent("original")}}}, Model: ladder.rungs[0].model, ThinkingLevel: "high"}
 	for _, index := range []int{0, 1, 1} {
 		ctx, err := ladder.attemptContext(session.ctx, index, 0)
 		if err != nil {

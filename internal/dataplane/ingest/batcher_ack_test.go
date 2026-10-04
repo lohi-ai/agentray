@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -34,10 +35,106 @@ func (m *fakeMsg) term() error             { m.mu.Lock(); m.termed = true; m.mu.
 func (m *fakeMsg) deliveries() uint64      { return m.deliv }
 func (m *fakeMsg) body() []byte            { return m.payload }
 func (m *fakeMsg) seq() uint64             { return m.seqN }
+func (m *fakeMsg) delivery() storage.DeliveryReceiptMark {
+	return storage.DeliveryReceiptMark{StreamID: "test", Subject: "events", StreamSeq: m.seqN, PayloadSHA256: "test-digest"}
+}
 func (m *fakeMsg) state() (bool, bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.acked, m.nakked, m.termed
+}
+
+func TestPoisonDLQFailurePreservesExistingReadinessHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "poison.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	msg := &fakeMsg{seqN: 17, deliv: 9, payload: []byte("poison")}
+	if err := duck.RecordReadinessHole(ctx, msg.delivery(), nil); err != nil {
+		t.Fatal(err)
+	}
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
+		return errors.New("sink unavailable")
+	}, EventBatcherConfig{
+		Durable: "probe", RecordPosition: duck.RecordPosition, RecordHole: duck.RecordReadinessHole,
+		DeadLetter: func([]byte) error { return errors.New("DLQ unavailable") }, FlushEvery: time.Hour,
+	})
+	defer b.Stop()
+	b.poison(msg, nil, errors.New("invalid event"))
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); holes != 1 || ack || !nak || term {
+		t.Fatalf("holes=%d ack=%v nak=%v term=%v", holes, ack, nak, term)
+	}
+}
+
+func TestPoisonReplaySettlementPreservesExistingReadinessHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "poison-replay.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	msg := &replayedFakeMsg{fakeMsg: fakeMsg{seqN: 17, deliv: 9, payload: []byte("poison")}}
+	if err := duck.RecordReadinessHole(ctx, msg.delivery(), nil); err != nil {
+		t.Fatal(err)
+	}
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{
+		Durable: "probe", RecordPosition: duck.RecordPosition,
+		DeadLetter: func([]byte) error { return nil },
+		RecordHole: func(context.Context, storage.DeliveryReceiptMark, *storage.SourceReceiptMark) error {
+			return errors.New("injected hole write failure after settlement")
+		},
+	})
+	defer b.Stop()
+	b.poison(msg, nil, errors.New("still-invalid replay"))
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); holes != 1 || ack || !nak || term {
+		t.Fatalf("holes=%d ack=%v nak=%v term=%v", holes, ack, nak, term)
+	}
+}
+
+type replayedFakeMsg struct{ fakeMsg }
+
+func (m *replayedFakeMsg) delivery() storage.DeliveryReceiptMark {
+	delivery := m.fakeMsg.delivery()
+	delivery.Replayed = true
+	return delivery
+}
+
+func TestMalformedProjectPoisonSettlesWithUnattributedHole(t *testing.T) {
+	ctx := context.Background()
+	duck, err := storage.OpenDuckDB(ctx, filepath.Join(t.TempDir(), "malformed.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer duck.Close()
+	dlq := 0
+	b := NewEventBatcher(duck.SinkEvents, EventBatcherConfig{Durable: "probe", RecordPosition: duck.RecordPosition,
+		RecordHole: duck.RecordReadinessHole, DeadLetter: func([]byte) error { dlq++; return nil }})
+	defer b.Stop()
+	msg := &fakeMsg{seqN: 1, deliv: 99, payload: []byte(`[{"project_id":"malformed"}]`)}
+	b.AddMsg([]storage.Event{{ProjectID: "malformed", EventID: uuid.NewString()}}, msg)
+	var holes int
+	if err := duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_holes WHERE project_id IS NULL AND cleared_at IS NULL`).Scan(&holes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, nak, term := msg.state(); dlq != 1 || holes != 1 || ack || nak || !term {
+		t.Fatalf("dlq=%d holes=%d ack=%v nak=%v term=%v", dlq, holes, ack, nak, term)
+	}
 }
 
 // A message whose insert succeeds must be acked (never redelivered).
@@ -53,6 +150,31 @@ func TestBatcherAcksOnSuccessfulInsert(t *testing.T) {
 
 	if a, n, term := msg.state(); !a || n || term {
 		t.Fatalf("want acked only; got ack=%v nak=%v term=%v", a, n, term)
+	}
+}
+
+func TestBatcherRecordsDeliveryIdentityForEmptySettlement(t *testing.T) {
+	recorded := make(chan storage.AppliedMark, 1)
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error { return nil }, EventBatcherConfig{
+		Durable: "empty-colour",
+		RecordPosition: func(_ context.Context, mark storage.AppliedMark) error {
+			recorded <- mark
+			return nil
+		},
+	})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 1, seqN: 9}
+	b.AddMsg(nil, msg)
+	select {
+	case mark := <-recorded:
+		if mark.Seq != 9 || len(mark.Deliveries) != 1 || mark.Deliveries[0].StreamSeq != 9 {
+			t.Fatalf("empty settlement mark = %+v", mark)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("empty settlement was not recorded")
+	}
+	if acked, _, _ := msg.state(); !acked {
+		t.Fatal("empty settlement was not acknowledged")
 	}
 }
 
@@ -125,6 +247,24 @@ func TestBatcherDeadLettersAtMaxDeliver(t *testing.T) {
 	defer dlqMu.Unlock()
 	if len(dlq) != 1 || string(dlq[0]) != "poison-body" {
 		t.Fatalf("want body dead-lettered once, got %v", dlq)
+	}
+}
+
+func TestBatcherCapacityAtMaxDeliverStaysRetriable(t *testing.T) {
+	var deadLetters atomic.Int32
+	b := NewEventBatcher(func(context.Context, []storage.Event, storage.AppliedMark) error {
+		return fmt.Errorf("disk reserve: %w", storage.ErrDataCapacity)
+	}, EventBatcherConfig{MaxBatch: 1, FlushEvery: time.Hour, MaxRetries: 1, MaxDeliver: 1,
+		DeadLetter: func([]byte) error { deadLetters.Add(1); return nil }})
+	defer b.Stop()
+	msg := &fakeMsg{deliv: 99, payload: []byte("valid-accepted-event")}
+	b.AddMsg(ev(1), msg)
+	waitForState(t, msg, func() bool { _, n, _ := msg.state(); return n })
+	if acked, nacked, termed := msg.state(); acked || !nacked || termed {
+		t.Fatalf("capacity settlement = ack=%v nak=%v term=%v, want delayed retry", acked, nacked, termed)
+	}
+	if deadLetters.Load() != 0 {
+		t.Fatal("capacity pressure was classified as poison")
 	}
 }
 

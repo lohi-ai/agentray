@@ -906,7 +906,7 @@ func TestNativeDelegationContinuationHonorsToolContextsAndTermination(t *testing
 			if err := json.Unmarshal(result.Telemetry, &spans); err != nil {
 				t.Fatal(err)
 			}
-			if len(spans) < 2 || spans[0].Name != "agentray.delegation.resume" || spans[1].Name != "agentray.tool.execute" || spans[1].ParentID == nil || *spans[1].ParentID != spans[0].ID || spans[1].Attributes["tool.name"] != subagent.ToolSpawnSubagent {
+			if len(spans) < 2 || spans[0].Name != "agentray.delegation.resume" || spans[1].Name != "agentray.tool.execute" || spans[1].ParentID == nil || *spans[1].ParentID != spans[0].ID || spans[1].Attributes.Get("tool.name") != subagent.ToolSpawnSubagent {
 				t.Fatalf("continuation tool telemetry is missing/misparented: %s", result.Telemetry)
 			}
 		})

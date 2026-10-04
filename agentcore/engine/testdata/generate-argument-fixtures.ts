@@ -2,6 +2,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { root, manifest } from "./oracle.ts";
 const { runToolCall } = await import(new URL("upstream/packages/agent/src/agent-loop.ts", root).pathname);
+const { Encode: encodePunycode } = await import(new URL("node_modules/typebox/build/format/idna/format/puny.mjs", root).pathname);
 const inputs = [
   "0", "-0", "+0", "42", "01", "+1.5", ".5", "1.", "1e3", "1e-3",
   "0x10", "0Xf", "0o10", "0O10", "0b10", "0B10",
@@ -307,6 +308,269 @@ definitions.push(
   { name: "evaluated-contains/min-restores-marks", parameters: { type: "object", properties: { value: { type: "array", contains: { type: "number" }, minContains: 0, items: { const: "" }, unevaluatedItems: false } } }, args: { value: [1] } },
   { name: "evaluated-contains/allOf", parameters: { type: "object", properties: { value: { type: "array", allOf: [{ contains: { type: "number" } }], unevaluatedItems: false } } }, args: { value: [1, 2] } },
 );
+const regexSyntax = [
+  // ECMAScript's Unicode grammar excludes legacy/.NET extensions even when
+  // the matching engine can compile them.
+  "\\a", "\\e", "\\A", "\\Z", "\\z", "\\G", "\\q", "\\_", "\\-", "\\,", "\\ ", "\\é",
+  "[\\q]", "[\\B]", "[\\-]", "[\\b]", "[\\/]", "\\/", "\\^", "\\$", "\\\\",
+  "\\0", "\\00", "\\01", "\\08", "[\\0]", "[\\1]", "[\\8]", "\\1", "\\8", "(a)\\2", "\\2(a)(b)", "(a)\\1",
+  "\\cA", "\\cz", "\\c1", "[\\c_]", "\\x41", "\\x4", "\\u0041", "\\u041", "\\u{1F600}", "\\u{110000}",
+  "(?i)a", "(?m)a", "(?s)a", "(?x:a)", "(?>a)", "(?#comment)a", "(a)(?(1)b|c)", "(?'name'a)", "(?<1>a)",
+  "(?<name>a)\\k<name>", "\\k<missing>", "(?<name>a)\\k<missing>", "(?<name>a)(?<other>b)", "(?<name>a)(?<name>b)",
+  "(?:a)", "(?=a)", "(?!a)", "(?<=a)", "(?<!a)", "(?=a)?", "(?!a)+", "(?<=a)*",
+  "a{", "a}", "a]", "{a}", "a{1,}", "a{1,2}", "a{1,2}?", "a{1", "a{,2}", "a{2,1}",
+  "[a-z]", "[z-a]", "[a-\\d]", "[\\d-a]", "[\\d-\\w]", "[-a]", "[a-]", "[[]", "[]", "[^]",
+  "\\x2b+", "\\u007b+", "\\cb+", "\\b+", "[\\b]+", "\\é+", "\\😀+", "[é-\\d]", "[é-ê]", "\\p{L}{2}",
+  "(?<name>a)|(?<name>b)", "(?:(?<name>a)|(?<name>b))", "(?<name>a)|(?<name>b)(?<name>c)", "(?<one>a)(?:b|(?<one>c))",
+  "(?i:a)", "(?im-s:a)", "(?-i:a)", "(?i-i:a)", "(?ii:a)", "(?i-:a)", "(?u:a)", "(?n:a)",
+  "^$", "(?:a)*", "a|", "|a", "(?:)", "[{}()?*+]", "\\{a\\}", "\\[a\\]", "\\(a\\)", "\\+", "\\?", "\\*",
+  "(?<a>a)(?<b-a>b)", "(?<a>a)(?<-a>b)", "(?-:a)", "(?im-:a)",
+  "(?<$a>x)", "(?<_a>x)", "(?<é>x)", "(?<a1>x)", "(?<a\u0301>x)", "(?<\u0301a>x)", "(?<a\u200c>x)", "(?<a\u200d>x)",
+  "(?<\\u0061>x)\\k<a>", "(?<a>x)\\k<\\u0061>", "(?<a>x)(?<\\u0061>y)", "(?<a>x)|(?<\\u0061>y)",
+  "(?<\\u{1D49C}>x)", "(?<\\uD835\\uDC9C>x)", "(?<\\uD835\\u{DC9C}>x)", "(?<\\u{D835}\\uDC9C>x)",
+  "(?<\\uD835>x)", "(?<\\u{110000}>x)", "(?<\\u00>x)", "(?<\\x61>x)", "(?<\\u0031>x)", "(?<a-b>x)",
+];
+for (let i = 0; i < regexSyntax.length; i++) definitions.push({name: `format/regex-syntax/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "regex"}}}, args: {value: regexSyntax[i]}});
+for (const [name, pattern, values] of [
+  ["named-first", "^(?<first>a)(b)\\1\\2$", ["abab", "abba", "abaa"]],
+  ["named-middle", "^(a)(?<middle>b)(c)\\1\\2\\3$", ["abcabc", "abcacb"]],
+  ["named-last", "^(a)(?<last>b)\\1\\2$", ["abab", "abba"]],
+  ["named-and-numbered", "^(?<first>a)(b)\\k<first>\\2$", ["abab", "abaa"]],
+  ["nested-named", "^(?<outer>(a)(?<inner>b))(c)\\1\\2\\3\\4$", ["abcababc", "abcacabb"]],
+  ["named-forward", "^\\k<later>(a)(?<later>b)\\2$", ["abb", "abab"]],
+  ["numbered-forward", "^\\2(?<first>a)(b)$", ["ab", "bab"]],
+  ["named-optional", "^(?<first>a)?(b)\\k<first>\\2$", ["bb", "abab", "bab"]],
+  ["named-lookahead", "^(?=(?<first>a))(a)\\1\\2$", ["aaa", "aa"]],
+  ["named-alternatives", "^(?:(?<same>a)|(?<same>b))(c)\\k<same>\\3$", ["acac", "bcbc", "acbc", "bcac"]],
+  ["named-dollar", "^(?<$first>a)(b)\\k<$first>\\1\\2$", ["abaab", "ababb"]],
+  ["named-unicode", "^(?<名>a)(b)\\k<名>\\1\\2$", ["abaab", "ababb"]],
+  ["named-escaped", "^(?<\\u0061>a)(b)\\k<a>\\1\\2$", ["abaab", "ababb"]],
+  ["reference-escaped", "^(?<a>a)(b)\\k<\\u0061>\\1\\2$", ["abaab", "ababb"]],
+  ["named-reference-digit", "^(?<a>x)(y)\\k<a>2\\1\\2$", ["xyx2xy", "xyxy2"]],
+  ["named-codepoint", "^(?<\\u{1D49C}>a)(b)\\k<𝒜>\\1\\2$", ["abaab", "ababb"]],
+  ["named-surrogate-pair", "^(?<\\uD835\\uDC9C>a)(b)\\k<𝒜>\\1\\2$", ["abaab", "ababb"]],
+  ["named-duplicate-repeat", "^(?:(?<same>a)|(?<same>b))+\\k<same>$", ["abb", "baa", "abab", "abba"]],
+] as [string, string, string[]][]) {
+  for (let i = 0; i < values.length; i++) definitions.push({name: `regexp-captures/${name}/${i}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value: values[i]}});
+}
+for (const [i, [pattern, values]] of ([
+  ["^\\b.$", ["é", "a"]], ["^\\B.$", ["é", "a"]],
+  ["^(?i:\\w)$", ["ſ", "İ", "K"]], ["^(?i:[^\\w#])$", ["ſ", "İ", "#"]],
+  ["^a\\bé$", ["aé"]], ["(?<=^(?i:[\\w#]))$", ["ſ", "İ"]],
+] as [string, string[]][]).entries()) {
+  for (const [j, value] of values.entries()) definitions.push({name: `regexp-characters/${i}/${j}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+const repetitionPatterns: [string, string, string[]][] = [
+  ["alternating", "^(?:(a)|(b))+\\1\\2$", ["abb", "baa", "abab", "abba", "aa", "bb"]],
+  ["optional-inner", "^(a(b)?)+\\2$", ["aba", "abab", "ababb", "aa", "aab"]],
+  ["nested-repeat", "^((a+)?(b+)?(c))*\\2\\3$", ["abcc", "abccab", "abccabc", "acacaa", "abcbcbb"]],
+  ["named-alternating", "^(?:(?<a>a)|(?<b>b))+\\k<a>\\k<b>$", ["abb", "baa", "abab", "abba"]],
+  ["duplicate-with-empty-branch", "^(?:(?<same>a)|(?<same>b)|c)+\\k<same>$", ["abc", "abcb", "abca", "abb", "baa"]],
+  ["bounded", "^(?:(a)|(b)){2}\\1\\2$", ["abb", "baa", "abab", "abba"]],
+  ["lazy", "^(?:(a)|(b))+?\\1\\2$", ["abb", "baa", "abab", "abba"]],
+  ["zero-minimum", "^(?:(a)|(b))*\\1\\2$", ["", "abb", "baa", "abab"]],
+  ["backtrack", "^(?:(a)|(b))+b\\1\\2$", ["abb", "abbb", "abab", "baab", "babaa"]],
+  ["nested-optional", "^(?:(a)|(b(c)?))+\\1\\2\\3$", ["bcabbc", "bcaa", "abcbc", "abcb", "bcbb"]],
+  ["lookahead-capture", "^(?:(?=(a))a|b)+\\1$", ["ab", "aba", "baa", "aa"]],
+  ["capture-in-body-reference", "^((a)?b\\2)+$", ["abab", "aba", "ababb", "bb", "abababa"]],
+  ["lookbehind-repeat", "^(?:a|b)+(?<=((a)|(b))+)\\2\\3$", ["abb", "baa", "abab", "abba", "aa", "bb"]],
+  ["lookahead-inside-lookbehind", "^(?:a|b)+(?<=((?=(a))a|b)+)\\2$", ["ab", "aba", "baa", "aa"]],
+  ["negative-lookahead", "^(?:(a)|(?!x)b)+\\1$", ["ab", "aba", "baa", "aa"]],
+  ["empty-iteration", "^(a?)*\\1$", ["", "a", "aa", "aaa", "aaaa"]],
+  ["empty-alternative", "^(?:(a)|())*\\1$", ["", "a", "aa", "aaa"]],
+  ["mandatory-empty", "^(a?){2}\\1$", ["", "a", "aa", "aaa"]],
+  ["empty-plus", "^(a?)+\\1$", ["", "a", "aa", "aaa"]],
+  ["empty-range", "^(a?){2,4}\\1$", ["", "a", "aa", "aaa", "aaaaa"]],
+  ["empty-lazy", "^(a?)*?\\1$", ["", "a", "aa", "aaa"]],
+  ["empty-nested", "^((a?)*)+\\2$", ["", "a", "aa", "aaa"]],
+  ["empty-duplicate", "^(?:(?<same>a?)|(?<same>b?))+\\k<same>$", ["", "a", "b", "ab", "abb", "baa"]],
+  ["empty-lookbehind", "^a*(?<=(a?)*)\\1$", ["", "a", "aa", "aaa"]],
+  ["empty-lookbehind-minimum", "^a*(?<=(a?){2,4})\\1$", ["", "a", "aa", "aaa"]],
+  ["nullable-backreference", "^((a?)\\2?)*\\1$", ["", "a", "aa", "aaa", "aaaa"]],
+  ["lookahead-backreference", "^(?:(?=(a?))\\1)*\\1$", ["", "a", "aa", "aaa"]],
+  ["zero-width-lookahead", "^((?=a))*a\\1$", ["", "a", "aa"]],
+  ["nullable-named-reference", "^(?:(?<a>a?)\\k<a>?)*\\k<a>$", ["", "a", "aa", "aaa"]],
+  ["nullable-duplicate-reference", "^(?:(?<same>a?)|(?<same>b?))+\\k<same>*$", ["", "a", "b", "ab", "abb", "baa"]],
+  ["nullable-unicode", "^(😀?)*\\1$", ["", "😀", "😀😀", "😀😀😀"]],
+  ["nullable-property-class", "^([\\p{L}]?)*\\1$", ["", "a", "aa", "名", "名名"]],
+];
+for (const [name, pattern, values] of repetitionPatterns) {
+  for (const [i, value] of values.entries()) definitions.push({name: `regexp-repeat/${name}/${i}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+const repetitionInputs = [""];
+let repetitionFrontier = [""];
+for (let length = 1; length <= 5; length++) {
+  repetitionFrontier = repetitionFrontier.flatMap(prefix=>["a", "b", "c"].map(letter=>prefix+letter));
+  repetitionInputs.push(...repetitionFrontier);
+}
+const repetitions = {inputs: repetitionInputs, cases: repetitionPatterns.map(([name, pattern])=>{
+  const expression = new RegExp(pattern, "u");
+  return {name, pattern, accepted: repetitionInputs.flatMap((value,index)=>expression.test(value)?[index]:[])};
+})};
+const unicodeProperties = [
+  "L", "Letter", "Lu", "Uppercase_Letter", "General_Category=Letter", "gc=L", "gc=Uppercase_Letter",
+  "Script=Greek", "sc=Grek", "Script_Extensions=Greek", "scx=Grek", "Script=Hiragana", "scx=Hira",
+  "ASCII", "Any", "Assigned", "Alphabetic", "Alpha", "ID_Start", "ID_Continue", "Emoji", "Emoji_Presentation", "Extended_Pictographic",
+  "White_Space", "WSpace", "Hex_Digit", "ASCII_Hex_Digit", "Lowercase", "Uppercase", "Default_Ignorable_Code_Point", "Join_Control",
+  "Script=Unknown", "General_Category=Unassigned", "sc=Han", "General_Category=Other_Letter",
+];
+for (const [i, property] of unicodeProperties.entries()) {
+  definitions.push({name: `format/unicode-property/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "regex"}}}, args: {value: `\\p{${property}}`}});
+}
+for (const [i, property] of ["Greek", "IsGreek", "letter", "LETTER", "Script=greek", "script=Greek", "sc=Greek ", " Script=Greek", "gc =L", "Block=Basic_Latin", "Age=15.1", "Basic_Emoji", "RGI_Emoji", "Script_Extensions=NotAScript", "L=Yes", "", "Other_Alphabetic"].entries()) {
+  definitions.push({name: `format/unicode-property-invalid/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "regex"}}}, args: {value: `\\p{${property}}`}});
+}
+for (const [name, pattern, values] of [
+  ["letter", "^\\p{Letter}+$", ["abcé名", "123", "😀", "𝒜"]],
+  ["category", "^\\p{gc=Lu}+$", ["ABCΩ", "Abc", "𝒜"]],
+  ["greek", "^\\p{Script=Greek}+$", ["αΩ", "abc", "\u0342"]],
+  ["greek-extensions", "^\\p{scx=Grek}+$", ["αΩ", "abc", "\u0342"]],
+  ["japanese-script", "^\\p{sc=Hira}+$", ["あ", "ー", "カ"]],
+  ["japanese-extensions", "^\\p{Script_Extensions=Hiragana}+$", ["あ", "ー", "カ"]],
+  ["complement", "^\\P{Letter}+$", ["123😀", "α", "a"]],
+  ["class-union", "^[\\p{Letter}0-9]+$", ["a名2", "😀", "-"]],
+  ["class-complement-union", "^[\\P{ASCII}0-9]+$", ["名2", "A", "😀"]],
+  ["negated-class", "^[^\\p{ASCII}]+$", ["名😀", "abc", ""]],
+  ["binary", "^\\p{Emoji}+$", ["😀", "1", "A"]],
+  ["unicode-15-1", "^\\p{sc=Han}$", ["\u{2ebf0}", "\u{2ee5d}", "\u{2ee5e}"]],
+  ["any", "^\\p{Any}$", ["\n", "😀", "a", ""]],
+  ["not-any", "^\\P{Any}$", ["a", "😀", ""]],
+  ["empty-property-in-class", "^[\\P{Any}a]$", ["a", "b", ""]],
+  ["named-property", "^(?<letter>\\p{L})(\\p{Nd})\\1\\2$", ["α1α1", "α11α"]],
+] as [string, string, string[]][]) {
+  for (const [i, value] of values.entries()) definitions.push({name: `regexp-unicode/${name}/${i}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+const lineValues = ["", "a", "b", "\n", "\r", "\u2028", "\u2029", "😀", "\r\n", "a\n", "a\r", "a\u2028", "a\u2029", "\na", "\ra", "\u2028a", "\u2029a", "\r\na\r\n", "b\na\nb", "b\ra\rb", "b\u2028a\u2029b"];
+for (const [name, pattern] of [
+  ["dot-all", "^(?s:.)$"], ["dot-default", "^.$"], ["dot-disable", "^(?s:(?-s:.))$"],
+  ["dot-inherit", "^(?s:(?:.))$"], ["multiline", "(?m:^a$)"], ["absolute", "^a$"],
+  ["multiline-inherit", "(?m:(?:^a$))"], ["multiline-disable", "(?m:(?-m:^a$))"],
+]) {
+  for (const [i, value] of lineValues.entries()) definitions.push({name: `regexp-flags/${name}/${i}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+for (const [name, pattern, values] of [
+  ["dot-restore", "^(?s:.).$", ["\na", "a\n", "\u2028a", "a\u2028"]],
+  ["dot-reenable", "^(?s:(?-s:.)(?s:.))$", ["a\n", "\na", "a\u2029"]],
+  ["dot-lookahead", "^(?s:(?=.).)$", ["\n", "\u2028", ""]],
+  ["anchors-restore", "(?m:^a$)^b$", ["a\nb", "ab", "b"]],
+  ["anchors-backreference", "(?m:^(?<letter>a)(b)\\1\\2$)", ["\rab ab\r", "\rabab\r", "\rababx\r"]],
+  ["multiline-empty", "(?m:^$)", ["\r\n", "a\nb", "a\n\nb", "a\u2028\u2029b"]],
+  ["escaped-metacharacters", "^(?ms:\\.\\^\\$)$", [".^$", "a^$", "\n^$"]],
+  ["class-metacharacters", "^(?ms:[.^$])$", [".", "^", "$", "\n"]],
+  ["multiline-lookbehind", "(?m:(?<=^)a(?=$))", ["\ra\r", "\u2028a\u2029", "ba"]],
+  ["dotall-named", "^(?s:(?<line>.))(a)\\1\\2$", ["\na\na", "\u2028a\u2028a", "\naaa"]],
+  ["nested-mixed-flags", "(?ms:^.(?-s:.)(?-m:$))", ["\naX", "\na", "\n\n", "a\r"]],
+] as [string, string, string[]][]) {
+  for (const [i, value] of values.entries()) definitions.push({name: `regexp-flags/${name}/${i}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+const urlValues = [
+  "", "example.com", "/relative", "../a", "?q=1", "#part", "//example.com/a", "///example.com",
+  "https://example.com/a?q=1#part", "HTTP://EXAMPLE.COM", "http:example.com", "http:/example.com", "http:", "https://", "https:///",
+  "mailto:a@example.com", "urn:example:a", "data:text/plain,hello", "custom:", "custom:hello world", "custom://", "custom://host:80/a", "custom://host:bad/a",
+  "file:///tmp/a", "file://localhost/C:/a", "file://host:80/a", "file://user@host/a", "C:/a", "1http://example.com", "http//example.com", "a+b//example.com",
+  "http://127.1", "http://0x7f000001", "http://0177.0.0.1", "http://256.0.0.1", "http://1.2.3.999", "http://09", "http://4294967296",
+  "http://[::1]/", "http://[2001:db8::1]/", "http://[::ffff:192.0.2.1]/", "http://[::1", "http://[::1%25eth0]/", "http://[v1.a]/", "http://[VAF.a:b]/", "http://[vg.a]/", "http://[v1.]/",
+  "http://example.com:0/", "http://example.com:65535/", "http://example.com:65536/", "http://example.com:-1/", "http://example.com:/", "http://example.com:1.2/", "http://user:pass@example.com/",
+  "https://münich.example/đường", "https://例子.广告/", "https://ＥＸＡＭＰＬＥ．ＣＯＭ/", "https://😀.example/", "https://xn--/", "https://a_b.example/", "https://-a.example/", "https://a..b/", "https://a\u200db/", "https://%65xample.com/", "https://%FF/",
+  " https://example.com ", "\u0000https://example.com\u001f", "https://exa\nmple.com/", "https://example.com/a\tb", "https://example.com/a b", "https://example.com/a\u007fb", "https://exa mple.com/",
+  "https:\\example.com\\a", "https://example.com/%20", "https://example.com/%", "https://example.com/%GG", "https://example.com/%0", "custom://%GG/", "https://example.com/<a>", "https://example.com/^`{|}",
+  "http://[v1.a]/[v2.b]", "custom:[v1.a][v2.b]",
+];
+// TypeBox only narrows IPvFuture when JS's UTF-16 length is below 2048.
+for (const length of [2047, 2048]) {
+  const prefix = "http://[v1.a]/";
+  urlValues.push(prefix + "a".repeat(length - prefix.length));
+  urlValues.push(prefix + "😀".repeat(Math.floor((length - prefix.length) / 2)) + "a".repeat((length - prefix.length) % 2));
+}
+for (const format of ["url", "iri", "iri-reference"]) {
+  for (let i = 0; i < urlValues.length; i++) definitions.push({name: `format/${format}/${i}`, parameters: {type: "object", properties: {value: {type: "string", format}}}, args: {value: urlValues[i]}});
+}
+// Unicode 15.1 additions, neighboring unassigned scalars and IdentifierName
+// exceptions. Exercise the actual tool path as well as regex format admission.
+const escapedCaptureDelimiters = [
+  "^(?<a\\u003ex)$", "^(?<a\\u003e>x)$", "^(?<a\\u{3e}x)$",
+  "^(?<a\\u{0003e}>x)$", "^(?<a>x)\\k<a\\u003e$", "^(?<a>x)\\k<a\\u003e>$",
+  "^(?<a>x)\\k<a\\u{3e}$", "^(?<a>x)\\k<a\\u{3e}>$", "(?<\\u003e>x)",
+];
+for (const [i, pattern] of escapedCaptureDelimiters.entries()) {
+  definitions.push({name: `unicode-admission/delimiter/regex/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "regex"}}}, args: {value: pattern}});
+  try { new RegExp(pattern, "u"); } catch { continue; }
+  for (const value of ["x", ">x", "xx", "xx>"]) definitions.push({name: `unicode-admission/delimiter/match/${i}/${value}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+}
+const unicodeAdmissionPoints = [
+  0x2ebef, 0x2ebf0, 0x2ee5d, 0x2ee5e, 0x2ffc, 0x2fff, 0x31ef,
+  0x2118, 0x212e, 0x309b, 0x309c, 0xb7, 0x387, 0x1369, 0x19da,
+  0x200c, 0x200d, 0x30fb, 0xff65, 0x301, 0x1e4d0, 0x1e4ec, 0x1e4f0,
+  0x2160, 0x3007, 0x16ff4,
+];
+for (const code of unicodeAdmissionPoints) {
+  const scalar = String.fromCodePoint(code), label = code.toString(16);
+  for (const format of ["hostname", "idn-hostname", "idn-email"]) {
+    const values = format === "idn-email" ? [`a@${scalar}.example`] : [`${scalar}.example`, `xn--${encodePunycode(scalar)}.example`];
+    for (const [i, value] of values.entries()) definitions.push({name: `unicode-admission/${label}/${format}/${i}`, parameters: {type: "object", properties: {value: {type: "string", format}}}, args: {value}});
+  }
+  for (const [i, name] of [scalar, `a${scalar}`, `\\u{${label}}`].entries()) {
+    const pattern = `^(?<${name}>a)\\k<${name}>$`;
+    definitions.push({name: `unicode-admission/${label}/regex/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "regex"}}}, args: {value: pattern}});
+    // Invalid schemas have a separate error contract; here test matching only
+    // for capture identifiers admitted by the unchanged JavaScript runtime.
+    try { new RegExp(pattern, "u"); } catch { continue; }
+    for (const value of ["aa", "ab"]) definitions.push({name: `unicode-admission/${label}/capture/${i}/${value}`, parameters: {type: "object", properties: {value: {type: "string", pattern}}}, args: {value}});
+  }
+}
+const hostnameValues = [
+ "example.com", "localhost", "EXAMPLE.COM", "a-b.example", "123.example", "", ".", "example.com.", ".example", "a..b", "-a.example", "a-.example", "ab--cd.example", "a_b.example", "a+b.example", "a,b.example", "a:b.example", "a/b.example", "a b.example", "a\n.example",
+ "xn--bcher-kva.example", "XN--BCHER-KVA.example", "xn--.example", "xn--a.example", "xn--abc-.example", "xn---9uc.example", "xn--invalid!.example", "xn--e28h.example",
+ "xn--bcher-kvİ", "xn--bcher-Kva",
+ // Pi's raw decoder joins UTF-16 surrogate pairs before category validation.
+ "xn--ib9b66e", "xn--0c9bo7g", "xn--ib9b", "xn--r49b",
+ "bücher.example", "例子.广告", "é.example", "e\u0301.example", "ＥＸＡＭＰＬＥ．ＣＯＭ", "a。b", "a｡b", "a\u00adb.example", "a\u200bb.example", "a\ufe0fb.example", "a\u{e0100}b.example",
+ "a".repeat(63)+".example", "a".repeat(64)+".example", [63,63,63,61].map(n=>"a".repeat(n)).join("."), [63,63,63,62].map(n=>"a".repeat(n)).join("."),
+ "é".repeat(57)+".example", "é".repeat(58)+".example", "😀.example", "𝕒.example", "\u0301a.example",
+ "\u00ad".repeat(254)+"a.com", "e\u0301".repeat(57)+".example", "e\u0301".repeat(58)+".example", "xn--"+"z".repeat(55), "xn--"+"9".repeat(55),
+];
+for (const label of ["l·l", "a·b", "é".repeat(57), "é".repeat(58), "a😀", "a.bé", "a:bé", "אב1١", "אב", "é\u200cb", "क्\u200dष", "𝕒", "\u0301a", "a\u302eb", "e\u0301"]) {
+ hostnameValues.push(`xn--${encodePunycode(label)}.example`);
+}
+for (const format of ["hostname", "idn-hostname"]) {
+ for (let i=0; i<hostnameValues.length; i++) definitions.push({name: `format/${format}/${i}`, parameters: {type: "object", properties: {value: {type: "string", format}}}, args: {value: hostnameValues[i]}});
+}
+const contextualHosts = [
+ "l·l.example", "a·b.example", "l·L.example", "\u0375α.example", "\u0375a.example", "א׳.example", "a׳.example", "א״.example",
+ "a\u200cb.example", "é\u200cb.example", "\u200ca.example", "a\u200db.example", "क्\u200dष.example", "क्\u200cष.example",
+ "カ・ナ.example", "a・b.example", "・漢.example", "عـرب.example", "a\u07fab.example", "a\u302eb.example", "a\u303bb.example",
+ "אבג.example", "عربي.example", "aאב.example", "אבa.example", "אב1.example", "אב١.example", "אב1١.example", "אב۱١.example", "אב\u0301.example", "אב+.example",
+ "123.אב", "a123.אב", "1a.אב", "xn--4dbc.123", "xn--4dbc.example", "ß.example", "ς.example", "a\u06fd.example", "a\u0f0b.example", "〇.example", "a\u20ddb.example",
+];
+for (let i=0; i<contextualHosts.length; i++) definitions.push({name: `format/idn-context/${i}`, parameters: {type: "object", properties: {value: {type: "string", format: "idn-hostname"}}}, args: {value: contextualHosts[i]}});
+for (const [format, values] of Object.entries({
+  uuid: ["123e4567-e89b-12d3-a456-426614174000", "00000000-0000-0000-0000-000000000000", "123E4567-E89B-12D3-A456-426614174000", "bad", "{123e4567-e89b-12d3-a456-426614174000}"],
+  ipv4: ["127.0.0.1", "255.255.255.255", "256.0.0.1", "01.2.3.4", "1.2.3", "1.2.3.4\n"],
+  ipv6: ["::1", "2001:db8::1", "::ffff:192.0.2.1", "2001::db8::1", "fe80::1%eth0", "::ffff:192.00.2.1"],
+  duration: ["P1Y2M3DT4H5M6S", "P2W", "PT0S", "P", "P1Y3D", "PT1.5S", "P1W2D"],
+  email: ["reader@example.com", '"a b"@example.com', "a@[127.0.0.1]", "a@[IPv6:::1]", "a..b@example.com", "a@", "a@localhost", "chào@example.com"],
+  "idn-email": ["chào@thếgiới.vn", "用户@例子.广告", "a\u0308@e\u0301xample.com", "a@-example.com", "a@example-.com", "a@foo..com", "a..b@example.com", '"hello world"@example.com'],
+  "json-pointer": ["", "/a~1b/~0", "/hello world", "/~2", "a/b", "/a\n"],
+  "json-pointer-uri-fragment": ["#", "#/a~1b/%20", "#/hello world", "#/~2", "#/a%GG", "/a"],
+  "relative-json-pointer": ["0", "0#", "12/a~1b", "01/a", "-1/a", "1/~2"],
+  uri: ["https://example.com/a?q=1#part", "urn:example:a", "http://[v1.a]/", "/relative", "https://example.com/%GG", "https://münich.example/", "https://example.com/a b"],
+  "uri-reference": ["", "/relative?q=1", "../a", "//example.com/a", "https://example.com/%GG", "relative path"],
+  "uri-template": ["https://example.com/{id}", "{+path}{?a,b}", "{x:4}", "{x*}", "{x:0}", "{unclosed", "a%GG", "a b"],
+  date: ["2024-02-29", "2000-02-29", "0000-02-29", "1900-02-29", "2023-02-29", "2024-13-01", "2024-01-00", "2024-1-01"],
+  time: ["23:59:60Z", "00:59:60+01:00", "22:59:60-01:00", "12:00:00.123z", "12:00:00", "12:00:60Z", "24:00:00Z", "00:00:00+24:00"],
+  "date-time": ["2024-02-29T23:59:60Z", "2024-01-01t12:00:00z", "2024-01-01 12:00:00Z", "2023-02-29T12:00:00Z", "2024-01-01T12:00:00", "2024-01-01TT12:00:00Z"],
+  regex: ["[a-z]+", "(?<=a)b", "(?<name>a)\\k<name>", "[", "(", "a{2,1}"],
+})) {
+  for (let i = 0; i < values.length; i++) definitions.push({name: `format/${format}/${i}`, parameters: {type: "object", properties: {value: {type: "string", format}}, required: ["value"]}, args: {value: values[i]}});
+}
+definitions.push(
+  {name: "format/unknown", parameters: {format: "unknown-custom"}, args: "anything"},
+  {name: "format/nonstring", parameters: {format: "uuid"}, args: 123},
+  {name: "format/coerced-string", parameters: {type: "object", properties: {value: {type: "string", format: "ipv4"}}}, args: {value: 123}},
+  {name: "format/sibling-errors", parameters: {type: "object", properties: {value: {type: "string", minLength: 5, format: "email", pattern: "^z"}}}, args: {value: "x"}},
+  {name: "format/union", parameters: {type: "object", properties: {value: {anyOf: [{type: "string", format: "ipv4"}, {type: "string", format: "uuid"}]}}}, args: {value: "bad"}},
+  {name: "format/reference", parameters: {type: "object", $defs: {id: {type: "string", format: "uuid"}}, properties: {value: {$ref: "#/$defs/id"}}}, args: {value: "bad"}},
+);
 for (const { name, parameters, args } of definitions) {
   let executed = false;
   let prepared: string | null = null;
@@ -327,7 +591,7 @@ for (const { name, parameters, args } of definitions) {
   } });
 }
 const destination = new URL("pi-arguments.json", import.meta.url);
-const output = JSON.stringify({ upstreamCommit: manifest.commit, cases }, null, 2) + "\n";
+const output = JSON.stringify({ upstreamCommit: manifest.commit, cases, repetitions }, null, 2) + "\n";
 if (process.argv.includes("--check")) {
   if (readFileSync(destination, "utf8") !== output) throw new Error("Pi argument fixtures differ; regenerate and review");
 } else writeFileSync(destination, output);

@@ -15,12 +15,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
@@ -38,7 +41,13 @@ type Store struct {
 
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
 	// key inherit it so the first ask works. Zero-value (empty APIKey) = off.
-	hostModel HostModelDefaults
+	hostModel       HostModelDefaults
+	manualFreshness time.Duration
+	now             func() time.Time
+	// sourcePolicy is loaded once at boot. It is never returned through a DTO;
+	// callers resolve only the binding for a concrete project/connector.
+	sourcePolicy           *connector.SourcePolicy
+	sourcePolicyConfigured bool
 
 	// The one shared demo (config.DemoProjectID): a REAL project fed by a real
 	// site, that every account is added to as a read-only viewer. Both empty
@@ -111,7 +120,7 @@ type Project struct {
 	Name        string `json:"name"`
 	// Timezone is a validated IANA name when set. Empty means an existing
 	// nullable row, which Overview reports as its explicit UTC fallback.
-	Timezone  string    `json:"timezone,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
 	// Goal is the owner's answer to "what are you trying to improve?" —
 	// activation | retention | revenue | traffic | skipped. A nil Goal means
 	// the prompt was never answered (the column is NULL); "skipped" means the
@@ -120,8 +129,8 @@ type Project struct {
 	// unset, and it is what the activation overview metric computes against.
 	Goal            *string   `json:"goal,omitempty"`
 	ActivationEvent string    `json:"activation_event,omitempty"`
-	APIKey    string    `json:"api_key"`
-	CreatedAt time.Time `json:"created_at"`
+	APIKey          string    `json:"api_key"`
+	CreatedAt       time.Time `json:"created_at"`
 	// Role is the requesting user's role in the owning workspace, and IsDemo
 	// says the project lives in the shared demo workspace (see demo.go). Both
 	// are additive read-only truth for the UI: without them it cannot tell a
@@ -620,6 +629,10 @@ type TemplateChart struct {
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Store, error) {
+	sourcePolicy, err := connector.LoadSourcePolicy(cfg.SourcePolicyFile)
+	if err != nil {
+		return nil, err
+	}
 	pgCfg, err := pgxpool.ParseConfig(cfg.PostgresURL)
 	if err != nil {
 		return nil, err
@@ -653,12 +666,17 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		pg.Close()
 		return nil, err
 	}
+	duck.diskReserve = NewDiskReserve(cfg.DuckDBPath, cfg.DataDiskReserveBytes)
 	store := &Store{
-		pg:        pg,
-		duck:      duck,
-		sandboxes: newSQLSandboxPool(duck),
-		resolvers: newResolverCache(30 * time.Second),
-		hostModel: HostModelDefaultsFromConfig(cfg),
+		pg:                     pg,
+		duck:                   duck,
+		sandboxes:              newSQLSandboxPool(duck),
+		resolvers:              newResolverCache(30 * time.Second),
+		hostModel:              HostModelDefaultsFromConfig(cfg),
+		manualFreshness:        cfg.SourceFreshnessMaxAge,
+		now:                    time.Now,
+		sourcePolicy:           sourcePolicy,
+		sourcePolicyConfigured: strings.TrimSpace(cfg.SourcePolicyFile) != "",
 	}
 	// Migrations run on their own single-connection pool with the per-statement
 	// cap lifted: DDL and one-time backfills on grown production tables can
@@ -1099,6 +1117,13 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	if err := s.migrateConnectorRuns(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateDataReadiness(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateConnectorSnapshots(ctx); err != nil {
+		return err
+	}
 
 	if err := s.migrateSourceCredentials(ctx); err != nil {
 		return err
@@ -1253,10 +1278,10 @@ GROUP BY ` + visitorColumn + `
 // an email property deliberately. The template string covers both the Product
 // Overview and the Marketing & Acquisition charts; they shipped identically.
 const (
-	staleStarterGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	staleStarterGuestVsIdentifiedSQL  = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND coalesce(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	staleTemplateGuestVsIdentifiedSQL = `SELECT if(json_extract_string(properties, '$.email') != '' OR json_extract_string(properties, '$."$set".email') != '', 'Identified', 'Guest') AS user_type, count(DISTINCT distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 
-	legacyStarterGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
+	legacyStarterGuestVsIdentifiedSQL  = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(canonical_id) AS visitors FROM events WHERE event_name = 'user.pageview' AND ifNull(visitor_class, 'human') = 'human' GROUP BY user_type ORDER BY visitors DESC`
 	legacyTemplateGuestVsIdentifiedSQL = `SELECT if(JSONExtractString(properties, 'email') != '' OR JSONExtractString(properties, '$set', 'email') != '', 'Identified', 'Guest') AS user_type, uniqExact(distinct_id) AS visitors FROM events WHERE event_name = 'user.pageview' GROUP BY user_type ORDER BY visitors DESC`
 )
 
@@ -1949,6 +1974,20 @@ func (s *Store) RecordPosition(ctx context.Context, mark AppliedMark) error {
 		return errors.New("storage: duckdb not open")
 	}
 	return s.duck.RecordPosition(ctx, mark)
+}
+
+func (s *Store) RecordReadinessHole(ctx context.Context, delivery DeliveryReceiptMark, source *SourceReceiptMark) error {
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
+	}
+	return s.duck.RecordReadinessHole(ctx, delivery, source)
+}
+
+func (s *Store) AdmitDataPublication() error {
+	if s.duck == nil {
+		return errors.New("storage: duckdb not open")
+	}
+	return s.duck.admitDataWrite()
 }
 
 func (s *Store) CreateAlias(ctx context.Context, projectID, anonymousID, canonicalID string) error {
@@ -3187,26 +3226,55 @@ RETURNING id::text, project_id::text, natural_language, generated_sql, verified,
 }
 
 func (s *Store) RunSQL(ctx context.Context, projectID string, sqlText string) ([]map[string]any, error) {
+	rows, _, err := s.runSQL(ctx, projectID, sqlText, false)
+	return rows, err
+}
+
+// RunSQLWithMeta uses the same guard, rewrite and sandbox execution path as
+// RunSQL and adds provenance for the exact refreshed sandbox snapshot.
+func (s *Store) RunSQLWithMeta(ctx context.Context, projectID string, sqlText string) ([]map[string]any, QueryMeta, error) {
+	return s.runSQL(ctx, projectID, sqlText, true)
+}
+
+func (s *Store) runSQL(ctx context.Context, projectID string, sqlText string, withMeta bool) ([]map[string]any, QueryMeta, error) {
 	// Soft-delete rules only matter when the query reads external_rows — skip
 	// the Postgres round-trip for the common events-only query.
 	var rules []softDeleteRule
-	if externalSourcePattern.MatchString(sqlText) {
+	if externalSourcePattern.MatchString(maskSQLCommentsAndStrings(sqlText)) {
 		var err error
 		if rules, err = s.softDeleteRulesForProject(ctx, projectID); err != nil {
-			return nil, err
+			return nil, QueryMeta{}, err
 		}
 	}
 	query, args, err := scopedReadonlySQL(sqlText, projectID, rules)
 	if err != nil {
-		return nil, err
+		return nil, QueryMeta{}, err
 	}
-	if !strings.Contains(strings.ToLower(query), "limit") {
+	serverBounded := !strings.Contains(strings.ToLower(query), "limit")
+	if serverBounded {
 		query += " LIMIT 100"
 	}
 	// Untrusted SQL runs inside the project's sandbox: an in-memory DuckDB
 	// holding only this project's rows, on a locked-down connection. See
 	// duckdb_sandbox.go.
-	return s.sandboxes.query(ctx, projectID, query, args)
+	if !withMeta {
+		rows, err := s.sandboxes.query(ctx, projectID, query, args)
+		return rows, QueryMeta{}, err
+	}
+	rows, evidence, err := s.sandboxes.queryWithEvidence(ctx, projectID, query, args)
+	if err != nil {
+		return nil, QueryMeta{}, err
+	}
+	meta := QueryMeta{QueryRef: uuid.NewString(), QueryDigest: queryDigest(projectID, sqlText),
+		ExecutedAt: s.now().UTC(), ServingDataWatermark: evidence.Watermark,
+		ResultCompleteness: ResultComplete}
+	if evidence.Watermark != nil && evidence.Watermark.SourcesTruncated {
+		meta.AvailabilityReason = stringPtr("serving_watermark_sources_summarized")
+	}
+	if serverBounded && len(rows) >= 100 {
+		meta.ResultCompleteness = ResultBounded
+	}
+	return rows, meta, nil
 }
 
 func (s *Store) filteredTimeline(ctx context.Context, projectID string, filter EventFilter) ([]TimelinePoint, error) {
@@ -4609,7 +4677,6 @@ var (
 	// multi-tenant table on a role with database-wide SELECT. String literals
 	// are stripped before this check so `WHERE name = 'events'` stays legal.
 	residualSourcePattern = regexp.MustCompile(`(?i)\b(events|external_rows)\b`)
-	sqlStringLiteral      = regexp.MustCompile(`'(?:[^'\\]|\\.|'')*'`)
 	// A caller's own CTE list. Its leading `WITH [RECURSIVE]` has to give way to
 	// ours — `WITH scoped_events AS (…) WITH money_raw AS (…)` is a parser error,
 	// and a multi-step query (a de-dup grid, a cohort) is written as a CTE by
@@ -4626,13 +4693,20 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 	if strings.Contains(sqlText, "?") {
 		return "", nil, fmt.Errorf("SQL parameters are not supported; use {project_id}")
 	}
+	// Source discovery runs over executable SQL only. Without this mask, a
+	// comment such as `-- FROM external_rows` or a literal containing
+	// `FROM events` could create a phantom source and either rewrite data or
+	// reject an otherwise valid query. The mask is byte-for-byte the same
+	// length as sqlText so its match offsets are safe to apply to the original.
+	sourceText := maskSQLCommentsAndStrings(sqlText)
 	// JOIN events is still rejected — the contract predates the sandbox and
 	// stays so saved queries and agent SQL keep one supported shape.
-	if eventsJoinPattern.MatchString(sqlText) {
+	if eventsJoinPattern.MatchString(sourceText) {
 		return "", nil, fmt.Errorf("SQL-lite does not support joining the events table")
 	}
-	hasExternal := externalSourcePattern.MatchString(sqlText)
-	eventsMatches := eventsSourcePattern.FindAllStringIndex(sqlText, -1)
+	externalMatches := externalSourcePattern.FindAllStringIndex(sourceText, -1)
+	hasExternal := len(externalMatches) > 0
+	eventsMatches := eventsSourcePattern.FindAllStringIndex(sourceText, -1)
 	hasEvents := len(eventsMatches) > 0
 	if hasEvents && len(eventsMatches) != 1 {
 		return "", nil, fmt.Errorf("SQL must read from the events table exactly once")
@@ -4643,16 +4717,20 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 
 	query := sqlText
 	if hasEvents {
-		query = eventsSourcePattern.ReplaceAllString(query, "FROM scoped_events")
+		query = replaceSQLMatches(query, eventsMatches, "scoped_events")
 	}
 	if hasExternal {
-		query = externalSourcePattern.ReplaceAllString(query, "${1} scoped_external_rows")
+		// The events replacement above changes offsets. Discover the external
+		// references again on the equally-sized executable mask of the current
+		// query before applying them.
+		externalMatches = externalSourcePattern.FindAllStringIndex(maskSQLCommentsAndStrings(query), -1)
+		query = replaceSQLMatches(query, externalMatches, "scoped_external_rows")
 	}
 	// Fail closed: any reference the rewrite did not catch (comma join, quoted
 	// identifier, second occurrence) is rejected rather than rewritten —
 	// inside the sandbox it could only ever see this project's rows, but the
 	// contract is that the two names appear exactly where the rewrite expects.
-	if residualSourcePattern.MatchString(sqlStringLiteral.ReplaceAllString(query, "''")) {
+	if residualSourcePattern.MatchString(maskSQLCommentsAndStrings(query)) {
 		return "", nil, fmt.Errorf("the events and external_rows tables may only be referenced directly after FROM or JOIN (comma joins and quoted table names are not supported)")
 	}
 	projectPlaceholders := strings.Count(query, "{project_id}")
@@ -4704,6 +4782,203 @@ func scopedReadonlySQL(sqlText string, projectID string, rules []softDeleteRule)
 	}
 	query = "WITH " + strings.Join(ctes, ", ") + " " + query
 	return query, args, nil
+}
+
+// replaceSQLMatches replaces source clauses identified on the byte-preserving
+// executable mask. The clause keyword's spelling is retained for readable SQL;
+// the tenant table name is replaced with the server-owned scoped CTE.
+func replaceSQLMatches(sqlText string, matches [][]int, replacement string) string {
+	if len(matches) == 0 {
+		return sqlText
+	}
+	var out strings.Builder
+	last := 0
+	for _, match := range matches {
+		out.WriteString(sqlText[last:match[0]])
+		fields := strings.Fields(sqlText[match[0]:match[1]])
+		keyword := "FROM"
+		if len(fields) > 0 {
+			keyword = fields[0]
+		}
+		out.WriteString(keyword)
+		out.WriteByte(' ')
+		out.WriteString(replacement)
+		last = match[1]
+	}
+	out.WriteString(sqlText[last:])
+	return out.String()
+}
+
+// maskSQLCommentsAndStrings blanks comments and quoted string literals while
+// preserving every byte position (including non-ASCII text). Double-quoted
+// identifiers deliberately remain visible: `FROM "events"` is not a supported
+// source form and the residual-source check must reject it.
+func maskSQLCommentsAndStrings(sqlText string) string {
+	out := []byte(sqlText)
+	const (
+		code = iota
+		singleQuoted
+		doubleQuoted
+		dollarQuoted
+		lineComment
+		blockComment
+	)
+	state := code
+	escapeQuoted := false
+	dollarDelimiter := ""
+	blockDepth := 0
+	for i := 0; i < len(out); i++ {
+		switch state {
+		case code:
+			switch {
+			case out[i] == '\'':
+				// DuckDB ordinary string literals do not make backslash an
+				// escape character. Only E'...' strings do; treating every
+				// backslash as an escape can consume the closing quote and mask
+				// executable SQL that follows it (including FROM events).
+				escapeQuoted = i > 0 && (sqlText[i-1] == 'e' || sqlText[i-1] == 'E') &&
+					!isSQLIdentifierContinuationBefore(sqlText, i-1)
+				out[i] = ' '
+				state = singleQuoted
+			case out[i] == '"':
+				// Keep quoted identifier bytes visible so the residual-source
+				// guard can still reject FROM "events", but do not interpret
+				// apostrophes or comment markers inside an alias as SQL syntax.
+				state = doubleQuoted
+			case out[i] == '$' && !isSQLIdentifierContinuationBefore(sqlText, i):
+				// DuckDB supports PostgreSQL-style dollar-quoted strings. Mask the
+				// whole span so apostrophes and source-looking text inside it cannot
+				// alter source discovery.
+				dollarDelimiter = sqlDollarDelimiterAt(sqlText, i)
+				if dollarDelimiter != "" {
+					for j := 0; j < len(dollarDelimiter); j++ {
+						out[i+j] = ' '
+					}
+					i += len(dollarDelimiter) - 1
+					state = dollarQuoted
+				}
+			case out[i] == '#':
+				out[i] = ' '
+				state = lineComment
+			case out[i] == '-' && i+1 < len(out) && out[i+1] == '-':
+				out[i], out[i+1] = ' ', ' '
+				i++
+				state = lineComment
+			case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
+				out[i], out[i+1] = ' ', ' '
+				i++
+				blockDepth = 1
+				state = blockComment
+			}
+		case singleQuoted:
+			if escapeQuoted && out[i] == '\\' && i+1 < len(out) {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				continue
+			}
+			if out[i] == '\'' {
+				out[i] = ' '
+				if i+1 < len(out) && out[i+1] == '\'' {
+					out[i+1] = ' '
+					i++
+					continue
+				}
+				state = code
+				continue
+			}
+			if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
+		case doubleQuoted:
+			if out[i] == '"' {
+				if i+1 < len(out) && out[i+1] == '"' {
+					i++
+					continue
+				}
+				state = code
+			}
+		case dollarQuoted:
+			if strings.HasPrefix(sqlText[i:], dollarDelimiter) {
+				for j := 0; j < len(dollarDelimiter); j++ {
+					out[i+j] = ' '
+				}
+				i += len(dollarDelimiter) - 1
+				state = code
+				continue
+			}
+			if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
+		case lineComment:
+			if out[i] == '\n' || out[i] == '\r' {
+				state = code
+			} else {
+				out[i] = ' '
+			}
+		case blockComment:
+			if out[i] == '/' && i+1 < len(out) && out[i+1] == '*' {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				blockDepth++
+			} else if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				blockDepth--
+				if blockDepth == 0 {
+					state = code
+				}
+			} else if out[i] != '\n' && out[i] != '\r' {
+				out[i] = ' '
+			}
+		}
+	}
+	return string(out)
+}
+
+// sqlDollarDelimiterAt returns a DuckDB dollar-string delimiter beginning at
+// start. Tags follow identifier spelling: an ASCII letter, underscore, or
+// non-ASCII byte first, followed by those bytes or ASCII digits.
+func sqlDollarDelimiterAt(sqlText string, start int) string {
+	if start < 0 || start >= len(sqlText) || sqlText[start] != '$' || start+1 >= len(sqlText) {
+		return ""
+	}
+	if sqlText[start+1] == '$' {
+		return "$$"
+	}
+	if !isSQLDollarTagStartByte(sqlText[start+1]) {
+		return ""
+	}
+	for i := start + 2; i < len(sqlText); i++ {
+		if sqlText[i] == '$' {
+			return sqlText[start : i+1]
+		}
+		if !isSQLDollarTagContinuationByte(sqlText[i]) {
+			return ""
+		}
+	}
+	return ""
+}
+
+func isSQLDollarTagStartByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= 0x80
+}
+
+func isSQLDollarTagContinuationByte(b byte) bool {
+	return isSQLDollarTagStartByte(b) || b >= '0' && b <= '9'
+}
+
+// isSQLIdentifierContinuationBefore reports whether the rune immediately
+// before end can continue an unquoted DuckDB identifier. Dollar signs and
+// non-ASCII non-space runes are significant here: treating a following $tag$
+// as a string delimiter can otherwise mask executable SQL later in the query.
+func isSQLIdentifierContinuationBefore(sqlText string, end int) bool {
+	if end <= 0 || end > len(sqlText) {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(sqlText[:end])
+	return r == '_' || r == '$' ||
+		r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r >= utf8.RuneSelf && !unicode.IsSpace(r)
 }
 
 func validateReadonlySQL(sqlText string) error {
@@ -4944,6 +5219,43 @@ func normalizeSQLValue(value any) any {
 	default:
 		return v
 	}
+}
+
+// containsNonFiniteSQLValue walks a normalized result value and rejects NaN
+// and infinities before the worker reports a successful query. encoding/json
+// cannot serialize them, and discovering that only while writing the response
+// would turn valid SQL execution into a misleading transport failure. Reflection
+// covers driver-returned typed slices/maps as well as the []any/map[string]any
+// shapes normalizeSQLValue creates.
+func containsNonFiniteSQLValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	v := reflect.ValueOf(value)
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return math.IsNaN(v.Float()) || math.IsInf(v.Float(), 0)
+	case reflect.Array, reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			if containsNonFiniteSQLValue(v.Index(i).Interface()) {
+				return true
+			}
+		}
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			if containsNonFiniteSQLValue(iter.Value().Interface()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // stringKeyedMap renders a DuckDB MAP as a JSON-ready object.

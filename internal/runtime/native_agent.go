@@ -110,7 +110,22 @@ func (a *NativeAgent) State(ctx context.Context) (json.RawMessage, error) {
 	if err := a.ctx.Err(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(a.agent.State())
+	state := a.agent.State()
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	// The host protocol explicitly spreads Pi's Set into an array. The native
+	// engine keeps the original Set identity and direct JSON shape instead.
+	fields["pendingToolCalls"], err = json.Marshal(state.PendingToolCalls.Values())
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(fields)
 }
 
 func (a *NativeAgent) Prompt(ctx context.Context, input json.RawMessage) error {
@@ -302,9 +317,9 @@ func (a *NativeAgent) Call(ctx context.Context, method string, params json.RawMe
 			return nil, err
 		}
 		if method == "steer" {
-			a.agent.Steer(message)
+			a.agent.Steer(&message)
 		} else {
-			a.agent.FollowUp(message)
+			a.agent.FollowUp(&message)
 		}
 		return nil, nil
 	case "setState":
@@ -331,7 +346,7 @@ func (a *NativeAgent) setState(raw json.RawMessage) error {
 	// Decode every supplied value before mutating state.
 	var level string
 	var messages []ai.Message
-	var tools []engine.Tool
+	var tools []*engine.Tool
 	var err error
 	if value, ok := fields["thinkingLevel"]; ok {
 		if err = json.Unmarshal(value, &level); err != nil {
@@ -356,7 +371,7 @@ func (a *NativeAgent) setState(raw json.RawMessage) error {
 		a.agent.SetThinkingLevel(level)
 	}
 	if _, ok := fields["messages"]; ok {
-		a.agent.SetMessages(messages)
+		a.agent.SetMessages(engine.MessagePointers(messages))
 	}
 	if _, ok := fields["tools"]; ok {
 		a.agent.SetTools(tools)

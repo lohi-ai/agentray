@@ -135,9 +135,9 @@ func TestTypedStarterPreservesValuesAndFailures(t *testing.T) {
 	for _, parent := range []telemetry.Context{{}, telemetry.NewInMemory().Context} {
 		starter := telemetry.CreateTypedSpanStarter(parent, nil)
 		calls := 0
-		value, err := telemetry.StartTypedSpan(starter, "operation", nil, func(_ *telemetry.Span, children telemetry.SpanStarter) (*struct{ Value int }, error) {
+		value, err := telemetry.StartTypedSpan(starter, "operation", telemetry.Attributes{}, func(_ *telemetry.Span, children telemetry.SpanStarter) (*struct{ Value int }, error) {
 			calls++
-			return telemetry.StartTypedSpan(children, "request", nil, func(*telemetry.Span, telemetry.SpanStarter) (*struct{ Value int }, error) {
+			return telemetry.StartTypedSpan(children, "request", telemetry.Attributes{}, func(*telemetry.Span, telemetry.SpanStarter) (*struct{ Value int }, error) {
 				calls++
 				return expected, failure
 			})
@@ -152,7 +152,7 @@ func TestTypedStarterPreservesValuesAndFailures(t *testing.T) {
 					t.Error("typed starter changed panic identity")
 				}
 			}()
-			_ = starter.StartSpan("operation", nil, func(*telemetry.Span, telemetry.SpanStarter) error { panic(marker) })
+			_ = starter.StartSpan("operation", telemetry.Attributes{}, func(*telemetry.Span, telemetry.SpanStarter) error { panic(marker) })
 		}()
 	}
 }

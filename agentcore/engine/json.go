@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // Pi catch sites use Error.message, otherwise String(value). Keep Go error
@@ -25,139 +28,162 @@ func failureError(value any) error {
 }
 
 func jsValueString(value any) string {
-	switch value := value.(type) {
-	case nil:
+	return jsReflectString(reflect.ValueOf(value), make(map[jsArrayIdentity]bool))
+}
+
+// Array#join elides a recursive array only while that array is already being
+// joined. A shared child in separate branches must still appear in each one.
+type jsArrayIdentity struct {
+	pointer uintptr
+	length  int
+}
+
+func jsReflectString(value reflect.Value, active map[jsArrayIdentity]bool) string {
+	for value.IsValid() && value.Kind() == reflect.Interface {
+		value = value.Elem()
+	}
+	if !value.IsValid() {
 		return "null"
-	case float64:
-		switch {
-		case math.IsNaN(value):
-			return "NaN"
-		case math.IsInf(value, 1):
-			return "Infinity"
-		case math.IsInf(value, -1):
-			return "-Infinity"
-		}
-		raw, _ := marshalJSScalar(value)
-		return string(raw)
-	case map[string]any:
+	}
+	switch value.Kind() {
+	case reflect.String:
+		return value.String()
+	case reflect.Bool:
+		return strconv.FormatBool(value.Bool())
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return jsNumberString(float64(value.Int()))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return jsNumberString(float64(value.Uint()))
+	case reflect.Float32, reflect.Float64:
+		return jsNumberString(value.Float())
+	case reflect.Map:
 		return "[object Object]"
-	case []any:
-		items := make([]string, len(value))
-		for i, item := range value {
-			if item != nil {
-				items[i] = jsValueString(item)
+	case reflect.Slice, reflect.Array:
+		if value.Len() == 0 {
+			return ""
+		}
+		if value.Kind() == reflect.Slice {
+			identity := jsArrayIdentity{pointer: value.Pointer(), length: value.Len()}
+			if active[identity] {
+				return ""
+			}
+			active[identity] = true
+			defer delete(active, identity)
+		}
+		items := make([]string, value.Len())
+		for i := range items {
+			item := value.Index(i)
+			for item.IsValid() && item.Kind() == reflect.Interface {
+				item = item.Elem()
+			}
+			// Null/undefined elements join as empty strings, unlike top-level null.
+			if item.IsValid() {
+				items[i] = jsReflectString(item, active)
 			}
 		}
 		return strings.Join(items, ",")
 	default:
-		return fmt.Sprint(value)
+		return fmt.Sprint(value.Interface())
 	}
 }
 
-// marshalArguments preserves the insertion order of source object keys after
-// coercion. Tools can observe that order by stringifying validated arguments.
-// JavaScript array-index properties enumerate first, in numeric order.
-func marshalArguments(value any, source json.RawMessage) ([]byte, error) {
+func jsNumberString(value float64) string {
+	switch {
+	case math.IsNaN(value):
+		return "NaN"
+	case math.IsInf(value, 1):
+		return "Infinity"
+	case math.IsInf(value, -1):
+		return "-Infinity"
+	}
+	raw, _ := marshalJSScalar(value)
+	return string(raw)
+}
+
+func jsArrayIndex(key string) (uint64, bool) {
+	n, err := strconv.ParseUint(key, 10, 32)
+	return n, err == nil && n < 4294967295 && strconv.FormatUint(n, 10) == key
+}
+
+// Rebuild container identity in source property order without a JSON round trip.
+// Scalar values keep their binary64 bits and WTF-8 strings throughout validation.
+func orderedArgumentValue(value, template any) any {
 	switch value := value.(type) {
 	case map[string]any:
-		keys := []string{}
-		original := map[string]json.RawMessage{}
-		decoder := json.NewDecoder(bytes.NewReader(source))
-		if token, err := decoder.Token(); err == nil && token == json.Delim('{') {
-			for decoder.More() {
-				token, err := decoder.Token()
-				if err != nil {
-					return nil, err
-				}
-				key := token.(string)
-				var raw json.RawMessage
-				if err := decoder.Decode(&raw); err != nil {
-					return nil, err
-				}
-				if _, seen := original[key]; !seen {
-					if _, exists := value[key]; exists {
-						keys = append(keys, key)
-					}
-				}
-				original[key] = raw
+		object := jsonjs.NewObject()
+		original, _ := template.(*jsonjs.Object)
+		for _, property := range original.Entries() {
+			if child, exists := value[property.Name]; exists {
+				object.Set(property.Name, orderedArgumentValue(child, property.Value))
 			}
 		}
-		additional := []string{}
+		extra := []string{}
 		for key := range value {
-			if _, exists := original[key]; !exists {
-				additional = append(additional, key)
+			if _, exists := original.Lookup(key); !exists {
+				extra = append(extra, key)
 			}
 		}
-		slices.Sort(additional)
-		keys = append(keys, additional...)
-		index := func(key string) (uint64, bool) {
-			n, err := strconv.ParseUint(key, 10, 32)
-			return n, err == nil && n < 4294967295 && strconv.FormatUint(n, 10) == key
+		slices.Sort(extra)
+		for _, key := range extra {
+			object.Set(key, orderedArgumentValue(value[key], nil))
 		}
-		slices.SortStableFunc(keys, func(a, b string) int {
-			x, ax := index(a)
-			y, bx := index(b)
-			if ax && bx {
-				if x < y {
-					return -1
-				}
-				if x > y {
-					return 1
-				}
-				return 0
-			}
-			if ax {
-				return -1
-			}
-			if bx {
-				return 1
-			}
-			return 0
-		})
-		var out bytes.Buffer
-		out.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				out.WriteByte(',')
-			}
-			name, _ := marshalJSScalar(key)
-			child, err := marshalArguments(value[key], original[key])
-			if err != nil {
-				return nil, err
-			}
-			out.Write(name)
-			out.WriteByte(':')
-			out.Write(child)
-		}
-		out.WriteByte('}')
-		return out.Bytes(), nil
+		return object
 	case []any:
-		var original []json.RawMessage
-		_ = json.Unmarshal(source, &original)
-		var out bytes.Buffer
-		out.WriteByte('[')
+		array := jsonjs.NewArray()
+		original, _ := template.(*jsonjs.Array)
 		for i, child := range value {
-			if i > 0 {
-				out.WriteByte(',')
-			}
-			var template json.RawMessage
-			if i < len(original) {
-				template = original[i]
-			}
-			raw, err := marshalArguments(child, template)
-			if err != nil {
-				return nil, err
-			}
-			out.Write(raw)
+			array.Append(orderedArgumentValue(child, original.Get(i)))
 		}
-		out.WriteByte(']')
-		return out.Bytes(), nil
+		return array
 	default:
-		return marshalJSScalar(value)
+		return value
 	}
+}
+
+// Union candidates use structured copies: JSON serialization would turn
+// infinity into null, erase negative zero and alter lone UTF-16 surrogates.
+func cloneArgument(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(value))
+		for key, child := range value {
+			clone[key] = cloneArgument(child)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(value))
+		for i, child := range value {
+			clone[i] = cloneArgument(child)
+		}
+		return clone
+	default:
+		return value
+	}
+}
+
+func marshalArguments(value any, source json.RawMessage) ([]byte, error) {
+	var template any
+	if len(source) != 0 {
+		var err error
+		template, err = jsonjs.DecodeValue(source)
+		if err != nil {
+			return nil, err
+		}
+	}
+	raw, err := jsonjs.MarshalValue(orderedArgumentValue(value, template))
+	if err != nil {
+		return nil, err
+	}
+	return jsonjs.StringifyJSON(raw)
 }
 
 func marshalJSScalar(value any) ([]byte, error) {
+	if text, ok := value.(string); ok {
+		return jsonjs.QuoteString(text), nil
+	}
+	if number, ok := value.(float64); ok && (math.IsInf(number, 0) || math.IsNaN(number)) {
+		return []byte("null"), nil
+	}
 	if number, ok := value.(float64); ok && number == 0 {
 		return []byte("0"), nil
 	}
