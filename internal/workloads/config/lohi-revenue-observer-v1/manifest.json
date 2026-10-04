@@ -1,0 +1,56 @@
+{
+  "version": "lohi-revenue-observer-v1",
+  "definition_version": "lohi-evidence-v1",
+  "agent_preset": "insight-digest",
+  "skill_sha256": "228e27b0b17a9ad078e2f153e13e35ba92243d18f30b2e0d34b1cd50a30c2240",
+  "scheduler_timezone": "UTC",
+  "local_timezone": "Asia/Ho_Chi_Minh",
+  "initially_enabled": false,
+  "activation_requirements": [
+    "operator-approved source bindings installed",
+    "source readiness verified",
+    "plans:write authorized for findings",
+    "delivery channel explicitly configured when delivery is wanted"
+  ],
+  "schedules": [
+    {
+      "name": "Lohi daily completeness",
+      "kind": "schedule",
+      "enabled": false,
+      "cron": "0 2 * * *",
+      "cadence_hcm": "daily 09:00 Asia/Ho_Chi_Minh",
+      "mode": "daily_completeness",
+      "prompt_template": "Use lohi-revenue-observer-v1 in daily_completeness mode. Evaluate the previous complete HCM day; follow the readiness gate, observation-key, deduplication, Plans-write, and delivery rules exactly."
+    },
+    {
+      "name": "Lohi weekly mature cohort",
+      "kind": "schedule",
+      "enabled": false,
+      "cron": "0 2 * * 1",
+      "cadence_hcm": "Monday 09:00 Asia/Ho_Chi_Minh",
+      "mode": "weekly_mature_cohort",
+      "minimum_cohort_age_days": 14,
+      "prompt_template": "Use lohi-revenue-observer-v1 in weekly_mature_cohort mode. Evaluate the last completed HCM week and only cohorts with at least 14 fully elapsed days; follow the readiness gate, observation-key, deduplication, Plans-write, and delivery rules exactly."
+    }
+  ],
+  "finding": {
+    "read_operation": "list_findings",
+    "write_operation": "submit_recommendation",
+    "context_path": "evidence.observation_key",
+    "observation_key_fields": [
+      "project",
+      "definition_version",
+      "period",
+      "condition"
+    ],
+    "idempotency_key": "sha256(project|definition_version|period|condition)",
+    "idempotency_decision": "Plans atomically claims (project, operation, idempotency_key) for identical requests; a different request under the same observation key conflicts and must be surfaced, never retried under a new key. Notification delivery keeps existing retry semantics and is not exactly-once."
+  },
+  "delivery": {
+    "operation": "send_notification",
+    "channel_required": false,
+    "on_missing_channel": "keep the Plans finding and run-history result; surface that delivery was skipped",
+    "on_denied_finding_write": "record the run failure and do not deliver an unrecorded assertion",
+    "guarantee": "existing delivery semantics; no exactly-once promise"
+  }
+}

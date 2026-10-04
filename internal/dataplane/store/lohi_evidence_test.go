@@ -2,12 +2,15 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -351,5 +354,124 @@ func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
 		if skill.Name == workloads.LohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
 			t.Fatal("reinstall overwrote the operator-edited Lohi skill")
 		}
+	}
+}
+
+func TestLohiRevenueObserverInstallsOnInsightDigestWithoutArmingSchedule(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+	pack := workloads.MustBySlug("insight-digest")
+	preset := AgentPreset{
+		Slug: pack.Slug, Name: pack.Name, Tagline: pack.Tagline, Description: pack.Description,
+		Category: string(pack.Category), Icon: pack.Icon, SoulMD: pack.SoulMD, AgentsMD: pack.AgentsMD,
+		Scopes: pack.Scopes,
+	}
+	for _, skill := range pack.Skills {
+		preset.Skills = append(preset.Skills, AgentPresetSkill(skill))
+	}
+	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
+		return preset, slug == preset.Slug
+	})
+	t.Cleanup(func() { SetPackCatalog(nil, nil) })
+
+	agent, err := s.InstallAgentPreset(ctx, userID, projectID, "insight-digest")
+	if err != nil {
+		t.Fatalf("install insight digest: %v", err)
+	}
+	skills, err := s.ListAgentSkills(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list installed skills: %v", err)
+	}
+	installed := map[string]int{}
+	for _, skill := range skills {
+		installed[skill.Name]++
+	}
+	if installed[workloads.LohiEvidenceVersion] != 1 || installed[workloads.LohiRevenueObserverVersion] != 1 {
+		t.Fatalf("installed Lohi skills = %+v", installed)
+	}
+	triggers, err := s.ListAgentTriggers(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list triggers: %v", err)
+	}
+	if len(triggers) != 0 {
+		t.Fatalf("preset install armed %d trigger(s); observer templates must stay disabled until configured", len(triggers))
+	}
+}
+
+func TestLohiRevenueObserverFindingOverlapIsAtomic(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	period := "2026-09-28/2026-10-04@Asia/Ho_Chi_Minh"
+	condition := "mature_cohort:conversion_14d_decline"
+	rawKey := strings.Join([]string{projectID, workloads.LohiEvidenceVersion, period, condition}, "|")
+	idemKey := fmt.Sprintf("%x", sha256.Sum256([]byte(rawKey)))
+	evidence, err := json.Marshal(map[string]any{
+		"query_ref":      "lohi-evidence-v1/R10",
+		"metric_version": workloads.LohiEvidenceVersion,
+		"range":          period,
+		"timezone":       "Asia/Ho_Chi_Minh",
+		"observation_key": map[string]string{
+			"project": projectID, "definition_version": workloads.LohiEvidenceVersion,
+			"period": period, "condition": condition,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := AgentRecommendation{
+		ProjectID: projectID, Category: "growth", Title: "Mature 14-day cohort conversion declined",
+		Rationale:    "R10 returned a complete mature cohort comparison with eligible and converted counts.",
+		EvidenceJSON: string(evidence), ImpactScore: 70,
+	}
+
+	const callers = 2
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, callErr := s.CreateRecommendationIdempotent(ctx, rec, idemKey, "same-observer-request")
+			ids <- id
+			errs <- callErr
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for callErr := range errs {
+		if callErr != nil {
+			t.Fatalf("overlap write: %v", callErr)
+		}
+	}
+	var first string
+	for id := range ids {
+		if first == "" {
+			first = id
+		} else if id != first {
+			t.Fatalf("overlap returned findings %s and %s", first, id)
+		}
+	}
+	var count int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM agent_recommendations WHERE project_id = $1`, projectID).Scan(&count); err != nil {
+		t.Fatalf("count findings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("overlap created %d findings, want one", count)
+	}
+
+	changed := rec
+	changed.Rationale = "A different payload must not create a second finding."
+	if _, err := s.CreateRecommendationIdempotent(ctx, changed, idemKey, "different-observer-request"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed overlap = %v, want ErrIdempotencyConflict", err)
+	}
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM agent_recommendations WHERE project_id = $1`, projectID).Scan(&count); err != nil {
+		t.Fatalf("recount findings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("conflicting overlap created %d findings, want one", count)
 	}
 }
