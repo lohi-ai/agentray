@@ -154,7 +154,13 @@ export function ConnectorsTab() {
           ) : null}
           <div className="mt-4">
             {selected ? (
-              <SyncsPanel connector={selected} canWrite={access.canWrite} writeReason={access.reason} />
+              <SyncsPanel
+                connector={selected}
+                syncs={readiness.syncs.filter((sync) => sync.connector_id === selected.id)}
+                loading={readiness.loadingByConnector[selected.id] ?? false}
+                canWrite={access.canWrite}
+                writeReason={access.reason}
+              />
             ) : (
               <Panel title="Table syncs">
                 <EmptyState title="Pick a connector" detail="Select a connector above to configure which tables to sync." />
@@ -219,8 +225,8 @@ function AddConnectorDialog({ kinds, onSubmit, onClose }: {
   );
 }
 
-function SyncsPanel({ connector, canWrite, writeReason }: { connector: DataConnector; canWrite: boolean; writeReason: string }) {
-  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id);
+function SyncsPanel({ connector, syncs: statusSyncs, loading: statusLoading, canWrite, writeReason }: { connector: DataConnector; syncs: ConnectorSync[]; loading: boolean; canWrite: boolean; writeReason: string }) {
+  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id, { syncs: statusSyncs, loading: statusLoading });
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
   const [adding, setAdding] = useState(false);

@@ -178,7 +178,9 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
     });
   }, [applied, chart.id, current, evidenceMeta, onEvidence, queryEvidence]);
   const body = current.status === 'ready'
-    ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} appearance={appearance} title={chart.name} />
+    ? chart.kind === 'stat'
+      ? <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{formatCompact(current.values[current.values.length - 1])}</div>
+      : <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} appearance={appearance} title={chart.name} />
     : (
       <div
         className="grid w-full place-items-center px-3 text-center"
@@ -230,10 +232,10 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
           </HStack>
         )}
       </HStack>
-      {chart.kind === 'stat' ? (
-        <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
-      ) : chart.sql ? (
+      {chart.sql ? (
         projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} appearance={appearance} onEvidence={onEvidence} /> : <SeriesChart values={[]} type={specType(chart.kind)} appearance={appearance} title={chart.name} />
+      ) : chart.kind === 'stat' ? (
+        <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
       ) : (
         <SeriesChart
           values={(summary?.timeline ?? []).map((p) => p.count)}

@@ -1,35 +1,58 @@
 'use client';
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AgentRayAPI, APIError, apiErrorMessage, newIdempotencyKey, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 
 export type ReadinessSync = ConnectorSync & { connector_name: string };
 
+const connectorSyncsKey = (projectID: string | undefined, connectorID: string | null) => ['connector-syncs', projectID, connectorID] as const;
+
+function isConnectorSyncActive(sync: ConnectorSync): boolean {
+  return sync.readiness?.state === 'syncing'
+    || sync.latest_run?.status === 'queued'
+    || sync.latest_run?.status === 'running';
+}
+
+function connectorSyncsQuery(projectID: string | undefined, connectorID: string) {
+  return {
+    queryKey: connectorSyncsKey(projectID, connectorID),
+    queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID),
+    enabled: !!projectID,
+    refetchInterval: (query: { state: { data?: { syncs?: ConnectorSync[] } } }) =>
+      (query.state.data?.syncs ?? []).some(isConnectorSyncActive) ? 2000 : false,
+  };
+}
+
 // One read model for evidence consumers that need readiness across connectors.
-// It intentionally composes existing generic endpoints: no UI-only source or
-// Lohi route is introduced, and a 403 remains distinguishable from empty data.
+// Each connector owns one cache key and one poller, so the settings summary and
+// selected table consume the same source_status response instead of issuing
+// parallel aggregate/detail requests. A 403 remains distinguishable from empty.
 export function useSourceReadinessOverview(connectorIDs?: Array<{ id: string; name: string }>) {
   const projectID = useAuthStore((s) => s.project?.id);
-  const inputKey = connectorIDs?.map((c) => `${c.id}:${c.name}`).join('|') ?? 'all';
-  const query = useQuery({
-    queryKey: ['source-readiness-overview', projectID, inputKey],
-    queryFn: async () => {
-      const api = new AgentRayAPI(projectID!);
-      const connectors = connectorIDs ?? (await api.connectors()).connectors.map((c) => ({ id: c.id, name: c.name }));
-      const groups = await Promise.all(connectors.map(async (connector) => {
-        const result = await api.connectorSyncs(connector.id);
-        return result.syncs.map((sync) => ({ ...sync, connector_name: connector.name }));
-      }));
-      return groups.flat();
-    },
-    enabled: !!projectID,
-    refetchInterval: (q) => (q.state.data ?? []).some((s) =>
-      s.readiness?.state === 'syncing' || s.latest_run?.status === 'queued' || s.latest_run?.status === 'running',
-    ) ? 2000 : false,
+  const connectorList = useQuery({
+    queryKey: ['connectors', projectID],
+    queryFn: () => new AgentRayAPI(projectID!).connectors(),
+    enabled: !!projectID && connectorIDs === undefined,
   });
-  const denied = query.error instanceof APIError && query.error.status === 403;
-  return { syncs: query.data ?? [], loading: query.isFetching, denied, error: denied ? null : query.error };
+  const connectors = connectorIDs ?? connectorList.data?.connectors.map((connector) => ({ id: connector.id, name: connector.name })) ?? [];
+  const statusQueries = useQueries({
+    queries: connectors.map((connector) => connectorSyncsQuery(projectID, connector.id)),
+  });
+  const errors = [connectorList.error, ...statusQueries.map((query) => query.error)].filter((error): error is Error => error instanceof Error);
+  const denied = errors.some((error) => error instanceof APIError && error.status === 403);
+  const error = errors.find((candidate) => !(candidate instanceof APIError && candidate.status === 403)) ?? null;
+  const loadingByConnector = Object.fromEntries(connectors.map((connector, index) => [connector.id, statusQueries[index]?.isFetching ?? false]));
+  const syncs = connectors.flatMap((connector, index) =>
+    (statusQueries[index]?.data?.syncs ?? []).map((sync) => ({ ...sync, connector_name: connector.name })),
+  );
+  return {
+    syncs,
+    loading: connectorList.isFetching || statusQueries.some((query) => query.isFetching),
+    loadingByConnector,
+    denied,
+    error,
+  };
 }
 
 // useConnectors drives the Data connectors settings tab: the project's
@@ -48,7 +71,6 @@ export function useConnectors() {
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
-    void queryClient.invalidateQueries({ queryKey: ['source-readiness-overview', projectID] });
   };
 
   const create = useMutation({
@@ -76,37 +98,18 @@ export function useConnectors() {
   };
 }
 
-// useConnectorSyncs lists one connector's table syncs through the shared
-// source_status operation — each row carries its latest durable run receipt —
-// and exposes create / update / delete / run-now / cancel / pause mutations.
-// While any run is queued/running or its data is still becoming queryable,
-// the query polls so both the receipt and readiness converge without a refresh.
-export function useConnectorSyncs(connectorID: string | null) {
+// useConnectorSyncs exposes mutations for the selected connector. Its rows are
+// supplied by useSourceReadinessOverview, the sole source_status query owner,
+// so the summary and detail table cannot start duplicate polling loops.
+export function useConnectorSyncs(connectorID: string | null, status: { syncs: ConnectorSync[]; loading: boolean }) {
   const queryClient = useQueryClient();
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
 
-  const query = useQuery({
-    queryKey: ['connector-syncs', projectID, connectorID],
-    queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID!),
-    enabled: !!projectID && !!connectorID,
-    refetchInterval: (q) =>
-      (q.state.data?.syncs ?? []).some((s) =>
-        s.readiness?.state === 'syncing'
-        || s.latest_run?.status === 'queued'
-        || s.latest_run?.status === 'running',
-      )
-        ? 2000
-        : false,
-  });
-
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
-    // This aggregate has many input-key variants (dashboard = all sources,
-    // settings = the current connector list), so invalidate its project prefix.
-    // Its interval also follows queued/running receipts, not only readiness
-    // state, so a just-enqueued run cannot strand a previously-ready summary.
-    void queryClient.invalidateQueries({ queryKey: ['source-readiness-overview', projectID] });
+    // The shared query follows queued/running receipts as well as readiness, so
+    // a just-enqueued run cannot strand either the summary or detail table.
+    void queryClient.invalidateQueries({ queryKey: connectorSyncsKey(projectID, connectorID) });
     // The preview is a separate query with its own 30s staleTime. A landed run,
     // a re-pointed key/cursor column or a pause all change what it would show,
     // and without this it keeps serving the rows from before the change.
@@ -158,8 +161,8 @@ export function useConnectorSyncs(connectorID: string | null) {
   });
 
   return {
-    syncs: query.data?.syncs ?? [],
-    loading: query.isFetching,
+    syncs: status.syncs,
+    loading: status.loading,
     create,
     update,
     remove,
