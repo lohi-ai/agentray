@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CalendarRange, RotateCcw, TriangleAlert } from 'lucide-react';
 import { Calendar, type DateRange } from '@astryxdesign/core/Calendar';
 import { Popover } from '@astryxdesign/core/Popover';
@@ -69,6 +69,15 @@ export function FilterBar({
   const platforms = summary?.platforms ?? [];
   const showPlatform = platforms.length > 1 || !!applied.platform;
   const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarMonths, setCalendarMonths] = useState<1 | 2>(1);
+
+  useEffect(() => {
+    const desktopCalendar = window.matchMedia('(min-width: 720px)');
+    const updateCalendarMonths = () => setCalendarMonths(desktopCalendar.matches ? 2 : 1);
+    updateCalendarMonths();
+    desktopCalendar.addEventListener('change', updateCalendarMonths);
+    return () => desktopCalendar.removeEventListener('change', updateCalendarMonths);
+  }, []);
 
   const hasCustom = !!applied.from && !!applied.to;
   const rangeValue = hasCustom ? CUSTOM : String(applied.hours);
@@ -139,7 +148,7 @@ export function FilterBar({
           alignment="start"
           label="Pick custom date range"
           className={appearance === 'lohi-evidence' ? 'lohi-evidence-popover' : undefined}
-          content={<Calendar mode="range" numberOfMonths={2} value={range} onChange={onCustomRange} />}
+          content={<Calendar mode="range" numberOfMonths={calendarMonths} value={range} onChange={onCustomRange} />}
         >
           <button
             className={`grid h-8 w-8 place-items-center rounded-md border border-[var(--color-border)] bg-transparent transition-colors hover:bg-[var(--color-background-surface)] ${hasCustom ? 'text-primary' : 'text-[var(--color-text-secondary)]'}`}

@@ -19,6 +19,8 @@ describe('dashboard evidence', () => {
     [{ loading: false, denied: false, charts: [chart], syncs: [sync('stale')], chartStatuses: ['ready'] }, 'stale'],
     [{ loading: false, denied: false, charts: [chart], syncs: [sync('incomplete')], chartStatuses: ['ready'] }, 'error'],
     [{ loading: false, denied: true, charts: [chart], syncs: [sync('ready')], chartStatuses: ['ready'] }, 'read-only-denied'],
+    [{ loading: false, denied: false, readinessError: true, charts: [chart], syncs: [sync('ready')], chartStatuses: ['ready'] }, 'readiness-error'],
+    [{ loading: false, denied: false, charts: [chart], syncs: [sync('ready')], chartStatuses: ['denied'] }, 'query-denied'],
     [{ loading: false, denied: false, charts: [chart], syncs: [sync('ready')], chartStatuses: ['ready'], cohortEligibility: 'Not ready · cohort under 14 days' }, 'immature'],
   ] as const)('resolves every required evidence state', (input, expected) => {
     expect(resolveEvidenceState(input)).toBe(expected);

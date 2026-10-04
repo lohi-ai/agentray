@@ -73,7 +73,7 @@ export function ConnectorsTab() {
       header: 'Data ready to query',
       sortable: false,
       width: { type: 'proportional', value: 2, minWidth: 200 },
-      renderCell: (c) => <ConnectorReadinessSummary readiness={readiness.syncs.filter((sync) => sync.connector_id === c.id).map((sync) => sync.readiness)} loading={readiness.loading} denied={readiness.denied} />,
+      renderCell: (c) => <ConnectorReadinessSummary readiness={readiness.syncs.filter((sync) => sync.connector_id === c.id).map((sync) => sync.readiness)} loading={readiness.loading} denied={readiness.denied} error={!!readiness.error} />,
     },
     {
       key: 'created_at',
@@ -101,7 +101,7 @@ export function ConnectorsTab() {
     },
     // testConnector is stable enough for this table; testing drives the label.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [selectedID, testing, readiness.syncs, readiness.loading, readiness.denied, access.canWrite, access.reason]);
+  ], [selectedID, testing, readiness.syncs, readiness.loading, readiness.denied, readiness.error, access.canWrite, access.reason]);
 
   return (
     <>

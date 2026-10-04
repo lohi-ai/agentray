@@ -52,15 +52,22 @@ export function SourceReadinessCell({ readiness, denied = false }: { readiness?:
   return <div className="lohi-source-readiness" aria-live="polite"><StatusPill status={pillState} label={view.label} grow={false} pulse={view.state === 'syncing'} /><span className="lohi-source-readiness__meta">{view.detail}</span>{view.captureInterval ? <span className="lohi-source-readiness__meta">Capture interval {view.captureInterval}</span> : null}</div>;
 }
 
-export function ConnectorReadinessSummary({ readiness, loading, denied = false }: { readiness: Array<SourceReadiness | null | undefined>; loading?: boolean; denied?: boolean }) {
+export function oldestCompleteAt(readiness: readonly SourceReadiness[]): string | null {
+  return readiness.map((item) => item.last_complete_at).filter((item): item is string => !!item).sort().at(0) ?? null;
+}
+
+export function ConnectorReadinessSummary({ readiness, loading, denied = false, error = false }: { readiness: Array<SourceReadiness | null | undefined>; loading?: boolean; denied?: boolean; error?: boolean }) {
   if (denied) return <SourceReadinessCell denied />;
+  if (error) return <SourceReadinessCell readiness={{ state: 'error', published_at: null, landed_at: null, queryable_at: null, generation: null, capture_started_at: null, capture_finished_at: null, reason: 'readiness request failed', last_complete_at: null }} />;
   if (loading && readiness.length === 0) return <div className="lohi-source-readiness" role="status" aria-live="polite"><StatusPill status="working" label="Checking readiness" grow={false} /></div>;
   if (readiness.length === 0) return <SourceReadinessCell readiness={{ state: 'not_configured', published_at: null, landed_at: null, queryable_at: null, generation: null, capture_started_at: null, capture_finished_at: null, reason: null, last_complete_at: null }} />;
   const present = readiness.filter((item): item is SourceReadiness => !!item);
   if (present.length !== readiness.length) return <SourceReadinessCell />;
   const states = new Set(present.map((item) => item.state));
   const state: SourceReadiness['state'] = states.has('error') ? 'error' : states.has('incomplete') ? 'incomplete' : states.has('stale') ? 'stale' : states.has('syncing') ? 'syncing' : present.every((item) => item.state === 'ready') ? 'ready' : 'not_configured';
-  const lastComplete = present.map((item) => item.last_complete_at).filter((item): item is string => !!item).sort().at(-1) ?? null;
+  // The aggregate is only as fresh as its oldest dependency. Showing the
+  // newest completion would hide a stale table behind a fresh sibling sync.
+  const lastComplete = oldestCompleteAt(present);
   const captureStarted = present.map((item) => item.capture_started_at).filter((item): item is string => !!item).sort().at(0) ?? null;
   const captureFinished = present.map((item) => item.capture_finished_at).filter((item): item is string => !!item).sort().at(-1) ?? null;
   return <SourceReadinessCell readiness={{ state, published_at: null, landed_at: null, queryable_at: null, generation: null, capture_started_at: captureStarted, capture_finished_at: captureFinished, reason: present.find((item) => item.reason)?.reason ?? null, last_complete_at: lastComplete }} />;

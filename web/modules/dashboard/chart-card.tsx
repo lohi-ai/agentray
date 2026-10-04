@@ -105,7 +105,7 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
   type State =
     | { key: symbol | null; status: 'loading' }
     | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[]; evidenceFacts: EvidenceFacts; meta?: QueryMeta }
-    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string; evidenceFacts?: EvidenceFacts; meta?: QueryMeta };
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied'; message: string; evidenceFacts?: EvidenceFacts; meta?: QueryMeta };
   const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
@@ -128,6 +128,10 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
       })
       .catch((error: unknown) => {
         if (!active) return;
+        if (error instanceof APIError && error.status === 403) {
+          setData({ key: requestKey, status: 'denied', message: 'Query access denied. Ask a workspace owner for SQL query access.' });
+          return;
+        }
         if (error instanceof APIError && (error.kind === 'retryable' || error.status === 503)) {
           setData({ key: requestKey, status: 'capacity', message: 'Query capacity is busy. Retry shortly.' });
           return;
@@ -167,7 +171,7 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
       <div
         className="grid w-full place-items-center px-3 text-center"
         style={{ height: 168 }}
-        role={current.status === 'error' || current.status === 'capacity' || current.status === 'unsupported' || current.status === 'non_plottable' ? 'alert' : undefined}
+        role={current.status === 'error' || current.status === 'capacity' || current.status === 'unsupported' || current.status === 'non_plottable' || current.status === 'denied' ? 'alert' : undefined}
       >
         <Text type="supporting">{current.status === 'loading' ? 'Running query…' : current.message}</Text>
       </div>

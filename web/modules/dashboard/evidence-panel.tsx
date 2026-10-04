@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import { useState } from 'react';
 import { Database, MessageSquare } from 'lucide-react';
 import type { Chart, Dashboard, Filters, QueryMeta } from '@/lib/api';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger, Button, Card, CardContent } from '@/lib/lohi-ui';
@@ -8,7 +8,7 @@ import { StatusPill } from '@/modules/shared/components/lohi-evidence-primitives
 import type { ReadinessSync } from '@/modules/app/hooks/connectors';
 import { evidenceTime } from '@/modules/settings/source-readiness';
 
-export type ChartEvidenceStatus = 'loading' | 'ready' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable';
+export type ChartEvidenceStatus = 'loading' | 'ready' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied';
 export type ChartEvidence = {
   status: ChartEvidenceStatus;
   filterKey: string;
@@ -19,7 +19,7 @@ export type ChartEvidence = {
   cohortEligibility?: string;
   meta?: QueryMeta;
 };
-export type EvidenceState = 'ready' | 'syncing' | 'empty' | 'stale' | 'error' | 'immature' | 'read-only-denied';
+export type EvidenceState = 'ready' | 'syncing' | 'empty' | 'stale' | 'error' | 'immature' | 'read-only-denied' | 'query-denied' | 'readiness-error';
 
 export type BoardEvidence = {
   definition: string;
@@ -70,8 +70,10 @@ export function evidenceFilterKey(filters: Filters): string {
   return JSON.stringify([filters.from || '', filters.to || '', filters.hours]);
 }
 
-export function resolveEvidenceState({ loading, denied, charts, syncs, chartStatuses, cohortEligibility }: { loading: boolean; denied: boolean; charts: readonly Chart[]; syncs: readonly ReadinessSync[]; chartStatuses: readonly ChartEvidenceStatus[]; cohortEligibility?: string }): EvidenceState {
+export function resolveEvidenceState({ loading, denied, readinessError = false, charts, syncs, chartStatuses, cohortEligibility }: { loading: boolean; denied: boolean; readinessError?: boolean; charts: readonly Chart[]; syncs: readonly ReadinessSync[]; chartStatuses: readonly ChartEvidenceStatus[]; cohortEligibility?: string }): EvidenceState {
   if (denied) return 'read-only-denied';
+  if (readinessError) return 'readiness-error';
+  if (chartStatuses.some((status) => status === 'denied')) return 'query-denied';
   if (chartStatuses.some((status) => status === 'error' || status === 'unsupported' || status === 'capacity' || status === 'non_plottable')) return 'error';
   if (syncs.some((s) => s.readiness?.state === 'error' || s.readiness?.state === 'incomplete')) return 'error';
   if (syncs.some((s) => s.readiness?.state === 'stale')) return 'stale';
@@ -89,30 +91,9 @@ const STATE_COPY: Record<EvidenceState, { label: string; detail: string; pill: s
   error: { label: 'Evidence incomplete', detail: 'The current source or query result is incomplete. No current conclusion is shown.', pill: 'error' },
   immature: { label: 'Cohort not ready', detail: 'The current query reports that the cohort has not reached its maturity window.', pill: 'immature' },
   'read-only-denied': { label: 'Read-only evidence', detail: 'Saved definitions remain readable, but source readiness is not granted to this credential.', pill: 'denied' },
+  'query-denied': { label: 'Query access denied', detail: 'This credential can read the saved figure, but it cannot run the figure’s SQL query.', pill: 'denied' },
+  'readiness-error': { label: 'Readiness check failed', detail: 'Source readiness could not be refreshed. Retry before treating this evidence as current.', pill: 'error' },
 };
-
-function sourceBindings(chartEvidence: ChartEvidence | undefined): NonNullable<QueryMeta['serving_data_watermark']>['sources'] {
-  const watermark = chartEvidence?.meta?.serving_data_watermark;
-  if (!watermark || watermark.sources_truncated || !chartEvidence.sql) return [];
-  return watermark.sources.filter((source) => {
-    const escaped = source.table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(?:['\"]${escaped}['\"]|\\b(?:from|join)\\s+${escaped}\\b)`, 'i').test(chartEvidence.sql!);
-  });
-}
-
-function verifiedCoverage(chartEvidence: ChartEvidence | undefined, bindings: NonNullable<QueryMeta['serving_data_watermark']>['sources']): string {
-  const meta = chartEvidence?.meta;
-  const range = chartEvidence?.range;
-  if (!meta || meta.result_completeness !== 'complete' || range?.kind !== 'applied' || !range.from || !range.to || bindings.length === 0) return 'Coverage not verified';
-  const from = Date.parse(range.from);
-  const to = Date.parse(range.to);
-  const covered = Number.isFinite(from) && Number.isFinite(to) && bindings.every((source) => {
-    const started = Date.parse(source.capture_started_at ?? '');
-    const finished = Date.parse(source.capture_finished_at ?? '');
-    return Number.isFinite(started) && Number.isFinite(finished) && started <= from && finished >= to;
-  });
-  return covered ? 'Verified for applied range' : 'Coverage not verified';
-}
 
 function partialDay(range: ChartEvidence['range']): string {
   if (!range?.from || !range.to) return 'Partial-day status not verified';
@@ -129,18 +110,17 @@ function pendingRange(filters: Filters): string {
     : `Last ${filters.hours} hours (pending execution)`;
 }
 
-export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, readinessDenied, chartEvidence, appliedFilters }: { dashboard: Dashboard | null; charts: Chart[]; syncs: ReadinessSync[]; readinessLoading: boolean; readinessDenied: boolean; chartEvidence: Record<string, ChartEvidence>; appliedFilters: Filters }) {
+export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, readinessDenied, readinessError, chartEvidence, appliedFilters }: { dashboard: Dashboard | null; charts: Chart[]; syncs: ReadinessSync[]; readinessLoading: boolean; readinessDenied: boolean; readinessError: boolean; chartEvidence: Record<string, ChartEvidence>; appliedFilters: Filters }) {
   const browserTimezone = typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : 'UTC';
   const savedEvidence = parseBoardEvidence(dashboard?.description ?? '', browserTimezone);
   const filterKey = evidenceFilterKey(appliedFilters);
   const sqlCharts = charts.filter((chart) => !!chart.sql);
-  const selectedChart = sqlCharts[0];
+  const [selectedChartID, setSelectedChartID] = useState<string | null>(null);
+  const selectedChart = sqlCharts.find((chart) => chart.id === selectedChartID) ?? sqlCharts[0];
   const selectedEvidence = selectedChart && chartEvidence[selectedChart.id]?.filterKey === filterKey ? chartEvidence[selectedChart.id] : undefined;
   const chartStatuses = sqlCharts.map((chart) => chartEvidence[chart.id]?.filterKey === filterKey ? chartEvidence[chart.id].status : 'loading');
-  const state = resolveEvidenceState({ loading: readinessLoading, denied: readinessDenied, charts, syncs, chartStatuses, cohortEligibility: selectedEvidence?.cohortEligibility });
+  const state = resolveEvidenceState({ loading: readinessLoading, denied: readinessDenied, readinessError, charts, syncs, chartStatuses, cohortEligibility: selectedEvidence?.cohortEligibility });
   const copy = STATE_COPY[state];
-  const bindings = sourceBindings(selectedEvidence);
-  const sourceTables = [...new Set(bindings.map((source) => source.table))];
   const lastComplete = syncs.map((sync) => sync.readiness?.last_complete_at).filter((value): value is string => !!value).sort()[0];
   const freshness = [lastComplete ? `Source last complete ${evidenceTime(lastComplete)}` : null, selectedEvidence?.meta?.executed_at ? `Query executed ${evidenceTime(selectedEvidence.meta.executed_at)}` : null].filter(Boolean).join(' · ') || 'Freshness not verified';
   const queryRef = selectedEvidence?.meta?.query_ref || 'Query reference pending';
@@ -157,7 +137,10 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
     : selectedEvidence?.range
       ? 'Timezone not verified for fixed query'
       : browserTimezone;
-  const coverage = verifiedCoverage(selectedEvidence, bindings);
+  // Collection timestamps and a project watermark are neither query lineage
+  // nor the business-date coverage of this result. Until the API supplies
+  // those facts, an honest evidence panel keeps both claims unverified.
+  const coverage = 'Coverage not verified';
   const cohortEligibility = selectedEvidence?.cohortEligibility || 'Eligibility not verified for this query';
 
   return (
@@ -168,12 +151,30 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
             <div className="min-w-0 flex-1"><h2 id="board-evidence-title" className="m-0 text-base font-semibold">Evidence</h2><p className="m-0 mt-1 text-sm text-[var(--lohi-muted-foreground)]">{copy.detail}</p></div>
             <StatusPill status={copy.pill} label={copy.label} grow={false} pulse={state === 'syncing'} />
           </div>
+          {sqlCharts.length > 1 ? (
+            <div className="lohi-evidence-figures" role="group" aria-label="Choose figure evidence">
+              <span>Figure evidence</span>
+              {sqlCharts.map((chart) => (
+                <Button
+                  key={chart.id}
+                  type={selectedChart?.id === chart.id ? 'default' : 'outlined'}
+                  color={selectedChart?.id === chart.id ? 'brand' : 'neutral'}
+                  size="large"
+                  aria-pressed={selectedChart?.id === chart.id}
+                  onClick={() => setSelectedChartID(chart.id)}
+                >
+                  {chart.name || 'Untitled chart'}
+                </Button>
+              ))}
+            </div>
+          ) : null}
           <dl className="lohi-evidence-grid">
             <div className="lohi-evidence-fact"><dt>Timezone</dt><dd>{timezone}</dd></div>
             <div className="lohi-evidence-fact"><dt>Source coverage</dt><dd>{coverage}</dd></div>
             <div className="lohi-evidence-fact"><dt>Partial day</dt><dd>{partialDay(selectedEvidence?.range)}</dd></div>
             <div className="lohi-evidence-fact"><dt>Cohort eligibility</dt><dd>{cohortEligibility}</dd></div>
           </dl>
+          {state === 'stale' && lastComplete ? <p className="lohi-evidence-stale-age">Source last complete {evidenceTime(lastComplete)}</p> : null}
           <Accordion type="single" collapsible>
             <AccordionItem value="evidence-detail">
               <AccordionTrigger>Review evidence</AccordionTrigger>
@@ -183,7 +184,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
                   <div><dt>Unit</dt><dd>{unit}</dd></div>
                   <div><dt>Range</dt><dd>{range}</dd></div>
                   <div><dt>Query reference</dt><dd><code>{queryRef}</code></dd></div>
-                  <div><dt>Source bindings</dt><dd>{sourceTables.length ? sourceTables.join(', ') : 'Bindings not verified'}</dd></div>
+                  <div><dt>Source bindings</dt><dd>Bindings not verified</dd></div>
                   <div><dt>Freshness</dt><dd>{freshness}</dd></div>
                   <div><dt>Limitation</dt><dd>{limitation}</dd></div>
                 </dl>
@@ -195,6 +196,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
             </AccordionItem>
           </Accordion>
           {state === 'read-only-denied' ? <p className="m-0 text-sm text-[var(--lohi-muted-foreground)]">Ask a workspace owner for source-read access if you need live readiness. No request is sent automatically.</p> : null}
+          {state === 'query-denied' ? <p className="m-0 text-sm text-[var(--lohi-muted-foreground)]">Ask a workspace owner for SQL query access. No request is sent automatically.</p> : null}
         </CardContent>
       </Card>
     </section>

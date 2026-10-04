@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SourceReadiness } from '@/lib/api';
-import { sourceReadinessView } from './source-readiness';
+import { oldestCompleteAt, sourceReadinessView } from './source-readiness';
 
 const readiness = (state: SourceReadiness['state'], extra: Partial<SourceReadiness> = {}): SourceReadiness => ({
   state, published_at: null, landed_at: null, queryable_at: null, generation: null,
@@ -29,5 +29,12 @@ describe('sourceReadinessView', () => {
     const view = sourceReadinessView(readiness('ready', { capture_started_at: '2026-10-03T10:00:00Z', capture_finished_at: '2026-10-03T11:00:00Z', generation: 'secret-sequence' }));
     expect(view.captureInterval).toMatch(/2026.*2026/);
     expect(JSON.stringify(view)).not.toContain('secret-sequence');
+  });
+
+  it('aggregates freshness from the oldest dependent sync', () => {
+    expect(oldestCompleteAt([
+      readiness('ready', { last_complete_at: '2026-10-04T07:00:00Z' }),
+      readiness('stale', { last_complete_at: '2026-09-01T07:00:00Z' }),
+    ])).toBe('2026-09-01T07:00:00Z');
   });
 });

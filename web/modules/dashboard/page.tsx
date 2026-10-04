@@ -179,6 +179,7 @@ export function DashboardPage() {
         syncs={sourceReadiness.syncs}
         readinessLoading={sourceReadiness.loading}
         readinessDenied={sourceReadiness.denied}
+        readinessError={!!sourceReadiness.error}
         chartEvidence={chartEvidence}
         appliedFilters={appliedFilters}
       />
