@@ -57,11 +57,11 @@ function RowsTable({ rows }: { rows: Array<Record<string, unknown>> }) {
   return <Table data={rows.slice(0, MAX_DISPLAY_ROWS)} columns={columns} density="compact" />;
 }
 
-export function SQLPage() {
+export function SQLPage({ initialSQL }: { initialSQL?: string } = {}) {
   const router = useRouter();
   const { sqlRows, run, running, error, elapsedMs, clearError } = useSQL();
   const { savedQueries, savedResult, createSavedQuery, runSavedQuery, renameSavedQuery, deleteSavedQuery, busy } = useSavedQueries();
-  const [sql, setSql] = useState(SAMPLE);
+  const [sql, setSql] = useState(() => initialSQL?.trim() || SAMPLE);
   const [ask, setAsk] = useState('');
   const [showReference, setShowReference] = useState(false);
   const [copied, setCopied] = useState(false);

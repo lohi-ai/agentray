@@ -24,7 +24,9 @@ export function useSourceReadinessOverview(connectorIDs?: Array<{ id: string; na
       return groups.flat();
     },
     enabled: !!projectID,
-    refetchInterval: (q) => (q.state.data ?? []).some((s) => s.readiness?.state === 'syncing') ? 2000 : false,
+    refetchInterval: (q) => (q.state.data ?? []).some((s) =>
+      s.readiness?.state === 'syncing' || s.latest_run?.status === 'queued' || s.latest_run?.status === 'running',
+    ) ? 2000 : false,
   });
   const denied = query.error instanceof APIError && query.error.status === 403;
   return { syncs: query.data ?? [], loading: query.isFetching, denied, error: denied ? null : query.error };
@@ -44,7 +46,10 @@ export function useConnectors() {
     enabled: !!projectID,
   });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
+    void queryClient.invalidateQueries({ queryKey: ['source-readiness-overview', projectID] });
+  };
 
   const create = useMutation({
     mutationFn: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) =>
@@ -92,11 +97,16 @@ export function useConnectorSyncs(connectorID: string | null) {
   });
 
   const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
+    void queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
+    // This aggregate has many input-key variants (dashboard = all sources,
+    // settings = the current connector list), so invalidate its project prefix.
+    // Its interval also follows queued/running receipts, not only readiness
+    // state, so a just-enqueued run cannot strand a previously-ready summary.
+    void queryClient.invalidateQueries({ queryKey: ['source-readiness-overview', projectID] });
     // The preview is a separate query with its own 30s staleTime. A landed run,
     // a re-pointed key/cursor column or a pause all change what it would show,
     // and without this it keeps serving the rows from before the change.
-    queryClient.invalidateQueries({ queryKey: ['dataset-preview', projectID] });
+    void queryClient.invalidateQueries({ queryKey: ['dataset-preview', projectID] });
   };
 
   const create = useMutation({

@@ -3,17 +3,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pencil, Sparkles, Trash2 } from 'lucide-react';
+import { Card as AstryxCard } from '@astryxdesign/core/Card';
 import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Text } from '@astryxdesign/core/Text';
 import { AgentRayAPI, APIError, type ActivitySummary, type Chart, type QueryMeta } from '@/lib/api';
-import { Card } from '@/lib/lohi-ui';
+import { Card as LohiCard } from '@/lib/lohi-ui';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
 import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
-import type { ChartEvidence } from './evidence-panel';
+import { evidenceFilterKey, type ChartEvidence } from './evidence-panel';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -34,6 +35,27 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
     case 'event_breakdown': return formatCompact(summary.event_counts[0]?.count ?? 0);
     default: return formatCompact(summary.event_count);
   }
+}
+
+type EvidenceFacts = { definition?: string; unit?: string; cohortEligibility?: string };
+
+function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
+  const first = rows[0];
+  if (!first) return {};
+  const text = (...keys: string[]) => {
+    const value = keys.map((key) => first[key]).find((candidate) => typeof candidate === 'string' && candidate.trim());
+    return typeof value === 'string' ? value.trim() : undefined;
+  };
+  const eligible = first.eligible ?? first.eligible_count;
+  const excluded = first.excluded ?? first.excluded_count;
+  const counts = (typeof eligible === 'number' || typeof eligible === 'string') && (typeof excluded === 'number' || typeof excluded === 'string')
+    ? `Eligible ${String(eligible)} / excluded ${String(excluded)}`
+    : undefined;
+  return {
+    definition: text('metric_definition', 'definition'),
+    unit: text('unit'),
+    cohortEligibility: text('cohort_eligibility') || counts,
+  };
 }
 
 // SeriesChart leads with the graph — that's the point of the card. A single
@@ -82,8 +104,8 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
   );
   type State =
     | { key: symbol | null; status: 'loading' }
-    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[]; meta?: QueryMeta }
-    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string; meta?: QueryMeta };
+    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[]; evidenceFacts: EvidenceFacts; meta?: QueryMeta }
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string; evidenceFacts?: EvidenceFacts; meta?: QueryMeta };
   const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
@@ -93,14 +115,16 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
       .then((res) => {
         if (!active) return;
         const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
-        if (projected.status === 'ready') setData({ key: requestKey, ...projected, meta: res.meta });
+        const evidenceFacts = queryEvidenceFacts(res.rows);
+        if (projected.status === 'ready') setData({ key: requestKey, ...projected, evidenceFacts, meta: res.meta });
         else if (projected.status === 'empty') setData({
           key: requestKey,
           status: 'empty',
           message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
+          evidenceFacts,
           meta: res.meta,
         });
-        else setData({ key: requestKey, ...projected });
+        else setData({ key: requestKey, ...projected, evidenceFacts });
       })
       .catch((error: unknown) => {
         if (!active) return;
@@ -113,17 +137,30 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
     return () => { active = false; };
   }, [api, query, requestKey, chart.y_field, chart.x_field]);
 
-  const current: State = data.key === requestKey
+  const current = useMemo<State>(() => data.key === requestKey
     ? data
     : query.ok
       ? { key: requestKey, status: 'loading' }
-      : { key: requestKey, status: 'unsupported', message: query.message };
-  const evidenceStatus: ChartEvidence['status'] = current.status === 'loading' ? 'loading' : current.status === 'ready' ? 'ready' : current.status === 'empty' ? 'empty' : 'error';
+      : { key: requestKey, status: 'unsupported', message: query.message }, [data, query, requestKey]);
   const evidenceMeta = 'meta' in current ? current.meta : undefined;
+  const queryEvidence = useMemo(() => query.ok ? {
+    sql: query.sql,
+    range: query.status === 'applied'
+      ? { kind: 'applied' as const, label: query.label, from: query.from.toISOString(), to: query.to.toISOString() }
+      : { kind: 'fixed' as const, label: query.label },
+  } : {}, [query]);
   useEffect(() => {
     if (!onEvidence) return;
-    onEvidence(chart.id, { status: evidenceStatus, meta: evidenceMeta });
-  }, [chart.id, evidenceStatus, evidenceMeta, onEvidence]);
+    onEvidence(chart.id, {
+      status: current.status,
+      filterKey: evidenceFilterKey(applied),
+      ...queryEvidence,
+      definition: 'evidenceFacts' in current ? current.evidenceFacts?.definition : undefined,
+      unit: 'evidenceFacts' in current ? current.evidenceFacts?.unit : undefined,
+      cohortEligibility: 'evidenceFacts' in current ? current.evidenceFacts?.cohortEligibility : undefined,
+      meta: evidenceMeta,
+    });
+  }, [applied, chart.id, current, evidenceMeta, onEvidence, queryEvidence]);
   const body = current.status === 'ready'
     ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} appearance={appearance} title={chart.name} />
     : (
@@ -158,14 +195,8 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
     router.push(`/chat?q=${encodeURIComponent(q)}`);
   }
 
-  // Astryx migration: the hand-rolled card div is now an Astryx <Card>, the
-  // title a <Heading level={5}>, and the three action buttons Astryx
-  // <IconButton>s. That last swap is not cosmetic — the raw buttons carried
-  // only `title`, which is not an accessible name, and sat at 26px against a
-  // 44px touch target. IconButton's `label` is the accessible name and its
-  // tooltip keeps the hover affordance.
-  return (
-    <Card>
+  const content = (
+    <>
       <HStack align="center" gap={0} className="mb-3">
         {handle}
         <Heading level={5}>{chart.name || 'Untitled chart'}</Heading>
@@ -197,6 +228,12 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
           title={chart.name}
         />
       )}
-    </Card>
+    </>
   );
+
+  // Evidence boards opt into the vendored Lohi surface. Editor previews and
+  // every other caller retain the legacy Astryx card contract by default.
+  return appearance === 'lohi-evidence'
+    ? <LohiCard>{content}</LohiCard>
+    : <AstryxCard padding={4}>{content}</AstryxCard>;
 }

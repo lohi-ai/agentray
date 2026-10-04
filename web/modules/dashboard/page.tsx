@@ -54,7 +54,7 @@ export function DashboardPage() {
   const sourceReadiness = useSourceReadinessOverview();
   const [chartEvidence, setChartEvidence] = useState<Record<string, ChartEvidence>>({});
   const reportChartEvidence = useCallback((chartID: string, evidence: ChartEvidence) => {
-    setChartEvidence((current) => current[chartID]?.status === evidence.status && current[chartID]?.meta === evidence.meta ? current : { ...current, [chartID]: evidence });
+    setChartEvidence((current) => JSON.stringify(current[chartID]) === JSON.stringify(evidence) ? current : { ...current, [chartID]: evidence });
   }, []);
 
   // The board's annotation window is the applied filter range — the same
@@ -180,6 +180,7 @@ export function DashboardPage() {
         readinessLoading={sourceReadiness.loading}
         readinessDenied={sourceReadiness.denied}
         chartEvidence={chartEvidence}
+        appliedFilters={appliedFilters}
       />
 
       {/* Headline numbers in one strip above the board, never scattered across
