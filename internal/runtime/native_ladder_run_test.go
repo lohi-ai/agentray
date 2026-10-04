@@ -57,7 +57,7 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: "ladder-run"})
+	session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: "ladder-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestNativeLadderRunStopsAtVisibleContentAndHostFailure(t *testing.T) {
 				store = &nativeSelectionFailStore{MemorySessionStore: memory, selectionError: errors.New("append failed")}
 			}
 			binding, _, stream := ladder.sessionBinding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: mode})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: mode})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -237,7 +237,7 @@ func TestNativeLadderRunCandidateIsolationAndGenerationFence(t *testing.T) {
 			ctx := context.Background()
 			ladder := testNativeLadder(t)
 			binding, _, stream := ladder.sessionBinding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 			if err != nil {
 				t.Fatal(err)
 			}

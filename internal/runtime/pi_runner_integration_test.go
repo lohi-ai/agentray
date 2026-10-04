@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -42,7 +40,7 @@ func TestPiRunnerDispatchUsesNativeProviderAndGovernedTools(t *testing.T) {
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{piComposedTool{&effects}}
-	r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "runner-native", BaseURL: server.URL + "/v1", APIKey: "native-key"}}
 	var tokens string
 	result, err := r.runModelLoop(ctx, p, RunOptions{Prompt: "execute", NativeHistory: json.RawMessage(`[{"role":"user","content":"prior native user","timestamp":1,"extension":{"preserve":true}}]`)}, tier, func(event agentcore.StreamEvent) {
@@ -130,7 +128,7 @@ func TestPiRunnerControlsAndSchemaValidationWithNativeProvider(t *testing.T) {
 			if tc.unsupported {
 				tier.Capabilities.StructuredOutput = agentcore.CapabilityUnsupported
 			}
-			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 			result, err := r.runModelLoop(ctx, p, RunOptions{Prompt: "write and return JSON", ToolChoice: p.ToolChoice, ParallelToolCalls: &parallel}, tier, nil)
 			if tc.wantError {
 				if err == nil || !strings.Contains(err.Error(), "structured output") || result.Final != "" || result.StopReason != "error" {
@@ -173,7 +171,7 @@ func TestPiRunnerInvalidControlsFailBeforeProviderIO(t *testing.T) {
 			} else {
 				p.OutputSchema = &agentcore.OutputSchema{Schema: map[string]any{"type": "invalid"}}
 			}
-			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 			tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "controls", BaseURL: server.URL + "/v1", APIKey: "test"}}
 			_, err := r.runModelLoop(piSessionContext(t), p, RunOptions{Prompt: "test"}, tier, nil)
 			if err == nil || requests.Load() != 0 {
@@ -231,7 +229,7 @@ func TestPiRunnerNativeStructuredOutputDialects(t *testing.T) {
 			if provider == "anthropic" {
 				tier.BaseURL = server.URL
 			}
-			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 			result, err := r.runModelLoop(piSessionContext(t), p, RunOptions{Prompt: "return JSON"}, tier, nil)
 			if err != nil || result.Final != `{"ok":true}` || requests.Load() != 1 || result.Usage.InputTokens != 4 || result.Usage.OutputTokens != 2 {
 				t.Fatalf("native structured %s: final=%q stop=%s usage=%+v err=%v (requests=%d)", provider, result.Final, result.StopReason, result.Usage, err, requests.Load())

@@ -128,7 +128,7 @@ func TestPiConversationSuffixChecksSeedAndToolBoundaries(t *testing.T) {
 
 func TestPiChatUsesNativeHandlerWithoutGoClassifier(t *testing.T) {
 	history := &PiConversationHistory{Messages: json.RawMessage(`[]`), LeafID: "anchor"}
-	svc := NewChatService(nil, WithPiRuntime(PiRuntimeConfig{Worker: "unused"}))
+	svc := NewChatService(nil, WithPiRuntime(PiRuntimeConfig{}))
 	svc.classify = func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
 		t.Fatal("native chat invoked legacy classifier")
 		return chatDecision{}, nil

@@ -78,7 +78,8 @@ func TestNativeAnthropicFederationScopedBinding(t *testing.T) {
 	}
 }
 func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses bool, provider string, federated bool) {
-	anthropic := provider == "anthropic"
+	claudePool := provider == ai.VendorClaudeCode
+	anthropic := provider == "anthropic" || claudePool
 	azure := provider == ai.VendorAzureResponses
 	piMessages := provider == "radius" || provider == ai.VendorPiMessages
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -111,6 +112,12 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 		}
 		if anthropic {
 			path, header, credential = "/v1/messages", "X-Api-Key", fmt.Sprintf("refreshed-%d", n)
+		}
+		if claudePool {
+			header, credential = "Authorization", fmt.Sprintf("Bearer refreshed-%d", n)
+			if r.Header.Get("X-Api-Key") != "" {
+				t.Error("pooled Claude sent API-key auth")
+			}
 		}
 		if federated {
 			header, credential = "Authorization", "Bearer native-federated-access"
@@ -271,15 +278,24 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 	if federated {
 		p.RefreshKey = nil
 	}
+	if claudePool {
+		p.RefreshKey = func(context.Context, string) (string, error) {
+			t.Error("pool used static key refresh")
+			return "stale-key", nil
+		}
+	}
 	p.Tracer = observe.SinkFunc(func(trace observe.TraceRecord) {
 		traceMu.Lock()
 		defer traceMu.Unlock()
 		traces = append(traces, trace)
 	})
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker", Runtime: "/missing/runtime"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: provider, Model: "native-http", BaseURL: server.URL + "/v1", APIKey: "stale-key"}}
 	if anthropic {
 		tier.BaseURL = server.URL
+	}
+	if claudePool {
+		tier.TokenSource = &nativeClaudeAccountSource{acquired: &refreshes}
 	}
 	if federated {
 		tier.APIKey = ""
@@ -315,7 +331,7 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 	if !strings.Contains(string(result.NativeState), `"extension":{"opaque":"keep"}`) || !strings.Contains(string(result.NativeState), "private reasoning") || len(result.NativeTelemetry) == 0 {
 		t.Fatal("native artifacts lost")
 	}
-	if piMessages && strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "refreshed-") {
+	if (piMessages || claudePool) && strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "refreshed-") {
 		t.Fatal("gateway credential leaked into artifacts")
 	}
 	if federated && (strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "native-federated-access") || strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "native-fixture-assertion")) {
@@ -372,10 +388,13 @@ func TestNativeAnthropicHTTPProviderInheritedByChildrenAndSummary(t *testing.T) 
 func TestNativeAnthropicFederationInheritedByChildrenAndSummary(t *testing.T) {
 	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, true, true, false, false)
 }
-func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses, anthropic, federated, azure, piMessages bool) {
+func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses, anthropic, federated, azure, piMessages bool, pooledProvider ...string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	var parentCalls, childCalls, effects, summaryCalls, exchanges atomic.Int32
+	gemini := len(pooledProvider) > 0 && pooledProvider[0] == "google"
+	claudePool := len(pooledProvider) > 0 && pooledProvider[0] == ai.VendorClaudeCode
+	antigravity := len(pooledProvider) > 0 && pooledProvider[0] == ai.VendorGoogleAntigravity
+	var parentCalls, childCalls, effects, summaryCalls, exchanges, acquisitions atomic.Int32
 	if federated {
 		configureNativeFederationEnv(t)
 	}
@@ -383,10 +402,19 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 		if federated && serveNativeFederationExchange(t, w, r, &exchanges) {
 			return
 		}
+		if (claudePool || antigravity) && (!strings.HasPrefix(r.Header.Get("Authorization"), "Bearer refreshed-") || r.Header.Get("X-Api-Key") != "") {
+			t.Error("child/summary lost Claude pool auth")
+		}
 		if federated && r.Header.Get("Authorization") != "Bearer native-federated-access" {
 			t.Error("child/summary lost federation auth")
 		}
 		var body struct {
+			Project string
+			Request struct {
+				Contents          []json.RawMessage
+				SystemInstruction json.RawMessage
+				Tools             []struct{ FunctionDeclarations []struct{ Name string } }
+			}
 			Context ai.Context
 			Options struct {
 				SessionID  string
@@ -407,6 +435,21 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			return
 		}
 		path := "/v1/chat/completions"
+		if antigravity {
+			path = "/v1internal:streamGenerateContent"
+			if body.Project != "native-project" {
+				t.Error("project missing")
+			}
+			body.Messages, body.System = body.Request.Contents, body.Request.SystemInstruction
+			for _, tool := range body.Request.Tools {
+				for _, decl := range tool.FunctionDeclarations {
+					body.Tools = append(body.Tools, struct {
+						Name     string
+						Function struct{ Name string }
+					}{Name: decl.Name})
+				}
+			}
+		}
 		if piMessages {
 			path = "/v1/messages"
 			body.Messages = nil
@@ -466,7 +509,7 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			if responses {
 				header = "Session_id"
 			}
-			if !anthropic && !azure && !piMessages && r.Header.Get(header) == "" {
+			if !gemini && !antigravity && !anthropic && !azure && !piMessages && r.Header.Get(header) == "" {
 				t.Error("child lost provider session affinity")
 			}
 			if piMessages && body.Options.SessionID == "" {
@@ -482,6 +525,17 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if antigravity {
+			part := map[string]any{}
+			if calls, ok := delta["tool_calls"].([]any); ok {
+				function := calls[0].(map[string]any)["function"].(map[string]any)
+				part["functionCall"] = map[string]any{"id": "call", "name": function["name"], "args": json.RawMessage(function["arguments"].(string))}
+			} else {
+				part["text"] = delta["content"]
+			}
+			writeNativeAntigravity(w, []map[string]any{part}, 1, 1)
+			return
+		}
 		if piMessages {
 			if calls, ok := delta["tool_calls"].([]any); ok {
 				function := calls[0].(map[string]any)["function"].(map[string]any)
@@ -523,14 +577,23 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{nativeChildWrite{&effects}}
-	runtime := PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker", Runtime: "/missing/runtime"}
+	runtime := PiRuntimeConfig{}
 	runner := NewRunner(nil, WithPiRuntime(runtime))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openrouter", Model: "native-http", BaseURL: server.URL + "/v1", APIKey: "key"}}
+	if len(pooledProvider) > 0 && pooledProvider[0] == "google" {
+		tier.Provider = "google"
+	}
 	if piMessages {
 		tier.Provider = "radius"
 	}
 	if anthropic {
 		tier.Provider, tier.BaseURL = "anthropic", server.URL
+	}
+	if claudePool {
+		tier.Provider, tier.TokenSource = ai.VendorClaudeCode, &nativeClaudeAccountSource{acquired: &acquisitions}
+	}
+	if antigravity {
+		tier.Provider, tier.BaseURL, tier.TokenSource = ai.VendorGoogleAntigravity, server.URL, &nativeAntigravityAccountSource{acquired: &acquisitions}
 	}
 	if federated {
 		tier.APIKey = ""
@@ -570,6 +633,9 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 	summary, usage, err := summarizePiHistoryWithUsage(ctx, runtime, tier, history, nativeAgentRevision, nil, nil)
 	if federated && exchanges.Load() != 1 {
 		t.Errorf("parent/child/summary exchanges: %d", exchanges.Load())
+	}
+	if (claudePool || antigravity) && acquisitions.Load() != 5 {
+		t.Errorf("Claude parent/child/summary acquisitions=%d", acquisitions.Load())
 	}
 	if err != nil || summary != "native summary" || summaryCalls.Load() != 1 || usage.InputTokens != 1 {
 		t.Fatalf("native summary HTTP: %q %+v %v", summary, usage, err)
@@ -682,7 +748,7 @@ func testNativeStreamFailureHasNoEffect(t *testing.T, anthropic, azure, piMessag
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{nativeChildWrite{&effects}}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker", Runtime: "/missing/runtime"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorOpenAIResponses, Model: "native-http", BaseURL: server.URL + "/v1", APIKey: "key"}}
 	if azure {
 		tier.Provider = ai.VendorAzureResponses

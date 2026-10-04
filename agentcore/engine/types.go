@@ -14,8 +14,17 @@ import (
 // Context retains live message/tool collections shared with hooks. Replacing a
 // field detaches that collection; edits through a retained list remain visible.
 type Context struct {
-	Messages *MessageList `json:"messages"`
-	Tools    *ToolList    `json:"-"`
+	Messages        *MessageList `json:"messages"`
+	Tools           *ToolList    `json:"-"`
+	assistantStream *ai.AssistantMessageEventStream
+}
+
+func (c *Context) readAssistant(read func()) {
+	if c.assistantStream != nil {
+		c.assistantStream.Synchronize(read)
+		return
+	}
+	read()
 }
 
 // Tool is shared by pointer. Preparation selects the object before invoking
@@ -41,11 +50,11 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var fields map[string]json.RawMessage
+	var fields jsonjs.RawObject
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
-	fields["label"], _ = json.Marshal(t.Label)
+	fields["label"] = jsonjs.QuoteString(t.Label)
 	if t.OutputSchema != nil {
 		fields["outputSchema"] = t.OutputSchema
 	}
@@ -58,17 +67,17 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
-// ToolResult shares Details and StructuredContent graphs with hooks/events.
+// ToolResult shares its content list, Details and StructuredContent with hooks/events.
 // Values use *Object, *Array or primitives. nil/Undefined omit an optional
 // field; Null retains explicit JSON null. Concurrent access needs synchronization.
 type ToolResult struct {
 	preserved         map[string]json.RawMessage
-	Content           []*ai.ContentBlock `json:"content"`
-	Details           any                `json:"-"`
-	StructuredContent any                `json:"-"`
-	Usage             *ai.Usage          `json:"usage,omitempty"`
-	IsError           *bool              `json:"isError,omitempty"`
-	Terminate         *bool              `json:"terminate,omitempty"`
+	Content           *ai.BlockList `json:"content"`
+	Details           any           `json:"-"`
+	StructuredContent any           `json:"-"`
+	Usage             *ai.Usage     `json:"usage,omitempty"`
+	IsError           *bool         `json:"isError,omitempty"`
+	Terminate         *bool         `json:"terminate,omitempty"`
 }
 
 func (r ToolResult) MarshalJSON() ([]byte, error) {
@@ -77,7 +86,7 @@ func (r ToolResult) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var fields map[string]json.RawMessage
+	var fields jsonjs.RawObject
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil, err
 	}
@@ -117,7 +126,7 @@ func (r *ToolResult) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, (*plain)(r)); err != nil {
 		return err
 	}
-	var values map[string]json.RawMessage
+	var values jsonjs.RawObject
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return err
 	}
@@ -134,7 +143,7 @@ func (r *ToolResult) UnmarshalJSON(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	var source, projected map[string]json.RawMessage
+	var source, projected jsonjs.RawObject
 	if err := json.Unmarshal(raw, &source); err != nil {
 		return err
 	}
@@ -267,6 +276,8 @@ func (c Config) now() int64 {
 }
 
 type Event struct {
+	payloadYield          ai.PayloadYield
+	payloadAccess         func(func())
 	Type                  string
 	Message               *ai.Message
 	Messages              *MessageList
@@ -278,6 +289,28 @@ type Event struct {
 	Result                *ToolResult
 	PartialResult         *ToolResult
 	IsError               bool
+}
+
+// Await yields a provider payload lock while a synchronous event sink waits,
+// then reacquires it before returning. Do not inspect live message fields in
+// work. Non-provider events call work directly. A provider event's Await is
+// scoped to its sink invocation and must not be retained for later use.
+func (e Event) Await(work func() error) error {
+	if e.payloadYield != nil {
+		return e.payloadYield(work)
+	}
+	return work()
+}
+
+// Synchronize protects access to a retained provider event's live payload.
+// Sinks already hold this lock; use this method only outside the sink callback.
+// Like Pi, retaining an event does not detach its nested messages or blocks.
+func (e Event) Synchronize(read func()) {
+	if e.payloadAccess != nil {
+		e.payloadAccess(read)
+		return
+	}
+	read()
 }
 
 // MarshalJSON emits exactly the fields belonging to each Pi event variant.
@@ -293,7 +326,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	case "message_update":
 		value["message"], value["assistantMessageEvent"] = e.Message, e.AssistantMessageEvent
 	case "tool_execution_start", "tool_execution_update", "tool_execution_end":
-		value["toolCallId"], value["toolName"] = e.ToolCallID, e.ToolName
+		value["toolCallId"], value["toolName"] = json.RawMessage(jsonjs.QuoteString(e.ToolCallID)), json.RawMessage(jsonjs.QuoteString(e.ToolName))
 		if e.Type == "tool_execution_end" {
 			value["result"], value["isError"] = e.Result, e.IsError
 		} else {

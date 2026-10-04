@@ -124,7 +124,7 @@ func TestPiFailureValues(t *testing.T) {
 					if stage == "execute" {
 						panic(failure)
 					}
-					return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)}, nil
 				}}
 				hooks := engine.ToolHooks{}
 				if stage == "prepare" {
@@ -184,14 +184,14 @@ func TestPiToolUpdateFailures(t *testing.T) {
 			failure := errors.New("update failed")
 			continued, caught, after := false, false, false
 			tool := &engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
-				invoke := func() { update(&engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}) }
+				invoke := func() { update(&engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)}) }
 				if test.Mode == "caught" {
 					func() { defer func() { caught = recover() == failure }(); invoke() }()
 				} else {
 					invoke()
 				}
 				continued = true
-				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)}, nil
 			}}
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
 			outcome, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
@@ -274,7 +274,7 @@ func TestPiPendingToolUpdates(t *testing.T) {
 				if test.Mode == "tool-error" || test.Mode == "tool-and-update-error" || test.Mode == "late-tool-and-update-error" {
 					return &engine.ToolResult{}, toolError
 				}
-				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)}, nil
 			}}
 			type completion struct {
 				outcome engine.ToolOutcome

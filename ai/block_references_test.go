@@ -37,7 +37,7 @@ func TestPiBlockReferences(t *testing.T) {
 				t.Fatal(err)
 			}
 			originals := map[*ContentBlock]int{}
-			for i, block := range tc.Input.Messages[0].Content.Blocks {
+			for i, block := range tc.Input.Messages[0].Content.Blocks.Values() {
 				originals[block] = i
 			}
 			var normalize ToolCallIDNormalizer
@@ -48,7 +48,7 @@ func TestPiBlockReferences(t *testing.T) {
 			indices := make([][]int, len(messages))
 			for i, message := range messages {
 				indices[i] = []int{}
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					index, found := originals[block]
 					if !found {
 						index = -1

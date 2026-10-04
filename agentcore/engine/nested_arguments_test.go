@@ -103,9 +103,9 @@ func TestPiNestedArguments(t *testing.T) {
 					if phase == "execute_replace" {
 						args.Set("branch", branch("replacement"))
 					}
-					onUpdate(&engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)})
+					onUpdate(&engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)})
 					capture("execute", args)
-					return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`), Terminate: &terminate}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`), Terminate: &terminate}, nil
 				},
 			}
 			initial, err := json.Marshal(engine.NewObject(engine.Property{Name: "branch", Value: branch("original")}))

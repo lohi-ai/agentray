@@ -57,7 +57,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 				return usageStream(ctx, usageFixture("stop", 1, 0)), nil
 			}
 			binding, _, stream := ladder.sessionBinding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestNativeRequestPreparationUsesFreshCandidateContext(t *testing.T) {
 		}
 	}
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestNativeRequestPreparationFailureNeverRetriesOrEscalates(t *testing.T) {
 					return nil, errors.New("unexpected provider")
 				}
 			}
-			session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+			session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 			if err != nil {
 				t.Fatal(err)
 			}

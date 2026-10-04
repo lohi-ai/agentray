@@ -18,7 +18,6 @@ type anthropicAccumulator struct {
 	stream          *AssistantMessageEventStream
 	push            func(AssistantMessageEvent)
 	output          *Message
-	blocks          []*ContentBlock
 	transformations []json.RawMessage
 	now             func() int64
 	ended           bool
@@ -35,11 +34,7 @@ func newAnthropicAccumulator(model completionsModel, oauth bool, tools []Tool, o
 	}
 	return &anthropicAccumulator{model: model, cost: model.Cost, oauth: oauth, tools: tools, stream: stream, push: stream.Push, output: output, now: now}
 }
-func (a *anthropicAccumulator) refresh() {
-	a.output.Content = BlockReferences(a.blocks...)
-}
 func (a *anthropicAccumulator) publish(event AssistantMessageEvent) {
-	a.refresh()
 	if event.Type != "done" && event.Type != "error" {
 		event.Partial = a.output
 	}
@@ -50,7 +45,7 @@ func (a *anthropicAccumulator) start() {
 }
 func (a *anthropicAccumulator) find(index json.RawMessage) (int, *ContentBlock) {
 	key := responsesSlotKey(index)
-	for i, block := range a.blocks {
+	for i, block := range a.output.Content.Blocks.Values() {
 		if responsesSlotKey(block.Extra["index"]) == key {
 			return i, block
 		}
@@ -94,7 +89,6 @@ func (a *anthropicAccumulator) chunk(raw json.RawMessage) error {
 		if a.ended {
 			return
 		}
-		defer a.refresh()
 		event, ok := samplingObject(raw)
 		if !ok {
 			return
@@ -137,7 +131,7 @@ func (a *anthropicAccumulator) chunk(raw json.RawMessage) error {
 		case "content_block_start":
 			content, _ := samplingObject(event["content_block"])
 			if samplingString(content["type"]) == "fallback" {
-				if len(a.blocks) > 0 {
+				if a.output.Content.Blocks.Len() > 0 {
 					failure = fmt.Errorf("Anthropic performed an unsupported mid-output model fallback")
 				}
 				return
@@ -194,8 +188,8 @@ func (a *anthropicAccumulator) chunk(raw json.RawMessage) error {
 			default:
 				return
 			}
-			a.blocks = append(a.blocks, block)
-			a.publish(AssistantMessageEvent{Type: kind, ContentIndex: len(a.blocks) - 1})
+			a.output.Content.Blocks.Append(block)
+			a.publish(AssistantMessageEvent{Type: kind, ContentIndex: a.output.Content.Blocks.Len() - 1})
 		case "content_block_delta":
 			delta, _ := samplingObject(event["delta"])
 			index, block := a.find(event["index"])
@@ -372,7 +366,7 @@ func (a *anthropicAccumulator) fail(message string, aborted bool) {
 	})
 }
 func (a *anthropicAccumulator) failLocked(message string, aborted bool) {
-	for _, block := range a.blocks {
+	for _, block := range a.output.Content.Blocks.Values() {
 		delete(block.Extra, "index")
 		delete(block.Extra, "partialJson")
 	}

@@ -1,9 +1,6 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -41,7 +37,7 @@ func TestPiRunnerNativeTraceRecordsEveryParentAndChildCall(t *testing.T) {
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tracer = newTestSink(st)
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-trace", BaseURL: server.URL + "/v1", APIKey: "trace-secret-key"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "parent finished" {
@@ -102,29 +98,10 @@ func TestPiTraceSinkPanicDoesNotChangeNativeResult(t *testing.T) {
 	p.Tracer = observe.SinkFunc(func(observe.TraceRecord) { calls.Add(1); panic("observer failed") })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { piChildSSE(w, "", "", "still done") }))
 	defer server.Close()
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-trace", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	result, err := runner.runModelLoop(piSessionContext(t), p, RunOptions{Prompt: "test"}, tier, nil)
 	if err != nil || result.Final != "still done" || calls.Load() != 1 {
 		t.Fatalf("observer altered execution: %+v %v calls=%d", result, err, calls.Load())
-	}
-}
-
-func TestPiWorkerTraceIncludesCallbackFailureAndSettledSpans(t *testing.T) {
-	if piTestNative {
-		t.Skip("worker transport only; native telemetry is covered by TestNative trace tests")
-	}
-	traces := make(chan json.RawMessage, 1)
-	worker, err := agentcore.NewPi(piSessionContext(t), agentcore.PiConfig{Worker: piSessionWorker(t), Options: piSessionOptions(), OnTrace: func(_ context.Context, raw json.RawMessage) { traces <- append(json.RawMessage{}, raw...) }, Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
-		return nil, context.DeadlineExceeded
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer worker.Close()
-	_ = worker.Prompt(piSessionContext(t), json.RawMessage(`"test"`))
-	trace := <-traces
-	if !strings.Contains(string(trace), "deadline exceeded") || !strings.Contains(string(trace), `"settled":true`) {
-		t.Fatalf("failure observation missing: %s", trace)
 	}
 }

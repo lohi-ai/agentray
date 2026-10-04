@@ -310,7 +310,7 @@ func completionsHasToolHistory(messages []Message) bool {
 			return true
 		}
 		if message.Role == "assistant" {
-			for _, block := range message.Content.Blocks {
+			for _, block := range message.Content.Blocks.Values() {
 				if block.Type == "toolCall" {
 					return true
 				}

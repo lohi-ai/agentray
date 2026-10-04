@@ -76,7 +76,7 @@ func streamAnthropic(ctx context.Context, rawModel json.RawMessage, transcript T
 		now = func() int64 { return time.Now().UnixMilli() }
 	}
 	key := samplingString(controls["apiKey"])
-	oauth := client == nil && model.Provider != "github-copilot" && strings.Contains(key, "sk-ant-oat")
+	oauth := client == nil && model.Provider != "github-copilot" && (model.Provider == VendorClaudeCode || strings.Contains(key, "sk-ant-oat"))
 	options, callbackFailure := nativeFailureCallbacks(options)
 	recordNativeFailure(ctx, model.Provider, nil, false)
 	acc := newAnthropicAccumulator(model, oauth, GetCurrentTools(transcript.Messages()), controls, stream, now)
@@ -167,7 +167,7 @@ func anthropicHeaders(rawModel json.RawMessage, transcript TranscriptContext, co
 		put("Openai-Intent", "conversation-edits")
 		for _, message := range messages {
 			if message.Role == "user" || message.Role == "toolResult" {
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "image" {
 						put("Copilot-Vision-Request", "true")
 					}

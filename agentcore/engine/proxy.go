@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lohi-ai/agentray/ai"
@@ -33,11 +34,10 @@ type ProxyStreamOptions struct {
 // Partial pointers stay live. Use the stream's snapshot methods or Synchronize
 // when inspecting payloads while the producer is still running.
 func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, options ProxyStreamOptions) *ai.AssistantMessageEventStream {
-	stream := ai.NewAssistantMessageEventStream()
+	stream := ai.NewAssistantMessageEventStreamFor(ctx)
 	// Pi captures identity before the clock, then timestamps the partial before
 	// JSON.stringify invokes user serializers. Those callbacks can mutate inputs.
-	var identity struct{ API, Provider, ID string }
-	identityErr := json.Unmarshal(model, &identity)
+	partial, identityErr := proxyPartial(model)
 	now := time.Now().UnixMilli()
 	if options.Now != nil {
 		now = options.Now()
@@ -58,7 +58,7 @@ func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.Trans
 	if requestErr == nil {
 		requestErr = identityErr
 	}
-	partial := &ai.Message{Role: "assistant", StopReason: "pending", Content: ai.BlockContent(), API: identity.API, Provider: identity.Provider, Model: identity.ID, Usage: &ai.Usage{}, Timestamp: now}
+	partial.Timestamp = now
 	go func() {
 		defer stream.End()
 		err := requestErr
@@ -77,6 +77,32 @@ func StreamProxy(ctx context.Context, model json.RawMessage, transcript ai.Trans
 		}
 	}()
 	return stream
+}
+
+// Copy only the exact model properties Pi reads, before the clock or request
+// serializers can mutate the source. Message's wire decoder retains omission,
+// null, non-string values and UTF-16 without inventing empty identity fields.
+func proxyPartial(model json.RawMessage) (*ai.Message, error) {
+	partial := &ai.Message{Role: "assistant", StopReason: "pending", Content: ai.BlockContent(), Usage: &ai.Usage{}}
+	properties, err := jsonjs.DecodeObjectProperties(model)
+	if err != nil {
+		return partial, err
+	}
+	fields := map[string]any{"role": partial.Role, "stopReason": partial.StopReason,
+		"content": partial.Content, "usage": partial.Usage, "timestamp": 0}
+	for _, property := range properties {
+		switch property.Name {
+		case "api", "provider":
+			fields[property.Name] = property.Value
+		case "id":
+			fields["model"] = property.Value
+		}
+	}
+	raw, err := json.Marshal(fields)
+	if err == nil {
+		err = json.Unmarshal(raw, partial)
+	}
+	return partial, err
 }
 
 // JSON.stringify runs inside Pi's producer try/catch. Go MarshalJSON callbacks
@@ -124,18 +150,21 @@ func readProxy(ctx context.Context, stream *ai.AssistantMessageEventStream, part
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	var closeOnce sync.Once
+	closeBody := func() { closeOnce.Do(func() { _ = response.Body.Close() }) }
+	defer closeBody()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := "Proxy error: " + response.Status
-		var data struct {
-			Error any `json:"error"`
-		}
-		encoded, readErr := io.ReadAll(response.Body)
-		if readErr == nil && json.Unmarshal(encoded, &data) == nil && proxyTruthy(data.Error) {
-			message = "Proxy error: " + jsValueString(data.Error)
-		}
-		return errors.New(message)
+		return errors.New(proxyHTTPErrorMessage(response.Body, "Proxy error: "+response.Status))
 	}
+	// Pi cancels the active reader independently of fetch's abort handling.
+	// An injected Go transport may not wire its response body to request.Context.
+	// Close exactly once to release such reads, including an already-canceled
+	// context; a cleanup panic must not escape the abort callback goroutine.
+	stopAbort := context.AfterFunc(ctx, func() {
+		defer func() { _ = recover() }()
+		closeBody()
+	})
+	defer stopAbort()
 	// Unlike Scanner, ReadString imposes no 64 KiB token limit. The decoder
 	// handles UTF-8 sequences split across network reads and a leading BOM.
 	reader := bufio.NewReader(unicode.UTF8BOM.NewDecoder().Reader(response.Body))
@@ -183,6 +212,55 @@ func readProxy(ctx context.Context, stream *ai.AssistantMessageEventStream, part
 		return errors.New("Connection closed by proxy server before the response completed")
 	}
 	return nil
+}
+
+// Response.json decodes UTF-8 (including its BOM), then JSON.parse retains
+// binary64 overflow and UTF-16 code units. Pi ignores body/read/coercion failures
+// here and keeps the HTTP status message. Property lookup is case-sensitive.
+func proxyHTTPErrorMessage(body io.Reader, fallback string) (message string) {
+	message = fallback
+	defer func() { _ = recover() }()
+	raw, err := io.ReadAll(unicode.UTF8BOM.NewDecoder().Reader(body))
+	if err != nil {
+		return
+	}
+	value, err := jsonjs.DecodeJSON(raw)
+	if err != nil {
+		return
+	}
+	object, ok := value.(map[string]any)
+	if !ok || !proxyTruthy(object["error"]) {
+		return
+	}
+	if detail, ok := proxyHTTPErrorString(object["error"]); ok {
+		message = "Proxy error: " + detail
+	}
+	return
+}
+
+func proxyHTTPErrorString(value any) (string, bool) {
+	switch value := value.(type) {
+	case map[string]any:
+		// JSON can shadow Object.prototype.toString with a non-callable own
+		// property. valueOf cannot supply a primitive either, so coercion fails.
+		if _, shadowed := value["toString"]; shadowed {
+			return "", false
+		}
+	case []any:
+		parts := make([]string, len(value))
+		for i, item := range value {
+			if item == nil {
+				continue
+			}
+			part, ok := proxyHTTPErrorString(item)
+			if !ok {
+				return "", false
+			}
+			parts[i] = part
+		}
+		return strings.Join(parts, ","), true
+	}
+	return jsValueString(value), true
 }
 
 type proxyEvent struct {
@@ -274,25 +352,32 @@ func decodeProxyEvent(raw []byte) (proxyEvent, error) {
 			if err := json.Unmarshal(value, target); err != nil {
 				return proxyEvent{}, err
 			}
+			if text, ok := target.(*string); ok {
+				decoded, err := jsonjs.DecodeJSON(value)
+				if err != nil {
+					return proxyEvent{}, err
+				}
+				if decoded, ok := decoded.(string); ok {
+					*text = decoded
+				}
+			}
 		}
 	}
 	return frame, nil
 }
 
-// Content entries and toolcall_end events share stable block objects even when
-// appending another block reallocates the list.
+// Content entries and toolcall_end events share live block objects and the
+// message's content list, including across sparse writes and terminal events.
 type proxyAccumulator struct {
 	message *ai.Message
-	blocks  []*ai.ContentBlock
 }
 
 func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, error) {
 	partial := p.message
-	defer func() { partial.Content = ai.BlockReferences(p.blocks...) }()
 	event := ai.AssistantMessageEvent{Type: frame.Type, ContentIndex: frame.ContentIndex, Partial: partial}
 	var content *ai.ContentBlock
-	if frame.ContentIndex >= 0 && frame.ContentIndex < len(p.blocks) {
-		content = p.blocks[frame.ContentIndex]
+	if frame.ContentIndex >= 0 && frame.ContentIndex < partial.Content.Blocks.Len() {
+		content = partial.Content.Blocks.Get(frame.ContentIndex)
 	}
 	require := func(kind string) error {
 		if content == nil || content.Type != kind {
@@ -306,11 +391,8 @@ func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, 
 		if frame.ContentIndex < 0 {
 			return ai.AssistantMessageEvent{}, errors.New("Invalid negative contentIndex")
 		}
-		for len(p.blocks) <= frame.ContentIndex {
-			p.blocks = append(p.blocks, nil)
-		}
 		content = &ai.ContentBlock{}
-		p.blocks[frame.ContentIndex] = content
+		partial.Content.Blocks.Set(frame.ContentIndex, content)
 		switch frame.Type {
 		case "text_start":
 			*content = ai.ContentBlock{Type: "text"}
@@ -355,7 +437,8 @@ func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, 
 		}
 		var input string
 		if data, ok := content.Extra["partialJson"]; ok {
-			_ = json.Unmarshal(data, &input)
+			decoded, _ := jsonjs.DecodeJSON(data)
+			input, _ = decoded.(string)
 		} else {
 			input = "undefined"
 		}
@@ -363,7 +446,7 @@ func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, 
 		if content.Extra == nil {
 			content.Extra = map[string]json.RawMessage{}
 		}
-		content.Extra["partialJson"], _ = json.Marshal(input)
+		content.Extra["partialJson"] = jsonjs.QuoteString(input)
 		content.Arguments = ai.ParseStreamingJSON(input)
 		var parsed any
 		_ = json.Unmarshal(content.Arguments, &parsed)
@@ -377,7 +460,7 @@ func (p *proxyAccumulator) process(frame proxyEvent) (ai.AssistantMessageEvent, 
 		for key, value := range content.Extra {
 			copied.Extra[key] = value
 		}
-		p.blocks[frame.ContentIndex] = &copied
+		partial.Content.Blocks.Set(frame.ContentIndex, &copied)
 	case "toolcall_end":
 		if content == nil || content.Type != "toolCall" {
 			return ai.AssistantMessageEvent{}, nil
@@ -426,6 +509,13 @@ func proxySignature(content *ai.ContentBlock, name string, raw json.RawMessage) 
 		if err := json.Unmarshal(raw, &signature); err != nil {
 			return nil, err
 		}
+		if signature != nil {
+			value, err := jsonjs.DecodeJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			*signature = value.(string)
+		}
 	}
 	delete(content.Extra, name)
 	if len(raw) > 0 && signature == nil {
@@ -457,7 +547,7 @@ func (p *proxyAccumulator) terminal(frame proxyEvent) error {
 			fields[name] = value
 		}
 	}
-	fields["stopReason"], _ = json.Marshal(frame.Reason)
+	fields["stopReason"] = jsonjs.QuoteString(frame.Reason)
 	assign("usage", frame.Usage)
 	if len(frame.ProviderThinkingLevel) > 0 {
 		assign("providerThinkingLevel", frame.ProviderThinkingLevel)
@@ -473,6 +563,9 @@ func (p *proxyAccumulator) terminal(frame proxyEvent) error {
 	if err := json.Unmarshal(raw, &updated); err != nil {
 		return err
 	}
+	// Terminal assignment does not touch content. Decoding it would break list
+	// and block identity and turn sparse holes into explicit null entries.
+	updated.Content = p.message.Content
 	*p.message = updated
 	return nil
 }

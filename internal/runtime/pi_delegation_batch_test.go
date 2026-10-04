@@ -78,7 +78,7 @@ func testNativeParkedBatch(t *testing.T, localOnly bool) {
 			var mu sync.Mutex
 			parents := 0
 			children := map[string]int{}
-			runtime := PiSessionConfig{NativeGo: true, Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Worker: "/missing/worker"}}
+			runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
 			runtime.Pi.Callback = func(ctx context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected method %s", method)

@@ -11,11 +11,12 @@ import (
 // is an observation made by the caller, not a prerequisite for consuming Pi's
 // events: live numbers may be nonfinite and extension JSON may be unreadable.
 // All mutable public fields detach; immutable transcript encoding metadata can
-// remain shared. Memoization preserves repeated message/block/usage objects.
+// remain shared. Memoization preserves repeated message/list/block/usage objects.
 type streamSnapshot struct {
 	values   jsonjs.ValueCloner
 	messages map[*Message]*Message
 	blocks   map[*ContentBlock]*ContentBlock
+	lists    map[*BlockList]*BlockList
 	usages   map[*Usage]*Usage
 }
 
@@ -39,10 +40,7 @@ func (s *streamSnapshot) message(source *Message) *Message {
 	copy := *source
 	s.messages[source] = &copy
 	copy.Content.Text = copyStreamValue(source.Content.Text)
-	copy.Content.Blocks = slices.Clone(source.Content.Blocks)
-	for i, block := range source.Content.Blocks {
-		copy.Content.Blocks[i] = s.block(block)
-	}
+	copy.Content.Blocks = s.blockList(source.Content.Blocks)
 	copy.Sections = slices.Clone(source.Sections)
 	for i, section := range source.Sections {
 		copy.Sections[i].Value = copyStreamValue(section.Value)
@@ -68,6 +66,24 @@ func (s *streamSnapshot) message(source *Message) *Message {
 	copy.Extra = snapshotJSONFields(source.Extra)
 	copy.Usage = s.usage(source.Usage)
 	return &copy
+}
+
+func (s *streamSnapshot) blockList(source *BlockList) *BlockList {
+	if source == nil {
+		return nil
+	}
+	if copy, ok := s.lists[source]; ok {
+		return copy
+	}
+	if s.lists == nil {
+		s.lists = map[*BlockList]*BlockList{}
+	}
+	copy := NewBlockList()
+	s.lists[source] = copy
+	for _, block := range source.Values() {
+		copy.Append(s.block(block))
+	}
+	return copy
 }
 
 func (s *streamSnapshot) block(source *ContentBlock) *ContentBlock {

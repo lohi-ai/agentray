@@ -378,7 +378,7 @@ func openAIHeadersFor(rawModel json.RawMessage, transcript TranscriptContext, op
 		text("Openai-Intent", "conversation-edits")
 		for _, message := range messages {
 			if message.Role == "user" || message.Role == "toolResult" {
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "image" {
 						text("Copilot-Vision-Request", "true")
 					}

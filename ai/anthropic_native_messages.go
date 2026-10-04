@@ -131,13 +131,13 @@ func anthropicToolResultContent(content []*ContentBlock) any {
 		for i, block := range content {
 			texts[i] = block.Text
 		}
-		return strings.Join(texts, "\n")
+		return SanitizeSurrogates(strings.Join(texts, "\n"))
 	}
 	blocks := []map[string]any{}
 	hasText := false
 	for _, block := range content {
 		if block.Type == "text" {
-			blocks = append(blocks, map[string]any{"type": "text", "text": block.Text})
+			blocks = append(blocks, map[string]any{"type": "text", "text": SanitizeSurrogates(block.Text)})
 			hasText = true
 		} else {
 			blocks = append(blocks, anthropicImage(block))
@@ -168,7 +168,7 @@ func ConvertAnthropicMessages(messages []Message, options AnthropicMessagesOptio
 			blocks := []map[string]any{}
 			text := RenderSystemMessageUpdate(message)
 			if text != "" {
-				blocks = append(blocks, map[string]any{"type": "text", "text": text})
+				blocks = append(blocks, map[string]any{"type": "text", "text": SanitizeSurrogates(text)})
 			}
 			if options.ConvertToolDefinitions != nil {
 				names := map[string]bool{}
@@ -198,14 +198,15 @@ func ConvertAnthropicMessages(messages []Message, options AnthropicMessagesOptio
 		case "user":
 			if message.Content.Text != nil {
 				if nonempty(*message.Content.Text) {
-					params = append(params, map[string]any{"role": "user", "content": *message.Content.Text})
+					params = append(params, map[string]any{"role": "user", "content": SanitizeSurrogates(*message.Content.Text)})
 				}
 			} else {
 				blocks := []map[string]any{}
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "text" {
-						if nonempty(block.Text) {
-							blocks = append(blocks, map[string]any{"type": "text", "text": block.Text})
+						text := SanitizeSurrogates(block.Text)
+						if nonempty(text) {
+							blocks = append(blocks, map[string]any{"type": "text", "text": text})
 						}
 					} else {
 						blocks = append(blocks, anthropicImage(block))
@@ -218,11 +219,11 @@ func ConvertAnthropicMessages(messages []Message, options AnthropicMessagesOptio
 		case "assistant":
 			flush()
 			blocks := []map[string]any{}
-			for _, block := range message.Content.Blocks {
+			for _, block := range message.Content.Blocks.Values() {
 				switch block.Type {
 				case "text":
 					if nonempty(block.Text) {
-						blocks = append(blocks, map[string]any{"type": "text", "text": block.Text})
+						blocks = append(blocks, map[string]any{"type": "text", "text": SanitizeSurrogates(block.Text)})
 					}
 				case "thinking":
 					if block.Redacted != nil && *block.Redacted {
@@ -238,13 +239,13 @@ func ConvertAnthropicMessages(messages []Message, options AnthropicMessagesOptio
 						continue
 					}
 					if !signed && !options.AllowEmptySignature {
-						blocks = append(blocks, map[string]any{"type": "text", "text": block.Thinking})
+						blocks = append(blocks, map[string]any{"type": "text", "text": SanitizeSurrogates(block.Thinking)})
 					} else {
 						signature := ""
 						if signed {
 							signature = *block.ThinkingSignature
 						}
-						blocks = append(blocks, map[string]any{"type": "thinking", "thinking": block.Thinking, "signature": signature})
+						blocks = append(blocks, map[string]any{"type": "thinking", "thinking": SanitizeSurrogates(block.Thinking), "signature": signature})
 					}
 				case "toolCall":
 					input := block.Arguments
@@ -266,7 +267,7 @@ func ConvertAnthropicMessages(messages []Message, options AnthropicMessagesOptio
 			results := []map[string]any{}
 			for ; i < len(messages) && messages[i].Role == "toolResult"; i++ {
 				result := messages[i]
-				results = append(results, map[string]any{"type": "tool_result", "tool_use_id": result.ToolCallID, "content": anthropicToolResultContent(result.Content.Blocks), "is_error": result.IsError})
+				results = append(results, map[string]any{"type": "tool_result", "tool_use_id": result.ToolCallID, "content": anthropicToolResultContent(result.Content.Blocks.Values()), "is_error": result.IsError})
 			}
 			i--
 			params = append(params, map[string]any{"role": "user", "content": results})

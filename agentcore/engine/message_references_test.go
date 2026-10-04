@@ -72,7 +72,7 @@ func TestPiMessageReferences(t *testing.T) {
 			tools := []*engine.Tool{}
 			if input.Role == "toolResult" {
 				tools = append(tools, &engine.Tool{Tool: ai.Tool{Name: "echo", Description: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Label: "echo", Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "result"}}, Details: argumentRef(`{}`)}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "result"}), Details: argumentRef(`{}`)}, nil
 				}})
 			}
 			turns, requestCount, responseCount := 0, 0, 0

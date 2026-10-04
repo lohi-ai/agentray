@@ -181,7 +181,7 @@ func runFixture(t *testing.T, input loopInput) []byte {
 			if spec.Result != nil {
 				return cloneResult(spec.Result), nil
 			}
-			return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: argumentJSON(t, args)}}, Details: argumentRef(`{}`)}, nil
+			return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: argumentJSON(t, args)}), Details: argumentRef(`{}`)}, nil
 		}
 		tools = append(tools, tool)
 	}

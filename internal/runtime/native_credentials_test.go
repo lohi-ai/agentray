@@ -154,7 +154,7 @@ func TestNativeCredentialRefreshAcrossHTTPRetryFallbackAndResume(t *testing.T) {
 				t.Fatal(err)
 			}
 			binding, _, stream := ladder.sessionBinding()
-			cfg := PiRunConfig{Input: json.RawMessage(`"answer"`), Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}, Store: agentcore.NewMemorySessionStore(), SessionID: "row-refresh"}}
+			cfg := PiRunConfig{Input: json.RawMessage(`"answer"`), Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}, Store: agentcore.NewMemorySessionStore(), SessionID: "row-refresh"}}
 			result, err := RunPi(ctx, cfg)
 			if mutation != "rotate" {
 				mu.Lock()

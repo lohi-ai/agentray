@@ -140,6 +140,7 @@ func TestPiOpenAIResponsesStreamOracle(t *testing.T) {
 func TestResponsesStreamConcurrentSnapshots(t *testing.T) {
 	stream := NewAssistantMessageEventStream()
 	acc := newResponsesAccumulator(completionsModel{ID: "test"}, nil, stream, 100)
+	content := acc.output.Content
 	producer := make(chan error, 1)
 	go func() {
 		acc.start()
@@ -195,7 +196,7 @@ func TestResponsesStreamConcurrentSnapshots(t *testing.T) {
 		if event.ToolCall != nil {
 			ends[event.ContentIndex] = event.ToolCall
 			stream.Synchronize(func() {
-				if event.Partial.Content.Blocks[event.ContentIndex] != event.ToolCall {
+				if event.Partial.Content.Blocks.Get(event.ContentIndex) != event.ToolCall {
 					t.Fatal("toolcall_end and transcript do not share the block")
 				}
 			})
@@ -204,7 +205,7 @@ func TestResponsesStreamConcurrentSnapshots(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if snapshot.ToolCall != nil && snapshot.Partial.Content.Blocks[snapshot.ContentIndex] != snapshot.ToolCall {
+		if snapshot.ToolCall != nil && snapshot.Partial.Content.Blocks.Get(snapshot.ContentIndex) != snapshot.ToolCall {
 			t.Fatal("snapshot separated toolcall_end from its transcript block")
 		}
 	}
@@ -214,15 +215,20 @@ func TestResponsesStreamConcurrentSnapshots(t *testing.T) {
 	if err := stream.WaitForEnd(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	stream.Synchronize(func() {
+		if content.Blocks != acc.output.Content.Blocks || content.Blocks.Len() != 101 {
+			t.Fatal("provider growth did not reach the retained content list")
+		}
+	})
 	result, err := stream.SnapshotResult(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.StopReason != "toolUse" || len(result.Content.Blocks) != 101 || len(ends) != 100 || result.Content.Blocks[0].Text != "final" {
+	if result.StopReason != "toolUse" || result.Content.Blocks.Len() != 101 || len(ends) != 100 || result.Content.Blocks.Get(0).Text != "final" {
 		t.Fatalf("lost Responses blocks: %+v", result)
 	}
 	for index, block := range ends {
-		if block != acc.blocks[index] {
+		if block != acc.output.Content.Blocks.Get(index) {
 			t.Fatal("toolcall_end lost original block identity")
 		}
 		if string(block.Arguments) != `{"value":1}` || len(block.Extra) != 0 {

@@ -126,7 +126,7 @@ func TestPiContextLists(t *testing.T) {
 			tool := func(name string) *engine.Tool {
 				return &engine.Tool{Tool: ai.Tool{Name: name, Parameters: json.RawMessage(`{"type":"object"}`)}, Label: name, Execute: func(_ context.Context, id string, _ any, _ func(*engine.ToolResult)) (*engine.ToolResult, error) {
 					executed = append(executed, map[string]string{"executor": name, "id": id})
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "ok"}}, Details: engine.NewObject()}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "ok"}), Details: engine.NewObject()}, nil
 				}}
 			}
 			initial := engine.Context{Messages: engine.NewList(loopListUser(1)), Tools: engine.NewList(tool("echo"))}

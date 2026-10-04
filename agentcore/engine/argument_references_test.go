@@ -141,9 +141,9 @@ func TestPiArgumentReferences(t *testing.T) {
 					value = replacement()
 				}
 				executeLocal = value
-				_update(&engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)})
+				_update(&engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)})
 				capture("execute_after_update", value)
-				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`), Terminate: &terminate}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`), Terminate: &terminate}, nil
 			}}
 			call := &ai.ContentBlock{Type: "toolCall", Name: "echo", ID: "first", Arguments: json.RawMessage(initial)}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockReferences(call), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}

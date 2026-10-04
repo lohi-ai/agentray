@@ -238,7 +238,7 @@ func TestAssistantStreamSnapshotAndProducerSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream.Synchronize(func() {
-		message.Content.Blocks[0].Text = "after"
+		message.Content.Blocks.Get(0).Text = "after"
 		message.StopReason = "stop"
 		stream.Push(AssistantMessageEvent{Type: "done", Message: message})
 	})
@@ -251,12 +251,12 @@ func TestAssistantStreamSnapshotAndProducerSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream.Synchronize(func() { message.Content.Blocks[0].Text = "post-terminal" })
+	stream.Synchronize(func() { message.Content.Blocks.Get(0).Text = "post-terminal" })
 	stream.End()
 	if err := stream.WaitForEnd(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Partial.Content.Blocks[0].Text != "before" || result.Content.Blocks[0].Text != "after" || event.Partial.Content.Blocks[0].Text != "post-terminal" {
+	if snapshot.Partial.Content.Blocks.Get(0).Text != "before" || result.Content.Blocks.Get(0).Text != "after" || event.Partial.Content.Blocks.Get(0).Text != "post-terminal" {
 		t.Fatal("snapshot/live payload semantics changed")
 	}
 }
@@ -279,8 +279,8 @@ func TestAssistantStreamSnapshotPreservesObjectGraph(t *testing.T) {
 	if snapshot.Partial != snapshot.Error || snapshot.Message == snapshot.Partial || snapshot.Message.Usage != snapshot.Partial.Usage {
 		t.Fatal("message or usage aliases were lost or unrelated objects merged")
 	}
-	blocks := snapshot.Partial.Content.Blocks
-	if blocks[0] != blocks[1] || blocks[0] != snapshot.ToolCall || blocks[0] != snapshot.Message.Content.Blocks[0] || blocks[0] == blocks[2] {
+	blocks := snapshot.Partial.Content.Blocks.Values()
+	if blocks[0] != blocks[1] || blocks[0] != snapshot.ToolCall || blocks[0] != snapshot.Message.Content.Blocks.Get(0) || blocks[0] == blocks[2] {
 		t.Fatal("block aliases were lost or equal but distinct blocks merged")
 	}
 	before, err := json.Marshal(source)
@@ -296,7 +296,7 @@ func TestAssistantStreamSnapshotPreservesObjectGraph(t *testing.T) {
 	}
 	snapshot.ToolCall.Name = "snapshot"
 	snapshot.Partial.Usage.Input = 9
-	if blocks[1].Name != "snapshot" || snapshot.Message.Content.Blocks[0].Name != "snapshot" || snapshot.Message.Usage.Input != 9 || shared.Name != "echo" || usage.Input != 3 {
+	if blocks[1].Name != "snapshot" || snapshot.Message.Content.Blocks.Get(0).Name != "snapshot" || snapshot.Message.Usage.Input != 9 || shared.Name != "echo" || usage.Input != 3 {
 		t.Fatal("snapshot edits did not follow the detached object graph")
 	}
 	stream.Push(AssistantMessageEvent{Type: "done", Message: partial})
@@ -305,10 +305,10 @@ func TestAssistantStreamSnapshotPreservesObjectGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result == partial || result.Content.Blocks[0] == shared || result.Content.Blocks[0] != result.Content.Blocks[1] || result.Content.Blocks[0] == result.Content.Blocks[2] {
+	if result == partial || result.Content.Blocks.Get(0) == shared || result.Content.Blocks.Get(0) != result.Content.Blocks.Get(1) || result.Content.Blocks.Get(0) == result.Content.Blocks.Get(2) {
 		t.Fatal("result snapshot lost repeated block identity")
 	}
-	if result.Content.Blocks[0].Name != "echo" || result.Usage.Input != 3 {
+	if result.Content.Blocks.Get(0).Name != "echo" || result.Usage.Input != 3 {
 		t.Fatal("snapshots share mutable objects with each other")
 	}
 }

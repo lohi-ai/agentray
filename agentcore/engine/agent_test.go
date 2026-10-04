@@ -186,7 +186,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		for _, spec := range specs {
 			result = append(result, &engine.Tool{Tool: ai.Tool{Name: spec.Name, Description: spec.Description, Parameters: spec.Parameters}, Label: spec.Label,
 				Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: spec.Name}}, Details: argumentRef(`{}`)}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: spec.Name}), Details: argumentRef(`{}`)}, nil
 				},
 			})
 		}
@@ -317,7 +317,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 				value = message
 			}
 			if err == nil {
-				err = agent.Prompt(context.Background(), value, ai.BlockContent(action.Images...).Blocks...)
+				err = agent.Prompt(context.Background(), value, ai.BlockContent(action.Images...).Blocks.Values()...)
 			}
 		case "continue":
 			err = agent.Continue(context.Background())
@@ -382,7 +382,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 			checkpoint("message mutation", nil)
 		}
 		if event.Type == "tool_execution_end" && input.ToolEndContent != nil {
-			event.Result.Content = []*ai.ContentBlock{{Type: "text", Text: *input.ToolEndContent}}
+			event.Result.Content = ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: *input.ToolEndContent})
 			event.Result.Terminate = &input.ToolEndTerminate
 		}
 		for i, reaction := range input.Reactions {

@@ -3,6 +3,8 @@ package ai
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // BuildCodexResponsesParams ports Pi's Codex request builder. The transcript
@@ -59,7 +61,7 @@ func BuildCodexResponsesParams(rawModel json.RawMessage, context TranscriptConte
 	set("model", model.ID)
 	set("store", false)
 	set("stream", true)
-	set("instructions", instructions)
+	body["instructions"] = jsonjs.QuoteString(instructions)
 	body["input"] = messages
 	verbosity := options["textVerbosity"]
 	if !samplingTruthy(verbosity) {

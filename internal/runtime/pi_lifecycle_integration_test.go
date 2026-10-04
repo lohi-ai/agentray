@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -40,7 +38,7 @@ func TestPiHostPlanContextSurvivesNativeResumeWithoutRewritingHistory(t *testing
 			t.Fatal(err)
 		}
 		result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("continue"), Session: PiSessionConfig{
-			Store: p.Session, SessionID: p.SessionID, Resume: attempt == 1, Policy: agentcore.NewAllowList(todo.ToolName), Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			Store: p.Session, SessionID: p.SessionID, Resume: attempt == 1, Policy: agentcore.NewAllowList(todo.ToolName), Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected %s", method)
 				}
@@ -110,7 +108,7 @@ func TestPiHostSteeringDuringAnswerAndFollowUpReachDurableHistory(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer host.Close()
-	result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("original question"), Session: PiSessionConfig{Store: store, SessionID: "live", Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Callback: func(_ context.Context, _ string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("original question"), Session: PiSessionConfig{Store: store, SessionID: "live", Pi: agentcore.PiConfig{Callback: func(_ context.Context, _ string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		n := requests.Add(1)
 		var request struct {
 			Context struct{ Messages []json.RawMessage }
@@ -198,7 +196,7 @@ func TestPiHostLifecyclePreservesNativeHistoryAndDurableInjections(t *testing.T)
 	defer host.Close()
 	result, err := RunPi(ctx, PiRunConfig{Host: host, Task: "execute then verify", Input: piSessionJSON("execute"), PricingKnown: true,
 		Session: PiSessionConfig{Store: store, SessionID: "lifecycle", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
-			Worker: piSessionWorker(t), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected callback %s", method)
 				}
@@ -301,7 +299,7 @@ func TestPiHostLifecycleCeilingsAndTerminalTools(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer host.Close()
-			result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("execute"), Session: PiSessionConfig{Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("execute"), Session: PiSessionConfig{Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected callback %s", method)
 				}
@@ -357,7 +355,7 @@ func TestPiHostLifecycleCancellationDuringStepGate(t *testing.T) {
 	defer host.Close()
 	done := make(chan error, 1)
 	go func() {
-		_, err := RunPi(runCtx, PiRunConfig{Host: host, Input: piSessionJSON("execute"), Session: PiSessionConfig{Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+		_, err := RunPi(runCtx, PiRunConfig{Host: host, Input: piSessionJSON("execute"), Session: PiSessionConfig{Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			streams.Add(1)
 			return piSessionReply(true), nil
 		}}}})
@@ -397,7 +395,7 @@ func TestPiHostLifecycleRunsServerGoalPlugin(t *testing.T) {
 	defer host.Close()
 	var calls atomic.Int32
 	result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("finish the task"), Session: PiSessionConfig{
-		Store: p.Session, SessionID: p.SessionID, Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+		Store: p.Session, SessionID: p.SessionID, Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method != "stream" {
 				return nil, fmt.Errorf("unexpected %s", method)
 			}

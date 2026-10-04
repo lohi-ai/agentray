@@ -98,7 +98,7 @@ func TestNativeRequestAdmissionFallbackToolContextUsageAndTraces(t *testing.T) {
 		traces = append(traces, append(json.RawMessage(nil), raw...))
 	}
 	store := agentcore.NewMemorySessionStore()
-	result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"read and finish"`), Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}, Policy: agentcore.NewAllowList("read"), Store: store, SessionID: "admission"}})
+	result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"read and finish"`), Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}, Policy: agentcore.NewAllowList("read"), Store: store, SessionID: "admission"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestNativeRequestAdmissionStreamsBeforeProviderSettlement(t *testing.T) {
 		}
 		return nil
 	}
-	session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}})
+	session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestNativeRequestAdmissionHostFailureDoesNotTraceOrEscalate(t *testing.T) {
 		return nil, failure
 	}
 	binding.OnTrace = func(context.Context, json.RawMessage) { traces++ }
-	result, err := RunPi(context.Background(), PiRunConfig{Input: json.RawMessage(`"fail before dispatch"`), Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 3}}})
+	result, err := RunPi(context.Background(), PiRunConfig{Input: json.RawMessage(`"fail before dispatch"`), Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 3}}})
 	if err == nil || !strings.Contains(err.Error(), "host preparation failed") {
 		t.Fatal("host preparation failure not surfaced", err)
 	}
@@ -301,7 +301,7 @@ func TestNativeRequestAdmissionAbortRetainsNativeTerminalAndUsage(t *testing.T) 
 			}
 			done := make(chan outcome, 1)
 			go func() {
-				result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"abort"`), Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}}})
+				result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"abort"`), Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}}})
 				done <- outcome{result, err}
 			}()
 			select {

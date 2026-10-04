@@ -62,7 +62,7 @@ func TestPiArgumentValues(t *testing.T) {
 				Tool: ai.Tool{Name: "echo", Parameters: tc.Input.Schema},
 				Execute: func(_ context.Context, _ string, args any, _ func(*engine.ToolResult)) (*engine.ToolResult, error) {
 					executed = inspect(args)
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "done"}}, Details: argumentRef(`{}`)}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "done"}), Details: argumentRef(`{}`)}, nil
 				},
 			}
 			call := &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(tc.Input.Raw)}
@@ -82,7 +82,7 @@ func TestPiArgumentValues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			block, err := json.Marshal(outcome.Result.Content[0])
+			block, err := json.Marshal(outcome.Result.Content.Get(0))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +94,7 @@ func TestPiArgumentValues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			actual, err := json.Marshal(map[string]any{"before": before, "executed": executed, "isError": outcome.IsError, "text": string(jsonjs.QuoteString(outcome.Result.Content[0].Text)), "wireText": string(wireText), "source": string(source)})
+			actual, err := json.Marshal(map[string]any{"before": before, "executed": executed, "isError": outcome.IsError, "text": string(jsonjs.QuoteString(outcome.Result.Content.Get(0).Text)), "wireText": string(wireText), "source": string(source)})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -3,7 +3,6 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,7 +58,7 @@ func TestPiHostStartupFailureDoesNotConsumeSteering(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	_, err = RunPi(ctx, PiRunConfig{Host: host, Input: json.RawMessage(`"test"`), Session: PiSessionConfig{Pi: agentcore.PiConfig{Runtime: filepath.Join(t.TempDir(), "missing-runtime"), Worker: "missing-worker.mjs"}}})
+	_, err = RunPi(ctx, PiRunConfig{Host: host, Input: json.RawMessage(`"test"`), Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`null`)}}})
 	if err == nil || drains != 0 {
 		t.Fatalf("failed startup consumed queued input: drains=%d err=%v", drains, err)
 	}

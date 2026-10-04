@@ -23,13 +23,13 @@ func TestAssistantStreamRelayPreservesLivePayloads(t *testing.T) {
 		t.Fatal("attempt terminal leaked into relay result", err)
 	}
 	source := NewAssistantMessageEventStreamFor(shared)
-	message := &Message{Role: "assistant", Content: MessageContent{Blocks: []*ContentBlock{{Type: "text", Text: ""}}}, StopReason: "stop"}
+	message := &Message{Role: "assistant", Content: BlockContent(ContentBlock{Type: "text", Text: ""}), StopReason: "stop"}
 	go func() {
 		defer source.End()
 		source.Synchronize(func() { source.Push(AssistantMessageEvent{Type: "start", Partial: message}) })
 		for i := 0; i < 1000; i++ {
 			source.Synchronize(func() {
-				message.Content.Blocks[0].Text = fmt.Sprint(i)
+				message.Content.Blocks.Get(0).Text = fmt.Sprint(i)
 				source.Push(AssistantMessageEvent{Type: "text_delta", Delta: "x", Partial: message})
 			})
 		}
@@ -76,7 +76,7 @@ func TestAssistantStreamRelayPreservesLivePayloads(t *testing.T) {
 		t.Fatal("relay copied/lost terminal pointer", err)
 	}
 	snapshot, err := relay.SnapshotResult(ctx)
-	if err != nil || snapshot.Content.Blocks[0].Text != "999" {
+	if err != nil || snapshot.Content.Blocks.Get(0).Text != "999" {
 		t.Fatal("relay snapshot lost final mutation", err)
 	}
 	independent := NewAssistantMessageEventStreamFor(context.Background())

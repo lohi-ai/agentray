@@ -42,7 +42,7 @@ func TestNativeAttemptUsageCountsDiscardedAndIdenticalResponsesOnce(t *testing.T
 	}
 	binding, _, stream := ladder.sessionBinding()
 	projection := &piRunProjection{pricingKnown: false}
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttemptObserved: projection.accountNativeAttempt, nativeTerminalPublished: projection.expectNativeTerminal})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttemptObserved: projection.accountNativeAttempt, nativeTerminalPublished: projection.expectNativeTerminal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestNativeAttemptUsageThroughEngineMessageEnd(t *testing.T) {
 		return out, nil
 	}
 	var err error
-	session, err = NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: logical, nativeLadder: ladder, nativeAttemptObserved: projection.accountNativeAttempt, nativeTerminalPublished: projection.expectNativeTerminal})
+	session, err = NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: logical, nativeLadder: ladder, nativeAttemptObserved: projection.accountNativeAttempt, nativeTerminalPublished: projection.expectNativeTerminal})
 	if err != nil {
 		t.Fatal(err)
 	}

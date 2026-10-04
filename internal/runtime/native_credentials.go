@@ -23,7 +23,7 @@ func (p BuildParams) nativeLadderOptions(tier ModelTier, options PiModelOptions)
 		seen := map[string]identity{}
 		for _, resolved := range tier.resolvedRungs() {
 			rung := resolved.tier
-			if ai.NormalizeOAuthVendor(rung.Provider) == ai.VendorOpenAICodex && rung.TokenSource != nil {
+			if supportsNativeOAuthPool(rung.Provider) && rung.TokenSource != nil {
 				continue
 			}
 			providerName := ai.NormalizeVendor(rung.Provider)

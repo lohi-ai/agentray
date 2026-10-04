@@ -22,7 +22,7 @@ func TestAssistantStreamSnapshotDetachesEveryPublicField(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := &Message{Role: "user", Content: TextContent("original"), Extra: map[string]json.RawMessage{}}
-	source := AssistantMessageEvent{Extra: map[string]json.RawMessage{"extension": json.RawMessage(`{"value":10}`)}, Type: "toolcall_end", Partial: &message, Message: text, Error: &message, ToolCall: message.Content.Blocks[0]}
+	source := AssistantMessageEvent{Extra: map[string]json.RawMessage{"extension": json.RawMessage(`{"value":10}`)}, Type: "toolcall_end", Partial: &message, Message: text, Error: &message, ToolCall: message.Content.Blocks.Get(0)}
 	before, err := json.Marshal(source)
 	if err != nil {
 		t.Fatal(err)
@@ -112,10 +112,10 @@ func TestAssistantStreamSnapshotDoesNotSerialize(t *testing.T) {
 	if !math.IsNaN(u.Input) || !math.IsInf(u.Output, 1) || !math.IsInf(u.Cost.Total, -1) || !math.Signbit(*u.Reasoning) {
 		t.Fatal("snapshot coerced live numeric values")
 	}
-	message.Content.Blocks[0].Arguments[0] = 'x'
+	message.Content.Blocks.Get(0).Arguments[0] = 'x'
 	message.Extra["unfinished"][0] = 'x'
 	*message.Usage.Reasoning = 1
-	if string(snapshot.Partial.Content.Blocks[0].Arguments) != "{" || string(snapshot.Partial.Extra["unfinished"]) != "[" || !math.Signbit(*u.Reasoning) {
+	if string(snapshot.Partial.Content.Blocks.Get(0).Arguments) != "{" || string(snapshot.Partial.Extra["unfinished"]) != "[" || !math.Signbit(*u.Reasoning) {
 		t.Fatal("snapshot retained mutable JSON or optional number fields")
 	}
 	if _, err := json.Marshal(snapshot); err == nil {

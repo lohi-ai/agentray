@@ -39,7 +39,7 @@ func TestPiToolLists(t *testing.T) {
 				return &engine.Tool{Tool: ai.Tool{Name: name, Description: "tool", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, ExecutionMode: mode,
 					Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
 						executed = append(executed, name)
-						return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: name}}, Details: engine.NewObject()}, nil
+						return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: name}), Details: engine.NewObject()}, nil
 					},
 				}
 			}
@@ -89,7 +89,7 @@ func TestPiToolLists(t *testing.T) {
 					value["role"] = event.Message.Role
 				}
 				if event.Result != nil {
-					value["isError"], value["text"] = event.IsError, event.Result.Content[0].Text
+					value["isError"], value["text"] = event.IsError, event.Result.Content.Get(0).Text
 				}
 				events = append(events, value)
 				if !changed && event.Type == input.Stage && (input.Stage != "message_end" || event.Message.Role == "assistant") {
@@ -119,7 +119,7 @@ func TestPiToolLists(t *testing.T) {
 						problem = err.Error()
 						return
 					}
-					outcome = map[string]any{"isError": result.IsError, "text": result.Result.Content[0].Text}
+					outcome = map[string]any{"isError": result.IsError, "text": result.Result.Content.Get(0).Text}
 				} else {
 					if input.Stage == "initial" {
 						apply()
@@ -152,7 +152,7 @@ func TestExplicitEmptyToolListOverridesContext(t *testing.T) {
 	}}
 	current := &engine.Context{Tools: engine.NewList(tool)}
 	result, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Name: "first", Arguments: json.RawMessage(`{}`)}, engine.NewList[*engine.Tool](), nil, current, engine.ToolHooks{}, nil)
-	if err != nil || !result.IsError || result.Result.Content[0].Text != "Tool first not found" {
+	if err != nil || !result.IsError || result.Result.Content.Get(0).Text != "Tool first not found" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

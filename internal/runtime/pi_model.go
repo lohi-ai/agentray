@@ -31,13 +31,13 @@ type PiModelOptions struct {
 // BindPi prepares this tier's model and credential callbacks for either
 // Pi-contract runtime. Provider execution is selected by the host. The binding
 // preserves the resolver's provider identity, endpoint, and chosen API dialect.
-// Public worker bindings reject OAuth pools and fallback ladders. The native
-// runner selects its internal Codex pool binding alongside the pooled stream.
+// Standalone bindings reject OAuth pools and fallback ladders. The native
+// runner selects its supported native pool binding alongside the pooled stream.
 // The returned bool says whether the native cost metadata is known.
 func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcore.PiConfig, bool, error) {
 	return t.bindPi(cfg, opts, false)
 }
-func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCodexPool bool) (agentcore.PiConfig, bool, error) {
+func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeOAuthPool bool) (agentcore.PiConfig, bool, error) {
 	if strings.TrimSpace(t.Model) == "" {
 		return cfg, false, errors.New("Pi model ID is required")
 	}
@@ -61,10 +61,10 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 	if t.Fallback != nil || strings.TrimSpace(t.FallbackModel) != "" {
 		return cfg, false, errors.New("Pi model binding requires explicit native fallback lifecycle integration")
 	}
-	if nativeCodexPool && (ai.NormalizeOAuthVendor(t.Provider) != ai.VendorOpenAICodex || t.TokenSource == nil) {
-		return cfg, false, errors.New("native Codex binding requires its account pool")
+	if nativeOAuthPool && (!supportsNativeOAuthPool(t.Provider) || t.TokenSource == nil) {
+		return cfg, false, errors.New("native OAuth binding requires a supported account pool")
 	}
-	if !nativeCodexPool && (ai.IsOAuthVendor(t.Provider) || t.TokenSource != nil) {
+	if !nativeOAuthPool && (ai.IsOAuthVendor(t.Provider) || t.TokenSource != nil) {
 		return cfg, false, errors.New("Pi model binding requires explicit OAuth account-pool lifecycle integration")
 	}
 	options := map[string]json.RawMessage{}
@@ -79,7 +79,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 			return cfg, false, errors.New("Pi stream options must be an object")
 		}
 	}
-	wire, err := t.resolvePiWire(nativeCodexPool, streamOptions)
+	wire, err := t.resolvePiWire(nativeOAuthPool, streamOptions)
 	if err != nil {
 		return cfg, false, err
 	}
@@ -240,7 +240,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 			if err := json.Unmarshal(params, &requested); err != nil || requested != providerName {
 				return nil, errors.New("Pi requested credentials for an unbound provider")
 			}
-			if nativeCodexPool {
+			if nativeOAuthPool {
 				return json.RawMessage(`null`), nil
 			}
 			key := t.APIKey

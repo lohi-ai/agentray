@@ -31,7 +31,7 @@ func TestNativeLadderJournalCrashRecovery(t *testing.T) {
 			store := agentcore.NewMemorySessionStore()
 			ladder := testNativeLadder(t)
 			binding, _, stream := ladder.binding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: name})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: name})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,7 +167,7 @@ func TestNativeLadderJournalWriteFailureFencesSession(t *testing.T) {
 			store := &nativeSelectionFailStore{MemorySessionStore: agentcore.NewMemorySessionStore(), selectionError: failure}
 			ladder := testNativeLadder(t)
 			binding, _, stream := ladder.binding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: "write-failure"})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: "write-failure"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +207,7 @@ func TestNativeLadderJournalConcurrentCheckpoints(t *testing.T) {
 	store := agentcore.NewMemorySessionStore()
 	ladder := testNativeLadder(t)
 	binding, _, stream := ladder.binding()
-	session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: "checkpoint-race"})
+	session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, nativeLadder: ladder, NativeStream: stream, Store: store, SessionID: "checkpoint-race"})
 	if err != nil {
 		t.Fatal(err)
 	}

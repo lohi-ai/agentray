@@ -63,9 +63,9 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 			tools := []*engine.Tool{}
 			if tc.Input.Tool {
 				tools = append(tools, &engine.Tool{Tool: ai.Tool{Name: "echo", Description: "Echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Label: "Echo", Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
-					update(&engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "working"}}})
+					update(&engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "working"})})
 					terminate := true
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "done"}}, Terminate: &terminate}, nil
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "done"}), Terminate: &terminate}, nil
 				}})
 			}
 			provider := engine.StreamFn(func(_ context.Context, model json.RawMessage, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {

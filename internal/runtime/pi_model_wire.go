@@ -17,7 +17,7 @@ type piModelWire struct {
 
 // Resolve native-only APIs without constructing a legacy client for a different
 // wire. Existing legacy providers still supply their established host defaults.
-func (t ModelTier) resolvePiWire(nativeCodexPool bool, streamOptions map[string]json.RawMessage) (piModelWire, error) {
+func (t ModelTier) resolvePiWire(nativeOAuthPool bool, streamOptions map[string]json.RawMessage) (piModelWire, error) {
 	vendor := ai.NormalizeVendor(t.Provider)
 	if vendor == ai.VendorPiMessages || vendor == "radius" {
 		return piModelWire{api: ai.VendorPiMessages, provider: vendor, endpoint: t.BaseURL}, nil
@@ -25,9 +25,24 @@ func (t ModelTier) resolvePiWire(nativeCodexPool bool, streamOptions map[string]
 	if vendor == ai.VendorAzureResponses {
 		return t.resolveAzurePiWire(streamOptions)
 	}
+	if nativeOAuthPool && ai.NormalizeOAuthVendor(t.Provider) == ai.VendorGoogleAntigravity {
+		endpoint := strings.TrimSpace(t.BaseURL)
+		defaults := endpoint == ""
+		if defaults {
+			endpoint = "https://daily-cloudcode-pa.googleapis.com"
+		}
+		return piModelWire{api: ai.VendorGoogleAntigravity, provider: ai.VendorGoogleAntigravity, endpoint: endpoint, compat: map[string]any{"antigravityDefaultEndpoints": defaults}}, nil
+	}
 	var provider agentcore.LLMProvider
 	var err error
-	if nativeCodexPool {
+	if nativeOAuthPool && ai.NormalizeOAuthVendor(t.Provider) == ai.VendorClaudeCode {
+		endpoint := t.BaseURL
+		if strings.TrimSpace(endpoint) == "" {
+			endpoint = "https://api.anthropic.com"
+		}
+		return piModelWire{api: "anthropic-messages", provider: ai.VendorClaudeCode, endpoint: endpoint}, nil
+	}
+	if nativeOAuthPool {
 		p := ai.NewCodexProvider()
 		p.BaseURL = t.BaseURL
 		provider = p

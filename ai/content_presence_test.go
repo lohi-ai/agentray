@@ -29,7 +29,7 @@ func TestDecodedContentPresenceSurvivesReplacement(t *testing.T) {
 				message.Content.Text = &text
 				expected = `"body"`
 			case "blocks_field":
-				message.Content.Blocks = []*ContentBlock{}
+				message.Content.Blocks = NewBlockList()
 				expected = `[]`
 			}
 			if !message.HasContent() {

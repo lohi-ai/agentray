@@ -10,7 +10,7 @@ func TestNativeRuntimeSelection(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{"", false}, {"false", false}, {"true", true}, {"1", true}, {"invalid", false},
+		{"", true}, {"false", false}, {"true", true}, {"1", true}, {"invalid", true},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			t.Setenv("AGENTRAY_AGENT_NATIVE_GO", tc.value)

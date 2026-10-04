@@ -181,7 +181,7 @@ func TestNativeRunnerCodexPoolBindingAndRotation(t *testing.T) {
 		return "stale-key", nil
 	}
 	tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorOpenAICodex, Model: "test", BaseURL: server.URL, APIKey: ai.OAuthPoolKey, TokenSource: pool}}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "hello"}, tier, nil)

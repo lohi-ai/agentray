@@ -14,11 +14,12 @@ import (
 type piMessagesTypedAdapter struct {
 	messages map[*Object]*Message
 	blocks   map[*Object]*ContentBlock
+	lists    map[*Array]*BlockList
 	usages   map[*Object]*Usage
 }
 
 func newPiMessagesTypedAdapter() *piMessagesTypedAdapter {
-	return &piMessagesTypedAdapter{messages: map[*Object]*Message{}, blocks: map[*Object]*ContentBlock{}, usages: map[*Object]*Usage{}}
+	return &piMessagesTypedAdapter{messages: map[*Object]*Message{}, blocks: map[*Object]*ContentBlock{}, lists: map[*Array]*BlockList{}, usages: map[*Object]*Usage{}}
 }
 
 // Malformed provider fields remain serializable even where Go has a stricter
@@ -145,7 +146,14 @@ func (a *piMessagesTypedAdapter) message(value *Object) (*Message, error) {
 				return nil, err
 			}
 		}
-		message.Content = MessageContent{Blocks: blocks}
+		list := a.lists[content]
+		if list == nil {
+			list = NewBlockList()
+			a.lists[content] = list
+		}
+		list.SetLength(0)
+		list.Append(blocks...)
+		message.Content = MessageContent{Blocks: list}
 	}
 	if usage, ok := value.Get("usage").(*Object); ok {
 		next, err := decodePiMessagesProjection[Usage](usage)

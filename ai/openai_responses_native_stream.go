@@ -22,7 +22,6 @@ type responsesAccumulator struct {
 	stream                  *AssistantMessageEventStream
 	push                    func(AssistantMessageEvent)
 	output                  *Message
-	blocks                  []*ContentBlock
 	slots                   map[string]*responsesSlot
 	reasoning               map[string]*ContentBlock
 	sawTerminal, ended      bool
@@ -38,11 +37,7 @@ func newResponsesAccumulator(model completionsModel, grammar map[string]string, 
 		output: &Message{Role: "assistant", Content: BlockContent(), API: model.API, Provider: model.Provider, Model: model.ID, Usage: &Usage{}, StopReason: "pending", Timestamp: timestamp},
 		slots:  map[string]*responsesSlot{}, reasoning: map[string]*ContentBlock{}}
 }
-func (a *responsesAccumulator) refresh() {
-	a.output.Content = BlockReferences(a.blocks...)
-}
 func (a *responsesAccumulator) publish(event AssistantMessageEvent) {
-	a.refresh()
 	if event.Type != "done" && event.Type != "error" {
 		event.Partial = a.output
 	}
@@ -80,7 +75,7 @@ func (a *responsesAccumulator) applyPhase(item map[string]json.RawMessage) {
 }
 func (a *responsesAccumulator) createSlot(key string, item map[string]json.RawMessage) *responsesSlot {
 	block := &ContentBlock{Extra: map[string]json.RawMessage{}}
-	slot := &responsesSlot{block: block, contentIndex: len(a.blocks)}
+	slot := &responsesSlot{block: block, contentIndex: a.output.Content.Blocks.Len()}
 	event := ""
 	switch samplingString(item["type"]) {
 	case "reasoning":
@@ -111,7 +106,7 @@ func (a *responsesAccumulator) createSlot(key string, item map[string]json.RawMe
 	default:
 		return nil
 	}
-	a.blocks = append(a.blocks, block)
+	a.output.Content.Blocks.Append(block)
 	a.slots[key] = slot
 	a.publish(AssistantMessageEvent{Type: event, ContentIndex: slot.contentIndex})
 	return slot
@@ -140,7 +135,6 @@ func (a *responsesAccumulator) chunk(raw json.RawMessage) error {
 		if a.ended {
 			return
 		}
-		defer a.refresh()
 		event, ok := samplingObject(raw)
 		if strings.TrimSpace(string(raw)) == "null" {
 			failure = fmt.Errorf("null is not an object (evaluating 'event.type')")
@@ -439,7 +433,7 @@ func (a *responsesAccumulator) finalizeResponse(raw json.RawMessage) error {
 	a.output.StopReason = stop
 	a.output.ErrorMessage = errorMessage
 	if stop == "stop" {
-		for _, block := range a.blocks {
+		for _, block := range a.output.Content.Blocks.Values() {
 			if block.Type == "toolCall" {
 				a.output.StopReason = "toolUse"
 				break
@@ -472,7 +466,7 @@ func (a *responsesAccumulator) streamFailure() string {
 	if !a.sawTerminal {
 		failure = "OpenAI Responses stream ended before a terminal response event"
 	} else if a.output.StopReason == "toolUse" {
-		for _, block := range a.blocks {
+		for _, block := range a.output.Content.Blocks.Values() {
 			if block.Type == "toolCall" && (block.Extra["partialJson"] != nil || block.Extra["customInput"] != nil) {
 				failure = fmt.Sprintf("OpenAI Responses stream completed with an unfinished tool call: %s (%s)", block.Name, block.ID)
 				break
@@ -519,7 +513,7 @@ func (a *responsesAccumulator) fail(message string, aborted bool) {
 	})
 }
 func (a *responsesAccumulator) failLocked(message string, aborted bool) {
-	for _, block := range a.blocks {
+	for _, block := range a.output.Content.Blocks.Values() {
 		delete(block.Extra, "index")
 		delete(block.Extra, "partialJson")
 		delete(block.Extra, "customInput")

@@ -39,7 +39,7 @@ func contentReadShape(t *testing.T, message *ai.Message) any {
 		content["kind"], content["text"] = "text", *message.Content.Text
 	default:
 		keys, values := []string{}, []any{}
-		for index, block := range message.Content.Blocks {
+		for index, block := range message.Content.Blocks.Values() {
 			var value any
 			if block != nil {
 				keys = append(keys, strconv.Itoa(index))
@@ -53,7 +53,7 @@ func contentReadShape(t *testing.T, message *ai.Message) any {
 			}
 			values = append(values, value)
 		}
-		content["kind"], content["length"], content["keys"], content["values"] = "array", len(message.Content.Blocks), keys, values
+		content["kind"], content["length"], content["keys"], content["values"] = "array", message.Content.Blocks.Len(), keys, values
 	}
 	return map[string]any{"role": message.Role, "reason": reason, "error": message.ErrorMessage, "content": content}
 }
@@ -159,7 +159,7 @@ func TestPiContentReads(t *testing.T) {
 			}
 			tool := &engine.Tool{Tool: ai.Tool{Name: "echo", Description: "tool", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				executed = append(executed, "echo")
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "ok"}}, Details: engine.NewObject()}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "ok"}), Details: engine.NewObject()}, nil
 			}}
 			stream := func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 				requests++
@@ -219,7 +219,7 @@ func TestPiContentReads(t *testing.T) {
 			events, executed := []string{}, 0
 			tool := &engine.Tool{Tool: ai.Tool{Name: "echo", Description: "tool", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}, Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				executed++
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "ok"}}, Details: engine.NewObject()}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "ok"}), Details: engine.NewObject()}, nil
 			}}
 			config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 },
 				ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil },

@@ -83,7 +83,7 @@ func TestNativeToolBindingRetainsNullResultsAndUpdates(t *testing.T) {
 			if len(updates) != 3 || updates[0] != nil || updates[1] == nil || updates[2] != nil {
 				t.Fatalf("lost null update shape: %+v", updates)
 			}
-			if len(updates[1].Content) != 1 || updates[1].Content[0].Text != "working" {
+			if updates[1].Content.Len() != 1 || updates[1].Content.Get(0).Text != "working" {
 				t.Fatalf("lost update content: %+v", updates[1])
 			}
 			wantError := resultJSON == "null"
@@ -91,7 +91,7 @@ func TestNativeToolBindingRetainsNullResultsAndUpdates(t *testing.T) {
 			if wantError {
 				wantText = "null is not an object (evaluating 'result.isError')"
 			}
-			if outcome.IsError != wantError || outcome.Result == nil || len(outcome.Result.Content) != 1 || outcome.Result.Content[0].Text != wantText {
+			if outcome.IsError != wantError || outcome.Result == nil || outcome.Result.Content.Len() != 1 || outcome.Result.Content.Get(0).Text != wantText {
 				t.Fatalf("unexpected result: %+v", outcome)
 			}
 		})

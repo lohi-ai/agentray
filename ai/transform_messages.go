@@ -77,11 +77,11 @@ func transformMessageReferencesAt(messages []*Message, model *Model, normalize T
 			if message.Role == "user" && message.Content.Text == nil {
 				copy := *message
 				message = &copy
-				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionUserImagePlaceholder)...)
+				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks.Values(), nonVisionUserImagePlaceholder)...)
 			} else if message.Role == "toolResult" {
 				copy := *message
 				message = &copy
-				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks, nonVisionToolImagePlaceholder)...)
+				message.Content = BlockReferences(replaceImagesWithPlaceholder(message.Content.Blocks.Values(), nonVisionToolImagePlaceholder)...)
 			}
 			prepared[i] = message
 		}
@@ -98,7 +98,14 @@ func transformMessageReferencesAt(messages []*Message, model *Model, normalize T
 		if message.Role == "assistant" {
 			same := message.Provider == model.Provider && message.API == model.API && message.Model == model.ID
 			blocks := []*ContentBlock{}
-			for _, block := range message.Content.Blocks {
+			// flatMap captures the array and length, then reads each live slot.
+			// A normalizer may replace later entries or the message's content.
+			content := message.Content.Blocks
+			for index, length := 0, content.Len(); index < length; index++ {
+				block := content.Get(index)
+				if block == nil {
+					continue
+				}
 				switch block.Type {
 				case "thinking":
 					if block.Redacted != nil && *block.Redacted {
@@ -172,7 +179,7 @@ func transformMessageReferencesAt(messages []*Message, model *Model, normalize T
 			if message.StopReason == "error" || message.StopReason == "aborted" {
 				continue
 			}
-			for _, block := range message.Content.Blocks {
+			for _, block := range message.Content.Blocks.Values() {
 				if block.Type == "toolCall" {
 					pending = append(pending, block)
 				}

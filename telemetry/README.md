@@ -162,6 +162,9 @@ Valid surrogate pairs use ordinary UTF-8. Attribute export restores the original
 surrogate escapes, including in nested objects and arrays. Preserve these strings
 as opaque values or serialize them through `Attributes`; ordinary Go rune
 iteration and `encoding/json` on a plain string do not preserve lone surrogates.
+Span options and recorded span/event names use the same UTF-16 decoding and
+export rules. Ten pinned-source cases verify names through admission, active
+and settled snapshots, and importing serialized records again.
 Ordered attributes and decoded nested objects preserve source key insertion
 order. Plain Go maps remain accepted as nested values, but their insertion order
 cannot be recovered; those values export deterministically. Use `NewObject` or
@@ -324,35 +327,11 @@ stays detached while nested edits remain shared, and automatic failures retain
 the original error identity. Go checks cover explicit field absence/null/empty
 strings, live overflow and signed zero, cycles and passive function export.
 
-To regenerate or verify the development oracle:
-
-```sh
-bun telemetry/testdata/generate-pi-fixtures.ts
-bun telemetry/testdata/generate-pi-fixtures.ts --check
-bun telemetry/testdata/generate-schema-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-decode-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-unicode-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-order-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-array-fixtures.ts --check
-bun telemetry/testdata/generate-array-property-fixtures.ts --check
-bun telemetry/testdata/generate-attribute-reader-fixtures.ts --check
-bun telemetry/testdata/generate-option-reader-fixtures.ts --check
-bun telemetry/testdata/generate-status-json-fixtures.ts --check
-bun telemetry/testdata/generate-status-reader-fixtures.ts --check
-bun telemetry/testdata/generate-status-reference-fixtures.ts --check
-```
-
-The pinned TypeScript under `third_party/pi/upstream` is a development reference
-only for this module. The generator verifies its original bytes before use.
-The port's completion criteria include deleting this reference, TS fixture
-generators, and TS-only bridge/build tooling after parity verification. Retain
-the verified JSON fixtures, Go tests, and provenance/license notices.
-The native host records request spans and delivers trace packets with this
-module for callback and explicitly bound Go-provider streams. The native session
-adapter feeds the existing trace sink directly. Default production provider
-instrumentation has not yet switched to the Go engine.
-The original MIT license is retained in `LICENSE.pi`.
+Run `go test -race ./telemetry/...` against the recorded source fixtures.
+The TypeScript reference and generators have been removed. Source provenance
+is retained in `third_party/pi/UPSTREAM.json`; the original MIT notice is in
+`LICENSE.pi`. The native host records request spans and settled trace packets
+through this package and is the server default.
 
 The ordered value containers and JSON codec are shared with the native
 agent engine through `internal/jsonjs`. Telemetry exports concrete aliases;

@@ -360,7 +360,7 @@ func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.Se
 			input, _ = json.Marshal(request.Prompt)
 		}
 		result, err := RunPi(ctx, PiRunConfig{Host: host, Task: request.Task, Input: input, Sink: sink, PricingKnown: known, Compaction: compaction,
-			Session: PiSessionConfig{Pi: cfg, nativeLadder: ladder, nativeAttempts: runtime.nativeAttempts, NativeGo: runtime.NativeGo, NativeStream: stream, Policy: agentcore.NewAllowList(names...), Store: sessionStore, SessionID: request.SessionID, Resume: resume, HistoryRevision: revision, Invocation: invocation}})
+			Session: PiSessionConfig{Pi: cfg, nativeLadder: ladder, nativeAttempts: runtime.nativeAttempts, NativeStream: stream, Policy: agentcore.NewAllowList(names...), Store: sessionStore, SessionID: request.SessionID, Resume: resume, HistoryRevision: revision, Invocation: invocation}})
 		projection := result.Projection
 		projection.NativeState, projection.NativeTelemetry, projection.NativeRevision = result.State, result.Telemetry, result.Revision
 		if err != nil {

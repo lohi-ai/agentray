@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/lohi-ai/agentray/ai"
 )
@@ -15,7 +14,7 @@ func validateNativeProviderModel(raw json.RawMessage) error {
 		return err
 	}
 	switch model.API {
-	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses", "pi-messages":
+	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses", "pi-messages", ai.VendorGoogleAntigravity:
 		return nil
 	}
 	return fmt.Errorf("native Go provider for API %q is not ported", model.API)
@@ -43,54 +42,26 @@ func nativeProviderStream(ctx context.Context, model json.RawMessage, transcript
 	if err != nil {
 		return nil, err
 	}
-	provider := ai.OpenAICompletionsStreamOptions{Options: raw}
-	if client, exists := options["fetch"]; exists && client != nil {
-		var ok bool
-		provider.Client, ok = client.(*http.Client)
-		if !ok {
-			return nil, fmt.Errorf("native fetch must be an *http.Client")
-		}
+	provider, err := ai.BindNativeStreamOptions(raw, options, ai.OpenAICompletionsStreamOptions{})
+	if err != nil {
+		return nil, err
 	}
-	switch callback := options["onPayload"].(type) {
-	case nil:
-	case func(json.RawMessage, json.RawMessage) (json.RawMessage, error):
-		provider.OnPayload = func(_ context.Context, payload, model json.RawMessage) (json.RawMessage, error) {
-			return callback(payload, model)
-		}
-	case func(context.Context, json.RawMessage, json.RawMessage) (json.RawMessage, error):
-		provider.OnPayload = callback
-	default:
-		return nil, fmt.Errorf("unsupported native onPayload callback %T", callback)
-	}
-	switch callback := options["onResponse"].(type) {
-	case nil:
-	case func(ai.CompletionsResponse, json.RawMessage) error:
-		provider.OnResponse = func(_ context.Context, response ai.CompletionsResponse, model json.RawMessage) error {
-			return callback(response, model)
-		}
-	case func(context.Context, ai.CompletionsResponse, json.RawMessage) error:
-		provider.OnResponse = callback
-	default:
-		return nil, fmt.Errorf("unsupported native onResponse callback %T", callback)
-	}
-	switch callback := options["onProviderStreamEvent"].(type) {
-	case nil:
-	case func(*json.RawMessage, json.RawMessage) error:
-		provider.OnProviderStreamEvent = func(_ context.Context, event *json.RawMessage, model json.RawMessage) error {
-			return callback(event, model)
-		}
-	case func(context.Context, *json.RawMessage, json.RawMessage) error:
-		provider.OnProviderStreamEvent = callback
-	default:
-		return nil, fmt.Errorf("unsupported native onProviderStreamEvent callback %T", callback)
-	}
-	var selected struct{ API string }
+	var selected struct{ API, Provider string }
 	_ = json.Unmarshal(model, &selected) // Validated before callback binding.
 	if pool != nil {
+		if selected.API == ai.VendorGoogleAntigravity && selected.Provider == ai.VendorGoogleAntigravity {
+			return ai.StreamAntigravityPooled(ctx, model, transcript, provider, pool)
+		}
+		if selected.API == "anthropic-messages" && selected.Provider == ai.VendorClaudeCode {
+			return ai.StreamClaudeCodePooled(ctx, model, transcript, provider, pool)
+		}
 		if selected.API != "openai-codex-responses" {
 			return nil, fmt.Errorf("native Codex account pool cannot serve API %q", selected.API)
 		}
 		return ai.StreamCodexResponsesPooled(ctx, model, transcript, provider, pool)
+	}
+	if selected.API == ai.VendorGoogleAntigravity {
+		return nil, fmt.Errorf("Antigravity requires an account pool")
 	}
 	if selected.API == ai.VendorPiMessages {
 		return ai.StreamPiMessagesJSON(ctx, model, transcript, provider)

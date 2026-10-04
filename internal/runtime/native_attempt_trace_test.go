@@ -26,7 +26,7 @@ func TestNativeAttemptTracePreservesAdmissionFailure(t *testing.T) {
 	binding.OnTrace = func(_ context.Context, raw json.RawMessage) {
 		traces = append(traces, append(json.RawMessage(nil), raw...))
 	}
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}

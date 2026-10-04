@@ -132,6 +132,7 @@ func TestPiOpenAICompletionsStreamOracle(t *testing.T) {
 func TestCompletionsStreamConcurrentSnapshots(t *testing.T) {
 	stream := NewAssistantMessageEventStream()
 	acc := newCompletionsAccumulator(completionsModel{ID: "test"}, OpenAICompletionsCompat{SupportsFinishReason: true}, nil, stream, 100)
+	content := acc.output.Content
 	go func() {
 		acc.start()
 		// Grow the block array repeatedly while updating the first tool through
@@ -164,7 +165,7 @@ func TestCompletionsStreamConcurrentSnapshots(t *testing.T) {
 		if event.ToolCall != nil {
 			ends[event.ContentIndex] = event.ToolCall
 			stream.Synchronize(func() {
-				if event.Partial.Content.Blocks[event.ContentIndex] != event.ToolCall {
+				if event.Partial.Content.Blocks.Get(event.ContentIndex) != event.ToolCall {
 					t.Fatal("toolcall_end and transcript do not share the block")
 				}
 			})
@@ -173,28 +174,33 @@ func TestCompletionsStreamConcurrentSnapshots(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if snapshot.ToolCall != nil && snapshot.Partial.Content.Blocks[snapshot.ContentIndex] != snapshot.ToolCall {
+		if snapshot.ToolCall != nil && snapshot.Partial.Content.Blocks.Get(snapshot.ContentIndex) != snapshot.ToolCall {
 			t.Fatal("snapshot separated toolcall_end from its transcript block")
 		}
 	}
+	stream.Synchronize(func() {
+		if content.Blocks != acc.output.Content.Blocks || content.Blocks.Len() != 101 {
+			t.Fatal("provider growth did not reach the retained content list")
+		}
+	})
 	result, err := stream.SnapshotResult(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.StopReason != "toolUse" || len(result.Content.Blocks) != 101 || len(ends) != 100 {
+	if result.StopReason != "toolUse" || result.Content.Blocks.Len() != 101 || len(ends) != 100 {
 		t.Fatalf("lost blocks: %+v", result)
 	}
-	if string(result.Content.Blocks[0].Arguments) != "{}" || result.Content.Blocks[1].Text != string(bytes.Repeat([]byte("x"), 100)) {
+	if string(result.Content.Blocks.Get(0).Arguments) != "{}" || result.Content.Blocks.Get(1).Text != string(bytes.Repeat([]byte("x"), 100)) {
 		t.Fatal("updates lost after growing content array")
 	}
-	if ends[0] != acc.blocks[0] {
+	if ends[0] != acc.output.Content.Blocks.Get(0) {
 		t.Fatal("toolcall_end did not retain block identity")
 	}
 	// Producer settlement makes retained pointers safe to inspect directly.
 	if err := stream.WaitForEnd(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, block := range acc.blocks {
+	for _, block := range acc.output.Content.Blocks.Values() {
 		if len(block.Extra) > 0 {
 			t.Fatal("scratch data survived finalization")
 		}

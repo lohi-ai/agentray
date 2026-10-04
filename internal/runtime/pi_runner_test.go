@@ -21,7 +21,7 @@ func TestPiRunnerRejectsUnsupportedMigrationWithoutGoFallback(t *testing.T) {
 		{"malformed native history", RunOptions{NativeHistory: json.RawMessage(`{}`)}, "message array"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: "unused"}))
+			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 			// Empty build parameters would fail Build. The migration error must win
 			// before either driver, provider, or tool host can be invoked.
 			_, err := r.runModelLoop(context.Background(), BuildParams{}, tc.opts, ModelTier{}, nil)

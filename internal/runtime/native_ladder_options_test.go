@@ -23,7 +23,7 @@ func TestNativeAttemptOptionsOwnCredentialCapAndPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestNativeAttemptOptionsNullCredentialDropsPreviousKey(t *testing.T) {
 		return original(ctx, method, params, emit)
 	}
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}

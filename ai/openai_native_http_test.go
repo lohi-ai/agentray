@@ -317,7 +317,7 @@ func testOpenAIHTTPTimeoutAndAbort(t *testing.T, api string, streamFn func(conte
 					t.Fatalf("%+v", result)
 				}
 			case "body outlives header timeout":
-				if result.StopReason != "stop" || result.Content.Blocks[0].Text != "finished" {
+				if result.StopReason != "stop" || result.Content.Blocks.Get(0).Text != "finished" {
 					t.Fatalf("%+v", result)
 				}
 			case "abort body":

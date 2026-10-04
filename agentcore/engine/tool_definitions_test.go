@@ -46,7 +46,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 						mu.Lock()
 						executed = append(executed, map[string]string{"id": id, "executor": label})
 						mu.Unlock()
-						return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: label}}, Details: argumentRef(`{}`), Terminate: &terminate}, nil
+						return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: label}), Details: argumentRef(`{}`), Terminate: &terminate}, nil
 					},
 				}
 			}
@@ -77,7 +77,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 			}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockContent(ai.ContentBlock{Type: "toolCall", ID: "first", Name: "echo", Arguments: json.RawMessage(`{}`)}), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}
 			if mode != "programmatic" {
-				assistant.Content.Blocks = append(assistant.Content.Blocks, &ai.ContentBlock{Type: "toolCall", ID: "second", Name: "echo", Arguments: json.RawMessage(`{}`)})
+				assistant.Content.Blocks.Append(&ai.ContentBlock{Type: "toolCall", ID: "second", Name: "echo", Arguments: json.RawMessage(`{}`)})
 			}
 			model := json.RawMessage(`{"id":"test","api":"test","provider":"test"}`)
 			config := engine.Config{Model: model, ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil }, Now: func() int64 { return 1000 },
@@ -107,7 +107,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 				return nil
 			}
 			if mode == "programmatic" {
-				outcome, err := engine.RunToolCall(context.Background(), assistant.Content.Blocks[0], activeTools, assistant, &engine.Context{Messages: engine.NewList([]*ai.Message{assistant}...), Tools: activeTools}, config.ToolHooks, nil)
+				outcome, err := engine.RunToolCall(context.Background(), assistant.Content.Blocks.Get(0), activeTools, assistant, &engine.Context{Messages: engine.NewList([]*ai.Message{assistant}...), Tools: activeTools}, config.ToolHooks, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

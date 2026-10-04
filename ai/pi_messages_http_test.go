@@ -291,7 +291,7 @@ func TestRadiusNativePiMessagesHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !called || result.StopReason != "stop" || result.Content.Blocks[0].Text != "hello" || result.Timestamp != 1000000 {
+		if !called || result.StopReason != "stop" || result.Content.Blocks.Get(0).Text != "hello" || result.Timestamp != 1000000 {
 			t.Fatalf("unexpected native result %#v", result)
 		}
 		body := publicationAwait(t, requests)
@@ -344,7 +344,7 @@ func TestPiMessagesHTTPStreamingAndCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.Partial.Content.Blocks[0].Text != "first" {
+			if first.Partial.Content.Blocks.Get(0).Text != "first" {
 				t.Fatal("provider buffered progressive output")
 			}
 			if abort {
@@ -369,11 +369,11 @@ func TestPiMessagesHTTPStreamingAndCancellation(t *testing.T) {
 			}
 			publicationAwait(t, observed)
 			if abort {
-				if result.StopReason != "aborted" || len(result.Content.Blocks) != 0 {
+				if result.StopReason != "aborted" || result.Content.Blocks.Len() != 0 {
 					t.Fatalf("aborted result retained partial content: %#v", result)
 				}
 				retained, _ := stream.SnapshotEvent(AssistantMessageEvent{Partial: partial})
-				if retained.Partial.Content.Blocks[0].Text != "first" {
+				if retained.Partial.Content.Blocks.Get(0).Text != "first" {
 					t.Fatal("partial message mutated into failure")
 				}
 			} else {
@@ -381,11 +381,11 @@ func TestPiMessagesHTTPStreamingAndCancellation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if native != partial || result.Content.Blocks[0].Text != "first"+strings.Repeat(".", 50) {
+				if native != partial || result.Content.Blocks.Get(0).Text != "first"+strings.Repeat(".", 50) {
 					t.Fatal("terminal lost partial identity or text")
 				}
 			}
-			if first.Partial.Content.Blocks[0].Text != "first" {
+			if first.Partial.Content.Blocks.Get(0).Text != "first" {
 				t.Fatal("snapshot changed after producer updates")
 			}
 		})

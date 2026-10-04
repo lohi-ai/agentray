@@ -14,15 +14,10 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 )
 
-// PiRuntimeConfig selects the Pi-contract runtime for the parent, children and
-// auxiliary summaries. NativeGo runs in process; NativeStream optionally
-// overrides the built-in Go provider dispatcher. Worker/Runtime serve only the
-// explicit development/test TypeScript path. An empty Worker selects Go;
-// neither path silently falls back to the other.
+// PiRuntimeConfig configures the native Go engine for parents, children and summaries.
+// NativeStream optionally overrides the built-in Go provider dispatcher.
 type PiRuntimeConfig struct {
-	Worker, Runtime string
-	NativeGo        bool
-	NativeStream    engine.StreamFn
+	NativeStream engine.StreamFn
 }
 
 func WithPiRuntime(cfg PiRuntimeConfig) RunnerOption {
@@ -50,7 +45,6 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 		return a.Continue(ctx, messages, opts.Prompt)
 	}
 	runtime := *r.Pi
-	runtime.NativeGo = runtime.NativeGo || runtime.Worker == ""
 	// Auxiliary calls bind their own tier; never inherit the parent's bound
 	// dispatcher or account pool. Preserve an explicit host stream override.
 	summaryRuntime := runtime
@@ -117,23 +111,21 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 		return agentcore.RunResult{}, err
 	}
 	modelOptions := PiModelOptions{MaxTokens: p.MaxTokens, Pricing: observe.DefaultPricing(), RefreshKey: p.RefreshKey, ToolChoice: p.ToolChoice, ParallelToolCalls: p.ParallelToolCalls, OutputSchema: p.OutputSchema}
-	workerConfig := agentcore.PiConfig{Worker: runtime.Worker, Runtime: runtime.Runtime, Options: options}
-	var worker agentcore.PiConfig
+	baseBinding := agentcore.PiConfig{Options: options}
+	var binding agentcore.PiConfig
 	var known bool
 	var ladder *nativeModelLadder
-	if runtime.NativeGo && runtime.NativeStream == nil {
+	if runtime.NativeStream == nil {
 		var optionsFor func(ModelTier) (PiModelOptions, error)
 		optionsFor, err = p.nativeLadderOptions(tier, modelOptions)
 		if err == nil {
-			ladder, err = newNativeModelLadder(tier, workerConfig, optionsFor)
+			ladder, err = newNativeModelLadder(tier, baseBinding, optionsFor)
 		}
 		if err == nil {
-			worker, known, runtime.NativeStream = ladder.admissionBinding()
+			binding, known, runtime.NativeStream = ladder.admissionBinding()
 		}
-	} else if runtime.NativeGo {
-		worker, known, runtime.NativeStream, err = tier.bindNativeTier(workerConfig, p.nativeModelOptions(tier, modelOptions), runtime.NativeStream)
 	} else {
-		worker, known, err = tier.BindPi(workerConfig, modelOptions)
+		binding, known, runtime.NativeStream, err = tier.bindNativeTier(baseBinding, p.nativeModelOptions(tier, modelOptions), runtime.NativeStream)
 	}
 	if err != nil {
 		return agentcore.RunResult{}, err
@@ -143,18 +135,15 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 		attempts = &agentcore.RetryPolicy{}
 	}
 	ctx = agentcore.WithRunSession(ctx, p.SessionID)
-	worker = bindPiTrace(worker, p.Tracer, known, p.RunID)
+	binding = bindPiTrace(binding, p.Tracer, known, p.RunID)
 	compactTier := tier
 	if p.PiCompactionTier != nil {
 		compactTier = *p.PiCompactionTier
 	}
 	summaryOptions := piSummaryModelOptions(p.RefreshKey)
-	summaryOptionsFor := func(ModelTier) (PiModelOptions, error) { return summaryOptions, nil }
-	if summaryRuntime.NativeGo {
-		summaryOptionsFor, err = p.nativeLadderOptions(compactTier, summaryOptions)
-		if err != nil {
-			return agentcore.RunResult{}, err
-		}
+	summaryOptionsFor, err := p.nativeLadderOptions(compactTier, summaryOptions)
+	if err != nil {
+		return agentcore.RunResult{}, err
 	}
 	compaction := &PiContextCompaction{Summarize: func(ctx context.Context, messages json.RawMessage, revision string) (string, agentcore.Usage, error) {
 		// A separate trace session prevents auxiliary model calls from becoming
@@ -164,7 +153,7 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 	}}
 	if p.Subagents != nil {
 		plugin := *p.Subagents
-		plugin.RunFork = piForkRunner(PiSessionConfig{Pi: worker, nativeLadder: ladder, nativeAttempts: attempts, NativeGo: runtime.NativeGo, NativeStream: runtime.NativeStream}, known, p.Session, p.ToolChoice, compaction)
+		plugin.RunFork = piForkRunner(PiSessionConfig{Pi: binding, nativeLadder: ladder, nativeAttempts: attempts, NativeStream: runtime.NativeStream}, known, p.Session, p.ToolChoice, compaction)
 		p.Subagents = &plugin
 	}
 	a, err := Build(p)
@@ -193,7 +182,7 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 		}
 	}
 	result, err := RunPi(ctx, PiRunConfig{Host: host, Task: opts.Prompt, Input: input, Sink: sink, PricingKnown: known, Compaction: compaction,
-		Session: PiSessionConfig{Pi: worker, nativeLadder: ladder, nativeAttempts: attempts, NativeGo: runtime.NativeGo, NativeStream: runtime.NativeStream, Store: p.Session, SessionID: p.SessionID, Resume: resume, ReviseGoal: p.ReviseGoal, HistoryRevision: opts.NativeHistoryRevision, Policy: agentcore.NewAllowList(names...)}})
+		Session: PiSessionConfig{Pi: binding, nativeLadder: ladder, nativeAttempts: attempts, NativeStream: runtime.NativeStream, Store: p.Session, SessionID: p.SessionID, Resume: resume, ReviseGoal: p.ReviseGoal, HistoryRevision: opts.NativeHistoryRevision, Policy: agentcore.NewAllowList(names...)}})
 	result.Projection.NativeState = result.State
 	result.Projection.NativeTelemetry = result.Telemetry
 	result.Projection.NativeRevision = result.Revision

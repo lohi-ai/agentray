@@ -61,7 +61,7 @@ func TestNativeLadderPrepareUpdatesNextEngineTurn(t *testing.T) {
 		}
 		return value, err
 	}
-	session, err = NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err = NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestNativeLadderPrepareRejectsHostModelOverride(t *testing.T) {
 				}
 				return value, err
 			}
-			session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+			session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +120,7 @@ func TestNativeLadderPrepareRejectsHostModelOverride(t *testing.T) {
 func TestNativeLadderPrepareCandidateDoesNotPublishAgentModel(t *testing.T) {
 	ladder := testNativeLadder(t)
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder})
 	if err != nil {
 		t.Fatal(err)
 	}

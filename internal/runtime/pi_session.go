@@ -33,10 +33,7 @@ type PiSessionConfig struct {
 	nativeAttempts          *agentcore.RetryPolicy // nonnil installs native request admission
 	nativeAttemptObserved   func(nativeBoundRung, nativeRetryAttempt) error
 	nativeTerminalPublished func(nativeAttemptOutcome) error
-	// An empty Pi.Worker or NativeGo selects the in-process Go adapter, retaining this session's
-	// existing policy, lease and lossless journal. NativeStream optionally
-	// overrides the built-in Go provider in streamMode=native. Worker/Runtime are unused.
-	NativeGo        bool
+	// NativeStream optionally overrides the built-in Go provider.
 	NativeStream    engine.StreamFn
 	Policy          agentcore.Policy // nil is deny-all
 	Store           agentcore.SessionStore
@@ -167,7 +164,7 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 				return nil, err
 			}
 			for _, entry := range entries {
-				if entry.Kind == agentcore.EntryPiModelSelection && (cfg.nativeLadder == nil || (!cfg.NativeGo && cfg.Pi.Worker != "")) {
+				if entry.Kind == agentcore.EntryPiModelSelection && cfg.nativeLadder == nil {
 					return nil, errors.New("native model selection requires current native ladder bindings")
 				}
 			}
@@ -207,46 +204,36 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 		}
 		options["initialState"], _ = json.Marshal(initial)
 	}
-	worker := cfg.Pi
-	worker.Options, _ = json.Marshal(options)
-	worker.Callback = s.callback
-	worker.OnEvent = s.event
+	binding := cfg.Pi
+	binding.Options, _ = json.Marshal(options)
+	binding.Callback = s.callback
+	binding.OnEvent = s.event
 	var err error
-	if cfg.NativeGo || cfg.Pi.Worker == "" {
-		var native *NativeAgent
-		config := NativeAgentConfig{Options: worker.Options, Callback: worker.Callback, OnEvent: worker.OnEvent, OnTrace: worker.OnTrace, StreamFn: cfg.NativeStream}
-		if cfg.nativeAttempts != nil {
-			if cfg.nativeLadder == nil {
-				return nil, errors.New("native request admission requires a model ladder")
-			}
-			policy := *cfg.nativeAttempts
-			config.admitRequest = func(ctx context.Context, request engine.Request, options map[string]any) (*engine.RequestAdmission, error) {
-				return s.admitNativeRequest(ctx, request, options, policy)
-			}
+
+	var native *NativeAgent
+	config := NativeAgentConfig{Options: binding.Options, Callback: binding.Callback, OnEvent: binding.OnEvent, OnTrace: binding.OnTrace, StreamFn: cfg.NativeStream}
+	if cfg.nativeAttempts != nil {
+		if cfg.nativeLadder == nil {
+			return nil, errors.New("native request admission requires a model ladder")
 		}
-		native, err = NewNativeAgent(s.ctx, config)
-		if err == nil {
-			s.native = native
-			s.agent = &piSessionAgent{Call: native.Call, State: native.State, Prompt: native.Prompt, Continue: native.Continue, Close: native.Close, UpstreamCommit: native.UpstreamCommit, ObserveDelegation: native.observeDelegation}
+		policy := *cfg.nativeAttempts
+		config.admitRequest = func(ctx context.Context, request engine.Request, options map[string]any) (*engine.RequestAdmission, error) {
+			return s.admitNativeRequest(ctx, request, options, policy)
 		}
-	} else {
-		if cfg.nativeAttempts != nil {
-			return nil, errors.New("native request admission cannot run in a worker")
-		}
-		var bridge *agentcore.PiAgent
-		bridge, err = agentcore.NewPi(s.ctx, worker)
-		if err == nil {
-			s.agent = &piSessionAgent{Call: bridge.Call, State: bridge.State, Prompt: bridge.Prompt, Continue: bridge.Continue, Close: bridge.Close, UpstreamCommit: bridge.UpstreamCommit}
-		}
+	}
+	native, err = NewNativeAgent(s.ctx, config)
+	if err == nil {
+		s.native = native
+		s.agent = &piSessionAgent{Call: native.Call, State: native.State, Prompt: native.Prompt, Continue: native.Continue, Close: native.Close, UpstreamCommit: native.UpstreamCommit, ObserveDelegation: native.observeDelegation}
 	}
 	if err != nil {
 		return nil, err
 	}
 	if restoredCommit != "" && restoredCommit != s.agent.UpstreamCommit() {
-		return nil, fmt.Errorf("Pi session revision %s differs from worker %s; explicit migration required", restoredCommit, s.agent.UpstreamCommit())
+		return nil, fmt.Errorf("Pi session revision %s differs from native engine %s; explicit migration required", restoredCommit, s.agent.UpstreamCommit())
 	}
 	if cfg.HistoryRevision != "" && cfg.HistoryRevision != s.agent.UpstreamCommit() {
-		return nil, errors.New("Pi history revision differs from worker; explicit migration required")
+		return nil, errors.New("Pi history revision differs from native engine; explicit migration required")
 	}
 	if !cfg.Resume {
 		if len(cfg.Invocation) > 0 {

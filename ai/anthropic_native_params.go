@@ -200,7 +200,7 @@ func BuildAnthropicParams(rawModel json.RawMessage, context TranscriptContext, o
 		systemBlocks = append(systemBlocks, systemBlock("You are Claude Code, Anthropic's official CLI for Claude."))
 	}
 	if system != "" {
-		systemBlocks = append(systemBlocks, systemBlock(system))
+		systemBlocks = append(systemBlocks, systemBlock(SanitizeSurrogates(system)))
 	}
 	if len(systemBlocks) > 0 {
 		set("system", systemBlocks)

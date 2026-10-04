@@ -35,7 +35,7 @@ func TestNativeAttemptRelayRetryRetainsSuccessfulPointers(t *testing.T) {
 	defer cancel()
 	out := ai.NewAssistantMessageEventStream()
 	rejected := &ai.Message{Role: "assistant", StopReason: "error"}
-	successful := &ai.Message{Role: "assistant", StopReason: "stop", Content: ai.MessageContent{Blocks: []*ai.ContentBlock{{Type: "text", Text: "answer"}}}}
+	successful := &ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "answer"})}
 	commits := 0
 	commit := func(context.Context) error { assertAttemptEmpty(t, out); commits++; return nil }
 	first, err := relayNativeAttempt(ctx, out, attemptFixture(ai.AssistantMessageEvent{Type: "start", Partial: rejected}, ai.AssistantMessageEvent{Type: "error", Error: rejected}), commit)
@@ -219,7 +219,7 @@ func TestNativeAttemptRelayDurableModelBeforeToolEvents(t *testing.T) {
 			}
 			ladder := testNativeLadder(t)
 			binding, _, stream := ladder.sessionBinding()
-			session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: name})
+			session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: name})
 			if err != nil {
 				t.Fatal(err)
 			}

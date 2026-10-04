@@ -30,7 +30,7 @@ func TestNativeLadderCompactionUsesRequestWindow(t *testing.T) {
 		}
 		return "saved evidence", agentcore.Usage{InputTokens: 7}, nil
 	}}
-	cfg := PiRunConfig{Compaction: &policy, Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder}}
+	cfg := PiRunConfig{Compaction: &policy, Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder}}
 	projection := &piRunProjection{}
 	initialize, err := bindPiRequestCompaction(&cfg, projection)
 	if err != nil {

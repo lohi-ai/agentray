@@ -1,6 +1,71 @@
 package telemetry
 
-import "github.com/lohi-ai/agentray/internal/jsonjs"
+import (
+	"encoding/json"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
+)
+
+func (o SpanOptions) MarshalJSON() ([]byte, error) {
+	value := NewObject(Property{Name: "name", Value: o.Name})
+	if !o.Attributes.IsZero() {
+		value.Set("attributes", o.Attributes)
+	}
+	return jsonjs.MarshalValue(value)
+}
+
+func (o *SpanOptions) UnmarshalJSON(raw []byte) error {
+	type plain SpanOptions
+	var decoded plain
+	if err := decodeRecordName(raw, &decoded, &decoded.Name); err != nil {
+		return err
+	}
+	*o = SpanOptions(decoded)
+	return nil
+}
+
+func (e *RecordedEvent) UnmarshalJSON(raw []byte) error {
+	type plain RecordedEvent
+	var decoded plain
+	if err := decodeRecordName(raw, &decoded, &decoded.Name); err != nil {
+		return err
+	}
+	*e = RecordedEvent(decoded)
+	return nil
+}
+
+func (s *RecordedSpan) UnmarshalJSON(raw []byte) error {
+	type plain RecordedSpan
+	var decoded plain
+	if err := decodeRecordName(raw, &decoded, &decoded.Name); err != nil {
+		return err
+	}
+	*s = RecordedSpan(decoded)
+	return nil
+}
+
+// The typed envelope still uses Go's field validation. Read the name with the
+// shared UTF-16 codec so lone surrogate units survive admission and snapshot
+// imports just as they do for attributes and error details.
+func decodeRecordName(raw []byte, target any, name *string) error {
+	if err := json.Unmarshal(raw, target); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if encoded, ok := fields["name"]; ok {
+		value, err := jsonjs.DecodeJSON(encoded)
+		if err != nil {
+			return err
+		}
+		if text, ok := value.(string); ok {
+			*name = text
+		}
+	}
+	return nil
+}
 
 // Build the snapshot's typed envelope as a shared JSON graph so metadata hooks
 // see their real containing key (attributes/name/message), not a false root key.

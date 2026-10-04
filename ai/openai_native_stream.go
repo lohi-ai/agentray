@@ -22,7 +22,6 @@ type completionsAccumulator struct {
 	stream          *AssistantMessageEventStream
 	push            func(AssistantMessageEvent)
 	output          *Message
-	blocks          []*ContentBlock
 	text, thinking  *ContentBlock
 	byIndex         map[float64]*ContentBlock
 	byID            map[string]*ContentBlock
@@ -74,16 +73,10 @@ func newCompletionsAccumulator(model completionsModel, compat OpenAICompletionsC
 }
 
 func (a *completionsAccumulator) publish(event AssistantMessageEvent) {
-	// Publish the current list of shared blocks before exposing a new event.
-	a.refresh()
 	if event.Type != "done" && event.Type != "error" {
 		event.Partial = a.output
 	}
 	a.push(event)
-}
-
-func (a *completionsAccumulator) refresh() {
-	a.output.Content = BlockReferences(a.blocks...)
 }
 
 func (a *completionsAccumulator) start() {
@@ -91,7 +84,7 @@ func (a *completionsAccumulator) start() {
 }
 
 func (a *completionsAccumulator) index(block *ContentBlock) int {
-	for i, candidate := range a.blocks {
+	for i, candidate := range a.output.Content.Blocks.Values() {
 		if block == candidate {
 			return i
 		}
@@ -102,7 +95,7 @@ func (a *completionsAccumulator) index(block *ContentBlock) int {
 func (a *completionsAccumulator) ensureThinking(signature string) *ContentBlock {
 	if a.thinking == nil {
 		a.thinking = &ContentBlock{Type: "thinking", ThinkingSignature: &signature}
-		a.blocks = append(a.blocks, a.thinking)
+		a.output.Content.Blocks.Append(a.thinking)
 		a.publish(AssistantMessageEvent{Type: "thinking_start", ContentIndex: a.index(a.thinking)})
 	}
 	return a.thinking
@@ -150,7 +143,7 @@ func (a *completionsAccumulator) ensureTool(call map[string]json.RawMessage) *Co
 		if id != "" {
 			a.byID[id] = block
 		}
-		a.blocks = append(a.blocks, block)
+		a.output.Content.Blocks.Append(block)
 		a.publish(AssistantMessageEvent{Type: "toolcall_start", ContentIndex: a.index(block)})
 	}
 	if hasIndex && block.Extra["streamIndex"] == nil {
@@ -191,7 +184,6 @@ func (a *completionsAccumulator) chunk(raw json.RawMessage) error {
 		if a.ended {
 			return
 		}
-		defer a.refresh()
 		chunk, ok := samplingObject(raw)
 		if !ok {
 			return
@@ -245,7 +237,7 @@ func (a *completionsAccumulator) chunk(raw json.RawMessage) error {
 		if text := samplingString(delta["content"]); text != "" {
 			if a.text == nil {
 				a.text = &ContentBlock{Type: "text"}
-				a.blocks = append(a.blocks, a.text)
+				a.output.Content.Blocks.Append(a.text)
 				a.publish(AssistantMessageEvent{Type: "text_start", ContentIndex: a.index(a.text)})
 			}
 			a.text.Text += text
@@ -364,7 +356,7 @@ func (a *completionsAccumulator) finish(ctx context.Context) {
 		if a.ended {
 			return
 		}
-		for i, block := range a.blocks {
+		for i, block := range a.output.Content.Blocks.Values() {
 			switch block.Type {
 			case "text":
 				a.publish(AssistantMessageEvent{Type: "text_end", ContentIndex: i, Content: block.Text})
@@ -394,7 +386,7 @@ func (a *completionsAccumulator) finish(ctx context.Context) {
 		}
 		if !a.hasFinishReason && !a.compat.SupportsFinishReason {
 			a.output.StopReason = "stop"
-			for _, block := range a.blocks {
+			for _, block := range a.output.Content.Blocks.Values() {
 				if block.Type == "toolCall" {
 					a.output.StopReason = "toolUse"
 					break
@@ -427,7 +419,7 @@ func (a *completionsAccumulator) fail(message string, aborted bool) {
 	})
 }
 func (a *completionsAccumulator) failLocked(message string, aborted bool) {
-	for _, block := range a.blocks {
+	for _, block := range a.output.Content.Blocks.Values() {
 		a.applyDetails(block)
 		a.clean(block)
 	}

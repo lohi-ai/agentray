@@ -60,7 +60,7 @@ func TestPiPromptImageReferences(t *testing.T) {
 					return nil
 				}
 				content := []any{}
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "image" {
 						content = append(content, map[string]any{"type": block.Type, "data": block.Data, "same": block == original})
 					} else {
@@ -79,14 +79,14 @@ func TestPiPromptImageReferences(t *testing.T) {
 				case "images_append":
 					images = append(images, makeImage("appended"))
 				case "content_edit":
-					if retained != nil && len(retained.Content.Blocks) > 1 {
-						retained.Content.Blocks[1].Data = "content"
+					if retained != nil && retained.Content.Blocks.Len() > 1 {
+						retained.Content.Blocks.Get(1).Data = "content"
 					} else {
 						applied = false
 					}
 				case "content_replace":
-					if retained != nil && len(retained.Content.Blocks) > 1 {
-						retained.Content.Blocks[1] = makeImage("replacement")
+					if retained != nil && retained.Content.Blocks.Len() > 1 {
+						retained.Content.Blocks.Set(1, makeImage("replacement"))
 					} else {
 						applied = false
 					}
@@ -182,7 +182,7 @@ func TestPiPromptImageReferences(t *testing.T) {
 			var content []*ai.ContentBlock
 			for _, message := range agent.State().Messages.Values() {
 				if message.Role == "user" {
-					content = message.Content.Blocks
+					content = message.Content.Blocks.Values()
 					break
 				}
 			}

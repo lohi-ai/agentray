@@ -12,6 +12,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"github.com/lohi-ai/agentray/telemetry"
 )
 
@@ -179,7 +180,7 @@ func (a *NativeAgent) run(ctx context.Context, continuation bool, input json.Raw
 			if continuation {
 				err = a.agent.Continue(runCtx)
 			} else {
-				err = a.agent.Prompt(runCtx, prompt, ai.BlockContent(images...).Blocks...)
+				err = a.agent.Prompt(runCtx, prompt, ai.BlockContent(images...).Blocks.Values()...)
 			}
 			if state := a.agent.State(); state.ErrorMessage != nil && *state.ErrorMessage != "" {
 				span.SetStatus(telemetry.SpanStatus{Status: "error"})
@@ -207,8 +208,7 @@ func (a *NativeAgent) run(ctx context.Context, continuation bool, input json.Raw
 
 func decodeNativePrompt(raw json.RawMessage) (any, error) {
 	raw = bytes.TrimSpace(raw)
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
+	if text, err := nativeString(raw); err == nil {
 		return text, nil
 	}
 	var messages []ai.Message
@@ -223,6 +223,23 @@ func decodeNativePrompt(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return message, nil
+}
+
+// Keep the typed boundary (including its null handling and diagnostics), then
+// recover lone UTF-16 units that encoding/json replaces in ordinary strings.
+func nativeString(raw json.RawMessage) (string, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", err
+	}
+	value, err := jsonjs.DecodeJSON(raw)
+	if err != nil {
+		return "", err
+	}
+	if value != nil {
+		text = value.(string)
+	}
+	return text, nil
 }
 
 func (a *NativeAgent) wait(ctx context.Context) error {

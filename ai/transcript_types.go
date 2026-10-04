@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
@@ -76,7 +78,7 @@ func NullContentBlock() *ContentBlock { return &ContentBlock{null: true} }
 
 // HasContent reports own-field presence without serializing the message. Native
 // zero content is explicit null; decoded messages can retain an absent field.
-// Assigning text or a non-nil block slice makes the field present again.
+// Assigning text or a non-nil block list makes the field present again.
 func (m Message) HasContent() bool {
 	return !m.Content.undefined || m.Content.Text != nil || m.Content.Blocks != nil
 }
@@ -86,7 +88,7 @@ func (m Message) HasContent() bool {
 type MessageContent struct {
 	undefined bool
 	Text      *string
-	Blocks    []*ContentBlock
+	Blocks    *BlockList
 }
 
 func TextContent(text string) MessageContent { return MessageContent{Text: &text} }
@@ -98,38 +100,31 @@ func BlockContent(blocks ...ContentBlock) MessageContent {
 	return BlockReferences(refs...)
 }
 
-// BlockReferences preserves block identity across hooks and content lists.
-// Replacing a list entry or growing its backing array does not replace a block
-// retained by another list or callback. BlockContent constructs new objects
-// from values when the caller does not need to retain references.
+// BlockReferences constructs a new list retaining the supplied block objects.
+// Copy MessageContent to share the list itself. BlockContent also constructs
+// new block objects when the caller does not need to retain references.
 func BlockReferences(blocks ...*ContentBlock) MessageContent {
-	if blocks == nil {
-		blocks = []*ContentBlock{}
-	}
-	return MessageContent{Blocks: blocks}
+	return MessageContent{Blocks: NewBlockList(blocks...)}
 }
 
 func (c MessageContent) MarshalJSON() ([]byte, error) {
 	if c.Text != nil {
-		return json.Marshal(*c.Text)
+		return jsonjs.QuoteString(*c.Text), nil
 	}
 	return json.Marshal(c.Blocks)
 }
 func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	*c = MessageContent{}
 	if len(bytes.TrimSpace(data)) > 0 && bytes.TrimSpace(data)[0] == '"' {
-		return json.Unmarshal(data, &c.Text)
-	}
-	if err := json.Unmarshal(data, &c.Blocks); err != nil {
-		return err
-	}
-	// JSON null is a present entry, unlike a nil slot from a live sparse stream.
-	for i, block := range c.Blocks {
-		if block == nil {
-			c.Blocks[i] = NullContentBlock()
+		value, err := jsonjs.DecodeJSON(data)
+		if err != nil {
+			return err
 		}
+		text := value.(string)
+		c.Text = &text
+		return nil
 	}
-	return nil
+	return json.Unmarshal(data, &c.Blocks)
 }
 
 type Usage struct {
@@ -161,7 +156,9 @@ type Tool struct {
 	Extra               map[string]json.RawMessage `json:"-"`
 }
 type ToolReference struct {
-	Name string `json:"name"`
+	encoding *transcriptEncoding
+	Name     string                     `json:"name"`
+	Extra    map[string]json.RawMessage `json:"-"`
 }
 
 type Context struct {
@@ -222,11 +219,13 @@ func (s SystemSections) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			out.WriteByte(',')
 		}
-		name, _ := json.Marshal(section.Name)
-		value, _ := json.Marshal(section.Value)
-		out.Write(name)
+		out.Write(jsonjs.QuoteString(section.Name))
 		out.WriteByte(':')
-		out.Write(value)
+		if section.Value == nil {
+			out.WriteString("null")
+		} else {
+			out.Write(jsonjs.QuoteString(*section.Value))
+		}
 	}
 	out.WriteByte('}')
 	return out.Bytes(), nil
@@ -236,27 +235,26 @@ func (s *SystemSections) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return nil
 	}
-	d := json.NewDecoder(bytes.NewReader(data))
-	start, err := d.Token()
+	properties, err := jsonjs.DecodeObjectProperties(data)
 	if err != nil {
 		return err
 	}
-	if start != json.Delim('{') {
+	if bytes.TrimSpace(data)[0] != '{' {
 		return fmt.Errorf("ai: sections must be an object")
 	}
-	for d.More() {
-		name, err := d.Token()
-		if err != nil {
-			return err
-		}
+	for _, property := range properties {
 		var value *string
-		if err := d.Decode(&value); err != nil {
+		if err := json.Unmarshal(property.Value, &value); err != nil {
 			return err
 		}
-		*s = append(*s, SystemSection{Name: name.(string), Value: value})
-	}
-	if _, err := d.Token(); err != nil {
-		return err
+		if value != nil {
+			decoded, err := jsonjs.DecodeJSON(property.Value)
+			if err != nil {
+				return err
+			}
+			*value = decoded.(string)
+		}
+		*s = append(*s, SystemSection{Name: property.Name, Value: value})
 	}
 	*s = s.ordered()
 	return nil
@@ -269,9 +267,25 @@ func marshalTranscriptObject(value any, extra map[string]json.RawMessage, requir
 	if err != nil {
 		return nil, err
 	}
-	var fields map[string]json.RawMessage
+	var fields jsonjs.RawObject
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
+	}
+	// encoding/json replaces lone UTF-16 units carried as WTF-8. Restore all
+	// emitted string fields, including optional signatures and model metadata.
+	v := reflect.ValueOf(value)
+	for i := 0; i < v.NumField(); i++ {
+		name := strings.SplitN(v.Type().Field(i).Tag.Get("json"), ",", 2)[0]
+		if _, emitted := fields[name]; !emitted {
+			continue
+		}
+		field := v.Field(i)
+		if field.Kind() == reflect.Pointer && !field.IsNil() {
+			field = field.Elem()
+		}
+		if field.Kind() == reflect.String {
+			fields[name] = jsonjs.QuoteString(field.String())
+		}
 	}
 	for key, value := range extra {
 		if _, exists := fields[key]; !exists {
@@ -362,13 +376,51 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 	return restoreTranscriptEncoding(raw, err, t.encoding)
 }
 
+func (t ToolReference) MarshalJSON() ([]byte, error) {
+	type plain ToolReference
+	raw, err := marshalTranscriptObject(plain(t), t.Extra, nil)
+	return restoreTranscriptEncoding(raw, err, t.encoding)
+}
+
+func (t *ToolReference) UnmarshalJSON(data []byte) error {
+	type plain ToolReference
+	*t = ToolReference{}
+	extra, err := decodeTranscriptObject(data, (*plain)(t), "name")
+	t.Extra = extra
+	if err == nil {
+		t.encoding, err = captureTranscriptEncoding(data, t)
+	}
+	return err
+}
+
 func decodeTranscriptObject(data []byte, target any, known string) (map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(data, target); err != nil {
 		return nil, err
 	}
-	var extra map[string]json.RawMessage
+	var extra jsonjs.RawObject
 	if err := json.Unmarshal(data, &extra); err != nil {
 		return nil, err
+	}
+	// Recover the original code units before callers append deltas or copy
+	// decoded fields. Retaining raw encoding metadata alone cannot do that.
+	v := reflect.ValueOf(target).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		name := strings.SplitN(v.Type().Field(i).Tag.Get("json"), ",", 2)[0]
+		raw := bytes.TrimSpace(extra[name])
+		if len(raw) == 0 || raw[0] != '"' {
+			continue
+		}
+		field := v.Field(i)
+		if field.Kind() == reflect.Pointer && !field.IsNil() {
+			field = field.Elem()
+		}
+		if field.CanSet() && field.Kind() == reflect.String {
+			decoded, err := jsonjs.DecodeJSON(raw)
+			if err != nil {
+				return nil, err
+			}
+			field.SetString(decoded.(string))
+		}
 	}
 	for _, key := range bytes.Fields([]byte(known)) {
 		delete(extra, string(key))
@@ -381,7 +433,7 @@ func decodeTranscriptObject(data []byte, target any, known string) (map[string]j
 func (m *Message) UnmarshalJSON(data []byte) error {
 	type plain Message
 	*m = Message{}
-	var fields map[string]json.RawMessage
+	var fields jsonjs.RawObject
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
@@ -469,7 +521,7 @@ type transcriptEncoding struct {
 }
 
 func captureTranscriptEncoding(raw []byte, value any) (*transcriptEncoding, error) {
-	var original, normalized map[string]json.RawMessage
+	var original, normalized jsonjs.RawObject
 	if err := json.Unmarshal(raw, &original); err != nil {
 		return nil, err
 	}
@@ -507,7 +559,7 @@ func restoreTranscriptEncoding(raw []byte, err error, encoding *transcriptEncodi
 	if err != nil || encoding == nil {
 		return raw, err
 	}
-	var current map[string]json.RawMessage
+	var current jsonjs.RawObject
 	if err := json.Unmarshal(raw, &current); err != nil {
 		return nil, err
 	}

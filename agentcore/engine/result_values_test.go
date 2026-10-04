@@ -60,7 +60,7 @@ func TestPiResultValues(t *testing.T) {
 				}
 			}
 			terminate := true
-			original := &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "done"}}, Details: branch(shared), StructuredContent: branch(shared), Terminate: &terminate}
+			original := &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "done"}), Details: branch(shared), StructuredContent: branch(shared), Terminate: &terminate}
 			if tc.Input.Decoded {
 				raw, err := json.Marshal(original)
 				if err != nil {
@@ -71,7 +71,7 @@ func TestPiResultValues(t *testing.T) {
 				}
 				shared = original.Details.(*engine.Object).Get("branch")
 			}
-			partial := &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: original.Details, StructuredContent: original.StructuredContent}
+			partial := &engine.ToolResult{Content: ai.NewBlockList(), Details: original.Details, StructuredContent: original.StructuredContent}
 			snapshots := []json.RawMessage{}
 			capture := func(stage string, result any) {
 				raw, err := json.Marshal(map[string]any{"stage": stage, "result": result})
@@ -103,7 +103,7 @@ func TestPiResultValues(t *testing.T) {
 				case "after_empty_override":
 					return &engine.AfterToolResult{}, nil
 				case "after_content_override":
-					return &engine.AfterToolResult{Content: []*ai.ContentBlock{}}, nil
+					return &engine.AfterToolResult{Content: ai.NewBlockList()}, nil
 				case "after_details_override":
 					return &engine.AfterToolResult{Details: replacement()}, nil
 				case "after_structured_override":
@@ -111,7 +111,7 @@ func TestPiResultValues(t *testing.T) {
 				case "after_null_override":
 					return &engine.AfterToolResult{Details: engine.Null, StructuredContent: engine.Null}, nil
 				case "after_null_content_override":
-					return &engine.AfterToolResult{Details: engine.Null, StructuredContent: engine.Null, Content: []*ai.ContentBlock{}}, nil
+					return &engine.AfterToolResult{Details: engine.Null, StructuredContent: engine.Null, Content: ai.NewBlockList()}, nil
 				}
 				return nil, nil
 			}
@@ -242,7 +242,7 @@ func TestPiResultOptionalValues(t *testing.T) {
 					case "null_override":
 						return &engine.AfterToolResult{Details: engine.Null, StructuredContent: engine.Null}, nil
 					case "content_override":
-						return &engine.AfterToolResult{Content: []*ai.ContentBlock{}}, nil
+						return &engine.AfterToolResult{Content: ai.NewBlockList()}, nil
 					case "primitive_override":
 						return &engine.AfterToolResult{Details: false, StructuredContent: float64(0)}, nil
 					case "clear":
@@ -313,7 +313,7 @@ func TestToolResultLiveGraphDoesNotSerializeDuringExecution(t *testing.T) {
 	details := engine.NewObject(engine.Property{Name: "text", Value: passiveResultText("passive")}, engine.Property{Name: "number", Value: math.Inf(1)})
 	details.Set("self", details)
 	details.Set("function", func() {})
-	original := &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: details, StructuredContent: details}
+	original := &engine.ToolResult{Content: ai.NewBlockList(), Details: details, StructuredContent: details}
 	tool := &engine.Tool{Tool: ai.Tool{Name: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
 		update(original)
 		return original, nil

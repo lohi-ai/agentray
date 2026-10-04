@@ -98,7 +98,7 @@ func TestNativeRunnerFallbackCompactionToolAndResume(t *testing.T) {
 	var mu sync.Mutex
 	var traces []observe.TraceRecord
 	p.Tracer = observe.SinkFunc(func(record observe.TraceRecord) { mu.Lock(); defer mu.Unlock(); traces = append(traces, record) })
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "write and finish", NativeHistory: piRequestJSON(piLongRequest())}, tier, nil)
 	if err != nil || result.Final != "finished" || effects.Load() != 1 || primary.Load() != 1 || fallback.Load() != 2 || summaryPrimary.Load() != 1 || summaryFallback.Load() != 1 {
 		t.Fatal("runner fallback/summary did not complete", err, result.StopReason, effects.Load(), primary.Load(), fallback.Load(), summaryPrimary.Load(), summaryFallback.Load())
@@ -239,7 +239,7 @@ func TestNativeRunnerFallbackChildOwnsSelection(t *testing.T) {
 		traceCount++
 		traceInput += record.Usage.InputTokens
 	})
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "parent answer" || parentPrimary.Load() != 1 || childPrimary.Load() != 1 || parentFallback.Load() != 2 || childFallback.Load() != 1 {
 		t.Fatal("parent/child ladder ownership failed", err, parentPrimary.Load(), childPrimary.Load(), parentFallback.Load(), childFallback.Load())
@@ -295,7 +295,7 @@ func TestNativeRunnerFallbackPersistenceFailurePreventsToolEffect(t *testing.T) 
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{nativeChildWrite{&effects}}
 	p.Session = &nativeSelectionFailStore{MemorySessionStore: agentcore.NewMemorySessionStore(), selectionError: errors.New("selection journal unavailable")}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	if _, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "write"}, tier, nil); err == nil || !strings.Contains(err.Error(), "selection journal unavailable") {
 		t.Fatal("selection write failure lost", err)
 	}

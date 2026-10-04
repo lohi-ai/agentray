@@ -69,7 +69,7 @@ func TestNativeForkRunnerUsesIndependentLadderBindings(t *testing.T) {
 	}
 	binding, known, stream := ladder.sessionBinding()
 	binding.OnTrace = func(context.Context, json.RawMessage) { traces.Add(1) }
-	fork := piForkRunner(PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder}, known, store, agentcore.ToolChoice{}, nil)
+	fork := piForkRunner(PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder}, known, store, agentcore.ToolChoice{}, nil)
 	// Switch after the fork closure is created: it must not capture the parent's
 	// mutable dispatcher or inherit the parent's durable generation.
 	if err := ladder.selectRung(ctx, 0, 1, func(context.Context, nativeLadderSelection) error { return nil }); err != nil {

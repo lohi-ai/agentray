@@ -45,7 +45,7 @@ func TestPiLazyStreamLateResultPreservesLiveMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trace := map[string]any{"beforeLength": len(before.Content.Blocks)}
+	trace := map[string]any{"beforeLength": before.Content.Blocks.Len()}
 	probe, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 	if err := outer.WaitForEnd(probe); !errors.Is(err, context.DeadlineExceeded) {
@@ -234,7 +234,7 @@ func TestModelsStreamNativeHTTPIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.StopReason != "stop" || len(result.Content.Blocks) != 1 || result.Content.Blocks[0].Text != "hello!" || !kinds["text_delta"] || !kinds["done"] {
+			if result.StopReason != "stop" || result.Content.Blocks.Len() != 1 || result.Content.Blocks.Get(0).Text != "hello!" || !kinds["text_delta"] || !kinds["done"] {
 				t.Fatalf("native forwarding failed: %s", mustStreamTestJSON(result))
 			}
 			if !publicationAwait(t, sharedLock) {

@@ -33,7 +33,7 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 	}
 	var wire struct {
 		InitialState struct {
-			SystemPrompt  string
+			SystemPrompt  json.RawMessage
 			Model         json.RawMessage
 			ThinkingLevel string
 			Tools         json.RawMessage
@@ -74,7 +74,14 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 	if err != nil {
 		return options, err
 	}
-	options.InitialState = engine.InitialState{SystemPrompt: wire.InitialState.SystemPrompt, Model: wire.InitialState.Model, ThinkingLevel: wire.InitialState.ThinkingLevel, Tools: tools, Messages: wire.InitialState.Messages}
+	var systemPrompt string
+	if len(wire.InitialState.SystemPrompt) > 0 {
+		systemPrompt, err = nativeString(wire.InitialState.SystemPrompt)
+		if err != nil {
+			return options, err
+		}
+	}
+	options.InitialState = engine.InitialState{SystemPrompt: systemPrompt, Model: wire.InitialState.Model, ThinkingLevel: wire.InitialState.ThinkingLevel, Tools: tools, Messages: wire.InitialState.Messages}
 	if nativeNull(options.InitialState.Model) {
 		options.InitialState.Model = nil
 	}

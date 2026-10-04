@@ -34,9 +34,9 @@ func TestNativeSessionDurableRoundTripAndPolicy(t *testing.T) {
 			defer cancel()
 			store := agentcore.NewMemorySessionStore()
 			var streams, effects atomic.Int32
-			cfg := PiSessionConfig{NativeGo: true, Store: store, SessionID: "go-session", Pi: agentcore.PiConfig{
+			cfg := PiSessionConfig{Store: store, SessionID: "go-session", Pi: agentcore.PiConfig{
 				// Deliberately unusable paths prove this path cannot launch the worker.
-				Runtime: "/missing/runtime", Worker: "/missing/worker", Options: json.RawMessage(nativeSessionOptions),
+				Options: json.RawMessage(nativeSessionOptions),
 				Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 					switch method {
 					case "stream":
@@ -130,7 +130,7 @@ func TestNativeSessionCancellationRetainsUnsettledEffect(t *testing.T) {
 	var once sync.Once
 	finish := func() { once.Do(func() { close(release) }) }
 	defer finish()
-	cfg := PiSessionConfig{NativeGo: true, Store: store, SessionID: "unsettled", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Options: json.RawMessage(nativeSessionOptions), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	cfg := PiSessionConfig{Store: store, SessionID: "unsettled", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{Options: json.RawMessage(nativeSessionOptions), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method == "stream" {
 			return nativeSessionToolReply(), nil
 		}
@@ -182,7 +182,7 @@ func TestNativeSessionCustomMetadataSurvivesJournal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	store := agentcore.NewMemorySessionStore()
-	cfg := PiSessionConfig{NativeGo: true, Store: store, SessionID: "metadata", Pi: agentcore.PiConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	cfg := PiSessionConfig{Store: store, SessionID: "metadata", Pi: agentcore.PiConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		return json.RawMessage(nativeStreamReply), nil
 	}}}
 	session, err := NewPiSession(ctx, cfg)
@@ -228,7 +228,7 @@ func TestNativeRunParksAndResumesHumanAnswer(t *testing.T) {
 			return PiRunResult{}, err
 		}
 		defer host.Close()
-		cfg := PiRunConfig{Host: host, Session: PiSessionConfig{NativeGo: true, Store: store, SessionID: "go-ask", Resume: resume, Policy: agentcore.NewAllowList("ask"), Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+		cfg := PiRunConfig{Host: host, Session: PiSessionConfig{Store: store, SessionID: "go-ask", Resume: resume, Policy: agentcore.NewAllowList("ask"), Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method != "stream" {
 				return nil, fmt.Errorf("unexpected callback %s", method)
 			}

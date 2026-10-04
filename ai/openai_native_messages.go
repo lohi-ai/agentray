@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // ConvertOpenAICompletionsMessages ports Pi's exported convertMessages. The
@@ -50,17 +52,17 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 				text = RenderSystemMessageUpdate(message)
 			}
 			if text != "" {
-				params = append(params, map[string]any{"role": role, "content": text})
+				params = append(params, map[string]any{"role": role, "content": SanitizeSurrogates(text)})
 			}
 		case "user":
 			if message.Content.Text != nil {
-				params = append(params, map[string]any{"role": "user", "content": *message.Content.Text})
+				params = append(params, map[string]any{"role": "user", "content": SanitizeSurrogates(*message.Content.Text)})
 			} else {
 				content := []map[string]any{}
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "text" {
 						if block.Text != "" {
-							content = append(content, map[string]any{"type": "text", "text": block.Text})
+							content = append(content, map[string]any{"type": "text", "text": SanitizeSurrogates(block.Text)})
 						}
 					} else {
 						content = append(content, completionsImage(block))
@@ -80,12 +82,12 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 			texts := []string{}
 			thinking := []*ContentBlock{}
 			calls := []*ContentBlock{}
-			for _, block := range message.Content.Blocks {
+			for _, block := range message.Content.Blocks.Values() {
 				switch block.Type {
 				case "text":
 					if strings.TrimFunc(block.Text, jsWhitespace) != "" {
-						parts = append(parts, map[string]any{"type": "text", "text": block.Text})
-						texts = append(texts, block.Text)
+						parts = append(parts, map[string]any{"type": "text", "text": SanitizeSurrogates(block.Text)})
+						texts = append(texts, SanitizeSurrogates(block.Text))
 					}
 				case "thinking":
 					thinking = append(thinking, block)
@@ -127,7 +129,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 			text := strings.Join(texts, "")
 			if len(nonempty) > 0 {
 				if compat.RequiresThinkingAsText {
-					assistant["content"] = append([]map[string]any{{"type": "text", "text": strings.Join(thinkingText, "\n\n")}}, parts...)
+					assistant["content"] = append([]map[string]any{{"type": "text", "text": SanitizeSurrogates(strings.Join(thinkingText, "\n\n"))}}, parts...)
 				} else {
 					if text != "" {
 						assistant["content"] = text
@@ -138,7 +140,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 							signature = "reasoning_content"
 						}
 						if signature == "reasoning" || signature == "reasoning_content" || signature == "reasoning_text" {
-							assistant[signature] = strings.Join(thinkingText, "\n")
+							assistant[signature] = json.RawMessage(jsonjs.QuoteString(strings.Join(thinkingText, "\n")))
 						}
 					}
 				}
@@ -153,7 +155,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 						if err != nil {
 							return nil, err
 						}
-						output = append(output, map[string]any{"id": call.ID, "type": "custom", "custom": map[string]any{"name": call.Name, "input": input}})
+						output = append(output, map[string]any{"id": call.ID, "type": "custom", "custom": map[string]any{"name": call.Name, "input": SanitizeSurrogates(input)}})
 					} else {
 						arguments, err := stringifyCompletionsJSON(call.Arguments)
 						if err != nil {
@@ -189,7 +191,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 				tool := transformed[i]
 				texts := []string{}
 				hasImages := false
-				for _, block := range tool.Content.Blocks {
+				for _, block := range tool.Content.Blocks.Values() {
 					if block.Type == "text" {
 						texts = append(texts, block.Text)
 					}
@@ -208,7 +210,7 @@ func ConvertOpenAICompletionsMessages(rawModel json.RawMessage, context Transcri
 						text = "(no tool output)"
 					}
 				}
-				result := map[string]any{"role": "tool", "content": text, "tool_call_id": tool.ToolCallID}
+				result := map[string]any{"role": "tool", "content": SanitizeSurrogates(text), "tool_call_id": tool.ToolCallID}
 				if compat.RequiresToolResultName && tool.ToolName != "" {
 					result["name"] = tool.ToolName
 				}
@@ -371,63 +373,8 @@ func isCompletionsReasoningDetail(raw json.RawMessage) bool {
 // Arguments are a JSON string within the request, so their property ordering,
 // string escapes and number spelling are observable, unlike request object keys.
 func stringifyCompletionsJSON(raw json.RawMessage) (json.RawMessage, error) {
-	raw = bytes.TrimSpace(raw)
 	if !json.Valid(raw) {
 		return nil, fmt.Errorf("invalid tool arguments JSON")
 	}
-	switch raw[0] {
-	case '{':
-		object, _ := samplingObject(raw)
-		keys := samplingObjectKeys(raw)
-		for key, value := range object {
-			next, err := stringifyCompletionsJSON(value)
-			if err != nil {
-				return nil, err
-			}
-			object[key] = next
-		}
-		return marshalSamplingObject(object, keys), nil
-	case '[':
-		var values []json.RawMessage
-		_ = json.Unmarshal(raw, &values)
-		var out bytes.Buffer
-		out.WriteByte('[')
-		for i, value := range values {
-			next, err := stringifyCompletionsJSON(value)
-			if err != nil {
-				return nil, err
-			}
-			if i > 0 {
-				out.WriteByte(',')
-			}
-			out.Write(next)
-		}
-		out.WriteByte(']')
-		return out.Bytes(), nil
-	case '"':
-		var value string
-		_ = json.Unmarshal(raw, &value)
-		return json.RawMessage(marshalSamplingString(value)), nil
-	case 't', 'f', 'n':
-		return raw, nil
-	default:
-		value, err := strconv.ParseFloat(string(raw), 64)
-		if math.IsInf(value, 0) {
-			return json.RawMessage(`null`), nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		if value == 0 {
-			return json.RawMessage(`0`), nil
-		}
-		format := byte('f')
-		absolute := math.Abs(value)
-		if absolute < 1e-6 || absolute >= 1e21 {
-			format = 'e'
-		}
-		encoded := strconv.FormatFloat(value, format, -1, 64)
-		encoded = strings.ReplaceAll(strings.ReplaceAll(encoded, "e-0", "e-"), "e+0", "e+")
-		return json.RawMessage(encoded), nil
-	}
+	return jsonjs.StringifyJSON(raw)
 }

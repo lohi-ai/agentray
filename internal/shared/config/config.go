@@ -146,8 +146,8 @@ type Config struct {
 	AgentMaxTurns     int
 	AgentMaxToolCalls int
 	// AgentNativeGo selects the in-process Pi-contract Go engine for server
-	// runs, children, and summaries. The legacy Go driver remains the default
-	// until OAuth account pools and fallback lifecycles have been migrated.
+	// runs, children, and summaries. Enabled by default; false is an explicit
+	// compatibility option for existing legacy Go sessions.
 	AgentNativeGo bool
 	// The shared demo workspace — one feature, two keys.
 	//
@@ -210,7 +210,7 @@ func FromEnv() Config {
 		AgentKeepRecentTokens:        envInt("AGENTRAY_AGENT_KEEP_RECENT_TOKENS", 0),
 		AgentMaxTurns:                envInt("AGENTRAY_AGENT_MAX_TURNS", 0),
 		AgentMaxToolCalls:            envInt("AGENTRAY_AGENT_MAX_TOOL_CALLS", 0),
-		AgentNativeGo:                envBool("AGENTRAY_AGENT_NATIVE_GO", false),
+		AgentNativeGo:                envBool("AGENTRAY_AGENT_NATIVE_GO", true),
 		DemoProjectID:                os.Getenv("AGENTRAY_DEMO_PROJECT_ID"),
 		DemoAgentRunsPerUserPerDay:   envInt("AGENTRAY_DEMO_AGENT_RUNS_PER_USER_PER_DAY", 5),
 		// Hosted model: dedicated DEFAULT_* vars, then the real-provider test

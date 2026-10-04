@@ -22,7 +22,7 @@ func TestProgrammaticCallUsesExplicitToolsAndScopedUpdates(t *testing.T) {
 			t.Errorf("execution arguments: %s %s", id, args)
 		}
 		retained = update
-		update(&engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "partial"}}})
+		update(&engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "partial"})})
 		return &engine.ToolResult{}, errors.New("tool failed")
 	}
 	current := &engine.Context{} // Explicit nested-call tools need not be in context.Tools.
@@ -37,7 +37,7 @@ func TestProgrammaticCallUsesExplicitToolsAndScopedUpdates(t *testing.T) {
 		},
 		After: func(_ context.Context, hook engine.AfterToolCall) (*engine.AfterToolResult, error) {
 			after = true
-			if !hook.IsError || hook.Result.Content[0].Text != "tool failed" {
+			if !hook.IsError || hook.Result.Content.Get(0).Text != "tool failed" {
 				t.Error("after hook missed executed failure")
 			}
 			return nil, nil
@@ -88,7 +88,7 @@ func TestParallelSinkFailureRejectsWithoutResultMessages(t *testing.T) {
 		} else {
 			<-blocked
 		}
-		return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
+		return &engine.ToolResult{Content: ai.NewBlockList(), Details: argumentRef(`{}`)}, nil
 	}
 	failure := errors.New("end sink failed")
 	var mu sync.Mutex

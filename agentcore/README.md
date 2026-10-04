@@ -1,13 +1,19 @@
 # agentcore
 
-The migration target is a native Go port of Pi's agent behavior. The existing
-TypeScript worker bridge is transitional, not the target runtime. Go code lives
-in `agentcore`, providers in `ai`, and recording in [`telemetry`](../telemetry/);
-application composition and persistence adapters remain in `internal/runtime`.
-The pinned upstream source is a development oracle for differential tests.
-Matching source hashes of that reference does not establish Go behavior parity.
-The boundaries below describe the current kernel; package extraction should
-follow independent ownership and dependencies as the Go port replaces it.
+The server uses the native Go engine by default. Execution lives in
+[`engine/`](engine/), provider transcripts and transports in [`ai`](../ai/),
+and recording in [`telemetry`](../telemetry/). Application composition,
+credentials and persistence adapters stay in `internal/runtime`.
+
+The supported completion scope is Codex, Antigravity, Gemini and Claude Code.
+TypeScript source, worker transport, fixture generators and Bun build tooling
+have been removed. Go tests consume recorded JSON fixtures; source hashes and
+licenses remain in [`third_party/pi`](../third_party/pi/README.md).
+
+The root contracts, plugins and legacy Go driver still have active callers.
+They remain available for explicit legacy-session compatibility. Package
+boundaries follow ownership and dependency direction; no additional interface
+hierarchy is needed.
 
 The existing kernel is one flat package. The native Go replacement lives in
 [`engine/`](engine/); the other subdirectories are ejectable
@@ -85,7 +91,7 @@ cannot give one belongs in a plugin, or belongs nowhere.
 |---|---|
 | [`doc.go`](doc.go) | **contract** — the package doc: the two boundary rules, the three kinds of plugin contribution, and the layer map below rendered where `go doc` can see it. No code. |
 | [`provider.go`](provider.go) | **contract** — `LLMProvider`, `ChatRequest/ChatResponse`, `Usage`, and provider-neutral text/image `ContentPart`s. The wire seam every model call goes through, kept small enough that an implementation is a translation layer and nothing more. |
-| [`pi.go`](pi.go) | **contract** — transitional `NewPi` and `PiAgent` transport the pinned TypeScript Agent's public operations, JSON provider/tool callbacks, and awaited events to existing Go hosts. The native replacement is [`engine/`](engine/); reference bundles build directly from pinned sources under [`third_party/pi`](../third_party/pi/README.md). |
+| [`pi.go`](pi.go) | **contract** — native JSON options, callbacks and errors shared with the Go host; no process bridge. |
 | [`provider_session.go`](provider_session.go) | **contract + seam default** — provider-private conversation state with selective account-rotation reset, plus the bounded lease-aware in-process registry. The loop carries the session on every request; providers own the concrete records, and a cache miss may cost discovery but never change correctness. |
 | [`plugin.go`](plugin.go) | **loop** — `Plugin`, `Registry`, `Priority`. The composition surface itself: seam setters, additive contributions, per-plugin `Unload`. |
 | [`compose.go`](compose.go) | **loop** — `Build`, `BuildRegistry`, `ApplyConfig`, and `Limits`/`DefaultLimits`: the run's bounds are chosen at composition, read every turn, and published to extensions through `RunInfo`. There is no composition in which a run is unbounded. |
@@ -105,7 +111,7 @@ cannot give one belongs in a plugin, or belongs nowhere.
 | [`hooks.go`](hooks.go) | **contract** — the lifecycle hook types and their dispatch, including the `BeforeToolCall` shape the permission gate is built from. |
 | [`tool.go`](tool.go) | **contract** — `Tool`, optional additive `RichTool`, `ToolSet`, `ArgPreparer`, and the loop's own byte bounding. Ordinary text stays compatible while image parts can cross the neutral provider seam. |
 | [`toolbridge.go`](toolbridge.go) | **contract + loop** — the run-owned `ToolInvoker` capability for tools such as eval that need to call another registered tool. Nested calls re-enter the single dispatch trust boundary (schema, policy, credentials, hooks, bounds, tracing, idempotency), share the run's atomic execution budget, reject recursion, and persist as audit metadata without inventing provider-authored tool messages. Directly constructing a tool never grants this capability. |
-| [`pi_tools.go`](pi_tools.go) | **host adapter** — exposes a composed Agent's tools to the unchanged Pi runtime through the existing dispatch boundary. Owns extension resources and the busy slot, supplies native tool definitions/results, and shares the execution budget with nested calls. |
+| [`pi_tools.go`](pi_tools.go) | **host adapter** — exposes a composed Agent's tools to the native Go engine through the existing dispatch boundary. Owns extension resources and the busy slot, supplies native tool definitions/results, and shares the execution budget with nested calls. |
 | `pi_lifecycle.go` | Native-loop host boundary for composed prompt, step, batch, stop, and ceiling policies. Calls extension contracts while Pi owns scheduling and native history. |
 | [`image.go`](image.go) | **loop** — the central rich-image trust boundary: decode validation, MIME correction, pixel/input limits, provider-portable resize/recompression, aggregate byte budgeting, and coordinate mapping. Keeping it beside tool dispatch gives every rich tool identical laptop/server behavior without trusting each implementation to normalize correctly. |
 | [`permission.go`](permission.go) | **contract + seam default** — `Policy`, `Decision`, and `DenyAll`. Default-deny is the kernel's, so a composition that forgets governance is not ungoverned. |

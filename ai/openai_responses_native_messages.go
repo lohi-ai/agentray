@@ -133,17 +133,17 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 					text = RenderSystemMessageUpdate(message)
 				}
 				if text != "" {
-					output = append(output, map[string]any{"role": role, "content": text})
+					output = append(output, map[string]any{"role": role, "content": SanitizeSurrogates(text)})
 				}
 			}
 		case "user":
 			content := []map[string]any{}
 			if message.Content.Text != nil {
-				content = append(content, map[string]any{"type": "input_text", "text": *message.Content.Text})
+				content = append(content, map[string]any{"type": "input_text", "text": SanitizeSurrogates(*message.Content.Text)})
 			} else {
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					if block.Type == "text" {
-						content = append(content, map[string]any{"type": "input_text", "text": block.Text})
+						content = append(content, map[string]any{"type": "input_text", "text": SanitizeSurrogates(block.Text)})
 					} else {
 						content = append(content, responsesImage(block))
 					}
@@ -158,7 +158,7 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 			sameProviderAPI := message.Provider == model.Provider && message.API == model.API
 			sameModel := sameProviderAPI && message.Model == model.ID
 			textIndex := 0
-			for _, block := range message.Content.Blocks {
+			for _, block := range message.Content.Blocks.Values() {
 				switch block.Type {
 				case "thinking":
 					if block.ThinkingSignature != nil && *block.ThinkingSignature != "" {
@@ -179,7 +179,7 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 						id = "msg_" + completionsShortHash(id)
 					}
 					textIndex++
-					item := map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": block.Text, "annotations": []any{}}}, "status": "completed", "id": id}
+					item := map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": SanitizeSurrogates(block.Text), "annotations": []any{}}}, "status": "completed", "id": id}
 					if phase != "" {
 						item["phase"] = phase
 					}
@@ -196,7 +196,7 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 							return nil, err
 						}
 						item["type"] = "custom_tool_call"
-						item["input"] = input
+						item["input"] = SanitizeSurrogates(input)
 					} else {
 						item["type"] = "function_call"
 						if len(block.Arguments) > 0 {
@@ -228,7 +228,7 @@ func ConvertResponsesMessages(rawModel json.RawMessage, context TranscriptContex
 			if _, ok := options.GrammarToolInputProperties[message.ToolName]; ok {
 				kind = "custom_tool_call_output"
 			}
-			output = append(output, map[string]any{"type": kind, "call_id": strings.Split(message.ToolCallID, "|")[0], "output": responsesToolResultOutput(model, message.Content.Blocks)})
+			output = append(output, map[string]any{"type": kind, "call_id": strings.Split(message.ToolCallID, "|")[0], "output": responsesToolResultOutput(model, message.Content.Blocks.Values())})
 		}
 		if !leading {
 			msgIndex++
@@ -287,7 +287,7 @@ func responsesToolResultOutput(model completionsModel, blocks []*ContentBlock) a
 	text := strings.Join(texts, "\n")
 	if len(images) == 0 || !slices.Contains(model.Input, "image") {
 		if text != "" {
-			return text
+			return SanitizeSurrogates(text)
 		}
 		if len(images) > 0 {
 			return "(see attached image)"
@@ -296,7 +296,7 @@ func responsesToolResultOutput(model completionsModel, blocks []*ContentBlock) a
 	}
 	output := []map[string]any{}
 	if text != "" {
-		output = append(output, map[string]any{"type": "input_text", "text": text})
+		output = append(output, map[string]any{"type": "input_text", "text": SanitizeSurrogates(text)})
 	}
 	for _, block := range images {
 		output = append(output, responsesImage(block))

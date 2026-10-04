@@ -28,6 +28,9 @@ func piValidateToolChoice(choice agentcore.ToolChoice, names []string) error {
 // hook. Pi still owns all message encoding, signatures, caching, and streaming.
 // Raw fields preserve extension values and numbers without a float64 roundtrip.
 func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (json.RawMessage, error) {
+	if api == ai.VendorGoogleAntigravity {
+		return antigravityControlledPayload(raw, opts)
+	}
 	if api == ai.VendorPiMessages {
 		return piMessagesControlledPayload(raw, opts)
 	}
@@ -201,4 +204,61 @@ func piMessagesControlledPayload(raw json.RawMessage, opts PiModelOptions) (json
 	}
 	payload["options"], _ = json.Marshal(controls)
 	return json.Marshal(payload)
+}
+
+// Cloud Code Assist carries generation controls inside its request envelope.
+func antigravityControlledPayload(raw json.RawMessage, opts PiModelOptions) (json.RawMessage, error) {
+	if opts.ParallelToolCalls != nil {
+		return nil, errors.New("Antigravity does not support parallel tool-call controls")
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["request"], &request); err != nil || request == nil {
+		return nil, errors.New("invalid Antigravity request")
+	}
+	var tools []struct{ FunctionDeclarations []struct{ Name string } }
+	if err := json.Unmarshal(request["tools"], &tools); err != nil && len(request["tools"]) > 0 {
+		return nil, err
+	}
+	names := []string{}
+	for _, tool := range tools {
+		for _, declaration := range tool.FunctionDeclarations {
+			names = append(names, declaration.Name)
+		}
+	}
+	if len(names) > 0 {
+		if err := piValidateToolChoice(opts.ToolChoice, names); err != nil {
+			return nil, err
+		}
+		mode := "VALIDATED"
+		switch opts.ToolChoice.Mode {
+		case agentcore.ToolChoiceAuto:
+			mode = "AUTO"
+		case agentcore.ToolChoiceNone:
+			mode = "NONE"
+		case agentcore.ToolChoiceNamed, agentcore.ToolChoiceRequired:
+			mode = "ANY"
+		}
+		choice := map[string]any{"mode": mode}
+		if opts.ToolChoice.Mode == agentcore.ToolChoiceNamed {
+			choice["allowedFunctionNames"] = []string{opts.ToolChoice.Name}
+		}
+		request["toolConfig"], _ = json.Marshal(map[string]any{"functionCallingConfig": choice})
+	} else {
+		delete(request, "toolConfig")
+	}
+	if opts.OutputSchema != nil {
+		generation := map[string]json.RawMessage{}
+		if err := json.Unmarshal(request["generationConfig"], &generation); err != nil {
+			return nil, err
+		}
+		generation["responseMimeType"] = json.RawMessage(`"application/json"`)
+		generation["responseJsonSchema"], _ = json.Marshal(opts.OutputSchema.Schema)
+		request["generationConfig"], _ = json.Marshal(generation)
+	}
+	envelope["request"], _ = json.Marshal(request)
+	return json.Marshal(envelope)
 }

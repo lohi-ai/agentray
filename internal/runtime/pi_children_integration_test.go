@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -83,7 +81,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{piComposedTool{&effects}}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-fork", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY", NativeHistory: json.RawMessage(`[{"role":"user","content":"parent private history","timestamp":1}]`)}, tier, nil)
 	if err != nil {
@@ -122,7 +120,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	}
 	// Reattach through the same consumer callback: no process/provider/tool is
 	// needed, no historical spend is charged, and the request must match.
-	worker, known, err := tier.BindPi(agentcore.PiConfig{Worker: piSessionWorker(t)}, PiModelOptions{MaxTokens: p.MaxTokens})
+	worker, known, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{MaxTokens: p.MaxTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +220,7 @@ func TestPiRunnerChildSchemaRetryKeepsOriginalNativeTranscript(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-fork", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "parent done" || parents.Load() != 2 || children.Load() != 2 || result.Usage.InputTokens != 28 {
@@ -281,7 +279,7 @@ func TestPiRunnerRepeatedProviderCallIDsCreateDistinctChildren(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-fork", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "finished both" || children.Load() != 2 || parents.Load() != 3 {
@@ -316,7 +314,7 @@ func TestPiRunnerCancellationReachesNativeChild(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-fork", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	done := make(chan error, 1)
 	go func() {
@@ -374,7 +372,7 @@ func TestPiForkKeepsInheritedPermissionHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: piSessionOptions(), Callback: func(_ context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := agentcore.PiConfig{Options: piSessionOptions(), Callback: func(_ context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		return piSessionReply(requests.Add(1) == 1), nil
 	}}
 	result, err := piForkRunner(PiSessionConfig{Pi: worker}, true, nil, agentcore.ToolChoice{}, nil)(ctx, parent.Fork(""), subagent.ForkRequest{Prompt: "try write", Task: "try write"}, nil)
@@ -425,7 +423,7 @@ func TestPiRunnerParallelChildrenHaveSeparateSessions(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool = nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "native-fork", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "parallel done" || parents.Load() != 2 || children.Load() != 2 {
@@ -471,7 +469,7 @@ func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id strin
 		t.Fatal(err)
 	}
 	var requests atomic.Int32
-	worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected %s", method)
 		}
@@ -516,7 +514,7 @@ func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id strin
 	}}
 	fork := piForkRunner(PiSessionConfig{Pi: worker}, true, store, agentcore.ToolChoice{}, nil)
 	// A parked/completed reattach must not even need a worker installation.
-	reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{Worker: "/missing/pi-worker"}}, true, store, agentcore.ToolChoice{}, nil)
+	reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{}}, true, store, agentcore.ToolChoice{}, nil)
 	req := subagent.ForkRequest{SessionID: id, Prompt: "child task", Task: "child task"}
 	previousID := ""
 	for n := 1; n <= 2; n++ {

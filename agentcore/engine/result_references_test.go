@@ -45,7 +45,7 @@ func TestPiResultReferences(t *testing.T) {
 			}
 			makeResult := func(text string) *engine.ToolResult {
 				terminate := true
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: text}}, Details: argumentRef(`{}`), Terminate: &terminate}
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: text}), Details: argumentRef(`{}`), Terminate: &terminate}
 			}
 			original, partial := makeResult("original"), makeResult("partial")
 			if input.Phase == "update_nil" {
@@ -54,7 +54,7 @@ func TestPiResultReferences(t *testing.T) {
 			produced := original
 			var endResult, afterResult *engine.ToolResult
 			mutate := func(value *engine.ToolResult) {
-				value.Content = []*ai.ContentBlock{{Type: "text", Text: "mutated"}}
+				value.Content = ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "mutated"})
 				value.Details = argumentRef(`{"changed":true}`)
 			}
 			onUpdate := func(value *engine.ToolResult) {
@@ -90,7 +90,7 @@ func TestPiResultReferences(t *testing.T) {
 					return nil, errors.New("after failed")
 				}
 				if input.Phase == "after_override" {
-					return &engine.AfterToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "override"}}}, nil
+					return &engine.AfterToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "override"})}, nil
 				}
 				if input.Phase == "after_same_override" {
 					return value.Result, nil

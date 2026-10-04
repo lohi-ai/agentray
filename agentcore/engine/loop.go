@@ -68,6 +68,18 @@ func Continue(ctx context.Context, initial Context, config Config, emit EventSin
 }
 
 func runLoop(ctx context.Context, current *Context, messages *MessageList, config Config, emit EventSink, stream StreamFn) (*MessageList, error) {
+	sink := emit
+	emit = func(event Event) error {
+		// Streaming events already hold their provider lock. Subsequent tool,
+		// turn and terminal events may still reference that provider's result.
+		if event.payloadYield != nil || current.assistantStream == nil {
+			return sink(event)
+		}
+		return current.assistantStream.SynchronizeYielding(func(yield ai.PayloadYield) error {
+			event.payloadYield, event.payloadAccess = yield, current.assistantStream.Synchronize
+			return sink(event)
+		})
+	}
 	var last *Turn
 	pending, err := poll(config.GetSteeringMessages)
 	if err != nil {
@@ -146,7 +158,18 @@ func runLoop(ctx context.Context, current *Context, messages *MessageList, confi
 			}
 			messages.Append(message)
 			toolResults := NewList[*ai.Message]()
-			if message.StopReason == "error" || message.StopReason == "aborted" {
+			var stopReason string
+			var calls []*ai.ContentBlock
+			current.readAssistant(func() {
+				stopReason = message.StopReason
+				if stopReason != "error" && stopReason != "aborted" {
+					calls, err = toolCalls(message)
+				}
+			})
+			if err != nil {
+				return nil, err
+			}
+			if stopReason == "error" || stopReason == "aborted" {
 				last = &Turn{Message: message, ToolResults: toolResults, Context: current, NewMessages: messages}
 				if config.FinishTurn != nil {
 					if _, err := config.FinishTurn(ctx, last); err != nil {
@@ -159,12 +182,8 @@ func runLoop(ctx context.Context, current *Context, messages *MessageList, confi
 				return finish()
 			}
 			moreTools = false
-			calls, err := toolCalls(message)
-			if err != nil {
-				return nil, err
-			}
 			if len(calls) > 0 {
-				batch, err := executeBatch(ctx, current, message, calls, config, emit)
+				batch, err := executeBatch(ctx, current, message, calls, stopReason == "length", config, emit)
 				if err != nil {
 					return nil, err
 				}
@@ -383,27 +402,37 @@ func requestOptions(config Config) map[string]any {
 }
 
 func consumeAssistant(ctx context.Context, current *Context, config Config, emit EventSink, response *ai.AssistantMessageEventStream) (*ai.Message, error) {
+	current.assistantStream = response
 	addedPartial, hasPartial := false, false
+	emitPayload := func(event Event, yield ai.PayloadYield) error {
+		event.payloadYield, event.payloadAccess = yield, response.Synchronize
+		return emit(event)
+	}
 	settle := func() (*ai.Message, error) {
-		message, err := response.SnapshotResult(context.WithoutCancel(ctx))
+		// Result may await provider work or invoke a host hook, so obtain it
+		// before entering the payload critical section. Preserve its identity.
+		message, err := response.Result(context.WithoutCancel(ctx))
 		if err != nil {
 			return nil, err
 		}
 		if message == nil {
 			return nil, errors.New("engine: stream has no final assistant message")
 		}
-		level := config.thinkingLevel()
-		message.ThinkingLevel = &level
-		if addedPartial {
-			current.Messages.setLast(message)
-		} else {
-			current.Messages.Append(message)
-			copy := *message
-			if err := emit(Event{Type: "message_start", Message: &copy}); err != nil {
-				return nil, err
+		err = response.SynchronizeYielding(func(yield ai.PayloadYield) error {
+			level := config.thinkingLevel()
+			message.ThinkingLevel = &level
+			if addedPartial {
+				current.Messages.setLast(message)
+			} else {
+				current.Messages.Append(message)
+				copy := *message
+				if err := emitPayload(Event{Type: "message_start", Message: &copy}, yield); err != nil {
+					return err
+				}
 			}
-		}
-		if err := emit(Event{Type: "message_end", Message: message}); err != nil {
+			return emitPayload(Event{Type: "message_end", Message: message}, yield)
+		})
+		if err != nil {
 			return nil, err
 		}
 		return message, nil
@@ -418,34 +447,33 @@ func consumeAssistant(ctx context.Context, current *Context, config Config, emit
 		if !ok {
 			break
 		}
-		event, err = response.SnapshotEvent(event)
+		if event.Type == "done" || event.Type == "error" {
+			return settle()
+		}
+		err = response.SynchronizeYielding(func(yield ai.PayloadYield) error {
+			switch event.Type {
+			case "start":
+				if event.Partial == nil {
+					return errors.New("engine: start event has no partial message")
+				}
+				current.Messages.Append(event.Partial)
+				addedPartial, hasPartial = true, true
+				copy := *event.Partial
+				return emitPayload(Event{Type: "message_start", Message: &copy}, yield)
+			case "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end":
+				if hasPartial {
+					if event.Partial == nil {
+						return errors.New("engine: update event has no partial message")
+					}
+					current.Messages.setLast(event.Partial)
+					copy := *event.Partial
+					return emitPayload(Event{Type: "message_update", Message: &copy, AssistantMessageEvent: &event}, yield)
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, err
-		}
-		switch event.Type {
-		case "start":
-			if event.Partial == nil {
-				return nil, errors.New("engine: start event has no partial message")
-			}
-			current.Messages.Append(event.Partial)
-			addedPartial, hasPartial = true, true
-			copy := *event.Partial
-			if err := emit(Event{Type: "message_start", Message: &copy}); err != nil {
-				return nil, err
-			}
-		case "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end":
-			if hasPartial {
-				if event.Partial == nil {
-					return nil, errors.New("engine: update event has no partial message")
-				}
-				current.Messages.setLast(event.Partial)
-				copy := *event.Partial
-				if err := emit(Event{Type: "message_update", Message: &copy, AssistantMessageEvent: &event}); err != nil {
-					return nil, err
-				}
-			}
-		case "done", "error":
-			return settle()
 		}
 	}
 	return settle()

@@ -101,6 +101,9 @@ func compileSchema(schema any, source ...json.RawMessage) (*argumentValidator, e
 	registerArgumentObjects(compiler, orderedSchema, validator)
 	const resource = "https://agentcore.local/pi-tool.json"
 	locations := map[string]string{}
+	if err := registerArgumentComposition(compiler, locations); err != nil {
+		return nil, err
+	}
 	if err := compiler.AddResource(resource, compilerSchema(schema, "", locations)); err != nil {
 		return nil, err
 	}

@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -67,7 +65,7 @@ func TestPiCompactionUsesNativeProviderWithoutHistoricalTools(t *testing.T) {
 			for _, raw := range piCompactionFixture() {
 				source = append(source, json.RawMessage(raw))
 			}
-			summary, err := summarizePiHistory(piSessionContext(t), PiRuntimeConfig{Worker: piSessionWorker(t)}, tier, piSessionJSON(source), piCompactionRevision, func(context.Context, string) (string, error) { return "refreshed", nil }, nil)
+			summary, err := summarizePiHistory(piSessionContext(t), PiRuntimeConfig{}, tier, piSessionJSON(source), piCompactionRevision, func(context.Context, string) (string, error) { return "refreshed", nil }, nil)
 			if finish == "stop" {
 				if err != nil || summary != "Saved decisions" {
 					t.Fatalf("native summary: %q %v", summary, err)
@@ -164,7 +162,7 @@ func TestPiCompactionSQLBranchesRacesAndNextNativeTurn(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "after-compaction", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	user, err := AppendMessageEntryAtLeaf(ctx, st, conv.ID, "user", "next question", "", boot.User.ID, compacted.LeafID)
 	if err != nil {
@@ -269,7 +267,7 @@ func TestPiCompactCommandResolvesWorkspaceTierAndPersistsNativeCheckpoint(t *tes
 	if _, err := AppendCommandEntry(ctx, st, conv.ID, "user", "/compact", "", boot.User.ID); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewChatService(st, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	svc := NewChatService(st, WithPiRuntime(PiRuntimeConfig{}))
 	svc.classify = func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
 		t.Fatal("compact invoked legacy classifier")
 		return chatDecision{}, nil

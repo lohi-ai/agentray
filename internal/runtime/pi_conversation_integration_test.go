@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -72,7 +70,7 @@ func TestPiConversationNativeProviderRoundTripAndBranches(t *testing.T) {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "history", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	runTurn := func(prompt string, want, unwanted []string) (PiConversationHistory, storage.AgentConversationEntry) {
 		t.Helper()
@@ -246,7 +244,7 @@ func TestPiConversationRevisionMismatchBeforeProvider(t *testing.T) {
 	p := representativeBuildParams()
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "history", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	_, err := runner.runModelLoop(piSessionContext(t), p, RunOptions{Prompt: "next", NativeHistory: json.RawMessage(`[]`), NativeHistoryRevision: "wrong-revision"}, tier, nil)
 	if err == nil || !strings.Contains(err.Error(), "revision") || requests.Load() != 0 {

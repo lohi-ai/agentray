@@ -44,9 +44,9 @@ func TestPiToolReferences(t *testing.T) {
 			}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockContent(ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{"value":"original"}`)}), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}
 			if strings.HasPrefix(input.Phase, "next_") {
-				assistant.Content.Blocks = append(assistant.Content.Blocks, &ai.ContentBlock{Type: "toolCall", ID: "second", Name: "echo", Arguments: json.RawMessage(`{"value":"second"}`)})
+				assistant.Content.Blocks.Append(&ai.ContentBlock{Type: "toolCall", ID: "second", Name: "echo", Arguments: json.RawMessage(`{"value":"second"}`)})
 			}
-			retained := assistant.Content.Blocks[0]
+			retained := assistant.Content.Blocks.Get(0)
 			firstDone := make(chan struct{})
 			mutate := func() {
 				retained.ID = "changed"
@@ -55,11 +55,11 @@ func TestPiToolReferences(t *testing.T) {
 			}
 			editContent := func(at string) {
 				if input.Phase == at+"_slot" {
-					assistant.Content.Blocks[0] = &ai.ContentBlock{Type: "toolCall", ID: "slot", Name: "renamed", Arguments: json.RawMessage(`{"value":"slot"}`)}
+					assistant.Content.Blocks.Set(0, &ai.ContentBlock{Type: "toolCall", ID: "slot", Name: "renamed", Arguments: json.RawMessage(`{"value":"slot"}`)})
 				}
 				if input.Phase == at+"_grow" {
 					for range 8 {
-						assistant.Content.Blocks = append(assistant.Content.Blocks, &ai.ContentBlock{Type: "text", Text: "padding"})
+						assistant.Content.Blocks.Append(&ai.ContentBlock{Type: "text", Text: "padding"})
 					}
 				}
 			}
@@ -74,13 +74,13 @@ func TestPiToolReferences(t *testing.T) {
 					if input.Phase == "execute" {
 						mutate()
 					}
-					update(&engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "partial"}}, Details: argumentRef(`{}`)})
-					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "result"}}, Details: argumentRef(`{}`), Terminate: &terminate}, nil
+					update(&engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "partial"}), Details: argumentRef(`{}`)})
+					return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "result"}), Details: argumentRef(`{}`), Terminate: &terminate}, nil
 				}})
 			}
 			toolHooks := engine.ToolHooks{
 				Before: func(_ context.Context, hook *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
-					hooks = append(hooks, capture(map[string]any{"hook": "before", "identity": hook.ToolCall == hook.AssistantMessage.Content.Blocks[0], "call": hook.ToolCall, "args": hook.Args}))
+					hooks = append(hooks, capture(map[string]any{"hook": "before", "identity": hook.ToolCall == hook.AssistantMessage.Content.Blocks.Get(0), "call": hook.ToolCall, "args": hook.Args}))
 					if hook.ToolCall.ID != "second" {
 						retained = hook.ToolCall
 					}
@@ -103,7 +103,7 @@ func TestPiToolReferences(t *testing.T) {
 					return nil, nil
 				},
 				After: func(_ context.Context, hook engine.AfterToolCall) (*engine.AfterToolResult, error) {
-					hooks = append(hooks, capture(map[string]any{"hook": "after", "identity": hook.ToolCall == hook.AssistantMessage.Content.Blocks[0], "call": hook.ToolCall, "args": hook.Args}))
+					hooks = append(hooks, capture(map[string]any{"hook": "after", "identity": hook.ToolCall == hook.AssistantMessage.Content.Blocks.Get(0), "call": hook.ToolCall, "args": hook.Args}))
 					editContent("after")
 					if strings.HasPrefix(input.Phase, "after") {
 						mutate()
@@ -142,7 +142,7 @@ func TestPiToolReferences(t *testing.T) {
 					events = append(events, capture(event))
 					if event.Type == "message_end" && event.Message.Role == "assistant" {
 						assistant = event.Message
-						retained = assistant.Content.Blocks[0]
+						retained = assistant.Content.Blocks.Get(0)
 					}
 					if input.Phase == "start" && event.Type == "tool_execution_start" || input.Phase == "update" && event.Type == "tool_execution_update" || input.Phase == "end" && event.Type == "tool_execution_end" || input.Phase == "message_start" && event.Type == "message_start" && event.Message.Role == "toolResult" {
 						mutate()

@@ -425,7 +425,7 @@ func TestProxyConcurrentEngineSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := messages.Get(messages.Len() - 1)
-	if last.Content.Blocks[0].Text != strings.Repeat("x", 100) {
+	if last.Content.Blocks.Get(0).Text != strings.Repeat("x", 100) {
 		t.Fatalf("lost deltas: %+v", last)
 	}
 	// Consumer-owned snapshots are safe to retain and serialize independently.
@@ -464,7 +464,7 @@ func TestProxyFragmentedUTF8AndLongFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.StopReason != "stop" || len(result.Content.Blocks) != 1 || result.Content.Blocks[0].Text != text {
+	if result.StopReason != "stop" || result.Content.Blocks.Len() != 1 || result.Content.Blocks.Get(0).Text != text {
 		t.Fatal("fragmented/long frame corrupted")
 	}
 	if err := stream.WaitForEnd(ctx); err != nil {
@@ -519,7 +519,7 @@ func TestProxyDrainsAfterTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.Content.Blocks[0].Text != "" {
+	if before.Content.Blocks.Get(0).Text != "" {
 		t.Fatal("server passed the gate")
 	}
 	finish()
@@ -530,7 +530,7 @@ func TestProxyDrainsAfterTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw != after || after.Content.Blocks[0].Text != "after terminal" || before.Content.Blocks[0].Text != "" {
+	if raw != after || after.Content.Blocks.Get(0).Text != "after terminal" || before.Content.Blocks.Get(0).Text != "" {
 		t.Fatal("live result stopped updating at terminal")
 	}
 	events := []string{}
@@ -546,5 +546,64 @@ func TestProxyDrainsAfterTerminal(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, []string{"start", "text_start", "done"}) {
 		t.Fatalf("post-terminal event leaked: %v", events)
+	}
+}
+
+// An injected transport can return a body whose reads do not observe the
+// request context. Pi's abort handler still cancels that body explicitly.
+func TestProxyAbortClosesIndependentBody(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	admitted := make(chan struct{})
+	client := &http.Client{Transport: proxyTransport(func(*http.Request) (*http.Response, error) {
+		close(admitted)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: reader}, nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := engine.StreamProxy(ctx, json.RawMessage(`{"api":"test","provider":"test","id":"test"}`), ai.NormalizeContext(ai.Context{}), engine.ProxyStreamOptions{ProxyURL: "http://proxy.test", Client: client})
+	<-admitted
+	cancel()
+	wait, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+	result, err := stream.SnapshotResult(wait)
+	if err != nil {
+		t.Fatalf("abort did not release the independent response reader: %v", err)
+	}
+	if result.StopReason != "aborted" || result.ErrorMessage == nil || *result.ErrorMessage != "Request aborted by user" {
+		t.Fatalf("unexpected abort result: %+v", result)
+	}
+	if err := stream.WaitForEnd(wait); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProxySharesRelayPayloadLock(t *testing.T) {
+	relay := ai.NewAssistantMessageEventStream()
+	ctx := ai.WithAssistantStreamSynchronization(context.Background(), relay)
+	client := &http.Client{Transport: proxyTransport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"done\",\"reason\":\"stop\",\"usage\":{}}\n"))}, nil
+	})}
+	stream := engine.StreamProxy(ctx, json.RawMessage(`{"api":"test","provider":"test","id":"test"}`), ai.NormalizeContext(ai.Context{}), engine.ProxyStreamOptions{ProxyURL: "http://proxy.test", Client: client})
+	started, acquired := make(chan struct{}), make(chan struct{})
+	relay.Synchronize(func() {
+		go func() { close(started); stream.Synchronize(func() { close(acquired) }) }()
+		<-started
+		select {
+		case <-acquired:
+			t.Error("proxy payload access bypassed the relay lock")
+		case <-time.After(50 * time.Millisecond):
+		}
+	})
+	wait, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-acquired:
+	case <-wait.Done():
+		t.Fatal("payload access did not resume")
+	}
+	if err := stream.WaitForEnd(wait); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -17,7 +17,7 @@ func TestNativeLadderSessionResumeBindsSelectedRow(t *testing.T) {
 	store := agentcore.NewMemorySessionStore()
 	first := testNativeLadder(t)
 	binding, _, stream := first.sessionBinding()
-	session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: first, Store: store, SessionID: "resume-ladder"})
+	session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: first, Store: store, SessionID: "resume-ladder"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestNativeLadderSessionResumeBindsSelectedRow(t *testing.T) {
 		wrapped.Add(1)
 		return original(ctx, method, params, emit)
 	}
-	resumed, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: fresh, Store: store, SessionID: "resume-ladder", Resume: true})
+	resumed, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: fresh, Store: store, SessionID: "resume-ladder", Resume: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestNativeLadderSessionResumeRejectsMissingOrChangedBinding(t *testing.T) {
 	store := agentcore.NewMemorySessionStore()
 	ladder := testNativeLadder(t)
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(ctx, PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: "invalid-binding"})
+	session, err := NewPiSession(ctx, PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, Store: store, SessionID: "invalid-binding"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +113,11 @@ func TestNativeLadderSessionResumeRejectsMissingOrChangedBinding(t *testing.T) {
 	if err = session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"missing", "changed-row", "changed-model", "worker"} {
+	for _, mode := range []string{"missing", "changed-row", "changed-model"} {
 		t.Run(mode, func(t *testing.T) {
 			fresh := testNativeLadder(t)
 			binding, _, stream := fresh.sessionBinding()
-			cfg := PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: fresh, Store: store, SessionID: "invalid-binding", Resume: true}
+			cfg := PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: fresh, Store: store, SessionID: "invalid-binding", Resume: true}
 			switch mode {
 			case "missing":
 				cfg.nativeLadder = nil
@@ -125,9 +125,6 @@ func TestNativeLadderSessionResumeRejectsMissingOrChangedBinding(t *testing.T) {
 				fresh.rungs[1].providerID = "replaced-row"
 			case "changed-model":
 				fresh.rungs[1].model = json.RawMessage(`{"id":"replacement","api":"openai-responses","provider":"openai"}`)
-			case "worker":
-				cfg.NativeGo = false
-				cfg.Pi.Worker = "/nonexistent-worker"
 			}
 			resumed, err := NewPiSession(ctx, cfg)
 			if err == nil {
@@ -148,7 +145,7 @@ func TestNativeLadderSessionRegistersFallbackCapabilityHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding, _, stream := ladder.sessionBinding()
-	session, err := NewPiSession(context.Background(), PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, Policy: agentcore.NewAllowList("write")})
+	session, err := NewPiSession(context.Background(), PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, Policy: agentcore.NewAllowList("write")})
 	if err != nil {
 		t.Fatal(err)
 	}

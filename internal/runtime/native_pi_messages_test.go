@@ -130,7 +130,7 @@ func TestNativePiMessagesDispatcherCallbacks(t *testing.T) {
 				t.Fatalf("callback order %v", sequence)
 			}
 			if mode == "observer-error" || mode == "null-event" {
-				if result.StopReason != "error" || len(result.Content.Blocks) != 0 {
+				if result.StopReason != "error" || result.Content.Blocks.Len() != 0 {
 					t.Fatalf("wrong failure %#v", result)
 				}
 				if mode == "observer-error" && (!capture.HostFailure() || result.ErrorMessage == nil || *result.ErrorMessage != sentinel.Error()) {
@@ -141,7 +141,7 @@ func TestNativePiMessagesDispatcherCallbacks(t *testing.T) {
 				if mode == "mutate" {
 					want = "changed"
 				}
-				if result.StopReason != "stop" || len(result.Content.Blocks) != 1 || result.Content.Blocks[0].Text != want {
+				if result.StopReason != "stop" || result.Content.Blocks.Len() != 1 || result.Content.Blocks.Get(0).Text != want {
 					t.Fatalf("wrong result %#v", result)
 				}
 			}

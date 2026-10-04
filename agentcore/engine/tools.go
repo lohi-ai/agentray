@@ -48,8 +48,7 @@ func toolCalls(message *ai.Message) ([]*ai.ContentBlock, error) {
 		return nil, jsonjs.PropertyReadError(message.HasContent(), "message.content.filter")
 	}
 	calls := []*ai.ContentBlock{}
-	for i := range message.Content.Blocks {
-		block := message.Content.Blocks[i]
+	for _, block := range message.Content.Blocks.Values() {
 		if block == nil {
 			continue // Array.filter skips absent indices, including proxy gaps.
 		}
@@ -64,7 +63,7 @@ func toolCalls(message *ai.Message) ([]*ai.ContentBlock, error) {
 }
 
 func errorResult(message string) *ToolResult {
-	return &ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: message}}, Details: NewObject()}
+	return &ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: message}), Details: NewObject()}
 }
 
 // Array.find visits holes as undefined, stops at the first match, and never
@@ -306,13 +305,15 @@ type toolBatch struct {
 	terminate bool
 }
 
-func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, calls []*ai.ContentBlock, config Config, emit EventSink) (toolBatch, error) {
+func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, calls []*ai.ContentBlock, truncated bool, config Config, emit EventSink) (toolBatch, error) {
 	batch := toolBatch{messages: []*ai.Message{}}
 	sequential := config.ToolExecution == "sequential"
+	// Pi selects its truncated-message path before invoking any batch callbacks.
+	// Later edits to the retained assistant message must not change that choice.
 	// Truncated responses bypass tool selection entirely. Otherwise Pi's
 	// some(find(...)) stops as soon as one selected tool is sequential, even
 	// when later calls would encounter an unreadable list entry.
-	if assistant.StopReason != "length" {
+	if !truncated {
 		for _, call := range calls {
 			tool, err := findTool(current.Tools, call.Name)
 			if err != nil {
@@ -327,8 +328,12 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 	finalized := []ToolOutcome{}
 	prepared := []preparedCall{}
 	appendResult := func(outcome ToolOutcome) error {
+		content := outcome.Result.Content
+		if content == nil {
+			content = ai.NewBlockList()
+		}
 		message := ai.Message{Role: "toolResult", ToolCallID: outcome.ToolCall.ID, ToolName: outcome.ToolCall.Name,
-			Content: ai.BlockReferences(nonnil(outcome.Result.Content)...), Details: outcome.Result.Details, Usage: outcome.Result.Usage, IsError: outcome.IsError, Timestamp: config.now()}
+			Content: ai.MessageContent{Blocks: content}, Details: outcome.Result.Details, Usage: outcome.Result.Usage, IsError: outcome.IsError, Timestamp: config.now()}
 		if outcome.Result.Usage == nil && outcome.Result.preserved["usage"] != nil {
 			message.Extra = map[string]json.RawMessage{"usage": outcome.Result.preserved["usage"]}
 		}
@@ -352,7 +357,7 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 		if err := emit(Event{Type: "tool_execution_start", ToolCallID: call.ID, ToolName: call.Name, Args: call.Arguments}); err != nil {
 			return batch, err
 		}
-		if assistant.StopReason == "length" {
+		if truncated {
 			outcome := ToolOutcome{ToolCall: call, IsError: true, Result: errorResult("Tool call \"" + call.Name + "\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.")}
 			if err := end(outcome); err != nil {
 				return batch, err
@@ -398,7 +403,7 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 			break
 		}
 	}
-	if assistant.StopReason == "length" {
+	if truncated {
 		return batch, nil
 	}
 	if !sequential {

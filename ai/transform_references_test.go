@@ -36,7 +36,7 @@ func TestPiTransformReferences(t *testing.T) {
 			originalMessages, originalBlocks := map[*Message]int{}, map[*ContentBlock]int{}
 			for i, message := range messages {
 				originalMessages[message] = i
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					originalBlocks[block] = len(originalBlocks)
 				}
 			}
@@ -53,7 +53,7 @@ func TestPiTransformReferences(t *testing.T) {
 				if id != "call" {
 					return id
 				}
-				block := source.Content.Blocks[0]
+				block := source.Content.Blocks.Get(0)
 				switch input.Phase {
 				case "id_equal":
 					block.ID = "changed"
@@ -74,11 +74,11 @@ func TestPiTransformReferences(t *testing.T) {
 				case "source_stop":
 					source.StopReason = "error"
 				case "next_slot":
-					source.Content.Blocks[1] = &ContentBlock{Type: "text", Text: "replacement"}
+					source.Content.Blocks.Set(1, &ContentBlock{Type: "text", Text: "replacement"})
 				case "next_grow":
 					for i := 0; i < 32; i++ {
 						call := &ContentBlock{Type: "toolCall", ID: fmt.Sprintf("extra-%d", i), Name: "echo", Arguments: json.RawMessage(`{}`), ThoughtSignature: block.ThoughtSignature}
-						source.Content.Blocks = append(source.Content.Blocks, call)
+						source.Content.Blocks.Append(call)
 					}
 				case "model_input":
 					if len(target.Input) == 2 {
@@ -90,10 +90,10 @@ func TestPiTransformReferences(t *testing.T) {
 					target.ID = "source"
 				case "prior_message":
 					messages[0].Timestamp = 9
-					messages[0].Content.Blocks[1].Text = "changed"
+					messages[0].Content.Blocks.Get(1).Text = "changed"
 				case "later_message":
 					messages[4].Timestamp = 9
-					messages[4].Content.Blocks[1].Text = "changed"
+					messages[4].Content.Blocks.Get(1).Text = "changed"
 				case "later_content":
 					messages[4].Content = BlockContent(ContentBlock{Type: "text", Text: "replacement"})
 				}
@@ -108,7 +108,7 @@ func TestPiTransformReferences(t *testing.T) {
 				}
 				messageIndices = append(messageIndices, index)
 				indices := []int{}
-				for _, block := range message.Content.Blocks {
+				for _, block := range message.Content.Blocks.Values() {
 					index, found := originalBlocks[block]
 					if !found {
 						index = -1

@@ -36,7 +36,7 @@ const defaultRunMaxTokens = 16000
 // scheduler go through this one path.
 type Runner struct {
 	// Pi selects the Pi-contract runtime, including the in-process Go port. Nil
-	// retains the existing driver while provider migration is completed.
+	// retains the legacy Go driver for explicitly selected compatibility runs.
 	Pi    *PiRuntimeConfig
 	Store *storage.Store
 	// Sandbox, when non-nil, is threaded into every BuildParams so agents get

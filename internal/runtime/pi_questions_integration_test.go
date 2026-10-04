@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -41,7 +39,7 @@ func TestPiAskPreparationMatchesGoPlugin(t *testing.T) {
 			defer host.Close()
 			var requests int
 			var prepared json.RawMessage
-			worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: json.RawMessage(`{"callbacks":["beforeToolCall"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			worker := agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["beforeToolCall"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				switch method {
 				case "beforeToolCall":
 					var call struct{ Args json.RawMessage }
@@ -130,7 +128,7 @@ func TestPiRunnerAskResumeKeepsGoalAndNativeHistory(t *testing.T) {
 	p.PrepareNextTurn, p.RefreshKey = nil, nil
 	p.Goal = condition
 	p.Tools = []agentcore.Tool{ask.Tool{}}
-	r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "ask-test", BaseURL: server.URL + "/v1", APIKey: "test"}}
 	var questions int
 	sink := func(event agentcore.StreamEvent) {

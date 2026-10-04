@@ -84,7 +84,7 @@ func TestPiPendingToolSets(t *testing.T) {
 				close(gates[len(gates)-1])
 			}
 			result := func() *engine.ToolResult {
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "ok"}}, Details: engine.NewObject()}
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "ok"}), Details: engine.NewObject()}
 			}
 			tools := []*engine.Tool{}
 			blocks := []*ai.ContentBlock{}
@@ -206,7 +206,7 @@ func TestPiPendingToolSets(t *testing.T) {
 func TestPendingToolSetsConcurrentReaders(t *testing.T) {
 	tool := &engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)},
 		Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
-			return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: engine.NewObject()}, nil
+			return &engine.ToolResult{Content: ai.NewBlockList(), Details: engine.NewObject()}, nil
 		},
 	}
 	blocks := []*ai.ContentBlock{}

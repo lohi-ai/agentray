@@ -1,5 +1,3 @@
-//go:build pi || pi_native
-
 package agentruntime
 
 import (
@@ -34,7 +32,7 @@ func (t piLargeEvidenceTool) Run(context.Context, string) (string, error) {
 
 func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T) {
 	ctx := observe.WithTraceID(piSessionContext(t), "request-compaction")
-	native := piSessionWorker(t) == ""
+	const native = true
 	var mainCalls, summaryCalls, effects, compactedCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -106,7 +104,7 @@ func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T
 			}
 		}
 	}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "complete the original task"}, tier, nil)
 	if err != nil || result.Final != "finished" || effects.Load() != 3 || mainCalls.Load() != 4 || summaryCalls.Load() == 0 || compactedCalls.Load() == 0 {
 		t.Fatalf("native loop failed: %+v %v main=%d summary=%d compacted=%d effects=%d", result, err, mainCalls.Load(), summaryCalls.Load(), compactedCalls.Load(), effects.Load())
@@ -192,7 +190,7 @@ func checkPiRequestCompactionResume(t *testing.T, store agentcore.SessionStore, 
 	ctx := piSessionContext(t)
 	seed := piLongRequest()
 	var summaries, requests atomic.Int32
-	worker := agentcore.PiConfig{Worker: piSessionWorker(t), Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": seed}}), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": seed}}), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected callback %s", method)
 		}
@@ -243,7 +241,7 @@ func TestPiRequestCompactionStorageFailurePreventsUnrecordedView(t *testing.T) {
 	var calls atomic.Int32
 	result, err := RunPi(ctx, PiRunConfig{Input: piRequestJSON("finish"), Compaction: &PiContextCompaction{Budget: 1500, KeepRecent: 500, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
 		return "summary", agentcore.Usage{InputTokens: 11}, nil
-	}}, Session: PiSessionConfig{Store: store, SessionID: "failed-summary", Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	}}, Session: PiSessionConfig{Store: store, SessionID: "failed-summary", Pi: agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		calls.Add(1)
 		return piSessionReply(false), nil
 	}}}})
@@ -275,7 +273,7 @@ func TestPiRequestCompactionCancellationSettlesWithoutProviderCall(t *testing.T)
 			close(started)
 			<-ctx.Done()
 			return "", agentcore.Usage{InputTokens: 9}, ctx.Err()
-		}}, Session: PiSessionConfig{Pi: agentcore.PiConfig{Worker: piSessionWorker(t), Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+		}}, Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			calls.Add(1)
 			return piSessionReply(false), nil
 		}}}})
@@ -346,7 +344,7 @@ func TestPiChildRequestCompactionKeepsIndependentViewAndUsage(t *testing.T) {
 	summaryTier := tier
 	summaryTier.Model = "summary"
 	p.PiCompactionTier = &summaryTier
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{Worker: piSessionWorker(t)}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil || result.Final != "parent finished" || summaries.Load() == 0 || effects.Load() != 3 || children.Load() != 4 {
 		t.Fatalf("child compaction failed: %+v %v summaries=%d children=%d effects=%d", result, err, summaries.Load(), children.Load(), effects.Load())

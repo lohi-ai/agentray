@@ -181,7 +181,7 @@ func TestPiLoopLists(t *testing.T) {
 				return nil
 			}
 			tool := &engine.Tool{Tool: ai.Tool{Name: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Label: "echo", Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: "ok"}}, Details: engine.NewObject()}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: "ok"}), Details: engine.NewObject()}, nil
 			}}
 			initial := engine.Context{Tools: engine.NewList([]*engine.Tool{tool}...)}
 			var err error

@@ -215,7 +215,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// Rotation-safe long runs: re-resolve each rung's BYO key before every turn.
 	runnerOpts = append(runnerOpts, agentruntime.WithKeyRefresh())
 	if cfg.AgentNativeGo {
-		runnerOpts = append(runnerOpts, agentruntime.WithPiRuntime(agentruntime.PiRuntimeConfig{NativeGo: true}))
+		runnerOpts = append(runnerOpts, agentruntime.WithPiRuntime(agentruntime.PiRuntimeConfig{}))
 	}
 	// Optional compaction-budget override (deployment/test knob); 0 keeps the 200k
 	// default.

@@ -37,7 +37,7 @@ func TestPiToolArgumentsOracle(t *testing.T) {
 			tool := &engine.Tool{Tool: ai.Tool{Name: "number", Parameters: tc.Parameters}}
 			tool.Execute = func(_ context.Context, _ string, args any, _ func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				executed = true
-				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: argumentJSON(t, args)}}, Details: argumentRef(`{}`)}, nil
+				return &engine.ToolResult{Content: ai.NewBlockList(&ai.ContentBlock{Type: "text", Text: argumentJSON(t, args)}), Details: argumentRef(`{}`)}, nil
 			}
 			before := append([]byte(nil), tc.Args...)
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "number", Arguments: tc.Args}
@@ -58,7 +58,7 @@ func TestPiToolArgumentsOracle(t *testing.T) {
 			if err := json.Compact(&original, tc.Args); err != nil {
 				t.Fatal(err)
 			}
-			actual, err := json.Marshal(map[string]any{"executed": executed, "prepared": prepared, "isError": outcome.IsError, "content": outcome.Result.Content[0].Text, "source": original.String()})
+			actual, err := json.Marshal(map[string]any{"executed": executed, "prepared": prepared, "isError": outcome.IsError, "content": outcome.Result.Content.Get(0).Text, "source": original.String()})
 			if err != nil {
 				t.Fatal(err)
 			}

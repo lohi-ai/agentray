@@ -6,10 +6,9 @@ question and the run parks until the answer arrives.
 
 ## Model Experience
 
-The Go driver uses the dangling-call workflow below. With the original Pi
-driver, the plugin's bundled `pi.mts` supplies its synchronous argument preparer.
-Both preparers trim and bound the same fields, retaining valid UTF-8 at byte
-limits. Pi emits an immutable waiting tool result; the host parks the run using
+The legacy Go driver uses the dangling-call workflow below. The native engine
+uses the Go argument preparer, which trims and bounds fields while retaining
+valid UTF-8 at byte limits. The native engine emits an immutable waiting tool result; the host parks the run using
 the settled effect receipt. A human answer is a new native user message on
 resume, rather than a replacement of that result. The physical effect ID keeps
 questions distinct even when a provider reuses a tool-call ID. An unanswered

@@ -64,7 +64,7 @@ func TestPiStreamAliases(t *testing.T) {
 				}
 				events = append(events, raw)
 				if event.Message != nil && event.Message.Role == "assistant" {
-					blocks := event.Message.Content.Blocks
+					blocks := event.Message.Content.Blocks.Values()
 					indices := []int{}
 					for _, block := range blocks {
 						for i, original := range blocks {

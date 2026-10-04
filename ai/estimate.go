@@ -41,7 +41,7 @@ func EstimateTextAndImageContentTokens(content MessageContent) float64 {
 		return EstimateTextTokens(*content.Text)
 	}
 	chars := 0
-	for _, block := range content.Blocks {
+	for _, block := range content.Blocks.Values() {
 		if block.Type == "text" {
 			chars += estimateUTF16Length(block.Text)
 		} else {
@@ -78,7 +78,7 @@ func EstimateMessageTokens(message Message) float64 {
 		return EstimateTextAndImageContentTokens(message.Content)
 	}
 	chars := 0
-	for _, block := range message.Content.Blocks {
+	for _, block := range message.Content.Blocks.Values() {
 		switch block.Type {
 		case "text":
 			chars += estimateUTF16Length(block.Text)

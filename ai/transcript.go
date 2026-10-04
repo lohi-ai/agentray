@@ -27,7 +27,7 @@ func ContentText(content MessageContent, separator ...string) string {
 		sep = separator[0]
 	}
 	parts := []string{}
-	for _, block := range content.Blocks {
+	for _, block := range content.Blocks.Values() {
 		if block == nil {
 			continue
 		}

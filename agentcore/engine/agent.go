@@ -86,10 +86,15 @@ func (s State) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	type plain State
+	var errorMessage json.RawMessage
+	if s.ErrorMessage != nil {
+		errorMessage = jsonjs.QuoteString(*s.ErrorMessage)
+	}
 	return json.Marshal(struct {
-		SystemPrompt string `json:"systemPrompt"`
+		SystemPrompt json.RawMessage `json:"systemPrompt"`
 		plain
-	}{SystemPrompt: prompt, plain: plain(s)})
+		ErrorMessage json.RawMessage `json:"errorMessage,omitempty"`
+	}{SystemPrompt: jsonjs.QuoteString(prompt), plain: plain(s), ErrorMessage: errorMessage})
 }
 
 // Listener has identity independently of its Go callback. Subscribing the same
@@ -643,7 +648,7 @@ func (a *Agent) handleFailure(active *activeRun, failure error, timestamp int64)
 		stopReason = "aborted"
 	}
 	fields := map[string]any{"role": "assistant", "content": ai.BlockContent(ai.ContentBlock{Type: "text", Text: ""}),
-		"usage": &ai.Usage{}, "stopReason": stopReason, "timestamp": timestamp, "errorMessage": failure.Error()}
+		"usage": &ai.Usage{}, "stopReason": stopReason, "timestamp": timestamp, "errorMessage": json.RawMessage(jsonjs.QuoteString(failure.Error()))}
 	for field, property := range map[string]string{"api": "api", "provider": "provider", "model": "id"} {
 		if value, present := model[property]; present {
 			fields[field] = value

@@ -86,7 +86,7 @@ func TestNativeLadderToolCapabilitiesPreserveHostCatalogue(t *testing.T) {
 			if mode == "host-policy" {
 				policy = agentcore.NewAllowList()
 			}
-			result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"finish"`), Session: PiSessionConfig{NativeGo: true, Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}, Policy: policy}})
+			result, err := RunPi(ctx, PiRunConfig{Input: json.RawMessage(`"finish"`), Session: PiSessionConfig{Pi: binding, NativeStream: stream, nativeLadder: ladder, nativeAttempts: &agentcore.RetryPolicy{MaxAttempts: 1}, Policy: policy}})
 			if err != nil || result.Projection.Final != "finished" || primary.Load() != 1 || fallback.Load() != 2 {
 				t.Fatal("capability transition failed", err, result.Projection.StopReason, primary.Load(), fallback.Load())
 			}

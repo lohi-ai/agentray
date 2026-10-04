@@ -123,7 +123,7 @@ func TestNativeRunnerChildrenUseGoIsolationReceiptsAndTrace(t *testing.T) {
 				}
 				return nativeChildResponse(nativeChildThinking("child-opaque-signature"), ai.ContentBlock{Type: "text", Text: "child answer"}), nil
 			}
-			runtime := PiRuntimeConfig{NativeGo: true, NativeStream: provider, Runtime: "/missing/runtime", Worker: "/missing/worker"}
+			runtime := PiRuntimeConfig{NativeStream: provider}
 			runner := NewRunner(nil, WithPiRuntime(runtime))
 			tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 			result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY", NativeHistory: json.RawMessage(`[{"role":"user","content":"parent private history","timestamp":1}]`)}, tier, nil)
@@ -148,7 +148,7 @@ func TestNativeRunnerChildrenUseGoIsolationReceiptsAndTrace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reattach := piForkRunner(PiSessionConfig{NativeGo: true, Pi: agentcore.PiConfig{Worker: "/missing/worker"}}, true, store, p.ToolChoice, nil)
+			reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{}}, true, store, p.ToolChoice, nil)
 			for _, id := range store.Sessions() {
 				if id == p.SessionID {
 					continue
@@ -201,7 +201,7 @@ func TestNativeChildParkReattachAndAnswerResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	var requests atomic.Int32
-	runtime := PiSessionConfig{NativeGo: true, Pi: agentcore.PiConfig{Runtime: "/missing/runtime", Worker: "/missing/worker", Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected callback: %s", method)
 		}
@@ -279,7 +279,7 @@ func TestNativeParentReceiptRetainsChildQuestionRoute(t *testing.T) {
 		}
 		return nativeChildResponse(ai.ContentBlock{Type: "text", Text: "child completed work"}), nil
 	}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, NativeStream: provider, Runtime: "/missing/runtime", Worker: "/missing/worker"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeStream: provider}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
 	if err != nil {
@@ -495,7 +495,7 @@ func TestNativeDelegationResumeReparksAndRecoversDelivery(t *testing.T) {
 				}
 				return nativeChildResponse(ai.ContentBlock{Type: "text", Text: "child completed"}), nil
 			}
-			runtime := PiRuntimeConfig{NativeGo: true, NativeStream: provider, Runtime: "/missing/runtime", Worker: "/missing/worker"}
+			runtime := PiRuntimeConfig{NativeStream: provider}
 			runner := NewRunner(nil, WithPiRuntime(runtime))
 			tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 			result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY"}, tier, nil)
@@ -598,7 +598,7 @@ func TestNativeNestedDelegationQuestionsResumeOriginalTree(t *testing.T) {
 		}
 		return nativeChildResponse(ai.ContentBlock{Type: "text", Text: fmt.Sprintf("depth %d complete", depth)}), nil
 	}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, NativeStream: provider, Worker: "/missing/worker"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeStream: provider}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "parent task"}, tier, nil)
 	if err != nil || !result.Parked {
@@ -662,7 +662,7 @@ func TestNativeSchemaRetryQuestionResumesCorrectiveChild(t *testing.T) {
 		}
 		return nativeChildResponse(ai.ContentBlock{Type: "text", Text: `{"value":"corrected value"}`}), nil
 	}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, NativeStream: provider, Worker: "/missing/worker"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeStream: provider}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "parent task"}, tier, nil)
 	if err != nil || !result.Parked || parents != 1 || originals != 1 || retries != 1 {
@@ -723,7 +723,7 @@ func TestNativeParallelChildQuestionsCompleteBeforeParentContinues(t *testing.T)
 		}
 		return nativeChildResponse(ai.ContentBlock{Type: "text", Text: "child done"}), nil
 	}
-	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, NativeStream: provider, Worker: "/missing/worker"}))
+	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeStream: provider}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test"}}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "parent task"}, tier, nil)
 	if err != nil || !result.Parked || len(children) != 2 || parents != 1 {
@@ -797,7 +797,7 @@ func TestNativeDelegationContinuationHonorsToolContextsAndTermination(t *testing
 			}
 			var parents, children int
 			var hooks atomic.Int32
-			runtime := PiSessionConfig{NativeGo: true, Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Worker: "/missing/worker"}}
+			runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
 			runtime.Pi.Callback = func(ctx context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected callback %s", method)
@@ -935,7 +935,7 @@ func TestNativeAuxiliarySummaryUsesGoAndPreservesSource(t *testing.T) {
 		}
 		return nativeChildResponse(ai.ContentBlock{Type: "text", Text: " summary "}), nil
 	})
-	runtime := PiRuntimeConfig{NativeGo: true, NativeStream: provider, Worker: "/missing/worker", Runtime: "/missing/runtime"}
+	runtime := PiRuntimeConfig{NativeStream: provider}
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "stale"}}
 	history := json.RawMessage(`[{"role":"system","content":"historical policy","timestamp":1},{"role":"user","content":"question","timestamp":2},{"role":"assistant","content":[{"type":"thinking","thinking":"private","thinkingSignature":"source-opaque-signature"},{"type":"text","text":"answer"}],"stopReason":"stop","timestamp":3}]`)
 	result, usage, err := summarizePiHistoryWithUsage(context.Background(), runtime, tier, history, nativeAgentRevision, func(context.Context, string) (string, error) { return "refreshed", nil }, observe.SinkFunc(func(record observe.TraceRecord) { traces = append(traces, record) }))

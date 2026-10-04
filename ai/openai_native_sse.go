@@ -16,6 +16,10 @@ import (
 // lines, multiline data, an unterminated final event, and the exact sentinel.
 // It has no Scanner token limit and stops reading immediately at [DONE].
 func readCompletionsSSE(ctx context.Context, body io.Reader, headers http.Header, consume func(json.RawMessage) error) error {
+	return readNativeJSONSSE(ctx, body, headers, true, consume)
+}
+
+func readNativeJSONSSE(ctx context.Context, body io.Reader, headers http.Header, inspectErrors bool, consume func(json.RawMessage) error) error {
 	reader := bufio.NewReader(body)
 	var line strings.Builder
 	var data []string
@@ -45,14 +49,14 @@ func readCompletionsSSE(ctx context.Context, body io.Reader, headers http.Header
 			}{name, raw})
 		} else {
 			fields, _ := samplingObject(raw)
-			if name == "error" {
+			if inspectErrors && name == "error" {
 				failure := fields["error"]
 				if !samplingNonNull(failure) {
 					failure = raw
 				}
 				return false, newCompletionsRequestError(0, failure, "", headers)
 			}
-			if samplingTruthy(fields["error"]) {
+			if inspectErrors && samplingTruthy(fields["error"]) {
 				return false, newCompletionsRequestError(0, fields["error"], "", headers)
 			}
 		}
