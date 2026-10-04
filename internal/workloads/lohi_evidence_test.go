@@ -16,13 +16,14 @@ func TestLohiEvidenceV1ConfigContract(t *testing.T) {
 		Fields []string `json:"fields"`
 	}
 	var manifest struct {
-		Version      string            `json:"version"`
-		SkillSHA256  string            `json:"skill_sha256"`
-		ConnectorID  string            `json:"connector_id"`
-		Exports      []export          `json:"exports"`
-		Recipes      []string          `json:"recipes"`
-		RecipeSHA256 map[string]string `json:"recipe_sha256"`
-		Board        struct {
+		Version        string                         `json:"version"`
+		SkillSHA256    string                         `json:"skill_sha256"`
+		ConnectorID    string                         `json:"connector_id"`
+		Normalizations map[string]map[string][]string `json:"normalizations"`
+		Exports        []export                       `json:"exports"`
+		Recipes        []string                       `json:"recipes"`
+		RecipeSHA256   map[string]string              `json:"recipe_sha256"`
+		Board          struct {
 			Mode               string   `json:"mode"`
 			OverwriteUserEdits bool     `json:"overwrite_user_edits"`
 			RecipeRefs         []string `json:"recipe_refs"`
@@ -42,6 +43,9 @@ func TestLohiEvidenceV1ConfigContract(t *testing.T) {
 	}
 	if manifest.Install.ExternalMCPExport != "SKILL.md" || manifest.Install.Reinstall != "idempotent_no_overwrite" {
 		t.Fatalf("portable/reinstall contract drifted: %+v", manifest.Install)
+	}
+	if got := strings.Join(manifest.Normalizations["wallet_ledger_v1.reason"]["topup_purchase"], ","); got != "topup,topup_apple_consented,topup_purchase" {
+		t.Fatalf("topup reason normalization drifted: %q", got)
 	}
 	skill := LohiEvidenceSkill()
 	digest := sha256.Sum256([]byte(skill.Body))

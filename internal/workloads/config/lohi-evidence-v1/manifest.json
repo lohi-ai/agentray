@@ -1,6 +1,6 @@
 {
   "version": "lohi-evidence-v1",
-  "skill_sha256": "98d26556a33b04852762f9db9999c09c88097a798f4c1af39c8305a7f83e1f31",
+  "skill_sha256": "39731ada71e518283bb4c6a1f6eea4bba773e7a7a15c8dfec2034e795e6bd331",
   "connector_id": "51515151-5151-4515-8515-515151515151",
   "timezone": "Asia/Ho_Chi_Minh",
   "as_of_exclusive": "2026-10-03T11:14:00Z",
@@ -8,6 +8,11 @@
     "source_snapshot": "frozen sanitized fixture; production verification requires operator-approved extract",
     "events_start": "2026-09-01T00:00:00+07:00",
     "partial_day": "2026-10-03"
+  },
+  "normalizations": {
+    "wallet_ledger_v1.reason": {
+      "topup_purchase": ["topup", "topup_apple_consented", "topup_purchase"]
+    }
   },
   "exports": [
     {"table":"ar_lohi.users_v1","key":"id","mode":"incremental_maintained_updated_at_or_snapshot","fields":["id","user_id","registered_at","updated_at","signup_provider"]},
@@ -24,12 +29,12 @@
     "R03":"a41904c03671517f3a9770f490ef4bcda21d49394c589fc8061717da8dffa492",
     "R04":"aef5f544ea274fc8f63b44d58c064faa93210833851b450c7b93c62cd1455080",
     "R05":"f4ff37e6ae18463eee582df93d09b4c5a2ee0972a2b216c476c0546e76df4a1f",
-    "R06":"d917e79772c64e37e2405a8504659437588664e05712a43fa4f13509e6c02a17",
+    "R06":"70d2f9aa90ac6b682f29f5a74f1c5aa0b111b47b1a53ca4fed9163eb6a2b66e7",
     "R07":"37e4d04391c19331c68a401e5b25ce96479e37aa9f6192a9e9191dcc6d9eddbd",
     "R08":"babd79ec3ec2ee4dce94c1090449e489ad80d2163732569eccd671c8529499cd",
     "R09":"39e61355cd909454f99902d3dceea9242059d23ce79538bb88f45c5c98d6a614",
     "R10":"1f1884d5d51591652804af8728f10ce19afbc2bf4324e65dc3cfdcf5a5bb961a",
-    "R11":"c6a0921ee54b42f0f4028e49a9b185ed99ed67b73fb24b8cc645d65016865767"
+    "R11":"afc84d8598ff131a937168da47b807276874bc0666e33aad81227757e043a182"
   },
   "board": {
     "mode": "extend_existing_only",

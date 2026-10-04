@@ -17,9 +17,11 @@ and the exact body external MCP clients import.
    `2026-10-03T11:14:00Z` (18:14 HCM); October 3 is partial. Do not compare it to
    a full day without that label.
 4. Money has three non-interchangeable universes: completed wallet topups are
-   gross VND; deduplicated `revenue` minus `revenue_reversed` is net event
-   revenue; wallet ledger amounts are LT credits, not money. Preserve exact
-   integer money/counts and round only ratios.
+   gross VND; canonical deduplicated event money is bookings minus reversals;
+   wallet ledger amounts are LT credits, not money. A reversal is any
+   `revenue_reversed`, `revenue` with `kind=refund`, or negative money amount;
+   subtract `abs(amount)` exactly once when forms overlap. Preserve exact integer
+   money/counts and round only ratios.
 5. Count event people by `canonical_id`. Join source users only on the approved
    `user_id`. Unknown signup attribution remains unknown; a payment rail is not
    an acquisition source. Never backfill TikTok from a later page view.
@@ -45,8 +47,11 @@ and the exact body external MCP clients import.
 
 Timestamps are ISO-8601 with offsets. IDs are opaque strings. `signup_provider`
 is only `google`, `apple`, or `unknown`; source SQL maps everything else to
-`unknown`. Views must exclude email, name, OAuth tokens/IDs, credentials, raw
-payment metadata, and free-form user content.
+`unknown`. `wallet_ledger_v1.reason` retains its source value; recipes normalize
+trimmed, lowercased `topup`, `topup_apple_consented`, and legacy
+`topup_purchase` to the canonical `topup_purchase` evidence bucket. Views must
+exclude email, name, OAuth tokens/IDs, credentials, raw payment metadata, and
+free-form user content.
 
 ## Canonical recipes
 
@@ -238,7 +243,11 @@ WITH bound AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
          json_extract_string(data, '$.user_id') AS user_id,
          try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
-         json_extract_string(data, '$.reason') AS reason
+         CASE
+           WHEN lower(trim(coalesce(json_extract_string(data, '$.reason'), '')))
+             IN ('topup', 'topup_apple_consented', 'topup_purchase') THEN 'topup_purchase'
+           ELSE lower(trim(coalesce(json_extract_string(data, '$.reason'), '')))
+         END AS reason
   FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
     AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
       >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
@@ -497,25 +506,33 @@ WITH source_bound AS (
 ), ledger AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
          try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
-         json_extract_string(data, '$.reason') AS reason
+         CASE
+           WHEN lower(trim(coalesce(json_extract_string(data, '$.reason'), '')))
+             IN ('topup', 'topup_apple_consented', 'topup_purchase') THEN 'topup_purchase'
+           ELSE lower(trim(coalesce(json_extract_string(data, '$.reason'), '')))
+         END AS reason
   FROM source_bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
     AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
       < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), event_input AS (
   SELECT event_id, event_name, insert_id, timestamp, canonical_id, utm_source,
-         try_cast(json_extract_string(properties, '$.amount') AS BIGINT) AS amount,
-         upper(json_extract_string(properties, '$.currency')) AS currency
+         coalesce(try_cast(json_extract_string(properties, '$.amount') AS BIGINT), 0) AS amount,
+         upper(trim(coalesce(json_extract_string(properties, '$.currency'), ''))) AS currency,
+         lower(trim(coalesce(json_extract_string(properties, '$.kind'), ''))) AS kind
   FROM events WHERE event_name IN ('revenue', 'revenue_reversed', 'user_registered')
     AND timestamp < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), event_money_raw AS (
-  SELECT event_id, event_name, insert_id, timestamp, amount, currency,
+  SELECT event_id, event_name, insert_id, timestamp, amount, currency, kind,
          row_number() OVER (
            PARTITION BY coalesce(nullif(insert_id, ''), cast(event_id AS VARCHAR))
            ORDER BY timestamp DESC, event_id DESC
          ) AS retry_rank
   FROM event_input WHERE event_name IN ('revenue', 'revenue_reversed')
 ), event_net AS (
-  SELECT coalesce(sum(CASE WHEN event_name = 'revenue_reversed' THEN -amount ELSE amount END), 0)::BIGINT AS value,
+  SELECT coalesce(sum(CASE
+           WHEN event_name = 'revenue_reversed' OR kind = 'refund' OR amount < 0 THEN -abs(amount)
+           ELSE amount
+         END), 0)::BIGINT AS value,
          count(*) FILTER (WHERE cast(timezone('Asia/Ho_Chi_Minh', timestamp) AS DATE) = DATE '2026-10-03')::BIGINT AS partial_rows
   FROM event_money_raw WHERE retry_rank = 1 AND currency = 'VND'
 ), daily AS (
@@ -563,11 +580,11 @@ WITH source_bound AS (
   UNION ALL SELECT 'net_event_revenue_vnd', value::DOUBLE, 'VND', 1,
     CASE WHEN partial_rows > 0 THEN 'partial' ELSE 'complete' END,
     CASE WHEN partial_rows > 0
-      THEN 'deduplicated revenue minus revenue_reversed over available event history through exclusive cutoff 18:14 HCM, includes partial Oct 3, separate universe'
-      ELSE 'deduplicated revenue minus revenue_reversed over available event history through Oct 2 complete HCM days, separate universe' END
+      THEN 'canonical deduplicated bookings minus reversals over available event history through exclusive cutoff 18:14 HCM, includes partial Oct 3, separate universe'
+      ELSE 'canonical deduplicated bookings minus reversals over available event history through Oct 2 complete HCM days, separate universe' END
     FROM event_net
   UNION ALL SELECT 'lt_issued', issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 complete days, sum of purchased, refunded, granted and other issuance' FROM ledger_totals
-  UNION ALL SELECT 'lt_purchased_ledger', purchased_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as topup_purchase' FROM ledger_totals
+  UNION ALL SELECT 'lt_purchased_ledger', purchased_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows normalized from topup, topup_apple_consented or legacy topup_purchase' FROM ledger_totals
   UNION ALL SELECT 'lt_refunded', refunded_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as refund issuance' FROM ledger_totals
   UNION ALL SELECT 'lt_granted', granted_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as grant issuance' FROM ledger_totals
   UNION ALL SELECT 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows outside purchase, refund and grant classes' FROM ledger_totals
